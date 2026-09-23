@@ -29,7 +29,7 @@ import type { SessionRole } from "@loom/shared";
 
 export const PLATFORM_TOOLS: readonly string[] = [
   "agent_clone", "agent_clone_batch", "agent_create", "agent_delete", "agent_get", "agent_prompt_search",
-  "agent_update", "daemon_restart", "end_me", "events_search", "git_checkout", "git_commit",
+  "agent_update", "daemon_restart", "end_me", "events_search", "gate_queue", "git_checkout", "git_commit",
   "git_create_branch", "git_push", "idle_report", "list_all_agents", "list_all_profiles",
   "list_all_projects", "list_all_schedules", "list_all_sessions", "list_all_tasks",
   "platform_config_get", "profile_assign", "profile_create", "profile_delete",

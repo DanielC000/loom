@@ -36,6 +36,8 @@ import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP 
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { projectFields, agentFields, profileFields } from "./entityRowFields.js";
 import { skillListData, skillWriteData, skillWriteInputSchema, skillEditData, skillEditInputSchema } from "./skillTools.js";
+import { bundledSkillAssetsDir } from "../skills/store.js";
+import type { PendingMergeOpNotice } from "../sessions/service.js";
 import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } from "./promptSearch.js";
 import { searchProjectMemory, DEFAULT_MEMORY_SEARCH_CAP, MAX_MEMORY_SEARCH_CAP } from "./projectMemorySearch.js";
 
@@ -927,6 +929,21 @@ export function validateColumnLayout(
  * role-gated to 'platform' (manager/worker/plain → 404, no surface). Stateless: a fresh
  * McpServer+transport per request, so no cached transport can be wedged by a dropped stream.
  */
+/**
+ * Card c77dda7d: the loud text a Platform write attaches when a same-repo merge op is still pending. A commit
+ * landing on that repo's mainline moves the base a merge gate pinned, so the op forfeits/rejects
+ * (`batch_merge_forfeited` / `gate_base_invalidated`) and its gate time is wasted — the incident this exists for.
+ */
+export function pendingMergeWarning(ops: PendingMergeOpNotice[], subject: string): string {
+  const list = ops.map((o) => {
+    const mins = Math.round(o.ageMs / 60_000);
+    const branches = o.branchCount == null ? "branch count unknown" : `${o.branchCount} branch${o.branchCount === 1 ? "" : "es"}`;
+    return `${o.kind} merge ${o.opId.slice(0, 8)} (${o.phase}, ${branches}, ${mins}m old)`;
+  }).join("; ");
+  return `⚠️ PENDING MERGE on this repo — ${subject}. Any commit to its mainline while these are pending invalidates their pinned base ` +
+    `and forfeits/rejects them, wasting their gate time: ${list}. Wait for them to settle (read \`gate_queue\`) before committing.`;
+}
+
 export class PlatformMcpRouter {
   // `sessions` (the SessionService) drives session_spawn/session_stop — the cross-project lifecycle
   // ops. Mirrors OrchestrationMcpRouter(db, sessions). `import type` keeps it a compile-time-only
@@ -3324,9 +3341,10 @@ export class PlatformMcpRouter {
      * byte-identical to this tool surface's pre-card-a0dff493 behavior, so an existing single-repo project
      * or an unchanged caller sees no behavior change.
      */
-    const resolveGitWriter = (p: Project, repoKey: string | null | undefined): { ok: true; writer: GitWriter } | { ok: false; error: string } => {
+    const resolveGitWriter = (p: Project, repoKey: string | null | undefined): { ok: true; writer: GitWriter; repoPath: string } | { ok: false; error: string } => {
       try {
-        return { ok: true, writer: gitWriterFor(resolveRepoByKey(p, repoKey).path) };
+        const repoPath = resolveRepoByKey(p, repoKey).path;
+        return { ok: true, writer: gitWriterFor(repoPath), repoPath };
       } catch (e) {
         if (e instanceof UnknownRepoKeyError) return { ok: false, error: e.message };
         throw e;
@@ -3366,15 +3384,25 @@ export class PlatformMcpRouter {
     server.registerTool(
       "git_commit",
       {
-        description: "Stage ALL changes (add -A) and commit a project's repo with the given message — plain commit under the repo's configured identity (no -c overrides, no Co-Authored-By trailer). Explicit projectId. Optional repoKey (multi-repo epic) targets one of the project's registered `repos` entries instead of its primary repo — omit (or pass \"primary\") for primary; an unknown key (including anything path-shaped) is rejected with {error}, never silently falling back to primary. A clean tree is an EXPECTED no-op failure ('nothing to commit'). Returns { ok:true, hash } or { ok:false, error }. 404 if the project is unknown.",
-        inputSchema: strictShape({ projectId: z.string(), message: z.string(), repoKey: z.string().nullable().optional() }),
+        description: "Stage ALL changes (add -A) — or, with `paths`, ONLY those repo-relative paths (add -A -- <paths>, commit -- <paths>; unrelated untracked files in the checkout are never swept in) — and commit a project's repo with the given message — plain commit under the repo's configured identity (no -c overrides, no Co-Authored-By trailer). PENDING-MERGE GUARD (card c77dda7d): a commit to a repo's mainline moves the base a queued/running merge (solo or batch) pinned and forfeits it, so while any same-repo merge op is pending this call REFUSES (nothing staged or committed) with { ok:false, refused:true, error, pendingMergeOps:[{opId,kind,phase,branchCount,ageMs}] } — read `gate_queue`, wait for it to settle, or re-call with acknowledgePendingMerge:true if you accept forfeiting it (e.g. you are committing on a non-mainline branch). Explicit projectId. Optional repoKey (multi-repo epic) targets one of the project's registered `repos` entries instead of its primary repo — omit (or pass \"primary\") for primary; an unknown key (including anything path-shaped) is rejected with {error}, never silently falling back to primary. A clean tree is an EXPECTED no-op failure ('nothing to commit'). Returns { ok:true, hash } or { ok:false, error }. 404 if the project is unknown.",
+        inputSchema: strictShape({
+          projectId: z.string(), message: z.string(), repoKey: z.string().nullable().optional(),
+          paths: z.array(z.string()).optional(), acknowledgePendingMerge: z.boolean().optional(),
+        }),
       },
-      async ({ projectId, message, repoKey }) => {
+      async ({ projectId, message, repoKey, paths, acknowledgePendingMerge }) => {
         const p = db.getProject(projectId);
         if (!p) return ok({ error: "project not found" });
         const resolved = resolveGitWriter(p, repoKey);
         if (!resolved.ok) return ok({ error: resolved.error });
-        return ok(await resolved.writer.commit(message));
+        const pendingMergeOps = sessions.pendingMergeOpsForRepoPath(resolved.repoPath);
+        const warning = pendingMergeOps.length ? pendingMergeWarning(pendingMergeOps, "this commit would land on it") : undefined;
+        if (warning && acknowledgePendingMerge !== true) {
+          return ok({ ok: false, refused: true, error: `${warning} Nothing was staged or committed. Re-call with acknowledgePendingMerge:true to commit anyway.`, pendingMergeOps });
+        }
+        const result = await resolved.writer.commit(message, paths ? { paths } : undefined);
+        if (!warning || !result.ok) return ok(result);
+        return ok({ ...result, warning: [result.warning, warning].filter(Boolean).join(" "), pendingMergeOps });
       },
     );
 
@@ -3390,6 +3418,25 @@ export class PlatformMcpRouter {
         const resolved = resolveGitWriter(p, repoKey);
         if (!resolved.ok) return ok({ error: resolved.error });
         return ok(await resolved.writer.push());
+      },
+    );
+
+    // Card c77dda7d: read-only gate_queue for the Lead — the SAME snapshot the manager/worker tool serves
+    // (`sessions.gateQueueForManager`), so the pre-check before a commit/skill edit is a tool call, not a raw
+    // `pending_gate_ops` DB read. The Lead sits above every project, so it opts into the UNREDACTED view.
+    // See the manager `gate_queue` tool's own description for the full field/caveat contract.
+    server.registerTool(
+      "gate_queue",
+      {
+        description:
+          "Read-only snapshot of the WHOLE daemon-global gate queue — the resolved concurrency cap plus every gate run `running` or `queued` (merge/deploy/worker-self-check), and `repoGuardOnly`/`squashing`/`declarations`. " +
+          "The SAME snapshot the manager's `gate_queue` returns (same fields, same caveats — it measures semaphore admissions, never host load), EXCEPT that as the cross-project Lead you see every project's entries UNREDACTED (taskId/branch/workerLabel/repoPath present on every row). " +
+          "Use it before committing to a repo or editing a bundled skill: a `merge` entry (solo or batch) for that repo's project means a commit to its mainline would forfeit it. `skill_edit`/`skill_write`/`git_commit` also check this for you and warn/refuse.",
+        inputSchema: strictShape({}),
+      },
+      async () => {
+        const projectId = callerSessionId ? db.getSession(callerSessionId)?.projectId : undefined;
+        return ok(sessions.gateQueueForManager(projectId ?? "", { unredacted: true }));
       },
     );
 
@@ -3418,6 +3465,20 @@ export class PlatformMcpRouter {
     //     which is why it lives in this P3 elevated block (it reuses publishSkillToBundled, the same
     //     store→asset path the human POST /api/skills/:name/publish route uses — no guard bypassed). See
     //     the WRITE TARGET box in mcp/skillTools.ts for the full rationale. ---
+    /**
+     * Card c77dda7d: a bundled-asset skill write lands in the canonical checkout's working tree at once, and the
+     * commit that follows (even a plain `git commit` this surface never sees) forfeits any pending same-repo
+     * merge — so warn HERE, at the write, not only at `git_commit`. WARN, don't refuse: the write itself is
+     * harmless to a merge base (only a commit moves it) and the Lead is human-driven. Only an actual asset
+     * write (`target:"asset"`) is checked; a user-store write or an error result passes through untouched.
+     */
+    const withAssetPendingMergeWarning = (result: Record<string, unknown>): Record<string, unknown> => {
+      if (result.ok !== true || result.target !== "asset") return result;
+      const pendingMergeOps = sessions.pendingMergeOpsForRepoPath(bundledSkillAssetsDir());
+      if (!pendingMergeOps.length) return result;
+      return { ...result, warning: pendingMergeWarning(pendingMergeOps, "this bundled-skill write dirtied its canonical checkout, and committing it (git_commit or plain git) would land on it"), pendingMergeOps };
+    };
+
     server.registerTool(
       "skill_list",
       {
@@ -3438,7 +3499,7 @@ export class PlatformMcpRouter {
         inputSchema: strictShape(skillWriteInputSchema),
       },
       // allowBundledAsset:TRUE — the Lead's bundled-asset edit (the operator surface passes false).
-      async ({ name, content, confirm }) => ok(skillWriteData({ name, content, confirm }, { allowBundledAsset: true })),
+      async ({ name, content, confirm }) => ok(withAssetPendingMergeWarning(skillWriteData({ name, content, confirm }, { allowBundledAsset: true }))),
     );
 
     server.registerTool(
@@ -3452,7 +3513,7 @@ export class PlatformMcpRouter {
       },
       // allowBundledAsset:TRUE — same elevated write target as this surface's skill_write.
       async ({ name, oldString, newString, replaceAll, confirm }) =>
-        ok(skillEditData({ name, oldString, newString, replaceAll, confirm }, { allowBundledAsset: true })),
+        ok(withAssetPendingMergeWarning(skillEditData({ name, oldString, newString, replaceAll, confirm }, { allowBundledAsset: true }))),
     );
 
     return server;

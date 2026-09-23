@@ -292,6 +292,18 @@ export interface GateIntentEntry {
   redacted?: true;
 }
 
+/** One merge op {@link SessionService.pendingMergeOpsForRepoPath} says a same-repo commit could invalidate
+ *  (card c77dda7d). `branchCount` is null only for a `pending`-row-only batch (the count lives on the live
+ *  semaphore entry, which it hasn't reached yet). `phase:"pending"` = tombstone only, not yet queued. */
+export interface PendingMergeOpNotice {
+  opId: string;
+  projectId: string;
+  kind: "solo" | "batch";
+  phase: "queued" | "running" | "pending";
+  branchCount: number | null;
+  ageMs: number;
+}
+
 /** {@link SessionService.gateQueueForManager}'s result: the resolved cap plus every live gate run, split
  *  into running/queued so a manager reads queue depth and admission order without counting entries itself.
  *  `repoGuardOnly` (card b9e07a4a) is a SEPARATE array, deliberately not folded into `running`/`queued` —
@@ -4269,13 +4281,17 @@ export class SessionService {
   /** @decision 80d54122 — recentTimeoutStreak is unconditional/cross-project; only taskId/branch/
    *  workerLabel stay own-project — its old co-location with those three was an implementation accident;
    *  never re-gate it behind that same conditional */
-  gateQueueForManager(callerProjectId: string): GateQueueSnapshot {
+  gateQueueForManager(callerProjectId: string, opts?: { unredacted?: boolean }): GateQueueSnapshot {
     const snap = this.gateSemaphore.snapshot();
     const cap = resolveConfig({}, this.db.getPlatformConfig()).orchestration.maxConcurrentGates;
+    // Card c77dda7d: the Platform Lead sits ABOVE every project (it already reads every project's board/
+    // sessions), so its `gate_queue` passes `unredacted` and sees every project's own-project fields.
+    // Only that one caller opts in — the manager/worker surfaces never pass it, so their redaction is unchanged.
+    const isCallerProject = (projectId: string): boolean => opts?.unredacted === true || projectId === callerProjectId;
     const toEntry = (e: GateSnapshotEntry): GateQueueEntry => {
       const project = this.db.getProject(e.projectId);
       const liveness: "pending" | "observed" = e.lastOutputAt != null ? "observed" : "pending";
-      const isOwnProject = e.projectId === callerProjectId;
+      const isOwnProject = isCallerProject(e.projectId);
       const entry: GateQueueEntry = {
         opId: e.opId,
         gateType: e.gateType,
@@ -4329,7 +4345,7 @@ export class SessionService {
       };
       // Card b9e07a4a Code Review MAJOR fix: `repoPath` (an absolute HOST FILESYSTEM PATH) is own-project
       // ONLY — see this type's own doc. It used to sit outside this block, disclosed unconditionally.
-      if (e.projectId === callerProjectId) {
+      if (isCallerProject(e.projectId)) {
         const task = e.taskId ? this.db.getTask(e.taskId) : undefined;
         const session = this.db.getSession(e.sessionId);
         const agent = session?.agentId ? this.db.getAgent(session.agentId) : undefined;
@@ -4353,7 +4369,7 @@ export class SessionService {
         opId: e.opId, projectId: e.projectId, projectName: project?.name ?? e.projectId,
         since: new Date(e.since).toISOString(), elapsedMs: Date.now() - e.since,
       };
-      if (e.projectId === callerProjectId) {
+      if (isCallerProject(e.projectId)) {
         const task = e.taskId ? this.db.getTask(e.taskId) : undefined;
         const session = this.db.getSession(e.sessionId);
         const agent = session?.agentId ? this.db.getAgent(session.agentId) : undefined;
@@ -4376,8 +4392,63 @@ export class SessionService {
     const nowMs = Date.now();
     const declarations: GateIntentEntry[] = this.gateIntents
       .snapshot((sid) => this.db.getSession(sid)?.processState === "live")
-      .map((row) => this.toGateIntentEntry(row, callerProjectId, nowMs));
+      .map((row) => this.toGateIntentEntry(row, isCallerProject(row.projectId) ? row.projectId : callerProjectId, nowMs));
     return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued, repoGuardOnly, squashing, declarations };
+  }
+
+  /**
+   * Card c77dda7d: the merge ops (solo or batch) that could be invalidated by a commit landing on `repoPath`'s
+   * mainline right now — the Platform Lead's pre-flight for `skill_edit`/`skill_write`/`git_commit`.
+   * `repoPath` may be the repo root OR any path inside it (a skill's asset dir): a project matches when one
+   * of its registered repos (primary `repoPath` + `repos[]`) contains it.
+   *
+   * Two sources, unioned by opId: the live GateSemaphore snapshot (queued OR running — carries the real
+   * branch count for a batch) and `pending_gate_ops` rows still `pending` (minted before admission, so
+   * a batch waiting on the semaphore is covered by both; a solo merge still in worktree prep only by the
+   * row). A `pending` row whose owner session is no longer live is skipped: a batch tombstone can be left
+   * permanently `pending` by a crash (see the batch mint site's own doc) and must not warn forever.
+   * NOT covered: a batch still ASSEMBLING its worktree — nothing is minted or queued until it's assembled.
+   * Multi-repo project caveat: rows/entries carry no repoKey, so a match is per PROJECT (any of its repos).
+   */
+  pendingMergeOpsForRepoPath(repoPath: string): PendingMergeOpNotice[] {
+    const norm = (p: string): string => {
+      const r = path.resolve(p);
+      return process.platform === "win32" ? r.toLowerCase() : r;
+    };
+    const target = norm(repoPath);
+    const contains = (root: string): boolean => {
+      const r = norm(root);
+      return target === r || target.startsWith(r.endsWith(path.sep) ? r : r + path.sep);
+    };
+    const projectIds = new Set<string>();
+    for (const p of this.db.listAllProjects()) {
+      const roots = [p.repoPath, ...(p.repos ?? []).map((r) => r.path)].filter((r): r is string => !!r);
+      if (roots.some(contains)) projectIds.add(p.id);
+    }
+    if (projectIds.size === 0) return [];
+    const now = Date.now();
+    const out = new Map<string, PendingMergeOpNotice>();
+    const rowsByOpId = new Map(this.db.listPendingGateOps().filter((r) => r.state === "pending").map((r) => [r.opId, r]));
+    for (const e of this.gateSemaphore.snapshot().entries) {
+      if (e.gateType !== "merge" || !projectIds.has(e.projectId) || !e.opId) continue;
+      const row = rowsByOpId.get(e.opId);
+      const isBatch = e.batchBranches != null || row?.key.startsWith("merge-batch:") === true;
+      out.set(e.opId, {
+        opId: e.opId, projectId: e.projectId, kind: isBatch ? "batch" : "solo", phase: e.phase,
+        branchCount: isBatch ? (e.batchLandedCount ?? e.batchBranches?.length ?? null) : 1,
+        ageMs: row ? now - Date.parse(row.startedAt) : now - e.since,
+      });
+    }
+    for (const row of rowsByOpId.values()) {
+      if (row.kind !== "merge" || out.has(row.opId) || !row.projectId || !projectIds.has(row.projectId)) continue;
+      if (this.db.getSession(row.ownerSessionId)?.processState !== "live") continue;
+      const isBatch = row.key.startsWith("merge-batch:");
+      out.set(row.opId, {
+        opId: row.opId, projectId: row.projectId, kind: isBatch ? "batch" : "solo", phase: "pending",
+        branchCount: isBatch ? null : 1, ageMs: now - Date.parse(row.startedAt),
+      });
+    }
+    return [...out.values()].sort((a, b) => b.ageMs - a.ageMs);
   }
 
   /** Shapes one {@link GateIntentRow} into its wire form ({@link GateIntentEntry}) — shared by

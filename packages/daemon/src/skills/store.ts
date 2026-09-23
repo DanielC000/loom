@@ -870,6 +870,12 @@ export function resetSkillToBundled(name: string): boolean {
   return true;
 }
 
+/** The directory `publishSkillToBundled` writes into (the bundled-asset skills dir) — exposed so a caller
+ *  can ask WHICH repo that write lands in (e.g. the platform surface's pending-merge warning). */
+export function bundledSkillAssetsDir(): string {
+  return ASSET_SKILLS;
+}
+
 /**
  * Inverse of resetSkillToBundled: write the STORE's SKILL.md back into the repo's bundled asset so a
  * UI edit becomes committable (the human commits — this never commits). RESTRICTED to names that

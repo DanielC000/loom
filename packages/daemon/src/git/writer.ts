@@ -339,9 +339,18 @@ export class GitWriter {
    */
   async commit(
     message: string,
-    opts?: { maxFileBytes?: number },
+    opts?: { maxFileBytes?: number; paths?: string[] },
   ): Promise<GitWriteResult<{ hash: string; warning?: string }>> {
     if (!message?.trim()) return { ok: false, error: "commit message required" };
+    // Card c77dda7d: `paths` narrows the commit to exactly those repo-relative paths (add -A -- <paths> +
+    // commit -- <paths>), so an unrelated untracked file in the checkout is never swept in. Validated as
+    // plain repo-relative pathspecs: no absolute/drive paths, no `..`, nothing option-shaped.
+    const paths = opts?.paths;
+    if (paths !== undefined) {
+      if (paths.length === 0) return { ok: false, error: "paths must be non-empty when provided" };
+      const bad = paths.find((p) => !p.trim() || path.isAbsolute(p) || /^[A-Za-z]:/.test(p) || p.startsWith("-") || p.split(/[\\/]/).includes(".."));
+      if (bad !== undefined) return { ok: false, error: `invalid path "${bad}" — paths must be non-empty repo-relative paths with no "..", no absolute path, and no leading "-"` };
+    }
     const maxFileBytes = opts?.maxFileBytes ?? DEFAULT_MAX_VAULT_FILE_BYTES;
     const { message: cleanedMessage, stripped } = stripClaudeSessionTrailer(message);
     // Re-check emptiness AFTER the strip — a message consisting of nothing but a Claude-Session trailer
@@ -357,10 +366,12 @@ export class GitWriter {
           // Nothing staged AND nothing to stage → don't even attempt the commit (git would exit 1).
           const status = await withTimeout(git.status(), this.localMs, "git status");
           if (status.isClean()) return { ok: false, error: "nothing to commit (working tree clean)" };
-          await withTimeout(git.raw(["add", "-A"]), this.localMs, "git add -A");
+          await withTimeout(git.raw(paths ? ["add", "-A", "--", ...paths] : ["add", "-A"]), this.localMs, "git add -A");
           const staged = await withTimeout(git.status(), this.localMs, "git status (post-add)");
           const oversizedWarning = this.oversizedStagedWarning(staged.files, maxFileBytes);
-          const res = await withTimeout(git.commit(cleanedMessage.trim()), this.localMs, "git commit");
+          // With `paths`, `git commit -- <paths>` (--only) commits just those paths even if something else
+          // was already staged; without, the whole index as before.
+          const res = await withTimeout(paths ? git.commit(cleanedMessage.trim(), paths) : git.commit(cleanedMessage.trim()), this.localMs, "git commit");
           const hash = res.commit || (await withTimeout(git.revparse(["HEAD"]), this.localMs, "git rev-parse HEAD")).trim();
           const strippedWarning = stripped
             ? "Removed a Claude-Session: trailer from the commit message — this project's mainline commits don't carry harness attribution."
