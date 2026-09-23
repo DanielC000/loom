@@ -4103,41 +4103,94 @@ export async function computeEmitCompareGate(
   };
 }
 
-/** @decision 815b4b30 — loads the REAL `EXCLUDED_DIR_NAMES` Set, dynamically imported from the diff's OWN
- *  `worktreePath` checkout (never this daemon's own installed copy, and never a hand-copied list).
+/** Bound on evaluating the worktree's harness config in a child process. Generous for a plain module load
+ *  (measured well under a second); exists only so a hung/looping branch copy can never wedge a merge. */
+export const HARNESS_CONFIG_LOAD_TIMEOUT_MS = 20_000;
+
+/** Evaluated by the child (`node --input-type=module -e`). Imports the worktree's script, prints ONE JSON
+ *  line, and force-exits so a stray timer/handle in the branch's module can't keep the child alive. An
+ *  import that never settles (top-level await) makes node itself exit non-zero with no output. */
+const HARNESS_EXPORT_PROBE_SOURCE =
+  "const [url,name]=process.argv.slice(1);" +
+  "import(url).then(m=>{const v=m[name];" +
+  "process.stdout.write(JSON.stringify(v instanceof Set?{ok:true,values:[...v].map(String)}:{ok:false})+'\\n');" +
+  "process.exit(0)},()=>process.exit(2));";
+
+/** @decision fca110cf — the worktree's harness config is evaluated in a killable CHILD PROCESS, never an
+ *  in-process `import()`: `import()` has no time limit, a sync loop in the branch's module body freezes the
+ *  daemon event loop, and the ESM cache is per-URL for the process lifetime (a re-gate of the SAME worktree
+ *  after an edit would read the OLD copy, and every gated worktree would leak a module graph). Async spawn
+ *  only (never spawnSync); `null` on ANY failure (spawn error, timeout-kill, non-zero exit, bad JSON,
+ *  non-`Set` export) — the same fail-closed value the callers already treat as "fail the whole diff closed". */
+function loadHarnessSetExport(
+  worktreePath: string, exportName: string, timeoutMs: number,
+): Promise<Set<string> | null> {
+  return new Promise((resolve) => {
+    const scriptPath = path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs");
+    let settled = false;
+    let out = "";
+    let child: ChildProcess;
+    const done = (r: Set<string> | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      killRemoveChild(child);
+      done(null);
+    }, timeoutMs);
+    try {
+      // Windows: import() needs a file:// URL, never a bare drive-letter path (ERR_UNSUPPORTED_ESM_URL_SCHEME).
+      child = spawn(process.execPath, ["--input-type=module", "-e", HARNESS_EXPORT_PROBE_SOURCE, pathToFileURL(scriptPath).href, exportName], {
+        cwd: worktreePath, stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+      });
+    } catch {
+      done(null);
+      return;
+    }
+    child.stdout?.on("data", (d) => { if (out.length < 1_000_000) out += d; });
+    child.on("error", () => done(null));
+    child.on("close", (code) => {
+      if (code !== 0) { done(null); return; }
+      try {
+        const line = out.trim().split(/\r?\n/).filter(Boolean).pop() ?? "";
+        const parsed = JSON.parse(line) as { ok?: boolean; values?: unknown };
+        done(parsed.ok === true && Array.isArray(parsed.values) ? new Set(parsed.values as string[]) : null);
+      } catch {
+        done(null);
+      }
+    });
+  });
+}
+
+/** @decision 815b4b30 — loads the REAL `EXCLUDED_DIR_NAMES` Set from the diff's OWN `worktreePath` checkout
+ *  (never this daemon's own installed copy, and never a hand-copied list). Evaluated per call in a child
+ *  process (see {@link loadHarnessSetExport}), so an edit to the branch's copy is seen on the next call.
  *
  *  Fails closed
  *  to `null` on any error — never resolve ambiguity to an empty-but-truthy Set; a caller getting `null` MUST
  *  fail the whole diff closed. */
-async function loadExcludedTestDirNames(worktreePath: string): Promise<Set<string> | null> {
-  try {
-    const scriptPath = path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs");
-    // Windows: dynamic import() needs a file:// URL, never a bare drive-letter path
-    // (ERR_UNSUPPORTED_ESM_URL_SCHEME) — same caveat test/census/lib.mjs's own import already documents.
-    const mod = (await import(pathToFileURL(scriptPath).href)) as { EXCLUDED_DIR_NAMES?: unknown };
-    return mod.EXCLUDED_DIR_NAMES instanceof Set ? (mod.EXCLUDED_DIR_NAMES as Set<string>) : null;
-  } catch {
-    return null;
-  }
+export function loadExcludedTestDirNames(
+  worktreePath: string, timeoutMs: number = HARNESS_CONFIG_LOAD_TIMEOUT_MS,
+): Promise<Set<string> | null> {
+  return loadHarnessSetExport(worktreePath, "EXCLUDED_DIR_NAMES", timeoutMs);
 }
 
 /**
  * Card 17cd1f30 — the same reuse shape as {@link loadExcludedTestDirNames} immediately above, applied to
  * the harness's OTHER driftable name set: `NOT_HERMETIC` (scripts/test-daemon.mjs). Loaded from THIS
- * diff's OWN worktree copy of the script, dynamically imported (never a hand-copied second list — the
- * precise pattern card 815b4b30 established and forbids re-diverging from), so a future edit to that set
- * is seen immediately by the reduced gate, not after a daemon restart. Same fail-closed contract: `null`
- * on any load/parse error or a non-`Set` export — a caller that gets `null` MUST fail the whole diff
- * closed, same as the `EXCLUDED_DIR_NAMES` case.
+ * diff's OWN worktree copy of the script (never a hand-copied second list — the precise pattern card
+ * 815b4b30 established and forbids re-diverging from). Each call re-evaluates the script in a fresh child
+ * process (card fca110cf), so an edit to that set on the same worktree is seen on the very next call — the
+ * previous in-process `import()` was cached per-URL and did NOT see it. Same fail-closed contract: `null`
+ * on any load/parse error, timeout or a non-`Set` export — a caller that gets `null` MUST fail the whole
+ * diff closed, same as the `EXCLUDED_DIR_NAMES` case.
  */
-async function loadNotHermeticNames(worktreePath: string): Promise<Set<string> | null> {
-  try {
-    const scriptPath = path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs");
-    const mod = (await import(pathToFileURL(scriptPath).href)) as { NOT_HERMETIC?: unknown };
-    return mod.NOT_HERMETIC instanceof Set ? (mod.NOT_HERMETIC as Set<string>) : null;
-  } catch {
-    return null;
-  }
+export function loadNotHermeticNames(
+  worktreePath: string, timeoutMs: number = HARNESS_CONFIG_LOAD_TIMEOUT_MS,
+): Promise<Set<string> | null> {
+  return loadHarnessSetExport(worktreePath, "NOT_HERMETIC", timeoutMs);
 }
 
 /** @decision bafc68e7 — never re-add a local soundness-predicate/walker/transpile-helper copy here; they

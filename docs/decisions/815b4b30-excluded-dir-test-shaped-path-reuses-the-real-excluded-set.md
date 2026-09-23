@@ -20,7 +20,7 @@ On Windows, dynamic `import()` needs a `file://` URL, never a bare drive-letter 
 
 ## Do not
 
-- Do not hand-copy `EXCLUDED_DIR_NAMES` (or a second notion of "is this a test") for this classification loop — dynamically import the diff's own `scripts/test-daemon.mjs` copy via `loadExcludedTestDirNames`; a hand-copied second list is exactly the divergence that produced the original bug.
+- Do not hand-copy `EXCLUDED_DIR_NAMES` (or a second notion of "is this a test") for this classification loop — load the diff's own `scripts/test-daemon.mjs` copy via `loadExcludedTestDirNames` (evaluated in a child process since `fca110cf`, never an in-process import); a hand-copied second list is exactly the divergence that produced the original bug.
 - Do not re-check `loom:not-a-test:`/`loom:gate-exempt:` markers here — they only affect the full-suite banner's annotation, never whether a file actually runs, so they carry no information for this reduced-gate decision.
 - Do not run the underscore/shell-safety checks against an excluded-dir path before this check — that path never reaches the shell-interpolated chain those checks protect, so running them first could only produce a spurious refusal.
 - Do not read `EXCLUDED_DIR_NAMES`/`NOT_HERMETIC` from this daemon process's own installed copy of `test-daemon.mjs` — always import from the diff's OWN `worktreePath` checkout, so a future edit to either set is seen immediately, not after a daemon restart.
