@@ -200,6 +200,12 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    file, use Playwright `page.screenshot({ path })` against the loopback page (launch with `{ channel:
    'chrome' }` to reuse system Chrome and skip a download), or decode the base64 from the transcript for a
    shot already captured.
+   **Reviewing (or authoring) a diff with a long WHY-heavy comment?** If it is decision/incident narrative
+   — not a guard, contract docs, or restated code — it belongs in a decision record: a short
+   `@decision <id> — <consequence>` pointer (or `@decision sha:<8hex>` when no card covers it) left in the
+   code, with the narrative moved to `docs/decisions/<id>-<slug>.md` (or `docs/adr/<id>-<slug>.md` for a
+   rare, cross-cutting, immutable decision). Check first whether that id already has a record — extend it,
+   never duplicate. This applies in every project you touch, not just Loom.
    **Verify a claim before you adopt it into a DoD or use it to close/retract a card — the same evidence
    bar as one that opens work.** An unverified sub-claim inside a report you were otherwise scrutinizing
    survives because it wasn't where you were looking, not because it held up; writing it into a card's DoD
