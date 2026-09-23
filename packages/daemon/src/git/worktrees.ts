@@ -2423,6 +2423,25 @@ export function normalizeDiffstatPath(raw: string): string {
   return arrowIdx === -1 ? raw : raw.slice(arrowIdx + 4).trim();
 }
 
+/**
+ * The SOURCE (pre-rename) path of a `--stat` rename entry — the sibling of {@link normalizeDiffstatPath}
+ * (same two forms, same doubled-slash collapse for an empty-side `{ => sub}` / `{sub => }` move). `null`
+ * when `raw` is not a rename. A filtered diff needs BOTH paths in its pathspec: with only the destination
+ * git cannot pair the rename and shows the whole file as added.
+ */
+export function diffstatRenameSource(raw: string): string | null {
+  const openIdx = raw.indexOf("{");
+  const closeIdx = openIdx === -1 ? -1 : raw.indexOf("}", openIdx + 1);
+  if (openIdx !== -1 && closeIdx !== -1) {
+    const inner = raw.slice(openIdx + 1, closeIdx);
+    const arrowIdx = inner.indexOf(" => ");
+    if (arrowIdx === -1) return null;
+    return `${raw.slice(0, openIdx)}${inner.slice(0, arrowIdx)}${raw.slice(closeIdx + 1)}`.replace(/\/{2,}/g, "/");
+  }
+  const arrowIdx = raw.indexOf(" => ");
+  return arrowIdx === -1 ? null : raw.slice(0, arrowIdx).trim();
+}
+
 /** @decision 91d847db — a bare leading `*` with no `/` anywhere (e.g. `*service.ts`) is auto-prefixed with
  *  `**​/` before translation — `*` alone stays within one segment and would silently match 0 files,
  *  indistinguishable from "no changes"; never widen this to a pattern already containing `/` or `**`. */
@@ -2542,7 +2561,7 @@ export async function diffBranch(
 
   const patch = includePatch
     ? filtering
-      ? (files.length > 0 ? await withTimeout(git.diff([range, "--", ...files.map((f) => normalizeDiffstatPath(f.file))]), timeoutMs, "git diff (diffBranch patch, filtered)") : "")
+      ? (files.length > 0 ? await withTimeout(git.diff([range, "--", ...new Set(files.flatMap((f) => [normalizeDiffstatPath(f.file), diffstatRenameSource(f.file)].filter((p): p is string => p !== null)))]), timeoutMs, "git diff (diffBranch patch, filtered)") : "")
       : await withTimeout(git.diff([range]), timeoutMs, "git diff (diffBranch patch)")
     : "";
 

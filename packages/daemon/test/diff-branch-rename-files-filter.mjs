@@ -9,7 +9,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 
-const { diffBranch, normalizeDiffstatPath } = await import("../dist/git/worktrees.js");
+const { diffBranch, normalizeDiffstatPath, diffstatRenameSource } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -41,12 +41,19 @@ try {
   const byGlob = await diffBranch(repo, "feat", "main", { pathGlob: "src/*.ts" });
   check("pathGlob on the new path returns a non-empty patch", byGlob.patch.includes("line 5 EDITED"));
 
+  // Review signal: git must PAIR the rename (both paths in the pathspec) -> `rename from/to` + only the real edit.
+  check("files:[new path] patch pairs the rename (rename from/to)", byFile.patch.includes("rename from src/old.ts") && byFile.patch.includes("rename to src/new.ts"));
+  check("files:[new path] patch does NOT re-add the unchanged content", !byFile.patch.includes("+line 7") && byFile.patch.includes("+line 5 EDITED"));
+  check("pathGlob patch also pairs the rename", byGlob.patch.includes("rename from src/old.ts"));
+
   // Negative control: a path matching nothing stays empty.
   const none = await diffBranch(repo, "feat", "main", { files: ["nope/absent.ts"] });
   check("bogus path -> empty patch, 0 files", none.patch === "" && none.files.length === 0);
 
   check("normalize: common-prefix form", normalizeDiffstatPath("src/{old.ts => new.ts}") === "src/new.ts");
   check("normalize: whole-path form", normalizeDiffstatPath("a.ts => b.ts") === "b.ts");
+  check("source: common-prefix / whole-path / non-rename", diffstatRenameSource("src/{old.ts => new.ts}") === "src/old.ts" && diffstatRenameSource("a.ts => b.ts") === "a.ts" && diffstatRenameSource("src/plain.ts") === null);
+  check("source: empty-side dir move", diffstatRenameSource("src/{ => sub}/x.ts") === "src/x.ts" && diffstatRenameSource("src/{sub => }/x.ts") === "src/sub/x.ts");
   check("normalize: empty-side dir move has no doubled slash", normalizeDiffstatPath("src/{ => sub}/x.ts") === "src/sub/x.ts" && normalizeDiffstatPath("src/{sub => }/x.ts") === "src/x.ts");
 } finally {
   fs.rmSync(repo, { recursive: true, force: true });
