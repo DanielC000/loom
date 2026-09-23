@@ -11115,6 +11115,9 @@ export class SessionService {
     this.db.reparentEventTriggerTargets(freshId, oldId);
     this.db.reparentPollJobTargets(freshId, oldId);
     this.db.reparentWebhookTargets(freshId, oldId);
+    // Card 788ed7f4: same direction as reparentWakes/reparentQuestions above — an open "owner message left
+    // without a disposition" episode must come back too, or a dead successor would silently strand it.
+    this.db.reparentPendingOwnerMessage(freshId, oldId);
     if (role === "manager") {
       this.capQueue.reparent(freshId, oldId);
       void this.maybeDrainCapQueue(oldId);
@@ -11331,6 +11334,8 @@ export class SessionService {
         this.db.reparentEventTriggerTargets(freshId, predecessorId);
         this.db.reparentPollJobTargets(freshId, predecessorId);
         this.db.reparentWebhookTargets(freshId, predecessorId);
+        // Card 788ed7f4: same direction as reparentWakes/reparentQuestions above.
+        this.db.reparentPendingOwnerMessage(freshId, predecessorId);
         finalizeRecovery(predecessorId, freshId, reparentedWorkers);
       } catch (e) {
         // @decision 08c81809 — round 4 item 3: do NOT clear the marker here — a throw anywhere in this
@@ -11525,6 +11530,11 @@ export class SessionService {
     this.db.reparentEventTriggerTargets(oldManagerId, fresh.id);
     this.db.reparentPollJobTargets(oldManagerId, fresh.id);
     this.db.reparentWebhookTargets(oldManagerId, fresh.id);
+    // Card 788ed7f4: carry an open "owner message left without a disposition" episode onto the successor
+    // too — a park-then-recycle is exactly how such a message would otherwise get silently lost (unlike
+    // idle_nudge_policy, which deliberately resets fresh on recycle — that's the watchdog's own cadence,
+    // a different concern from an unactioned owner request).
+    this.db.reparentPendingOwnerMessage(oldManagerId, fresh.id);
     // Card daf7dfa1: move any of the predecessor's still-queued cap-queue entries onto the successor too —
     // otherwise a spawn queued behind the cap gets permanently orphaned under a manager id that no future
     // retirement will ever drain again (see CapQueueRegistry.reparent's own doc). Fire-and-forget catch-up
@@ -11744,6 +11754,9 @@ export class SessionService {
     this.db.reparentEventTriggerTargets(oldLeadId, fresh.id);
     this.db.reparentPollJobTargets(oldLeadId, fresh.id);
     this.db.reparentWebhookTargets(oldLeadId, fresh.id);
+    // Card 788ed7f4: carry an open "owner message left without a disposition" episode onto the successor
+    // too — see recycleManager's identical call for the full reasoning.
+    this.db.reparentPendingOwnerMessage(oldLeadId, fresh.id);
     const carried = this.pty.flushPending(oldLeadId);
     const carriedDurable = this.db.listUnresolvedQueuedMessagesForWorker(oldLeadId);
     this.carryPendingToSuccessor(oldLeadId, fresh.id, carried, carriedDurable);
@@ -11794,6 +11807,8 @@ export class SessionService {
   ): {
     recorded: boolean; state: string; policy: IdleNudgePolicy; snoozeUntil: string | null; unanswered: number;
     snoozeMinutes?: number; snoozeMinutesRequested?: number; snoozeClamped?: boolean;
+    unhandledOwnerMessage?: { excerpt: string; at: string; ageMinutes: number; count: number };
+    warning?: string;
   } {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("unknown session");
@@ -11840,19 +11855,46 @@ export class SessionService {
       policy = "suppressed";
     }
 
+    // Card 788ed7f4: on a park ('waiting'/'done' only — 'working' means back at it, nothing to surface),
+    // fire-once-then-clear an open "owner message left without a disposition" episode. A disposition tool
+    // call (tasks_create/platform_escalate/question_ask/question_resolve) already clears the episode
+    // before this ever runs; this is the backstop for a park where none of those happened. Checked AFTER
+    // the policy/snooze bookkeeping above so a bad `minutes` still throws before any of this half-applies.
+    let unhandledOwnerMessage: { excerpt: string; at: string; ageMinutes: number; count: number } | undefined;
+    let warning: string | undefined;
+    if (state === "waiting" || state === "done") {
+      const pending = this.db.getPendingOwnerMessage(sessionId);
+      if (pending) {
+        const ageMinutes = Math.max(0, Math.round((Date.now() - new Date(pending.at).getTime()) / 60_000));
+        unhandledOwnerMessage = { excerpt: pending.excerpt, at: pending.at, ageMinutes, count: pending.count };
+        const more = pending.count > 1 ? ` (+${pending.count - 1} more)` : "";
+        warning =
+          `An owner message arrived at ${pending.at} (${ageMinutes}m ago) and no card/escalation/question ` +
+          `followed: "${pending.excerpt}"${more}. If you answered it in chat, fine; otherwise file it now.`;
+        this.db.clearPendingOwnerMessage(sessionId); // fire-once — this surfacing IS the disposition
+      }
+    }
+
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: sessionId, kind: "idle_report",
       // `minutes` stays the RAW requested value (unchanged shape, for any existing reader) — `snoozeMinutes`/
       // `snoozeClamped` are the new, additive fields that let a later reader tell "asked for 600, got 60"
       // (both present, clamped:true) from "asked for 60" (both equal, clamped:false).
-      detail: { state, detail: opts.detail, minutes: opts.minutes, snoozeMinutes, snoozeClamped, policy, snoozeUntil },
+      // unhandledOwnerMessage* (card 788ed7f4): length + age ONLY — never the raw excerpt in this durable
+      // audit row (same LOOM_LOG_MESSAGE_CONTENT posture CLAUDE.md documents for the daemon's own log).
+      detail: {
+        state, detail: opts.detail, minutes: opts.minutes, snoozeMinutes, snoozeClamped, policy, snoozeUntil,
+        unhandledOwnerMessageLength: unhandledOwnerMessage?.excerpt.length,
+        unhandledOwnerMessageAgeMinutes: unhandledOwnerMessage?.ageMinutes,
+      },
     });
 
     // resetIdleNudgeState always zeros the counter and we never re-bump it here ⇒ unanswered === 0.
     return {
       recorded: true, state, policy, snoozeUntil, unanswered: 0,
       snoozeMinutes, snoozeMinutesRequested: opts.minutes, snoozeClamped,
+      ...(unhandledOwnerMessage ? { unhandledOwnerMessage, warning } : {}),
     };
   }
 

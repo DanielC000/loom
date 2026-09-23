@@ -1960,7 +1960,15 @@ export class PlatformMcpRouter {
           "agent's work is complete. If you need the human, file " +
           "a Request via `question_ask` instead. Always clears your unanswered-nudge counter. Pass a " +
           "short `detail` to say why (recorded for the human). `state` is the canonical param; `status` " +
-          "is accepted as an ALIAS for it — pass either one (if both, state wins).",
+          "is accepted as an ALIAS for it — pass either one (if both, state wins). " +
+          "On a 'waiting'/'done' call (never 'working'), the response may ALSO carry `unhandledOwnerMessage` " +
+          "({excerpt, at, ageMinutes, count}) + a loud `warning` string (card 788ed7f4): the owner sent you " +
+          "a message via chat and, since then, none of tasks_create/platform_escalate/question_ask/" +
+          "question_resolve has fired for this session — a park with no visible disposition. `excerpt` is " +
+          "the FIRST such message (never a later one), `count` is how many have landed since. This fires " +
+          "ONCE per open episode — surfacing it clears it, so read it now: file a card, escalate, ask/" +
+          "resolve a Request, or (if you already answered it in chat) just note that and move on. A NEW " +
+          "owner message starts a fresh episode. Both fields are ABSENT when nothing is pending.",
         inputSchema: strictShape({
           state: z.enum(["working", "waiting", "done"]).optional(),
           status: z.enum(["working", "waiting", "done"]).optional(),
@@ -2414,6 +2422,10 @@ export class PlatformMcpRouter {
             detail: { destinationProjectId: project.id, destinationTaskId: created.id },
           });
         }
+        // Card 788ed7f4: this is the Lead's own card-create disposition (the platform-surface equivalent
+        // of the manager's tasks_create) — clear any open "owner message left without a disposition"
+        // episode for THIS session, by occurrence alone (no content matching).
+        if (callerSessionId && "id" in created) db.clearPendingOwnerMessage(callerSessionId);
         return ok(created);
       },
     );
@@ -3055,6 +3067,9 @@ export class PlatformMcpRouter {
         const supersede = input.supersedes
           ? applySupersede(db, callerSessionId, input.supersedes, question)
           : undefined;
+        // Card 788ed7f4: filing a Request is a disposition — clear any open "owner message left without a
+        // disposition" episode for THIS session, by occurrence alone (no content matching).
+        db.clearPendingOwnerMessage(callerSessionId);
         return ok(supersede !== undefined ? { questionId: question.id, supersede } : { questionId: question.id });
       },
     );
@@ -3211,10 +3226,14 @@ export class PlatformMcpRouter {
       },
       async ({ questionId, chosenOption }) => {
         if (!callerSessionId) return ok({ error: "no caller session" });
-        return ok(resolveQuestionForAgent(
+        const result = resolveQuestionForAgent(
           db, callerSessionId, questionId, chosenOption,
           pty?.getActiveTurnOwnerText(callerSessionId) ?? pty?.getRecentOwnerTurns?.(callerSessionId)?.[0] ?? null,
-        ));
+        );
+        // Card 788ed7f4: resolving a pending Request is a disposition — clear any open "owner message
+        // left without a disposition" episode for THIS session, by occurrence alone (no content matching).
+        if (!("error" in result)) db.clearPendingOwnerMessage(callerSessionId);
+        return ok(result);
       },
     );
 

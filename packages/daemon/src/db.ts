@@ -482,7 +482,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- PtyHostEvents.onTurnCompleted's doc for why the other setBusy(false) sites are deliberately excluded).
   -- Used to detect a manager directive that ages past N real turns with no worker_report — see the
   -- staleDirective projection in mcp/orchestration.ts. Legacy rows backfill to 0 (no completed turns known).
-  turn_seq INTEGER NOT NULL DEFAULT 0
+  turn_seq INTEGER NOT NULL DEFAULT 0,
+  -- Card 788ed7f4: an open "owner message left without a disposition" episode, manager/platform-only
+  -- (idle_report's own role gate — see recordIdleReport). Set from the composer route's ownerText the
+  -- FIRST time an owner-authored message lands with none already pending — never overwritten by a LATER
+  -- owner message in the same episode (a "ok" following a real ask must not replace it) — only the count
+  -- bumps. Cleared either by a disposition tool call (tasks_create/platform_escalate/question_ask/
+  -- question_resolve) or by idle_report surfacing it once (fire-once-then-clear). NEVER the raw owner
+  -- text beyond this bounded excerpt reaches a console/daemon-log line — see recordPendingOwnerMessage's
+  -- own doc. Nullable, no DEFAULT: every legacy row backfills to "no open episode".
+  pending_owner_msg_excerpt TEXT,
+  pending_owner_msg_at TEXT,
+  pending_owner_msg_count INTEGER NOT NULL DEFAULT 0
 );
 -- Append-only orchestration audit trail (manager↔worker timeline; UI timeline in #18).
 -- seq (attention-push watcher fix, CR-caught): the sqlite rowid is NOT a safe tail-poll cursor for this
@@ -1670,6 +1681,12 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   // Card 343441bd: completed-worker-turn counter — see the CREATE TABLE comment above. NOT NULL + constant
   // DEFAULT is legal on ALTER TABLE ADD COLUMN, so legacy rows backfill to 0.
   turn_seq: "INTEGER NOT NULL DEFAULT 0",
+  // Card 788ed7f4: open "owner message left without a disposition" episode — see the CREATE TABLE comment
+  // above. Nullable/no-DEFAULT text columns + a NOT NULL constant-DEFAULT counter, all legal on ALTER
+  // TABLE ADD COLUMN; every legacy row backfills to "no open episode" (0/NULL/NULL).
+  pending_owner_msg_excerpt: "TEXT",
+  pending_owner_msg_at: "TEXT",
+  pending_owner_msg_count: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `projects` after phase-1; applied to existing DBs by migrateProjects(). */
@@ -2083,6 +2100,20 @@ export interface ContextNudgeState {
   lastContextNudgeAt: string | null;
   unanswered: number;
 }
+
+/** Card 788ed7f4: an open "owner message left without a disposition" episode, read back from the sessions
+ *  row. `excerpt` is the FIRST unhandled owner-authored message of the episode (never a later one — see
+ *  Db.recordPendingOwnerMessage); `count` is how many owner messages have landed since. */
+export interface PendingOwnerMessage {
+  excerpt: string;
+  at: string;
+  count: number;
+}
+
+/** Card 788ed7f4: the excerpt bound applied at the composer-route write site (gateway/server.ts), before
+ *  `Db.recordPendingOwnerMessage` ever sees the text — so the stored/returned excerpt is bounded by
+ *  construction, not by a later reader remembering to truncate. */
+export const PENDING_OWNER_MSG_EXCERPT_MAX_CHARS = 300;
 
 /** A gate/merge PendingOpRegistry op's terminal classification — see the `pending_gate_ops` schema doc
  *  for what each value means and which call site writes it. Never re-mutated once terminal. */
@@ -5489,6 +5520,66 @@ export class Db {
     this.db.prepare("UPDATE sessions SET idle_nudge_policy = 'watching', idle_nudge_snooze_until = NULL, idle_nudge_unanswered = 0 WHERE id = ?")
       .run(id);
     this.notifySessionChanged(id);
+  }
+
+  // --- Card 788ed7f4: "owner message left without a disposition at park" — persisted per-manager, same
+  // posture as the idle-watchdog columns above (a manager/platform-only DB-durable episode, carried across
+  // a daemon restart for free since it lives on the session row; explicitly REPARENTED across a recycle by
+  // the two recycle methods in sessions/service.ts, unlike idle_nudge_policy's own reset-on-recycle default
+  // — a park-then-recycle is exactly how an unhandled owner message would otherwise get lost). ---
+  /** Read the open pending-owner-message episode for `id`, or null when none is open / the row is missing. */
+  getPendingOwnerMessage(id: string): PendingOwnerMessage | null {
+    const r = this.db.prepare(
+      "SELECT pending_owner_msg_excerpt, pending_owner_msg_at, pending_owner_msg_count FROM sessions WHERE id = ?",
+    ).get(id) as Row | undefined;
+    if (!r || !r.pending_owner_msg_excerpt) return null;
+    return {
+      excerpt: r.pending_owner_msg_excerpt as string,
+      at: r.pending_owner_msg_at as string,
+      count: (r.pending_owner_msg_count as number) ?? 1,
+    };
+  }
+  /**
+   * Record a fresh owner-authored composer message. FIRST-message-wins: if an episode is already open
+   * (excerpt non-null), the excerpt/at stay pinned to the FIRST unhandled message and only `count` bumps —
+   * a later "ok" following a real ask must never silently replace the real ask. Starts a new episode
+   * (count 1) when none is open. `excerpt` must already be caller-bounded (idle_report's own warning
+   * bounds it further) — this method never itself logs the text anywhere; it only ever reaches this DB
+   * row and, later, a tool response — never a console/daemon-log line (the `LOOM_LOG_MESSAGE_CONTENT`
+   * posture in CLAUDE.md).
+   */
+  recordPendingOwnerMessage(id: string, excerpt: string, atIso: string): void {
+    this.db.prepare(
+      `UPDATE sessions SET
+         pending_owner_msg_excerpt = COALESCE(pending_owner_msg_excerpt, ?),
+         pending_owner_msg_at = COALESCE(pending_owner_msg_at, ?),
+         pending_owner_msg_count = pending_owner_msg_count + 1
+       WHERE id = ?`,
+    ).run(excerpt, atIso, id);
+    this.notifySessionChanged(id);
+  }
+  /** Close the open episode — either a disposition tool call fired, or idle_report just surfaced it once
+   *  (fire-once-then-clear). A no-op (0 rows changed in effect) when nothing was open. */
+  clearPendingOwnerMessage(id: string): void {
+    this.db.prepare(
+      "UPDATE sessions SET pending_owner_msg_excerpt = NULL, pending_owner_msg_at = NULL, pending_owner_msg_count = 0 WHERE id = ?",
+    ).run(id);
+    this.notifySessionChanged(id);
+  }
+  /** Carry an open episode across a manager/platform recycle (card 788ed7f4) — this state lives ON the
+   *  session row itself (not a separate table keyed by session id), so unlike reparentWakes/
+   *  reparentQuestions this is a copy-then-clear from old→new, not an UPDATE...WHERE. A TRUE move (the
+   *  source row is cleared too), matching those siblings' semantics — never leaves a stale duplicate on
+   *  the retiring `oldSessionId` row that a later reverse-reparent (a failed-recycle recovery path) could
+   *  read back as if it were still current. No-op when nothing was open. */
+  reparentPendingOwnerMessage(oldSessionId: string, newSessionId: string): void {
+    const pending = this.getPendingOwnerMessage(oldSessionId);
+    if (!pending) return;
+    this.db.prepare(
+      "UPDATE sessions SET pending_owner_msg_excerpt = ?, pending_owner_msg_at = ?, pending_owner_msg_count = ? WHERE id = ?",
+    ).run(pending.excerpt, pending.at, pending.count, newSessionId);
+    this.notifySessionChanged(newSessionId);
+    this.clearPendingOwnerMessage(oldSessionId);
   }
 
   // --- ContextWatcher recycle-nudge state (persisted per-manager, parity with the idle accessors above

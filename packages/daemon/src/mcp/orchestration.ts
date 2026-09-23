@@ -3810,6 +3810,9 @@ export class OrchestrationMcpRouter {
           id: randomUUID(), ts: question.createdAt, managerSessionId,
           kind: "question_asked", detail: { questionId: question.id, title: question.title },
         });
+        // Card 788ed7f4: filing a Request is a disposition — clear any open "owner message left without a
+        // disposition" episode for THIS session, by occurrence alone (no content matching).
+        db.clearPendingOwnerMessage(managerSessionId);
         return ok(supersede !== undefined ? { questionId: question.id, supersede } : { questionId: question.id });
       },
     );
@@ -3958,11 +3961,16 @@ export class OrchestrationMcpRouter {
           "chosenOption, note} or {error}.",
         inputSchema: strictShape({ questionId: z.string(), chosenOption: z.string().optional() }),
       },
-      async ({ questionId, chosenOption }) =>
-        ok(resolveQuestionForAgent(
+      async ({ questionId, chosenOption }) => {
+        const result = resolveQuestionForAgent(
           db, managerSessionId, questionId, chosenOption,
           pty?.getActiveTurnOwnerText(managerSessionId) ?? pty?.getRecentOwnerTurns?.(managerSessionId)?.[0] ?? null,
-        )),
+        );
+        // Card 788ed7f4: resolving a pending Request is a disposition — clear any open "owner message
+        // left without a disposition" episode for THIS session, by occurrence alone (no content matching).
+        if (!("error" in result)) db.clearPendingOwnerMessage(managerSessionId);
+        return ok(result);
+      },
     );
 
     // requests_list (card 988bb585 follow-up): a NON-CONSUMING, board-wide read of YOUR OWN project's
@@ -5164,7 +5172,15 @@ export class OrchestrationMcpRouter {
           "agent's work is complete. If you need the human, file " +
           "a Request via `question_ask` instead. Always clears your unanswered-nudge counter. Pass a " +
           "short `detail` to say why (recorded for the human). `state` is the canonical param; `status` " +
-          "is accepted as an ALIAS for it — pass either one (if both, state wins).",
+          "is accepted as an ALIAS for it — pass either one (if both, state wins). " +
+          "On a 'waiting'/'done' call (never 'working'), the response may ALSO carry `unhandledOwnerMessage` " +
+          "({excerpt, at, ageMinutes, count}) + a loud `warning` string (card 788ed7f4): the owner sent you " +
+          "a message via chat and, since then, none of tasks_create/platform_escalate/question_ask/" +
+          "question_resolve has fired for this session — a park with no visible disposition. `excerpt` is " +
+          "the FIRST such message (never a later one), `count` is how many have landed since. This fires " +
+          "ONCE per open episode — surfacing it clears it, so read it now: file a card, escalate, ask/" +
+          "resolve a Request, or (if you already answered it in chat) just note that and move on. A NEW " +
+          "owner message starts a fresh episode. Both fields are ABSENT when nothing is pending.",
         inputSchema: strictShape({
           state: z.enum(["working", "waiting", "done"]).optional(),
           status: z.enum(["working", "waiting", "done"]).optional(),
@@ -5628,7 +5644,11 @@ export class OrchestrationMcpRouter {
         const resolvedDetail = resolveAlias(detail, body);
         if (resolvedDetail === undefined) return ok({ error: "detail (or body) is required" });
         try {
-          return ok(sessions.platformEscalate(managerSessionId, { title, detail: resolvedDetail, severity, followUpOn }));
+          const result = sessions.platformEscalate(managerSessionId, { title, detail: resolvedDetail, severity, followUpOn });
+          // Card 788ed7f4: a successful escalation is a disposition — clear any open "owner message left
+          // without a disposition" episode for THIS session, by occurrence alone (no content matching).
+          db.clearPendingOwnerMessage(managerSessionId);
+          return ok(result);
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

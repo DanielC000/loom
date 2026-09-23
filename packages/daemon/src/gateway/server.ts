@@ -18,7 +18,7 @@ import { readTranscript, readArchivedTranscript, archivedTranscriptExists, archi
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import { sweepDeadSessions } from "../sessions/liveness.js";
 import type { Db } from "../db.js";
-import { inTestMode } from "../db.js";
+import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
@@ -5156,15 +5156,29 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { id } = req.params as { id: string };
     const { text } = (req.body as { text?: string }) ?? {};
     if (typeof text !== "string" || !text.trim()) return reply.code(400).send({ error: "text required" });
+    const role = deps.db.getSession(id)?.role;
     // @decision 018ce1db — a Companion (role:"assistant") session is REFUSED here, full stop — never even
     // reaches enqueueStdin: loopback trusts ANY co-resident process (incl. a manager's own Bash), so
     // without this it could curl this route and author words landing as the Companion's own ownerText.
-    if (deps.db.getSession(id)?.role === "assistant") {
+    if (role === "assistant") {
       // Owner-facing wording (not internals-facing "assistant-role"/"generic composer route" jargon) —
       // sibling card 9ccedbee's client fix (api.ts's post/del/put parsing a REST {error} body via
       // errorMessageFrom, instead of throwing a bare status) is what will actually surface this text to
       // the owner once both land; write it for THAT reader, not for a log line.
       return reply.code(403).send({ error: "This is a Companion session — it's driven through Chat, not a raw terminal. Message it from the Chat tab instead." });
+    }
+    // Card 788ed7f4: record an open "owner message left without a disposition" episode — manager/platform
+    // ONLY, since idle_report (the one reader) is role-gated to those two. This composer route is the ONE
+    // channel that populates `ownerText` for a manager/platform session (raw-terminal `/ws/term` input
+    // bypasses it entirely — a known, separately-tracked gap, card b4b9b707 — and Companion inbound is
+    // irrelevant here, refused just above). Bounded at the write site so the stored/returned excerpt is
+    // never the raw unbounded text; NEVER logged anywhere (see Db.recordPendingOwnerMessage's own doc).
+    if (role === "manager" || role === "platform") {
+      const trimmed = text.trim();
+      const excerpt = trimmed.length > PENDING_OWNER_MSG_EXCERPT_MAX_CHARS
+        ? trimmed.slice(0, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS) + "…"
+        : trimmed;
+      deps.db.recordPendingOwnerMessage(id, excerpt, new Date().toISOString());
     }
     // 'human' source: ONLY this composer path tags its entries human; every programmatic enqueue
     // (worker reports, nudges, resume notes) defaults to 'system'. That tag is what gates the mutators.

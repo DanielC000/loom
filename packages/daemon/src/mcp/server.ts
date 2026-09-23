@@ -315,6 +315,9 @@ export class TaskMcpRouter {
         },
         async ({ allowDuplicate, supersedes, relatedTo, allowHtmlEntities, allowNonConventionalType, ...args }) => {
           const created = createProjectTaskChecked(db, projectId, args, { allowDuplicate, supersedes, relatedTo }, allowHtmlEntities, allowNonConventionalType);
+          // Card 788ed7f4: a successful card create is a disposition — clear any open "owner message left
+          // without a disposition" episode for THIS session, by occurrence alone (no content matching).
+          if (!("error" in created)) db.clearPendingOwnerMessage(sessionId);
           // Card f651aff0: same oversized-body gap as tasks_get (card 7aeea78b) — createProjectTaskChecked
           // returns the full Task (title+body) on success, unbounded. spillableTaskGet is a no-op below the
           // cap (byte-identical to before).
