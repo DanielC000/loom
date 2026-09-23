@@ -1857,12 +1857,21 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Read the FULL MEMORY.md of one of YOUR OWN durable memory entries by name. Returns {name, " +
-          "content}, or {error} if there's no such entry.",
+          "content}, or {error} if there's no such entry. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
+          "content spills to a scratch file instead of inlining, and the response becomes {name, " +
+          "contentFile, contentChars, note}.",
         inputSchema: strictShape({ name: z.string() }),
       },
       async ({ name }) => {
         const content = readCompanionMemory(sessionId, name);
-        return ok(content == null ? { error: `no memory "${name}"` } : { name, content });
+        if (content == null) return ok({ error: `no memory "${name}"` });
+        // card 91fef05a, mirroring skill_read (card 26134f1a): a self-authored memory entry is free-form
+        // and uncapped — the companion (assistant role, a TRANSCRIPT_ROOT_DENY_ROLES member) could write/
+        // accumulate enough of it to exceed the engine's own native tool-result threshold with no spill
+        // protection.
+        const spill = spillTextIfLarge(sessionId, "memory-read-spills", name, content, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok({ name, content });
+        return ok({ name, contentFile: spill.file, contentChars: spill.chars, note: `content is ${spill.chars} chars — too large to inline safely, so it was written to ${spill.file}. Read it directly, or grep it for a substring.` });
       },
     );
 

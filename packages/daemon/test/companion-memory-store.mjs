@@ -29,7 +29,8 @@ import { requireHermeticEnv } from "./_guard.mjs";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
-const { SKILLS_DIR, COMPANION_MEMORY_DIR, companionMemoryDir } = await import("../dist/paths.js");
+const { SKILLS_DIR, COMPANION_MEMORY_DIR, companionMemoryDir, sessionScratchDir } = await import("../dist/paths.js");
+const { SPILL_INLINE_BUDGET_CHARS } = await import("../dist/spill.js");
 const {
   authorCompanionMemory, listCompanionMemories, readCompanionMemory, removeCompanionMemory,
   NEAR_DUP_THRESHOLD, MIN_DEDUP_UNION_TOKENS,
@@ -246,11 +247,55 @@ try {
     check("wiring: the MCP-authored memory stayed out of the global SKILLS_DIR", !fs.existsSync(path.join(SKILLS_DIR, "user-nickname")));
     db.close();
   }
+
+  // ============ Part 8 — memory_read spill protection (card 91fef05a, reviewer finding 1) ============
+  // A self-authored memory entry is free-form and uncapped (no MAX on `content` — see
+  // authorCompanionMemory's own doc), so a large one could exceed the engine's own native tool-result
+  // threshold with no spill protection, the same asymmetry the sibling companion skill_read was already
+  // fixed for on the same rationale (card 26134f1a).
+  {
+    const db = new Db(path.join(tmpHome, "p8.db"));
+    class SeamHost extends createSeamHost(PtyHost) {
+      createPty(opts) { return { ...super.createPty(opts), pid: 1 }; }
+      stop() {}
+    }
+    const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
+    const svc = new SessionService(db, host, new OrchestrationControl());
+    const orch = new OrchestrationMcpRouter(db, svc, { companionSessionIds: new Set([SESS]), deliverReply: async () => ({ delivered: true }) });
+    const c = await (async (server) => {
+      const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverT);
+      const client = new Client({ name: "companion-memory-spill-test", version: "0" });
+      await client.connect(clientT);
+      return client;
+    })(orch.buildServer(SESS, "assistant"));
+
+    const bigBody = "z".repeat(SPILL_INLINE_BUDGET_CHARS + 5000);
+    const bigContent = `---\nname: huge-memory\ndescription: an oversized entry\npinned: false\n---\n\n${bigBody}`;
+    const writtenBig = JSON.parse((await c.callTool({ name: "memory_write", arguments: { name: "huge-memory", content: bigContent } })).content[0].text);
+    check("(8) fixture sanity: the oversized memory_write succeeded", writtenBig.authored === "huge-memory");
+
+    const readBig = JSON.parse((await c.callTool({ name: "memory_read", arguments: { name: "huge-memory" } })).content[0].text);
+    check("(8) an oversized memory_read IS spilled (not the bare {name,content} shape)", readBig.content === undefined && typeof readBig.contentFile === "string");
+    check("(8) the spill pointer carries name/contentFile/contentChars/note", readBig.name === "huge-memory" && typeof readBig.contentChars === "number" && typeof readBig.note === "string");
+    check("(8) the spill file lives under THIS companion session's own scratch dir", readBig.contentFile.startsWith(sessionScratchDir(SESS)));
+    const spilledContent = fs.readFileSync(readBig.contentFile, "utf8");
+    check("(8) the spill file's content is the real (unescaped) entry text", spilledContent === bigContent);
+
+    // A SMALL entry stays byte-identical (no spill pointer) — mirrors the pre-existing skill_read contract.
+    const smallContent = "---\nname: small-memory\ndescription: a small entry\npinned: false\n---\n\nsmall body";
+    await c.callTool({ name: "memory_write", arguments: { name: "small-memory", content: smallContent } });
+    const readSmall = JSON.parse((await c.callTool({ name: "memory_read", arguments: { name: "small-memory" } })).content[0].text);
+    check("(8) a below-cap memory_read stays inline (byte-identical shape)", readSmall.name === "small-memory" && readSmall.content === smallContent && readSmall.contentFile === undefined);
+
+    await c.close();
+    db.close();
+  }
 } finally {
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — companion self-authored memory entries are ISOLATED (persist under <LOOM_HOME>/companion-memory/<sessionId>/, never the global SKILLS_DIR), CRUD'd (author/list/read/remove) with name+description+pinned frontmatter, refined in place, curated (remove), guarded against near-duplicate NEW names, confined against path traversal / absolute / percent-encoded names, and exposed as memory_write/memory_list/memory_read/memory_remove gated to the single bound companion session on the MCP surface."
+  ? "\n✅ ALL PASS — companion self-authored memory entries are ISOLATED (persist under <LOOM_HOME>/companion-memory/<sessionId>/, never the global SKILLS_DIR), CRUD'd (author/list/read/remove) with name+description+pinned frontmatter, refined in place, curated (remove), guarded against near-duplicate NEW names, confined against path traversal / absolute / percent-encoded names, exposed as memory_write/memory_list/memory_read/memory_remove gated to the single bound companion session on the MCP surface, and (card 91fef05a) memory_read spills an oversized entry to the caller's own scratch dir instead of inlining unbounded."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
