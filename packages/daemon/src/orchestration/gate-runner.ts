@@ -1232,7 +1232,7 @@ export function formatWeakerPassWarning(retriedFile: string, outputTail?: string
     return `⚠ WEAKER PASS: the first gate attempt ${killedClause} on a timeout, not an assertion failure — passed only after ${retryClause}. This is NOT evidence of an order-dependent/cross-test-pollution bug. The cause of the timeout is not established by this signal alone — read the retained gate output before attributing it.${batchClause}`;
   }
   const retryClause = single ? `retrying '${names[0]}' in isolation once` : `retrying ${names.length} files together in ONE isolated retry ('${names.join("', '")}')`;
-  return `⚠ WEAKER PASS: the first gate attempt failed; passed only after ${retryClause}. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.${batchClause}`;
+  return `⚠ WEAKER PASS: the first gate attempt failed; passed only after ${retryClause}. The cause is not established by this signal alone — plausible explanations include a timeout kill, host contention, an order-dependent/cross-test-pollution bug, or a flake; read the retained gate output before attributing it to any one of them — treat this differently from an ordinary clean pass.${batchClause}`;
 }
 
 /**

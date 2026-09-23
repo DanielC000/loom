@@ -3926,9 +3926,10 @@ export class SessionService {
      *  `[loom:merge-done]` nudge already renders inline for a live read of this exact op (one shared
      *  formatter feeds both, so the two can never tell two different stories about the identical settle).
      *  Explains, in plain language, why a retry-assisted pass is weaker evidence than an ordinary clean
-     *  pass (an order-dependent/cross-test-pollution bug can pass alone and fail in the full suite) — read
-     *  this before treating any settled "merge" pass as trustworthy on its own. Absent (never an empty
-     *  string) whenever `retriedFile` is `null` or `undefined`. */
+     *  pass (card db1fc7af: the cause is left UNESTABLISHED — a timeout kill, host contention, an
+     *  order-dependent/cross-test-pollution bug, and a flake are all plausible and undistinguished) —
+     *  read this before treating any settled "merge" pass as trustworthy on its own. Absent (never an
+     *  empty string) whenever `retriedFile` is `null` or `undefined`. */
     retryWarning?: string;
     /** Code Review, card 67030bb9 finding [5]; CORRECTED, card 553ea58c — present ONLY on a "merge" row
      *  produced by `mergeBatch`: the count of branches ASSEMBLED into the batch worktree during assembly,

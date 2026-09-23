@@ -152,10 +152,10 @@ const now = new Date().toISOString();
     "      exit->close gap: 12ms",
   ].join("\n");
   const timeoutWarning = formatWeakerPassWarning("kickoff-real-spawn", timeoutTail);
-  // Checks the GENERIC sentence itself ("...bug can pass alone and fail in the full suite"), not the bare
-  // "order-dependent/cross-test-pollution" phrase — the new timeout wording deliberately still USES that
+  // Checks the GENERIC branch's own distinguishing phrase ("plausible explanations include"), not the bare
+  // "order-dependent/cross-test-pollution" phrase — the timeout wording deliberately still USES that
   // phrase (to say what this is NOT), so a bare substring check would pass vacuously either way.
-  check("(unit weaker-pass — POSITIVE CONTROL) a real timeout/SIGTERM tail branches OFF the generic cross-test-pollution sentence", !timeoutWarning.includes("can pass alone and fail in the full suite"));
+  check("(unit weaker-pass — POSITIVE CONTROL) a real timeout/SIGTERM tail branches OFF the generic multi-cause sentence", !timeoutWarning.includes("plausible explanations include"));
   check("(unit weaker-pass — POSITIVE CONTROL) ...and differs from the plain generic wording for the same file", timeoutWarning !== formatWeakerPassWarning("kickoff-real-spawn"));
   check("(unit weaker-pass — POSITIVE CONTROL) ...and names the timeout + file explicitly instead", timeoutWarning.includes("timeout") && timeoutWarning.includes("kickoff-real-spawn"));
   check("(unit weaker-pass — POSITIVE CONTROL) still opens with the same '⚠ WEAKER PASS' marker every reader already greps for", timeoutWarning.startsWith("⚠ WEAKER PASS:"));
@@ -167,10 +167,10 @@ const now = new Date().toISOString();
 
   // FAIL-SAFE, this card's own §NON-NEGOTIABLE — an UNRECOGNISED signature (a genuine assertion failure,
   // no "exit timeout" anywhere) must keep TODAY'S generic wording unchanged. Never assert "timeout" from
-  // an absent match — a false "timeout" label would suppress a genuine pollution warning, strictly worse
-  // than the pre-card over-general text.
+  // an absent match — a false "timeout" label would suppress a genuine multi-cause warning, strictly
+  // worse than the pre-card over-general text.
   const genuineTail = "FAILURES:\n  - flaky-file (exit 1): FAIL some_check_label\n";
-  check("(unit weaker-pass — NEGATIVE CONTROL) a genuine (non-timeout) failure tail keeps today's generic cross-test-pollution wording, unchanged", formatWeakerPassWarning("flaky-file", genuineTail) === formatWeakerPassWarning("flaky-file"));
+  check("(unit weaker-pass — NEGATIVE CONTROL) a genuine (non-timeout) failure tail keeps today's generic multi-cause wording, unchanged", formatWeakerPassWarning("flaky-file", genuineTail) === formatWeakerPassWarning("flaky-file"));
 
   // ANCHOR SPECIFICITY — a timeout mentioned for a DIFFERENT file in the SAME tail must not flip the
   // retried file's own warning; a bare "exit timeout" substring match anywhere in the tail would be a
@@ -179,14 +179,25 @@ const now = new Date().toISOString();
   const otherFileTimeoutTail = "FAILURES:\n  - unrelated-file (exit timeout (killed (exited via signal SIGTERM after kill))): \n";
   check("(unit weaker-pass — ANCHOR CONTROL) a timeout on a DIFFERENT file in the same tail does not flip the retried file's own warning", formatWeakerPassWarning("flaky-file", otherFileTimeoutTail) === formatWeakerPassWarning("flaky-file"));
 
-  // BACK-COMPAT — omitting `outputTail` entirely (every pre-card call site, and any non-"merge" caller
-  // that never threads it) reproduces the ORIGINAL wording verbatim, byte-for-byte.
-  check("(unit weaker-pass — BACK-COMPAT) omitting outputTail entirely reproduces the original, pre-card wording verbatim", formatWeakerPassWarning("flaky-file") === "⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying 'flaky-file' in isolation once. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.");
+  // BACK-COMPAT (card db1fc7af RE-DERIVED): omitting `outputTail` entirely (every pre-card call site, and
+  // any non-"merge" caller that never threads it) reproduces the CURRENT generic wording verbatim,
+  // byte-for-byte. Card db1fc7af (Platform Auditor finding 4be406ac) rewrote this generic branch: it used
+  // to name ONE mechanism ("An order-dependent/cross-test-pollution bug can pass alone and fail in the
+  // full suite") as if it were the established cause; a manager reading only the nudge took that as fact.
+  // The corrected wording states the cause is UNESTABLISHED and lists every plausible, undistinguished
+  // cause instead — mirroring the `9966c52d` timeout branch's own "don't assert a cause" discipline (see
+  // that card's decision record) rather than contradicting it.
+  check("(unit weaker-pass — BACK-COMPAT) omitting outputTail entirely reproduces the current, corrected generic wording verbatim", formatWeakerPassWarning("flaky-file") === "⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying 'flaky-file' in isolation once. The cause is not established by this signal alone — plausible explanations include a timeout kill, host contention, an order-dependent/cross-test-pollution bug, or a flake; read the retained gate output before attributing it to any one of them — treat this differently from an ordinary clean pass.");
+  // DoD (card db1fc7af): the new text NAMES the causes but must not ASSERT any one of them as the cause.
+  const generic = formatWeakerPassWarning("flaky-file");
+  check("(unit weaker-pass — DoD) the generic wording names all four plausible causes", ["timeout kill", "host contention", "order-dependent/cross-test-pollution bug", "flake"].every((c) => generic.includes(c)));
+  check("(unit weaker-pass — DoD) the generic wording states the cause is unestablished rather than asserting one", generic.includes("The cause is not established by this signal alone"));
+  check("(unit weaker-pass — DoD) still preserves the 'treat this differently from an ordinary clean pass' framing", generic.includes("treat this differently from an ordinary clean pass"));
 
   // SECOND SPECIMEN — a DIFFERENT file (`batch-merge`, op 4f94abde), same shape: proves this is a
   // warning-TEXT defect, not something specific to `kickoff-real-spawn`'s own seven-pty cost profile.
   const batchMergeTail = "FAILURES:\n  - batch-merge (exit timeout (killed (exited via signal SIGTERM after kill))): \n";
-  check("(unit weaker-pass — SECOND SPECIMEN) the same branch fires for an unrelated file's own timeout kill (batch-merge, op 4f94abde)", !formatWeakerPassWarning("batch-merge", batchMergeTail).includes("can pass alone and fail in the full suite"));
+  check("(unit weaker-pass — SECOND SPECIMEN) the same branch fires for an unrelated file's own timeout kill (batch-merge, op 4f94abde), never the generic multi-cause list", !formatWeakerPassWarning("batch-merge", batchMergeTail).includes("plausible explanations include"));
 }
 
 // ── (unit) GateSemaphore.findByOpId ──────────────────────────────────────────────────────────────────
