@@ -1066,7 +1066,7 @@ export class PlatformMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId.",
+          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
         inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
@@ -1108,8 +1108,11 @@ export class PlatformMcpRouter {
         // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
         const warning = agentUpdatePromptWarning(db, resolved, v.patch);
         db.updateAgent(resolved.id, v.patch);
-        const updated = agentFields(db.getAgent(resolved.id));
-        return ok(warning ? { ...updated, promptWarning: warning } : updated);
+        const updated = agentFields(db.getAgent(resolved.id))!;
+        const withWarning = warning ? { ...updated, promptWarning: warning } : updated;
+        // Same unbounded-startupPrompt shape spillableAgentGet already protects for agent_get — a PATCH
+        // that touches/keeps a large prompt echoes it right back in the response.
+        return ok(callerSessionId ? spillableAgentGet(callerSessionId, "agent-update-spills", withWarning.id, withWarning) : withWarning);
       },
     );
 
@@ -1288,10 +1291,16 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_projects",
       {
-        description: "List every live project across the platform, INCLUDING the reserved/system home (the ordinary project picker hides reserved ones; this admin view does not). Excludes archived projects. Returns project rows. Every row's config.sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
+        description: "List every live project across the platform, INCLUDING the reserved/system home (the ordinary project picker hides reserved ones; this admin view does not). Excludes archived projects. Returns project rows. Every row's config.sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the rows spill to a scratch file as NDJSON instead of inlining, and the response becomes {projectsFile, projectsChars, rowCount, note}.",
         inputSchema: strictShape({}),
       },
-      async () => ok(db.listAllProjects().map(projectFields)),
+      async () => {
+        const rows = db.listAllProjects().map(projectFields);
+        if (!callerSessionId) return ok(rows);
+        const spill = spillRowsIfLarge(callerSessionId, "list-all-projects-spills", "all", rows, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok(rows);
+        return ok({ projectsFile: spill.file, projectsChars: spill.chars, rowCount: spill.rowCount, note: spill.note });
+      },
     );
 
     server.registerTool(
@@ -1401,27 +1410,42 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_profiles",
       {
-        description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, restrictedTools, noCommit). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update.",
+        description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, restrictedTools, noCommit). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the rows spill to a scratch file as NDJSON instead of inlining, and the response becomes {profilesFile, profilesChars, rowCount, note}.",
         inputSchema: strictShape({}),
       },
-      async () => ok(db.listProfiles().map(profileFields)),
+      async () => {
+        const rows = db.listProfiles().map(profileFields);
+        if (!callerSessionId) return ok(rows);
+        const spill = spillRowsIfLarge(callerSessionId, "list-all-profiles-spills", "all", rows, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok(rows);
+        return ok({ profilesFile: spill.file, profilesChars: spill.chars, rowCount: spill.rowCount, note: spill.note });
+      },
     );
 
     server.registerTool(
       "list_all_schedules",
       {
-        description: "List cron schedules across the platform (each {id, agentId, cron, enabled, nextFireAt, nextFireAtLocal, lastFiredAt, lastDeferredAt, lastDeferredReason, kind, prompt}). `cron`/`nextFireAt` are evaluated/expressed in the DAEMON's LOCAL timezone, NOT UTC — `nextFireAtLocal` is the reliable human-readable cross-check, never assume nextFireAt's ISO instant reads as UTC-intuitive wall-clock time. `lastDeferredReason` is non-null when a fire was held back by a budget/owner gate OR missed entirely while the daemon was down (see the durable `schedule_fire_deferred`/`schedule_fire_missed` orchestration events for the full history). Optional projectId narrows to schedules whose agent lives in that project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, returns every schedule. Read-only. Use to discover a scheduleId before schedule_update/schedule_delete.",
+        description: "List cron schedules across the platform (each {id, agentId, cron, enabled, nextFireAt, nextFireAtLocal, lastFiredAt, lastDeferredAt, lastDeferredReason, kind, prompt}). `cron`/`nextFireAt` are evaluated/expressed in the DAEMON's LOCAL timezone, NOT UTC — `nextFireAtLocal` is the reliable human-readable cross-check, never assume nextFireAt's ISO instant reads as UTC-intuitive wall-clock time. `lastDeferredReason` is non-null when a fire was held back by a budget/owner gate OR missed entirely while the daemon was down (see the durable `schedule_fire_deferred`/`schedule_fire_missed` orchestration events for the full history). Optional projectId narrows to schedules whose agent lives in that project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, returns every schedule. Read-only. Use to discover a scheduleId before schedule_update/schedule_delete. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the rows spill to a scratch file as NDJSON instead of inlining, and the response becomes {schedulesFile, schedulesChars, rowCount, note}.",
         inputSchema: strictShape({ projectId: z.string().optional() }),
       },
       async ({ projectId }) => {
         const all = db.listSchedules();
-        if (projectId === undefined) return ok(all.map((s) => withScheduleTimeEcho(s)));
-        // projectId resolves EXACTLY like the sibling cross-project reads (project_get/list_all_sessions) —
-        // full id OR unambiguous 8-char prefix, error on unknown/ambiguous (sibling of card 7097f3fb / f10093f).
-        const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
-        if ("error" in project) return ok(project);
-        // Schedules are keyed by agentId; a project filter resolves each schedule's agent → its project.
-        return ok(all.filter((s) => db.getAgent(s.agentId)?.projectId === project.id).map((s) => withScheduleTimeEcho(s)));
+        let rows: ReturnType<typeof withScheduleTimeEcho>[];
+        if (projectId === undefined) {
+          rows = all.map((s) => withScheduleTimeEcho(s));
+        } else {
+          // projectId resolves EXACTLY like the sibling cross-project reads (project_get/list_all_sessions) —
+          // full id OR unambiguous 8-char prefix, error on unknown/ambiguous (sibling of card 7097f3fb / f10093f).
+          const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+          if ("error" in project) return ok(project);
+          // Schedules are keyed by agentId; a project filter resolves each schedule's agent → its project.
+          rows = all.filter((s) => db.getAgent(s.agentId)?.projectId === project.id).map((s) => withScheduleTimeEcho(s));
+        }
+        if (!callerSessionId) return ok(rows);
+        const spillKey = projectId ?? "all";
+        const spill = spillRowsIfLarge(callerSessionId, "list-all-schedules-spills", spillKey, rows, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok(rows);
+        return ok({ schedulesFile: spill.file, schedulesChars: spill.chars, rowCount: spill.rowCount, note: spill.note });
       },
     );
 
@@ -1853,7 +1877,7 @@ export class PlatformMcpRouter {
           : s.engineSessionId ? readTranscript(s.cwd, s.engineSessionId, s.harness) : [];
         if (finalMessageOnly) {
           const last = [...turns].reverse().find((t) => t.role === "assistant");
-          return ok(last ? [last] : []);
+          return ok(spillableTurnsResponse(last ? [last] : [], null));
         }
         if (typeof lastN === "number" && lastN > 0) {
           return ok(spillableTurnsResponse(lastNTurns(turns, lastN), null));

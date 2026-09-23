@@ -19,7 +19,7 @@ import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { projectFields, agentFields, profileFields } from "./entityRowFields.js";
-import { spillableAgentGet, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
+import { spillableAgentGet, spillRowsIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { skillListData, skillWriteData } from "./skillTools.js";
 import { getByIdPrefix } from "../id-prefix.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
@@ -406,7 +406,7 @@ export class SetupMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is platform/auditor/workspace-auditor (a setup operator can never elevate an agent — that's human-only).",
+          "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is platform/auditor/workspace-auditor (a setup operator can never elevate an agent — that's human-only). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
         inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
@@ -455,8 +455,11 @@ export class SetupMcpRouter {
         // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
         const warning = agentUpdatePromptWarning(db, resolved, v.patch);
         db.updateAgent(resolved.id, v.patch);
-        const updated = agentFields(db.getAgent(resolved.id));
-        return ok(warning ? { ...updated, promptWarning: warning } : updated);
+        const updated = agentFields(db.getAgent(resolved.id))!;
+        const withWarning = warning ? { ...updated, promptWarning: warning } : updated;
+        // card 91fef05a: same unbounded-startupPrompt shape spillableAgentGet already protects for
+        // agent_get — a PATCH that touches/keeps a large prompt echoes it right back in the response.
+        return ok(callerSessionId ? spillableAgentGet(callerSessionId, "agent-update-spills", withWarning.id, withWarning) : withWarning);
       },
     );
 
@@ -596,10 +599,16 @@ export class SetupMcpRouter {
     server.registerTool(
       "list_all_projects",
       {
-        description: "List every live project across the platform, INCLUDING reserved/system homes. Excludes archived projects. Returns project rows. Every row's config.sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
+        description: "List every live project across the platform, INCLUDING reserved/system homes. Excludes archived projects. Returns project rows. Every row's config.sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the rows spill to a scratch file as NDJSON instead of inlining, and the response becomes {projectsFile, projectsChars, rowCount, note}.",
         inputSchema: strictShape({}),
       },
-      async () => ok(db.listAllProjects().map(projectFields)),
+      async () => {
+        const rows = db.listAllProjects().map(projectFields);
+        if (!callerSessionId) return ok(rows);
+        const spill = spillRowsIfLarge(callerSessionId, "list-all-projects-spills", "all", rows, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok(rows);
+        return ok({ projectsFile: spill.file, projectsChars: spill.chars, rowCount: spill.rowCount, note: spill.note });
+      },
     );
 
     server.registerTool(
