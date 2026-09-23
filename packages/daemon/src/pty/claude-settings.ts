@@ -114,9 +114,11 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  *
  * Card 5244adc2 (the remaining half of `661b7d46` DoD-2's "no injection, no overhead"): this hook group
  * is wired ONLY when `repoPath` resolves to a project that has adopted at least one of the three record
- * stores (see `anyDecisionRecordStoreExists` below, which mirrors `decision-records.mjs`'s own runtime
- * `anyStoreExists` bail — keep both in sync). `repoPath` OMITTED falls back to the pre-5244adc2 behavior
- * of always wiring the hook, so every existing caller stays byte-identical.
+ * stores (see `anyDecisionRecordStoreExists` below, which — since card a4760fc8 — actually mirrors
+ * `decision-records.mjs`'s own runtime resolution in full: walk up to the nearest `.git`, THEN check for
+ * a store there, exactly as that script's own `findRepoRoot` + `anyStoreExists` pair do; keep both in
+ * sync). `repoPath` OMITTED falls back to the pre-5244adc2 behavior of always wiring the hook, so every
+ * existing caller stays byte-identical.
  *
  * @decision 5244adc2 — a
  * session already LIVE when the first store appears is NOT rewired until its own next resume — an
@@ -165,7 +167,35 @@ export function toCliPermissionMode(mode: PermissionPolicy["mode"]): CliPermissi
  */
 export const DECISION_RECORD_STORE_KINDS: readonly string[] = ["adr", "decisions", "investigations"];
 
-function anyDecisionRecordStoreExists(repoRoot: string): boolean {
+/** Card a4760fc8 — mirrors `decision-records.mjs`'s own `findRepoRoot` exactly (same doc there):
+ *  walk UP from `startDir` looking for a `.git` ENTRY (dir or FILE — a git worktree's `.git` is a file,
+ *  and `fs.existsSync` doesn't distinguish, so this recognizes either without extra logic), stopping at
+ *  the first one found. Returns `null` if the walk reaches a filesystem root with no `.git` anywhere
+ *  above `startDir` (never throws). Duplicated here rather than imported for the same "assets ship
+ *  standalone" reason `DECISION_RECORD_STORE_KINDS` above is duplicated rather than imported — this
+ *  daemon-side copy exists purely to decide whether to WIRE the hook, and it must resolve the SAME root
+ *  the runtime script resolves at read time, or the two can disagree (see `anyDecisionRecordStoreExists`
+ *  below for exactly what disagreeing looked like before this card). */
+function findGitRootUpward(startDir: string): string | null {
+  let dir = startDir;
+  for (;;) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * Card a4760fc8 — first walks `cwd` UP to the nearest `.git` (via `findGitRootUpward` above), THEN checks
+ * for a record store there; falls back to checking `cwd` ITSELF when no `.git` is found anywhere above it
+ * (preserves the pre-a4760fc8 behavior for that case — e.g. a freshly `project_init`'d vault-only folder
+ * that the vault auto-committer hasn't `git init`'d yet).
+ *
+ * @decision a4760fc8 — never check `docs/<kind>` directly under the passed `cwd` without the walk-up first.
+ */
+function anyDecisionRecordStoreExists(cwd: string): boolean {
+  const repoRoot = findGitRootUpward(cwd) ?? cwd;
   return DECISION_RECORD_STORE_KINDS.some((kind) => fs.existsSync(path.join(repoRoot, "docs", kind)));
 }
 
@@ -183,12 +213,13 @@ export function writeSessionSettings(
   permission: { mode: CliPermissionMode; allow: PermissionPolicy["allow"]; deny: PermissionPolicy["deny"] },
   hookToken: string,
   vaultPath?: string,
-  // Card 5244adc2: the session's own repo root (host.ts's `createPty` passes `opts.cwd` — the session's
-  // ACTUAL working directory, e.g. a worker's own worktree — never `opts.repoPath`, which is documented
-  // elsewhere as "ALWAYS the project's main checkout, never a worker's own worktree"; the decision-records
-  // hook must agree with what `decision-records.mjs` itself checks at runtime, which walks up from the
-  // session's own cwd, not the main checkout). OMITTED ⇒ the Read hook is always wired (the pre-5244adc2
-  // behavior) — every caller that doesn't thread this (see the test population) stays byte-identical.
+  // Card 5244adc2: the session's own CWD (host.ts's `createPty` passes `opts.cwd` — the session's ACTUAL
+  // working directory, e.g. a worker's own worktree, or a manager/plain session's `project.repoPath` —
+  // never a separate "main checkout" concept). Despite the param name, this is NOT necessarily a git
+  // repo ROOT — `anyDecisionRecordStoreExists` below walks up from it to find one (card a4760fc8), the
+  // same as `decision-records.mjs` itself does at runtime via `findRepoRoot`. OMITTED ⇒ the Read hook is
+  // always wired (the pre-5244adc2 behavior) — every caller that doesn't thread this (see the test
+  // population) stays byte-identical.
   repoPath?: string,
   // Card d92ec82b: the EXPLICIT "docLint is on" signal, threaded through SpawnOpts.docLint (host.ts) from
   // sessions/service.ts's own `config.docLint` — gates the comment-anchor-lint hook below independently of
