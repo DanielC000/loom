@@ -273,7 +273,47 @@
               <p class="card-body">
                 A lead session plans, delegates to worker sessions on isolated
                 worktree branches, reviews each diff, and merges through a gate.
-                Workers report up; the lead holds the whole picture.
+                A whole batch of ready branches can land in one gate run, and a
+                docs-only diff takes a reduced gate. Workers report up; the lead
+                holds the whole picture.
+              </p>
+            </li>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="6" y="6" width="28" height="9" rx="2" />
+                  <rect x="6" y="19" width="28" height="9" rx="2" />
+                  <path d="M10.5 10.5h.01 M10.5 23.5h.01" />
+                  <path d="M15 10.5h14 M15 23.5h9" />
+                  <path d="M12 32h16" />
+                </svg>
+              </span>
+              <h3 class="card-title">Every gate in one place</h3>
+              <p class="card-body">
+                Gates run daemon-wide through a single concurrency budget, and
+                the Gates page is the view of all of them: what's running, what's
+                queued behind it, and a filterable history of settled runs with
+                per-step timings, across every project.
+              </p>
+            </li>
+
+            <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="5" y="7" width="13" height="10" rx="2" />
+                  <rect x="22" y="7" width="13" height="10" rx="2" />
+                  <rect x="13.5" y="25" width="13" height="10" rx="2" />
+                  <path d="M11.5 17v4h17v-4" />
+                  <path d="M20 21v4" />
+                </svg>
+              </span>
+              <h3 class="card-title">Multi-repo projects</h3>
+              <p class="card-body">
+                One project can register more than one writable repository and
+                route each board card to a specific repo, threaded through
+                worktree creation, the merge gate, and the per-card merged badge.
+                A front end and a back end in separate checkouts, one board.
               </p>
             </li>
 
@@ -288,9 +328,10 @@
               </span>
               <h3 class="card-title">The terminal cockpit</h3>
               <p class="card-body">
-                A stateless web viewport attaches over WebSockets: Mission Control,
-                a task board, live terminals, runs and git, all in one
-                phosphor-on-dark instrument panel.
+                A stateless web viewport attaches over WebSockets and follows a live
+                status feed: Mission Control, live terminals, the board, Memory,
+                gates, runs and the repository, all in one phosphor-on-dark
+                instrument panel.
               </p>
             </li>
 
@@ -307,11 +348,33 @@
                 Everything Loom keeps is local: a loopback-bound daemon, an SQLite
                 store, your git checkouts, transcripts, and vault. Loom adds no
                 cloud service of its own, so your code and history stay on your
-                machine.
+                machine. Every write route needs a local access credential, so
+                another process on the box can't drive the API just by reaching
+                the socket.
               </p>
             </li>
 
             <li class="card reveal">
+              <span class="card-glyph" aria-hidden="true">
+                <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="13" y="5" width="14" height="24" rx="2.5" />
+                  <path d="M18 8.5h4" />
+                  <circle cx="20" cy="24.5" r="1" />
+                  <path d="M8 33c3-2.5 7-3.8 12-3.8S29 30.5 32 33" />
+                </svg>
+              </span>
+              <h3 class="card-title">Reach it from your phone</h3>
+              <p class="card-body">
+                Put a Tailscale or SSH tunnel in front of the loopback daemon, or
+                turn on Loom's own authenticated bind: a gateway token per client,
+                TLS required off a tailnet, and a fail-closed route allowlist that
+                keeps every human-only writer loopback-only. Off by default.
+              </p>
+            </li>
+
+            <!-- card-tab-wide: at the 4-column breakpoint this is the odd card before the
+                 full-width board card, so it fills its own row rather than sitting alone. -->
+            <li class="card card-tab-wide reveal">
               <span class="card-glyph" aria-hidden="true">
                 <svg viewBox="0 0 40 40" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M20 5 33 12.5v15L20 35 7 27.5v-15z" />
@@ -372,8 +435,9 @@
                 durable real-<code>claude</code> runtime. It keeps a durable
                 memory recalled at the start of each chat, sets one-shot and
                 recurring reminders, writes its own private skills, and can
-                proactively check in, behind a fail-closed, human-only security
-                model.
+                proactively check in. Grant it a lever and it will commit and push
+                on your behalf too, asking first. Fail-closed and human-only: it
+                can never change what it's allowed to do.
               </p>
             </li>
 
@@ -388,11 +452,12 @@
               </span>
               <h3 class="card-title">Editable skills, injected per session</h3>
               <p class="card-body">
-                Loom ships a curated skill set and mirrors it into every session,
-                shadowing your personal <code>~/.claude/skills</code>. A built-in
-                editor lets you read, edit, create, reset, and three-way-merge
-                Loom's shipped updates into your own edits; changes take effect on
-                the next session spawn.
+                Loom ships a curated skill set and mirrors it into every session as
+                project-local skills, leaving your personal
+                <code>~/.claude/skills</code> untouched. A profile can pin which
+                skills its sessions get, and a built-in editor lets you read, edit,
+                create, reset, and three-way-merge Loom's shipped updates into your
+                own; changes take effect on the next session spawn.
               </p>
             </li>
 
@@ -587,7 +652,7 @@
             </p>
             <ul class="quickstart-meta" aria-label="Distribution facts">
               <li><span class="dot dot-phosphor"></span> MIT licensed</li>
-              <li><span class="dot dot-cyan"></span> Loopback only</li>
+              <li><span class="dot dot-cyan"></span> Loopback by default</li>
               <li><span class="dot dot-amber"></span> macOS · Linux · Windows</li>
             </ul>
           </div>
