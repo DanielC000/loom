@@ -100,17 +100,22 @@ try {
   {
     const SID = "w-suppressed";
     spawnReady(host, SID);
-    const stranded = "leftover text from a prior turn";
-    const intended = "the message this turn actually intended to submit";
+    // Card d1ac9fed: `stranded + intended` (reported ENDS WITH intended) used to classify
+    // fallback-benign-offset-insertion, now unconditionally record-only, so no notice would ever fire to
+    // suppress. Re-fixtured onto wholly unrelated content (no shared prefix/suffix), which stays a LARGE
+    // fallback-unrecognized regardless of the small-bucket bound — this suite's own job is only to prove
+    // the WIRING, not any particular arm.
+    const stranded = "completely unrelated content that shares nothing at all with what this turn intended to submit — a wholly different string";
+    const intended = "the message this turn actually intended to submit, long enough to stay clearly above the small-bucket bound";
     host.enqueueStdin(SID, intended);
-    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended });
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: stranded });
     const enqueued = await waitUntil(() => hasPendingMismatchNotice(SID));
     check("(1) setup: the first occurrence's notice actually enqueues", enqueued);
 
     check("(1) PtyHost level: no suppression recorded yet (only one occurrence so far)", host.getLastMismatchNoticeSuppressed(SID) === null);
 
     host.live.get(SID).enterConfirmed = false; // force the SAME (gen, hashes) to be re-examined
-    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended });
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: stranded });
     const suppressed = host.getLastMismatchNoticeSuppressed(SID);
     check("(1) PtyHost level: a suppression is now recorded, count:1", suppressed?.count === 1 && typeof suppressed?.gen === "number" && typeof suppressed?.writtenHash === "string" && typeof suppressed?.reportedHash === "string");
 
@@ -129,7 +134,7 @@ try {
 
     // A FURTHER repeat of the SAME signature must accumulate the count, visible over MCP too.
     host.live.get(SID).enterConfirmed = false;
-    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended });
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: stranded });
     const list2 = await mgrClient.call("worker_list");
     const row2 = list2.find((w) => w.workerSessionId === SID);
     check("(1) worker_list: a further repeat increments count to 2 over MCP (not reset)", row2?.lastMismatchNoticeSuppressed?.count === 2);

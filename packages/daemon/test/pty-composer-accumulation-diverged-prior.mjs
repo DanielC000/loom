@@ -476,16 +476,15 @@ try {
     check("7: it names the exact stripped length (9, matching the live specimen's own lenDelta)", /strippedAnsiLen=9\b/.test(ansiLines[0] ?? ""));
     check("7: neither accumulation detector confirms this shape (it's a DEFICIT, not a fusion — those are always longer)",
       !capturedLines.some((l) => (l.startsWith("[composer-accumulation] ") || l.startsWith("[composer-accumulation-diverged-prior] ")) && l.includes("CONFIRMED")));
-
-    const enqueued = await waitUntil(() => hasPendingMismatchNotice(sid));
-    check("7: the notice enqueues (not suppressed)", enqueued);
+    // Card d1ac9fed: `confirmed-ansi-strip` is unconditionally RECORD-ONLY now — its own text ("What YOU
+    // can check yourself: nothing") asks nothing actionable. Re-fixtured from "the notice enqueues" to the
+    // record-only assertions, same shape as pty-prompt-mismatch.mjs's own scenarios 22/23.
+    const armLines7 = capturedLines.filter((l) => l.startsWith("[prompt-mismatch-arm] "));
+    check("7: the arm-classification instrument confirms arm=confirmed-ansi-strip, disposition=recorded-only",
+      armLines7.length === 1 && /arm=confirmed-ansi-strip/.test(armLines7[0]) && /disposition=recorded-only/.test(armLines7[0]) && /delivered=false/.test(armLines7[0]));
+    check("7: RECORD-ONLY (card d1ac9fed) — no session-facing turn is ever enqueued for this arm", !hasPendingMismatchNotice(sid));
     host.deliverHook(sid, { hook_event_name: "Stop" });
-    const noticeText = fake.writes.slice(writesBefore).join("");
-    check("7: REQUIRED — the notice explicitly says this is NOT a loss", /NOT A LOSS/.test(noticeText));
-    check("7: it names the ANSI/CSI mechanism (distinct wording from the wrapper-deficit shape)", /stripping ANSI\/CSI escape sequences/.test(noticeText));
-    check("7: it does NOT reuse the wrapper-deficit's own \"STALE, out-of-order confirmation\" wording (a different mechanism)",
-      !/STALE, out-of-order confirmation/.test(noticeText));
-    check("7: it does NOT use the generic \"possible LOSS\" framing", !/possible LOSS/.test(noticeText));
+    check("7: no write ever reached the pty for this mismatch", fake.writes.length === writesBefore);
   }
 
   // ===== 7b. NEGATIVE CONTROL — ANSI present but content genuinely diverges (the card's own DoD-3 required

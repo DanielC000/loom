@@ -34,7 +34,7 @@ const tmpHome = path.join(os.tmpdir(), `loom-prompt-mismatch-${Date.now()}-${pro
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
-const { PtyHost, classifyDroppedChar, classifyExcessChars } = await import("../dist/pty/host.js");
+const { PtyHost, classifyDroppedChar, classifyExcessChars, RECORD_ONLY_MISMATCH_ARMS } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const fakesById = new Map(); // sessionId -> fake pty ({ writes, ... }) — card 201d0d95's new scenarios need
@@ -2070,6 +2070,173 @@ try {
     check("30: no write ever reached the pty for this mismatch", fake.writes.length === writesBeforeMismatch);
     check("30: no per-event parent push for a single occurrence (below the rate threshold)",
       pushEvents.filter((e) => e.sessionId === sid).length === 0);
+  }
+
+  // ===== 31. Code Review MAJOR — condition (a): a recognized-but-unmatched shape (`unmatchedRecognized`
+  // truthy) must stay LOUD even when unaccountedIntended/lenDelta/control-char would otherwise qualify it
+  // for the small bucket. Reproduces `pty-composer-accumulation-diverged-prior.mjs` scenario 4's own
+  // shape directly against this file's own harness: a stale placeholder + an EARLIER generation's own
+  // full recognized write + this generation's own text, sandwiched so the substring recognizer finds it
+  // mid-string (not at an edge). unaccountedIntended=0, lenDelta≈+4.8K (well under 96... no, ABOVE 96,
+  // so condition (b) alone would already exclude it — this scenario deliberately uses a SHORT earlier
+  // write so lenDelta stays under 96, isolating condition (a) as the ONLY thing keeping it loud). =====
+  {
+    const sid = newSession("SandwichedRecognizedSmall"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const earlierGenText = "e".repeat(40); // short enough that lenDelta stays under UNRECOGNIZED_EXTRA_MAX_CHARS=96
+    const currentGenText = "c".repeat(30);
+    const stalePlaceholder = "Q".repeat(20); // arbitrary, non-matching prefix (not a real placeholder token — doesn't matter for this arm)
+    host.enqueueStdin(sid, earlierGenText); // gen=1
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: earlierGenText });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    host.enqueueStdin(sid, currentGenText); // gen=2
+    const sandwichedReported = stalePlaceholder + earlierGenText + currentGenText;
+    // lenDelta = (20+40+30) - 30 = 60, under 96; unaccountedIntended: divergesAtChar=0 (stalePlaceholder
+    // differs from currentGenText immediately), suffix matches currentGenText's own full 30 chars exactly
+    // -> unaccountedIntended = 30 - 0 - 30 = 0. Both (unaccountedIntended, lenDelta) conditions PASS —
+    // only condition (a) (unmatchedRecognized) can keep this loud.
+    check("SETUP 31: lenDelta stays under UNRECOGNIZED_EXTRA_MAX_CHARS=96", (sandwichedReported.length - currentGenText.length) <= 96);
+    const writesBeforeMismatch = fake.writes.length;
+    const captured31 = captureMultiWarnings(["[prompt-mismatch-arm]", "[prompt-mismatch-unaccounted]"], () => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: sandwichedReported });
+    });
+    const armLine31 = captured31["[prompt-mismatch-arm]"][0] ?? "";
+    const unaccLine31 = captured31["[prompt-mismatch-unaccounted]"][0] ?? "";
+    check("31: classifies arm=fallback-unrecognized", /arm=fallback-unrecognized/.test(armLine31));
+    check("31: unaccountedIntended=0 and lenDelta=+60 (both would otherwise qualify for the small bucket)",
+      /unaccountedIntended=0\b/.test(unaccLine31) && /lenDelta=\+60\b/.test(unaccLine31));
+    check("31: unmatchedRecognized=true is logged, and small=false — condition (a) alone disqualifies it",
+      /unmatchedRecognized=true/.test(unaccLine31) && /small=false/.test(unaccLine31));
+    check("31: disposition=delivered (LOUD) — the recognized-duplicate-content risk stays loud", /disposition=delivered/.test(armLine31));
+    const enqueued31 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("31: the session-facing notice actually fires", enqueued31);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    check("31: the original per-event parent push fires too (escalation:\"single-event\")",
+      pushEvents.filter((e) => e.sessionId === sid).length === 1);
+  }
+
+  // ===== 32. Code Review CRITICAL — condition (b): lenDelta upper bound (UNRECOGNIZED_EXTRA_MAX_CHARS=96).
+  // A specimen with unaccountedIntended=1 (tiny), no control char, no unmatchedRecognized, but lenDelta WAY above
+  // 96 (the diverged-prior scenario 4 shape, unshortened) must stay loud — condition (b) alone. =====
+  {
+    const sid = newSession("LargeExtraNoRecognition"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "c".repeat(30);
+    // A mutated leading char in the tail copy breaks isOffsetInsertion's own `endsWith` check (same trick
+    // as scenarios 27-30) — without it, `reported` would literally end with `intended` and classify as
+    // fallback-benign-offset-insertion instead of fallback-unrecognized.
+    const mutatedTail = "X" + intended.slice(1);
+    const unrecognizedPrefix = "Z".repeat(200); // large, arbitrary, matches NO prior write — unmatchedRecognized stays null
+    host.enqueueStdin(sid, intended); // gen=1
+    const reported = unrecognizedPrefix + mutatedTail; // unaccountedIntended=1 (not 0, but still tiny), lenDelta=+200 (way over 96)
+    const writesBeforeMismatch = fake.writes.length;
+    const captured32 = captureMultiWarnings(["[prompt-mismatch-arm]", "[prompt-mismatch-unaccounted]"], () => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    const armLine32 = captured32["[prompt-mismatch-arm]"][0] ?? "";
+    const unaccLine32 = captured32["[prompt-mismatch-unaccounted]"][0] ?? "";
+    check("32: classifies arm=fallback-unrecognized", /arm=fallback-unrecognized/.test(armLine32));
+    check("32: unaccountedIntended=1 (well under the 64 bound), unmatchedRecognized=false, but lenDelta=+200 (over the 96 cap)",
+      /unaccountedIntended=1\b/.test(unaccLine32) && /unmatchedRecognized=false/.test(unaccLine32) && /lenDelta=\+200\b/.test(unaccLine32));
+    check("32: small=false and disposition=delivered — condition (b) alone disqualifies it", /small=false/.test(unaccLine32) && /disposition=delivered/.test(armLine32));
+    const enqueued32 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("32: the session-facing notice actually fires", enqueued32);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+  }
+
+  // ===== 33. Code Review item 4 — DEFENSIVE: "unclassified" is never in the allow-list, so an unlisted or
+  // unclassified arm defaults to LOUD (the positive-allow-list's own fail-safe property). Cannot construct
+  // real input that reaches the "unclassified" branch (it is unreachable by construction — the guard
+  // conditions are exhaustive), so this asserts the SAFETY PROPERTY directly on the exported allow-list. =====
+  {
+    check("33: RECORD_ONLY_MISMATCH_ARMS never contains \"unclassified\"", !RECORD_ONLY_MISMATCH_ARMS.has("unclassified"));
+    check("33: RECORD_ONLY_MISMATCH_ARMS never contains an arbitrary unlisted arm name", !RECORD_ONLY_MISMATCH_ARMS.has("some-made-up-arm-name"));
+    check("33: RECORD_ONLY_MISMATCH_ARMS never contains fallback-replay-awaiting-resolution (the loss-possible arm)", !RECORD_ONLY_MISMATCH_ARMS.has("fallback-replay-awaiting-resolution"));
+    check("33: RECORD_ONLY_MISMATCH_ARMS never contains fallback-unrecognized (its own split governs it separately, not blanket membership)", !RECORD_ONLY_MISMATCH_ARMS.has("fallback-unrecognized"));
+  }
+
+  // ===== 34. Code Review item 6 — empty reported: a total loss of a tiny 1-2 char message (`reported=""`)
+  // must NOT be silently record-only just because `intended.startsWith("")` trivially holds and the tail
+  // bound (<=2 chars) happens to be met. =====
+  {
+    const sid = newSession("EmptyReportedTinyMessage"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "AB"; // 2 chars — within OFFSET_OMISSION_MAX_TAIL_CHARS=2
+    host.enqueueStdin(sid, intended); // gen=1
+    const writesBeforeMismatch = fake.writes.length;
+    const armWarnings34 = captureArmWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: "" }); // total loss — nothing arrived at all
+    });
+    check("34: classifies arm=fallback-benign-offset-omission (the trivial startsWith('') match)",
+      armWarnings34.length === 1 && /arm=fallback-benign-offset-omission/.test(armWarnings34[0]));
+    check("34: disposition=delivered (LOUD) — a total loss of a real message must never go quiet", /disposition=delivered/.test(armWarnings34[0]));
+    const enqueued34 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("34: the session-facing notice actually fires for the empty-reported total loss", enqueued34);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+  }
+
+  // ===== 35-37. Code Review item 7 — RATE LIFECYCLE: window pruning, cooldown-expiry re-arming, and the
+  // onExit reset. Uses a stubbed Date.now() (a clock seam) rather than real wall-clock waits — bounded,
+  // deterministic, and fast. =====
+  const smallUnrecognizedReported = (n) => {
+    const intended = `[loom:worker-report] worker RATE${n} — occurrence ${n} of a rate-lifecycle scenario, a real report body`;
+    const mutatedTail = "X" + intended.slice(1);
+    return { intended, reported: "P".repeat(57) + mutatedTail };
+  };
+
+  // ===== 35. Window pruning: two STALE timestamps (poked directly onto `live`, outside the 30-min window)
+  // must be pruned BEFORE a fresh occurrence is counted — so a session with 2 old + 1 new does NOT cross
+  // the threshold=3, even though the raw array length would otherwise suggest it should. =====
+  {
+    const sid = newSession("RateWindowPruning"); SIDS.push(sid);
+    const live = host.live.get(sid);
+    const now = Date.now();
+    live.unrecognizedMismatchTimestamps = [now - 40 * 60 * 1000, now - 35 * 60 * 1000]; // both outside the 30-min window
+    const { intended, reported } = smallUnrecognizedReported(1);
+    host.enqueueStdin(sid, intended);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    check("35: the 2 stale timestamps were pruned — only the fresh occurrence remains", live.unrecognizedMismatchTimestamps.length === 1);
+    check("35: no push fires — 1 (post-prune) is below the threshold of 3", pushEvents.filter((e) => e.sessionId === sid).length === 0);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+  }
+
+  // ===== 36. Cooldown expiry re-arms a second push: after the first push (3 occurrences), an EXPIRED
+  // cooldown (poked into the past) lets a 4th occurrence — with 4 timestamps still inside the window —
+  // trigger a SECOND, distinct push, proving cooldown is a time-bound gate, not a one-shot latch. =====
+  {
+    const sid = newSession("RateCooldownExpiryRearms"); SIDS.push(sid);
+    const live = host.live.get(sid);
+    for (let n = 1; n <= 3; n++) {
+      const { intended, reported } = smallUnrecognizedReported(n);
+      host.enqueueStdin(sid, intended);
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+      host.deliverHook(sid, { hook_event_name: "Stop" });
+    }
+    check("36: the first push fired after 3 occurrences", pushEvents.filter((e) => e.sessionId === sid).length === 1);
+    check("SETUP 36: a cooldown is actually active before we expire it", live.unrecognizedMismatchCooldownUntil !== null);
+    live.unrecognizedMismatchCooldownUntil = Date.now() - 1000; // simulate the cooldown having already expired
+    const { intended: intended4, reported: reported4 } = smallUnrecognizedReported(4);
+    host.enqueueStdin(sid, intended4);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported4 });
+    check("36: a SECOND, distinct push fires once the cooldown has expired", pushEvents.filter((e) => e.sessionId === sid).length === 2);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+  }
+
+  // ===== 37. onExit resets the rate-tracking state: a dead session's stale timestamps/cooldown must never
+  // influence a respawn's own fresh rate count. =====
+  {
+    const sid = newSession("RateResetOnExit"); SIDS.push(sid);
+    const live = host.live.get(sid);
+    const { intended, reported } = smallUnrecognizedReported(1);
+    host.enqueueStdin(sid, intended);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    check("SETUP 37: at least one timestamp is recorded before exit", live.unrecognizedMismatchTimestamps.length >= 1);
+    host.stop(sid, "hard");
+    await waitUntil(() => live.alive === false);
+    check("37: unrecognizedMismatchTimestamps is reset to [] on exit", live.unrecognizedMismatchTimestamps.length === 0);
+    check("37: unrecognizedMismatchCooldownUntil is reset to null on exit", live.unrecognizedMismatchCooldownUntil === null);
   }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
