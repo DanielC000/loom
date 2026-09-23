@@ -6914,11 +6914,11 @@ export class SessionService {
     });
   }
 
-  /** @decision 2c16447b — the manager id to hand an ownership-checked call for a batch candidate that was
+  /** @decision 2c16447b — the manager id to hand an ownership-checked call for a worker (batch candidate or solo-confirm) that was
    *  selected under `originalManagerId` and is acted on after a long await: the worker's CURRENT parent, but
    *  ONLY when that parent is `originalManagerId` itself or a `recycled_from` descendant of it. Any other
    *  parent (or a vanished worker) yields null — never adopt an unrelated manager's worker. */
-  private resolveBatchCandidateOwner(originalManagerId: string, workerSessionId: string): string | null {
+  private resolveLineageOwnerForWorker(originalManagerId: string, workerSessionId: string): string | null {
     const parent = this.db.getSession(workerSessionId)?.parentSessionId ?? null;
     if (!parent) return null;
     if (parent === originalManagerId) return parent;
@@ -15086,13 +15086,13 @@ export class SessionService {
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
       // bookkeeping idempotently via the SAME helper the early-idempotency check above uses. `merge.sha`
       // rides along free (mergeBranchLocked's own findLandedSquashCommit lookup, widened to return it).
-      return this.finishAlreadyMerged({ managerSessionId: this.resolveBatchCandidateOwner(managerSessionId, workerSessionId) ?? managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
+      return this.finishAlreadyMerged({ managerSessionId: this.resolveLineageOwnerForWorker(managerSessionId, workerSessionId) ?? managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
     }
 
     // @decision 0771da77 — everything below runs AFTER the gate/merge awaits, so the manager captured at confirm
     //  start may have been recycled; finalize under the worker's CURRENT lineage owner (same resolver as the batch
     //  path, card 2c16447b), falling back to the captured id — never adopt an unrelated manager.
-    const owner = this.resolveBatchCandidateOwner(managerSessionId, workerSessionId) ?? managerSessionId;
+    const owner = this.resolveLineageOwnerForWorker(managerSessionId, workerSessionId) ?? managerSessionId;
 
     // STALE IDLE-NUDGE PURGE (card 6119778b — same evaluation-vs-delivery gap task 69a128b0 fixed for
     // recycleWorker, applied here): classifyIdleWorker's PENDING-MERGE GUARD reads `pendingMerge.state`
@@ -15476,7 +15476,7 @@ export class SessionService {
     const runFallback = async (list: { workerSessionId: string; reason: string }[], batchOpId?: string): Promise<{ workerSessionId: string; reason: string; started?: boolean }[]> => {
       const out: { workerSessionId: string; reason: string; started?: boolean }[] = [];
       for (const f of list) {
-        const owner = this.resolveBatchCandidateOwner(managerSessionId, f.workerSessionId);
+        const owner = this.resolveLineageOwnerForWorker(managerSessionId, f.workerSessionId);
         if (!owner) {
           const why = `fallback NOT started: worker is not a child of this manager or its recycle lineage`;
           console.warn(`[merge-batch] ${why} (worker ${f.workerSessionId}; batch reason: ${f.reason})`);
@@ -16126,7 +16126,7 @@ export class SessionService {
             await this.finishAlreadyMerged({
               // @decision 2c16447b — the worker's CURRENT lineage owner, so the post-merge purge/cap-drain
               // reach a recycled successor instead of a dead predecessor (falls back to the captured id).
-              managerSessionId: this.resolveBatchCandidateOwner(managerSessionId, lb.workerSessionId) ?? managerSessionId, workerSessionId: lb.workerSessionId, taskId: lb.taskId,
+              managerSessionId: this.resolveLineageOwnerForWorker(managerSessionId, lb.workerSessionId) ?? managerSessionId, workerSessionId: lb.workerSessionId, taskId: lb.taskId,
               worktreePath: worker.worktreePath ?? worker.cwd, branch: lb.branch, repoPath: finalRepoPath,
               projectId: finalProjectId, opId: randomUUID(), mergedSha: lb.sha, repoKey: c?.repoKey ?? null,
               mergedVerification, suppressNotify: true,

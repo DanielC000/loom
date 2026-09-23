@@ -2,7 +2,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // SOLO worker_merge_confirm AFTER THE OWNING MANAGER RECYCLED MID-GATE (card 0771da77; sibling of card 2c16447b's
 // batch fix). The confirm captures `managerSessionId` up front; the gate runs long enough for the manager to be
 // recycled (old session archived, worker reparented to the successor). The post-await finalize must resolve the
-// CURRENT lineage owner (resolveBatchCandidateOwner(...) ?? captured), so:
+// CURRENT lineage owner (resolveLineageOwnerForWorker(...) ?? captured), so:
 //   (A) green path: merge_done is attributed to the successor; the queued-worker-report / idle-nudge purges and the
 //       cap-queue drain target the successor, not the dead id.
 //   (B) STRICT lineage: a worker reparented to an UNRELATED manager falls back to the captured id (never adopted).
