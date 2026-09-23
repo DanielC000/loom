@@ -69,6 +69,12 @@ try {
   // cache WRITE, which could poison a LATER, unrelated non-forced invocation's cache-hit read).
   check("(3d7dccb9) build ALSO runs the \"stamp\" task, positioned right after \"build\" (turbo's own dependsOn ordering, not this array's)",
     build.args.includes("stamp") && build.args.indexOf("stamp") === build.args.indexOf("build") + 1);
+  // Card bce50c22 — "skills-sync" (turbo.json: cache:false, dependsOn:["build"], same shape as "stamp")
+  // must ALSO ride this same invocation, or a deploy build could leave this checkout's .claude/skills
+  // mirror unrefreshed after a merged assets/skills/** change (the sync used to run INSIDE the cached
+  // "build" script and is now a separate uncached task that must be explicitly requested).
+  check("(bce50c22) build ALSO runs the \"skills-sync\" task, right after \"stamp\"",
+    build.args.includes("skills-sync") && build.args.indexOf("skills-sync") === build.args.indexOf("stamp") + 1);
   // The aad5fff3 footgun guard: the build must NOT be the `pnpm … build --force` shape (where --force
   // reaches vite, not turbo). Proven by the absence of a `pnpm`-script invocation in the command/args.
   check("(A) build is NOT the `pnpm run build --force` footgun shape (--force would forward to vite)",

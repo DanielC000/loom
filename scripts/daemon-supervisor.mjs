@@ -323,8 +323,10 @@ for (;;) {
   // 1) shared + daemon (turbo ^build handles the shared dependency) — FATAL on failure: never start
   //    a broken daemon.
   // "stamp" runs right after "build" (turbo.json: dependsOn:["build"], cache:false — see card 3d7dccb9)
-  // so dist/build-info.json always reflects THIS checkout's real HEAD, cache hit or miss.
-  const buildCode = sh("pnpm exec turbo build stamp --filter=@loom/daemon", repoRoot);
+  // so dist/build-info.json always reflects THIS checkout's real HEAD, cache hit or miss. "skills-sync"
+  // (same shape, card bce50c22) refreshes .claude/skills from packages/daemon/assets/skills/** the same
+  // way, cache hit or miss — self-hosting picks up a merged skill doctrine fix on the next relaunch.
+  const buildCode = sh("pnpm exec turbo build stamp skills-sync --filter=@loom/daemon", repoRoot);
   if (buildCode !== 0) {
     console.error(`[supervisor] daemon build failed (exit ${buildCode}) — NOT starting a broken daemon.`);
     process.exit(buildCode);

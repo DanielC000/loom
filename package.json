@@ -9,7 +9,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "turbo build stamp",
+    "build": "turbo build stamp skills-sync",
     "dev": "turbo dev",
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",

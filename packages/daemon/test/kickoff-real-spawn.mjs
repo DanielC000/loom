@@ -198,7 +198,10 @@ async function waitForStallAware(matchPattern, label, description, sessionId, ab
 const READY_ABSOLUTE_CEILING_MS = 2 * FIXTURE_READY_TIMEOUT_MS;
 
 const claudeMd = fs.readFileSync(path.join(REPO_ROOT, "CLAUDE.md"), "utf8");
-const workerSkill = fs.readFileSync(path.join(REPO_ROOT, ".claude", "skills", "worker", "SKILL.md"), "utf8");
+// The canonical, TRACKED source (packages/daemon/assets/skills/**), not the gitignored .claude/skills
+// build-time mirror (card bce50c22) — this file only wants realistic prose content/size, never the mirror
+// mechanism itself, and the mirror is absent in a fresh worktree whenever @loom/daemon#build cache-hits.
+const workerSkill = fs.readFileSync(path.join(REPO_ROOT, "packages", "daemon", "assets", "skills", "worker", "SKILL.md"), "utf8");
 console.log(`[measured] real CLAUDE.md=${claudeMd.length} chars, real worker SKILL.md=${workerSkill.length} chars`);
 
 // Realistic per-role kickoff text — real prose, embedded quotes/backticks included, so escaping through

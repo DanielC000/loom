@@ -651,7 +651,12 @@ export function deployBuildSteps(root: string): BuildStep[] {
     // @decision 24f53a72 — `--force` on "build" does NOT also protect "build"'s own CACHE WRITE: turbo.json
     // excludes "!dist/build-info.json" from "build"'s outputs so a cache hit/restore, forced or not, can
     // never clobber what "stamp" (cache:false) most recently wrote.
-    { label: "build", command: process.execPath, args: [turboBin(), "build", "stamp", ...DEPLOY_PACKAGES.map((p) => `--filter=${p.name}`), "--force"], shell: false, timeoutMs: 0 },
+    // Card bce50c22 — "skills-sync" (turbo.json: cache:false, dependsOn:["build"], same shape as "stamp")
+    // rides the SAME invocation for the same reason: it used to run INSIDE @loom/daemon's cached "build"
+    // script, so a cache hit (even --force'd builds still WRITE a cache entry a later non-forced deploy
+    // could read) could leave this checkout's .claude/skills mirror unrefreshed. Omitting it here would
+    // silently stop self-hosting deploys from ever picking up a merged assets/skills/** change.
+    { label: "build", command: process.execPath, args: [turboBin(), "build", "stamp", "skills-sync", ...DEPLOY_PACKAGES.map((p) => `--filter=${p.name}`), "--force"], shell: false, timeoutMs: 0 },
   ];
 }
 

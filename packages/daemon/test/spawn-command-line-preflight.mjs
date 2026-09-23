@@ -175,7 +175,11 @@ if (process.platform !== "win32") {
   // preflight (the full real CLAUDE.md + full real /worker SKILL.md, uncut, not synthetic padding) must
   // now spawn for REAL with no throw — because it no longer contributes to argv at all. ---
   const claudeMd = fs.readFileSync(path.join(REPO_ROOT, "CLAUDE.md"), "utf8");
-  const workerSkill = fs.readFileSync(path.join(REPO_ROOT, ".claude", "skills", "worker", "SKILL.md"), "utf8");
+  // The canonical, TRACKED source (packages/daemon/assets/skills/**), not the gitignored .claude/skills
+  // build-time mirror (card bce50c22) — this file only wants realistic prose content/size, never the
+  // mirror mechanism itself, and the mirror is absent in a fresh worktree whenever @loom/daemon#build
+  // cache-hits.
+  const workerSkill = fs.readFileSync(path.join(REPO_ROOT, "packages", "daemon", "assets", "skills", "worker", "SKILL.md"), "utf8");
   const oversizedRealisticPrompt = `${claudeMd}\n\n---\n\n${workerSkill}`;
   check("fixture prompt is genuinely oversized relative to the old ceiling (not a toy string)",
     oversizedRealisticPrompt.length > WINDOWS_COMMAND_LINE_LIMIT);
