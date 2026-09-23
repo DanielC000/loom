@@ -239,35 +239,41 @@ This list is **Loom-specific**. Every project keeps its OWN "Commit scopes" list
   `git/writer.ts` — checkout/commit/push/create-branch). These are trust-boundary surfaces like gateCommand: NO **core / project-session** MCP tool exposes them; an agent in an ordinary project session can never write/commit/push. There are now two deliberate exceptions. (1) The `LOOM_DEV`-gated **Platform Lead** surface (`mcp/platform.ts`), which is itself human-driven and ABOVE all projects: it registers `git_checkout`/`git_create_branch`/`git_commit`/`git_push` + `vault_write` as agent tools (each reusing the same bounded writer code by explicit `projectId`). (2) **Codex worker auto-commit** (card `00a6cdd6`): a codex-harness worker's own uncommitted worktree changes are committed onto its OWN assigned branch as a side effect of `SessionService.workerReport` handling its `done` report (`git/worktrees.ts`'s `attemptCodexAutoCommit`) — daemon-side, worktree-scoped, branch-scoped, NO push, and never a new agent-callable tool; it exists only because a codex worker's own CLI sandbox denies every write under `.git` on every OS, so this is the sole way it can ever land a commit. Gated STRICTLY LAST among the method's own refusals: it never runs for a report already refused for an earlier reason (queued manager direction, the auto-recovery dedupe), and never at all when the report itself declares `noChanges:true` (a worker asserting no changes must never be auto-committed for, even over real dirty files). Every successful commit is audited immediately and unconditionally via a dedicated `codex_auto_commit` orchestration event — appended before anything downstream (the uncommitted-files precheck, `updateTask`, the report's own event) gets a chance to refuse or throw — so no daemon-authored commit can exist with nothing naming it. Every git write is bounded by a timeout so a hung git call can't wedge the daemon. `GIT_TERMINAL_PROMPT=0` is a separate, narrower guarantee on top of that: it applies to the paths that can actually reach the network (`git/writer.ts`'s fetch/push/clone surface) and is deliberately omitted where the call set is purely local — `vault/versioner.ts`'s `commitVault` (the primary vault commit path) is the live exception; see `boundedVaultGit`'s own doc comment there for why. The read-only log/branches view is unchanged.
 
 ### Comment taxonomy — the source-vs-record split
-A comment is one of four classes, each with its own correct disposition (card `90b19799`, the convention this section adopts):
-- **A. Guard / prohibition** ("this is deliberate, do not change it, see card X") — **stays inline, permanently**, compressed to <=3 lines. Never relocate it: the reasoning that justifies this is recorded on card `90b19799` itself — two near-misses where prose sitting AT the predicate is what stopped a "fix" from undoing the deliberate choice, or stopped a real defect from looking safe unreviewed. Move that prose to a file the agent doesn't open and both failure modes come back.
-- **B. Decision record / incident narrative** — **moves out** to a version-controlled markdown record in one of the two registers below, keyed by card id, with an anchor left at the source.
-- **C. Contract / API docs** (`@param`/`@returns`/etc.) — leave as-is; nothing to do.
-- **D. Restating the code** ("// increment the counter") — **delete outright**. Don't relocate noise — that just moves the mess.
+**The generic rule now lives in the shipped doctrine, not here.** The four comment classes (guard /
+decision-record / contract-docs / noise), the `@decision <id>` / `@decision sha:<8hex>` anchor grammar,
+the `docs/adr/` (immutable) vs `docs/decisions/` (mutable) split, and "one record file per id, always" —
+read them in `packages/daemon/assets/skills/worker/SKILL.md` ("Extracting a decision record") and
+`packages/daemon/assets/skills/orchestrate/SKILL.md` (the matching review-side bullet). Every Loom
+project gets that doctrine, not just this one; what follows here is Loom's OWN tooling on top of it —
+specific to this repo, not part of the generic rule.
 
-A and B are routinely interleaved inside the same long comment block, so splitting one is not mechanical: read the whole block and separate the one-line guard that stays from the narrative that goes.
+**Loom keeps a THIRD register the generic doctrine doesn't have**, alongside `docs/adr/` and
+`docs/decisions/`: `docs/investigations/` — narrative incident reports, not decisions. A sha-keyed record
+(card `969b0e1c`, deciding card `966238f1`) lives in whichever of the three stores fits, named by the same
+`<8hex>-slug.md` convention as a card-keyed one.
 
-**Two registers for class B**, alongside the existing `docs/investigations/`:
-- `docs/adr/` — architecturally significant, cross-cutting decisions a contributor must know even if they never touch the file. Few. **Immutable**: amend or supersede, never edit in place.
-- `docs/decisions/` — local implementation decisions and incident findings tied to one module. Many. **Mutable**: normal doc hygiene applies.
+⛔ **A bare 8-hex sha after `@decision` is NOT the commit form and never has been** — `ANCHOR_RE` matches
+an 8-hex sha byte-for-byte indistinguishably from a card id, so a bare 8-hex always means a board card;
+the commit id-space requires the `sha:` sigil. `decision-records.mjs`'s resolver verifies a cited sha
+(`git rev-parse --verify`) and REFUSES an anchor whose sha no longer resolves in this repo, rather than
+silently falling through to a same-named record file.
 
-Promotion test between them: *would a contributor who never touches this file still need to know?* The anchor format is register-agnostic, so a record can move between the two without touching the source file that points at it.
+**A record anchored this way gets a GUARD EXTRACT auto-injected alongside a `Read` whose range covers the
+anchor line — never the full record** (the `decision-records.mjs` PostToolUse hook, card 661b7d46): the
+record's title plus its `Do not` section(s) (or an explicit no-Do-not note, for the minority of records
+without one), plus a pointer to the full file — the narrative around them is deliberately never injected
+(`@decision abd049da`, `@decision 8449a258`). That extract is itself bounded by a per-record byte cap
+(`PER_RECORD_MAX_BYTES` in that script; read it there rather than trusting a number restated here, per
+this file's own "point at a source of truth" rule) — an over-cap extract still injects, but head+tail-
+truncated with an explicit marker rather than complete. Follow the pointer and `Read` the record file
+directly for the narrative. Keep a record under the cap, or expect truncation and don't be surprised by
+it (card `da723d41`).
 
-**Anchor left at the source when a class-B comment moves out:**
-```
-// @decision <8hex card id> — <the prohibition or consequence, not a summary>
-```
-<=3 lines. Keyed on the **board card id**, never a sequential ADR number — thousands of existing source comments already cite card ids, and those already join the board where the actual discussion lives; a second id space would only compete with the one that already works.
-
-**A second, explicitly sigil'd form keys a verified git commit sha instead, for narrative that cites no board card** (card `969b0e1c`, deciding card `966238f1`): a real population of long comment blocks carries genuine class-B decision narrative with no card id anywhere — not in the block, not in the file, not in the introducing commit — and the "never write an id you weren't handed" rule (a worker-doctrine rule, not stated in this file — see card `966238f1`'s body) means those blocks are otherwise permanently un-extractable.
-```
-// @decision sha:<8hex commit sha> — <the prohibition or consequence, not a summary>
-```
-⛔ **A bare 8-hex sha in the ORIGINAL grammar above is NOT adopted** — `ANCHOR_RE` matched an 8-hex sha byte-for-byte before this card, making it indistinguishable from a card id to a reader, to `tasks_get`, and to the resolver. The `sha:` sigil is the fix, not a convenience: **it is required for the commit id-space**, and a bare 8-hex after `@decision` still, always, means a board card. Source the sha the same way you'd source a card id — off `git blame -L <range>` at extraction time, never guessed or minted; `decision-records.mjs`'s resolver verifies it (`git rev-parse --verify`) and REFUSES an anchor whose sha no longer resolves in this repo, rather than silently falling through to a same-named record file. A sha-keyed record lives in the exact same `docs/adr`/`docs/decisions`/`docs/investigations` stores as a card-keyed one, named by the same `<8hex>-slug.md` convention — only the anchor's own admission gate differs, never the file lookup or the byte cap below. Recommended: put a one-line `Source: commit <sha>, no board card` inside the record body itself, so a human reader sees the namespace even without parsing the anchor.
-
-**A `docs/adr/`/`docs/decisions/`/`docs/investigations/` record anchored this way gets a GUARD EXTRACT auto-injected alongside a `Read` whose range covers the anchor line — never the full record** (the `decision-records.mjs` PostToolUse hook, card 661b7d46): the record's title plus its `Do not` section(s) (or an explicit no-Do-not note, for the minority of records without one), plus a pointer to the full file — the narrative around them is deliberately never injected (`@decision abd049da`, `@decision 8449a258`). That extract is itself bounded by a per-record byte cap (`PER_RECORD_MAX_BYTES` in that script; read it there rather than trusting a number restated here, per this file's own "point at a source of truth" rule) — an over-cap extract still injects, but head+tail-truncated with an explicit marker rather than complete. Follow the pointer and `Read` the record file directly for the narrative. Keep a record under the cap, or expect truncation and don't be surprised by it (card `da723d41`).
-
-**One record FILE per id, always — this is a hard mechanical constraint, not a style preference.** `decision-records.mjs`'s own `resolveRecord()` resolves an anchored id to EXACTLY one file (store precedence, then alphabetically-first within that store) and silently drops every other file sharing that id — forever, with no error, no lint failure by default, and no way for a reader to know a second record exists (card `a4b83fb7`, filed after this recurred across three independent lanes in one afternoon). **Same id ⇒ same file, however distinct the sub-decisions feel — a second decision under an existing id is a new SECTION in the existing record, never a new file.** Before writing a new record, check whether the id already has one (`find docs/adr docs/decisions -iname "<id>*"`, or `docs/investigations/<id>-*/`) and extend it if so. `comment-anchor-lint.mjs`'s `collidingRecords` check (CLI-scan only — see that script's own header) flags a violation after the fact, but it is a backstop, not the fix: by the time it fires, the second file's own content has already been written and one of the two records has already gone permanently unreachable.
+`comment-anchor-lint.mjs`'s `collidingRecords` check (CLI-scan only — see that script's own header) flags
+a same-id-two-files violation after the fact, but it is a backstop, not the fix: by the time it fires, the
+second file's own content has already been written and one of the two records has already gone
+permanently unreachable — search first (`find docs/adr docs/decisions -iname "<id>*"`, or
+`docs/investigations/<id>-*/`) before writing a new record, per the generic doctrine's own rule.
 
 ### Vault structure
 Loom's design docs live in the Obsidian vault at `Projects/Loom/` in a **shallow (one-level), stable** taxonomy — not a flat wall of notes. **Fixed-path / canonical docs stay pinned at the vault root** — including the ones this `CLAUDE.md` references by exact path (`Architecture.md`, `Vision & Architecture.md`, `Setup Assistant Design.md`), which is *why* they're pinned: moving them would break those refs. The root-pinned set: `Architecture.md`, `Vision & Architecture.md`, `Setup Assistant Design.md`, `Companion Design.md`, `Loom.md`, `Platform Manager.md`, `Orchestrator Log.md`. (The Platform Lead's living resume doc is **not** a vault note — it's a LOOM_HOME operational file at `~/.loom/PLATFORM-LEAD-RESUME.md`, injected into each Lead spawn.) **Every other note lives in a taxonomy folder:** `Design/`, `Operations/`, `Roadmap/`, `Release/`, `Spikes/`. One non-note folder, **`Mockups/`**, archives design-mockup deliverable SETS the owner reviews before a build — one sub-folder per feature named `YYYY-MM-DD <Feature>`, each holding the interactive mockup HTML + rendered PNG directions (see `Mockups/README.md` for the set list + which direction was picked). The **LEAD files a completed mockup set there** (the Web Designer produces it and reports the path); verification screenshots of a *built* change are NOT mockups — those stay under `~/.loom/workspaces/`, never the vault. An **`_Index.md`** map-of-content at the vault root lists every note by group — **read it to locate a note instead of Globbing, and update its line when you add or move a note.** Wikilinks resolve by note name, so moving a note between folders never breaks a `[[link]]`.
