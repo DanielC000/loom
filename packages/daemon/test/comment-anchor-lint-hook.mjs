@@ -93,8 +93,19 @@ try {
   check("isInScope: a non-source extension (.md) is rejected", isInScope(REPO, wrongExtPath) === null);
   check("isInScope: a path outside repoRoot entirely is rejected",
     isInScope(REPO, path.join(os.tmpdir(), "elsewhere.ts")) === null);
-  check("isInScope: a path under a directory NOT in SOURCE_ROOTS is rejected",
-    isInScope(REPO, path.join(REPO, "packages", "daemon", "notsrc", "x.ts")) === null);
+  // card 03fbb126: scope is layout-AGNOSTIC — a non-Loom layout is in scope; hidden/build dirs still are not.
+  check("isInScope (03fbb126): a non-Loom layout (lib/x.js at the repo root) IS in scope",
+    isInScope(REPO, path.join(REPO, "lib", "x.js")) === "lib/x.js");
+  check("isInScope (03fbb126): a former not-in-SOURCE_ROOTS path is now in scope",
+    isInScope(REPO, path.join(REPO, "packages", "daemon", "notsrc", "x.ts")) === "packages/daemon/notsrc/x.ts");
+  check("isInScope (03fbb126): src/docs/thing.ts (a NESTED docs dir) IS in scope",
+    isInScope(REPO, path.join(REPO, "src", "docs", "thing.ts")) === "src/docs/thing.ts");
+  check("isInScope (03fbb126): repo-ROOT docs/investigations/x/scripts/y.mjs is NOT in scope",
+    isInScope(REPO, path.join(REPO, "docs", "investigations", "x", "scripts", "y.mjs")) === null);
+  check("isInScope (03fbb126): a hidden directory (.claude/skills) is rejected",
+    isInScope(REPO, path.join(REPO, ".claude", "skills", "x.mjs")) === null);
+  check("isInScope (03fbb126): a build-output directory (dist/) is rejected",
+    isInScope(REPO, path.join(REPO, "dist", "x.js")) === null);
 
   // --- computeFileReport: positive control (must be able to SEE a violation) -----------------------
   const violatingReport = computeFileReport(REPO, violatingPath, violatingSrc, { minLines: 15 });
@@ -152,6 +163,40 @@ try {
   {
     const r = spawnSync(process.execPath, [COMMENT_ANCHOR_LINT_SCRIPT, "--hook"], { input: "{}", encoding: "utf8" });
     check("runHook (negative control): missing repoRoot arg exits 0 and stays silent", r.status === 0 && !(r.stdout || "").trim());
+  }
+
+  // --- card 03fbb126: the hook fires on a NON-Loom layout, and resolves docs/ at the nearest .git root ---
+  {
+    const NL = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cal-nonloom-"));
+    fs.mkdirSync(path.join(NL, ".git"), { recursive: true });
+    fs.mkdirSync(path.join(NL, "docs", "decisions"), { recursive: true });
+    fs.mkdirSync(path.join(NL, "app", "lib"), { recursive: true });
+    fs.writeFileSync(path.join(NL, "docs", "decisions", "eeeeeeee-real.md"), "# eeeeeeee\n\nA record.\n");
+    const srcPath = path.join(NL, "app", "lib", "thing.js");
+    fs.writeFileSync(srcPath, [
+      "// @decision eeeeeeee — resolves at the git root's docs/decisions, must NOT be an orphan",
+      "// @decision 99999999 — resolves to nothing, MUST be flagged as an orphan",
+      "const x = 1;",
+    ].join("\n"));
+    try {
+      const run = (rootArg) => {
+        const payload = { tool_name: "Write", tool_input: { file_path: srcPath }, cwd: NL };
+        const r = spawnSync(process.execPath, [COMMENT_ANCHOR_LINT_SCRIPT, "--hook", rootArg], { input: JSON.stringify(payload), encoding: "utf8" });
+        const out = (r.stdout || "").trim();
+        return out ? JSON.parse(out).hookSpecificOutput.additionalContext : null;
+      };
+      // hook arg = the project SUBFOLDER (cwd below the git root), the nested-repo shape of card a4760fc8
+      const viaSub = run(path.join(NL, "app"));
+      check("hook (03fbb126, non-Loom layout, nested cwd): fires and flags the truly-orphan anchor",
+        !!viaSub && /99999999/.test(viaSub));
+      check("hook (03fbb126, nested cwd): docs/ resolved at the .git root, so the recorded anchor is NOT an orphan",
+        !!viaSub && !/eeeeeeee/.test(viaSub));
+      const viaRoot = run(NL);
+      check("hook (03fbb126): same result when the hook arg IS the git root",
+        !!viaRoot && /99999999/.test(viaRoot) && !/eeeeeeee/.test(viaRoot));
+    } finally {
+      try { fs.rmSync(NL, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
   }
 
   // --- extractWrittenText (card a862e8f0 round 2): pure-function coverage of the Write/Edit/MultiEdit -----

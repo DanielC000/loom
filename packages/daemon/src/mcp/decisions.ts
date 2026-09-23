@@ -175,7 +175,7 @@ function listAllRecords(repoRoot: string): RecordMeta[] {
 }
 
 /** Walk every regular file under `root`, skipping SKIP_DIRS + symlinks, bounded by MAX_WALK_FILES — a
- * generic, repo-layout-agnostic sweep (unlike comment-anchor-lint.mjs's Loom-specific SOURCE_ROOTS). */
+ * generic, repo-layout-agnostic sweep (parity with comment-anchor-lint.mjs's own layout-agnostic walk since card 03fbb126). */
 function* walkFiles(root: string): Generator<string> {
   let count = 0;
   const stack: string[] = [root];

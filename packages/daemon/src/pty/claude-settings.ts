@@ -101,7 +101,9 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * `--hook` mode (never a repo-wide scan — see that script's own doc for the whole-repo cost this
  * deliberately avoids), scoped to just the ONE file a Write/Edit just touched — gated on the explicit
  * `docLint` param (see {@link SpawnOpts.docLint} in host.ts) AND `repoPath` (a caller that omits
- * `repoPath` entirely never gets this hook wired).
+ * `repoPath` entirely never gets this hook wired). Card 03fbb126: the lint is layout-agnostic — any JS/TS
+ * file the session writes is in scope, whatever the project's directory layout — and the script itself
+ * walks `repoPath` UP to the nearest `.git` before resolving `docs/<kind>` (same as the store gate below).
  *
  * @decision d92ec82b — do not re-couple this gate
  * to `vaultPath` truthiness: that reintroduces a docLint-on/no-vault project silently losing this

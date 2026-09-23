@@ -18,7 +18,7 @@
 //      hook (computeFileReport); a well-formed same-line anchor and ordinary anchor-free prose are not.
 //   7. oversizedRecords (card d0d0401b): a record file over `PER_RECORD_MAX_BYTES` (imported from
 //      decision-records.mjs — one source of truth, not a hand-copied number) is flagged with its measured
-//      byte size; CLI-scan only — records live outside SOURCE_ROOTS, so the per-file hook never sees one.
+//      byte size; CLI-scan only — records are .md under docs/, outside the source-extension scope, so the per-file hook never sees one.
 //   8. collidingRecords (card a4b83fb7): two record files sharing an id are flagged, naming every
 //      candidate AND which one currently wins — replicating decision-records.mjs's own `resolveRecord()`
 //      winner pick (store precedence, then alphabetically-first within the winning store), not just
@@ -89,7 +89,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import {
   extractCommentBlocks,
@@ -1003,7 +1003,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
     const fileReport = computeFileReport(dir, path.join(dir, "packages", "daemon", "src", "x.ts"), "// nothing\n");
     check("sanity: computeFileReport actually returned a real report (else the next check is vacuous)", !!fileReport);
     check("computeFileReport: missingDoNotRecords is NOT a key on the hook-shaped report (CLI-scan only, "
-      + "by design — records live under docs/, outside SOURCE_ROOTS)",
+      + "by design — records live under docs/ as .md, outside the source-extension scope)",
       !!fileReport && !("missingDoNotRecords" in fileReport));
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -1819,8 +1819,8 @@ try {
       fileReport?.overlongAnchorIds?.length === 1
       && fileReport.overlongAnchorIds[0]?.ns === "sha"
       && fileReport.overlongAnchorIds[0]?.match === "@decision sha:1234567890abcdef1234567890abcdef12345678");
-    // oversizedRecords is deliberately NOT part of computeFileReport (records live under docs/, outside
-    // SOURCE_ROOTS — see this file's own header) — confirm the hook-shaped report has no such key at all,
+    // oversizedRecords is deliberately NOT part of computeFileReport (records are .md under docs/, outside
+    // the source-extension scope — see this file's own header) — confirm the hook-shaped report has no such key at all,
     // rather than silently reporting zero and looking like it checked.
     check("computeFileReport: oversizedRecords is not a key on the hook-shaped report (CLI-scan only, by design)",
       !("oversizedRecords" in fileReport));
@@ -1871,6 +1871,58 @@ try {
   check("computeReport: omitting minLines uses DEFAULT_MIN_LINES", computeReport(REPO).minLines === DEFAULT_MIN_LINES);
 } finally {
   try { fs.rmSync(REPO, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
+// --- card 03fbb126: layout-agnostic scan (non-Loom layout, hidden/excluded dirs, walk cap, .md ruling) ------
+{
+  const NL = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cal-layout-"));
+  const w = (rel, txt) => { const f = path.join(NL, ...rel.split("/")); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, txt); };
+  const long = (n) => Array.from({ length: n }, (_, i) => `// regrowing narrative ${i}`).join("\n");
+  try {
+    w("docs/decisions/aaaaaaaa-real.md", "# aaaaaaaa\n\nRecord.\n");
+    // a NON-Loom layout: source directly under src/ and lib/ — no packages/ anywhere
+    w("src/a.ts", "// @decision aaaaaaaa — recorded\nconst a = 1;\n");
+    w("lib/b.js", "// @decision bbbbbbbb — NO record: must surface as an orphan\nconst b = 1;\n");
+    w("lib/long.cjs", long(20) + "\nconst c = 1;\n");
+    // must NOT be scanned
+    w("node_modules/pkg/x.js", "// @decision cccccccc — vendored, must never be scanned\n");
+    w(".claude/skills/x.mjs", "// @decision dddddddd — hidden mirror dir, must never be scanned\n");
+    w("build/y.js", "// @decision eeeeeeee — build output, must never be scanned\n");
+    w("tests/z.js", "// @decision ffffffff — test fixture, must never be scanned\n");
+    w("src/docs/d.ts", "// @decision aaaaaaaa — nested src/docs IS real source, must be scanned\n");
+    w("docs/scripts/q.mjs", "// @decision 0a0a0a0a — docs/ one-off script, must never be scanned\n");
+    // .md ruling: a long HTML-comment block in a note is NOT a comment block, and the note is not scanned
+    w("notes/note.md", "<!--\n" + Array.from({ length: 20 }, (_, i) => `prose ${i}`).join("\n") + "\n-->\n<!-- @decision 12345678 — md anchor, this script does not scan .md -->\n");
+
+    const r = computeReport(NL);
+    check("03fbb126 layout-agnostic: the non-Loom layout is actually scanned (4 source files incl. nested src/docs, none excluded)", r.filesScanned === 4);
+    check("03fbb126 layout-agnostic: the orphan anchor in lib/b.js is FOUND (bbbbbbbb)",
+      r.orphanAnchors.count === 1 && r.orphanAnchors.items[0]?.id === "bbbbbbbb" && r.orphanAnchors.items[0]?.file === "lib/b.js");
+    check("03fbb126 layout-agnostic: the 20-line unanchored block in lib/long.cjs is FOUND",
+      r.unanchoredLongBlocks.count === 1 && r.unanchoredLongBlocks.items[0]?.file === "lib/long.cjs");
+    check("03fbb126 exclusions: node_modules/.claude/build/tests/docs anchors never surface (only the 3 real anchor sites count, incl. nested src/docs)",
+      r.totalAnchorSites === 3 && !r.orphanAnchors.items.some((o) => ["cccccccc", "dddddddd", "eeeeeeee", "ffffffff", "0a0a0a0a"].includes(o.id)));
+    check("03fbb126 .md ruling: the note's HTML-comment block and anchor are NOT scanned (4 real blocks: 3 anchors + 1 long)",
+      r.totalCommentBlocks === 4 && !r.orphanAnchors.items.some((o) => o.id === "12345678"));
+    check("03fbb126: an uncapped walk reports walkTruncated:false", r.walkTruncated === false);
+
+    // walk cap: a cap below the visited-file count must set walkTruncated (the line above is the negative control)
+    const capped = computeReport(NL, { maxWalkFiles: 2 });
+    check("03fbb126 walk cap: maxWalkFiles below the file count sets walkTruncated:true", capped.walkTruncated === true);
+    check("03fbb126 walk cap: the truncated report is PARTIAL (fewer files scanned than the uncapped one)",
+      capped.filesScanned < r.filesScanned);
+
+    // CLI on the uncapped fixture: stdout is parseable JSON with walkTruncated:false and no stderr warning. The
+    // CLI's cap is not lowerable from argv, so the warning text itself is covered by the source-text check below.
+    const scriptPath = path.join(import.meta.dirname, "..", "assets", "comment-anchor-lint.mjs");
+    const cli = spawnSync(process.execPath, [scriptPath, NL], { encoding: "utf8" });
+    check("03fbb126 CLI: stdout is the JSON report carrying walkTruncated:false, stderr has no truncation warning",
+      cli.status === 0 && JSON.parse(cli.stdout).walkTruncated === false && !/PARTIAL/.test(cli.stderr || ""));
+    check("03fbb126 CLI: the shipped script writes the truncation warning to stderr (walkTruncated -> PARTIAL)",
+      /if \(report\.walkTruncated\)[\s\S]{0,200}process\.stderr\.write\([^)]*PARTIAL/.test(fs.readFileSync(scriptPath, "utf8")));
+  } finally {
+    try { fs.rmSync(NL, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 }
 
 console.log(failures === 0

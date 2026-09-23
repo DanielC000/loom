@@ -54,8 +54,8 @@
 //   5. oversizedRecords (card d0d0401b) — a record file (docs/adr, docs/decisions) whose byte size exceeds
 //      `PER_RECORD_MAX_BYTES` (imported from decision-records.mjs — the SAME constant that script truncates
 //      against at read time, never a second copy of the number). CLI-scan mode only: records live under
-//      `docs/`, outside SOURCE_ROOTS, so the per-file hook (which only ever sees a write under
-//      packages/{daemon,web,shared}) structurally never observes a record file being authored or edited.
+//      `docs/` as `.md`, outside the source-extension scope, so the per-file hook (which only ever sees a
+//      source-file write) structurally never observes a record file being authored or edited.
 //   6. collidingRecords (card a4b83fb7) — two or more record files (across docs/adr, docs/decisions, and
 //      docs/investigations) whose ids resolve to the SAME id. `decision-records.mjs`'s own `resolveRecord()`
 //      picks exactly ONE winner per id (store precedence, then alphabetically-first filename within that
@@ -63,8 +63,8 @@
 //      drops every other file sharing that id, forever, with no error anywhere — the failure this check
 //      exists to surface: a well-formed anchor that resolves, to the WRONG decision. Reports every colliding
 //      id, every candidate file, and which one currently wins, so the author sees the casualty, not just a
-//      count. CLI-scan mode only, same ground as oversizedRecords above: records live under `docs/`, outside
-//      SOURCE_ROOTS, so the per-file hook structurally never observes a second record file for an id that
+//      count. CLI-scan mode only, same ground as oversizedRecords above: records live under `docs/` as `.md`, outside
+//      the source-extension scope, so the per-file hook structurally never observes a second record file for an id that
 //      already has one.
 //   7. overlongAnchorIds (card afc56dcc) — a `@decision` (optionally `sha:`-sigil'd) followed by 9+ hex
 //      chars on the SAME line: the shape a verbatim 40-hex `git blame`/`git log` paste produces, once card
@@ -214,7 +214,7 @@
 //      injection (title + an explicit "no Do not section" note, rather than a real prohibition) — this
 //      check makes that gap visible at authoring time instead of only discoverable by reading the injected
 //      output. CLI-scan only, same ground as `oversizedRecords`/`collidingRecords` above: records live
-//      under `docs/`, outside `SOURCE_ROOTS`, so the per-file hook structurally never observes one.
+//      under `docs/` as `.md`, outside the source-extension scope, so the per-file hook structurally never observes one.
 //
 // A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
 // short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
@@ -389,7 +389,7 @@ const POINTER_PHRASE_RE = /(see\s+docs\/|docs\/adr\/|docs\/decisions\/|docs\/inv
 const FLAT_STORES = ["adr", "decisions"];
 
 // Default N (DoD-3): justified against THIS repo's OWN measured block-length distribution (OBSERVED —
-// `node comment-anchor-lint.mjs .` against base commit 67e5c672, population = the 5 SOURCE_ROOTS below,
+// `node comment-anchor-lint.mjs .` against base commit 67e5c672, population = packages/{daemon/{src,assets,scripts},web/src,shared/src} (the pre-03fbb126 fixed roots),
 // 326 files, 10663 blocks — never the card's second-hand figures, which are a DIFFERENT measurement).
 // Bucketed by share of total comment VOLUME (lines, not block count): 1-3 lines 11.8%, 4-10 lines 33.2%,
 // 11-25 lines 28.0%, 26+ lines 27.0%. 15 sits inside the "11-25" bucket — the largest non-trivial share —
@@ -399,22 +399,33 @@ export const DEFAULT_MIN_LINES = 15;
 // or under this length that carries an anchor is the target state, never a violation.
 export const GUARD_MAX_LINES = 3;
 
-const SOURCE_ROOTS = [
-  ["packages", "daemon", "src"],
-  ["packages", "daemon", "assets"],
-  ["packages", "daemon", "scripts"],
-  ["packages", "web", "src"],
-  ["packages", "shared", "src"],
-];
-const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mjs"]);
-// `test`/`tests`/`e2e` excluded deliberately: this repo's own test fixtures plant SYNTHETIC anchor ids
+// @decision 03fbb126 — scope is layout-AGNOSTIC (whole repo minus the exclusions below); never a hardcoded
+// package layout, and never add `.md` (HTML-comment blocks in notes are prose, not comment bloat).
+// Extensions: the `//` + `/* */` syntax family `extractCommentBlocks` can group.
+const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]);
+// `test`/`tests`/`e2e` excluded by DEFAULT: test fixtures commonly plant SYNTHETIC anchor ids
 // (aaaaaaaa, deadbeef, cafebabe, ...) with no matching record by design — sweeping them would report
 // fixture noise as real orphan-anchor violations. Measuring against real production source only.
-const EXCLUDE_SEGMENTS = new Set(["node_modules", "dist", ".turbo", "coverage", "test", "tests", "e2e", ".git"]);
-// `SOURCE_ROOTS`, posix-joined with a trailing slash, for the hook's cheap per-file "is this path even in
-// scope" prefix test (`isInScope` below) — the same roots `walkSourceFiles` walks for the CLI scan, just
-// tested against one relative path instead of driving a directory walk.
-const SOURCE_ROOT_PREFIXES = SOURCE_ROOTS.map((parts) => `${parts.join("/")}/`);
+// The rest are build output / vendored / tool-state directories (parity with `mcp/decisions.ts`'s
+// SKIP_DIRS). Any dot-directory (`.claude`, `.github`, ...) is ALSO skipped — see `isExcludedSegment`.
+const EXCLUDE_SEGMENTS = new Set([
+  "node_modules", "dist", "build", ".turbo", ".next", ".cache", "coverage", "test", "tests", "e2e", ".git",
+  ".loom", "worktrees",
+]);
+// Repo-ROOT-relative exclusions (never matched at depth — `src/docs/x.ts` is real source): the root `docs/`
+// holds the record stores (`.md`) plus frozen one-off investigation scripts (21 of the 35 blocks newly
+// flagged on Loom's own tree when the walk first widened), by convention never primary source.
+const ROOT_EXCLUDED_DIRS = new Set(["docs"]);
+// A hidden directory is tool state or a mirror of tracked source (e.g. `.claude/skills`), never primary
+// source — walking it would double-count anchors. Applied to DIRECTORY segments only (a dotfile itself
+// has no source extension anyway).
+function isExcludedSegment(seg) {
+  return EXCLUDE_SEGMENTS.has(seg) || seg.startsWith(".");
+}
+// Hard bound on files VISITED by the CLI/`computeReport` walk (parity with `mcp/decisions.ts`'s
+// MAX_WALK_FILES). Overrun sets `walkTruncated` on the report — never a silent partial scan. The per-file
+// hook never walks, so this bound is not on the per-tool-call path.
+export const MAX_WALK_FILES = 20_000;
 
 const BUCKETS = [
   { key: "1-3", min: 1, max: 3 },
@@ -1051,21 +1062,36 @@ function isVerifiedInvestigationCrossReference(repoRoot, item) {
   return item.darkPaths.every((p) => winnerText.includes(p));
 }
 
-function walkSourceFiles(repoRoot) {
+/**
+ * Layout-agnostic walk from `repoRoot` (parity with `mcp/decisions.ts`'s `walkFiles`): skips excluded and
+ * hidden directories and symlinks, and stops after `maxFiles` VISITED files. Returns `{files, truncated}` —
+ * `truncated` is true iff the cap stopped the walk before it finished, so a partial scan is never silent.
+ */
+function walkSourceFiles(repoRoot, maxFiles = MAX_WALK_FILES) {
   const files = [];
-  const walk = (dir) => {
+  let visited = 0;
+  let truncated = false;
+  const stack = [repoRoot];
+  while (stack.length > 0 && !truncated) {
+    const dir = stack.pop();
     let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
     for (const e of entries) {
-      if (EXCLUDE_SEGMENTS.has(e.name)) continue;
+      if (e.isSymbolicLink()) continue;
       const full = path.join(dir, e.name);
-      if (e.isDirectory()) { walk(full); continue; }
+      if (e.isDirectory()) {
+        if (isExcludedSegment(e.name)) continue;
+        if (dir === repoRoot && ROOT_EXCLUDED_DIRS.has(e.name)) continue;
+        stack.push(full);
+        continue;
+      }
       if (!e.isFile()) continue;
+      if (++visited > maxFiles) { truncated = true; break; }
       if (SOURCE_EXTENSIONS.has(path.extname(e.name))) files.push(full);
     }
-  };
-  for (const parts of SOURCE_ROOTS) walk(path.join(repoRoot, ...parts));
-  return files;
+  }
+  files.sort();
+  return { files, truncated };
 }
 
 /** Bucket every block's LENGTH into the four card-cited ranges, reporting each bucket's share of total
@@ -1097,7 +1123,10 @@ export function bucketDistribution(blocks) {
  */
 export function computeReport(repoRoot, opts = {}) {
   const minLines = Number.isInteger(opts.minLines) && opts.minLines > 0 ? opts.minLines : DEFAULT_MIN_LINES;
-  const files = walkSourceFiles(repoRoot);
+  const { files, truncated: walkTruncated } = walkSourceFiles(
+    repoRoot,
+    Number.isInteger(opts.maxWalkFiles) && opts.maxWalkFiles > 0 ? opts.maxWalkFiles : MAX_WALK_FILES,
+  );
   const allBlocks = [];
   const allAnchors = [];
   const allBroken = [];
@@ -1165,6 +1194,7 @@ export function computeReport(repoRoot, opts = {}) {
     minLines,
     guardMaxLines: GUARD_MAX_LINES,
     filesScanned: files.length,
+    walkTruncated,
     totalCommentBlocks: allBlocks.length,
     totalAnchorSites: allAnchors.length,
     uniqueAnchorIds: anchorIdSet.size,
@@ -1271,20 +1301,36 @@ export function computeReport(repoRoot, opts = {}) {
 // --- per-file hook mode (card 67621894) -------------------------------------------------------------
 
 /**
- * Cheap "is this path even worth linting" test — extension + SOURCE_ROOTS prefix + no excluded segment
- * (mirrors `walkSourceFiles`'s own filters, tested against one relative path instead of a directory walk).
- * Returns the repo-relative path on a match, else `null`. For a repo NOT shaped like this one (no
- * `packages/{daemon,web,shared}/...` layout — i.e. every OTHER Loom-managed project) every write fails
- * this prefix test and the hook is a fast no-op: the SOURCE_ROOTS list itself is what scopes this lint to
- * this repo, the same way the CLI scan is already scoped by it — not a new limitation the hook introduces.
+ * Cheap "is this path even worth linting" test — inside repoRoot + source extension + no excluded/hidden
+ * DIRECTORY segment (mirrors `walkSourceFiles`'s own filters, tested against one relative path instead of
+ * a directory walk; pure string work, no filesystem access, so the per-tool-call hook cost is unchanged).
+ * Returns the repo-relative path on a match, else `null`. Layout-agnostic (card 03fbb126): any project's
+ * JS/TS source is in scope wherever it lives.
  */
 export function isInScope(repoRoot, filePath) {
   const rel = relPath(repoRoot, filePath);
   if (rel.startsWith("..") || path.isAbsolute(rel)) return null; // outside repoRoot entirely
   if (!SOURCE_EXTENSIONS.has(path.extname(filePath))) return null;
-  if (!SOURCE_ROOT_PREFIXES.some((p) => rel.startsWith(p))) return null;
-  if (rel.split("/").some((seg) => EXCLUDE_SEGMENTS.has(seg))) return null;
+  const segs = rel.split("/");
+  if (segs.slice(0, -1).some(isExcludedSegment)) return null;
+  if (segs.length > 1 && ROOT_EXCLUDED_DIRS.has(segs[0])) return null;
   return rel;
+}
+
+/**
+ * The hook's repo root: walk UP from `startDir` to the nearest `.git` entry (dir or worktree FILE), falling
+ * back to `startDir` itself when none exists — the same resolution `decision-records.mjs`'s `findRepoRoot`
+ * and the daemon's store gate (card a4760fc8) use, so a project bound to a SUBFOLDER of a larger repo
+ * resolves `docs/<kind>` at the real root instead of falsely reporting every anchor as an orphan.
+ */
+export function resolveHookRepoRoot(startDir) {
+  let dir = path.resolve(startDir);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return path.resolve(startDir);
+    dir = parent;
+  }
 }
 
 /**
@@ -1590,7 +1636,7 @@ export function scopeHookPointerAnchors(pointerAnchors, lines, writtenText) {
  */
 async function runHook(repoRootArg) {
   if (!repoRootArg) return;
-  const repoRoot = path.resolve(repoRootArg);
+  const repoRoot = resolveHookRepoRoot(repoRootArg);
 
   let raw = "";
   for await (const c of process.stdin) raw += c;
@@ -1653,6 +1699,10 @@ function main() {
   const minLines = minLinesArg ? Number(minLinesArg.slice("--min-lines=".length)) : undefined;
   const report = computeReport(repoRoot, { minLines });
   process.stdout.write(JSON.stringify(report, null, 2) + "\n");
+  // stderr, so stdout stays a parseable JSON report; a capped walk must never read as a complete scan.
+  if (report.walkTruncated) {
+    process.stderr.write(`comment-anchor-lint: WARNING — walk stopped at ${MAX_WALK_FILES} files; this report is PARTIAL (walkTruncated:true).\n`);
+  }
 }
 
 // Only run as a CLI/hook when invoked directly (`node comment-anchor-lint.mjs ...`) — an import (the test
