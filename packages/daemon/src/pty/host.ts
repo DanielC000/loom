@@ -5670,9 +5670,9 @@ export class PtyHost {
     live.pending.length = 0;
     // Card 7c2a6dc0: mirror claude's own `stop()` (see that method's own doc) — a still-outstanding
     // retry/give-up-style callback from whatever turn was in flight serves no purpose once a deliberate
-    // stop has been issued. Clearing the timer stops an ALREADY-armed CASE 3/4 fire; bumping the generation
-    // additionally invalidates (via `submitCodex`'s own gen check) a still-pending pre-Enter write if this
-    // stop landed inside `submitCodex`'s own text->\r gap. `armCodexBusyStaleTimer`'s own `stopping` check
+    // stop has been issued. Clearing the timer and bumping `busyStaleGen` stops an ALREADY-armed CASE 3/4
+    // fire; bumping `submitCancelGen` (below) additionally invalidates (via `submitCodex`'s own check of it)
+    // a still-pending pre-Enter write if this stop landed inside `submitCodex`'s own text->\r gap. `armCodexBusyStaleTimer`'s own `stopping` check
     // is the belt-and-suspenders backstop for a FRESH arm from output seen during the graceful window below.
     if (live.busyStaleTimer) { clearTimeout(live.busyStaleTimer); live.busyStaleTimer = null; }
     live.busyStaleGen++;
@@ -5711,8 +5711,9 @@ export class PtyHost {
    * mirroring claude's own guard.
    *
    * Card 7c2a6dc0: also neutralizes the same two things `stopCodex` does — clears any armed staleness
-   * timer and bumps `busyStaleGen`, so a still-outstanding retry/give-up-ladder callback from the
-   * interrupted turn can't fire against what this redirect just cut short.
+   * timer and bumps `busyStaleGen` (so a still-outstanding retry/give-up-ladder callback from the
+   * interrupted turn can't fire against what this redirect just cut short) and `submitCancelGen` (so a
+   * still-pending pre-Enter write from `submitCodex` can't land either).
    *
    * @decision 7c2a6dc0 — the COMMON path (turn already busy, its own Enter already out) MUST re-arm a
    * fresh staleness timer after clearing the old one, never just clear it — with nothing left to fire,
