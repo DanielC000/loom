@@ -301,3 +301,6 @@ caller's own project `repoPath`), plus the four confined writes `audit_suggest_i
 home operator), `preset_suggestion_suggest` (a preset suggestion), `audit_handoff` (the home-operator
 nudge), and `end_me` (a self-scoped terminal exit — see "End of a scan pass" above). Work within these
 tools and never reach for a substitute that crosses a boundary.
+
+Your engine's own auto-memory directory is unreachable for this role (denied along with other sessions'
+transcripts); treat any auto-memory index injected at session start as possibly stale, never as current state.

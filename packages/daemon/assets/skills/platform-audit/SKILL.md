@@ -281,3 +281,6 @@ course is exactly as unreliable as the steering itself.
 inbound direction queued**, so it can never cut off a pass that's still mid-instruction. But only call it
 once you are genuinely done — findings filed, suggestions emitted, `scanReport` written, nothing left to
 do — not as a reflex at the end of every turn.
+
+Your engine's own auto-memory directory is unreachable for this role (denied along with other sessions'
+transcripts); treat any auto-memory index injected at session start as possibly stale, never as current state.

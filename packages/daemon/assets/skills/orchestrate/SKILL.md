@@ -946,7 +946,10 @@ what you checked. Found none? Treat it as live.
    store and appends `[linked request <id>: <STATE> as of <date>]` automatically, so the note
    self-corrects the moment the owner answers it instead of relying on a reader remembering to check by
    hand; asking-voice phrasing in `text` stays the human-readable fallback, `requestIds` is what makes
-   the check automatic.
+   the check automatic. **Your engine's own auto-memory directory is unreachable for this role** (reads and
+   writes are denied along with other sessions' transcripts) — record durable facts with the project memory
+   tool or your resume doc, and treat any auto-memory index injected at session start as possibly stale,
+   never as current state.
 9. **Verify the whole, not just the parts.** Before declaring a phase done, require an integrated
    end-to-end pass; eyeball what can't be verified automatically. For visual/UI work the eyeball is
    *yours* — verifying it "done" means *seeing* it. **Prefer the Playwright/`browserTesting` path**: if

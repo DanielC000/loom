@@ -18,3 +18,18 @@ The ruling also carries an explicit, load-bearing caveat about the mechanism's o
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (above `TRANSCRIPT_ROOT_DENY_ROLES`, the `d78f8217`/`31613c1e` paragraph), as of `main` `8d9fe59d`. Extracted by card `a2a6b2ad` (tranche 11 on `pty/host.ts`) — this is the designated home for `31613c1e`'s fuller ruling content, left unrecorded by the `claude-transcript.ts` tranche that produced `docs/decisions/d78f8217-worker-per-other-project-transcript-deny.md` (see that record's own `Source` note). Wording unchanged beyond joining wrapped lines and stripping `*`/`{@link}` markup.
+
+## Revisited 2026-09-23 (card 895ba227): blanket kept
+
+Trigger: a manager-class session could not write its engine's own auto-memory dir (`<projects root>/<proj>/memory/`), because the blanket deny covers it. Asked whether to narrow the deny to transcript-bearing shapes only.
+
+Ruling: **keep the blanket for all six roles; no rule change.** Two costs decided it:
+
+1. Narrowing flips these roles from fail-CLOSED to fail-OPEN on any transcript shape the harness adds later (a shape deny-list would have to enumerate `*.jsonl`, `*.json`, and uuid-shaped session dirs).
+2. A deny cannot carve out "own project only" and a narrower allow cannot override a broader deny, so opening `memory/` opens EVERY project's memory notes to these roles.
+
+The need is already served by project memory (`memory_write`) and the resume doc. The shipped skills now say the auto-memory dir is unreachable and any injected auto-memory index may be stale.
+
+Evidence (path-shape census of the projects root on the dev host, names only, no transcript content read): per project dir, `<uuid>.jsonl` (2578), one non-uuid `*.jsonl` stray, `<uuid>/` session dirs (878, holding `tool-results/`, `subagents/`, a `.txt`), `memory/` (42, `*.md` only), `sessions-index.json` (1), `bridge-pointer.json` (6). `memory/` and `<uuid>/` sit at the same depth and differ only by name.
+
+Do not reopen this as a convenience fix; the LEAD RULING's limit sentence above still applies unchanged.
