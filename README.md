@@ -21,28 +21,38 @@ Because every agent is a genuine `claude` session rather than an API-key agent l
 - **🖥️ Durable real sessions, not headless.** Every agent is the genuine interactive `claude` driven
   over a PTY (`node-pty`) — never `claude -p` / headless, never an API-key agent loop — and its session is owned by a daemon, not your shell, so it's resumable and **outlives any viewer**: a closed tab or a reboot doesn't lose the thread.
 - **⛓️ Review-gated multi-agent orchestration.** A lead session plans, delegates to worker sessions on
-  isolated git **worktree branches**, reviews each diff, and merges through a build gate — a failing gate bounces the card back instead of merging. Workers report up; the lead holds the whole picture. Loom even orchestrates its own development with this loop.
+  isolated git **worktree branches**, reviews each diff, and merges through a build gate — a failing gate bounces the card back instead of merging. A lead can land a whole **batch** of ready branches in one gate run rather than paying for a gate per branch, and a diff that only touches docs or bundled assets takes a reduced gate instead of the full suite. Workers report up; the lead holds the whole picture. Loom even orchestrates its own development with this loop.
+- **🚦 Every gate in one place.** Gates run daemon-wide through a single concurrency budget, and the
+  **Gates** page is the god-eye view of them — what's running, what's queued behind it, and a filterable history of settled runs with per-step timings, across every project.
+- **🗂️ Multi-repo projects.** A project can register more than one writable repository and route each
+  board card to a specific repo, threaded all the way through worktree creation, the merge gate, and the per-card merged badge — so one board can drive a front end and a back end that live in separate checkouts.
 - **🏠 Your data, on your hardware.** Everything Loom keeps lives on your machine — an **SQLite** store,
-  your git checkouts, your transcripts, and your vault. Loom adds **no cloud service of its own**, so your code and history never leave your machine through Loom, and the daemon binds to **loopback only** (`127.0.0.1`) as its security boundary. To reach the daemon from another device, put a tunnel in front (see [Reach Loom from another device](#reach-loom-from-another-device)).
+  your git checkouts, your transcripts, and your vault. Loom adds **no cloud service of its own**, so your code and history never leave your machine through Loom. The daemon binds to **loopback** (`127.0.0.1`) by default, and every write route behind it requires a **local access credential** — a bearer secret generated at boot and kept `0600` under `LOOM_HOME` — so another process on the same machine can't drive the API just by reaching the socket. Opening it to another device is deliberate and opt-in (see [Reach Loom from another device](#reach-loom-from-another-device)).
 - **✦ A versioned knowledge layer — vault + Memory.** Design notes, decisions, and session logs live in
-  an Obsidian **vault** woven alongside the code, auto-committed so they stay versioned with the work. On top of it, **Memory** is a browsable window into the durable memory the fleet itself writes and recalls, so hard-won context carries across sessions instead of being re-derived.
+  an Obsidian **vault** woven alongside the code, auto-committed so they stay versioned with the work — optional, so a project can bind a repo with no vault, or be vault-only with no repo. On top of it, **Memory** is a browsable window into the durable memory the fleet itself writes and recalls, so hard-won context carries across sessions instead of being re-derived: notes show their inbound backlinks, and every note recalled into a session carries its version and age so a stale one is visible as stale.
+- **📌 Decision records the code points at.** A load-bearing decision is pulled out of the comment it
+  grew in and written to `docs/decisions/` (or `docs/adr/` for the architectural ones), leaving a one-line `@decision <id>` anchor behind. Reading that line in the source surfaces the record's prohibitions automatically, so the reasoning reaches the next person editing the code rather than sitting in a file nobody opens. Loom's own tree carries hundreds of them; a new project gets the store scaffolded for it.
 - **◧ A task board agents can use.** Tasks are a first-class, project-scoped surface backed by an MCP
   server, so agents read the board, create cards, and move work through columns as part of the same loop you watch — rendered as a per-project kanban.
 - **💳 Runs on your subscription, not metered API costs.** Because every agent is a genuine interactive
   `claude` session rather than an API-key agent loop, a whole fleet of them runs on the **Claude subscription (Pro/Max)** you already pay for — there's no per-token API bill for the orchestration the way there is with tools that call the Anthropic API directly. (Honest caveat: the agents still consume your subscription's usage and obey its rate limits.)
 - **❯ The terminal cockpit.** A stateless React/Vite web viewport attaches over WebSockets and
-  detaches freely — Mission Control, the task board, live terminals, Memory, runs, and git, navigated from a collapsible instrument-rail sidebar, all one phosphor-on-dark panel.
+  detaches freely, driven by a live status feed rather than polling. A collapsible instrument-rail sidebar groups every destination — Mission Control, live terminals, the Requests inbox, Runs, Gates and the session Archive to *operate*; a project's Overview, board, Memory and Repository (vault files + git) to work *in* it; Projects, Actors (profiles + skills), Companion and Automation (cron + event triggers) to *configure* it — all one phosphor-on-dark panel.
 - **💬 A chat-native personal companion.** Spin up a long-lived **companion** agent you talk to over
   **Telegram** or an in-app web chat — the same durable, real-`claude` runtime, now reachable from your phone. Give it a name and it holds the thread across restarts: it keeps a **durable memory** of what matters to you (recalled automatically at the start of each chat), sets **one-shot and recurring reminders** that ping you back on your own channel, authors its own private skills, and can proactively check in. You manage it from one **Companion** page — chat plus config, channels, memory, reminders, and its persona — behind a fail-closed security model: an encrypted bot token, sender allowlists, DM pairing codes, and human-only configuration.
+- **🧪 An opt-in second CLI harness (experimental).** A profile can spawn the **Codex** CLI instead of
+  `claude`, pinned onto the session so every resume, fork, and recycle keeps the same harness. It's early and honestly narrower than the `claude` path: worker sessions only, a condensed doctrine instead of the full skill set, and no context or usage telemetry (Codex doesn't expose a shape Loom is willing to guess at), so those sessions recycle on turn count rather than context. Off by default; `claude` remains the harness everything else is built around.
 - **🌐 Opt-in per-worker browser testing.** A worker profile can be granted its own isolated headless
   Playwright browser, so QA-style sessions can drive a running app and verify UI before reporting back.
 - **🚀 Guided setup + a standing Platform operator.** A built-in **Platform** operator greets you on
   first run and stays one click away (the **Platform** page). It helps you create, configure, and archive your projects, agents, and profiles, pick your skills and workflow, and can set them up on your behalf — confirming the big moves first, on a deliberately narrow, safe tool surface.
+- **🔐 An opt-in Elevated Operator.** Off by default, and off unless you turn it on in Settings: an
+  *operator* session confined to the one project you start it in, allowed to switch or create local branches and commit, write into that project's vault, and push its own branch (never a force-push). It can't run host or deploy commands, reach another project, create schedules, edit Loom's bundled skills, or spawn anything. Leave it off unless you want an agent committing and pushing for you.
 - **🔎 Suggest-only Workspace Auditor.** A read-only reviewer scans your own recent sessions for vague or
   ambiguous instructions in *your* agent prompts and skills, and for prompts you type repeatedly that are worth saving as one-click presets — then files improvement suggestions as cards on your board. It never changes anything itself. Run it on demand ("Review my workspace" on the Platform page) or on a schedule.
-- **🧩 Editable skills, injected per session.** Loom ships a curated set of skills and mirrors them into every session as project-local skills that **shadow your personal `~/.claude/skills`**. A built-in editor lets you read, edit, create, reset, and three-way-merge Loom's shipped updates into your own edits — changes take effect on the next session spawn.
+- **🧩 Editable skills, injected per session.** Loom ships a curated set of skills and mirrors them into every session as **project-local** skills, leaving your personal `~/.claude/skills` untouched — Claude Code gives a personal skill precedence over a project-local one of the same name, so Loom's names are chosen not to collide. A profile can pin **which** skills its sessions get (its own role doctrine always ships), and a built-in editor lets you read, edit, create, reset, and three-way-merge Loom's shipped updates into your own — per file, not just `SKILL.md`. Changes take effect on the next session spawn.
 - **🛰️ Agents as authenticated API endpoints (Agent Runs).** Flag a project agent as an endpoint, mint a scoped API key with concurrency, token, and spend caps, then trigger structured async runs over `POST /api/runs`. The Runs page shows every run's input, result, usage, and retained transcript, with a per-key kill-switch that cancels in-flight runs.
-- **🔑 Connections — bound credentials the agent never sees.** Store a credential once (say a GitHub token), encrypted at rest; a session's profile allowlists which connections it may use, and the agent reaches the API through Loom without the secret ever entering its context. Write-only and human-managed — there is no agent path to read, create, or bind one.
+- **🔑 Connections — bound credentials the agent never sees.** Store a credential once (say a GitHub token), encrypted at rest; a session's profile allowlists which connections it may use, and the agent reaches the API through Loom without the secret ever entering its context. Write-only and human-managed — there is no agent path to read, create, or bind one. Separately, a session that genuinely needs a secret *in hand* asks for one through the attention queue: you type it, Loom encrypts it and hands it to that project's sessions as a named environment variable, and you can revoke it later without tearing the session down.
 - **⏱️ A built-in cron scheduler.** Run a manager — or the Workspace Auditor — on a cron cadence; each fire boots a real interactive session against the agent you pick, behind concurrency and usage-limit gates. Off by default; enable it in Settings.
 - **📄 Opt-in document conversion.** Grant a worker profile a markitdown MCP and its sessions can convert PDFs, Office files, images, and HTML to Markdown — useful for research and document-heavy work. Off by default, human-enabled per profile.
 
@@ -124,7 +134,11 @@ Open `http://127.0.0.1:5317` and you're in the cockpit. See
 
 ## Reach Loom from another device
 
-The daemon binds to **loopback only** (`127.0.0.1`) on purpose: that's its trust boundary. Loom keeps a deliberately simple model — anything that can reach the loopback socket is treated as you, the OS user — and does **not** ship its own network auth or a bind-beyond-loopback flag. To use a loopback daemon from your phone or laptop, put a tunnel in front that carries the authentication and encryption, and let it terminate on the host's loopback. Two well-supported options:
+The daemon binds to **loopback** (`127.0.0.1`) by default, and that stays the recommended shape. There are two supported ways to reach it from elsewhere: put a **tunnel** in front of the loopback daemon, or turn on Loom's own **authenticated remote bind**. The tunnel is the one to reach for first — it's less to get right, and the daemon never leaves loopback.
+
+### Option A — a tunnel (recommended)
+
+Put a tunnel in front that carries the authentication and encryption, and let it terminate on the host's loopback. Two well-supported options:
 
 - **SSH local port-forward** (SSH-key auth). From the remote device, forward a local port to the
   daemon's loopback on the host:
@@ -146,7 +160,24 @@ The daemon binds to **loopback only** (`127.0.0.1`) on purpose: that's its trust
 
   WireGuard encrypts the connection and your tailnet ACLs decide who may reach it; the daemon is never exposed to the public internet.
 
-In both cases the tunnel owns auth + transport security and Loom keeps its simple OS-user trust boundary. (Use the daemon port — `4317` by default, or whatever you set with `--port` / `LOOM_PORT`.) A first-class authenticated remote bind is a separate, deliberate decision and is **not** offered today.
+In both cases the tunnel owns auth + transport security and the daemon still only ever sees loopback traffic. (Use the daemon port — `4317` by default, or whatever you set with `--port` / `LOOM_PORT`.)
+
+### Option B — a direct authenticated bind
+
+If you'd rather not run a tunnel, Loom can bind a non-loopback interface itself. It is **off by default** and stays off until you configure it deliberately:
+
+- **A gateway token authenticates every remote caller.** Mint one over the loopback API
+  (`POST /api/gateway-tokens`); the plaintext is returned exactly once and only the hash is stored. Tokens can be rotated, paused, or revoked — but only from the loopback UI, never over the remote bind itself, so a remote caller can never mint or revoke its own access.
+- **TLS is mandatory** for any non-loopback bind that isn't a Tailscale `.ts.net` address (a tailnet link
+  is already encrypted). Point `remoteAccess.tls` at a cert and key; without readable material the daemon **refuses to open the remote listener and stays on loopback** rather than serving plaintext.
+- **Routes are allowlisted, fail-closed.** Only an explicitly listed set — reads, plus the surfaces you
+  need to actually answer and steer (the Requests inbox, session input/stop/resume/end, read-only terminals) — is reachable remotely. Everything else, including all configuration and every human-only writer, is loopback-only by construction: a new route is unreachable from the remote bind until someone deliberately allowlists it.
+- **Remote requests are rate-limited** per caller IP and per token, with a lockout on repeated auth
+  failures. The loopback path is exempt.
+
+Setting `bindHost` to `0.0.0.0` (or `::`) is supported and puts every device on your local network in scope — still behind the same token and TLS wall, but a deliberately broad surface, so the daemon logs a plain warning at startup and Settings says so too.
+
+Step-by-step instructions for both options live on the landing site's **Remote access** page ([`site/remote-access.html`](site/remote-access.html)).
 
 ## How it works
 
@@ -181,7 +212,9 @@ Beyond the orchestration fleet, Loom can run a **companion** — a single long-l
 
 The companion grows with you. It curates a **durable memory** of what matters — your preferences, ongoing context, things it said it would follow up on — and recalls it silently at the start of each conversation. It sets its own **reminders**, both one-shot ("remind me in 20 minutes") and recurring (on a cron schedule), which fire back to your chat as a nudge. It writes its own private **skills** for tasks worth repeating, and — when you enable a cadence — proactively checks in only when there's something genuinely worth surfacing.
 
-You set it up and run it from a single **Companion** page: chat on one side; configuration, channels, memory, reminders, and its editable persona on the other. Every inbound message is treated as untrusted input, the bot token is encrypted at rest, senders are allowlisted, enrollment uses one-time DM pairing codes, and all configuration is human-only — never something the chat-reachable agent can change about itself.
+What it may actually *do* is yours to grant, one lever at a time. Out of the box it talks; grant it more and it can commit and push on your behalf, against either the project's vault or its code repo — the target resolved by the daemon, never a path the agent supplies, and a push always asks you first. If you'd rather not hand out levers one by one, there's an opt-in **lead mode** that gives one companion full capability across every project; the UI states that blast radius plainly before you turn it on.
+
+You set it up and run it from a single **Companion** page: chat on one side; configuration, channels, memory, reminders, capability grants, and its editable persona on the other. Every inbound message is treated as untrusted input, the bot token is encrypted at rest, senders are allowlisted, enrollment uses one-time DM pairing codes, and all configuration is human-only — never something the chat-reachable agent can change about itself. It can't be driven through a raw terminal either: text pushed at a companion session over the API or a terminal socket is refused outright, so nothing can put words in your mouth for it to act on.
 
 ## Screenshots
 
@@ -210,6 +243,8 @@ You set it up and run it from a single **Companion** page: chat on one side; con
 
 - [`CLAUDE.md`](CLAUDE.md) — architecture, the validated gate-free spawn recipe, and the load-bearing
   invariants (start here to hack on Loom).
+- [`docs/decisions/`](docs/decisions) and [`docs/adr/`](docs/adr) — the decision records the
+  `@decision` anchors in the source point at; [`docs/investigations/`](docs/investigations) holds the incident write-ups.
 - [`docs/releasing.md`](docs/releasing.md) — the packaging, versioning, and release runbook.
 - [`CHANGELOG.md`](CHANGELOG.md) — notable changes per version.
 
