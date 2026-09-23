@@ -26,7 +26,7 @@ import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, RESERVED_CAPABILITY_SLUGS, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
-import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS } from "./codex-host.js";
+import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail } from "./codex-host.js";
 import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
 
 /** @decision 702f2197 — the ONLY server ids passed as `mcpServersToCodexArgs`'s `autoApproveServerIds` at
@@ -5311,6 +5311,15 @@ export class PtyHost {
     try {
       // eslint-disable-next-line no-console
       console.warn(`[codex-engine-id] ${sessionId} give-up rollout diagnostic: ${describeRolloutCandidatesForDiagnostic(cwd, live.startedAt, live.excludeEngineSessionIds ?? undefined)}`);
+    } catch { /* diagnostic only */ }
+    // Card 6654a47c: WHY did codex never begin its turn? Its own screen tail probably says. The tail is
+    // routed through `redactedExcerpt` (raw only under LOOM_LOG_MESSAGE_CONTENT=1; the echoed prompt is
+    // user content in a multi-tenant log). `markers` are allowlisted LABELS of codex chrome phrases present
+    // in the tail — a HINT that may come from the echoed prompt, not a verdict (see CODEX_SCREEN_MARKERS).
+    try {
+      const { tail, markers } = describeCodexScreenTail(Buffer.concat(live.ring.chunks).toString("utf8"));
+      // eslint-disable-next-line no-console
+      console.warn(`[codex-engine-id] ${sessionId} give-up screen tail: markers=[${markers.join(",")}] (hint: phrase present in tail, possibly from the echoed prompt) tail=${redactedExcerpt(tail)}`);
     } catch { /* diagnostic only */ }
   }
 

@@ -21,6 +21,45 @@ export function isTrustDialogPrompt(screen: string): boolean {
   return normalizeCodexScreenText(screen).includes(TRUST_DIALOG_MARKER);
 }
 
+/** Card 6654a47c: cap on the stripped screen tail the engine-id give-up diagnostic logs. */
+export const CODEX_SCREEN_TAIL_MAX_CHARS = 600;
+
+/** Card 6654a47c: raw chars read off the ring before stripping (stripping shrinks; slicing AFTER the strip
+ *  is what keeps the 600-char cap meaning "600 visible chars", not "600 raw bytes of escapes"). */
+const CODEX_SCREEN_TAIL_RAW_CHARS = 8192;
+
+/** Card 6654a47c: phrases codex's OWN chrome prints, each traced to a repo specimen/const (never guessed):
+ *  `trust-dialog` = `TRUST_DIALOG_MARKER`; `esc-to-interrupt` = the busy status line (`BUSY_STATUS_MARKER`
+ *  specimens); `starting-mcp-servers` = observed live in the real-spawn tests; `ready-placeholder` =
+ *  `CODEX_READY_PLACEHOLDER`; `update-available` = codex's own startup dialog (`CODEX_UPDATE_CHECK_OVERRIDE_ARGS`);
+ *  `press-enter-to-continue` = the stuck screen noted at host.ts's codex spawn. Matched case-insensitively.
+ *  ⚠️ A marker means "phrase PRESENT in the screen tail", which INCLUDES the echoed prompt — a HINT, never
+ *  a verdict (a prompt that itself says "esc to interrupt" emits the label with no codex chrome at all).
+ *  Only the label is ever logged, never matched text. Generic words (error/auth/trust/…) are deliberately
+ *  absent: they'd be 1-bit prompt-content leaks and false signals. Unverified phrases (sign-in, rate-limit
+ *  wording) are left out until a real specimen exists. */
+export const CODEX_SCREEN_MARKERS: ReadonlyArray<readonly [label: string, phrase: string]> = [
+  ["trust-dialog", TRUST_DIALOG_MARKER],
+  ["esc-to-interrupt", "esc to interrupt"],
+  ["starting-mcp-servers", "starting mcp servers"],
+  ["ready-placeholder", CODEX_READY_PLACEHOLDER],
+  ["update-available", "update available"],
+  ["press-enter-to-continue", "press enter to continue"],
+];
+
+/** Card 6654a47c: pure. `raw` = the session's raw ring text. Returns the ANSI-stripped, single-line,
+ *  whitespace-collapsed TAIL (≤ {@link CODEX_SCREEN_TAIL_MAX_CHARS}) and the marker labels present in it. */
+export function describeCodexScreenTail(raw: string): { tail: string; markers: string[] } {
+  const stripped = normalizeCodexScreenText(raw.slice(-CODEX_SCREEN_TAIL_RAW_CHARS))
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const tail = stripped.slice(-CODEX_SCREEN_TAIL_MAX_CHARS);
+  const lower = tail.toLowerCase();
+  const markers = CODEX_SCREEN_MARKERS.filter(([, phrase]) => lower.includes(phrase.toLowerCase())).map(([label]) => label);
+  return { tail, markers };
+}
+
 /** The keystroke sequence to write when {@link isTrustDialogPrompt} is true — accepts the highlighted
  *  "1. Yes, continue" option (see `codex-doctrine.ts#TRUST_DIALOG_ANSWER`'s own doc for why this is Enter
  *  on the default option, not a submitted prompt). */
