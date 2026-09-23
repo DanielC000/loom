@@ -34,7 +34,7 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
 export function registerTranscriptReadTools(
   server: McpServer,
   db: Db,
-  opts: { callerSessionId: string; agentPromptToolName?: string },
+  opts: { agentPromptToolName?: string } = {},
 ): void {
   // --- cross-project reads (the audit input) ---
   server.registerTool(

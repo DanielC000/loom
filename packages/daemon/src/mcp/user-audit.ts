@@ -9,7 +9,7 @@ import { registerScopedRepoReadTools, type ScopedRootResolution } from "./repo-r
 import { skillListData } from "./skillTools.js";
 import { readSkill, isValidSkillName } from "../skills/store.js";
 import { strictShape } from "./arg-alias.js";
-import { SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
+import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -87,7 +87,7 @@ export class WorkspaceAuditMcpRouter {
     // list_sessions/transcript_read (mcp/transcript-read.ts), reused, not copy-pasted. This surface DOES
     // register agent_prompt_read (below) — name it in list_sessions' shared description (the dev Auditor's
     // call site omits this, since loom-audit has no agent_prompt_read tool). ---
-    registerTranscriptReadTools(server, db, { callerSessionId: auditorSessionId, agentPromptToolName: "agent_prompt_read" });
+    registerTranscriptReadTools(server, db, { agentPromptToolName: "agent_prompt_read" });
 
     // --- READ: own-project source (repo_read_file / repo_grep / repo_glob), scoped PER CALL by a
     // caller-supplied projectId resolved SERVER-SIDE to that project's OWN repoPath — never another
@@ -114,13 +114,18 @@ export class WorkspaceAuditMcpRouter {
           "verified against what the agent ACTUALLY runs — never inferred from a transcript, and never a " +
           "duplicate \"add another rule\" finding for a rule the prompt already states. Pass the `agentId` " +
           "from list_sessions (full:true, or the summary's `agentId`). Returns {id, projectId, name, " +
-          "startupPrompt} or {error} if the id is unknown. Read-only.",
+          "startupPrompt} or {error} if the id is unknown. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
+          "startupPrompt spills to a scratch file instead of inlining, and the response becomes {id, " +
+          "projectId, name, startupPromptFile, startupPromptChars, note}. Read-only.",
         inputSchema: strictShape({ agentId: z.string() }),
       },
       async ({ agentId }) => {
         const a = db.getAgent(agentId);
         if (!a) return ok({ error: "agent not found" });
-        return ok({ id: a.id, projectId: a.projectId, name: a.name, startupPrompt: a.startupPrompt });
+        const spill = spillTextIfLarge(auditorSessionId, "agent-prompt-read-spills", a.id, a.startupPrompt, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok({ id: a.id, projectId: a.projectId, name: a.name, startupPrompt: a.startupPrompt });
+        const note = `startupPrompt is ${spill.chars} chars — too large to inline safely, so the plain text (real line breaks, UTF-8) was written to ${spill.file}. Read it directly, or grep it for a substring.`;
+        return ok({ id: a.id, projectId: a.projectId, name: a.name, startupPromptFile: spill.file, startupPromptChars: spill.chars, note });
       },
     );
 
@@ -149,13 +154,19 @@ export class WorkspaceAuditMcpRouter {
           "Read ONE skill's CURRENT full SKILL.md text by `name` (works for BUNDLED and USER skills) so a " +
           "suggestion verifies against the actual skill body instead of inferring it from a transcript — " +
           "avoiding a duplicate finding for guidance the skill already gives. Returns {name, content} or " +
-          "{error} if the name is invalid / not found. Read-only.",
+          "{error} if the name is invalid / not found. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
+          "content spills to a scratch file instead of inlining, and the response becomes {name, " +
+          "contentFile, contentChars, note}. Read-only.",
         inputSchema: strictShape({ name: z.string() }),
       },
       async ({ name }) => {
         if (!isValidSkillName(name)) return ok({ error: "invalid skill name" });
         const s = readSkill(name);
-        return ok(s ?? { error: "skill not found" });
+        if (!s) return ok({ error: "skill not found" });
+        const spill = spillTextIfLarge(auditorSessionId, "skill-read-spills", name, s.content, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok({ name: s.name, content: s.content });
+        const note = `content is ${spill.chars} chars — too large to inline safely, so it was written to ${spill.file}. Read it directly, or grep it for a substring.`;
+        return ok({ name: s.name, contentFile: spill.file, contentChars: spill.chars, note });
       },
     );
 
