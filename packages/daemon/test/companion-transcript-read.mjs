@@ -55,7 +55,8 @@ requireHermeticEnv();
 const { Db } = await import("../dist/db.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { COMPANION_CAPABILITIES } = await import("../dist/companion/capabilities.js");
-const { engineTranscriptPath, archivedTranscriptPath, TRANSCRIPT_AGGREGATE_CHAR_BUDGET } = await import("../dist/sessions/transcript.js");
+const { engineTranscriptPath, archivedTranscriptPath, TRANSCRIPT_AGGREGATE_CHAR_BUDGET, TRANSCRIPT_PAGE_CHAR_BUDGET } = await import("../dist/sessions/transcript.js");
+const { sessionScratchDir } = await import("../dist/paths.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
@@ -415,6 +416,35 @@ try {
     const result = JSON.parse(raw.content[0].text);
     check("(h) a session row with a null projectId is rejected with {error}, not read",
       typeof result.error === "string");
+  }
+
+  // ============ (i) card 26134f1a: an oversized single turn truncates INLINE, never spills to disk ============
+  // Before this card, the companion's OWN transcript_read had NO oversized-turn bounding at all (a 5th ad
+  // hoc pattern, unlike worker_transcript/transcript_read/session_transcript which at least spilled to
+  // scratch). It's now converged onto the SAME spillableTurnsResponse path those three already use.
+  {
+    const db = tmpDb();
+    const proj = "proj-spill";
+    seedProject(db, proj, "Spill");
+    const companionSess = "companion-spill";
+    seedSession(db, companionSess, proj, "assistant");
+    seedSession(db, "target-spill", proj, "manager", { engineSessionId: "eng-spill" });
+    const bigTurn = "MARKER-HEAD " + "x".repeat(TRANSCRIPT_PAGE_CHAR_BUDGET + 5000) + " MARKER-TAIL";
+    writeLiveTranscript(proj, "eng-spill", [bigTurn]);
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "transcript-read", projectId: proj, mode: "read" });
+
+    const orch = new OrchestrationMcpRouter(db, {}, {}, makeFakePty(null, "the owner said: read target-spill"));
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const result = await call(client, "transcript_read", { sessionId: "target-spill" });
+    check("(i) an oversized turn is STILL a bare turns array (never a spill pointer)", Array.isArray(result) && result.length === 1);
+    check("(i) the turn's text is bounded under the page budget", result[0].text.length <= TRANSCRIPT_PAGE_CHAR_BUDGET);
+    check("(i) carries the explicit TRUNCATED marker", result[0].text.includes("[TRUNCATED: showing"));
+    check("(i) the HEAD survived", result[0].text.includes("MARKER-HEAD"));
+    check("(i) a short TAIL also survived", result[0].text.includes("MARKER-TAIL"));
+    check("(i) NOTHING was written to disk anywhere under this session's own scratch dir",
+      !fs.existsSync(path.join(sessionScratchDir(companionSess), "transcript-spills")));
+    await client.close();
+    db.close();
   }
 } finally {
   cleanupPathSync(tmpHome);

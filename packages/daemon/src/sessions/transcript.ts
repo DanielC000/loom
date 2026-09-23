@@ -98,11 +98,13 @@ export function readTranscript(cwd: string, engineSessionId: string, harness?: T
 // ──────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Per-PAGE size budget (chars) for a transcript_read page. A single rendered page must fit the MCP
- * tool-result token cap, with headroom for the page envelope and JSON quoting. An ALIAS of
- * {@link SPILL_INLINE_BUDGET_CHARS} (spill.ts) — same underlying "MCP tool-result inline cap" figure,
- * kept as its own exported name here since call sites in this module already read as "the transcript
- * page budget." A page is bounded by this budget so it can never overflow / spill.
+ * Per-PAGE size budget (chars) for a transcript_read page. An ALIAS of {@link SPILL_INLINE_BUDGET_CHARS}
+ * (spill.ts) — same underlying "MCP tool-result inline cap" figure, kept as its own exported name here
+ * since call sites in this module already read as "the transcript page budget."
+ *
+ * @decision 26134f1a — CORRECTION: this budget bounds a page's SUM approximately; it does NOT prove a
+ * page can "never overflow / spill" (an earlier version of this doc falsely claimed that). Never restate
+ * that guarantee here without a fresh measurement against the engine's own truncation threshold.
  */
 export const TRANSCRIPT_PAGE_CHAR_BUDGET = SPILL_INLINE_BUDGET_CHARS;
 
@@ -243,57 +245,63 @@ export function applyAggregateWalkCap(walkKey: string, requestedOffset: number, 
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────────────────
-// Turns-response SPILL — a page/lastN/bare-array result can still overflow the tool-result cap even
+// Turns-response BOUNDING — a page/lastN/bare-array result can still overflow the tool-result cap even
 // though `pageTranscript` bounds page SIZE, because it always includes >=1 turn regardless of that
 // turn's own size (a single message can legitimately carry many/large tool_result blocks — e.g. a
 // batch of browser_snapshot calls). Card 605988ab: `worker_transcript`/`transcript_read` previously
 // handed such a page straight to `JSON.stringify`, which escapes every real newline INSIDE a turn's
-// own text (a tool_result body is already rendered, human-readable, often multi-line — e.g.
-// browser_snapshot's YAML) into a literal two-char `\n`, collapsing the whole response into one
-// unpageable line once the host engine's own overflow-spill kicks in. `spillableTurnsResponse` below
-// generalizes the proactive-own-spill pattern `SessionService.spillMergePatch` established for
-// worker_merge's fullDiff to this surface.
+// own text into a literal two-char `\n`, collapsing the response into one unpageable line once the
+// host engine's own overflow-spill kicked in.
 // ──────────────────────────────────────────────────────────────────────────────────────────────
 
+// @decision 26134f1a — transcript responses NEVER spill to disk, not even Loom's own scratch dir (no
+// deny rule covers it — would reopen the cross-session side door this closes). Truncate inline instead.
+
+/** Small, fixed tail kept alongside the head when there's room for it (see {@link truncateWithMarker}). */
+const TRUNCATION_TAIL_CHARS = 2000;
+/** Reserved headroom for the marker line itself — its exact length varies with digit count. */
+const TRUNCATION_MARKER_HEADROOM = 120;
+
 /**
- * Render turns as plain, human-readable text — NOT `JSON.stringify`, which would re-escape a tool
- * result's own real line breaks into a literal `\n`. Each turn gets a one-line marker header (so a
- * spilled file stays attributable and grep-able turn-by-turn) followed by its text VERBATIM, real
- * newlines intact — "unwrapping" a YAML-shaped tool_result (e.g. browser_snapshot) for free, since
- * `TranscriptTurn.text` is already the rendered, unescaped string by the time it reaches here.
+ * Truncate `text` to fit within `capChars`, keeping the HEAD and — when `capChars` is comfortably
+ * larger than the tail+marker overhead — a short TAIL too, with an explicit marker naming exactly how
+ * much survived vs. the original length. Pure, disk-free. Never returns longer than `capChars`.
  */
-function renderTurnsAsText(turns: TranscriptTurn[]): string {
-  return turns.map((t, i) => `=== turn ${i} [${t.role}] ===\n${t.text}`).join("\n\n");
+function truncateWithMarker(text: string, capChars: number): string {
+  if (text.length <= capChars) return text;
+  const tailChars = capChars > TRUNCATION_TAIL_CHARS * 3 ? TRUNCATION_TAIL_CHARS : 0;
+  const headChars = Math.max(0, capChars - tailChars - TRUNCATION_MARKER_HEADROOM);
+  const kept = headChars + tailChars;
+  const marker = `\n\n[TRUNCATED: showing ${kept} of ${text.length} chars of this turn]\n\n`;
+  const head = text.slice(0, headChars);
+  const tail = tailChars > 0 ? text.slice(text.length - tailChars) : "";
+  return head + marker + tail;
 }
 
 /**
- * Format a turns-bearing MCP response for `sessionId` (the RECIPIENT — the manager/auditor that will
- * read this result, not the transcript's own owner), spilling to that session's scratch dir when the
- * rendered turns would overflow {@link TRANSCRIPT_PAGE_CHAR_BUDGET} — the SAME budget `pageTranscript`/
- * `lastNTurns` already bound a page to, so a normal multi-turn page they've already kept within budget
- * never spills; only the genuine ">=1 turn forced past budget" edge case (a single oversized turn, or a
- * `lastN` selection dominated by one) does. `key` should be deterministic per (target transcript, page)
- * so repeated pulls overwrite rather than accumulate.
+ * Bound a turns-bearing MCP response to {@link TRANSCRIPT_PAGE_CHAR_BUDGET} — the SAME budget
+ * `pageTranscript`/`lastNTurns` already bound a page to, so a normal multi-turn page they've already
+ * kept within budget is untouched; only the genuine ">=1 turn forced past budget" edge case (a single
+ * oversized turn, or a `lastN` selection dominated by one) triggers truncation. Because `pageTranscript`/
+ * `lastNTurns` only ever let ONE turn push the total over budget (every other turn was already excluded
+ * by their own budget check before being added), truncating per-turn — rather than the whole rendered
+ * blob — is sufficient: each turn whose OWN rendered size alone exceeds the budget gets its `text`
+ * replaced by `truncateWithMarker`'s head(+tail); every other turn is untouched.
  *
  * BELOW the cap: byte-identical to before — `envelope` (if any) with the real `turns` array attached,
  * or the bare `turns` array itself when `envelope` is null.
- * ABOVE the cap: `turns` is replaced by `{turnsFile, turnsChars, note}` pointing at a plain-text scratch
- * file (real per-turn line breaks, explicit UTF-8) instead — grep/Read-pageable, unlike the JSON string
- * it replaces. Any envelope metadata (totalTurns/offset/returned/nextOffset/…) stays inline either way.
+ * ABOVE the cap: the offending turn(s)' `text` is truncated in place (head, an explicit
+ * `[TRUNCATED: showing N of M chars of this turn]` marker, and a short tail when there's room) — the
+ * response shape stays a `turns` array either way, just with that one field bounded. Any envelope
+ * metadata (totalTurns/offset/returned/nextOffset/…) stays inline either way.
  */
-export function spillableTurnsResponse(
-  sessionId: string, key: string, turns: TranscriptTurn[], envelope: Record<string, unknown> | null,
-): unknown {
-  const spill = spillTextIfLarge(sessionId, "transcript-spills", key, renderTurnsAsText(turns), TRANSCRIPT_PAGE_CHAR_BUDGET);
-  if (spill.inline) return envelope ? { ...envelope, turns } : turns;
-  const note =
-    `Turns are ${spill.chars} chars — too large to inline safely, so they were written to ${spill.file} as ` +
-    "plain text (one turn per \"=== turn N [role] ===\" section, real line breaks, UTF-8) — a tool result's " +
-    "own multi-line content (e.g. a browser_snapshot's YAML) survives verbatim. Page it with Read (offset/limit " +
-    "are LINE-based) or grep it for a keyword / turn marker. Re-call with a narrower turnRange/limit/lastN to " +
-    "inline fewer turns instead.";
-  const pointer = { turnsFile: spill.file, turnsChars: spill.chars, note };
-  return envelope ? { ...envelope, ...pointer } : pointer;
+export function spillableTurnsResponse(turns: TranscriptTurn[], envelope: Record<string, unknown> | null): unknown {
+  const bounded = turns.map((t) => {
+    const overhead = t.role.length + 40;
+    if (t.text.length + overhead <= TRANSCRIPT_PAGE_CHAR_BUDGET) return t;
+    return { ...t, text: truncateWithMarker(t.text, Math.max(0, TRANSCRIPT_PAGE_CHAR_BUDGET - overhead)) };
+  });
+  return envelope ? { ...envelope, turns: bounded } : bounded;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────────────────

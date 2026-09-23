@@ -3182,12 +3182,14 @@ export class OrchestrationMcpRouter {
           "continuing to loop. An unknown param name (e.g. a guessed `tailLines`) is REJECTED naming the " +
           "bad key + the real ones above, instead of being silently ignored. OVERSIZED TURN: even within " +
           "one page, a SINGLE turn can itself be too large to inline safely (e.g. a batch of several " +
-          "browser_snapshot calls landing in one message) — when that happens `turns` is REPLACED by " +
-          "{turnsFile, turnsChars, note} pointing at a scratch file instead (any page envelope fields " +
-          "stay inline). The file is PLAIN TEXT (not JSON) — one '=== turn N [role] ===' section per " +
-          "turn, real line breaks, UTF-8 — so a tool result's own multi-line content (e.g. YAML) is " +
-          "genuinely grep-able and Read-pageable (offset/limit are LINE-based there). Re-call with a " +
-          "narrower turnRange/limit/lastN to try to get it back inline instead. CAVEAT — engine session " +
+          "browser_snapshot calls landing in one message) — when that happens that turn's `text` is " +
+          "TRUNCATED IN PLACE (head, an explicit `[TRUNCATED: showing N of M chars of this turn]` marker, " +
+          "and a short tail when there's room); every other field and every other turn stays untouched, " +
+          "and the response shape is still a `turns` array either way. Transcript content is NEVER " +
+          "spilled to any file (not even a scratch dir) — that would reopen a cross-session read of " +
+          "content this tool's own gates exist to protect; a page too large to fit inline is trimmed, " +
+          "never redirected. Re-call with a narrower turnRange/limit/lastN if you need less truncation. " +
+          "CAVEAT — engine session " +
           "id rotation (card 8a5bd0d0): the Claude Code CLI can, rarely, fire a second SessionStart under " +
           "a DIFFERENT session id for the SAME live pty (most likely an internal auto-compact restarting " +
           "its own bookkeeping under a fresh transcript file) without any Loom-visible spawn/resume/fork. " +
@@ -3210,16 +3212,16 @@ export class OrchestrationMcpRouter {
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
         const turns = w.engineSessionId ? readTranscript(w.cwd, w.engineSessionId, w.harness) : [];
         if (typeof lastN === "number" && lastN > 0) {
-          return ok(spillableTurnsResponse(managerSessionId, `${workerSessionId}-lastN`, lastNTurns(turns, lastN), null));
+          return ok(spillableTurnsResponse(lastNTurns(turns, lastN), null));
         }
         const page = pageTranscript(turns, { offset, limit, turnRange });
         const explicit = offset !== undefined || limit !== undefined || turnRange !== undefined;
         if (!explicit && page.offset === 0 && page.nextOffset === null) {
-          return ok(spillableTurnsResponse(managerSessionId, `${workerSessionId}-0`, page.turns, null));
+          return ok(spillableTurnsResponse(page.turns, null));
         }
         const bounded = w.engineSessionId ? applyAggregateWalkCap(w.engineSessionId, page.offset, page) : page;
         const { turns: boundedTurns, ...meta } = bounded;
-        return ok(spillableTurnsResponse(managerSessionId, `${workerSessionId}-${bounded.offset}`, boundedTurns, meta));
+        return ok(spillableTurnsResponse(boundedTurns, meta));
       },
     );
 

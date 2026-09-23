@@ -1,38 +1,40 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// worker_transcript / transcript_read OVERSIZED-TURN spill (card 605988ab, gap (c) of auditor finding
-// 8a942a95). HERMETIC, NO daemon, NO claude: sandboxed HOME (nothing touches ~/.claude), a real Db, and
-// the REAL OrchestrationMcpRouter + registerTranscriptReadTools driven in-process over InMemoryTransport /
-// a bare McpServer — mirrors worker-transcript-paging.mjs's harness.
+// worker_transcript / transcript_read / session_transcript OVERSIZED-TURN bounding (card 605988ab, gap
+// (c) of auditor finding 8a942a95; REDESIGNED by card 26134f1a). HERMETIC, NO daemon, NO claude: sandboxed
+// HOME (nothing touches ~/.claude), a real Db, and the REAL OrchestrationMcpRouter + PlatformMcpRouter +
+// registerTranscriptReadTools driven in-process over InMemoryTransport / a bare McpServer.
 //
-// THE BUG IT GUARDS: `pageTranscript` bounds a page's SIZE but always includes >=1 turn regardless of
-// that turn's own size (a single message can legitimately carry many/large batched tool_result blocks —
-// e.g. several browser_snapshot calls). worker_transcript/transcript_read handed such a turn straight to
-// `JSON.stringify` (the `ok()` envelope), which escapes every real newline INSIDE the turn's own
-// already-rendered text (a tool_result body is human-readable, often multi-line YAML) into a literal
-// two-char `\n` — so once the response is big enough for the host engine's own overflow-spill to kick in,
-// the spilled file is ONE giant unpageable line: `Read` can't offset/limit it, and a line-scoped `grep`
-// for one marker pulls back the ENTIRE blob instead of just that turn.
+// THE ORIGINAL BUG (605988ab): `pageTranscript` bounds a page's SIZE but always includes >=1 turn
+// regardless of that turn's own size (a single message can legitimately carry many/large batched
+// tool_result blocks — e.g. several browser_snapshot calls). worker_transcript/transcript_read handed
+// such a turn straight to `JSON.stringify` (the `ok()` envelope), which escapes every real newline INSIDE
+// the turn's own already-rendered text into a literal two-char `\n` — so once the response was big enough
+// for the host engine's own overflow-spill to kick in, the spilled file was ONE giant unpageable line.
 //
-// FIX: `spillableTurnsResponse` (sessions/transcript.ts) proactively spills an oversized turns payload to
-// the RECIPIENT session's own scratch dir as plain text (real per-turn line breaks preserved verbatim,
-// explicit UTF-8) BEFORE the engine ever sees it, returning a small {turnsFile,turnsChars,note} pointer
-// instead — generalizing the same pattern `SessionService.spillMergePatch` already used for worker_merge's
-// fullDiff, onto the ACTUAL live gap (worker_transcript/transcript_read never got that treatment before).
+// FIRST FIX (605988ab): proactively spill an oversized turns payload to the RECIPIENT session's own Loom
+// scratch dir as plain text instead.
+//
+// @decision 26134f1a — that first fix was ITSELF a bug for transcript content specifically: Loom's own
+// scratch dir (`<LOOM_HOME>/tmp/scratch/**`) carries no deny rule, so ANY session that knows or guesses a
+// sibling's session id could `Read` its spilled transcript turn straight off disk — bypassing every one
+// of transcript_read's own owner-turn/DM-scope/project-scope gates. Transcript-bearing tools now NEVER
+// write to disk: an oversized turn's `text` is truncated INLINE (head + a short tail + an explicit
+// `[TRUNCATED: showing N of M chars of this turn]` marker) and the response stays a real, always-parseable
+// `turns` array — never a spill pointer, never a giant unpageable JSON.stringify blob either.
 //
 // Proves:
-//   (RED) The PRE-FIX shape (plain `JSON.stringify` of the turns) genuinely defeats line-scoped access on
-//         an oversized turn — demonstrated directly (not asserted) by reproducing that exact
-//         serialization here and showing a marker search can't be scoped to one line.
-//   (A)   SMALL transcript — response BYTE-IDENTICAL to before: bare turns array, no spill fields.
-//   (B)   OVERSIZED single turn (a realistic batched-tool-result turn, >40K chars, well under any
-//         individual tool_result's own 2KB cap so nothing here is truncated by that separate mechanism)
-//         — `turns` replaced by a pointer; envelope metadata (when present) stays inline.
-//   (C)   The spilled file lives under the RECIPIENT session's own scratch dir and is ACTUALLY
-//         grep/Read-pageable: real per-turn line breaks, a targeted marker resolves to its OWN line
-//         without pulling in the other markers, and non-ASCII content round-trips.
-//   (D)   Repeat pulls overwrite the same deterministic path (no scratch-dir accumulation).
-//   (E)   The SAME fix, reached via transcript_read (registerTranscriptReadTools) — proves the "shared
-//         writer" premise: one function, two independent call sites, not a per-tool patch.
+//   (RED) The PRE-FIX shape (plain `JSON.stringify` of the turns, no bounding at all) genuinely defeats
+//         line-scoped access on an oversized turn — demonstrated directly (not asserted).
+//   (A)   SMALL transcript — response BYTE-IDENTICAL to before: bare turns array, untouched turn text.
+//   (B)   OVERSIZED single turn (a realistic batched-tool-result turn, >40K chars) — `turns` stays an
+//         array, but the offending turn's `text` is truncated in place with the explicit marker; the
+//         HEAD survives (early markers present), the marker states the real original length.
+//   (C)   NOTHING is ever written to disk for this — no scratch-dir file exists anywhere for either
+//         session after the call (the actual defect this redesign closes).
+//   (D)   Repeat pulls are deterministic (same truncated output both times — nothing to "accumulate").
+//   (E)   The SAME bounding, reached via transcript_read (registerTranscriptReadTools) AND session_transcript
+//         (PlatformMcpRouter) — proves the "shared bounder" premise: one function, three independent call
+//         sites, not a per-tool patch.
 // Run: 1) build daemon (pnpm build), 2) node test/transcript-turns-spill.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -46,7 +48,8 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- sandbox HOME so engineTranscriptPath's ~/.claude/projects/... never touches the real one, AND so
-// sessionScratchDir's ~/.loom/tmp/scratch/... spill files land in a throwaway LOOM_HOME. ---
+// sessionScratchDir's ~/.loom/tmp/scratch/... (checked to stay EMPTY for transcript content) lands in a
+// throwaway LOOM_HOME. ---
 const sandboxHome = mkdtempManaged("loom-tts-home-");
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
@@ -55,6 +58,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { registerTranscriptReadTools } = await import("../dist/mcp/transcript-read.js");
 const { engineTranscriptPath, TRANSCRIPT_PAGE_CHAR_BUDGET } = await import("../dist/sessions/transcript.js");
 const { sessionScratchDir } = await import("../dist/paths.js");
@@ -63,7 +67,7 @@ const { sessionScratchDir } = await import("../dist/paths.js");
 // browser_snapshot calls landing in one turn), each block's OWN body well under the unrelated
 // per-tool-result 2KB truncation cap (so nothing here gets truncated by THAT separate mechanism) but the
 // turn's TOTAL text comfortably exceeds TRANSCRIPT_PAGE_CHAR_BUDGET. Each block carries a UNIQUE marker
-// (MARKER-NNN) plus non-ASCII/box-drawing content so line-scoped grep-ability and UTF-8 survival are both
+// (MARKER-NNN) plus non-ASCII/box-drawing content so head-survival and non-ASCII handling are both
 // genuinely exercised, not just ASCII padding. ──────────────────────────────────────────────────────────
 const N_BLOCKS = 30;
 function toolResultBlock(n) {
@@ -117,19 +121,18 @@ fs.writeFileSync(smallFile, Array.from({ length: 3 }, (_, i) =>
 check(`fixture sanity: the single-turn transcript's raw JSONL is itself well over the inline cap (${bigMessageLine.length} > ${TRANSCRIPT_PAGE_CHAR_BUDGET})`,
   bigMessageLine.length > TRANSCRIPT_PAGE_CHAR_BUDGET);
 
-// ═══════════════════════════════════ (RED) reproduce the PRE-FIX defeat directly ═══════════════════════
-// This is exactly what `ok(turns)` used to hand back: `JSON.stringify` of the turns array, no spill, no
-// line-break preservation. Demonstrate — not assert — that it defeats line-scoped access.
+// ═══════════════════════════════════ (RED) reproduce the PRE-605988ab defeat directly ═══════════════════
+// This is exactly what `ok(turns)` used to hand back with NO bounding at all: `JSON.stringify` of the
+// turns array. Demonstrate — not assert — that it defeats line-scoped access, motivating why bounding
+// (first the scratch-spill, now inline truncation) exists at all.
 {
   const { readTranscript } = await import("../dist/sessions/transcript.js");
   const rawTurns = readTranscript(cwd, "eng-w-huge-turn");
   check("fixture sanity: parses to exactly ONE turn", rawTurns.length === 1);
-  const preFixText = JSON.stringify(rawTurns); // the old `ok()` envelope's text field
+  const preFixText = JSON.stringify(rawTurns); // the old, unbounded `ok()` envelope's text field
   const preFixLines = preFixText.split("\n");
   check(`(RED) pre-fix JSON.stringify collapses the whole ${preFixText.length}-char turn into ONE line (got ${preFixLines.length} line(s))`,
     preFixLines.length === 1);
-  // A "grep" for one specific marker on the pre-fix blob can only ever return the WHOLE line — there is
-  // no way to scope it to just that marker's own content.
   const hitLines = preFixLines.filter((l) => l.includes("MARKER-015"));
   check("(RED) a line-scoped grep for one marker on the pre-fix blob returns the ENTIRE oversized blob, not a scoped hit",
     hitLines.length === 1 && hitLines[0].length === preFixText.length && hitLines[0].includes("MARKER-000") && hitLines[0].includes("MARKER-029"));
@@ -144,67 +147,45 @@ await server.connect(serverT);
 const client = new Client({ name: "transcript-turns-spill-test", version: "0" });
 await client.connect(clientT);
 const rawText = (res) => res.content[0].text;
-const parse = (res) => JSON.parse(res.content[0].text);
-const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
+const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
 
-// ── (A) SMALL transcript — byte-identical to before: bare array, no spill fields anywhere. ─────────────
+// ── (A) SMALL transcript — byte-identical to before: bare array, turn text untouched. ───────────────────
 const smallRes = await client.callTool({ name: "worker_transcript", arguments: { workerSessionId: "W-SMALL" } });
 const small = JSON.parse(rawText(smallRes));
 check("(A) small transcript: bare turns array (unchanged shape)", Array.isArray(small) && small.length === 3);
-check("(A) small transcript: no spill fields leak into a below-cap response", !rawText(smallRes).includes("turnsFile"));
+check("(A) small transcript: no truncation marker leaks into a below-cap response", !rawText(smallRes).includes("TRUNCATED"));
 
-// ── (B) OVERSIZED single turn, default call (no paging args) — pointer, not the inline array. ──────────
-const hugeRes = await client.callTool({ name: "worker_transcript", arguments: { workerSessionId: "W-HUGE-TURN" } });
-const huge = JSON.parse(rawText(hugeRes));
-check("(B) oversized turn: NOT a bare array (spilled)", !Array.isArray(huge));
-check("(B) oversized turn: turnsFile + turnsChars + note present, turns ABSENT",
-  typeof huge.turnsFile === "string" && typeof huge.turnsChars === "number" && huge.turnsChars > TRANSCRIPT_PAGE_CHAR_BUDGET &&
-  typeof huge.note === "string" && huge.turns === undefined);
+// ── (B) OVERSIZED single turn, default call (no paging args) — still an array, that turn truncated. ─────
+const huge = await call("worker_transcript", { workerSessionId: "W-HUGE-TURN" });
+check("(B) oversized turn: STILL a bare turns array (never a spill pointer)", Array.isArray(huge) && huge.length === 1);
+check("(B) oversized turn: text is bounded under the page budget", huge[0].text.length <= TRANSCRIPT_PAGE_CHAR_BUDGET);
+check("(B) oversized turn: carries the explicit TRUNCATED marker", huge[0].text.includes("[TRUNCATED: showing"));
+// The "of M" number is the RENDERED turn's own length (not the raw JSONL line) — checked precisely here.
+const markerMatch = huge[0].text.match(/\[TRUNCATED: showing (\d+) of (\d+) chars of this turn\]/);
+check("(B) the marker's own numbers are internally consistent (kept <= real M, M > page budget)",
+  !!markerMatch && Number(markerMatch[1]) <= Number(markerMatch[2]) && Number(markerMatch[2]) > TRANSCRIPT_PAGE_CHAR_BUDGET);
+check("(B) the HEAD survived — the first block's marker is present", huge[0].text.includes("MARKER-000"));
+check("(B) a short TAIL also survived — the LAST block's marker is present (head+tail, per the design)", huge[0].text.includes("MARKER-029"));
+const droppedMarkers = Array.from({ length: N_BLOCKS }, (_, n) => `MARKER-${String(n).padStart(3, "0")}`)
+  .filter((m) => !huge[0].text.includes(m));
+check(`(B) at least SOME middle block(s) genuinely did NOT survive (dropped: ${droppedMarkers.join(",") || "none"})`, droppedMarkers.length > 0);
 
-// ── (C) the spilled file: lives under the MANAGER's (recipient's) own scratch dir, real line breaks,
-// genuinely line-scoped grep-able, UTF-8 round-trips. ────────────────────────────────────────────────
-check("(C) turnsFile lives under the RECIPIENT (manager M)'s own session scratch dir",
-  huge.turnsFile.startsWith(sessionScratchDir("M")));
-check("(C) the recipient can actually read the pointer (file exists, non-empty)",
-  fs.existsSync(huge.turnsFile) && fs.statSync(huge.turnsFile).size > 0);
+// ── (C) NOTHING is written to disk anywhere for this — the actual defect this redesign closes. ──────────
+const managerScratch = sessionScratchDir("M");
+check("(C) the RECIPIENT's own scratch dir has no transcript-spills subdir at all", !fs.existsSync(path.join(managerScratch, "transcript-spills")));
+// Broader sweep: no NEW file appeared anywhere under LOOM_HOME/tmp/scratch as a result of this call.
+const scratchRoot = path.join(process.env.LOOM_HOME, "tmp", "scratch");
+const scratchFilesAfter = fs.existsSync(scratchRoot) ? fs.readdirSync(scratchRoot, { recursive: true }) : [];
+check("(C) no file was written anywhere under LOOM_HOME/tmp/scratch for this oversized-turn read", scratchFilesAfter.length === 0);
 
-const spilledText = fs.readFileSync(huge.turnsFile, "utf8");
-check("(C) spill file byte-length matches turnsChars", spilledText.length === huge.turnsChars);
-const spilledLines = spilledText.split("\n");
-check(`(C) spill file has REAL line breaks — many discrete lines, not one giant line (got ${spilledLines.length})`,
-  spilledLines.length > 100);
-
-// Line-scoped "grep": a single marker resolves to its OWN small set of lines, NOT the whole file.
-const markerLines = spilledLines.filter((l) => l.includes("MARKER-015"));
-check("(C) grep for ONE marker returns a SMALL, scoped hit (its own line), not the whole spill",
-  markerLines.length === 1 && markerLines[0].length < 200);
-check("(C) that scoped hit does NOT also contain unrelated markers (genuinely line-bounded)",
-  !markerLines[0].includes("MARKER-000") && !markerLines[0].includes("MARKER-029"));
-// Every distinct block's marker is present SOMEWHERE (nothing silently dropped/truncated).
-const allMarkersPresent = Array.from({ length: N_BLOCKS }, (_, n) => `MARKER-${String(n).padStart(3, "0")}`)
-  .every((m) => spilledText.includes(m));
-check("(C) every block's marker survived the spill (content preserved, not truncated)", allMarkersPresent);
-check("(C) non-ASCII/box-drawing content round-tripped through the UTF-8 write",
-  spilledText.includes("⇒") && spilledText.includes("λ") && spilledText.includes("─"));
-
-// Read-offset/limit-style access: slicing an arbitrary line range around a known marker's line gets
-// exactly that neighborhood, nothing more — proving genuine offset/limit pageability, not just grep.
-{
-  const idx = spilledLines.findIndex((l) => l.includes("MARKER-020"));
-  check("(C) MARKER-020's line is locatable by index (Read offset/limit would land exactly here)", idx > 0);
-  const slice = spilledLines.slice(Math.max(0, idx - 1), idx + 2).join("\n");
-  check("(C) a small offset/limit slice around it excludes distant markers", !slice.includes("MARKER-000") && !slice.includes("MARKER-029"));
-}
-
-// ── (D) repeat pull — deterministic path, overwrites rather than accumulating scratch-dir garbage. ─────
-const hugeRes2 = await client.callTool({ name: "worker_transcript", arguments: { workerSessionId: "W-HUGE-TURN" } });
-const huge2 = JSON.parse(rawText(hugeRes2));
-check("(D) repeat pull: same deterministic turnsFile path (no accumulation)", huge2.turnsFile === huge.turnsFile);
+// ── (D) repeat pull — deterministic: the SAME truncated text both times (nothing to accumulate). ────────
+const huge2 = await call("worker_transcript", { workerSessionId: "W-HUGE-TURN" });
+check("(D) repeat pull: byte-identical truncated output (deterministic, no state)", huge2[0].text === huge[0].text);
 
 await client.close();
 
-// ═══════════════════ (E) the SAME fix via transcript_read (registerTranscriptReadTools) — proves this is
-// genuinely a SHARED writer (one function, two independent call sites), not a second per-tool patch. ════
+// ═══════════════════ (E) the SAME bounding via transcript_read AND session_transcript — proves this is
+// genuinely a SHARED function (one implementation, three independent call sites), not per-tool patches. ══
 const bareServer = new McpServer({ name: "loom-audit-test", version: "0.1.0" });
 registerTranscriptReadTools(bareServer, db, { callerSessionId: "AUDITOR-1" });
 const [auditClientT, auditServerT] = InMemoryTransport.createLinkedPair();
@@ -217,12 +198,9 @@ const auditRes = await auditClient.callTool({
   arguments: { projectId: projId, sessionId: "W-HUGE-TURN", archived: false },
 });
 const audit = JSON.parse(auditRes.content[0].text);
-check("(E) transcript_read: oversized single turn ALSO spills (shared function, not a per-tool patch)",
-  !Array.isArray(audit) && typeof audit.turnsFile === "string" && typeof audit.turnsChars === "number");
-check("(E) transcript_read's spill lands under the CALLING auditor's OWN scratch dir (not the manager's)",
-  audit.turnsFile.startsWith(sessionScratchDir("AUDITOR-1")) && fs.existsSync(audit.turnsFile));
-check("(E) transcript_read's spilled content is independently line-scoped grep-able too",
-  fs.readFileSync(audit.turnsFile, "utf8").split("\n").filter((l) => l.includes("MARKER-007")).length === 1);
+check("(E) transcript_read: oversized single turn ALSO stays an array with the turn truncated (shared function)",
+  Array.isArray(audit) && audit.length === 1 && audit[0].text.includes("[TRUNCATED: showing"));
+check("(E) transcript_read's truncated content is independently head+tail-scoped the same way", audit[0].text.includes("MARKER-000") && audit[0].text.includes("MARKER-029") && droppedMarkers.some((m) => !audit[0].text.includes(m)));
 
 const auditSmallRes = await auditClient.callTool({
   name: "transcript_read",
@@ -233,6 +211,22 @@ check("(E) transcript_read small transcript: unchanged bare-array shape", Array.
 
 await auditClient.close();
 
+// session_transcript (PlatformMcpRouter) — the Lead's cross-project sibling.
+const platformRouter = new PlatformMcpRouter(db, {});
+const platformServer = platformRouter.buildServer("PLATFORM-1");
+const [platClientT, platServerT] = InMemoryTransport.createLinkedPair();
+await platformServer.connect(platServerT);
+const platClient = new Client({ name: "transcript-turns-spill-platform-test", version: "0" });
+await platClient.connect(platClientT);
+const platCall = async (name, args) => JSON.parse((await platClient.callTool({ name, arguments: args })).content[0].text);
+
+const platHuge = await platCall("session_transcript", { sessionId: "W-HUGE-TURN" });
+check("(E) session_transcript: oversized single turn ALSO stays an array with the turn truncated (shared function)",
+  Array.isArray(platHuge) && platHuge.length === 1 && platHuge[0].text.includes("[TRUNCATED: showing"));
+check("(E) session_transcript's truncation also writes nothing to disk", !fs.existsSync(path.join(sessionScratchDir("PLATFORM-1"), "transcript-spills")));
+
+await platClient.close();
+
 try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
 // sandboxHome's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed
@@ -241,8 +235,9 @@ for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force:
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — an oversized single transcript turn (the pageTranscript \"always take >=1\" edge case) " +
-    "no longer collapses into one unpageable JSON.stringify line; worker_transcript AND transcript_read both " +
-    "spill it to the RECIPIENT's own scratch dir as real, UTF-8, line-scoped grep/Read-pageable plain text via " +
-    "the SAME shared spillableTurnsResponse — below-cap responses stay byte-identical."
+    "no longer collapses into one unpageable JSON.stringify line, and (card 26134f1a) no longer spills to " +
+    "ANY disk location either — worker_transcript, transcript_read, AND session_transcript all truncate the " +
+    "offending turn INLINE (head survives, an explicit marker states the real length, nothing written to " +
+    "disk) via the SAME shared spillableTurnsResponse — below-cap responses stay byte-identical."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
