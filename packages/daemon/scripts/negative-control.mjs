@@ -54,6 +54,11 @@ const DEFAULT_REPO_ROOT = path.resolve(daemonRoot, "..", "..");
 
 const DEFAULT_BUILD_COMMAND = "pnpm --filter @loom/daemon build";
 const DEFAULT_REF = "HEAD";
+// `execFileSync`'s default maxBuffer is 1 MiB — too small for `git show <ref>:<path>` against a real
+// source file (packages/daemon/src/sessions/service.ts alone is already 1.44 MB; see card 7c979d92).
+// 100 MiB matches the same one-shot-allocation convention vault/versioner.ts's VAULT_FLUSH_MAX_BUFFER_BYTES
+// already uses for its own occasional git calls — cheap insurance, not a resource concern on this path.
+const GIT_SHOW_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
 
 const HELP = `negative-control — one-call RED→GREEN→clean-tree proof (card 616e5ec2)
 
@@ -102,7 +107,7 @@ function toAbsPath(repoRoot, repoRelPath) {
 
 function readRefContent(repoRoot, ref, posixRel) {
   try {
-    return execFileSync("git", ["show", `${ref}:${posixRel}`], { cwd: repoRoot });
+    return execFileSync("git", ["show", `${ref}:${posixRel}`], { cwd: repoRoot, maxBuffer: GIT_SHOW_MAX_BUFFER_BYTES });
   } catch (err) {
     throw new Error(`\`git show ${ref}:${posixRel}\` failed — does ${posixRel} exist at ref "${ref}"? (${err.message})`);
   }
