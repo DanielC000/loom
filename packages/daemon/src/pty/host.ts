@@ -223,6 +223,46 @@ const COMPOSER_ACCUM_WINDOW = 8;
  *  truncation. INSERTION direction carries no such risk — left unbounded (see below). */
 const OFFSET_OMISSION_MAX_TAIL_CHARS = 2;
 
+/** @decision d1ac9fed — a POSITIVE allow-list: a new/unlisted arm defaults to LOUD. Never add
+ *  `fallback-replay-awaiting-resolution`, a duplicate-check-asking `confirmed-*` arm, or
+ *  `fallback-unrecognized` (its own narrower split lives in `UNRECOGNIZED_UNACCOUNTED_MAX_CHARS`'s doc). */
+const RECORD_ONLY_MISMATCH_ARMS: ReadonlySet<string> = new Set([
+  "confirmed-ansi-strip",
+  "fallback-benign-offset-insertion",
+  "fallback-benign-offset-omission",
+]);
+
+/** @decision d1ac9fed — a first sizing for the `fallback-unrecognized` rate escalation, not a tuned
+ *  constant: do not raise/shrink casually. Session-scoped, not host-scoped — the escalation push routes
+ *  to THAT session's own parent, and a host-wide counter would have no single recipient to name. */
+const UNRECOGNIZED_MISMATCH_RATE_WINDOW_MS = 30 * 60 * 1000;
+/** @decision d1ac9fed — >= this many `fallback-unrecognized` detections within the rolling window
+ *  triggers ONE escalation push (see `UNRECOGNIZED_MISMATCH_RATE_WINDOW_MS`'s own doc). */
+const UNRECOGNIZED_MISMATCH_RATE_THRESHOLD = 3;
+/** @decision d1ac9fed — once an escalation pushes, no further push fires for this session until this
+ *  much time has passed, even if the rate keeps climbing — one push per spike, not one per event. */
+const UNRECOGNIZED_MISMATCH_RATE_COOLDOWN_MS = 30 * 60 * 1000;
+
+/** @decision d1ac9fed — `fallback-unrecognized`'s own magnitude split: a bare `lenDelta`/`divergesAtChar`
+ *  bound is wrong here (a same-length full substitution has lenDelta≈0 and IS a real loss shape) — see
+ *  `computeUnaccountedIntended`'s own doc for the real measure. A first sizing, not a measured bound. */
+const UNRECOGNIZED_UNACCOUNTED_MAX_CHARS = 64;
+
+/** @decision d1ac9fed — count of `intended` chars unaccounted for in `reported` (common PREFIX+SUFFIX,
+ *  clamped, subtracted from `intended.length`), PLUS the suffix length itself — a caller needs it to slice
+ *  the reported-side divergent region for the control-char check below. */
+function computeUnaccountedIntended(reported: string, intended: string, commonPrefixLen: number): { unaccountedIntended: number; suffixLen: number } {
+  const maxSuffix = Math.min(reported.length, intended.length) - commonPrefixLen;
+  let suffixLen = 0;
+  while (suffixLen < maxSuffix && reported[reported.length - 1 - suffixLen] === intended[intended.length - 1 - suffixLen]) suffixLen++;
+  return { unaccountedIntended: intended.length - commonPrefixLen - suffixLen, suffixLen };
+}
+
+/** @decision d1ac9fed — 3rd small-bucket condition: a C0 control char other than TAB/LF/CR/DEL anywhere in
+ *  the REPORTED-side divergent region disqualifies a specimen — card `2b57b5a9`'s chunk-seam FF race is
+ *  PROVEN to drop real chars (scenario 16), so its own signature must never read as benign-small. */
+const UNRECOGNIZED_DISQUALIFYING_CONTROL_CHAR_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
+
 /** @decision c2c750a9 — two-stage sum-then-hash accumulation detector (a sum alone can't pin ordering);
  *  never report its output as "duplicates detected" — it can only say "accumulation detectable at the
  *  next write", never a general duplicate census. */
@@ -2786,6 +2826,12 @@ interface Live {
   // @decision c0323f8a — durable, manager-visible counterpart; count resets to 1 on a different signature,
   // never a lifetime total. See c0323f8a's record, "lastMismatchNoticeSuppressed" section.
   lastMismatchNoticeSuppressed: { gen: number; writtenHash: string; reportedHash: string; count: number; detectedAt: number } | null;
+  // @decision d1ac9fed — rolling ms-epoch timestamps of this session's own `fallback-unrecognized`
+  // detections, pruned to `UNRECOGNIZED_MISMATCH_RATE_WINDOW_MS` on every push; cleared on session exit.
+  unrecognizedMismatchTimestamps: number[];
+  // @decision d1ac9fed — set the instant a rate-exceeded escalation fires; while `Date.now() <` this, no
+  // further escalation pushes for this session even if the rate keeps climbing. `null` = no cooldown active.
+  unrecognizedMismatchCooldownUntil: number | null;
   // @decision 72cab648 — a PULL surface, additive to the existing console.warn + attention-nudge channels
   // (never a replacement).
   //
@@ -3238,8 +3284,13 @@ export interface PtyHostEvents {
    *  @decision 68459420 — that pull surface is deliberately never cleared once set, a discovery aid for a
    *  manager who hasn't looked yet, not a live/transient flag.
    *  @decision 1a315058 — `arm` carries the session-facing notice's own classification across this event
-   *  boundary, so the sender-facing message can stop contradicting it (see that card's own record). */
-  onPromptMismatchUnmatched?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; intendedText: string; detectedAt: number; arm: string }): void;
+   *  boundary, so the sender-facing message can stop contradicting it (see that card's own record).
+   *  @decision d1ac9fed — TWO USES via `escalation`, both `arm:"fallback-unrecognized"`: `"single-event"`
+   *  is PRE-CARD unchanged (above the magnitude bound); `"rate-exceeded"` is NEW (at/under it, RATE-triggered). */
+  onPromptMismatchUnmatched?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; intendedText: string; detectedAt: number; arm: string } & (
+    | { escalation: "single-event"; unaccountedIntended: number }
+    | { escalation: "rate-exceeded"; count: number; windowMs: number }
+  )): void;
   /** @decision 176bdb0c — onExit: intended stays the load-bearing crash-recovery discriminator; signal/
    *  codexStopDiag (+ ece98bd8's engineSessionIdCaptureEndReason) are diagnostic-only additions that never
    *  change what counts as a successful/intended stop. signal is ALWAYS undefined on Windows/conpty. */
@@ -4425,6 +4476,7 @@ export class PtyHost {
       activeTurnProactive: false,
       lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      unrecognizedMismatchTimestamps: [], unrecognizedMismatchCooldownUntil: null,
       lastPasteTripwireGiveUp: null,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
@@ -4516,6 +4568,10 @@ export class PtyHost {
       // mismatch, if ever wanted, is a separate card and an owner call, not a default behavior of this one.
       for (const t of live.pendingMismatchUnresolvedTimers) clearTimeout(t);
       live.pendingMismatchUnresolvedTimers.clear();
+      // @decision d1ac9fed — bound the rate-tracking state to a live session's own lifetime; a dead
+      // session's stale timestamps/cooldown must never influence a respawn's own fresh rate count.
+      live.unrecognizedMismatchTimestamps = [];
+      live.unrecognizedMismatchCooldownUntil = null;
       // The pty is gone → empty the held queue so a stale "Queued (N)" can't linger after exit (the
       // live entry survives in the map with alive=false, and getPending reads live.pending). Covers
       // EVERY exit path — a Stop-initiated stop, a crash, a clean session end — not just stopWorker.
@@ -4633,6 +4689,7 @@ export class PtyHost {
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      unrecognizedMismatchTimestamps: [], unrecognizedMismatchCooldownUntil: null,
       lastPasteTripwireGiveUp: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
@@ -5722,6 +5779,7 @@ export class PtyHost {
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      unrecognizedMismatchTimestamps: [], unrecognizedMismatchCooldownUntil: null,
       lastPasteTripwireGiveUp: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
@@ -6922,6 +6980,21 @@ export class PtyHost {
                   : "fallback-benign-offset-omission";
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-arm] ${sessionId} gen=${noticeSignature.gen} arm=${mismatchArm} delivered=${!isExactRepeatNotice} writtenHash=${noticeSignature.writtenHash} reportedHash=${noticeSignature.reportedHash} reportedLen=${reported.length} intendedLen=${intended.length}`);
+                // @decision d1ac9fed — `fallback-unrecognized`'s three-condition small-bucket split (see
+                // UNRECOGNIZED_UNACCOUNTED_MAX_CHARS/UNRECOGNIZED_DISQUALIFYING_CONTROL_CHAR_RE's own
+                // docs): ALL THREE must hold — any one failing routes to the unchanged pre-card behaviour.
+                const unaccountedResult = mismatchArm === "fallback-unrecognized" ? computeUnaccountedIntended(reported, intended, i) : null;
+                const unaccountedIntended = unaccountedResult?.unaccountedIntended ?? null;
+                const reportedDivergentRegion = unaccountedResult !== null ? reported.slice(i, reported.length - unaccountedResult.suffixLen) : "";
+                const hasDisqualifyingControlChar = UNRECOGNIZED_DISQUALIFYING_CONTROL_CHAR_RE.test(reportedDivergentRegion);
+                const isSmallUnrecognized = unaccountedIntended !== null
+                  && unaccountedIntended <= UNRECOGNIZED_UNACCOUNTED_MAX_CHARS
+                  && lenDelta >= 1
+                  && !hasDisqualifyingControlChar;
+                if (mismatchArm === "fallback-unrecognized") {
+                  // eslint-disable-next-line no-console
+                  console.log(`[prompt-mismatch-unaccounted] ${sessionId} gen=${noticeSignature.gen} unaccountedIntended=${unaccountedIntended} bound=${UNRECOGNIZED_UNACCOUNTED_MAX_CHARS} lenDelta=${lenDelta > 0 ? `+${lenDelta}` : lenDelta} controlCharInRegion=${hasDisqualifyingControlChar} small=${isSmallUnrecognized}`);
+                }
                 if (isExactRepeatNotice) {
                   // eslint-disable-next-line no-console
                   console.log(`[prompt-mismatch-notice-suppressed] ${sessionId} gen=${noticeSignature.gen} writtenHash=${noticeSignature.writtenHash} reportedHash=${noticeSignature.reportedHash} — exact repeat of the last notice already sent for this event; not re-sending a byte-identical turn.`);
@@ -6932,19 +7005,45 @@ export class PtyHost {
                   const sameAsPrior = prior !== null && prior.gen === noticeSignature.gen
                     && prior.writtenHash === noticeSignature.writtenHash && prior.reportedHash === noticeSignature.reportedHash;
                   live.lastMismatchNoticeSuppressed = { ...noticeSignature, count: (sameAsPrior ? prior.count : 0) + 1, detectedAt: Date.now() };
+                } else if (RECORD_ONLY_MISMATCH_ARMS.has(mismatchArm) || isSmallUnrecognized) {
+                  // @decision d1ac9fed — RECORD-ONLY: detection is already fully recorded above (the arm
+                  // log line, the unaccounted-magnitude line, the pull-surface writes) — no session turn,
+                  // no per-event push. Reached via the allow-list, or a small `fallback-unrecognized`.
+                  live.lastMismatchNoticeSignature = noticeSignature;
+                  // eslint-disable-next-line no-console
+                  console.log(`[prompt-mismatch-notice-recorded-only] ${sessionId} gen=${noticeSignature.gen} arm=${mismatchArm}${isSmallUnrecognized ? ` unaccountedIntended=${unaccountedIntended}` : ""} writtenHash=${noticeSignature.writtenHash} reportedHash=${noticeSignature.reportedHash} — record-only arm (card d1ac9fed): no session turn, no per-event parent push.`);
+                  // @decision d1ac9fed — small `fallback-unrecognized` (still a genuine third state, not
+                  // confirmed benign) gets a RATE watch instead of a bare drop — see
+                  // UNRECOGNIZED_MISMATCH_RATE_WINDOW_MS's own doc.
+                  if (isSmallUnrecognized) {
+                    const now = Date.now();
+                    const timestamps = live.unrecognizedMismatchTimestamps.filter((t) => now - t <= UNRECOGNIZED_MISMATCH_RATE_WINDOW_MS);
+                    timestamps.push(now);
+                    live.unrecognizedMismatchTimestamps = timestamps;
+                    const withinCooldown = live.unrecognizedMismatchCooldownUntil !== null && now < live.unrecognizedMismatchCooldownUntil;
+                    if (!withinCooldown && timestamps.length >= UNRECOGNIZED_MISMATCH_RATE_THRESHOLD) {
+                      live.unrecognizedMismatchCooldownUntil = now + UNRECOGNIZED_MISMATCH_RATE_COOLDOWN_MS;
+                      // eslint-disable-next-line no-console
+                      console.log(`[prompt-mismatch-unmatched-rate-exceeded] ${sessionId} count=${timestamps.length} windowMs=${UNRECOGNIZED_MISMATCH_RATE_WINDOW_MS} — pushing rate escalation to parent/manager (onPromptMismatchUnmatched), if any.`);
+                      // @decision 1a315058 — `arm` still carries the classification across this event
+                      // boundary, unchanged from before this card. `escalation:"rate-exceeded"` is the
+                      // SECOND, distinct use of this hook — see its own doc for the first (below).
+                      this.events.onPromptMismatchUnmatched?.(sessionId, { gen: live.submitGeneration, writtenHash: sigWritten.hash, reportedHash: sigReported.hash, intendedLen: intended.length, intendedText: intended, detectedAt: now, arm: mismatchArm, escalation: "rate-exceeded", count: timestamps.length, windowMs: UNRECOGNIZED_MISMATCH_RATE_WINDOW_MS });
+                    }
+                  }
                 } else {
                   live.lastMismatchNoticeSignature = noticeSignature;
                   setTimeout(() => { this.enqueueStdin(sessionId, mismatchText, "system", undefined, undefined, "warning"); }, 0);
-                  // @decision 38d68b8d — push this UNMATCHABLE mismatch to the SENDER/parent too,
-                  // not just the recipient above: only the sender can tell whether their content
-                  // actually arrived.
-                  if (isUnmatchableMismatch) {
+                  // @decision d1ac9fed — `fallback-unrecognized` ABOVE the magnitude bound: the PRE-CARD
+                  // behaviour, unchanged — the original per-event push, `escalation:"single-event"` (see
+                  // onPromptMismatchUnmatched's own doc for its two distinct uses).
+                  if (mismatchArm === "fallback-unrecognized") {
                     // eslint-disable-next-line no-console
-                    console.log(`[prompt-mismatch-unmatched-pushed] ${sessionId} gen=${live.submitGeneration} arm=${mismatchArm} writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash} — pushing to parent/manager (onPromptMismatchUnmatched), if any.`);
+                    console.log(`[prompt-mismatch-unmatched-pushed] ${sessionId} gen=${live.submitGeneration} arm=${mismatchArm} unaccountedIntended=${unaccountedIntended} writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash} — pushing to parent/manager (onPromptMismatchUnmatched), if any.`);
                     // @decision 1a315058 — `arm` carries the SAME classification the session-facing notice
                     // used, across this event boundary — so the manager-facing senderMsg can stop asserting
                     // "possible LOSS" for an arm the session was just told is NOT a loss.
-                    this.events.onPromptMismatchUnmatched?.(sessionId, { gen: live.submitGeneration, writtenHash: sigWritten.hash, reportedHash: sigReported.hash, intendedLen: intended.length, intendedText: intended, detectedAt: live.lastMismatchUnmatched?.detectedAt ?? Date.now(), arm: mismatchArm });
+                    this.events.onPromptMismatchUnmatched?.(sessionId, { gen: live.submitGeneration, writtenHash: sigWritten.hash, reportedHash: sigReported.hash, intendedLen: intended.length, intendedText: intended, detectedAt: live.lastMismatchUnmatched?.detectedAt ?? Date.now(), arm: mismatchArm, escalation: "single-event", unaccountedIntended: unaccountedIntended ?? 0 });
                   }
                 }
               }
