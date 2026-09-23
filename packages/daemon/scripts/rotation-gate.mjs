@@ -373,6 +373,22 @@ function findHeadingLine(lines, token, fromIndex) {
   return -1;
 }
 
+// Card b41301cb — every 0-indexed line index that `findHeadingLine` above COULD have matched (same
+// predicate, but collects every hit instead of returning only the first). `findHeadingLine`'s own
+// first-match behavior is silent by construction: a second heading in the SAME text that also contains
+// `token` is a genuine same-file ambiguity, not the cross-file (--active vs --rules) shape the existing
+// "AMBIGUOUS" notice in main() already covers. Used only to surface that shape loudly — never to change
+// which heading wins (still deterministically the first, same as before).
+function findAllHeadingLines(lines, token) {
+  const needle = token.toLowerCase();
+  const headingRe = /^#{1,6}\s/;
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (headingRe.test(lines[i]) && lines[i].toLowerCase().includes(needle)) hits.push(i);
+  }
+  return hits;
+}
+
 // Returns the heading depth (1-6) of a markdown heading line, or null if `line` isn't one.
 function headingLevel(line) {
   const m = line.match(/^(#{1,6})\s/);
@@ -466,6 +482,8 @@ function countLiveCommitmentsIn(text, marker) {
   let startLine;
   let markerAmbiguous = false;
   let markerLines = null;
+  let headingAmbiguous = false;
+  let headingLines = null;
   if (marker) {
     const anchor = findMarkerAnchoredHeading(text, marker);
     if (anchor === null) {
@@ -486,6 +504,15 @@ function countLiveCommitmentsIn(text, marker) {
     if (startLine === -1) {
       return { count: null, diagnostic: null };
     }
+    // Card b41301cb — `findHeadingLine` above silently took the FIRST match; surface a SECOND (or later)
+    // matching heading in this SAME text loudly instead (see findAllHeadingLines's own doc) — this is the
+    // same-file counterpart to the cross-file "AMBIGUOUS" notice main() already prints for --active vs
+    // --rules, never a change to which heading wins (still deterministically the first).
+    const allHeadingLines = findAllHeadingLines(lines, "live commitments");
+    if (allHeadingLines.length > 1) {
+      headingAmbiguous = true;
+      headingLines = allHeadingLines.map((i) => i + 1); // 1-indexed for display, matching markerLines
+    }
   }
   const startLevel = headingLevel(lines[startLine]);
   const endLine = findSectionBoundary(lines, startLine + 1, startLevel);
@@ -501,6 +528,7 @@ function countLiveCommitmentsIn(text, marker) {
     count: matches ? matches.length : 0,
     diagnostic: `measured from ${startDesc} to ${endDesc}${anchorDesc}`,
     ...(markerAmbiguous ? { markerAmbiguous, markerLines } : {}),
+    ...(headingAmbiguous ? { headingAmbiguous, headingLines } : {}),
   };
 }
 
@@ -529,32 +557,38 @@ function countLiveCommitments(activeText, rulesSources, marker) {
     .filter((s) => s.result.count !== null);
   const singleRulesFile = rulesSources.length === 1;
   const markerFields = (r) => (r.markerAmbiguous ? { markerAmbiguous: true, markerLines: r.markerLines } : {});
+  // Card b41301cb — mirrors markerFields above: carries a SAME-FILE duplicate-heading result (see
+  // countLiveCommitmentsIn's own doc) through from whichever source actually won, same posture as
+  // markerAmbiguous (loud, never gating, never affects which source/count wins).
+  const headingFields = (r) => (r.headingAmbiguous ? { headingAmbiguous: true, headingLines: r.headingLines } : {});
 
   if (inActive.count !== null) {
     if (inRules.length === 1 && singleRulesFile) {
       // Byte-identical to the pre-115f2ba9 single-file shape.
-      return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: true, otherCount: inRules[0].result.count, otherDiagnostic: inRules[0].result.diagnostic, ...markerFields(inActive) };
+      return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: true, otherCount: inRules[0].result.count, otherDiagnostic: inRules[0].result.diagnostic, ...markerFields(inActive), ...headingFields(inActive) };
     }
     if (inRules.length > 0) {
       return {
         count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: true,
         others: inRules.map((s) => ({ source: s.label, count: s.result.count, diagnostic: s.result.diagnostic })),
         ...markerFields(inActive),
+        ...headingFields(inActive),
       };
     }
-    return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: false, otherCount: null, otherDiagnostic: null, ...markerFields(inActive) };
+    return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: false, otherCount: null, otherDiagnostic: null, ...markerFields(inActive), ...headingFields(inActive) };
   }
   if (inRules.length > 0) {
     const [first, ...rest] = inRules;
     if (singleRulesFile) {
       // Byte-identical to the pre-115f2ba9 single-file shape.
-      return { count: first.result.count, diagnostic: `${first.result.diagnostic} (in --rules)`, source: "rules", ambiguous: false, otherCount: null, otherDiagnostic: null, ...markerFields(first.result) };
+      return { count: first.result.count, diagnostic: `${first.result.diagnostic} (in --rules)`, source: "rules", ambiguous: false, otherCount: null, otherDiagnostic: null, ...markerFields(first.result), ...headingFields(first.result) };
     }
     return {
       count: first.result.count,
       diagnostic: `${first.result.diagnostic} (in ${first.label})`,
       source: first.label,
       ...markerFields(first.result),
+      ...headingFields(first.result),
       ...(rest.length > 0
         ? { ambiguous: true, others: rest.map((s) => ({ source: s.label, count: s.result.count, diagnostic: s.result.diagnostic })) }
         : { ambiguous: false, otherCount: null, otherDiagnostic: null }),
@@ -762,6 +796,25 @@ function main() {
         `${live.markerLines.join(", ")}. The section was anchored on the FIRST occurrence (line ${firstLine}) ` +
         `— this is a deterministic pick, not a verified one. A marker should occur EXACTLY ONCE; the other ` +
         `occurrence(s) (line ${restLines.join(", ")}) must be resolved, not left standing.`
+    );
+  }
+
+  // Card b41301cb — a THIRD, separate ambiguity notice: in DEFAULT (heading-text) mode, more than one
+  // heading matching "live commitments" was found WITHIN THE SAME winning source — the exact silent
+  // first-match `findHeadingLine` has by construction (see its own doc), now surfaced instead of left
+  // mute. Mutually exclusive with the MARKER AMBIGUOUS notice above (this only fires when
+  // --commitments-marker was NOT supplied — see countLiveCommitmentsIn). Non-gating, same posture as
+  // both notices above (mirrors card eba7a6f7's markerAmbiguous — never changes the exit code; a hard
+  // failure here was rejected for the same reason ruling (iii) rejected one for the cross-file case).
+  if (live.headingAmbiguous) {
+    const [firstLine, ...restLines] = live.headingLines;
+    console.error(
+      `[rotation-gate] ⚠️ HEADING AMBIGUOUS: ${live.headingLines.length} heading(s) matching "live ` +
+        `commitments" found in the winning source ("${live.source}") — at line(s) ` +
+        `${live.headingLines.join(", ")}. The section was anchored on the FIRST occurrence (line ${firstLine}) ` +
+        `— this is a deterministic pick, not a verified one. A file should carry exactly one LIVE ` +
+        `COMMITMENTS heading; the other occurrence(s) (line ${restLines.join(", ")}) must be resolved, not ` +
+        `left standing — or pass --commitments-marker to anchor unambiguously instead of relying on heading text.`
     );
   }
 

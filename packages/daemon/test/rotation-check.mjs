@@ -1347,6 +1347,72 @@ function tmpFile(name, content) {
   check("eba7a6f7: an empty-string marker behaves identically to omitting the argument entirely", withoutMarker.count === withEmptyMarker.count && withoutMarker.diagnostic === withEmptyMarker.diagnostic);
 }
 
+// ── SAME-FILE HEADING AMBIGUITY (card b41301cb) ────────────────────────────────────────────────────────
+// The DEFAULT (heading-text, no marker) locator's own silent first-match: `findHeadingLine` takes the
+// FIRST heading matching `headingToken` and never checked whether a SECOND one exists in the SAME text.
+// The `docWithCitingHeadingAbove` fixture in the MACHINE MARKER ANCHORING section above already
+// demonstrates the CONSEQUENCE of this (rHeadingMode.count === 2, landing on the wrong/decoy section) —
+// this section proves the hazard is now surfaced LOUDLY instead of silently, mirroring markerAmbiguous's
+// own shape exactly. Reuses the identical fixture shape (a citing heading above the real section) so the
+// same underlying incident is what both sections are about.
+{
+  const docWithTwoMatchingHeadings = [
+    "## Some earlier section that happens to cite LIVE COMMITMENTS in its own heading",
+    "1. unrelated item that must NOT be counted",
+    "2. another unrelated item",
+    "",
+    "## ⛔⛔ §LIVE COMMITMENTS — the real section",
+    "1. real item one",
+    "2. real item two",
+    "3. real item three",
+    "## Next section",
+    "4. must not be counted",
+  ].join("\n");
+
+  const r = countNumberedSection(docWithTwoMatchingHeadings, "LIVE COMMITMENTS");
+  check("b41301cb: 🔴 the hazard is real — first (decoy) heading still wins deterministically (count=2, not the real 3)", r.count === 2);
+  check("b41301cb: ✅ headingAmbiguous:true — no longer a silent first-match", r.headingAmbiguous === true);
+  check("b41301cb: ✅ headingOccurrences names both matching heading lines (1 and 5)", Array.isArray(r.headingOccurrences) && r.headingOccurrences.length === 2 && r.headingOccurrences[0] === 1 && r.headingOccurrences[1] === 5);
+  check("b41301cb: headingAmbiguous is mutually exclusive with markerAmbiguous (no marker was configured)", r.markerAmbiguous === undefined);
+
+  // Full checkRotation integration — mirrors the markerAmbiguous integration test above exactly.
+  const result = checkRotation({
+    activeText: docWithTwoMatchingHeadings, markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 2,
+  });
+  check("b41301cb checkRotation: liveCommitments.headingAmbiguous surfaces", result.liveCommitments.headingAmbiguous === true);
+  check("b41301cb checkRotation: liveCommitments.headingOccurrences carries through", Array.isArray(result.liveCommitments.headingOccurrences) && result.liveCommitments.headingOccurrences.length === 2);
+  check("b41301cb checkRotation: top-level headingAmbiguityWarning is a loud, non-gating notice", typeof result.headingAmbiguityWarning === "string" && result.headingAmbiguityWarning.includes("HEADING AMBIGUOUS") && result.headingAmbiguityWarning.includes("LIVE COMMITMENTS"));
+  check("b41301cb checkRotation: ambiguity never gates ok (2 >= floor of 2, still passes)", result.ok === true);
+  check("b41301cb checkRotation: no markerAmbiguityWarning fires alongside it (no marker configured)", result.markerAmbiguityWarning === undefined);
+}
+
+// CONFIRMATION: a single (non-duplicate) heading still resolves cleanly, with headingAmbiguous genuinely
+// ABSENT (not merely false) — the fix must not become a false positive on the overwhelmingly common,
+// correct shape (mirrors the "measured empty" discipline cd0c85f1's own tests above use).
+{
+  const cleanDoc = ["## ⛔⛔ §LIVE COMMITMENTS — carried verbatim", "1. a", "2. b", "## Next section", "1. unrelated"].join("\n");
+  const r = countNumberedSection(cleanDoc, "LIVE COMMITMENTS");
+  check("b41301cb: a single (non-duplicate) heading resolves correctly", r.count === 2);
+  check("b41301cb: headingAmbiguous is genuinely ABSENT (not false) on a non-duplicate heading", r.headingAmbiguous === undefined && r.headingOccurrences === undefined);
+}
+
+// MUTUAL EXCLUSIVITY with marker mode: when a marker IS configured, the heading-text duplicate-scan never
+// runs at all (mirrors countNumberedSection's own marker/no-marker branch split) — no spurious
+// headingAmbiguous even though the underlying text still carries two matching headings.
+{
+  const doc = [
+    "## Some earlier section that happens to cite LIVE COMMITMENTS in its own heading",
+    "1. unrelated item",
+    "",
+    "<!-- loom:live-commitments -->",
+    "## ⛔⛔ §LIVE COMMITMENTS — the real section",
+    "1. real one", "2. real two", "3. real three",
+  ].join("\n");
+  const r = countNumberedSection(doc, "LIVE COMMITMENTS", "<!-- loom:live-commitments -->");
+  check("b41301cb: marker mode locates the real section despite the duplicate heading text", r.count === 3);
+  check("b41301cb: no headingAmbiguous in marker mode — the heading-text scan never runs when a marker is configured", r.headingAmbiguous === undefined && r.headingOccurrences === undefined);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — rotation-check's marker/floor/archive/byte checks behave correctly, the two named historical bugs (a681aed5's name-anchor fail-open, 34a6f07e's equality-vs-floor) are proven absent from this port, a mutation test confirms a dropped marker is caught and named, configured:false is distinct from ok:true, the impure fs wrapper never throws on a missing doc, the new multi-rules-file union (card f6985338) is byte-identical for a legacy single-rulesPath caller while correctly unioning/attributing/failing-visibly across N files, (card 6dd3a17c) a rules file's own §ROTATION-GATE section no longer satisfies the marker union scan just by enumerating/discussing every token on both the single-rules and N-file paths while leaving the LIVE COMMITMENTS floor check untouched, (card e013b1ca) markerHits/markersNeedingReview now agree with what that same exclusion counted — filtering out excluded-section hits while every surviving hit's line number stays true to the real, unstripped file, and (card eba7a6f7) an explicit machine marker anchors the LIVE COMMITMENTS section immune to a citing heading above the real block — proven RED under heading-text mode and GREEN under marker mode on the SAME doc, with no silent fallback when the marker is absent from a text and a LOUD (never silent-first-match) surfacing when the marker occurs more than once — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);

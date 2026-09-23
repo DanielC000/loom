@@ -219,6 +219,26 @@ function findHeadingLine(lines: readonly string[], token: string, fromIndex: num
 }
 
 /**
+ * Card b41301cb — every 0-indexed line index that `findHeadingLine` above COULD have matched (same
+ * predicate, but collects every hit instead of returning only the first). `findHeadingLine`'s own
+ * first-match behavior is silent by construction: a second heading in the SAME text that also contains
+ * `token` is a genuine same-file ambiguity, not the cross-file (active doc vs rules file) shape
+ * `NumberedSectionUnionCount.ambiguous` already covers. Used only to surface that shape loudly — never to
+ * change which heading wins (still deterministically the first, same as before). Mirrors
+ * `rotation-gate.mjs`'s own `findAllHeadingLines` (independent port, same posture as every other function
+ * in this file — see this file's header).
+ */
+function findAllHeadingLines(lines: readonly string[], token: string): number[] {
+  const needle = token.toLowerCase();
+  const headingRe = /^#{1,6}\s/;
+  const hits: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (headingRe.test(lines[i]!) && lines[i]!.toLowerCase().includes(needle)) hits.push(i);
+  }
+  return hits;
+}
+
+/**
  * Finds the first line at or after `fromIndex` that is a markdown heading whose LEVEL is <= `maxLevel` —
  * i.e. a SIBLING or ANCESTOR section boundary. Returns the line index, or -1 (section runs to EOF).
  *
@@ -335,6 +355,15 @@ export interface NumberedSectionCount {
   /** Present only alongside `markerAmbiguous` — every 1-indexed line the marker's literal text occurred
    *  on in this text; the first entry is the one actually used to anchor the section. */
   markerOccurrences?: number[];
+  /** Card b41301cb: present (true) only when NO `marker` was supplied AND more than one heading in this
+   *  SAME text matches `headingToken` — see `findAllHeadingLines`'s own doc. Never gates `count`/`ok` — a
+   *  loud, non-gating signal, mirroring `markerAmbiguous` above but for the DEFAULT (heading-text) locator
+   *  instead of the opt-in marker one; the two are mutually exclusive (a marker, when supplied, replaces
+   *  heading-text search entirely — see `countNumberedSection`'s own doc). */
+  headingAmbiguous?: true;
+  /** Present only alongside `headingAmbiguous` — every 1-indexed line a heading matching `headingToken`
+   *  was found on in this text; the first entry is the one actually used to anchor the section. */
+  headingOccurrences?: number[];
 }
 
 /**
@@ -352,6 +381,8 @@ export function countNumberedSection(text: string, headingToken: string, marker?
   let startLine: number;
   let markerAmbiguous: true | undefined;
   let markerOccurrences: number[] | undefined;
+  let headingAmbiguous: true | undefined;
+  let headingOccurrences: number[] | undefined;
   if (marker) {
     const anchor = findMarkerAnchoredHeading(lines, marker);
     if (anchor === null) {
@@ -378,6 +409,15 @@ export function countNumberedSection(text: string, headingToken: string, marker?
       // direct caller of this exported function would have, which is the trap this fixes.)
       return { count: null, diagnostic: `no heading line matching /^#{1,6}\\s.*${headingToken}/i found in this text` };
     }
+    // Card b41301cb — `findHeadingLine` above silently took the FIRST match; surface a SECOND (or later)
+    // matching heading in this SAME text loudly instead (see `findAllHeadingLines`'s own doc) — the
+    // same-file counterpart to `NumberedSectionUnionCount.ambiguous`, which only covers the cross-file
+    // (active doc vs rules file) shape. Never changes which heading wins (still deterministically first).
+    const allHeadingLines = findAllHeadingLines(lines, headingToken);
+    if (allHeadingLines.length > 1) {
+      headingAmbiguous = true;
+      headingOccurrences = allHeadingLines.map((i) => i + 1); // 1-indexed, matching markerOccurrences
+    }
   }
   const startLevel = headingLevel(lines[startLine]!)!;
   const endLine = findSectionBoundary(lines, startLine + 1, startLevel);
@@ -393,6 +433,7 @@ export function countNumberedSection(text: string, headingToken: string, marker?
     count: matches ? matches.length : 0,
     diagnostic: `measured from ${startDesc} to ${endDesc}${anchorDesc}`,
     ...(markerAmbiguous ? { markerAmbiguous, markerOccurrences } : {}),
+    ...(headingAmbiguous ? { headingAmbiguous, headingOccurrences } : {}),
   };
 }
 
@@ -529,6 +570,10 @@ export interface NumberedSectionUnionCountMulti {
    *  source won (`inActive` or the winning `inSources` entry); see `countNumberedSection`'s own doc. */
   markerAmbiguous?: true;
   markerOccurrences?: number[];
+  /** Card b41301cb — mirrors `NumberedSectionCount.headingAmbiguous`/`headingOccurrences` from whichever
+   *  source won, same posture as `markerAmbiguous`/`markerOccurrences` above. */
+  headingAmbiguous?: true;
+  headingOccurrences?: number[];
 }
 
 /**
@@ -562,6 +607,7 @@ export function countNumberedSectionUnionMulti(
       diagnostic: `${first!.result.diagnostic} (in ${first!.label})`,
       source: first!.label,
       ...(first!.result.markerAmbiguous ? { markerAmbiguous: true as const, markerOccurrences: first!.result.markerOccurrences } : {}),
+      ...(first!.result.headingAmbiguous ? { headingAmbiguous: true as const, headingOccurrences: first!.result.headingOccurrences } : {}),
       ...(rest.length > 0
         ? { ambiguous: true as const, others: rest.map((s) => ({ source: s.label, count: s.result.count, diagnostic: s.result.diagnostic })) }
         : {}),
@@ -723,6 +769,16 @@ export interface RotationCheckResult {
     /** Present only alongside `markerAmbiguous` — every 1-indexed line the marker occurred on in the
      *  winning source; the first entry is the one actually used. */
     markerOccurrences?: number[];
+    /** Card b41301cb: true only when NO `commitmentsMarker` was configured AND more than one heading in
+     *  the winning source matches `commitmentsHeading` — see `findAllHeadingLines`'s own doc. The section
+     *  was still anchored on the FIRST occurrence (never left unresolved); this is a loud, non-gating
+     *  signal to inspect, mirroring `markerAmbiguous` above but for the DEFAULT (heading-text) locator
+     *  instead of the opt-in marker one — mutually exclusive with `markerAmbiguous` (a configured marker
+     *  replaces heading-text search entirely, so only one of the two can ever be set on a given result). */
+    headingAmbiguous?: true;
+    /** Present only alongside `headingAmbiguous` — every 1-indexed line a matching heading occurred on in
+     *  the winning source; the first entry is the one actually used. */
+    headingOccurrences?: number[];
   };
   archiveCheck: { checked: boolean; ok: boolean; reason?: string };
   byteCheck: { checked: boolean; ok: boolean; activeBytes?: number; preEditBytes?: number; reason?: string };
@@ -737,6 +793,11 @@ export interface RotationCheckResult {
    *  warning from `ambiguityWarning` above (a different kind of ambiguity — see that field's own doc).
    *  Never gates `ok`. */
   markerAmbiguityWarning?: string;
+  /** Card b41301cb — present (and loud) only when `liveCommitments.headingAmbiguous` is true; a SEPARATE
+   *  warning from both `ambiguityWarning` (cross-file) and `markerAmbiguityWarning` (a duplicated marker) —
+   *  this one covers a duplicated HEADING within the single winning source in DEFAULT (heading-text) mode.
+   *  Never gates `ok`. */
+  headingAmbiguityWarning?: string;
   /** Code review N1 (card f6985338): present (and loud) whenever ANY supplied rules source — the legacy
    *  singular `rules` field OR any `rulesFiles` entry — could not be read. `rulesCheck`/`rulesChecks`
    *  already report this per-file, but ONLY nested; DoD-4 asked for "fail visibly," and a field nobody
@@ -897,6 +958,7 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
             enabled: true, count: section.count, floor: input.commitmentsFloor, ok, diagnostic: section.diagnostic, source: section.source,
             ...(section.ambiguous ? { ambiguous: section.ambiguous as true, otherCount: section.otherCount, otherDiagnostic: section.otherDiagnostic } : {}),
             ...(section.markerAmbiguous ? { markerAmbiguous: section.markerAmbiguous as true, markerOccurrences: section.markerOccurrences } : {}),
+            ...(section.headingAmbiguous ? { headingAmbiguous: section.headingAmbiguous as true, headingOccurrences: section.headingOccurrences } : {}),
           };
         }
         // NEW path (card f6985338): same DEDUPED union set as the marker check above.
@@ -907,6 +969,7 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
           enabled: true, count: section.count, floor: input.commitmentsFloor, ok, diagnostic: section.diagnostic, source: section.source,
           ...(section.ambiguous ? { ambiguous: section.ambiguous as true, otherSources: section.others } : {}),
           ...(section.markerAmbiguous ? { markerAmbiguous: section.markerAmbiguous as true, markerOccurrences: section.markerOccurrences } : {}),
+          ...(section.headingAmbiguous ? { headingAmbiguous: section.headingAmbiguous as true, headingOccurrences: section.headingOccurrences } : {}),
         };
       })()
     : { enabled: false, count: null, floor: input.commitmentsFloor, ok: true, diagnostic: "disabled — no rotationLiveCommitmentsHeading configured for this seat", source: null };
@@ -992,6 +1055,22 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
       `occurrence (line ${firstLine}) — this is a deterministic pick, not a verified one. A marker should ` +
       `occur EXACTLY ONCE; the other occurrence(s) (line ${restLines.join(", ")}) must be resolved, not left ` +
       `standing.`;
+  }
+  // Card b41301cb — a THIRD warning, separate from both above: in DEFAULT (heading-text) mode, more than
+  // one heading matching `commitmentsHeading` was found WITHIN THE SAME winning source — the exact silent
+  // first-match `findHeadingLine` has by construction, now surfaced instead of left mute. Mutually
+  // exclusive with `markerAmbiguityWarning` (this only fires when `commitmentsMarker` was NOT configured —
+  // see `countNumberedSection`'s own doc). Never gates `ok`, same posture as the two warnings above.
+  if (liveCommitments.headingAmbiguous) {
+    const [firstLine, ...restLines] = liveCommitments.headingOccurrences!;
+    result.headingAmbiguityWarning =
+      `[resume-doc-check] HEADING AMBIGUOUS: ${liveCommitments.headingOccurrences!.length} heading(s) ` +
+      `matching "${input.commitmentsHeading}" found in the winning source ("${liveCommitments.source}") — ` +
+      `at line(s) ${liveCommitments.headingOccurrences!.join(", ")}. The section was anchored on the FIRST ` +
+      `occurrence (line ${firstLine}) — this is a deterministic pick, not a verified one. A file should ` +
+      `carry exactly one such heading; the other occurrence(s) (line ${restLines.join(", ")}) must be ` +
+      `resolved, not left standing — or configure a commitments-anchor marker to anchor unambiguously ` +
+      `instead of relying on heading text.`;
   }
   // Code review N1 (card f6985338): a TOP-LEVEL warning whenever ANY supplied rules source failed to
   // read — the legacy singular `rules` field AND every `rulesFiles` entry, so the singular path (the one
