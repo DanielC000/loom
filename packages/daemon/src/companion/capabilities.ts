@@ -692,9 +692,6 @@ const DECISIONS_RELAY: CompanionCapability = {
         // Deterministic, fixed key (not `now`, which contains ":" — an invalid path segment): each pull
         // overwrites the SAME file (spillRowsIfLarge's own "repeated pulls overwrite" contract), which is
         // correct here since a re-pull always supersedes the previous one for this caller.
-        // Deterministic, fixed key (not `now`, which contains ":" — an invalid path segment): each pull
-        // overwrites the SAME file (spillRowsIfLarge's own "repeated pulls overwrite" contract), which is
-        // correct here since a re-pull always supersedes the previous one for this caller.
         const spill = spillRowsIfLarge(ctx.sessionId, "decisions-list-spills", "decisions", decisions, SPILL_INLINE_BUDGET_CHARS);
         if (spill.inline) return ok({ decisions, asOf: now });
         return ok({ decisionsFile: spill.file, decisionsChars: spill.chars, rowCount: spill.rowCount, note: spill.note, asOf: now });
@@ -1156,7 +1153,11 @@ const BOARD_REACH: CompanionCapability = {
         };
         // card 26134f1a: a real card body can be large (this repo's own board carries multi-KB bodies) and
         // was returned with no spill protection — same fix as spillableTaskGet already applies to tasks_get.
-        return ok({ card: spillableTaskGet(ctx.sessionId, "board-get-spills", taskId, card) });
+        // Keyed by the RESOLVED id (card.id), not the caller's raw `taskId` arg — mirrors every sibling
+        // spillableTaskGet call site (card 91fef05a nit): `taskId` may be an unambiguous 8-char prefix,
+        // and a prefix-keyed scratch file would collide with (or fail to overwrite) the same task's own
+        // full-id-keyed spill from another call.
+        return ok({ card: spillableTaskGet(ctx.sessionId, "board-get-spills", card.id, card) });
       },
     );
 

@@ -200,6 +200,19 @@ try {
     const small = await call(client, "board_get", { project: proj, taskId: "t-small" });
     check("a below-cap board_get stays byte-identical (body inline, no spill fields)", small.card?.body === "a small body" && small.card?.bodyFile === undefined);
 
+    // card 91fef05a nit: the spill key is the RESOLVED (full) task id, never the caller's raw `taskId`
+    // arg — a full-id call and an 8-char-PREFIX call for the SAME task must spill to the SAME file
+    // (mirrors every sibling spillableTaskGet call site, e.g. tasks_get). A prefix-keyed spill would
+    // either collide with, or fail to overwrite, that same task's own full-id-keyed spill file.
+    const fullId = randomUUID();
+    seedTask(db, fullId, proj, { title: "Prefix card", body: bigBody });
+    const byFullId = await call(client, "board_get", { project: proj, taskId: fullId });
+    const byPrefix = await call(client, "board_get", { project: proj, taskId: fullId.slice(0, 8) });
+    check("(prefix) a full-id call spills (fixture sanity)", typeof byFullId.card?.bodyFile === "string");
+    check("(prefix) an 8-char-prefix call for the SAME task ALSO spills", typeof byPrefix.card?.bodyFile === "string");
+    check("(prefix) both calls spill to the SAME file (keyed by the RESOLVED id, not the raw arg)", byFullId.card?.bodyFile === byPrefix.card?.bodyFile);
+    check("(prefix) the spill filename itself carries the full resolved id, not the 8-char prefix", byPrefix.card.bodyFile.endsWith(fullId) || byPrefix.card.bodyFile.includes(fullId));
+
     await client.close();
     db.close();
   }
