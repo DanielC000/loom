@@ -62,7 +62,8 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    sha:<8hex>`) comment marks a load-bearing decision record.** A `Read` whose range covers that line
    already surfaces its guard (title + prohibitions + a pointer to the full record) automatically — if the
    project exposes a lookup tool for these, use it only to resolve what the guard didn't answer, never as
-   the primary way to read one.
+   the primary way to read one. Extracting a *new* one yourself, not just reading one? See "Extracting a
+   decision record" below.
 2. **Stay in scope.** Do exactly the assigned task and its definition of done — one logical change.
    Don't sprawl scope mid-task. If you discover something bigger (a real bug, a wrong assumption, a
    missing piece), surface it **up** via `worker_report` and let your manager decide — don't quietly
@@ -342,6 +343,28 @@ project's `CLAUDE.md` **"Vault structure"** section, and add its line to the **`
 map-of-content at the vault root (read `_Index.md` to find an existing note rather than Globbing). Notes
 the `CLAUDE.md` pins by exact path stay at the root. Wikilinks resolve by note name, so the folder never
 breaks a `[[link]]`.
+
+**Extracting a decision record.** When you're already editing a file and hit a long comment that's
+genuinely decision narrative — the WHY behind a past choice, or an incident finding a future reader would
+want even if they never open this file — pull it into a decision record instead of leaving it to grow
+inline (it only helps a future reader if you actually write it). Not every long comment qualifies: a
+short standing guard ("this is deliberate, don't undo it, see id X") stays inline; ordinary contract docs
+(`@param`/`@returns` and the like) stay as-is; a comment that only restates the code should just be
+deleted. Extract only genuine decision/incident narrative.
+
+To extract: leave a short pointer, in your language's comment syntax, compressed to a few lines —
+```
+@decision <id> — <the prohibition or consequence, not a summary>
+```
+— and move the narrative to a file. `<id>` is a board task id you were actually handed for this change,
+never guessed; when no task covers it, use `sha:<8hex>` instead — the introducing commit's sha, read off
+`git blame`, also never invented. Put the narrative in `docs/decisions/<id>-slug.md` (its first-ever
+record creates that folder — no separate setup needed), or, for a rare, cross-cutting,
+architecturally-significant decision, `docs/adr/<id>-slug.md` (immutable: amend or supersede an existing
+ADR, never rewrite it in place — `docs/decisions/` stays ordinary mutable doc hygiene). Before writing,
+check whether a record for that id already exists — a second decision under the same id is a new section
+in that file, never a second file. (Code comments only, for now — a note-only project with no source
+files has no anchor form defined for this yet.)
 
 **Learned something durable? Write it to project memory.** When your task surfaces a fact a FUTURE agent
 on this project would want handed to it — a verified invariant, a load-bearing gotcha, a hard-won

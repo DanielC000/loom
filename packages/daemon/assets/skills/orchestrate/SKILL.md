@@ -547,6 +547,19 @@ what you checked. Found none? Treat it as live.
      record.** A `Read` whose range covers that line already surfaces its guard (title + prohibitions +
      a pointer to the full record) automatically — if the project exposes a lookup tool for these, use it
      only to resolve what the guard didn't answer, never as the primary way to read one.
+   - **Reviewing a diff that grows or keeps a long WHY-heavy comment block? Ask whether it's decision
+     narrative — the WHY behind a choice, or an incident finding a future reader would want even without
+     opening this file — rather than a short standing guard, contract docs, or restated code.** If so, it
+     belongs in a decision record, not growing inline; request the extraction via `worker_message` rather
+     than waving it through. The extraction: a short `@decision <id> — <the prohibition or consequence,
+     not a summary>` pointer left in the code, with the narrative moved to `docs/decisions/<id>-slug.md`
+     (its first-ever record creates that folder) or, for a rare cross-cutting decision,
+     `docs/adr/<id>-slug.md` (immutable — amend or supersede, never rewrite in place). `<id>` is a board
+     task id, or `sha:<8hex>` (the introducing commit, from `git blame`) when no task covers it — never
+     one invented. Check first whether that id already has a record; a second decision under the same id
+     is a new section there, never a second file. The same rule applies when you author a change or a
+     project doc yourself. (Code comments only, for now — no anchor form is defined yet for a note-only
+     project with no source files.)
 2. **Decompose into delegable tasks**, each with an explicit **definition of done**. A task without a
    DoD/acceptance check can't be delegated — state what *proves* it works (your agent prompt names the
    project's gate command). One task = one focused, independently-mergeable change.
