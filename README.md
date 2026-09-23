@@ -225,7 +225,10 @@ You set it up and run it from a single **Companion** page: chat on one side; con
   <img src="docs/images/screenshot-terminals.png" alt="Loom's terminal cockpit: a lead session and its worker fleet tiled side by side — live interactive claude transcripts, per-session context meters, branch names, and voice controls in one phosphor-on-dark panel." width="100%" /> <br /> <em>The terminal cockpit — a lead orchestrating its worker fleet, every pane a real interactive <code>claude</code> session with its own context meter and branch.</em> </p>
 
 <p align="center">
-  <img src="docs/images/screenshot-board.png" alt="Loom's per-project task board: a kanban of cards that both you and the agents read and move through columns." width="100%" /> <br /> <em>The per-project task board — a kanban you and the agents share, with live worker status and branch on each card.</em> </p>
+  <img src="docs/images/screenshot-board.png" alt="Loom's per-project task board: a kanban of cards that both you and the agents read and move through columns, each card tagged with its priority and the repository it is routed to." width="100%" /> <br /> <em>The per-project task board — a kanban you and the agents share. On a multi-repo project each card carries the repo it's routed to, so one board can drive several checkouts.</em> </p>
+
+<p align="center">
+  <img src="docs/images/screenshot-gates.png" alt="Loom's Gates page: the daemon-wide gate lanes across every project, showing semaphore occupancy on top and a history table of settled merge, worker and deploy runs with outcome, branch, worker, duration and how long ago each ended." width="100%" /> <br /> <em>The Gates page — every merge, worker self-check, and deploy run across all projects, sharing one concurrency budget, with the failing test named on a rejection.</em> </p>
 
 <p align="center">
   <img src="docs/images/screenshot-terminal.png" alt="A live Loom session terminal: the real interactive claude running in a daemon-owned PTY, attached over a WebSocket." width="100%" /> <br /> <em>A live session terminal — the real interactive <code>claude</code>, attached over a WebSocket.</em> </p>
