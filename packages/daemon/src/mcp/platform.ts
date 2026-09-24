@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds, RotationMarker } from "@loom/shared";
-import { MEMORY_CONFIG_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, resolveConfig } from "@loom/shared";
+import { MEMORY_CONFIG_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, harnessFleetScopeAvailable, resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
@@ -273,8 +273,9 @@ const obsidianOverride = z.object({
 // binary a spawn runs is the same trust class as `profile.harness` (see AGENT_FORBIDDEN_PROFILE_KEYS) and
 // gateCommand, so the project layer is dropped from the agent shape below and the platform layer has no
 // agent variant at all. `scope:"fleet"` is FAIL-CLOSED here — rejected with an error naming the gate card —
-// because codex has no doctrine/parity for non-worker roles yet; card 4c4eb9af relaxes this ONE refinement.
-const harnessScope = z.enum(["workers", "fleet"]).refine((v) => v !== "fleet", {
+// because codex has no doctrine/parity for non-worker roles yet. It is accepted only once the shared
+// `HARNESS_FLEET_ROLES` allowlist reaches beyond `worker` (card 961da6c6) — the same const `harnessDefaultForRole` reads.
+const harnessScope = z.enum(["workers", "fleet"]).refine((v) => v !== "fleet" || harnessFleetScopeAvailable(), {
   message: 'scope "fleet" is not supported yet — gated behind card 4c4eb9af (codex non-worker readiness); only "workers" is accepted',
 });
 /**

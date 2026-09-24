@@ -1648,14 +1648,32 @@ export function resolveHarnessConfig(
 }
 
 /**
+ * The roles `scope:"fleet"` extends the default-harness to (card 961da6c6) — the ONE allowlist, read by BOTH the
+ * `scope:"fleet"` validator refinement (`mcp/platform.ts`) and `harnessDefaultForRole` below, so they cannot diverge.
+ * Today it is exactly `["worker"]`, i.e. `"fleet"` adds nothing over `"workers"` and stays rejected at write time.
+ * Widening it is one role per card (each may need an owner decision); intended order, NOT a commitment: worker →
+ * plain/run → manager, assistant → setup, auditor, workspace-auditor (safety doctrine — last) → platform lead.
+ * @decision 961da6c6 — never widen this in an unrelated change, and never replace it with a free-form roles config
+ * key: roles are the security spine, not user toggles.
+ */
+export const HARNESS_FLEET_ROLES: readonly SessionRole[] = ["worker"];
+
+/** Whether the human-facing `scope:"fleet"` is meaningful yet (it is once the allowlist reaches beyond `worker`). */
+export function harnessFleetScopeAvailable(): boolean {
+  return HARNESS_FLEET_ROLES.some((r) => r !== "worker");
+}
+
+/**
  * The harness a role's spawn takes from the DEFAULT layer (i.e. when its Profile sets none), or
  * `undefined` for "claude / engine default" — so a resolved claude writes a NULL session column and every
- * existing spawn stays byte-identical. Card 66b1b40d applies the default to `worker` ONLY, regardless of
- * `scope`: `"fleet"` is rejected by both write validators and, if it ever reached storage some other way,
- * is deliberately NOT honored here until card 4c4eb9af (codex non-worker readiness) relaxes this.
+ * existing spawn stays byte-identical. `scope:"workers"` applies the default to `worker` ONLY; `scope:"fleet"`
+ * applies it to {@link HARNESS_FLEET_ROLES} (today the same single role, and rejected at write time until that
+ * allowlist widens — card 4c4eb9af). The caller (`SessionService.defaultHarnessForSpawn`) additionally keeps a
+ * codex-incompatible agent on claude (card 961da6c6) — this function knows only the role.
  */
 export function harnessDefaultForRole(cfg: HarnessConfig, role: SessionRole | undefined): NonNullable<Profile["harness"]> | undefined {
-  if (role !== "worker") return undefined;
+  const roles: readonly SessionRole[] = cfg.scope === "fleet" ? HARNESS_FLEET_ROLES : ["worker"];
+  if (role === undefined || !roles.includes(role)) return undefined;
   return cfg.default === PLATFORM_DEFAULTS.harness.default ? undefined : cfg.default;
 }
 
