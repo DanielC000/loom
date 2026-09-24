@@ -9,6 +9,7 @@ import {
 } from "../lib/companionChat";
 import { channelBadgeLabel } from "../lib/companion";
 import { api, getLoopbackToken } from "../lib/api";
+import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCredential";
 import { Button, Dot, SectionLabel, StatusPill } from "./ui";
 import { color, font, radius } from "../theme";
 
@@ -135,6 +136,10 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let backoff = RECONNECT_MIN_MS;
+    // Card 093981dd: scoped to the whole effect, NOT to one `connect()` — once any attempt has opened,
+    // a later close is an ordinary disconnect, never a missing credential. Without this, the reconnect
+    // loop below would keep saying "reconnecting" forever against a guard 401 with nothing explaining why.
+    let everOpened = false;
 
     const clearReplyTimer = () => { clearTimeout(replyTimer.current); replyTimer.current = undefined; };
 
@@ -167,6 +172,7 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
 
       ws.onopen = () => {
         if (disposed) return;
+        everOpened = true;
         backoff = RECONNECT_MIN_MS; // reset the backoff once a connection actually establishes
         setConn("connected");
       };
@@ -244,6 +250,9 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
       ws.onclose = () => {
         if (disposed) return;
         wsRef.current = null;
+        // A handshake that never opened on a token-less browser is the credential lock, not a flaky link.
+        // Still reconnect: if the user pastes a credential into the banner, the next attempt carries it.
+        if (isCredentialSocketFailure(everOpened, getLoopbackToken())) noteCredentialLock("socket");
         setConn("reconnecting");
         reconnectTimer = setTimeout(connect, backoff);
         backoff = Math.min(backoff * 2, RECONNECT_MAX_MS); // exponential backoff, capped

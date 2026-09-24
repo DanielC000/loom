@@ -8,15 +8,21 @@
 // into @loom/web's `build` script (which CI runs via `pnpm build`). Run it standalone with:
 //   node --experimental-strip-types packages/web/test/companion.mjs
 import assert from "node:assert/strict";
+import { register } from "node:module";
 import {
   COMPANION_DEFAULT_NAME, COMPANION_ID_MAX, COMPANION_TOKEN_MAX, TELEGRAM_CHANNEL, bindingFromCreateForm,
   bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelBadgeLabel, channelDisplayName, companionDisplayName,
   emptyConfigForm, emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody,
   provisionErrorMessage, validateBinding, validateSender, validatePairing, validateTelegramConnect,
 } from "../src/lib/companion.ts";
-// api.ts has only a type-only `@loom/shared` import (erased under --experimental-strip-types), so it loads
-// here with no daemon/build — letting us drive api.provisionCompanion against a mocked global fetch.
-import { api } from "../src/lib/api.ts";
+// api.ts loads here with no daemon/build — letting us drive api.provisionCompanion against a mocked
+// global fetch. Its `@loom/shared` import is type-only (erased under --experimental-strip-types), but
+// since card 093981dd it ALSO has a real runtime import of ./loopbackCredential, written extensionless in
+// the bundler style the app uses — which Node's own resolver cannot follow. `_tsxLoaderHook.mjs` exists
+// for exactly that; registering it means the import below must be DYNAMIC, since a static one in this
+// same file would be hoisted and resolved before `register()` ever runs.
+register("./_tsxLoaderHook.mjs", import.meta.url);
+const { api } = await import("../src/lib/api.ts");
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };

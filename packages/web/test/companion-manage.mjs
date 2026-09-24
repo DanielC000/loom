@@ -18,14 +18,20 @@
 // test/run-all.mjs (wired into @loom/web's `build`). Run standalone with:
 //   node --experimental-strip-types packages/web/test/companion-manage.mjs
 import assert from "node:assert/strict";
+import { register } from "node:module";
 import { agentProfiles, companionProfile } from "../src/lib/profileRoles.ts";
 import {
   validatePersonaPrompt, COMPANION_PROMPT_MAX,
   reminderTitle, humanCron, reminderNextFireAt,
 } from "../src/lib/companion.ts";
-// api.ts has only a type-only `@loom/shared` import (erased under --experimental-strip-types), so it loads
-// here with no daemon/build — letting us drive the companion prompt/skills client against a mocked fetch.
-import { api, restartCompanionSession } from "../src/lib/api.ts";
+// api.ts loads here with no daemon/build — letting us drive the companion prompt/skills client against a
+// mocked fetch. Its `@loom/shared` import is type-only (erased under --experimental-strip-types), but
+// since card 093981dd it ALSO has a real runtime import of ./loopbackCredential, written extensionless in
+// the bundler style the app uses — which Node's own resolver cannot follow. `_tsxLoaderHook.mjs` exists
+// for exactly that; registering it means the import below must be DYNAMIC, since a static one in this
+// same file would be hoisted and resolved before `register()` ever runs.
+register("./_tsxLoaderHook.mjs", import.meta.url);
+const { api, restartCompanionSession } = await import("../src/lib/api.ts");
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };

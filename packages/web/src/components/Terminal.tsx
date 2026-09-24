@@ -3,6 +3,7 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
 import { getLoopbackToken } from "../lib/api";
+import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCredential";
 import { useIsCompanionSession } from "../lib/companionGuard";
 import "@xterm/xterm/css/xterm.css";
 import "./Terminal.css";
@@ -197,7 +198,22 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       try { fit.fit(); } catch { return; }
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
     };
-    ws.onopen = () => { if (resizable) fitAndReport(); };
+    // Card 093981dd: a rejected upgrade used to render as a permanently blank pane — this file carried no
+    // onerror/onclose at all. A browser cannot read the handshake's HTTP status, so a guard 401 and a dead
+    // daemon look identical here; isCredentialSocketFailure decides from what we DO hold (never opened +
+    // no token at all), and the banner's socket wording stays conditional about it.
+    let everOpened = false;
+    ws.onopen = () => { everOpened = true; if (resizable) fitAndReport(); };
+    ws.onclose = () => {
+      if (everOpened) { term.write("\r\n\x1b[2m[connection closed]\x1b[0m\r\n"); return; }
+      if (isCredentialSocketFailure(everOpened, getLoopbackToken())) {
+        noteCredentialLock("socket");
+        term.write("\r\n\x1b[31m[no local access credential — live terminals are disabled]\x1b[0m\r\n"
+          + "\x1b[2m[see the banner at the top of the page]\x1b[0m\r\n");
+      } else {
+        term.write("\r\n\x1b[31m[could not connect to this session]\x1b[0m\r\n");
+      }
+    };
 
     ws.onmessage = (e) => {
       if (typeof e.data === "string") {
@@ -255,6 +271,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       // it already has).
       ws.onmessage = null;
       ws.onopen = null;
+      ws.onclose = null; // a pane abandoned mid-handshake must not report a credential lock
       if (ws.readyState === ws.CONNECTING) ws.onopen = () => ws.close();
       else ws.close();
       term.dispose();

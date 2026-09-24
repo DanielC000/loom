@@ -9,6 +9,7 @@ import { Button } from "./components/ui";
 import { Sidebar } from "./components/Sidebar";
 import { CommandPalette } from "./components/CommandPalette";
 import { SetupWizard } from "./components/SetupWizard";
+import { CredentialBanner } from "./components/CredentialBanner";
 import { RequestModalProvider } from "./components/requests";
 import { api } from "./lib/api";
 import { useAttention, useNewAttention, attentionOpenTarget, type AttentionItem } from "./lib/attention";
@@ -281,6 +282,7 @@ export default function App() {
         <ToastContainer />
         <Sidebar />
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+          <CredentialBanner />
           <UpdateBanner />
           <main style={page}>
             <Routes>

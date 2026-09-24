@@ -2,6 +2,9 @@ import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, Session
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
+// Card 093981dd — the loopback credential's storage + the "writes are locked" signal (JSX-free, so it
+// stays unit-testable without a DOM renderer).
+import { captureTokenFromUrl, getLoopbackToken, isCredentialGuardFailure, noteCredentialLock } from "./loopbackCredential";
 
 // A one-time DM-pairing enrollment code, returned ONCE by the mint endpoint (the store keeps only a
 // salted hash). The human relays `code` to the person being enrolled; it is never recoverable after.
@@ -160,31 +163,39 @@ export interface SetupTemplate {
 export interface TemplateApplyResult { agents: Agent[]; tasks: Task[]; }
 
 // @decision 9ccedbee — every non-GET /api/* write (+ /ws/term) needs this token as
-// `Authorization: Bearer <token>`, captured below into localStorage. Under pnpm web's dev proxy the
-// SPA is a DIFFERENT origin with its own localStorage — a token captured elsewhere is invisible here.
-const LOOPBACK_TOKEN_STORAGE_KEY = "loom.loopbackToken";
+// `Authorization: Bearer <token>`, captured into localStorage. Under pnpm web's dev proxy the SPA is a
+// DIFFERENT origin with its own localStorage — a token captured elsewhere is invisible here.
+//
+// Storage + the `?token=` capture moved to lib/loopbackCredential.ts (card 093981dd) so ONE module owns
+// them; `getLoopbackToken` is re-exported below because Terminal.tsx/CompanionChat.tsx import it here.
+captureTokenFromUrl();
 
-(function captureLoopbackToken() {
-  if (typeof window === "undefined") return; // no window under a non-browser test harness
-  const url = new URL(window.location.href);
-  const token = url.searchParams.get("token");
-  if (!token) return;
-  window.localStorage.setItem(LOOPBACK_TOKEN_STORAGE_KEY, token);
-  url.searchParams.delete("token");
-  window.history.replaceState({}, "", url.toString());
-})();
-
-/** The captured loopback token, or null if none has been captured yet — for a caller that needs it
- *  outside the header-based fetch wrappers below (e.g. Terminal.tsx's `/ws/term` upgrade, which the
- *  guard now covers too and can't attach a header to a WebSocket handshake — see gateway/server.ts's
- *  reuse of the remote tier's own `?token=` query-param fallback). */
-export function getLoopbackToken(): string | null {
-  return typeof window !== "undefined" ? window.localStorage.getItem(LOOPBACK_TOKEN_STORAGE_KEY) : null;
-}
+export { getLoopbackToken, setLoopbackToken } from "./loopbackCredential";
 
 function authHeaders(): Record<string, string> {
   const token = getLoopbackToken();
   return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+/**
+ * Every `fetch` in this file goes through here so the credential-lock signal has ONE chokepoint rather
+ * than a hook repeated at each `if (!r.ok)` (nine of them, three of which read the body for their own
+ * extra fields and so can't share a parse). The body is read off a `clone()`, leaving the caller's copy
+ * untouched, and the whole check is fire-and-forget — it only ever flips a UI flag.
+ *
+ * @decision 093981dd — a new fetch wrapper in this file must call THIS, not the global `fetch`, or its
+ * 401s leave the user with the daemon's unrunnable "see `loom open`" advice and no way to act on it.
+ */
+async function guardedFetch(url: string, init?: RequestInit): Promise<Response> {
+  const r = await fetch(url, init);
+  if (r.status === 401) {
+    void r.clone().json()
+      .then((j: { error?: string }) => {
+        if (isCredentialGuardFailure(401, j?.error ?? "")) noteCredentialLock("write");
+      })
+      .catch(() => { /* non-JSON 401 body — not the guard's shape, so not our signal */ });
+  }
+  return r;
 }
 
 // Code Review fix: `post`/`del`/`put` below used to throw a bare `${url} -> ${r.status}` on failure,
@@ -200,7 +211,7 @@ async function errorMessageFrom(url: string, r: Response): Promise<string> {
 }
 
 async function get<T>(url: string): Promise<T> {
-  const r = await fetch(url);
+  const r = await guardedFetch(url);
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
   return r.json() as Promise<T>;
 }
@@ -208,7 +219,7 @@ async function get<T>(url: string): Promise<T> {
 // caller probes optimistically (e.g. "is this id archived?") and treats absence as a normal outcome, not
 // a query error.
 async function getOrNull<T>(url: string): Promise<T | null> {
-  const r = await fetch(url);
+  const r = await guardedFetch(url);
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
   return r.json() as Promise<T>;
@@ -217,7 +228,7 @@ async function getOrNull<T>(url: string): Promise<T | null> {
 // reader, whose EXPECTED 400 ("no predecessor — pass an explicit 'b'") carries a reason the replay
 // panel shows verbatim instead of an opaque "-> 400".
 async function getErr<T>(url: string): Promise<T> {
-  const r = await fetch(url);
+  const r = await guardedFetch(url);
   if (!r.ok) {
     let msg = `${url} -> ${r.status}`;
     try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON */ }
@@ -229,7 +240,7 @@ async function post<T>(url: string, body?: unknown): Promise<T> {
   // Only declare a JSON content-type when we actually send a body — Fastify's JSON parser rejects an
   // EMPTY body under content-type: application/json with 400 FST_ERR_CTP_EMPTY_JSON_BODY, which would
   // silently fail every no-body POST (resumeSession, no-role startSession). No body → no header.
-  const r = await fetch(url, {
+  const r = await guardedFetch(url, {
     method: "POST",
     headers: body === undefined ? authHeaders() : { "content-type": "application/json", ...authHeaders() },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -238,19 +249,19 @@ async function post<T>(url: string, body?: unknown): Promise<T> {
   return r.json() as Promise<T>;
 }
 async function del<T>(url: string): Promise<T> {
-  const r = await fetch(url, { method: "DELETE", headers: authHeaders() });
+  const r = await guardedFetch(url, { method: "DELETE", headers: authHeaders() });
   if (!r.ok) throw new Error(await errorMessageFrom(url, r));
   return r.json() as Promise<T>;
 }
 async function put<T>(url: string, body: unknown): Promise<T> {
-  const r = await fetch(url, { method: "PUT", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(body) });
+  const r = await guardedFetch(url, { method: "PUT", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(body) });
   if (!r.ok) throw new Error(await errorMessageFrom(url, r));
   return r.json() as Promise<T>;
 }
 // POST/DELETE that surface the server's JSON `{ error }` body as the thrown message — for the archive
 // surfaces, where an EXPECTED 400 (live group / not archived) carries a reason the UI shows verbatim.
 async function postErr<T>(url: string, body?: unknown): Promise<T> {
-  const r = await fetch(url, {
+  const r = await guardedFetch(url, {
     method: "POST",
     headers: body === undefined ? authHeaders() : { "content-type": "application/json", ...authHeaders() },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -263,7 +274,7 @@ async function postErr<T>(url: string, body?: unknown): Promise<T> {
   return r.json() as Promise<T>;
 }
 async function delErr<T>(url: string): Promise<T> {
-  const r = await fetch(url, { method: "DELETE", headers: authHeaders() });
+  const r = await guardedFetch(url, { method: "DELETE", headers: authHeaders() });
   if (!r.ok) {
     let msg = `${url} -> ${r.status}`;
     try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON */ }
@@ -275,7 +286,7 @@ async function delErr<T>(url: string): Promise<T> {
 // PUT that surfaces the server's JSON `{ error }` body as the thrown message — for the preset-prompts
 // edit surface, whose label/prompt validation 400s ({ error }) the inline editor shows verbatim.
 async function putErr<T>(url: string, body: unknown): Promise<T> {
-  const r = await fetch(url, { method: "PUT", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(body) });
+  const r = await guardedFetch(url, { method: "PUT", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(body) });
   if (!r.ok) {
     let msg = `${url} -> ${r.status}`;
     try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON */ }
@@ -299,7 +310,7 @@ export type ProjectPatchResult = Project & { staleStartupPrompts: StalePromptWar
 // server's `{ error }` body verbatim (non-repo / non-empty validation) AND attaches the live-worktree
 // refusal's `liveSessions[]` to the thrown Error so the rebind UI can list the sessions to stop.
 async function patchProject(url: string, body: unknown): Promise<ProjectPatchResult> {
-  const r = await fetch(url, { method: "PATCH", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(body) });
+  const r = await guardedFetch(url, { method: "PATCH", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(body) });
   if (!r.ok) {
     let msg = `${url} -> ${r.status}`;
     let liveSessions: LiveWorktreeSession[] | undefined;
@@ -327,7 +338,7 @@ export interface TaskUpdateConflictError extends Error { conflict?: true; curren
 // verbatim-`{error}`-surfacing convention, PLUS lifts `conflict`/`current` onto the thrown Error (same
 // pattern as patchProject's `liveSessions` above) so a 409 carries the fresh task, not just a message.
 async function updateTaskReq(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">> & { baseVersion?: number }): Promise<{ ok: boolean }> {
-  const r = await fetch(`/api/tasks/${id}`, { method: "POST", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(patch) });
+  const r = await guardedFetch(`/api/tasks/${id}`, { method: "POST", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(patch) });
   if (!r.ok) {
     let msg = `/api/tasks/${id} -> ${r.status}`;
     let conflict: true | undefined;
@@ -349,7 +360,7 @@ async function updateTaskReq(id: string, patch: Partial<Pick<Task, "title" | "bo
 // PATCH that surfaces the server's JSON `{ error }` body as the thrown message — the config schema is
 // strict zod, so a rejected override comes back 400 with a readable reason the Settings UI shows verbatim.
 async function patch<T>(url: string, body: unknown): Promise<T> {
-  const r = await fetch(url, { method: "PATCH", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(body) });
+  const r = await guardedFetch(url, { method: "PATCH", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(body) });
   if (!r.ok) {
     let msg = `${url} -> ${r.status}`;
     try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON body */ }
@@ -368,7 +379,7 @@ export interface CompanionProvisionError extends Error { status?: number; }
 // Surfaces the server's `{ error }` verbatim AND attaches the status (409 = single-companion guard) so the
 // create flow can render a friendly, non-alarming message instead of a raw error.
 async function provisionCompanionReq(body: { name?: string }): Promise<CompanionConfigMasked> {
-  const r = await fetch("/api/companion/provision", {
+  const r = await guardedFetch("/api/companion/provision", {
     method: "POST", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(body),
   });
   if (!r.ok) {
@@ -564,7 +575,7 @@ export const api = {
   // HEAD the raw endpoint for a binary file's size/content-type without downloading the bytes — for the
   // "Binary file · <size> · Download" card. Returns nulls if the headers are absent.
   vaultRawHead: async (projectId: string, path: string): Promise<{ size: number | null; contentType: string | null }> => {
-    const r = await fetch(`/api/projects/${projectId}/vault/raw?path=${encodeURIComponent(path)}`, { method: "HEAD" });
+    const r = await guardedFetch(`/api/projects/${projectId}/vault/raw?path=${encodeURIComponent(path)}`, { method: "HEAD" });
     if (!r.ok) throw new Error(`vault/raw HEAD -> ${r.status}`);
     const len = r.headers.get("content-length");
     return { size: len ? Number(len) : null, contentType: r.headers.get("content-type") };
