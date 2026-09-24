@@ -4,12 +4,15 @@ import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
-  usesOrchestrationMcp, contextPercentFor, resolveHarnessConfig, harnessDefaultForRole,
+  usesOrchestrationMcp, contextPercentFor,
   type Session, type StopMode, type OrchestrationEvent, type Task, type Project,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
   type GatesActive, type GateRun, type GateType, type CompanionRoute, type ProjectMemoryEntry,
 } from "@loom/shared";
+// Card 66b1b40d: its own statement (not folded into the import above) — orchestration-mcp-role-guard.mjs regex-scans
+// that import within a fixed window of `usesOrchestrationMcp`, which a longer name list would push out of range.
+import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
