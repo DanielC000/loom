@@ -56,6 +56,7 @@ process.env.LOOM_WEB_DIST = fakeDist;
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { commitDateAfterBuild } from "./_served-status-fixture-dates.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -133,7 +134,9 @@ if (realIndexJsMtimeMs === realDistMtimeMs) {
   check("(4-setup) real-tree positive control: dist/index.js mtime genuinely DIFFERS from max(dist/**) on this checkout (proves the bug class is real, not just a fixture artifact)", true);
 }
 const beforeBuild = new Date(realDistMtimeMs - 60_000).toISOString();
-const afterBuild = new Date(realDistMtimeMs + 60_000).toISOString();
+// @decision 2d06e5f1 — NOT realDistMtimeMs + 60s: served_status re-reads the live build clock, so a dist write
+// by another lane after the probe above would put a probe-derived date BEFORE it (stale:false in a full gate).
+const afterBuild = commitDateAfterBuild(realDistMtimeMs);
 const stalenessRepo = path.join(os.tmpdir(), `loom-svst-stalenessrepo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(stalenessRepo, "packages", "daemon", "src"), { recursive: true });
 const gitStale = (args, dateIso) => execSync(`git ${args}`, {
@@ -170,6 +173,8 @@ try {
   gitStale("add packages/daemon/src/foo.ts");
   gitStale('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add foo"', afterBuild);
   const statusStale = await call("served_status");
+  // Names (never asserts — an assertion here would itself flake) any dist write between the probe and this call.
+  if (statusStale.deployStaleness?.distBuiltAt !== realBuildProbe.distBuiltAt) console.log(`NOTE  (4) build clock drifted between the probe (${realBuildProbe.distBuiltAt}) and the call (${statusStale.deployStaleness?.distBuiltAt}) — a concurrent dist write; afterBuild is derived to tolerate it (card 2d06e5f1)`);
   check("(4) a daemon/src commit AFTER the real dist build ⇒ deployStaleness.stale:true" + reasonSuffix(statusStale.deployStaleness), statusStale.deployStaleness?.available === true && statusStale.deployStaleness?.stale === true);
   check("(4) stale: commitsBehind counts the new commit", statusStale.deployStaleness?.commitsBehind === 1);
   check("(4) stale: mainlineHeadSha is a real 40-char sha", /^[0-9a-f]{40}$/.test(statusStale.deployStaleness?.mainlineHeadSha ?? ""));
