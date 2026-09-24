@@ -60,7 +60,7 @@ import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
 import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
 import { canonicalRepoLockKey } from "../git/repo-lock.js";
-import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG } from "../orchestration/context-watcher.js";
+import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
 import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
@@ -2664,6 +2664,52 @@ export class SessionService {
       if (items.length > 0) return { harness: pinned, skipped: items };
     }
     return { harness: spawn.harness, skipped: undefined };
+  }
+
+  /**
+   * Human-only "switch now" (card fe4fdf5e): nudge every IDLE manager/platform-lead in `harnessDrainStatus(scope).pending`
+   * to recycle itself, so it re-resolves onto the harness a spawn would now pick. `pending` is the ONLY candidate set
+   * (never `blocked` — a recycle can't move those) and no second "who is off-target" computation exists. The nudge is the
+   * ORDINARY one ContextWatcher sends (same `[loom:context]` prefix + shared wind-down tail, plain `enqueueStdin`),
+   * so `carryPendingToSuccessor`'s DoD-4 purge still recognises it. A busy session is skipped, never interrupted.
+   *
+   * Never call `redirectManagerForEmergencyRecycle`/`interruptForRedirect` from here (the whole point is a
+   * non-interrupting nudge), and refuse outright when a relevant layer resolves default=codex + scope=fleet
+   * (fail-closed, mirroring the validators' rejection of a stored fleet scope until card 4c4eb9af).
+   */
+  switchHarnessNow(scope: "fleet" | { projectId: string }):
+    | { refused: string }
+    | { refused?: undefined; nudged: string[]; skippedBusy: string[]; skippedNotLive: string[]; blocked: number } {
+    const platformConfig = this.db.getPlatformConfig();
+    const isCodexFleet = (projectConfig: Parameters<typeof resolveHarnessConfig>[0]): boolean => {
+      const h = resolveHarnessConfig(projectConfig, platformConfig);
+      return h.default === "codex" && h.scope === "fleet";
+    };
+    if (isCodexFleet(scope === "fleet" ? undefined : this.db.getProject(scope.projectId)?.config)) {
+      return { refused: 'default harness codex with scope "fleet" is not supported yet — gated behind card 4c4eb9af (codex non-worker readiness)' };
+    }
+    const drain = this.harnessDrainStatus(scope);
+    const candidates = drain.pending.filter((p) => p.role === "manager" || p.role === "platform");
+    for (const p of candidates) {
+      if (isCodexFleet(this.db.getProject(p.projectId)?.config)) {
+        return { refused: `project ${p.projectId} resolves default harness codex with scope "fleet" — not supported yet (card 4c4eb9af)` };
+      }
+    }
+    const nudged: string[] = [];
+    const skippedBusy: string[] = [];
+    const skippedNotLive: string[] = [];
+    const msg =
+      `${CONTEXT_RECYCLE_NUDGE_PREFIX} The default harness for this fleet changed and this session is still on the old one — ` +
+      `recycle to switch over. ` + RECYCLE_WIND_DOWN_INSTRUCTIONS;
+    for (const p of candidates) {
+      if (!this.pty.isAlive(p.sessionId)) { skippedNotLive.push(p.sessionId); continue; }
+      if (this.pty.isBusy(p.sessionId)) { skippedBusy.push(p.sessionId); continue; }
+      try {
+        const r = this.pty.enqueueStdin(p.sessionId, msg);
+        if (r.delivered || r.queued) nudged.push(p.sessionId); else skippedNotLive.push(p.sessionId);
+      } catch { skippedNotLive.push(p.sessionId); }
+    }
+    return { nudged, skippedBusy, skippedNotLive, blocked: drain.blocked.length };
   }
 
   // @decision a92ea138 — companion "/new" reinject is COMPOSE-ONLY (never spawns/writes/re-arms): passes

@@ -66,6 +66,16 @@ export interface EmergencyInterruptOutcome {
 export const CONTEXT_RECYCLE_NUDGE_PREFIX = "[loom:context]";
 
 /**
+ * The "how to hand off" tail shared by every ordinary recycle nudge (ratio path, turn-count path, and
+ * `SessionService.switchHarnessNow`) — one literal so the wording cannot drift between them.
+ */
+export const RECYCLE_WIND_DOWN_INSTRUCTIONS =
+  `Wind down NOW: run /loom-session-end to log progress to the vault, then call recycle_me with a ` +
+  `self-contained continuation prompt for your successor (current goal, what's done, your in-flight ` +
+  `workers + their tasks/status, next steps, key decisions). Your successor boots with this agent's ` +
+  `warm-up + your continuation and inherits your workers — finish merges/reviews you can close quickly first.`;
+
+/**
  * The emergency (Trigger A) interrupt's own wire tag — see `checkEmergencyOccupancy`'s doc for why this
  * is a bespoke tag rather than `frameFromManager`'s `[loom:from-manager]` shape (the target here IS the
  * manager; there is no "from-manager" to speak of). Exported for the SAME reason as the prefix above: the
@@ -186,10 +196,7 @@ export class ContextWatcher {
 
       const msg =
         `${CONTEXT_RECYCLE_NUDGE_PREFIX} Your context is ~${pct}% of your ${kw}k window — hand off before it fills. ` +
-        `Wind down NOW: run /loom-session-end to log progress to the vault, then call recycle_me with a ` +
-        `self-contained continuation prompt for your successor (current goal, what's done, your in-flight ` +
-        `workers + their tasks/status, next steps, key decisions). Your successor boots with this agent's ` +
-        `warm-up + your continuation and inherits your workers — finish merges/reviews you can close quickly first.`;
+        RECYCLE_WIND_DOWN_INSTRUCTIONS;
       // Card 49fdcbbc: use the return value instead of discarding it. `delivered:true` (handed straight
       // to submit()) and `delivered:false, queued:true` (durably held — the doc on EnqueueResult says
       // this WILL land at the next turn boundary unless redelivery is later exhausted, an async failure
@@ -269,10 +276,7 @@ export class ContextWatcher {
     const msg =
       `${CONTEXT_RECYCLE_NUDGE_PREFIX} You have completed ${turns} turns this session and your harness reports no ` +
       `context telemetry, so your context can't be measured — hand off before it fills. ` +
-      `Wind down NOW: run /loom-session-end to log progress to the vault, then call recycle_me with a ` +
-      `self-contained continuation prompt for your successor (current goal, what's done, your in-flight ` +
-      `workers + their tasks/status, next steps, key decisions). Your successor boots with this agent's ` +
-      `warm-up + your continuation and inherits your workers — finish merges/reviews you can close quickly first.`;
+      RECYCLE_WIND_DOWN_INSTRUCTIONS;
     let result: { delivered: boolean; queued?: boolean };
     let threw = false;
     try { result = pty.enqueueStdin(m.id, msg); } catch { threw = true; result = { delivered: false, queued: false }; }

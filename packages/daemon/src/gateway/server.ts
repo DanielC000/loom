@@ -5311,6 +5311,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });
     return deps.sessions.harnessDrainStatus({ projectId });
   });
+  // Harness "switch now" (card fe4fdf5e): HUMAN-only write — nudges each IDLE off-target manager/platform-lead
+  // in the drain's `pending` set to recycle itself (the ordinary ContextWatcher nudge; never an interrupt).
+  // Tier 0 by the fail-closed default (deliberately NOT in TIER_1_ROUTES) and never an agent MCP tool.
+  // 409 when default=codex+scope=fleet (not supported yet); 404 for an unknown projectId.
+  app.post("/api/harness/switch-now", async (req, reply) => {
+    const { projectId } = (req.body ?? {}) as { projectId?: string };
+    if (projectId !== undefined && typeof projectId !== "string") return reply.code(400).send({ error: "projectId must be a string" });
+    if (projectId !== undefined && !deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });
+    const r = deps.sessions.switchHarnessNow(projectId === undefined ? "fleet" : { projectId });
+    if (r.refused) return reply.code(409).send({ error: r.refused });
+    return r;
+  });
   app.post("/api/questions/:id/answer", async (req, reply) => {
     const { id } = req.params as { id: string };
     const question = deps.db.getQuestion(id);
