@@ -79,6 +79,10 @@ try {
   const ctlStop = await remote("POST", "/api/sessions/no-such-agent/stop", { mode: "graceful" });
   check("control: /stop for a non-shell id still 200s", ctlStop.statusCode === 200);
 
+  // programmatic rate-limit resume must not claim to resume a shell, nor write to it
+  check("resumeAfterRateLimit(shellId) returns false and writes nothing", host.resumeAfterRateLimit(id) === false && fake.writes.length === 0);
+  check("stop(shellId) without {shell:true} returns false (refused)", host.stop(id, "hard") === false && host.isAlive(id));
+
   // raw writeStdin (the loopback /ws/term path) is the ONE way in, and shell teardown stays on its own route
   host.writeStdin(id, "ls\r");
   check("control: raw writeStdin still reaches the shell", fake.writes.join("") === "ls\r");

@@ -5651,8 +5651,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Shared by Claude sessions AND shell terminals (same `live` map): the transport is pty-generic.
   app.get("/ws/term/:sessionId", { websocket: true }, (socket: WebSocket, req) => {
     const { sessionId } = req.params as { sessionId: string };
-    // @decision 710a34fa — a non-loopback peer (a Tier-1 gateway token holder) gets a READ-ONLY view of an
-    // agent session and NO access at all to a host shell: never accept raw stdin from it, never attach it to
+    // @decision 710a34fa — a non-loopback peer (a Tier-1 gateway token holder) gets a view of an
+    // agent session with no input except a repaint (Ctrl-L), and NO access at all to a host shell: never accept raw stdin from it, never attach it to
     // a shell pty. An empty/undeterminable peer address counts as non-loopback (fail closed).
     const remotePeer = !LOOPBACK.has(req.socket?.remoteAddress ?? "");
     if (remotePeer && deps.pty.listShells().some((t) => t.id === sessionId)) {

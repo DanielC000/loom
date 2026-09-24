@@ -9951,7 +9951,7 @@ export class PtyHost {
    */
   resumeAfterRateLimit(sessionId: string): boolean {
     const live = this.live.get(sessionId);
-    if (!live?.alive) return false;
+    if (!live?.alive || live.kind === "shell") return false; // @decision 710a34fa — a shell has no parked turn to resume
     // DIAGNOSTIC ONLY (card 1f74080a instrumentation, no control-flow change): log EVERY invocation,
     // including the branch that ends up doing nothing (lastPrompt null, or busy true) — that silent-skip
     // branch previously left NO trace at all, which is exactly the gap that made the a3814193 incident's
@@ -10604,7 +10604,8 @@ export class PtyHost {
     // @decision 710a34fa — a host shell is torn down ONLY by its own loopback route (DELETE /api/terminals/:id,
     // which passes {shell:true}); every session-facing caller (incl. the Tier-1 POST /api/sessions/:id/stop)
     // gets a refusal (false), never a kill.
-    if (live.kind === "shell" && !opts?.shell) return false;
+    // `{shell:true}` is a claim the entry really IS a shell: DELETE /api/terminals/<agent-session-id> must not hard-kill an agent.
+    if ((live.kind === "shell") !== (opts?.shell === true)) return false;
     // A Stop intent must NOT be defeated by a queued inbound turn re-arming busy. Mark the session
     // STOPPING (drainPending/enqueueStdin then refuse to submit a new turn) and CLEAR the held queue,
     // so a queued composer turn ("sends when turn ends") can't be drained by the very Stop hook the
