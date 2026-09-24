@@ -908,7 +908,9 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "ASYMMETRIC: a queued `merge` is contended by ANY other holder of its repo (another `merge` OR a " +
         "`worker`), so two same-repo merges never race to squash and a same-repo merge/worker pair never " +
         "races a shared cross-process resource; a queued `worker` is contended ONLY by an active `merge` " +
-        "holder — TWO workers on the same repo never contend each other and both show `false` while " +
+        "holder OR by a same-repo `merge` still QUEUED ahead of it (card eb491463: a waiting merge blocks " +
+        "NEW same-repo worker admissions so worker self-checks cannot starve it) — TWO workers on the " +
+        "same repo with no merge waiting never contend each other and both show `false` while " +
         "running fully concurrently. A queued entry can show this `true` even while `cap` has a free " +
         "lane, which is expected, not a bug: it's waiting on the REPO, not the cap. `false` " +
         "means this specific guard isn't why it's queued (still possibly `cap`, or the older, separate " +

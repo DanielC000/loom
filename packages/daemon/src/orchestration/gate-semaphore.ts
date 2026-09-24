@@ -382,7 +382,7 @@ export class GateSemaphore {
    *  MERGE holder, never by another worker. Two workers on the SAME repo (e.g. two different workers each
    *  running their own `run_gate`) stay fully concurrent, exactly as before this card — only a merge↔worker
    *  pairing (either order) now serializes, closing the gap where that pairing could race a shared
-   *  cross-process resource. Returns `true` immediately (never blocking) for `deploy` or any other
+   *  cross-process resource. A `worker` is ALSO blocked by a QUEUED same-repo `merge` ({@link mergeWaitingOnRepo}). Returns `true` immediately (never blocking) for `deploy` or any other
    *  gateType (deliberately excluded — see `docs/decisions/e4701333-*.md`), or for a merge/worker
    *  descriptor with no `repoPath` set. Does not consider `cap`/`active`/worktree — callers combine this
    *  with those separately, same composition {@link acquire}/{@link grantNext} already use for
@@ -393,7 +393,20 @@ export class GateSemaphore {
     const rp = entry.descriptor.repoPath;
     if (rp == null) return true;
     if (gt === "merge") return !this.activeMergeRepos.has(rp) && !this.activeWorkerRepos.has(rp);
-    return !this.activeMergeRepos.has(rp);
+    return !this.activeMergeRepos.has(rp) && !this.mergeWaitingOnRepo(rp);
+  }
+
+  /** True while a `merge`-kind waiter for `repoPath` sits in either queue tier — {@link mergeRepoFree}
+   *  then holds back NEW same-repo `worker` admissions (writer-preference barrier).
+   *  @decision eb491463 — never drop this barrier or scope it to one admission site: workers never exclude
+   *  each other, so without it back-to-back worker gates starve a queued merge indefinitely. */
+  private mergeWaitingOnRepo(repoPath: string): boolean {
+    for (const tier of [this.highWaiters, this.lowWaiters]) {
+      for (const w of tier) {
+        if (w.entry.descriptor.gateType === "merge" && w.entry.descriptor.repoPath === repoPath) return true;
+      }
+    }
+    return false;
   }
 
   /** Card 567b8724: true iff some OTHER project currently has a queued waiter (either tier) that is
@@ -561,7 +574,7 @@ export class GateSemaphore {
       }
       this.logRepoGuardMutation("delete", rp, entry.descriptor.opId, "release-worker");
     }
-    this.grantNext();
+    this.grantEligible();
   }
 
   /** Waiters parked in {@link acquireRepoGuardOnly}, keyed by `repoPath` — entirely separate from
@@ -700,7 +713,7 @@ export class GateSemaphore {
       // `grantNext`'s own doc on why that scan needs `lastKnownCap`), so this call is what actually wakes
       // a cap-based sibling once the key is genuinely free. A harmless no-op scan when the key was instead
       // handed off to another repo-guard-only waiter (repoPath still held, nothing new is eligible).
-      this.grantNext();
+      this.grantEligible();
     };
   }
 
@@ -799,7 +812,14 @@ export class GateSemaphore {
    *  a different identity, is a safe no-op, never a throw. */
   releaseMergeRepoGuard(repoPath: string, opId: string): void {
     this.freeRepoPath(repoPath, opId, opId, "releaseMergeRepoGuard");
-    this.grantNext();
+    this.grantEligible();
+  }
+
+  /** Card eb491463: grant EVERY waiter now eligible (each grant re-checks cap via {@link grantNext}), not just one.
+   *  The writer-preference barrier ({@link mergeWaitingOnRepo}) can hold several workers back beside free cap; when the
+   *  merge that held them releases, one freed slot no longer means exactly one eligible waiter. */
+  private grantEligible(): void {
+    while (this.grantNext()) { /* drain */ }
   }
 
   /** Grant exactly ONE freed slot to the next eligible waiter — drains `highWaiters` before `lowWaiters`
@@ -810,8 +830,8 @@ export class GateSemaphore {
    *  @decision d9d5057f — gated on `this.lastKnownCap` before scanning: never assume every caller here is
    *  release-shaped — `releaseMergeRepoGuard`/`endSquash` frees a REPO guard, not a cap slot, so a
    *  cap-blind grant here could over-admit past `cap`. */
-  private grantNext(): void {
-    if (this.lastKnownCap !== undefined && this.active >= this.lastKnownCap) return;
+  private grantNext(): boolean {
+    if (this.lastKnownCap !== undefined && this.active >= this.lastKnownCap) return false;
     for (const tier of [this.highWaiters, this.lowWaiters]) {
       for (let i = 0; i < tier.length; i++) {
         const w = tier[i]!;
@@ -819,9 +839,10 @@ export class GateSemaphore {
         if (this.lastKnownCap !== undefined && !this.projectSlotFree(w.entry, this.lastKnownCap)) continue;
         tier.splice(i, 1);
         w.grant();
-        return;
+        return true;
       }
     }
+    return false;
   }
 
   /**
@@ -928,6 +949,11 @@ export class GateSemaphore {
         }
         const [w] = tier.splice(idx, 1);
         w!.cancel(kind, detail);
+        // Card eb491463: a cancelled `merge` waiter LIFTS its repo's worker barrier ({@link
+        // mergeWaitingOnRepo}) with no slot released, so workers it was holding back would sit idle beside
+        // free cap until some unrelated release — grant every now-eligible waiter (only a merge waiter can
+        // change eligibility here, so this is a no-op for a cancelled worker).
+        if (gateType === "merge") this.grantEligible();
         return true;
       }
     }
