@@ -27,6 +27,7 @@ import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 import { settleTracked } from "./_settle-tracked.mjs";
 
+process.env.LOOM_GATE_RETRY_SETTLE_MS = "20"; // the retry-link scenarios below wait this long between links
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mcvc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 registerForCleanup(process.env.LOOM_HOME);
@@ -53,13 +54,13 @@ function headSha(cwd) {
   return execSync(`git ${GIT_ID} rev-parse HEAD`, { cwd }).toString().trim();
 }
 
-async function setupWorkerProject(sfx, reposDir) {
+async function setupWorkerProject(sfx, reposDir, gateCommand = "pnpm gate") {
   registerForCleanup(reposDir);
   const db = new Db();
   const mgrId = `mcvc-mgr-${sfx}`, projId = `mcvc-p-${sfx}`, taskId = `mcvc-t-${sfx}`, workerId = `mcvc-w-${sfx}`;
   const repo = path.join(reposDir, "repo");
   makeRepo(repo);
-  const config = { orchestration: { gateCommand: "pnpm gate" } };
+  const config = { orchestration: { gateCommand } };
   db.insertProject({ id: projId, name: "MCVC", repoPath: repo, vaultPath: repo, config, createdAt: now, archivedAt: null });
   db.insertAgent({ id: `agent-mcvc-m-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
   db.insertSession({ id: mgrId, projectId: projId, agentId: `agent-mcvc-m-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
@@ -303,6 +304,104 @@ async function setupWorkerProject(sfx, reposDir) {
       check("(g1) the re-call RE-GATES: the stamp was dropped because the tip had moved at settle (RED if confirmGatedIdentity is mutated to return v)", gateCalls === 2 && r2.cacheHit === undefined);
     } else {
       check("(g2) PIN (known limit): a move-and-reset entirely inside the gate is invisible to a settle-time tip compare — cache hit at the captured tip", gateCalls === 1 && r2.cacheHit?.identity === capturedTip);
+    }
+  }
+}
+
+// ── (h/i/j) THE RETRY-LINK CAPTURES (card 801b6b39). Every fixture above returns `{failedStatus:1, steps:[]}`, which is
+//        never retry-eligible, so only attempt 1's `captureGatedTip` was ever exercised. Each scenario here drives ONE
+//        retry link of the chain and asserts the cached identity is the tip THAT link's gate ran on:
+//          (h) transient-kill link  — attempt 1 is a SIGKILL classification; main advances during it, so the link's own
+//              admission-time re-union forwards the branch tip before the retry gate spawns.
+//          (i) single-file link     — attempt 1 is a genuine failure naming one re-runnable test file; the worker
+//              commits mid-attempt-1, so the retry gate (which runs NO re-union) sees a newer tip.
+//          (j) resumed-steps link   — same as (i) but the retry passes and a never-run step is resumed; the worker
+//              commits mid-retry, so only the resume link's own capture names the tip it ran on.
+//        Two variants each. "moved": the tip differs between the previous link and the final one and STAYS there, so
+//        a missing final-link capture leaves a stamp that mismatches the settle-time tip and is dropped — the re-call
+//        re-gates instead of hitting the cache. "aba": the final link's stub puts the tip BACK where the previous
+//        link's capture saw it before failing, so a missing capture leaves a stamp that MATCHES the settle-time tip
+//        and survives — the one shape where the missing capture is NOT fail-safe (a verdict cached under a tip the
+//        final gate never ran on). Both variants go RED if that link's `captureGatedTip` is removed.
+{
+  const GATE_3STEP = "pnpm build && node packages/daemon/test/flaky-mid.mjs && pnpm true-final";
+  const GATE_2STEP = "pnpm build && node packages/daemon/test/flaky-mid.mjs";
+  const plantTestFile = (worktreePath, name) => {
+    fs.mkdirSync(path.join(worktreePath, "packages", "daemon", "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs"), "// stub\n");
+    fs.mkdirSync(path.join(worktreePath, "packages", "daemon", "test"), { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", `${name}.mjs`), "// stub\n");
+  };
+  const commitFile = (worktreePath, name) => { fs.writeFileSync(path.join(worktreePath, name), `${name}\n`); commitAll(worktreePath, name, GIT_ID); };
+  const genuineFail = (steps) => ({
+    passed: false, failedStep: "node packages/daemon/test/flaky-mid.mjs", failedStatus: 1, failedSignal: null, failedTimedOut: false,
+    outputTail: "FAIL  flaky-mid", failingTest: "FAIL  flaky-mid", failingTestCount: 1, failTierTest: "FAIL  flaky-mid", failTierTestCount: 1, failTierAll: ["FAIL  flaky-mid"],
+    steps,
+  });
+  const killed = { passed: false, failedStep: "pnpm gate", failedStatus: null, failedSignal: "SIGKILL", failedTimedOut: false, steps: [] };
+
+  // `stubs[n]` runs on gate call n+1 with (tipAtEntry, worktreePath, repo) and returns that call's GateSequentialResult; a call
+  // past the end (only the re-call in an "aba" variant reaches it) is a plain non-retriable failure. `tipAtEntry` is read
+  // from the real worktree the instant the stub is entered — i.e. exactly the tip `captureGatedTip` would have captured.
+  const scenarios = [
+    { link: "h-transient-kill", gate: "pnpm gate", plant: false, calls: 2,
+      stubs: [
+        (_t, _w, repo) => { fs.writeFileSync(path.join(repo, "main-advance.txt"), "advanced\n"); commitAll(repo, "main advanced mid-attempt-1", GIT_ID); return killed; },
+        () => killed,
+      ] },
+    { link: "i-single-file", gate: GATE_2STEP, plant: true, calls: 2, lastCommand: "node packages/daemon/scripts/test-daemon.mjs --only=flaky-mid",
+      stubs: [
+        (_t, w) => { commitFile(w, "fix-i.txt"); return genuineFail([{ step: "pnpm build", durationMs: 1, status: 0 }, { step: "node packages/daemon/test/flaky-mid.mjs", durationMs: 1, status: 1 }]); },
+        () => ({ passed: false, failedStep: "node packages/daemon/scripts/test-daemon.mjs --only=flaky-mid", failedStatus: 1, failedSignal: null, failedTimedOut: false, steps: [] }),
+      ] },
+    { link: "j-resumed-steps", gate: GATE_3STEP, plant: true, calls: 3, lastCommand: "pnpm true-final",
+      stubs: [
+        () => genuineFail([{ step: "pnpm build", durationMs: 1, status: 0 }, { step: "node packages/daemon/test/flaky-mid.mjs", durationMs: 1, status: 1 }]),
+        (_t, w) => { commitFile(w, "fix-j.txt"); return { passed: true, steps: [{ step: "node packages/daemon/scripts/test-daemon.mjs --only=flaky-mid", durationMs: 1, status: 0 }] }; },
+        () => ({ passed: false, failedStep: "pnpm true-final", failedStatus: 1, failedSignal: null, failedTimedOut: false, steps: [{ step: "pnpm true-final", durationMs: 1, status: 1 }] }),
+      ] },
+  ];
+
+  for (const sc of scenarios) for (const variant of ["moved", "aba"]) {
+    const tag = `(${sc.link}/${variant})`;
+    const sfx = `retry-${sc.link}-${variant}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const reposDir = path.join(os.tmpdir(), `loom-mcvc-${sfx}`);
+    const { db, mgrId, workerId, repo, worktreePath, workerSha } = await setupWorkerProject(sfx, reposDir, sc.gate);
+    if (sc.plant) plantTestFile(worktreePath, "flaky-mid");
+    // Main advances BEFORE op 1 in every scenario so the branch is forwarded: the pre-forward tip (`workerSha`) is then the
+    // verdict's unstamped fallback identity and can never coincide with a tip a gate actually ran on.
+    fs.writeFileSync(path.join(repo, "main-advance-0.txt"), "advanced\n");
+    commitAll(repo, "main advanced before op 1", GIT_ID);
+    const tips = [];
+    let gateCalls = 0;
+    const gateCommands = [];
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      syncAttachBudgetMs: 60_000,
+      runGate: async (gate) => {
+        const n = gateCalls++;
+        gateCommands.push(gate);
+        tips.push(headSha(worktreePath));
+        if (n >= sc.calls) return { passed: false, failedStep: "x", failedStatus: 1, failedSignal: null, failedTimedOut: false, steps: [] };
+        const res = sc.stubs[n](tips[n], worktreePath, repo);
+        // "aba": the FINAL link puts the tip back where the previous link's capture saw it, then fails.
+        if (variant === "aba" && n === sc.calls - 1) execSync(`git reset --hard ${tips[n - 1]}`, { cwd: worktreePath });
+        return res;
+      },
+    });
+    const r1 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
+    check(`${tag} op 1 settled + rejected after exactly ${sc.calls} gate calls (the chain reached the ${sc.link} link)`, r1.settled === true && r1.ok && r1.value.merged === false && gateCalls === sc.calls);
+    if (sc.lastCommand) check(`${tag} the final call ran the ${sc.link} link's own command`, gateCommands[sc.calls - 1] === sc.lastCommand);
+    check(`${tag} setup: the tip the final link ran on differs from the previous link's`, tips[sc.calls - 1] !== tips[sc.calls - 2]);
+    check(`${tag} setup: the branch was forwarded, so no gate tip is the pre-forward tip`, tips.every((t) => t !== workerSha));
+    const callsAfterOp1 = gateCalls;
+    const tipAtSettle = headSha(worktreePath);
+    const r2 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
+    if (variant === "moved") {
+      check(`${tag} the re-call is a cache hit — no further gate call`, r2.settled === true && gateCalls === callsAfterOp1);
+      check(`${tag} the cached identity is the tip the FINAL link ran on (RED if that link's captureGatedTip is removed)`, r2.cacheHit?.identity === tips[sc.calls - 1]);
+    } else {
+      check(`${tag} setup: the final link's stub put the tip back where the previous link saw it`, tipAtSettle === tips[sc.calls - 2]);
+      check(`${tag} the re-call RE-GATES — a verdict from a tip the final link never ran on is not cached (RED if that link's captureGatedTip is removed)`, r2.cacheHit === undefined && gateCalls > callsAfterOp1);
     }
   }
 }
