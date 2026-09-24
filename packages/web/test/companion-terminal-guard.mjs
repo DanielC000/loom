@@ -79,7 +79,12 @@ check("TerminalPane resolves companion-ness from the session store (not a caller
 check("TerminalPane still gates BOTH stdin surfaces on the effective flag", () => {
   const src = read("../src/components/Terminal.tsx");
   assert.match(src, /disableStdin:\s*readOnly/, "xterm disableStdin must read the effective flag");
-  assert.match(src, /if\s*\(\s*readOnly\s*\)\s*return;/,
+  // Card 5c14fa6b added a SECOND watch-only source to this same guard (the daemon's `readOnly` control
+  // frame, for a remote peer), so the condition is now a disjunction. This pattern deliberately admits
+  // further `|| <flag>` disjuncts while still REFUSING an `&&` — narrowing the companion guard with an
+  // extra required condition is precisely the fail-open regression this check exists to catch, and a
+  // looser `readOnly\b[^)]*` would have waved it through.
+  assert.match(src, /if\s*\(\s*readOnly(\s*\|\|\s*\w+)*\s*\)\s*return;/,
     "the onData handler must return before ws.send({type:'stdin'}) on the effective flag");
 });
 

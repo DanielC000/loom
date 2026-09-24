@@ -5,6 +5,8 @@ import type { TerminalControl } from "@loom/shared";
 import { getLoopbackToken } from "../lib/api";
 import { credentialLock, isCredentialSocketFailure, noteCredentialLock, subscribeCredentialLock } from "../lib/loopbackCredential";
 import { useIsCompanionSession } from "../lib/companionGuard";
+import { Dot } from "./ui";
+import { color, font, space } from "../theme";
 import "@xterm/xterm/css/xterm.css";
 import "./Terminal.css";
 
@@ -31,6 +33,11 @@ import "./Terminal.css";
  * A COMPANION session is watch-only whether or not the caller passes `readOnly` — resolved from the
  * session store inside the component (card 5c87f4b6), so no call site can render a writable terminal for
  * one by forgetting a prop. See the guard comment on the component itself.
+ *
+ * A REMOTE (non-loopback) viewer is watch-only too, and learns it from the DAEMON rather than from any
+ * prop or store: the socket opens with a one-off `readOnly` control frame (card 5c14fa6b) and the pane
+ * then behaves exactly like `readOnly`, plus a note saying so. Nothing about that is enforcement — the
+ * daemon drops a remote peer's stdin either way; this is purely so the viewer stops typing into the void.
  */
 export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyProp = false, heightBudget }: { sessionId: string; resizable?: boolean; readOnly?: boolean; heightBudget?: number }) {
   // COMPANION GUARD (card 5c87f4b6) — the structural half of the "a companion is driven ONLY through its
@@ -43,6 +50,11 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
   // worker and a manager are all byte-identical to before.
   const isCompanion = useIsCompanionSession(sessionId);
   const readOnly = readOnlyProp || isCompanion;
+  // Card 5c14fa6b — set from the daemon's `readOnly` control frame, which only a REMOTE peer receives.
+  // Deliberately NOT in the attach effect's deps: it is SET from inside that effect, and depending on it
+  // would tear the socket down and rebuild it the instant the frame lands (re-attaching forever). The
+  // effect keeps its own closure copy for the hot stdin path; this state exists only to render the note.
+  const [remoteReadOnly, setRemoteReadOnly] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   // Kept in a ref so a budget change is picked up on the next resize WITHOUT re-running the effect
   // (which would tear down + re-attach the websocket). It's constant per page in practice.
@@ -69,6 +81,12 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
   useEffect(() => {
     if (!ref.current) return;
     const el = ref.current;
+    // A fresh socket has not been told anything yet, so start writable and let the frame (if any) say
+    // otherwise. Matters on a re-attach: the previous socket's verdict must not carry over to this one.
+    // The closure flag is what the hot `onData` path reads — React state is async and would let the first
+    // keystroke after the frame through. `false` is a no-op bail-out in React, so this costs no re-render.
+    let serverReadOnly = false;
+    setRemoteReadOnly(false);
     const term = new XTerm({
       fontSize: 13,
       convertEol: true,
@@ -233,6 +251,16 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
         let msg: TerminalControl;
         try { msg = JSON.parse(e.data); } catch { term.write(e.data); return; }
         if (msg.type === "reset") term.reset();
+        else if (msg.type === "readOnly") {
+          // Card 5c14fa6b. Flip xterm itself inert as well as gating `onData` below — `disableStdin`
+          // stops the keystroke at the source, so a remote viewer gets no local echo either, and the
+          // resting cursor stops blinking as if it were waiting for them. Both are runtime-settable, so
+          // this needs no re-mount (and must not cause one: see the state declaration above).
+          serverReadOnly = true;
+          term.options.disableStdin = true;
+          term.options.cursorBlink = false;
+          setRemoteReadOnly(true);
+        }
         else if (msg.type === "geometry") {
           if (resizable) {
             // Shell: the daemon's initial grid is just a seed — we drive the size, so fit instead.
@@ -262,7 +290,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       }
     };
     const onData = term.onData((d) => {
-      if (readOnly) return; // watch-only attach — never write to the session
+      if (readOnly || serverReadOnly) return; // watch-only attach — never write to the session
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "stdin", data: d }));
     });
 
@@ -311,5 +339,31 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
   // on container resize) can briefly overshoot the cell math; this stops the canvas painting outside.
   // HUG mode seeds the height to the budget so the pane isn't collapsed before the first geometry frame
   // (its parent is content-sized); applyFontSize then trims it to the actual grid height.
-  return <div ref={ref} style={{ height: heightBudget != null ? heightBudget : "100%", width: "100%", overflow: "hidden" }} />;
+  return (
+    <div ref={ref} style={{ position: "relative", height: heightBudget != null ? heightBudget : "100%", width: "100%", overflow: "hidden" }}>
+      {/* Card 5c14fa6b — the remote viewer's "your keys go nowhere" notice. A hairline strip pinned to the
+          TOP of the pane, not a centred overlay: it reads as terminal chrome, and the BOTTOM rows (where
+          Claude's TUI keeps its composer and hints — the part a watcher most wants) stay uncovered.
+          `pointer-events:none` so selecting and copying the text underneath still works; the only thing
+          taken away is writing. Amber, not red: nothing is broken, this is a mode. */}
+      {remoteReadOnly && (
+        <div
+          role="status"
+          style={{
+            position: "absolute", top: 0, left: 0, right: 0, pointerEvents: "none",
+            display: "flex", alignItems: "center", gap: space(2),
+            padding: `${space(1)} ${space(2)}`,
+            background: color.panel2, borderBottom: `1px solid ${color.border}`,
+            fontFamily: font.mono, fontSize: 11, lineHeight: 1.5, color: color.textDim,
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+          }}
+        >
+          <Dot tone="amber" style={{ flexShrink: 0 }} />
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+            View-only from a remote device. Steer via the composer.
+          </span>
+        </div>
+      )}
+    </div>
+  );
 }
