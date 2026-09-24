@@ -26,6 +26,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { registerForCleanup, unregister } from "./_tmp-fixture.mjs";
 
 // SINGLE SOURCE OF TRUTH for family membership — `scripts/test-daemon.mjs` imports this array (not the
@@ -44,7 +45,7 @@ export const CODEX_REAL_SPAWN_BASENAMES = [
 ];
 export const CODEX_REAL_SPAWN_SET = new Set(CODEX_REAL_SPAWN_BASENAMES);
 
-const LOCK_PATH = path.join(os.tmpdir(), "loom-codex-real-spawn.lock");
+const LOCK_PATH = process.env.LOOM_CODEX_REAL_SPAWN_LOCK_PATH || path.join(os.tmpdir(), "loom-codex-real-spawn.lock"); // env: hermetic-test seam (card fb119c4c)
 // Far longer than any file's own worst-case runtime is EVER expected to be, but no longer this lock's
 // PRIMARY defense WITHIN one gate-executing process — see the file header. `scripts/test-daemon.mjs`'s
 // own sequential scheduling for CODEX_REAL_SPAWN_BASENAMES above (read the array for current membership
@@ -154,6 +155,84 @@ export function enableRawFixtureLogging() {
   process.env.LOOM_LOG_MESSAGE_CONTENT = "1";
 }
 
+// ---- Usage-limit preflight (card fb119c4c) ---------------------------------------------------------------
+// WHY: when the codex ACCOUNT is over its usage limit, `codex exec` prints "You've hit your usage limit …
+// try again at <date>" and the interactive TUI just sits at "Working (0s)" forever — so every real-codex
+// file hangs to its ceiling and the whole gate reds for a reason no code change can fix.
+// WHY A PREFLIGHT, NOT FAILURE-TIME DETECTION: the TUI never prints the limit text into the captured pty
+// (it only hangs), so a failure-time scan would have nothing to match and each file would burn its full
+// timeout first; the one place codex states the limit positively is `codex exec`.
+// COST: one tiny real model turn ("Reply with exactly: PONG") when the account is healthy — bounded by
+// PROBE_TIMEOUT_MS and CACHED for PROBE_CACHE_MS in a host-wide temp file, so a healthy host pays ONE turn
+// per ~10 min across the whole family, not one per file. An exhausted account refuses immediately and
+// spends nothing.
+// WHAT COUNTS AS LIMITED: ONLY output matching USAGE_LIMIT_RE. A hang/timeout, spawn error, auth failure
+// or any other error is NOT "limited" — the real test then runs and fails on its own, as before. There is
+// no skip-on-any-failure path.
+const PROBE_TIMEOUT_MS = Number(process.env.LOOM_CODEX_USAGE_PROBE_TIMEOUT_MS) || 45_000; // env: hermetic-test seam
+const PROBE_CACHE_MS = 10 * 60_000;
+const USAGE_LIMIT_RE = /you['’]?ve hit your usage limit/i;
+const PROBE_CACHE_PATH = process.env.LOOM_CODEX_USAGE_PROBE_CACHE || path.join(os.tmpdir(), "loom-codex-usage-probe.json"); // env: hermetic-test seam
+
+/** Pure: does codex output POSITIVELY report the usage limit? detail = the "try again at …" clause if
+ *  present, else the matched line. */
+export function detectCodexUsageLimit(text) {
+  const s = String(text ?? "");
+  if (!USAGE_LIMIT_RE.test(s)) return { limited: false, detail: null };
+  const reset = /try again at\s+([^\r\n]*?)\.?\s*(?:\r?\n|$)/i.exec(s);
+  const line = s.split(/\r?\n/).find((l) => USAGE_LIMIT_RE.test(l)) ?? "";
+  return { limited: true, detail: reset ? `resets ${reset[1].trim()}` : line.trim() };
+}
+
+// pid-scoped tree kill of the probe we spawned (a win32 shell wrapper leaves the real child alive on a bare kill()).
+function killTree(child) {
+  try {
+    if (process.platform === "win32" && child.pid) spawn("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true });
+    else child.kill();
+  } catch {}
+}
+
+/** Runs the probe once; never throws. opts (test seams): bin, prefixArgs, shell, timeoutMs. */
+export function probeCodexUsageLimit(opts = {}) {
+  const bin = opts.bin ?? process.env.LOOM_CODEX_BIN ?? "codex";
+  const shell = opts.shell ?? process.platform === "win32";
+  const args = [...(opts.prefixArgs ?? []), "exec", "--skip-git-repo-check", shell ? "\"Reply with exactly: PONG\"" : "Reply with exactly: PONG"]; // shell:true joins argv unquoted — quote the prompt so it stays ONE argument
+  return new Promise((resolve) => {
+    let out = "";
+    let done = false;
+    let child;
+    let timer = null;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      resolve(detectCodexUsageLimit(out));
+    };
+    try {
+      child = spawn(bin, args, { shell, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch {
+      return finish();
+    }
+    timer = setTimeout(() => { killTree(child); finish(); }, opts.timeoutMs ?? PROBE_TIMEOUT_MS);
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { out += d; });
+    child.on("error", finish);
+    child.on("close", finish);
+  });
+}
+
+/** Cached probe (host-wide temp file). opts.cachePath is a test seam. */
+export async function codexUsageLimitStatus(opts = {}) {
+  const cachePath = opts.cachePath ?? PROBE_CACHE_PATH;
+  try {
+    const c = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+    if (typeof c.at === "number" && Date.now() - c.at < PROBE_CACHE_MS) return { limited: !!c.limited, detail: c.detail ?? null };
+  } catch {}
+  const r = await probeCodexUsageLimit(opts);
+  try { fs.writeFileSync(cachePath, JSON.stringify({ at: Date.now(), ...r })); } catch {}
+  return r;
+}
+
 /**
  * Acquire the shared real-codex-spawn lock, polling up to WAIT_TIMEOUT_MS. Registers the lock file for
  * this process's own guaranteed cleanup (`_tmp-fixture.mjs`'s `beforeExit`/`exit` hooks) so a crash
@@ -190,7 +269,7 @@ export async function acquireCodexRealSpawnLock() {
   }
   registerForCleanup(LOCK_PATH);
   let released = false;
-  return function release() {
+  function release() {
     if (released) return;
     released = true;
     try {
@@ -199,5 +278,14 @@ export async function acquireCodexRealSpawnLock() {
       return; // best-effort — leave it registered so the exit backstop still retries
     }
     if (!fs.existsSync(LOCK_PATH)) unregister(LOCK_PATH);
-  };
+  }
+  // Card fb119c4c: under the lock (one probe at a time), skip LOUDLY if codex positively reports its usage
+  // limit. Any other outcome falls through: the real test runs and fails on its own if broken.
+  const usage = await codexUsageLimitStatus();
+  if (usage.limited) {
+    release();
+    console.log(`WARN  SKIP  ${waiterName()} — codex account is over its USAGE LIMIT (quota exhausted; ${usage.detail ?? "no reset time reported"}). Real-codex coverage did NOT run on this host; this is not a pass of the codex behaviour.`);
+    process.exit(0);
+  }
+  return release;
 }
