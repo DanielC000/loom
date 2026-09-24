@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
+import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
 import { resolveConfig, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
@@ -5661,6 +5661,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       socket.close(1008, "host shell terminals are loopback-only");
       return;
     }
+    // Card 5c14fa6b — tell a remote viewer its pane is inert BEFORE anything else, so the pane can
+    // disable its own keyboard and say so rather than silently swallowing keystrokes (the drop above is
+    // otherwise invisible: there is no error frame for a dropped stdin, by design). Sent ahead of
+    // subscribe() because subscribe() SYNCHRONOUSLY emits the ring replay + geometry, and the pane
+    // should already know what it is before it sizes and paints itself. Loopback gets no frame at all,
+    // so a local pane is byte-identical to before. This is a HINT to the viewer, never the enforcement:
+    // the drop below runs whatever the client does with (or without) this frame.
+    if (remotePeer) socket.send(JSON.stringify({ type: "readOnly", reason: "remote" } satisfies TerminalControl));
     const unsub = deps.pty.subscribe(sessionId, {
       onData: (b) => { if (socket.readyState === socket.OPEN) socket.send(b); },
       onControl: (e) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(e)); },

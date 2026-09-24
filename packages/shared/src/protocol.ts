@@ -18,7 +18,14 @@ export type TerminalControl =
   // INFO ONLY: the daemon telling a viewer the pinned pty grid so it can size its xterm
   // (resize the grid to match + scale fontSize to fill the tile). This is NOT resize
   // negotiation — the viewer never resizes the pty; the pin stays viewer-independent.
-  | { type: "geometry"; cols: number; rows: number };
+  | { type: "geometry"; cols: number; rows: number }
+  // This socket's INPUT is inert: the daemon will drop whatever the viewer sends except a repaint.
+  // Sent ONCE, on attach, only to the peer it applies to — a loopback viewer never receives it, so a
+  // pane that has not seen this frame is writable exactly as before. `reason` names WHY, so the pane
+  // can word its own notice rather than guessing: "remote" = a non-loopback peer (decision 710a34fa —
+  // stdin and resize dropped, host shells refused outright). It is a STATEMENT about the transport,
+  // never a request: the daemon enforces the drop regardless of what the viewer does with this.
+  | { type: "readOnly"; reason: "remote" };
 
 export type TerminalInput =
   | { type: "stdin"; data: string }
