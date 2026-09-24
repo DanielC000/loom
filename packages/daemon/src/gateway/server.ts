@@ -513,7 +513,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // probe before it has a token to send) and must not itself march an ip toward lockout. A rejected
         // WS subprotocol offer DID present a (malformed) credential, so it counts the same as a wrong one.
         if (wsProtocolRejected || token) rateLimiter.recordAuthFailure(ip, now);
-        return reply.code(401).send({ error: "unauthorized" });
+        // Card b855c37d: `code` + `hint` are ADDITIVE — `error` stays byte-identical so every string-matcher
+        // keeps working. Absent and wrong tokens get the identical body (no oracle), and the hint states only
+        // what any 401 already implies; it names no path, secret, or `loom open` pointer (that pointer is the
+        // LOOPBACK guard's own credential, which must never arm on this 401 — decision 093981dd).
+        return reply.code(401).send({
+          error: "unauthorized",
+          code: "gateway-token-required",
+          hint: "This remote request needs a gateway token: send it as `Authorization: Bearer <token>`.",
+        });
       }
       rateLimiter.clearAuthFailures(ip);
     });
