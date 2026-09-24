@@ -9,6 +9,7 @@ import { TerminalTile } from "../components/TerminalTile";
 import { TerminalCard } from "../components/TerminalCard";
 import { useSessionQueuesBulk, useSessionWakesBulk, useInvalidateSessionQueueWakesBulk } from "../lib/useSessionQueueWakesBulk";
 import { Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
+import { HarnessMixProvider } from "../components/HarnessPicker";
 import { color, font } from "../theme";
 
 // Tiles flow horizontally then wrap; reused per manager row and the catch-all rows. alignItems:"start" so
@@ -71,6 +72,9 @@ export default function Terminals() {
   );
 
   return (
+    // `shown` — not `live` — is deliberately the mix set: it respects the project filter above, so
+    // filtering down to a single-harness project stops badging every claude tile (@decision b8e52cfe).
+    <HarnessMixProvider sessions={shown}>
     <div>
       <ShellsSection />
       <div style={{ marginBottom: 12, display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -88,6 +92,7 @@ export default function Terminals() {
         </section>
       ))}
     </div>
+    </HarnessMixProvider>
   );
 }
 

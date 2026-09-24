@@ -21,6 +21,7 @@ import {
   Stat, FleetCard, FleetRow, AttentionRow, EventRow, fleetRollup, worstContext,
 } from "../components/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
+import { HarnessMixProvider } from "../components/HarnessPicker";
 import { color, font, tone } from "../theme";
 import { RoleBadge } from "../lib/roleDisplay";
 import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
@@ -140,6 +141,9 @@ export default function Overview() {
     all.find((s) => s.agentId === agentId && s.processState === "live");
 
   return (
+    // The fleet rows and terminal tiles below all render sessions from THIS project-filtered live set,
+    // so it is also what decides whether the view is mixed-harness (@decision b8e52cfe).
+    <HarnessMixProvider sessions={all}>
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       {/* --- Header: identity + roll-up status + counts + worst-of context --- */}
       <div>
@@ -253,6 +257,7 @@ export default function Overview() {
         </Panel>
       </section>
     </div>
+    </HarnessMixProvider>
   );
 }
 

@@ -12,6 +12,7 @@ import { color, font } from "../theme";
 import { Stat, PlanUsageStrip, AttentionRow, FleetRow, FleetCard, EventRow, WaveConsumption } from "../components/fleet";
 import { archivedOnlyProjects, ARCHIVED_ONLY_CAP, type ArchivedOnlyProject } from "../lib/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
+import { HarnessMixProvider } from "../components/HarnessPicker";
 import { AuditReplayPanel } from "../components/auditReplay";
 import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 
@@ -191,6 +192,9 @@ export default function MissionControl() {
   const kill = useMutation({ mutationFn: () => api.killOrchestration(), onSuccess: () => { refreshStatus(); refreshSessions(); } });
 
   return (
+    // Every fleet row below is a session in THIS set, so it is also what decides whether the view is
+    // mixed-harness (@decision b8e52cfe). `all` is the live, non-archived feed the page already derives.
+    <HarnessMixProvider sessions={all}>
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* Plan-usage strip — the user's REAL Claude account headroom (5h / 7d), distinct from the
           per-session context occupancy on the /usage page. */}
@@ -325,6 +329,7 @@ export default function MissionControl() {
         {replayOpen && <AuditReplayPanel managers={replayRoots} hideLabel />}
       </div>
     </div>
+    </HarnessMixProvider>
   );
 }
 

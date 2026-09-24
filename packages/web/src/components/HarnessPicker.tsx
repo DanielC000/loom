@@ -1,8 +1,8 @@
-import type { CSSProperties, ReactNode } from "react";
+import { createContext, useContext, type CSSProperties, type ReactNode } from "react";
 import { color, font, radius, tone as toneVar } from "../theme";
 import {
   CODEX_DROPPED_FIELDS, CODEX_FAIL_OPEN_FIELDS, SEVERITY_META,
-  harnessDrop, type DroppedFieldKey, type Harness,
+  harnessDrop, liveHarnesses, type DroppedFieldKey, type Harness, type HarnessMixSession,
 } from "../lib/harnessFields";
 
 // The harness picker on the Profiles editor (card fa2277b6, on an explicit owner directive): which vendor
@@ -137,15 +137,45 @@ export function dropStyle(harness: Harness, field: DroppedFieldKey): CSSProperti
   return harnessDrop(harness, field) ? { opacity: 0.55 } : undefined;
 }
 
-/** A `codex` marker for the profile list + editor header. Claude is the default, so it is never badged. */
+// ── Mixed-harness views ─────────────────────────────────────────────────────────────────────────────
+//
+// @decision b8e52cfe — never badge every row unconditionally, and never badge claude in a
+// single-harness view: a constant fact costs row width and buys nothing. Badge claude ONLY where a
+// second live harness makes an unbadged row genuinely ambiguous.
+//
+// Default `false`, so a call site with no provider above it (Profiles, a single-session page) renders
+// byte-identically to before this existed.
+const HarnessMixContext = createContext(false);
+
+/** Whether the surrounding view runs more than one harness. False (codex-only badging) with no provider. */
+export function useHarnessMixed(): boolean {
+  return useContext(HarnessMixContext);
+}
+
+/**
+ * Wrap a view that lists sessions, passing the SAME set it renders. Cheap: one pass over a list the page
+ * has already filtered, recomputed per render rather than memoised — these arrays are freshly derived on
+ * every render anyway, so a memo keyed on their identity would never hit.
+ */
+export function HarnessMixProvider({ sessions, children }: { sessions: readonly HarnessMixSession[]; children: ReactNode }) {
+  return <HarnessMixContext.Provider value={liveHarnesses(sessions).size > 1}>{children}</HarnessMixContext.Provider>;
+}
+
+/**
+ * The per-row harness marker. Renders for codex always, and for claude ONLY inside a mixed
+ * {@link HarnessMixProvider} — see the note above for why the two cases differ.
+ */
 export function HarnessTag({ harness, title }: { harness: Harness; title?: string }): ReactNode {
-  if (harness !== "codex") return null;
+  const mixed = useHarnessMixed();
+  if (harness !== "codex" && !mixed) return null;
+  const accent = harness === "codex" ? color.amber : color.textMuted;
   return (
-    <span data-testid="harness-tag" title={title ?? "Spawns the codex CLI, not claude"}
+    <span data-testid="harness-tag" data-harness={harness}
+      title={title ?? (harness === "codex" ? "Spawns the codex CLI, not claude" : "Spawns claude, Loom's native harness")}
       style={{ fontFamily: font.mono, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em",
-        padding: "1px 6px", border: `1px solid ${color.amber}`, borderRadius: radius.sm, color: color.amber,
+        padding: "1px 6px", border: `1px solid ${accent}`, borderRadius: radius.sm, color: accent,
         flexShrink: 0, lineHeight: 1.5 }}>
-      codex
+      {harness}
     </span>
   );
 }

@@ -129,12 +129,14 @@ export function TileTitle({ s, showProject }: { s: TerminalCardSession; showProj
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
       <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} style={{ flexShrink: 0 }} />
-      {/* Same codex-only rule as FleetRow. It sits with the status pill rather than after the identity
-          text so a narrow tile can never strand the tag alone on a wrapped second line, and so the two
-          badges read as one cluster. A title-override consumer (a raw shell, a companion watch window)
-          never reaches this path, and `harness` is optional on TerminalCardSession, so those call sites
-          stay byte-identical. */}
-      <HarnessTag harness={harnessOf(s.harness)} title="Runs the codex CLI, not claude" />
+      {/* Same rule as FleetRow — codex always, claude only in a mixed-harness view.
+          @decision b8e52cfe — never badge claude in a single-harness view.
+
+          It sits with the status pill rather than after the identity text so a narrow tile can never
+          strand the tag alone on a wrapped second line, and so the two badges read as one cluster. A
+          title-override consumer (a raw shell, a companion watch window) never reaches this path, and
+          `harness` is optional on TerminalCardSession, so those call sites stay byte-identical. */}
+      <HarnessTag harness={harnessOf(s.harness)} />
       <span data-testid="tile-identity" title={`${prefix} · ${shortId}`}
         style={{ display: "inline-flex", alignItems: "center", minWidth: 0 }}>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{prefix}</span>

@@ -2,6 +2,7 @@ import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, Session
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
+import type { HarnessDrainStatus } from "./harnessFields";
 // Card 093981dd — the loopback credential's storage + the "writes are locked" signal (JSX-free, so it
 // stays unit-testable without a DOM renderer).
 import { captureTokenFromUrl, getLoopbackToken, isCredentialGuardFailure, noteCredentialLock } from "./loopbackCredential";
@@ -491,6 +492,12 @@ export const api = {
   // nested field means "leave alone", not "delete", matching the top-level omitted-key contract.
   updatePlatformConfig: (config: PlatformConfigPatch) =>
     patch<{ ok: boolean; override: PlatformConfigOverride }>("/api/platform/config", { config }),
+  // Harness drain status (card 3d8edea5) — a DERIVED read of which live sessions still run a harness a
+  // spawn made right now would not pick. There is no stored drain state and no write surface: this is a
+  // status readout, so a GET is the whole API. `projectId` narrows to one project (404 for an unknown
+  // id); omitted = the whole fleet.
+  harnessDrain: (projectId?: string) =>
+    get<HarnessDrainStatus>(projectId ? `/api/harness/drain?projectId=${encodeURIComponent(projectId)}` : "/api/harness/drain"),
   agents: (projectId: string) => get<Agent[]>(`/api/projects/${projectId}/agents`),
   // Every agent across every project, enriched with its project name — ONE round-trip in place of the
   // client N+1 (api.projects() + Promise.all(projects.map(p => api.agents(p.id)))) that Schedules/

@@ -10,11 +10,18 @@
 //
 // THE THREE STATES ARE SEEDED DELIBERATELY. `sessionView.ts` distinguishes UNSET (`null`) from an explicit
 // `"claude"`, so this spec seeds all three — a manager with no harness pinned, a worker pinned `"claude"`,
-// and a worker pinned `"codex"` — and asserts the first two render IDENTICALLY (no marker). That collapse
-// is the product decision this card made explicitly: both spawn the same binary, so there is nothing for a
-// fleet reader to act on between them, and badging the majority case would spend row width on the rows
-// carrying no information. A future change that starts distinguishing them here has to DELETE an assertion,
-// not merely add one.
+// and a worker pinned `"codex"`. The first two must render IDENTICALLY to each other in every case: both
+// spawn the same binary, so there is nothing for a fleet reader to act on between them. That half of the
+// original decision is untouched, and it is what the per-row assertions below still pin.
+//
+// WHAT CARD b8e52cfe CHANGED. "claude is never badged" was absolute; it is now conditional on the VIEW
+// (@decision b8e52cfe). A view running exactly one harness still badges nothing but codex — badging a
+// constant fact spends row width and buys nothing — but a view holding MORE THAN ONE live harness names
+// both, because there an unbadged row is ambiguous between "claude" and "a row this surface forgot". This
+// spec's own trio is mixed by construction (it seeds a codex row on purpose), so the LIST views below now
+// expect claude tags too; the SINGLE-session view, which can never be mixed, still expects none. The two
+// halves are asserted separately on purpose — that is what keeps the conditional honest rather than
+// collapsing it into "always badge".
 //
 // SEEDING (the no-real-claude invariant): every session is a `processState:"live"` DB row inserted through
 // the test-only POST /internal/test/seed (`loomDaemon.seedLiveSession`) — NEVER startSession, which spawns a
@@ -95,20 +102,28 @@ test.describe("session harness in the fleet views", () => {
     await expect(claudeRow).toBeVisible();
     await expect(codexRow).toBeVisible();
 
-    // ── THE OBSERVABLE, per row: the codex worker carries the marker…
+    // ── THE OBSERVABLE, per row. This trio puts TWO harnesses on screen at once, so the view is mixed and
+    // every row is named — but each row must name its OWN value, which is what proves the tag still tracks
+    // the field rather than merely "is a session row".
     await expect(codexRow.getByTestId("harness-tag")).toHaveCount(1);
     await expect(codexRow.getByTestId("harness-tag")).toHaveText("codex");
-    // …and the two rows that differ ONLY in this field carry none, so the marker tracks the VALUE rather
-    // than merely "is a session row".
-    await expect(claudeRow.getByTestId("harness-tag")).toHaveCount(0);
-    await expect(mgrRow.getByTestId("harness-tag")).toHaveCount(0);
-    // Nothing else on the whole view is badged either — a per-row check alone would not catch a stray tag
-    // rendered outside these three rows.
-    await expect(page.getByTestId("harness-tag")).toHaveCount(1);
+    // The UNSET manager and the explicitly-pinned claude worker still render IDENTICALLY to each other —
+    // the collapse this spec has always pinned. What changed is only WHAT that identical render is.
+    await expect(claudeRow.getByTestId("harness-tag")).toHaveText("claude");
+    await expect(mgrRow.getByTestId("harness-tag")).toHaveText("claude");
+    // Exactly three tags on the whole view: one per row, none stray. A per-row check alone would not catch
+    // a tag rendered outside these three rows.
+    await expect(page.getByTestId("harness-tag")).toHaveCount(3);
   });
 
   // The same shared <HarnessTag> call, on the OTHER component it was added to: the terminal card's identity
   // line (TileTitle), which backs /session/:id, the /terminals grid and the Overview terminal grid.
+  //
+  // THIS IS THE NOT-MIXED HALF of the conditional (@decision b8e52cfe), and the pair with the /terminals
+  // test below is what makes the conditional falsifiable rather than decorative: the SAME component, fed
+  // the SAME two seeded sessions, badges claude on the grid and not here. /session/:id renders ONE session,
+  // so it sits under no HarnessMixProvider and can never be mixed — if the claude tag were unconditional
+  // (or the provider leaked app-wide) this test would fail while the grid one still passed.
   test("the terminal card's identity line marks a codex session and not a claude one", async ({ page, loomDaemon }) => {
     const { claudeWorker, codexWorker } = await seedTrio(loomDaemon);
 
@@ -146,7 +161,10 @@ test.describe("session harness in the fleet views", () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${loomDaemon.baseURL}/terminals`);
     await page.locator("select").filter({ hasText: "All (" }).selectOption({ label: project.name });
-    await expect(page.getByTestId("harness-tag")).toHaveCount(1);
+    // Two tags, not one: the filtered grid holds both harnesses, so it is a MIXED view and names both
+    // (@decision b8e52cfe). That makes the geometry below a STRICTER test than the original, not a weaker
+    // one — the claude sibling now carries a badge of its own (6 chars to codex's 5) and must still fit.
+    await expect(page.getByTestId("harness-tag")).toHaveCount(2);
 
     const header = (shortId: string) =>
       page.getByTestId("tile-identity").filter({ hasText: shortId }).locator("xpath=..").locator("xpath=..");
@@ -160,13 +178,16 @@ test.describe("session harness in the fleet views", () => {
       expect(tileWidth).toBeLessThan(700);
     }
 
-    // The reference row must itself be a single line, or the comparison below means nothing.
+    // THE REGRESSION PIN is now the ABSOLUTE bound, applied to BOTH tiles. The original used the unbadged
+    // claude sibling as a single-line reference; in a mixed grid there is no unbadged sibling to compare
+    // against, so the single-line fact is asserted directly instead of relatively. Before the ad3157b9 fix
+    // the codex header read 36 against an 18 reference, so a <28 ceiling still catches that regression.
     const claudeH = (await claudeHeader.boundingBox())!.height;
     expect(claudeH).toBeLessThan(28);
-
-    // THE REGRESSION PIN: the badged row costs no extra line. Before the fix this read 36 vs 18.
     const codexH = (await codexHeader.boundingBox())!.height;
-    expect(codexH).toBeLessThanOrEqual(claudeH + 2);
+    expect(codexH).toBeLessThan(28);
+    // …and the two stay in step, so a badge that wrapped only one of them is caught as well.
+    expect(Math.abs(codexH - claudeH)).toBeLessThanOrEqual(2);
 
     // …and the short id — the part that actually tells two tiles apart — survives intact: it is the prefix
     // that gives up space, and the identity never overflows its header.

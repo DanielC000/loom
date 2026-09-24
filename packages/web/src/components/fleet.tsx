@@ -254,13 +254,12 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
         {star ? "★ " : ""}{star ? "mgr " : "w:"}{s.id.slice(0, 8)}
       </span>
       {/* Which vendor CLI this session actually runs — grouped with the id because it's an identity
-          fact about the row, not a status. Reuses the Profiles tag verbatim, so it renders ONLY for
-          codex: claude is the default and the overwhelming majority, and badging every row would
-          spend the fleet's scarcest resource (row width, and the reader's attention) on the case that
-          carries no information. `null` (never pinned) and an explicit `"claude"` both read as claude
-          here — the daemon keeps them distinct because it's a provenance question, but they spawn the
-          same binary, so there is nothing for a fleet reader to act on between them. */}
-      <HarnessTag harness={harnessOf(s.harness)} title="Runs the codex CLI, not claude" />
+          fact about the row, not a status. `null` (never pinned) and an explicit `"claude"` both read
+          as claude here: the daemon keeps them distinct because it's a provenance question, but they
+          spawn the same binary, so there is nothing for a fleet reader to act on between them. The tag
+          renders for codex always, and for claude only inside a MIXED-harness view — see
+          @decision b8e52cfe for why that is conditional on the rendered set rather than global. */}
+      <HarnessTag harness={harnessOf(s.harness)} />
       <StatusPill tone={st.tone} label={st.label} glow={st.glow} />
       {/* Decision affordance (surface 5): a manager holding a pending decision flags it inline + jumps
           straight to the answer page — derived from the SAME pending-decision signal as the inbox + bell. */}

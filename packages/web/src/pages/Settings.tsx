@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   resolveConfig,
+  resolveHarnessConfig,
   type Project,
   type ProjectConfigOverride,
   type OrchestrationConfig,
@@ -32,6 +33,11 @@ import { useActiveProject } from "../lib/activeProject";
 import { useAllAgents } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Badge, Chip, StatusPill, StaleStartupPromptWarning } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
+import {
+  CodexDefaultConfirm, HarnessDrainBanner, fleetScopeAvailable, FLEET_SCOPE_DISABLED_REASON,
+  rolesAffected, switchesToCodex, type DefaultValue, type ScopeValue,
+} from "../components/DefaultHarness";
+import { HARNESS_TITLE, type Harness } from "../lib/harnessFields";
 import { color, font, tone, type Tone } from "../theme";
 import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 import { errorText } from "../lib/loopbackCredential";
@@ -286,6 +292,17 @@ function ConfigEditor({ project }: { project: Project }) {
   // LENGTHS only; every row's `value` starts "" because this panel never renders a stored value. See
   // SessionEnvRow / seedSessionEnvRows, and buildOverride's own sessionEnv block for the delta protocol.
   const [sessionEnvRows, setSessionEnvRows] = useState<SessionEnvRow[]>(() => seedSessionEnvRows(ov.sessionEnv));
+  // Default harness (card 66b1b40d) — the project layer of a TWO-layer human-only key. Blank = inherit
+  // the platform default, which is why this editor reads the platform override at all: `resolveConfig(ov)`
+  // above is called with NO platform layer, so `resolved.harness` would claim "claude" while the platform
+  // default actually said codex — an effective-value hint that is confidently wrong. This is the one field
+  // on this page whose honest answer needs both layers, so it resolves them directly.
+  const [harnessDefault, setHarnessDefault] = useState<DefaultValue>(ov.harness?.default ?? "");
+  const [harnessScope, setHarnessScope] = useState<ScopeValue>(ov.harness?.scope ?? "");
+  const platformConfig = useQuery({ queryKey: ["platformConfig"], queryFn: () => api.getPlatformConfig() });
+  const platformOverride = platformConfig.data?.override;
+  const harnessEffective = resolveHarnessConfig(ov, platformOverride);
+  const harnessInherited = resolveHarnessConfig(undefined, platformOverride);
 
   // Build the OVERRIDE from the current form, PLUS the `unset` dot-paths a cleared field needs (card
   // 546034fa: the PATCH now MERGES onto the stored override by default, so omitting a key from `override`
@@ -372,6 +389,15 @@ function ConfigEditor({ project }: { project: Project }) {
     else { delete orch.rotationLiveCommitmentsHeading; unset.push("orchestration.rotationLiveCommitmentsHeading"); }
     applyNum(orch, "rotationLiveCommitmentsFloor", rotationFloor, unset);
     if (Object.keys(orch).length) o.orchestration = orch; else delete o.orchestration;
+
+    // harness: each half independently overridable, so each gets its own delete + `unset` dot-path (the
+    // PATCH deep-merges, so omitting a key means "leave alone" — only the unset actually clears it).
+    const harness: Partial<{ default: Harness; scope: "workers" | "fleet" }> = { ...o.harness };
+    if (harnessDefault) harness.default = harnessDefault;
+    else { delete harness.default; unset.push("harness.default"); }
+    if (harnessScope) harness.scope = harnessScope;
+    else { delete harness.scope; unset.push("harness.scope"); }
+    if (Object.keys(harness).length) o.harness = harness; else delete o.harness;
 
     if (docLint !== "inherit") o.docLint = docLint === "true";
     else { delete o.docLint; unset.push("docLint"); }
@@ -583,6 +609,12 @@ function ConfigEditor({ project }: { project: Project }) {
   // a blocked Save can never be silent about which entry is blocking it.
   const blockingErrors = [...timeoutRangeErrors, ...sessionEnvErrors];
 
+  // The switch-to-codex gate. Compared on EFFECTIVE values so blanking a codex override back onto a codex
+  // platform default is correctly not a "switch", and a save that leaves codex alone never re-asks.
+  const harnessBuiltEffective = resolveHarnessConfig(built, platformOverride);
+  const codexSwitch = switchesToCodex(harnessEffective.default, harnessBuiltEffective.default);
+  const [confirmCodex, setConfirmCodex] = useState(false);
+
   const save = useMutation({
     mutationFn: () => api.updateProjectConfig(project.id, built, unset),
     // Surface this mutation's failures INLINE (see the Save row below); tell the global mutation-error
@@ -602,6 +634,8 @@ function ConfigEditor({ project }: { project: Project }) {
       );
       qc.invalidateQueries({ queryKey: ["projects"] });
       qc.invalidateQueries({ queryKey: ["board", project.id] });
+      // The drain readout is derived from this very setting, so it is stale the instant the save lands.
+      qc.invalidateQueries({ queryKey: ["harnessDrain"] });
     },
   });
 
@@ -718,6 +752,22 @@ function ConfigEditor({ project }: { project: Project }) {
         )}
       </Panel>
 
+      <Panel data-testid="default-harness-project">
+        <SectionLabel>Default Harness</SectionLabel>
+        <Hint>
+          Which vendor CLI this project&apos;s unpinned spawns run. Overrides the fleet-wide default under
+          Settings → Global; a Profile&apos;s own harness still wins over both.
+        </Hint>
+        <div style={{ marginTop: 10 }}>
+          <DefaultHarnessFields value={harnessDefault} scope={harnessScope}
+            setValue={setHarnessDefault} setScope={setHarnessScope}
+            effective={harnessEffective} inherited={harnessInherited} />
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <HarnessDrainBanner projectId={project.id} />
+        </div>
+      </Panel>
+
       <Panel>
         <SectionLabel>Doc Lint</SectionLabel>
         <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 280 }}>
@@ -781,8 +831,14 @@ function ConfigEditor({ project }: { project: Project }) {
         </div>
       </Panel>
 
+      {confirmCodex && (
+        <CodexDefaultConfirm layer="project" scopeNote={rolesAffected(harnessScope, harnessInherited.scope)}
+          onCancel={() => setConfirmCodex(false)}
+          onConfirm={() => { setConfirmCodex(false); save.mutate(); }} />
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <Button variant="primary" disabled={!dirty || save.isPending || blockingErrors.length > 0} onClick={() => save.mutate()}>
+        <Button variant="primary" disabled={!dirty || save.isPending || blockingErrors.length > 0}
+          onClick={() => (codexSwitch ? setConfirmCodex(true) : save.mutate())}>
           {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty
@@ -952,6 +1008,13 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   const [usageSampleRetentionDays, setUsageSampleRetentionDays] = useState(numStr(override.usageSampleRetentionDays));
   // Sweep G6 — update-check poll cadence, top-level scalar, displayed in hours.
   const [updateCheckHours, setUpdateCheckHours] = useState(msStr(override.updateCheckIntervalMs, "h"));
+  // Default harness (card 66b1b40d) — the daemon-global layer of the same two-layer key the per-project
+  // panel above edits. A deep-partial group (one of server.ts's DEEP_MERGE_GROUPS), so each half takes the
+  // per-field `null` clear sentinel rather than the whole group being replaced.
+  const [harnessDefault, setHarnessDefault] = useState<DefaultValue>(override.harness?.default ?? "");
+  const [harnessScope, setHarnessScope] = useState<ScopeValue>(override.harness?.scope ?? "");
+  const harnessEffective = resolveHarnessConfig(undefined, override);
+  const harnessInherited = resolveHarnessConfig(undefined, undefined);
   // Sweep §2 — rateLimit.exhaustedThresholdPct: a plain percentage (not ms-keyed), so it gets its own
   // control alongside the GLOBAL_FIELDS ms grid rather than joining it. Per-field-nullable already
   // (rateLimitPatchOverride is derived from rateLimitOverride.shape), so blank clears just this field.
@@ -1117,6 +1180,12 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
       const n = Number(ucTrim) * UNIT_MS.h;
       (o as Record<string, unknown>).updateCheckIntervalMs = Number.isFinite(n) ? n : ucTrim;
     }
+    // harness: a DEEP_MERGE_GROUPS member whose shape is per-field nullable, so a blank half sends the
+    // explicit clear sentinel while the other half survives — the same contract the ms groups above use.
+    o.harness = {
+      default: harnessDefault === "" ? null : harnessDefault,
+      scope: harnessScope === "" ? null : harnessScope,
+    };
     // Card 503a30a0: the "Codescape" host-tool integration row was REMOVED from this form (codescape is a
     // private internal tool — end users must not see it referenced anywhere in Settings). This form
     // therefore never emits `integrations` at all; an existing persisted `integrations.codescape.path`
@@ -1130,12 +1199,23 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   const baseline = useRef(builtJson);
   const dirty = builtJson !== baseline.current;
 
+  // Same effective-value comparison as the per-project gate. At THIS layer "inherit" is just the built-in
+  // claude default, so the effective value of the form is the one-liner below rather than another
+  // resolveHarnessConfig call.
+  const codexSwitch = switchesToCodex(
+    harnessEffective.default,
+    harnessDefault === "" ? harnessInherited.default : harnessDefault,
+  );
+  const [confirmCodex, setConfirmCodex] = useState(false);
+
   const save = useMutation({
     mutationFn: () => api.updatePlatformConfig(built),
     meta: { inlineError: true },
     onSuccess: () => {
       baseline.current = builtJson;
       qc.invalidateQueries({ queryKey: ["platformConfig"] });
+      // Derived straight from this setting, so it is stale the instant the save lands.
+      qc.invalidateQueries({ queryKey: ["harnessDrain"] });
     },
   });
 
@@ -1263,6 +1343,22 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             budget. Whole number, 1–50.
           </Hint>
         </label>
+      </Panel>
+
+      <Panel data-testid="default-harness-platform">
+        <SectionLabel>Default Harness</SectionLabel>
+        <Hint>
+          Which vendor CLI a spawn runs when its Profile pins none, across every project. A single project
+          can override this under Settings → Project; a Profile&apos;s own harness wins over both.
+        </Hint>
+        <div style={{ marginTop: 10 }}>
+          <DefaultHarnessFields value={harnessDefault} scope={harnessScope}
+            setValue={setHarnessDefault} setScope={setHarnessScope}
+            effective={harnessEffective} inherited={harnessInherited} />
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <HarnessDrainBanner />
+        </div>
       </Panel>
 
       <Panel>
@@ -1402,8 +1498,14 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         )}
       </Panel>
 
+      {confirmCodex && (
+        <CodexDefaultConfirm layer="platform" scopeNote={rolesAffected(harnessScope, harnessInherited.scope)}
+          onCancel={() => setConfirmCodex(false)}
+          onConfirm={() => { setConfirmCodex(false); save.mutate(); }} />
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+        <Button variant="primary" disabled={!dirty || save.isPending}
+          onClick={() => (codexSwitch ? setConfirmCodex(true) : save.mutate())}>
           {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty
@@ -3103,6 +3205,54 @@ function SessionEnvEditor({ rows, set }: { rows: SessionEnvRow[]; set: (r: Sessi
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 2 }}>
         <Button onClick={add} data-testid="senv-add">＋ Add variable</Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The two Default Harness selects — which vendor CLI an unpinned spawn takes, and which roles that
+ * covers — shared verbatim by the platform and per-project panels so the two layers can never drift in
+ * wording or in which scopes they offer. `effective` is resolved through BOTH layers (a project reading
+ * only its own override would claim "claude" while the platform default said codex); `inherited` is what
+ * blanking the field actually reverts to at this layer, which is a different value on each.
+ */
+function DefaultHarnessFields({ value, scope, setValue, setScope, effective, inherited }: {
+  value: DefaultValue;
+  scope: ScopeValue;
+  setValue: (v: DefaultValue) => void;
+  setScope: (v: ScopeValue) => void;
+  effective: { default: Harness; scope: "workers" | "fleet" };
+  inherited: { default: Harness; scope: "workers" | "fleet" };
+}) {
+  return (
+    <div className="loom-field-grid loom-field-grid-2">
+      <label style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+        <span style={fieldLabel}>Default harness</span>
+        <Select value={value} onChange={(e) => setValue(e.target.value as DefaultValue)}>
+          <option value="">inherit ({HARNESS_TITLE[inherited.default]})</option>
+          <option value="claude">{HARNESS_TITLE.claude}</option>
+          <option value="codex">{HARNESS_TITLE.codex}</option>
+        </Select>
+        <Hint>{effHint(HARNESS_TITLE[effective.default])}</Hint>
+        <Hint>
+          Which vendor CLI a spawn takes when its Profile pins none. A Profile&apos;s own harness always
+          wins over this, and a session already running keeps the harness pinned on its row.
+        </Hint>
+      </label>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+        <span style={fieldLabel}>Roles covered</span>
+        <Select value={scope} onChange={(e) => setScope(e.target.value as ScopeValue)}>
+          <option value="">inherit ({inherited.scope})</option>
+          <option value="workers">workers</option>
+          {/* Rendered DISABLED rather than hidden: an absent option reads as a UI that forgot it, and the
+              owner would have no way to learn the fleet-wide switch exists but is gated. */}
+          <option value="fleet" disabled={!fleetScopeAvailable}>
+            fleet{fleetScopeAvailable ? "" : " — not available yet"}
+          </option>
+        </Select>
+        <Hint>affects: <span style={{ color: color.text }}>{rolesAffected(scope, inherited.scope)}</span></Hint>
+        {!fleetScopeAvailable && <Hint>{FLEET_SCOPE_DISABLED_REASON}</Hint>}
+      </label>
     </div>
   );
 }

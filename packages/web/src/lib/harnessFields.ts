@@ -90,3 +90,64 @@ export const CODEX_FAIL_OPEN_FIELDS = (Object.keys(CODEX_DROPPED_FIELDS) as Drop
 export function harnessDrop(harness: Harness, field: DroppedFieldKey): HarnessDrop | null {
   return harness === "codex" ? CODEX_DROPPED_FIELDS[field] : null;
 }
+
+// ── Mixed-harness views + the default-harness config ────────────────────────────────────────────────
+
+/** Vendor product name, for a control that names the choice rather than tagging a row. */
+export const HARNESS_TITLE: Record<Harness, string> = { claude: "Claude Code", codex: "Codex CLI" };
+
+/** The shape {@link liveHarnesses} reads — structural, so a SessionListItem and a terminal-card session both fit. */
+export interface HarnessMixSession {
+  processState?: string;
+  harness?: Harness | null;
+}
+
+/**
+ * The distinct harnesses actually RUNNING in a set of sessions. Only `live` rows count: an exited/archived
+ * row is history, and letting one widen the set would badge a whole view off a session nobody can act on.
+ * An unset `harness` reads as claude (see {@link harnessOf}), so a fleet of untouched sessions is a
+ * one-harness set, never a mixed one.
+ */
+export function liveHarnesses(sessions: readonly HarnessMixSession[]): Set<Harness> {
+  const out = new Set<Harness>();
+  for (const s of sessions) {
+    if (s.processState !== undefined && s.processState !== "live") continue;
+    out.add(harnessOf(s.harness));
+  }
+  return out;
+}
+
+/** Which roles a default-harness `scope` actually reaches — the human-facing copy for the shared allowlist. */
+export type HarnessDefaultScopeValue = "workers" | "fleet";
+
+// ── GET /api/harness/drain ──────────────────────────────────────────────────────────────────────────
+//
+// A DERIVED read (no stored drain state): which live sessions still run a harness that a spawn made right
+// now would not pick. Typed here rather than imported from @loom/shared because the daemon builds the
+// shape inline in `SessionService.harnessDrainStatus` — keep this in step with that return type.
+
+/** One `codexIncompatibilities` item: the profile/session field that cannot be honoured, and why. */
+export interface HarnessDrainReason { id: string; reason: string }
+
+/** A session a drain WILL move — its next spawn/recycle lands on the target. */
+export interface HarnessDrainSession {
+  sessionId: string;
+  role: string | null;
+  harness: Harness;
+  projectId: string;
+}
+
+/** A session a drain will NEVER move: a recycle re-resolves to codex but the row carries codex-incompatible fields. */
+export interface HarnessDrainBlocked extends HarnessDrainSession {
+  wanted: Harness;
+  reasons: HarnessDrainReason[];
+}
+
+export interface HarnessDrainStatus {
+  target: Harness;
+  scope: "fleet" | { projectId: string };
+  pending: HarnessDrainSession[];
+  blocked: HarnessDrainBlocked[];
+  /** True only when NOTHING is off target — `pending` AND `blocked` both empty. */
+  done: boolean;
+}
