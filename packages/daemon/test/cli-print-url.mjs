@@ -4,7 +4,8 @@ import "./_guard.mjs"; // suite consistency (sets LOOM_TEST=1); this test touche
 //   - prints http://<host>:<port>/?token=<secret> on STDOUT, defaults host 127.0.0.1, honors --host/--port;
 //   - warns on STDERR (never stdout) that the URL is a live credential, and stdout carries the URL only;
 //   - `status` (running AND not running) output never contains the token — asserted against a fake daemon;
-//   - the source never routes the secret URL to console.log outside the print-url path (static scan);
+//   - STRUCTURE: no exported function returns a tokenized URL; openBrowser/printUrlCmd (the two sinks) are
+//     exercised through injected launch/write seams (card 85671808);
 //   - host/port input validation rejects anything that could smuggle characters into the URL;
 //   - a missing credential file is a clean exit 1 with no URL.
 import fs from "node:fs";
@@ -86,15 +87,48 @@ try {
     const down = await runLoom(["status", "--port", String(port)]);
     check("status (not running) output never contains the token", down.code === 1 && !down.stdout.includes(SECRET) && !down.stderr.includes(SECRET));
   }
-  // (6) static: the secret-bearing URL is only ever logged from the explicit print-url function.
+  // (6) STRUCTURE (card 85671808), not a text scan: the tokenized URL exists only inside the two sinks.
   {
-    const src = fs.readFileSync(BIN, "utf8");
-    check("no console.* call takes urlWithToken(", !/console\.\w+\([^;\n]*urlWithToken\(/.test(src));
-    const printers = src.match(/console\.log\([^;\n]*tokenizedUrl\(/g) || [];
-    check("exactly one console.log prints tokenizedUrl( (the print-url path)", printers.length === 1);
-    check("exactly one `?token=` builder (shared by print-url and openBrowser)", (src.match(/`[^`\n]*\?token=\$\{/g) || []).length === 1);
-    // negative control: the scan pattern DOES match a known-bad line.
-    check("control: scan pattern flags console.log(urlWithToken(url))", /console\.\w+\([^;\n]*urlWithToken\(/.test("console.log(urlWithToken(url));"));
+    const mod = await import(pathToFileURL(BIN).href);
+    // (a) no exported function is a tokenized-URL producer: call every exported function with plausible
+    // inputs under the temp LOOM_HOME and assert none RETURNS a string carrying the secret.
+    process.env.LOOM_HOME = home;
+    const returned = [];
+    for (const [name, fn] of Object.entries(mod)) {
+      if (typeof fn !== "function" || name === "printUrlCmd" || name === "openBrowser") continue;
+      for (const args of [[], ["http://127.0.0.1:1"], ["127.0.0.1"], [["open"]]]) {
+        try { returned.push(name + "=" + JSON.stringify(fn(...args))); } catch { /* ignore */ }
+      }
+    }
+    check("no exported helper returns the secret (exports: " + Object.keys(mod).join(",") + ")", returned.length > 0 && !returned.some((r) => r.includes(SECRET)));
+    check("tokenizedUrl / urlWithToken are not exported", !("tokenizedUrl" in mod) && !("urlWithToken" in mod));
+    // (b) sink 1: openBrowser takes a BARE origin and appends the token itself, only to its launcher.
+    const launched = [];
+    const returnedByOpen = mod.openBrowser("http://127.0.0.1:5000", { launch: (u) => launched.push(u) });
+    check("openBrowser hands the launcher the tokenized URL", launched.length === 1 && launched[0] === `http://127.0.0.1:5000/?token=${SECRET}`);
+    check("openBrowser returns nothing (no tokenized URL escapes as a value)", returnedByOpen === undefined);
+    const noKey = fs.mkdtempSync(path.join(os.tmpdir(), "loom-print-url-nokey-"));
+    process.env.LOOM_HOME = noKey;
+    const bare = [];
+    mod.openBrowser("http://127.0.0.1:5000", { launch: (u) => bare.push(u) });
+    check("openBrowser degrades to the bare origin when no credential file exists", bare[0] === "http://127.0.0.1:5000");
+    fs.rmSync(noKey, { recursive: true, force: true });
+    process.env.LOOM_HOME = home;
+    // (c) sink 2: printUrlCmd writes the tokenized URL exactly once, to its injected writer, returning only an exit code.
+    const written = [];
+    const origErr = console.error; console.error = () => {};
+    let code;
+    try { code = mod.printUrlCmd({ port: 5000, host: undefined }, { write: (u) => written.push(u) }); } finally { console.error = origErr; }
+    check("printUrlCmd writes the tokenized URL once, via its writer, and returns an exit code", code === 0 && written.length === 1 && written[0] === `http://127.0.0.1:5000/?token=${SECRET}`);
+    // (d) negative control: an openBrowser that leaked via console would be observable through the same seam.
+    const seen = [];
+    const origLog = console.log; console.log = (...a) => seen.push(a.join(" "));
+    try { mod.openBrowser("http://127.0.0.1:5000", { launch: (u) => console.log(u) }); } finally { console.log = origLog; }
+    check("control: a launcher that prints IS observable as a console leak (detector can fail)", seen.some((l) => l.includes(SECRET)));
+    const seen2 = [];
+    console.log = (...a) => seen2.push(a.join(" "));
+    try { mod.openBrowser("http://127.0.0.1:5000", { launch: () => {} }); } finally { console.log = origLog; }
+    check("openBrowser itself logs nothing to console.log", seen2.length === 0);
   }
   // (7) input validation: flag scoping + host/port smuggling.
   {

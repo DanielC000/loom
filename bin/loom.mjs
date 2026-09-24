@@ -206,8 +206,10 @@ const urlFor = (port) => `http://127.0.0.1:${port}`;
 // (the file not created yet) degrades to the bare URL: the browser just won't have a token until the
 // user revisits a tokenized URL once.
 //
-// `urlWithToken` (embeds the real secret) is for `openBrowser` ONLY — a one-time OS-process argv, not a
-// durable channel. It must NEVER be passed to `console.log`: `loom start --no-open` is how `loom service
+// The tokenized URL is built in exactly TWO sinks — `openBrowser` (a one-time OS-process argv, not a
+// durable channel) and `printUrlCmd` (the explicit `open --print-url` stdout write) — and no free function
+// returns one (card 85671808; cli-print-url.mjs proves the structure by injection, not a text scan). Both
+// take a BARE origin and read the secret themselves. A tokenized URL must NEVER reach a console: `loom start --no-open` is how `loom service
 // install` registers the daemon with the OS service manager (systemd/launchd/Task Scheduler), which
 // commonly captures a foregrounded service's own stdout into ITS OWN durable, often broadly-readable log
 // (e.g. `journalctl`) — the exact same "secret lands in a durable log agents routinely read for unrelated
@@ -221,12 +223,9 @@ function readLoopbackSecretResult() {
   catch (error) { return { secret: null, error }; }
 }
 function readLoopbackSecret() { return readLoopbackSecretResult().secret; }
-// The ONE tokenized-URL builder (origin like `http://127.0.0.1:4317`, no trailing slash).
+// The ONE tokenized-URL builder (origin like `http://127.0.0.1:4317`, no trailing slash). Module-private
+// and NOT exported; only the two sinks above may call it.
 const tokenizedUrl = (origin, secret) => `${origin}/?token=${encodeURIComponent(secret)}`;
-function urlWithToken(url) {
-  const secret = readLoopbackSecret();
-  return secret ? tokenizedUrl(url, secret) : url;
-}
 function urlHint(url) {
   return readLoopbackSecret()
     ? `${url}  (first visit: append ?token=<value>, where <value> is the contents of ${loopbackSecretPath()} — the browser remembers it after)`
@@ -305,7 +304,7 @@ function classifyPortResponse(port, timeoutMs = 1500) {
 // POST /internal/shutdown (the daemon's graceful control hook) → { status } or { error }.
 // Card 93249b52: this route now requires the SAME loopback-secret bearer credential every /api/* write
 // does (see gateway/server.ts's `isGuardedInternalWrite`) — this CLI runs on the same host and can read
-// the secret file directly (`readLoopbackSecret`, already used above for `urlWithToken`/`urlHint`), so no
+// the secret file directly (`readLoopbackSecret`, already used above for `openBrowser`/`urlHint`), so no
 // new discovery mechanism is needed. `stop()` only ever targets an ALREADY-running daemon (found via the
 // PID file / a live port probe), and `getOrCreateLoopbackSecret()` runs in index.ts's `main()` BEFORE the
 // gateway ever starts listening — so by the time a daemon is reachable at all, the secret file is
@@ -335,8 +334,7 @@ async function waitForExit(pid, timeoutMs) {
   return !isAlive(pid);
 }
 
-// Best-effort: open the default browser. If it fails, the URL is already printed.
-function openBrowser(target) {
+function launchBrowser(target) {
   try {
     let cmd, cmdArgs;
     if (process.platform === "win32") { cmd = "cmd"; cmdArgs = ["/c", "start", "", target]; }
@@ -348,6 +346,12 @@ function openBrowser(target) {
     child.on("error", () => {});
     child.unref();
   } catch { /* best-effort */ }
+}
+// Best-effort: open the default browser at a BARE origin, appending the loopback token here (a daemon
+// still mid-boot has no secret file yet → the bare origin). `launch` is a test seam.
+export function openBrowser(origin, { launch = launchBrowser } = {}) {
+  const secret = readLoopbackSecret();
+  launch(secret ? tokenizedUrl(origin, secret) : origin);
 }
 
 function resolveDaemonEntry() {
@@ -375,7 +379,7 @@ async function startForeground({ port, open }) {
   const ready = await waitForReady(port, 30000);
   if (ready) {
     console.log(`\n  Loom is running at ${urlHint(url)}\n  Press Ctrl-C to stop.\n`);
-    if (open) openBrowser(urlWithToken(url));
+    if (open) openBrowser(url);
   } else {
     console.error(`loom: the daemon did not answer on ${url} within 30s — it may still be starting; open the URL manually.`);
   }
@@ -413,7 +417,7 @@ async function startDetached({ port, open }) {
   const ready = await waitForReady(port, 30000);
   if (ready) {
     console.log(`\n  Loom is running at ${urlHint(url)}  (detached, PID ${child.pid})\n  Stop it with 'loom stop'.\n`);
-    if (open) openBrowser(urlWithToken(url));
+    if (open) openBrowser(url);
     return 0;
   }
   console.error(`loom: the daemon did not answer on ${url} within 30s (PID ${child.pid}).
@@ -554,16 +558,16 @@ async function openCmd({ port, printUrl, host }) {
     return 1;
   }
   console.log(`loom: opening ${url} …`);
-  openBrowser(urlWithToken(url));
+  openBrowser(url);
   return 0;
 }
 
 // `loom open --print-url`: the EXPLICIT, opt-in way to hand a tunnelled browser (which can't run `loom
 // open`) the loopback credential in a URL. The secret still comes only from the host filesystem — no
 // network surface. It prints to stdout ONLY on this explicit request (never from start/status — see the
-// urlWithToken note above) and warns on stderr that the URL is a live credential. `port` here is the
+// tokenized-URL note above) and warns on stderr that the URL is a live credential. `port` here is the
 // address the URL will be opened at (the tunnel's local port), so no daemon probe is made.
-function printUrlCmd({ port, host }) {
+export function printUrlCmd({ port, host }, { write = console.log } = {}) {
   const { secret, error } = readLoopbackSecretResult();
   if (!secret) {
     if (error && error.code !== "ENOENT") {
@@ -579,7 +583,7 @@ function printUrlCmd({ port, host }) {
   const p = port ?? rec?.port ?? resolvePort(undefined);
   const h = host === undefined ? "127.0.0.1" : normalizeUrlHost(host);
   console.error("loom: WARNING — this URL embeds the loopback access credential. Anyone holding it can drive the full local API. Treat it like a password: don't paste it into chat, tickets or logs.");
-  console.log(tokenizedUrl(`http://${h}:${p}`, secret));
+  write(tokenizedUrl(`http://${h}:${p}`, secret));
   return 0;
 }
 
