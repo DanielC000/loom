@@ -4,7 +4,7 @@
 //   node --experimental-strip-types packages/web/test/loopback-credential.mjs
 import assert from "node:assert/strict";
 import {
-  isCredentialGuardFailure, isCredentialSocketFailure,
+  isCredentialGuardFailure, isCredentialGuardMessage, isCredentialSocketFailure,
   credentialLock, noteCredentialLock, clearCredentialLock, subscribeCredentialLock,
   resetCredentialLockForTest,
 } from "../src/lib/loopbackCredential.ts";
@@ -41,6 +41,16 @@ check("a non-401 carrying the same words is not a credential failure", () => {
 check("an empty / non-JSON 401 body is not a credential failure", () => {
   assert.equal(isCredentialGuardFailure(401, ""), false);
   assert.equal(isCredentialGuardFailure(401, "/api/projects -> 401"), false);
+});
+
+// The message-only half, used by main.tsx to suppress its blocking window.alert for this one class (the
+// banner already covers it). Same three bodies, same verdicts — a drift between the two would mean either
+// a modal per failed write, or a genuine error silently swallowed.
+check("the message-only predicate agrees with the status-aware one", () => {
+  assert.equal(isCredentialGuardMessage(GUARD_401), true);
+  assert.equal(isCredentialGuardMessage(UNDETERMINABLE_401), false);
+  assert.equal(isCredentialGuardMessage(TRUST_TIER_401), false);
+  assert.equal(isCredentialGuardMessage("/api/projects -> 500"), false, "an unrelated failure must still alert");
 });
 
 // ── socket inference ──────────────────────────────────────────────────────────

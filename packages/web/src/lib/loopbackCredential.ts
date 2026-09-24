@@ -68,7 +68,16 @@ export function captureTokenFromUrl(): void {
  * for remote and undeterminable-peer callers, for whom this secret is the wrong credential or no help.
  */
 export function isCredentialGuardFailure(status: number, message: string): boolean {
-  return status === 401 && message.includes("loom open");
+  return status === 401 && isCredentialGuardMessage(message);
+}
+
+/**
+ * The message-only half, for a caller holding a thrown Error and no status — the global mutation-error
+ * handler, which suppresses its blocking `window.alert` for this one class because the banner already
+ * says it, better, and without blocking. A page of failing writes would otherwise be a page of modals.
+ */
+export function isCredentialGuardMessage(message: string): boolean {
+  return message.includes("loom open");
 }
 
 /**
