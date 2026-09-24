@@ -5276,6 +5276,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // decision). Includes answered AND consumed questions (a binding stays pending after the agent consumes
   // its answer), so this deliberately does NOT reuse listOpenQuestions' open-only filter.
   app.get("/api/pending-bindings", async () => deps.db.listPendingBindings());
+  // Harness drain status (card 3d8edea5): read-only, DERIVED (no stored drain state) view of which live
+  // sessions still run a harness a fresh spawn would no longer pick. Human-only loopback GET — Tier 0 by
+  // the fail-closed default (deliberately NOT in TIER_1_ROUTES) and never an agent MCP tool. `?projectId=`
+  // narrows to one project (404 for an unknown id); omitted = the whole fleet.
+  app.get("/api/harness/drain", async (req, reply) => {
+    const { projectId } = req.query as { projectId?: string };
+    if (projectId === undefined) return deps.sessions.harnessDrainStatus("fleet");
+    if (!deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });
+    return deps.sessions.harnessDrainStatus({ projectId });
+  });
   app.post("/api/questions/:id/answer", async (req, reply) => {
     const { id } = req.params as { id: string };
     const question = deps.db.getQuestion(id);

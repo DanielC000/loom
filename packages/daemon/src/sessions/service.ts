@@ -2547,6 +2547,37 @@ export class SessionService {
     return harnessDefaultForRole(resolveHarnessConfig(projectConfig, this.db.getPlatformConfig()), role);
   }
 
+  /**
+   * Harness DRAIN status (card 3d8edea5): which LIVE, non-archived in-scope sessions run a harness that a spawn
+   * made RIGHT NOW would not pick. A pure derived read — no persisted drain state. Each session is re-resolved
+   * through the real `resolveAgentSpawn` (profile pin > project > platform > claude, with the session's own
+   * role), never a second copy of that precedence. `target` is the worker-role default the scope resolves to
+   * (the fleet's platform-layer default, or the project's own resolved default); it is informational — `pending`
+   * is decided per session. A session whose agent/project row is gone is skipped (nothing to resolve against).
+   */
+  harnessDrainStatus(scope: "fleet" | { projectId: string }): {
+    target: "claude" | "codex";
+    scope: "fleet" | { projectId: string };
+    pending: { sessionId: string; role: SessionRole | null; harness: "claude" | "codex"; projectId: string }[];
+    done: boolean;
+  } {
+    const platformConfig = this.db.getPlatformConfig();
+    const targetProjectConfig = scope === "fleet" ? undefined : this.db.getProject(scope.projectId)?.config;
+    const target = harnessDefaultForRole(resolveHarnessConfig(targetProjectConfig, platformConfig), "worker") ?? "claude";
+    const pending: { sessionId: string; role: SessionRole | null; harness: "claude" | "codex"; projectId: string }[] = [];
+    for (const s of this.db.listAllSessions()) {
+      if (s.processState !== "live") continue;
+      if (scope !== "fleet" && s.projectId !== scope.projectId) continue;
+      const agent = this.db.getAgent(s.agentId);
+      const project = this.db.getProject(s.projectId);
+      if (!agent || !project) continue;
+      const current = s.harness ?? "claude";
+      const wanted = this.resolveAgentSpawn(agent, resolveConfig(project.config), s.role ?? undefined).harness ?? "claude";
+      if (current !== wanted) pending.push({ sessionId: s.id, role: s.role ?? null, harness: current, projectId: s.projectId });
+    }
+    return { target, scope, pending, done: pending.length === 0 };
+  }
+
   // @decision a92ea138 — companion "/new" reinject is COMPOSE-ONLY (never spawns/writes/re-arms): passes
   // explicitRole:"assistant" rather than re-resolving the agent's CURRENT profile, so a profile edited
   // after companion creation can't change what a reinject composes for it.
