@@ -92,6 +92,8 @@ import { listWebhookEndpoints, createWebhookEndpoint, deleteWebhookEndpoint, set
 import { detectIntegrations } from "../integrations/detect.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+/** Min gap between honoured `repaint` frames from one REMOTE /ws/term socket (card 5b4ddca5). */
+const REMOTE_REPAINT_MIN_INTERVAL_MS = 1000;
 
 // @decision cda454c8 — the ONLY writes exempt from the loopback-secret guard (they carry the run API key
 // in the same Bearer header). Never widen: a new entry needs an exact pattern AND authRunKey called first.
@@ -5663,11 +5665,22 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       onData: (b) => { if (socket.readyState === socket.OPEN) socket.send(b); },
       onControl: (e) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(e)); },
     });
+    let lastRemoteRepaintAt = 0;
     socket.on("message", (raw: Buffer) => {
       const msg = parseWsJsonObject(raw) as TerminalInput | null;
       if (!msg) return;
       // Remote peer: repaint only (stdin and resize dropped) — see the @decision 710a34fa note above.
-      if (remotePeer) { if (msg.type === "repaint") deps.pty.repaint(sessionId); return; }
+      // Card 5b4ddca5: a remote repaint is rate-limited per socket (excess frames dropped); loopback is not.
+      if (remotePeer) {
+        if (msg.type === "repaint") {
+          const now = performance.now();
+          if (lastRemoteRepaintAt === 0 || now - lastRemoteRepaintAt >= REMOTE_REPAINT_MIN_INTERVAL_MS) {
+            lastRemoteRepaintAt = now;
+            deps.pty.repaint(sessionId);
+          }
+        }
+        return;
+      }
       // RAW passthrough — NOT the busy-gated enqueueStdin (which is for programmatic agent turns).
       // SECURITY (card 018ce1db): a raw stdin write is ALSO a Primitive-A owner-attestation writer —
       // PtyHost.writeStdin feeds the SAME `pendingRawOwnerSubmit`/UserPromptSubmit mechanism a genuine

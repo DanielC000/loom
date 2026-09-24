@@ -100,6 +100,18 @@ try {
   check("(a) remote Tier-1 token: resize is dropped", !resizes.includes("agent-session-1"));
   wsSess.close();
 
+  // Card 5b4ddca5: a FLOOD of remote repaints on one socket yields a bounded number of pty repaints. Frames
+  // on one socket are processed in order, so the follow-up probe below (sent after the limiter window) being
+  // honored proves every flood frame was already processed — the count is then anchored, not a fixed wait.
+  const wsFlood = await app.injectWS("/ws/term/agent-session-flood", { headers: { ...H, "sec-websocket-protocol": proto(TOKEN) }, socket: REMOTE });
+  const floodCount = () => repaints.filter((r) => r === "agent-session-flood").length;
+  for (let i = 0; i < 50; i++) wsFlood.send(JSON.stringify({ type: "repaint" }));
+  check("(flood) first remote repaint honored", await waitFor(() => floodCount() >= 1));
+  const probeEnd = Date.now() + 5000;
+  while (floodCount() < 2 && Date.now() < probeEnd) { wsFlood.send(JSON.stringify({ type: "repaint" })); await waitFor(() => floodCount() >= 2, 100); }
+  check("(flood) 50-frame flood + later probe → exactly 2 pty repaints (flood bounded to 1, probe honored after the window)", floodCount() === 2);
+  wsFlood.close();
+
   // loopback controls (with the loopback secret): write to both an agent session and the shell still works
   const lp = (t) => ({ ...LH, "sec-websocket-protocol": proto(t) });
   const lpS = await app.injectWS("/ws/term/agent-session-2", { headers: lp(LOOPBACK_SECRET), socket: LOOP });

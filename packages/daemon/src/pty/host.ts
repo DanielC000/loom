@@ -2348,6 +2348,10 @@ interface Live {
   // before calling `ptyWrite`/`writeChunked` must check `alive && !killed`, not `alive` alone. Never
   // reset back to false (a fresh spawn/resume always gets a brand-new Live object, never a reused one).
   killed: boolean;
+  /** Number of `writeChunked` bursts currently mid-flight (first chunk written, `done` not yet fired).
+   *  Optional so construction sites needn't set it; `repaint()` reads it to skip a Ctrl-L that would
+   *  land inside a paced bracketed paste (card 5b4ddca5). */
+  chunkedWritesInFlight?: number;
   // Epoch ms when THIS pty process started — set once at creation for every kind. Distinct from the DB
   // session's createdAt (unchanged across a resume/recycle/upgrade): this is the CURRENT live process's
   // own start, so a resume/fork/recycle/companion-upgrade (all through createPty) each get a fresh value.
@@ -10575,14 +10579,20 @@ export class PtyHost {
     if (!live?.alive || live.killed) { done?.(); return; }
     if (text.length === 0) { done?.(); return; }
     let i = 0;
+    // Card 5b4ddca5: mark the burst in flight for repaint()'s skip; released on EVERY exit path below.
+    live.chunkedWritesInFlight = (live.chunkedWritesInFlight ?? 0) + 1;
+    const finish = (): void => {
+      live.chunkedWritesInFlight = Math.max(0, (live.chunkedWritesInFlight ?? 1) - 1);
+      done?.();
+    };
     const step = (): void => {
       const l = this.live.get(sessionId);
       // Same guarantee as above: the session died (or was killed) mid-burst — still fire `done` once.
-      if (!l?.alive || l.killed) { done?.(); return; }
+      if (!l?.alive || l.killed) { finish(); return; }
       const end = surrogateSafeChunkEnd(text, i, PTY_WRITE_CHUNK_UNITS);
       this.ptyWrite(sessionId, l, text.slice(i, end), "chunk");
       i = end;
-      if (i >= text.length) { done?.(); return; }
+      if (i >= text.length) { finish(); return; }
       setTimeout(step, PTY_WRITE_CHUNK_DELAY_MS);
     };
     step();
@@ -10593,7 +10603,10 @@ export class PtyHost {
     // Card bb3d9005 (S1): `alive` alone stays true through the kill()→'exit' window — see Live.killed's
     // doc. A viewer repaint landing in that window used to write to a destroyed socket and crash the
     // whole daemon; `!live.killed` closes it.
-    if (live?.alive && !live.killed) this.ptyWrite(sessionId, live, "\x0c", "repaint-ctrl-l"); // Ctrl-L
+    // Card 5b4ddca5: skip while a chunked write (paste/backspace burst) is mid-flight — a Ctrl-L there
+    // lands at a chunk seam inside the paste (the form-feed race 2b57b5a9 reconciles). Dropped, not deferred: a repaint
+    // is idempotent and the viewer's next request covers it.
+    if (live?.alive && !live.killed && !(live.chunkedWritesInFlight ?? 0)) this.ptyWrite(sessionId, live, "\x0c", "repaint-ctrl-l"); // Ctrl-L
   }
 
   stop(sessionId: string, mode: StopMode, opts?: { shell?: boolean }): boolean | void {
