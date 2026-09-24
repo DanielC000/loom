@@ -1,0 +1,147 @@
+import "./_guard.mjs";
+// Card 710a34fa — a NON-loopback caller holding a valid Tier-1 gateway token must NOT be able to write stdin
+// over /ws/term to (a) an agent session pty or (b) attach to a HOST SHELL made by POST /api/terminals; it may
+// still READ an agent session (subscribe) and ask for a repaint. Loopback (with the loopback secret) is unchanged.
+// HERMETIC + CLAUDE-FREE + NETWORK-FREE: buildServer + injectWS with a `socket:{remoteAddress}` override and a
+// recording pty stub. The stub cannot tell a shell from a session (neither can the real handler — one `live` map).
+import fs from "node:fs";
+import path from "node:path";
+import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
+
+const TMP = mkdtempManaged("loom-wsterm-remote-");
+process.env.LOOM_HOME = TMP;
+process.env.LOOM_PORT = String(hermeticPort());
+const sandboxHome = path.join(TMP, "home");
+fs.mkdirSync(sandboxHome, { recursive: true });
+process.env.USERPROFILE = sandboxHome;
+process.env.HOME = sandboxHome;
+requireHermeticEnv();
+
+const { Db } = await import("../dist/db.js");
+const { buildServer } = await import("../dist/gateway/server.js");
+const { WS_GENERIC_SUBPROTOCOL, WS_BEARER_PREFIX } = await import("../dist/gateway/trust-tier.js");
+
+let failures = 0;
+const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+const HOST = "loom-remote-test.example.com";
+const TOKEN = "test-valid-gateway-token";
+const LOOPBACK_SECRET = "loopback-secret-xyz";
+const REMOTE = { remoteAddress: "203.0.113.7" };
+const writes = [];
+const shells = new Map();
+const subs = [], repaints = [], resizes = [];
+const ptyStub = {
+  subscribe: (id) => { subs.push(id); return () => {}; },
+  writeStdin: (id, data) => { writes.push({ id, data }); },
+  repaint: (id) => { repaints.push(id); }, resize: (id) => { resizes.push(id); },
+  listShells: () => [...shells.values()],
+  spawnShell: (o) => { shells.set(o.id, { id: o.id, alive: true }); },
+  stop: () => {},
+};
+const stub = {};
+const db = new Db(path.join(TMP, "loom.db"));
+db.insertProject({ id: "p1", name: "P1", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: new Date().toISOString(), archivedAt: null });
+db.setPlatformConfig({ remoteAccess: { enabled: true, bindHost: HOST } });
+const app = await buildServer({
+  db, pty: ptyStub, sessions: { killAllWorkers: () => 0 }, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub,
+  userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, requestShutdown: () => {},
+  verifyGatewayToken: (t) => t === TOKEN, loopbackSecret: LOOPBACK_SECRET,
+});
+const H = { host: HOST, origin: `https://${HOST}` };
+const proto = (t) => `${WS_GENERIC_SUBPROTOCOL}, ${WS_BEARER_PREFIX}${t}`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred, ms = 2000) { const end = Date.now() + ms; while (Date.now() < end) { if (pred()) return true; await sleep(20); } return pred(); }
+
+try {
+  // Create the host shell the way the owner's UI does: over LOOPBACK (with the loopback secret).
+  const created = await app.inject({
+    method: "POST", url: "/api/terminals", remoteAddress: "127.0.0.1",
+    headers: { host: "127.0.0.1", origin: "http://127.0.0.1", "content-type": "application/json", authorization: `Bearer ${LOOPBACK_SECRET}` },
+    payload: { projectId: "p1", command: "sh" },
+  });
+  const shellId = created.json().id;
+  check("setup: shell created via loopback POST /api/terminals (201)", created.statusCode === 201 && !!shellId);
+
+  const remotePost = await app.inject({
+    method: "POST", url: "/api/terminals", remoteAddress: REMOTE.remoteAddress,
+    headers: { ...H, "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, payload: { projectId: "p1", command: "sh" },
+  });
+  check("control: a remote token holder CANNOT create a shell (POST /api/terminals → 403, Tier 0)", remotePost.statusCode === 403);
+
+  let denied = false;
+  try { (await app.injectWS(`/ws/term/${shellId}`, { headers: H, socket: REMOTE })).close(); } catch { denied = true; }
+  check("control: remote WITHOUT a token cannot open /ws/term (rejected)", denied);
+
+  const LOOP = { remoteAddress: "127.0.0.1" };
+  const LH = { host: "127.0.0.1", origin: "http://127.0.0.1" };
+  // (b) host shell: remote token holder is refused outright (closed, never subscribed, no write)
+  let shellClosed = false;
+  try {
+    const ws = await app.injectWS(`/ws/term/${shellId}`, { headers: { ...H, "sec-websocket-protocol": proto(TOKEN) }, socket: REMOTE });
+    ws.on("close", () => { shellClosed = true; });
+    try { ws.send(JSON.stringify({ type: "stdin", data: "echo pwned" })); } catch { /* closed */ }
+    await waitFor(() => shellClosed);
+  } catch { shellClosed = true; }
+  check("(b) remote Tier-1 token: host shell socket is CLOSED", shellClosed);
+  check("(b) remote Tier-1 token: NO stdin reached the host shell pty", !writes.some((w) => w.id === shellId));
+  check("(b) remote Tier-1 token: never subscribed to the host shell (no read either)", !subs.includes(shellId));
+
+  // (a) agent session: remote may READ + repaint, may NOT write stdin or resize
+  const wsSess = await app.injectWS("/ws/term/agent-session-1", { headers: { ...H, "sec-websocket-protocol": proto(TOKEN) }, socket: REMOTE });
+  check("(a) remote Tier-1 token: READ of an agent session still works (subscribed)", subs.includes("agent-session-1"));
+  wsSess.send(JSON.stringify({ type: "stdin", data: "hi" }));
+  wsSess.send(JSON.stringify({ type: "resize", cols: 10, rows: 10 }));
+  wsSess.send(JSON.stringify({ type: "repaint" }));
+  check("(a) remote repaint is still honored (positive control for the message path)", await waitFor(() => repaints.includes("agent-session-1")));
+  check("(a) remote Tier-1 token: stdin to an agent session pty is DROPPED", !writes.some((w) => w.id === "agent-session-1"));
+  check("(a) remote Tier-1 token: resize is dropped", !resizes.includes("agent-session-1"));
+  wsSess.close();
+
+  // loopback controls (with the loopback secret): write to both an agent session and the shell still works
+  const lp = (t) => ({ ...LH, "sec-websocket-protocol": proto(t) });
+  const lpS = await app.injectWS("/ws/term/agent-session-2", { headers: lp(LOOPBACK_SECRET), socket: LOOP });
+  lpS.send(JSON.stringify({ type: "stdin", data: "loop-a" }));
+  check("(ctl) loopback: stdin to an agent session still works", await waitFor(() => writes.some((w) => w.id === "agent-session-2" && w.data === "loop-a")));
+  lpS.close();
+  const lpH = await app.injectWS(`/ws/term/${shellId}`, { headers: lp(LOOPBACK_SECRET), socket: LOOP });
+  lpH.send(JSON.stringify({ type: "stdin", data: "loop-b" }));
+  check("(ctl) loopback: stdin to the host shell still works", await waitFor(() => writes.some((w) => w.id === shellId && w.data === "loop-b")));
+  lpH.close();
+
+  // empty/undeterminable peer address fails CLOSED: no attach to the shell, no stdin, even with a valid token
+  // and even with the loopback secret (the loopback guard 401s it; the handler would treat it as remote anyway)
+  for (const [label, hdrs] of [["token", proto(TOKEN)], ["loopback secret", proto(LOOPBACK_SECRET)]]) {
+    let refused = false;
+    try {
+      const ws = await app.injectWS(`/ws/term/${shellId}`, { headers: { ...H, "sec-websocket-protocol": hdrs }, socket: {} });
+      ws.on("close", () => { refused = true; });
+      try { ws.send(JSON.stringify({ type: "stdin", data: `empty-${label}` })); } catch { /* closed */ }
+      await waitFor(() => refused);
+    } catch { refused = true; }
+    check(`(fail-closed) empty remoteAddress + ${label}: shell attach refused`, refused);
+    check(`(fail-closed) empty remoteAddress + ${label}: no stdin reached the shell`, !writes.some((w) => w.data === `empty-${label}`));
+  }
+  const wsEmptySess = await app.injectWS("/ws/term/agent-session-3", { headers: { ...H, "sec-websocket-protocol": proto(TOKEN) }, socket: {} }).catch(() => null);
+  if (wsEmptySess) {
+    wsEmptySess.send(JSON.stringify({ type: "stdin", data: "empty-sess" }));
+    wsEmptySess.send(JSON.stringify({ type: "repaint" }));
+    await waitFor(() => repaints.includes("agent-session-3"));
+    check("(fail-closed) empty remoteAddress: stdin to an agent session is dropped (repaint sentinel proves ordering)", repaints.includes("agent-session-3") && !writes.some((w) => w.data === "empty-sess"));
+    wsEmptySess.close();
+  } else check("(fail-closed) empty remoteAddress: agent-session upgrade itself refused", true);
+
+  // loopback spellings other than 127.0.0.1 stay writable (host shell + session)
+  for (const addr of ["::1", "::ffff:127.0.0.1"]) {
+    const w = await app.injectWS(`/ws/term/${shellId}`, { headers: lp(LOOPBACK_SECRET), socket: { remoteAddress: addr } });
+    w.send(JSON.stringify({ type: "stdin", data: `loop-${addr}` }));
+    check(`(ctl) loopback ${addr}: stdin to the host shell still works`, await waitFor(() => writes.some((x) => x.id === shellId && x.data === `loop-${addr}`)));
+    w.close();
+  }
+} finally {
+  await app.close();
+  db.close();
+}
+await finishAndExit(failures === 0 ? 0 : 1);

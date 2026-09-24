@@ -88,7 +88,7 @@ try {
 
   // --- exit drops it from the map WITHOUT events.onExit (not a DB Session) ---
   const exitBefore = events.exitCalls;
-  host.stop(SID, "hard"); // hard → pty.kill() → fake fires onExit
+  host.stop(SID, "hard", { shell: true }); // hard → pty.kill() → fake fires onExit
   check("after exit the shell is gone from the live map", host.isAlive(SID) === false && host.listShells().length === 0);
   check("shell exit did NOT call events.onExit (no Session/MCP persistence for a shell)", events.exitCalls === exitBefore);
 } finally {

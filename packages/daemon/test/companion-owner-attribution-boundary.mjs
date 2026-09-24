@@ -142,7 +142,7 @@ try {
     const repaintCalls = [];
     const origRepaint = host.repaint.bind(host);
     host.repaint = (sid) => { repaintCalls.push(sid); origRepaint(sid); };
-    const ws = await app.injectWS(`/ws/term/${CID_WS}`, { headers: { host: "127.0.0.1" } });
+    const ws = await app.injectWS(`/ws/term/${CID_WS}`, { headers: { host: "127.0.0.1" }, socket: { remoteAddress: "127.0.0.1" } });
     ws.send(JSON.stringify({ type: "stdin", data: `${AUTH_PAYLOAD}\r` }));
     ws.send(JSON.stringify({ type: "repaint" }));
     check("WS /ws/term stdin at a Companion target: the repaint sent right after it was actually processed (anchor reached)",
@@ -167,7 +167,7 @@ try {
     const repaintCalls = [];
     const origRepaint = host.repaint.bind(host);
     host.repaint = (sid) => { repaintCalls.push(sid); origRepaint(sid); };
-    const ws = await app.injectWS(`/ws/term/${MID_WS}`, { headers: { host: "127.0.0.1" } });
+    const ws = await app.injectWS(`/ws/term/${MID_WS}`, { headers: { host: "127.0.0.1" }, socket: { remoteAddress: "127.0.0.1" } });
     ws.send(JSON.stringify({ type: "stdin", data: "approved\r" }));
     ws.send(JSON.stringify({ type: "repaint" }));
     check("WS /ws/term stdin at a manager target: the repaint sent right after it was actually processed (anchor reached)",

@@ -5102,7 +5102,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/sessions/:id/stop", async (req, reply) => {
     const { id } = req.params as { id: string };
     const { mode } = (req.body as { mode?: "graceful" | "hard" }) ?? {};
-    deps.pty.stop(id, mode === "hard" ? "hard" : "graceful");
+    // @decision 710a34fa — PtyHost.stop refuses a host shell id (returns false); map it to a 409.
+    if (deps.pty.stop(id, mode === "hard" ? "hard" : "graceful") === false)
+      return reply.code(409).send({ error: "host shell terminals are not sessions; close them from the Terminals page" });
     return reply.send({ ok: true });
   });
   // Manual per-session rate-limit override + retry-now (HUMAN/REST only — trust boundary like
@@ -5202,7 +5204,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // @decision 4458dd9e — senderId:HUMAN_COMPOSER_SENDER_ID lets consecutive composer entries queued
     // while the recipient is busy coalesce into one turn; safe w.r.t. the Companion Trust Window since
     // this route already refused role:"assistant" above before ever reaching enqueueStdin.
-    return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent", undefined, text, undefined, HUMAN_COMPOSER_SENDER_ID));
+    const enq = deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent", undefined, text, undefined, HUMAN_COMPOSER_SENDER_ID);
+    // @decision 710a34fa — PtyHost.enqueueStdin refuses a host shell id; a clear 409, not a silent 200.
+    if (enq.reason === "shell-terminal") return reply.code(409).send({ error: "host shell terminals are not sessions; type into them from the Terminals page" });
+    return reply.send(enq);
   });
   // One-click graceful wrap-up (card f55bd338). Injects ONE wrap-up turn that tells the session to run
   // the /loom-session-end skill (log progress to the board, leave it resumable) and then call the `end_me`
@@ -5638,7 +5643,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Loom's own reapOrphanedDescendants at onExit as the backstop for anything that escapes it). The
   // onExit handler then drops it from the live map. Idempotent (a no-op if already gone).
   app.delete("/api/terminals/:id", async (req) => {
-    deps.pty.stop((req.params as { id: string }).id, "hard");
+    deps.pty.stop((req.params as { id: string }).id, "hard", { shell: true });
     return { ok: true };
   });
 
@@ -5646,6 +5651,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Shared by Claude sessions AND shell terminals (same `live` map): the transport is pty-generic.
   app.get("/ws/term/:sessionId", { websocket: true }, (socket: WebSocket, req) => {
     const { sessionId } = req.params as { sessionId: string };
+    // @decision 710a34fa — a non-loopback peer (a Tier-1 gateway token holder) gets a READ-ONLY view of an
+    // agent session and NO access at all to a host shell: never accept raw stdin from it, never attach it to
+    // a shell pty. An empty/undeterminable peer address counts as non-loopback (fail closed).
+    const remotePeer = !LOOPBACK.has(req.socket?.remoteAddress ?? "");
+    if (remotePeer && deps.pty.listShells().some((t) => t.id === sessionId)) {
+      socket.close(1008, "host shell terminals are loopback-only");
+      return;
+    }
     const unsub = deps.pty.subscribe(sessionId, {
       onData: (b) => { if (socket.readyState === socket.OPEN) socket.send(b); },
       onControl: (e) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(e)); },
@@ -5653,6 +5666,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     socket.on("message", (raw: Buffer) => {
       const msg = parseWsJsonObject(raw) as TerminalInput | null;
       if (!msg) return;
+      // Remote peer: repaint only (stdin and resize dropped) — see the @decision 710a34fa note above.
+      if (remotePeer) { if (msg.type === "repaint") deps.pty.repaint(sessionId); return; }
       // RAW passthrough — NOT the busy-gated enqueueStdin (which is for programmatic agent turns).
       // SECURITY (card 018ce1db): a raw stdin write is ALSO a Primitive-A owner-attestation writer —
       // PtyHost.writeStdin feeds the SAME `pendingRawOwnerSubmit`/UserPromptSubmit mechanism a genuine

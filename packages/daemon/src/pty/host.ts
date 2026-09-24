@@ -2182,7 +2182,7 @@ export type QueuedMessage = { id: string; text: string; source: QueueSource; onD
  * member here; every `kind:"warning"` entry is either sanitized or logged, never dropped on shape alone.
  * A caller that only checked `delivered:false` could conflate "dropped" with "queued".
  */
-export type EnqueueDeliveryReason = "session-dead" | "held";
+export type EnqueueDeliveryReason = "session-dead" | "held" | "shell-terminal";
 /**
  * `enqueueStdin`'s full return shape. `delivered` NEVER changes meaning — callers and tests read it
  * as-is (delivered now vs not-yet).
@@ -7509,6 +7509,9 @@ export class PtyHost {
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
     if (!live?.alive) return { delivered: false, reason: "session-dead", queued: false, deliveryState: "dropped" };
+    // @decision 710a34fa — a host shell takes ONLY raw writeStdin over the loopback /ws/term; the programmatic
+    // turn path (bracketed paste + Enter) refuses it structurally, whatever route or tier reached here.
+    if (live.kind === "shell") return { delivered: false, reason: "shell-terminal", queued: false, deliveryState: "dropped" };
     // @decision 21a281b6 — captureMintGen must stay a strict, EXPLICIT opt-in, never a
     // `mintedAtWallClock`-presence fallback:
     //
@@ -8629,7 +8632,7 @@ export class PtyHost {
 
   private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue", origin?: QueuedMessage[]): void {
     const live = this.live.get(sessionId);
-    if (!live?.alive) return;
+    if (!live?.alive || live.kind === "shell") return; // @decision 710a34fa — never a programmatic turn into a host shell
     // Card 441499ee: remember the ORIGINAL queued message(s) this turn's text came from — see
     // `Live.giveUpOrigin`'s doc. Of the two direct submit() callers that don't originate from
     // enqueueStdin, only resumeAfterRateLimit's "rate-limit-replay" still calls with `origin` undefined
@@ -10593,11 +10596,15 @@ export class PtyHost {
     if (live?.alive && !live.killed) this.ptyWrite(sessionId, live, "\x0c", "repaint-ctrl-l"); // Ctrl-L
   }
 
-  stop(sessionId: string, mode: StopMode): void {
+  stop(sessionId: string, mode: StopMode, opts?: { shell?: boolean }): boolean | void {
     const liveCodexEntry = this.liveCodex.get(sessionId);
     if (liveCodexEntry) { this.stopCodex(sessionId, liveCodexEntry, mode); return; }
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
+    // @decision 710a34fa — a host shell is torn down ONLY by its own loopback route (DELETE /api/terminals/:id,
+    // which passes {shell:true}); every session-facing caller (incl. the Tier-1 POST /api/sessions/:id/stop)
+    // gets a refusal (false), never a kill.
+    if (live.kind === "shell" && !opts?.shell) return false;
     // A Stop intent must NOT be defeated by a queued inbound turn re-arming busy. Mark the session
     // STOPPING (drainPending/enqueueStdin then refuse to submit a new turn) and CLEAR the held queue,
     // so a queued composer turn ("sends when turn ends") can't be drained by the very Stop hook the

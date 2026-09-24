@@ -80,7 +80,7 @@ try {
 
   // --- /ws/term ---------------------------------------------------------------------------------------
   {
-    const ws = await app.injectWS("/ws/term/sess-term", { headers: { host: "127.0.0.1" } });
+    const ws = await app.injectWS("/ws/term/sess-term", { headers: { host: "127.0.0.1" }, socket: { remoteAddress: "127.0.0.1" } });
     // Card c976f009 (Part 2, resolved (b), fixed): a blind sleep(50) checking for the ABSENCE of a crash
     // risks a coverage gap (a slow-to-manifest crash passes vacuously before 50ms elapses), not a
     // spurious red — mitigated but not individually proven by the single canary after the loop below.
@@ -104,7 +104,7 @@ try {
 
   // --- /ws/companion ------------------------------------------------------------------------------------
   {
-    const ws = await app.injectWS("/ws/companion/sess-companion", { headers: { host: "127.0.0.1" } });
+    const ws = await app.injectWS("/ws/companion/sess-companion", { headers: { host: "127.0.0.1" }, socket: { remoteAddress: "127.0.0.1" } });
     // Card c976f009 (Part 2, resolved (b), fixed): same canary technique as /ws/term above — a UNIQUE
     // canary chat frame right after each malformed one, polled for its landing, proves in-order handling
     // instead of guessing a 50ms sleep was enough.
