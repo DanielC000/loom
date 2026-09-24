@@ -27,3 +27,7 @@ Inline comment in `packages/daemon/src/sessions/service.ts` (`ConfirmMergeResult
 Inline comment in `packages/daemon/src/orchestration/gate-semaphore.ts` (`GateDescriptor.attempt`/`priorAttemptMs`): lines 223-254, as of commit `5f6d9fd981336bfafd530fada633b229677aa081`. Relocated by card `9641742e`; no wording changed, wrapped lines joined into a flowing paragraph and `*` markers stripped.
 
 Inline comments in `packages/daemon/src/orchestration/pending-ops.ts`: `NEVER_CACHED_OUTCOMES`'s own doc (lines 17-32) and the class doc's `"stale-base"` paragraph (lines 330-339), as of commit `507e966583ff18068f5e7e56942acfe67001ee94`. Relocated by card `a1491009` (tranche 1); no wording changed beyond joining wrapped lines and stripping `*` markers.
+
+## Amended by 68155573
+
+`attempt`/`priorAttemptMs` now mark a chain link of ONE admission, not a re-admission; the retry reads `running`, never `queued`. `attemptStartedAt` was added beside them. See `68155573-a-retry-continues-its-admission-never-re-queues.md`.

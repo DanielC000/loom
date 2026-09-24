@@ -22,3 +22,7 @@ The caller is then on the hook to release the guard explicitly, later, once its 
 ## Source
 
 Inline comment in `packages/daemon/src/orchestration/gate-semaphore.ts` (`beginSquash`, lines 767-793; `releaseMergeRepoGuard`/`endSquash`, lines 803-838; `runExclusive`'s `holdRepoGuardOnExit` param doc, lines 924-943), commits `b9ec7a777`, `6ea080604`, `252d25bb5`, as of `beeeb7c2`. Relocated by card `772735d2` (tranche 2); no wording changed, wrapped source lines joined into flowing paragraphs and the `*` comment markers stripped.
+
+## Amended by 68155573
+
+A failing attempt that will be retried no longer releases the guard at all: the retry continues the same admission (only the last link's `holdRepoGuardOnExit` survives into squash). See `68155573-a-retry-continues-its-admission-never-re-queues.md`.

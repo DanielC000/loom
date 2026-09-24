@@ -30,3 +30,7 @@ CODE REVIEW FINDING [4]: every OTHER field is NOT simply "whichever side is newe
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`gateStatus`'s `retryWarning` dispatch): lines 3837-3850, as of this tranche's HEAD (tranche 9). Decision B above was originally three separate JSDoc comments in `packages/daemon/src/orchestration/gate-runner.ts` — above `remainingGateSteps` (lines 1039-1058), `mergeResumedGateResult` (lines 1063-1101), and `formatRetryRescuedButGateRejectedWarning` (lines 1393-1412), all as of tranche 1's HEAD (commit `18bb69e3`); extracted here (same card id) by tranche 2, no wording changed beyond joining wrapped lines and stripping `*`/`⚠️` markers.
+
+## Amended by 68155573
+
+With one admission per op, `holdRepoGuardOnExit` is per-link and only the LAST link's hold counts, so the "hold only when nothing remains" rule and the self-deadlock it avoided no longer apply. See `68155573-a-retry-continues-its-admission-never-re-queues.md`.

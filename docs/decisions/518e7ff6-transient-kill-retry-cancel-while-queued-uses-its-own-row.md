@@ -22,3 +22,7 @@ A consumer computing a rejection rate from `gate_history` must read this PAIRING
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`ConfirmMergeResult.cancelled`, transient-kill-retry caveat): lines 545-560, as of commit `f9caa77e30d5c1a6dd994b6203261968c0dbf94f`. Relocated by card `8f4c8a8f`; no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. The "different shape / how to read the rows" section above is from the cancel-while-queued catch block in `confirmWorkerMerge`'s TRANSIENT-KILL AUTO-RETRY block (as of this tranche's HEAD). Condensed and reworded, not verbatim.
+
+## Amended by 68155573
+
+The transient-kill retry no longer queues either (it is a link of attempt 1's admission), so its cancel-while-queued path and its `build_gate_retry` `cancelled:true` row were removed with it. See `68155573-a-retry-continues-its-admission-never-re-queues.md`.

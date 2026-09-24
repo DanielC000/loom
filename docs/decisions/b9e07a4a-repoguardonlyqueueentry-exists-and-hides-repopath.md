@@ -29,3 +29,7 @@ Card b9e07a4a CRITICAL: a bare `Set<string>` couldn't tell "free" from "held by 
 ## Source
 
 `sessions/service.ts` (`RepoGuardOnlyQueueEntry` doc, 183-199; single-file-retry fix, 587-609), commit `f9caa77e30d5c1a6dd994b6203261968c0dbf94f`, relocated by card `8f4c8a8f`. Also `orchestration/gate-semaphore.ts` (`GateDescriptor.opId`, 155-169; `RepoGuardOnlyEntry`, 380-394; `activeMergeRepos`, 524-547), commit `5f6d9fd981336bfafd530fada633b229677aa081`, relocated by card `9641742e`. No wording changed beyond joining wrapped lines into flowing paragraphs and stripping `*` markers.
+
+## Amended by 68155573
+
+The single-file retry no longer re-admits through its own `runExclusive` — it is a chain link of the first admission, so the repo-guard gap this record closed is now closed structurally rather than by a second admission. See `68155573-a-retry-continues-its-admission-never-re-queues.md`.

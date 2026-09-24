@@ -27,14 +27,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (iv) FAIL AFTER RETRY — the retry ALSO fails: the whole batch rejects, `retryPassed:false` is
 //       recorded (never silently dropped), and attempt 1's OWN diagnosis (`failingTest`) survives on the
 //       rejected row — never overwritten by the retry's own (different) failure.
-//   (v) THE RETRY'S OWN ADMISSION CANCELLED WHILE QUEUED — forces a real `GateCancelledError` through the
-//       retry's own (second, separately-queued) admission, deterministically: a holder is queued for the
-//       ONE gate slot WHILE attempt 1 still occupies it (synchronously, inside the fakeGate call itself —
-//       see the JSDoc on `seizeSlotBehindAttempt1` below for why this beats the retry's own not-yet-issued
-//       admission to the freed slot without any timing race). Proves finding [2]: the cancelled-while-
-//       queued `build_gate` event now stamps `durationMs`/`gateSpawned:true` — `gate_history.gateRan`
-//       (db.ts's `gateRanFromDetail`) must read `true`, not the pre-fix `false` (a well-formed POSITIVE
-//       assertion that no gate ever ran, when attempt 1 genuinely ran a full batch gate and failed).
+//   (v) THE RETRY CONTINUES ITS ADMISSION (card 68155573, replacing card 67030bb9's cancel-while-queued-retry
+//       block): a holder is queued for the ONE gate slot WHILE attempt 1 still occupies it (synchronously,
+//       inside the fakeGate call itself); it must NOT be admitted into the fail->retry gap, the retry reads
+//       running attempt:2 (never queued), and `cancelQueued` cannot reach it. The row still passes with
+//       retriedFile/retryPassed, and `gate_history.gateRan`/`durationMs` are still attempt 1's own.
 //   (vi) BONUS — a genuine batch gate failure whose failure does NOT name an identifiable file (a
 //       Jest-style path, refused by the bare-identifier guard): `retryDeclineReason` (finding [3]) is
 //       recorded on the SAME row as `"unparseable-name"`, mutually exclusive with `retriedFile` — the
@@ -323,7 +320,13 @@ try {
     check("(iv) finding [4] POSITIVE CONTROL: a timeout-kill-shaped outputTail produces the host-contention caveat on the FAIL side too", timeoutWarning.includes("host contention") && !timeoutWarning.includes("order-dependent/cross-test-pollution"));
   }
 
-  // ── (v) THE RETRY'S OWN ADMISSION CANCELLED WHILE QUEUED ───────────────────────────────────────────────
+  // ── (v) THE RETRY CONTINUES ITS ADMISSION — A QUEUED HOLDER IS NOT ADMITTED INTO THE GAP (card 68155573,
+  //        replacing card 67030bb9's cancel-the-retry's-own-queued-admission block). The batch retry is a link
+  //        of attempt 1's ONE admission: slot + repo guard stay held straight through, so a holder queued for
+  //        the ONE gate slot WHILE attempt 1 still occupies it (seized synchronously inside the fakeGate call —
+  //        `acquire` queues it before that call's promise ever resolves) is NOT admitted before the retry ran,
+  //        the retry reads `running` attempt:2 (never queued), and `cancelQueued` cannot reach it. RED on
+  //        pre-fix code: the holder won the freed slot and the retry queued behind it. ─────────────────────────
   {
     const P = setupBatchProject("cancel", "pnpm gate");
     const db = new Db(); dbs.push(db);
@@ -332,67 +335,46 @@ try {
     let sessions; // referenced by fakeGate below (assigned right after construction, before any call fires)
     let releaseHolder;
     const holderPromise = new Promise((resolve) => { releaseHolder = resolve; });
+    let holderRan = false;
+    let holderRanAtRetry = null;
+    let retryEntrySeen = null;
+    let queuedForProjectAtRetry = null;
+    let cancelQueuedOnRetry = null;
     const fakeGate = async (gate, worktreePath) => {
       calls++;
       if (calls === 1) {
         plantTestFile(worktreePath, "flaky-batch-cancel");
-        // Card 67030bb9 review, finding [2]'s own test rig: seize the ONE gate slot for a holder RIGHT
-        // NOW, while attempt 1's own admission still occupies it (we are executing INSIDE attempt 1's own
-        // runExclusive callback). `GateSemaphore.acquire` pushes a non-immediately-admittable waiter onto
-        // its priority queue SYNCHRONOUSLY, before this call's own returned promise ever resolves (see
-        // gate-semaphore.ts's `acquire`: the `new Promise((resolve) => { ...; queue.push(waiter); })`
-        // executor body runs synchronously at construction time) — so by the time this function returns,
-        // the holder is ALREADY queued, strictly BEFORE the retry below has even been considered, let
-        // alone issued its own (later) admission request. When attempt 1 releases moments from now,
-        // `release()` calls `grantNext()` synchronously and hands the freed slot to this already-queued
-        // holder — deterministically, by FIFO/priority-tier ordering, never a race against the retry's
-        // own not-yet-issued `runExclusive` call.
-        sessions.gateSemaphore.runExclusive(1, { gateType: "merge", projectId: `${P.projId}-holder`, sessionId: "cancel-holder-sess" }, () => holderPromise, "high").catch(() => {});
+        sessions.gateSemaphore.runExclusive(1, { gateType: "merge", projectId: `${P.projId}-holder`, sessionId: "cancel-holder-sess" }, () => { holderRan = true; return holderPromise; }, "high").catch(() => {});
         return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-batch-cancel", failingTestCount: 1, failTierTest: "FAIL  flaky-batch-cancel", failTierTestCount: 1, failTierAll: ["FAIL  flaky-batch-cancel"] };
       }
-      // Never actually reached for the retry — its own admission is cancelled while still queued, below.
+      // The RETRY's own gate call. Everything the fix guarantees is observable HERE, at the instant it runs.
+      holderRanAtRetry = holderRan;
+      const snap = sessions.gateSemaphore.snapshot().entries;
+      queuedForProjectAtRetry = snap.some((e) => e.phase === "queued" && e.projectId === P.projId);
+      retryEntrySeen = snap.find((e) => e.phase === "running" && e.projectId === P.projId) ?? null;
+      cancelQueuedOnRetry = retryEntrySeen ? sessions.gateSemaphore.cancelQueued(retryEntrySeen.id, "manual", "must not reach a running retry") : null;
       return { passed: true };
     };
     sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
     const { wA, wB, worktrees: wts } = await seedTwoWorkers(db, P);
     worktrees.push(...wts);
 
-    const batchPromise = sessions.mergeBatchTracked(P.mgrId, [wA, wB]);
+    const outcome = await resolveBatch(sessions, sessions.mergeBatchTracked(P.mgrId, [wA, wB]));
+    check("(v) exactly 2 gate calls (attempt 1 + the one multi-file retry)", calls === 2);
+    check("(v) THE FIX: the holder queued behind attempt 1 was NOT admitted into the fail->retry gap (pre-fix it won the slot first)", holderRanAtRetry === false);
+    check("(v) the retry was never queued — no queued entry for the batch's own project existed when it ran", queuedForProjectAtRetry === false);
+    check("(v) the retry read RUNNING with attempt:2, a priorAttemptMs and an attemptStartedAt", retryEntrySeen != null && retryEntrySeen.attempt === 2 && typeof retryEntrySeen.priorAttemptMs === "number" && typeof retryEntrySeen.attemptStartedAt === "number");
+    check("(v) cancelQueued on the running retry entry is refused — a retry can no longer be cancelled while queued", cancelQueuedOnRetry === false);
+    if (outcome.value) check("(v) ok:true — the batch lands via the retry", outcome.value.ok === true);
+    await waitUntil(() => (holderRan ? true : undefined));
+    check("(v) the holder is admitted once the batch's chain ended and its guard released", holderRan === true);
+    releaseHolder();
 
-    // Poll until the RETRY's own gate admission is genuinely queued behind the holder (deterministic per
-    // the comment above — this loop is just how the test OBSERVES that already-deterministic outcome, not
-    // how it produces it). Bounded so a real regression fails fast rather than hanging the suite.
-    const queueDeadline = Date.now() + 20_000;
-    let queuedEntry;
-    while (Date.now() <= queueDeadline) {
-      queuedEntry = sessions.gateSemaphore.snapshot().entries.find((e) => e.phase === "queued" && e.projectId === P.projId);
-      if (queuedEntry) break;
-      await sleep(5);
-    }
-    check("(v) precondition: the retry's own gate admission is genuinely queued behind the holder", !!queuedEntry);
-
-    if (!queuedEntry) {
-      releaseHolder();
-      await batchPromise.catch(() => {});
-    } else {
-      const cancelOk = sessions.gateSemaphore.cancelQueued(queuedEntry.id, "manual", "test cancel of the batch retry's own queued admission");
-      check("(v) cancelQueued accepts the queued retry admission", cancelOk === true);
-      releaseHolder();
-
-      const outcome = await resolveBatch(sessions, batchPromise);
-      if (outcome.value) check("(v) ok:false — a cancelled retry can't land the batch", outcome.value.ok === false);
-
-      const page = db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 });
-      const row = page.items.find((r) => r.branch === null);
-      check("(v) a build_gate row exists for the cancelled-retry op", !!row);
-      check("(v) the row reads outcome:\"cancelled\"", row?.outcome === "cancelled");
-      check("(v) retriedFile records that a retry WAS identified and attempted, even though it never ran to a verdict", row?.retriedFile === "flaky-batch-cancel");
-      // THE DISCRIMINATING ASSERTION for finding [2]: pre-fix, this event carried neither `durationMs` nor
-      // `gateSpawned`, so `gateRanFromDetail` (db.ts) resolved `gateRan:false` — a well-formed POSITIVE
-      // assertion that no gate ever ran, when attempt 1 genuinely ran a full batch gate and failed.
-      check("(v) finding [2] THE FIX, PROVEN: gate_history.gateRan reads true (attempt 1 genuinely ran a full batch gate) — pre-fix this read false", row?.gateRan === true);
-      check("(v) finding [2]: durationMs is a real, non-null number (attempt 1's own real measured run time) — pre-fix this was null", typeof row?.durationMs === "number");
-    }
+    const page = db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 });
+    const row = page.items.find((r) => r.branch === null);
+    check("(v) a build_gate row exists for the op and it PASSED (never cancelled)", !!row && row.passed === true && row.outcome !== "cancelled");
+    check("(v) retriedFile/retryPassed:true recorded", row?.retriedFile === "flaky-batch-cancel" && row?.retryPassed === true);
+    check("(v) gate_history.gateRan reads true and durationMs is a real number (attempt 1's own run)", row?.gateRan === true && typeof row?.durationMs === "number");
   }
 
   // ── (vi) BONUS — a genuine failure that is NOT identifiable: retryDeclineReason recorded (finding [3]) ──

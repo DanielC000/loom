@@ -21,20 +21,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (E) `identifyRetriableTestFile` unit coverage — undefined input, a candidate whose files don't exist on
 //       disk (fail-closed), a real match, an unsafe/path-shaped name (Jest-style `FAIL src/foo.test.js`)
 //       correctly refused by the bare-identifier guard.
-//   (G) THE GUARD IS HELD THROUGH THE RETRY (Code Review CRITICAL, card b9e07a4a): the single-file retry
-//       now re-admits through runExclusive and holds the per-repo merge-admission guard on a pass — before
-//       that fix, the FIRST attempt's own failure had already freed the guard, leaving this retry's own
-//       window unguarded. A same-repo sibling fired while the retry is genuinely running must wait for it.
-//   (H) CANCELLING THE RETRY'S OWN QUEUED ADMISSION (Code Review, card b9e07a4a — a NEW throw path this
-//       card introduced, previously unexercised by any test): since the retry now mints its OWN separate
-//       `runExclusive` admission (see (G) above), it is independently reachable via `gate_cancel` while
-//       QUEUED, exactly like any other merge-gate admission — `GateCancelledError` must be caught and
-//       settle `confirmWorkerMerge` as a clean `cancelled:true`, never a thrown/misreported crash.
-//       EXTENDED (card 318ac7b2): attempt 1 already genuinely ran and failed a full suite by the time this
-//       retry is queued — the cancel must ALSO record that real run as a `build_gate` gate_history row
-//       (`cancelled:true`, real `durationMs`), not just settle cleanly; before this card the row never
-//       existed at all and a real, completed full-suite run silently vanished from the duration/rejection
-//       series.
+//   (G) THE GUARD IS HELD THROUGH THE RETRY (Code Review CRITICAL, card b9e07a4a; now structural, card 68155573):
+//       the single-file retry continues attempt 1's admission and holds the per-repo merge-admission guard
+//       straight through — before b9e07a4a the FIRST attempt's own failure had already freed the guard. A same-repo sibling fired while the retry is genuinely running must wait for it.
+//   (H) A RETRY CAN NO LONGER BE QUEUED (card 68155573, replacing card b9e07a4a/318ac7b2's cancel-while-
+//       queued-retry block): the retry CONTINUES attempt 1's admission, so a queued cross-project waiter is not
+//       admitted into the fail->retry gap, the retry reads running attempt:2 (never queued) with an
+//       `attemptStartedAt`, and there is nothing for `gate_cancel` to withdraw.
 //   (J) card 0e5b2045, THE failingTest/failTierTest DECOUPLING END-TO-END: a run where the diagnostic-
 //       winning `failingTest` and the retry-target `failTierTest` genuinely DIVERGE (mirrors a real
 //       UNCAUGHT-idiom failure) must still retry using `failTierTest`'s name — proves the decoupling holds
@@ -328,54 +321,41 @@ try {
       confirm2.merged === true && confirm2.reason !== "gate_base_invalidated");
   }
 
-  // ── (H) CANCELLING THE RETRY'S OWN QUEUED ADMISSION — see this file's own header for the summary. The
-  //        retry's `runExclusive` call is a BRAND NEW admission cycle (Item 1/(G) above), so it can queue
-  //        behind an unrelated cap-1 contender exactly like any other merge gate, and `gate_cancel` must be
-  //        able to withdraw it there. Mirrors gate-cancel.mjs's B2-2 block (the ORDINARY first-attempt
-  //        case) for the RETRY's own admission specifically.
+  // ── (H) A RETRY CAN NO LONGER BE QUEUED (card 68155573, replacing card b9e07a4a's cancel-while-queued-retry
+  //        block). The retry is a CONTINUATION of attempt 1's ONE admission: slot + repo guard are held straight
+  //        through the fail->retry gap, so a cross-project waiter already queued behind cap 1 is NOT admitted
+  //        into it, the retry never appears as `queued` (nothing for `gate_cancel` to withdraw), and a cancel
+  //        aimed at it is refused like any running merge. RED on pre-fix code: the holder won the freed slot and
+  //        the retry queued behind it (the old (H) asserted exactly that shape).
   //
-  //        ORDERING IS DETERMINISTIC, NOT RACY: worker H's own first attempt is held open (blocking on
-  //        `releaseCall1`) until AFTER the holder has been fired and is confirmed QUEUED (step order below)
-  //        — so the holder is a genuinely PRE-QUEUED waiter by the time worker H's first attempt is finally
-  //        released to fail. `GateSemaphore.release()` (called from worker H's OWN settling `runExclusive`)
-  //        grants the freed cap-1 slot to that pre-queued waiter SYNCHRONOUSLY, inside `grantNext()`,
-  //        BEFORE control ever returns to `confirmWorkerMerge`'s own continuation (which is what would go
-  //        on to attempt the retry's fresh `acquire()`) — a plain consequence of `release()`/`grantNext()`
-  //        being synchronous, non-async functions: the holder's `admit()` call happens-before
-  //        `confirmWorkerMerge`'s microtask ever resumes, so the retry's own `acquire()` call always finds
-  //        `active === cap` and queues. There is no window in which the retry could instead win the race. ──
+  //        ORDERING IS OBSERVABLE, NOT TIMED: every step waits on an explicit event (call admitted / holder
+  //        queued / retry spawned), and the "holder not yet admitted" assertion is read at the instant the
+  //        retry's own gate call has provably started. ──
   {
     const H = mk("h", "feature-h1.txt");
     makeRepo(H);
     const db = new Db(); dbs.push(db);
     db.setPlatformConfig({ maxConcurrentGates: 1 });
 
-    let call1AdmittedResolve;
-    const call1Admitted = new Promise((res) => { call1AdmittedResolve = res; });
-    let releaseCall1;
-    let holderAdmittedResolve;
-    const holderAdmitted = new Promise((res) => { holderAdmittedResolve = res; });
+    let holderAdmitted = false;
     let releaseHolder;
-    // Counts calls scoped to worker H's OWN worktree only — the proof that the retry's gate command never
-    // spawns a SECOND time once its admission is cancelled. Deliberately NOT a shared/global counter: the
-    // holder's own gate call (a different cwd, asserted separately below) must never inflate this.
     let callsForH = 0;
+    const callResolvers = [];
+    const callStarted = [];
     const sharedGate = async (_gate, cwd) => {
       if (cwd === H.worktreePath) {
-        callsForH++;
-        call1AdmittedResolve();
-        await new Promise((res) => { releaseCall1 = res; });
-        // The genuine, identifiable failure that would normally trigger the single-file retry — but the
-        // retry's OWN admission gets cancelled below before this function is ever called a second time.
-        return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-h", failingTestCount: 1, failTierTest: "FAIL  flaky-h", failTierTestCount: 1, failTierAll: ["FAIL  flaky-h"] };
+        const n = ++callsForH;
+        callStarted.push(n);
+        await new Promise((res) => { callResolvers[n] = res; });
+        // Call 1 is the genuine, identifiable failure that triggers the single-file retry; call 2 (the retry) passes.
+        if (n === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-h", failingTestCount: 1, failTierTest: "FAIL  flaky-h", failTierTestCount: 1, failTierAll: ["FAIL  flaky-h"] };
+        return { passed: true };
       }
-      // The holder's own gate — held open once admitted (mirrors worker H's own call1 above) so it keeps
-      // occupying the cap-1 slot long enough for the retry's own admission to genuinely queue behind it and
-      // be observed/cancelled, instead of racing to finish and free the slot again before either happens.
-      holderAdmittedResolve();
+      holderAdmitted = true;
       await new Promise((res) => { releaseHolder = res; });
       return { passed: true };
     };
+    const callN = (n) => waitUntil(() => (callStarted.includes(n) ? true : undefined));
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate });
 
@@ -390,8 +370,7 @@ try {
     commitAll(worktreePath, `${H.file}`, GIT_ID);
     db.insertSession({ id: H.workerId, projectId: H.projId, agentId: H.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: H.mgrId, taskId: H.taskId, worktreePath, branch });
 
-    // A SEPARATE, unrelated project/worker to occupy the cap-1 slot once it frees — mirrors gate-cancel.mjs
-    // B2-2's own holder setup exactly.
+    // A SEPARATE, unrelated project/worker whose merge is QUEUED behind worker H's cap-1 slot.
     const holderRepo = path.join(os.tmpdir(), `loom-sfr-h-holder-${sfx}`);
     const holderProjId = `sfr-h-holder-proj-${sfx}`, holderAgentId = `sfr-h-holder-agent-${sfx}`;
     const holderTaskId = `sfr-h-holder-task-${sfx}`, holderWorkerId = `sfr-h-holder-wkr-${sfx}`;
@@ -407,71 +386,40 @@ try {
     db.insertSession({ id: holderMgrId, projectId: holderProjId, agentId: holderAgentId, engineSessionId: null, title: null, cwd: holderRepo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
     db.insertSession({ id: holderWorkerId, projectId: holderProjId, agentId: holderAgentId, engineSessionId: null, title: null, cwd: wtHolder.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: holderMgrId, taskId: holderTaskId, worktreePath: wtHolder.worktreePath, branch: wtHolder.branch });
 
-    // 1) Worker H's first attempt admits (cap 1, nothing else contending yet) and blocks mid-run.
+    // 1) Worker H's first attempt admits (cap 1) and blocks mid-run.
     const p1 = sessions.confirmWorkerMerge(H.mgrId, H.workerId);
-    await call1Admitted;
+    check("(H) setup: worker H's first attempt started", (await callN(1)) === true);
 
-    // 2) The holder fires NOW, while worker H's first attempt still occupies the cap-1 slot — it QUEUES.
+    // 2) The holder fires NOW — it QUEUES behind worker H's cap-1 slot.
     const pHolder = sessions.confirmWorkerMerge(holderMgrId, holderWorkerId);
     const holderQueued = await waitUntil(() => sessions.gateQueueForManager(holderProjId).queued.find((e) => e.gateType === "merge"));
-    check("(H) the holder is genuinely QUEUED behind worker H's first attempt (setup sanity)", !!holderQueued);
+    check("(H) setup: the holder is genuinely QUEUED behind worker H's first attempt", !!holderQueued);
 
-    // 3) Release worker H's first attempt to fail for real — its slot frees, and (per this block's own
-    //    ordering doc above) the ALREADY-QUEUED holder deterministically wins it, forcing the single-file
-    //    retry's own fresh admission to queue instead of running immediately. The holder is held open
-    //    (never resolves on its own) so it keeps occupying the slot until explicitly released below —
-    //    otherwise it would finish and free the slot again before the retry's own admission (and this
-    //    test's own observation of it) ever happens.
-    releaseCall1("go");
-    await holderAdmitted;
-    const retryEntry = await waitUntil(() => sessions.gateQueueForManager(H.projId).queued.find((e) => e.gateType === "merge"));
-    check("(H) the single-file retry's OWN admission is genuinely QUEUED (setup sanity)", !!retryEntry);
-
-    if (retryEntry) {
-      const cancelResult = await sessions.cancelGateOp(H.mgrId, retryEntry.opId, { scope: { kind: "project" } });
-      check("(H) cancelling the retry's QUEUED admission SUCCEEDS", cancelResult.outcome === "cancelled" && cancelResult.phase === "queued" && cancelResult.gateType === "merge");
-
-      const confirmH = await p1;
-      check("(H) confirmWorkerMerge settles cleanly with cancelled:true, never a thrown/misreported crash", confirmH.merged === false && confirmH.cancelled === true);
-      check("(H) the cancel is tagged 'manual' (gate_cancel, not an automatic supersede)", confirmH.cancelKind === "manual");
-      check("(H) it is NEVER misreported as a crash-shaped 'gate cancelled' error string", !/errored:.*gate cancelled/i.test(String(confirmH.reason ?? "")));
-      const mergeCancelledEvts = eventsOfKind(db, H.mgrId, "merge_cancelled");
-      check("(H) a merge_cancelled event was recorded (never a merge_rejected/merge-failed shape)", mergeCancelledEvts.length === 1 && mergeCancelledEvts[0].detail?.cancelKind === "manual");
-
-      // ── CARD 318ac7b2 — POSITIVE CONTROL: attempt 1's own gate call (`callsForH === 1`, asserted below)
-      //    genuinely spawned and genuinely failed a full suite before this retry's admission was ever
-      //    queued/cancelled. Before this card, that real run left NO `gate_history` row at all — only the
-      //    `merge_cancelled` event above (excluded from `GATE_HISTORY_KINDS`) was recorded. A record for a
-      //    rare path that is never exercised is indistinguishable from one that doesn't work, so this MUST
-      //    be forced to fire here rather than merely asserted never to regress. ──
-      const buildGateEvts = eventsOfKind(db, H.mgrId, "build_gate");
-      check("(H) attempt 1's real run is now recorded as a build_gate row instead of vanishing entirely", buildGateEvts.length === 1);
-      check("(H) that row is stamped cancelled:true — DoD-2: distinguishable from a genuine rejection", buildGateEvts[0]?.detail?.cancelled === true);
-      check("(H) it carries attempt 1's own real measured duration (never 0/undefined)", typeof buildGateEvts[0]?.detail?.durationMs === "number" && buildGateEvts[0].detail.durationMs >= 0);
-      check("(H) it names the retry that was identified but never completed — retriedFile set, retryPassed absent (never ran to a verdict)", buildGateEvts[0]?.detail?.retriedFile === "flaky-h" && buildGateEvts[0]?.detail?.retryPassed === undefined);
-      check("(H) it carries attempt 1's own gateCap/concurrency triple, not left unset", buildGateEvts[0]?.detail?.gateCap === 1 && typeof buildGateEvts[0]?.detail?.concurrentGates === "number");
-      check("(H) the real gate_history read (listGateEvents/toGateHistoryRow) surfaces this run as outcome:'cancelled' — NEVER 'reject' (would inflate the rejection rate) or 'pass' (would hide the real failure)", (() => {
-        const page = db.listGateEvents({ projectId: H.projId, limit: 100, offset: 0 });
-        const row = page.items.find((r) => r.gateType === "merge");
-        return row?.outcome === "cancelled" && row?.retriedFile === "flaky-h" && typeof row?.durationMs === "number" && row?.gateRan === true;
-      })());
-
-      // Let the holder's own gate proceed and settle — cleanup hygiene, not itself asserted on.
-      releaseHolder("go");
-      const holderResult = await pHolder;
-      check("(H) the holder itself merged normally once it won the freed slot", holderResult.merged === true);
-      check("(H) the retry's OWN gate command never actually spawned — cancelled while queued, before admission (fn is never invoked for a withdrawn admission)", callsForH === 1);
-    } else {
-      // SETUP SANITY FAILED (Code Review #4, card b9e07a4a): release the holder and let both confirms
-      // settle BEFORE moving on, instead of leaving `p1`/`pHolder` dangling — without this, a genuine
-      // regression in the exact property this test exists to catch (the retry's admission never showing up
-      // QUEUED) would leave worker H's `confirmWorkerMerge` parked forever behind a holder nobody ever
-      // releases, hanging this whole run instead of producing a named red. `allSettled` (not `all`): the
-      // point here is cleanup, not a second round of assertions — a red is already recorded above.
-      console.log("SKIP  (H) cancel/settle assertions — setup sanity check above already failed");
-      releaseHolder("go");
-      await Promise.allSettled([p1, pHolder]);
+    // 3) Attempt 1 fails for real. Pre-fix, release() handed the slot to the queued holder here and the retry
+    //    queued behind it. Now the retry's gate call must START without the holder ever having been admitted.
+    callResolvers[1]("go");
+    check("(H) the single-file retry's own gate call STARTED (a second call for worker H's worktree)", (await callN(2)) === true);
+    check("(H) THE FIX: the queued cross-project holder was NOT admitted into the fail->retry gap", holderAdmitted === false);
+    const q = sessions.gateQueueForManager(H.projId);
+    check("(H) the retry is NOT in the queue at all — a retry can no longer be queued", !q.queued.some((e) => e.gateType === "merge" && e.projectId === H.projId));
+    const running = q.running.find((e) => e.gateType === "merge" && e.projectId === H.projId);
+    check("(H) the retry reads RUNNING with attempt:2 (never queued) and a per-attempt start", !!running && running.attempt === 2 && typeof running.attemptStartedAt === "string" && typeof running.priorAttemptMs === "number");
+    check("(H) the holder is still queued while the retry runs", sessions.gateQueueForManager(holderProjId).queued.some((e) => e.gateType === "merge"));
+    if (running) {
+      const cancelResult = await sessions.cancelGateOp(H.mgrId, running.opId, { scope: { kind: "project" } });
+      check("(H) a cancel aimed at the running retry is REFUSED (nothing queued to withdraw)", cancelResult.outcome !== "cancelled");
     }
+
+    // 4) The retry passes -> worker H merges; only THEN does the holder win the slot.
+    callResolvers[2]("go");
+    const confirmH = await p1;
+    check("(H) worker H's merge lands via the retry", confirmH.merged === true);
+    await waitUntil(() => (holderAdmitted ? true : undefined));
+    check("(H) the holder is admitted only after worker H's retry settled and its squash released the guard", holderAdmitted === true);
+    releaseHolder("go");
+    const holderResult = await pHolder;
+    check("(H) the holder itself merged normally", holderResult.merged === true);
+    check("(H) exactly two gate calls for worker H (attempt 1 + one retry)", callsForH === 2);
   }
 
   // ── (F) BOUNDED MULTI-FILE RETRY (card 67030bb9 — the OLD test here, "manager review #128", proved the

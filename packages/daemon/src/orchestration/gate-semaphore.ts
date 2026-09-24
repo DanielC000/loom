@@ -118,10 +118,32 @@ export interface GateDescriptor {
   attempt?: number;
   /** Card 99a1cf6f — present iff `attempt` is, alongside it: attempt 1's own measured wall-clock run time
    *  (`gateAttempt1DurationMs`, `sessions/service.ts`, captured the instant attempt 1's own admission
-   *  settles) — carried onto the retry's descriptor so a manager reading `gate_status`/`gate_queue` while
-   *  `phase:"queued"` sees, e.g., `attempt:2, priorAttemptMs:1129000` instead of a bare, contextless
-   *  `queued`. Purely informational: never consulted by admission/queueing/squash logic itself. */
+   *  settles) — patched onto the live descriptor by a chain link (card 68155573) so a manager reading
+   *  `gate_status`/`gate_queue` sees, e.g., `phase:"running", attempt:2, priorAttemptMs:1129000`.
+   *  Purely informational: never consulted by admission/queueing/squash logic itself. */
   priorAttemptMs?: number;
+}
+
+/** The callback shape {@link GateSemaphore.runExclusive} runs once admitted — one per chain link. */
+export type GateRunFn<T> = (
+  startedAt: number, cancelSignal: AbortSignal, hooks: GateLivenessHooks,
+  getMaxConcurrentGates: () => number, holdRepoGuardOnExit: () => void,
+) => Promise<T>;
+
+/**
+ * One further link of a {@link GateSemaphore.runExclusive} CHAIN: a retry/resume that continues the SAME
+ * admission.
+ * @decision 68155573 — never release the slot/guard between links or re-queue a retry; a fresh
+ *   `runExclusive` for a retry lets a sibling take the slot in the same tick (see the decision record).
+ *
+ * `descriptorPatch` merges into the live registry descriptor (typically `attempt`/`priorAttemptMs`) so
+ * `gate_queue`/`gate_status` read the retry as `running` with `attempt:2`. `next` decides whether ANOTHER
+ * link follows this one.
+ */
+export interface GateContinuation<T> {
+  descriptorPatch?: Partial<GateDescriptor>;
+  fn: GateRunFn<T>;
+  next?: (result: T) => GateContinuation<T> | null | Promise<GateContinuation<T> | null>;
 }
 
 /** One live gate run in the snapshot — a `GateDescriptor` enriched with its lane phase + timing. */
@@ -144,6 +166,10 @@ export interface GateSnapshotEntry {
    *  `2`/`<ms>` on either of `confirmWorkerMerge`'s own retries' re-admission. */
   attempt: number | null;
   priorAttemptMs: number | null;
+  /** Card 68155573: epoch-ms the CURRENT chain link (attempt) began running — equals `since` on a
+   *  first/only attempt, later than it once a retry continued this same admission (`since` deliberately
+   *  keeps the ORIGINAL admission time). Null while queued. */
+  attemptStartedAt: number | null;
   /** "running" once it holds a lane; "queued" while it's still waiting for one. */
   phase: "running" | "queued";
   /** Epoch-ms anchor for the UI's live elapsed clock: startedAt (running) or enqueuedAt (queued). */
@@ -258,6 +284,8 @@ interface RegistryEntry {
   priority: GatePriority;
   enqueuedAt: number;
   startedAt: number | null;
+  /** Card 68155573: start of the current chain link; `null` while queued. See {@link GateSnapshotEntry.attemptStartedAt}. */
+  attemptStartedAt: number | null;
   controller: AbortController;
   /** See {@link GateSnapshotEntry.lastOutputAt} — null until the running `fn`'s `GateLivenessHooks` first
    *  reports a step start/output, updated in lockstep with `gate-runner.ts`'s own internal clock. */
@@ -475,6 +503,7 @@ export class GateSemaphore {
   private admit(entry: RegistryEntry): void {
     this.active++;
     entry.startedAt = Date.now();
+    entry.attemptStartedAt = entry.startedAt;
     const wt = entry.descriptor.worktreePath;
     if (wt != null) this.activeWorktrees.add(wt);
     const rp = entry.descriptor.repoPath;
@@ -874,8 +903,9 @@ export class GateSemaphore {
    */
   async runExclusive<T>(
     cap: number, descriptor: GateDescriptor,
-    fn: (startedAt: number, cancelSignal: AbortSignal, hooks: GateLivenessHooks, getMaxConcurrentGates: () => number, holdRepoGuardOnExit: () => void) => Promise<T>,
+    fn: GateRunFn<T>,
     priority: GatePriority = "high",
+    next?: (result: T) => GateContinuation<T> | null | Promise<GateContinuation<T> | null>,
   ): Promise<T> {
     // TRANSITION LOG (card 424ed9a8): fires exactly when THIS semaphore observes `cap` change from what
     // it last saw — i.e. what a gate run actually adopted, not merely what was written to config (those
@@ -887,7 +917,7 @@ export class GateSemaphore {
     }
     this.lastKnownCap = cap;
     const entry: RegistryEntry = {
-      id: `gate-${++this.seq}`, descriptor, priority, enqueuedAt: Date.now(), startedAt: null,
+      id: `gate-${++this.seq}`, descriptor, priority, enqueuedAt: Date.now(), startedAt: null, attemptStartedAt: null,
       controller: new AbortController(), lastOutputAt: null, extended: false, maxConcurrent: 0,
     };
     this.registry.set(entry.id, entry);
@@ -911,7 +941,22 @@ export class GateSemaphore {
       const outcome = await this.acquire(cap, priority, entry);
       if (!outcome.admitted) throw new GateCancelledError(outcome.kind, outcome.detail);
       acquired = true;
-      return await fn(entry.startedAt!, entry.controller.signal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit);
+      let result = await fn(entry.startedAt!, entry.controller.signal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit);
+      // Card 68155573 — CHAIN: each further link runs INSIDE this same try, so the one `finally` below is the
+      // only release on every exit (a throw in `next`/`fn`, a cancel, a normal end). No release, `grantEligible`
+      // or re-queue happens between links; `holdRepoGuard` is per-link, so only the LAST link's hold counts.
+      let link = next ? await next(result) : null;
+      while (link) {
+        Object.assign(entry.descriptor, link.descriptorPatch);
+        entry.attemptStartedAt = Date.now();
+        entry.lastOutputAt = null;
+        entry.extended = false;
+        entry.controller = new AbortController();
+        holdRepoGuard = false;
+        result = await link.fn(entry.attemptStartedAt, entry.controller.signal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit);
+        link = link.next ? await link.next(result) : null;
+      }
+      return result;
     } finally {
       this.registry.delete(entry.id);
       if (acquired) this.release(entry, holdRepoGuard);
@@ -1020,6 +1065,7 @@ export class GateSemaphore {
       fallbackOfBatchOpId: e.descriptor.fallbackOfBatchOpId ?? null,
       attempt: e.descriptor.attempt ?? null,
       priorAttemptMs: e.descriptor.priorAttemptMs ?? null,
+      attemptStartedAt: phase === "running" ? e.attemptStartedAt : null,
       phase,
       since: phase === "running" ? e.startedAt! : e.enqueuedAt,
       queuePosition,

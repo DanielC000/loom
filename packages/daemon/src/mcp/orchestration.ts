@@ -335,7 +335,7 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
       "id-prefix (the short id Loom displays everywhere else — same resolution as `tasks_get`/" +
       "`worker_spawn`/`escalation_status`). Returns {state:\"queued\"|\"running\"|\"pending\"|\"settled\"|" +
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"unknown\"|\"ambiguous\", gateType, elapsedMs, " +
-      "idleMs, extended?, attempt?, priorAttemptMs?, priorAttemptVerdict?, error?, note?, admittedAt?, ownerSessionAlive?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
+      "idleMs, extended?, attempt?, priorAttemptMs?, attemptStartedAt?, priorAttemptVerdict?, error?, note?, admittedAt?, ownerSessionAlive?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
       "outputTail?, outputFile?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?, emitCompareReduced?, " +
       "emitCompareNotApplicableKind?, " +
       "this tool is UNSCOPED for a manager — a real opId from ANY project on this daemon resolves here, not " +
@@ -352,28 +352,28 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
       "\"everything sensitive\" by " +
       "inference — treat any field not named here as VISIBLE on a foreign read, never assume redaction. " +
       "What stays visible on a foreign read: `state`/`passed`/`cancelled`/`outcome`/`gateType`/`durationMs`/" +
-      "`admittedAt`/`settledAt`/`totalDurationMs`/`extended`/`attempt`/`priorAttemptMs`/`proximity`/`gateCap`/`concurrentGates`/" +
+      "`admittedAt`/`settledAt`/`totalDurationMs`/`extended`/`attempt`/`priorAttemptMs`/`attemptStartedAt`/`proximity`/`gateCap`/`concurrentGates`/" +
       "`concurrentGatesMax`/`emitCompareReduced`/`emitCompareIdenticalCount`/`emitCompareNotApplicableKind`/" +
       "`retryPassed`/`transientRetried`/" +
       "`transientRetryWarning` — this is a targeted redaction of content-bearing fields, not a refusal. " +
-      "`attempt`/`priorAttemptMs` (card 99a1cf6f) are present ONLY while `state` is `queued`/`running` " +
+      "`attempt`/`priorAttemptMs`/`attemptStartedAt` (cards 99a1cf6f, 68155573) are present ONLY while `state` is `queued`/`running` " +
       "(a live-entry-only concept, same population scope as `extended`), and ONLY for a `merge`-kind op — " +
       "`undefined` on every ordinary first admission. `attempt:2` means this LIVE entry is `confirmWorkerMerge`'s " +
-      "OWN single-file or transient-kill retry re-admitting for a SECOND time, not a first-time queue wait — " +
-      "the two are otherwise structurally identical on every other field. `attempt:3` (card 7ad12202, both " +
+      "OWN single-file or transient-kill retry — a CONTINUATION of the SAME admission (card 68155573): it keeps " +
+      "the cap slot and the per-repo guard straight through the fail->retry gap and is NEVER re-queued, so it " +
+      "reads `state:\"running\"`, never `queued`, and `elapsedMs` keeps counting from the ORIGINAL admission. " +
+      "`attemptStartedAt` (ISO) is when the CURRENT attempt began — equal to the admission time on a first " +
+      "attempt, later once a retry continued it; `null` while queued. `attempt:3` (card 7ad12202, both " +
       "the solo AND batch merge paths) means a single-file retry above already passed but the original gate " +
-      "short-circuited on a non-final step — this is a THIRD admission re-running whatever step(s) never got " +
-      "to run, so a pass can be reported without a configured step ever silently going unexecuted. `priorAttemptMs` alongside " +
-      "either is how long everything BEFORE this admission already ran, so a `state:\"queued\"` reading with " +
-      "`attempt:2`/`attempt:3` doesn't read as an unexplained zero-progress wait: this op has already done " +
-      "real work, just not on THIS admission. `priorAttemptVerdict` (card 2ec00f6a) is attempt 1's own failed " +
+      "short-circuited on a non-final step — this is a THIRD link of the same admission re-running whatever step(s) " +
+      "never got to run, so a pass can be reported without a configured step ever silently going unexecuted. " +
+      "`priorAttemptMs` alongside either is how long everything BEFORE this attempt already ran (attempt 1, and the " +
+      "retry for `attempt:3`). `priorAttemptVerdict` (card 2ec00f6a) is attempt 1's own failed " +
       "verdict {attempt:1, passed:false, durationMs, retriedFile, failingTest?} — present ONLY on a live " +
-      "`attempt>=2` single/multi-file retry (queued or running), so a re-queued retry no longer hides that " +
+      "`attempt>=2` single/multi-file retry (a retry now reads running), so a retry never hides that " +
       "attempt 1 FAILED; the same fact is durable as a `build_gate_single_file_retry_attempt` event. `retriedFile`/" +
-      "`failingTest` are omitted on a cross-project read (`attempt`/`passed`/`durationMs` stay). Read this before concluding a long-`queued` merge op is stuck — " +
-      "a re-queue for a real retry is routine, not evidence of a wedge (the SAME distinction the resolution " +
-      "half of card 99a1cf6f itself was filed to close: a two-sample `gate_queue` read of a running→queued " +
-      "swap, with no `attempt` field to explain it, was mistaken for a lost verdict when it was actually this). " +
+      "`failingTest` are omitted on a cross-project read (`attempt`/`passed`/`durationMs` stay). Read this before concluding a long-`running` merge op is stuck — " +
+      "a retry is a routine continuation of the same admission (card 68155573), not a wedge or a lost verdict. " +
       "`emitCompareNotApplicableKind` (card fd0d34da) is a coarse CATEGORY naming why `emitCompareReduced` " +
       "itself is `undefined` (e.g. `\"repo-out-of-domain\"`, `\"path-out-of-scope\"`) — it never carries a " +
       "path/filename/error string the way `reason` does, which is exactly why it's safe to leave visible " +
@@ -858,7 +858,7 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "THIS project's own HIGH-tier (merge/deploy) waiter. Tier priority stays fully preserved WITHIN " +
         "one project either way — only cross-project ordering bends, deliberately, for fairness. " +
         "Each entry carries {opId, gateType, projectId, projectName, since, elapsedMs, idleMs, extended, " +
-        "attempt, priorAttemptMs, queuePosition, repoContended} — " +
+        "attempt, priorAttemptMs, attemptStartedAt, queuePosition, repoContended} — " +
         "`since`/`elapsedMs` are PHASE-SCOPED to whichever array the entry is in, not a fixed admission " +
         "clock: for a `queued` entry they measure time WAITING (since it was enqueued); once admitted, the " +
         "SAME entry RE-BASES to admission time and they measure time RUNNING instead. " +
@@ -901,7 +901,7 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "fallbackOfBatchOpId} — " +
         "everything else in the enumeration above (`opId` in FULL, chainable into `gate_status` same as " +
         "for an own-project entry; `gateType`/`projectId`/`projectName`; the phase-scoped `since`/" +
-        "`elapsedMs`/`idleMs`/`extended`/`attempt`/`priorAttemptMs`; `queuePosition`/`repoContended`; and, on its own separate " +
+        "`elapsedMs`/`idleMs`/`extended`/`attempt`/`priorAttemptMs`/`attemptStartedAt`; `queuePosition`/`repoContended`; and, on its own separate " +
         "has-a-branch condition unrelated to project ownership, `recentTimeoutStreak`) still rides the " +
         "wire cross-project, un-redacted. That four-field omission — not 'project + gate kind + age', " +
         "which undercounted what a foreign entry actually carries — is enough to tell 'someone else " +
@@ -922,22 +922,19 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "per-worktree guard from card 8d585277, which this field does NOT report on). Always `false` " +
         "while `running`, or for a `deploy`/other non-guarded entry. It's a LIVE read, recomputed on " +
         "every call — it can flip on a still-queued entry as sibling ops settle. " +
-        "`attempt`/`priorAttemptMs` (card 99a1cf6f, `merge`-kind entries only, `null`/`null` on a first " +
-        "admission) tell a genuine first-time queue wait apart from a RE-queue: `confirmWorkerMerge`'s own " +
+        "`attempt`/`priorAttemptMs`/`attemptStartedAt` (cards 99a1cf6f, 68155573; `merge`-kind entries only, " +
+        "`null`/`null`/`null` on a first admission) describe a RETRY of the same op: `confirmWorkerMerge`'s own " +
         "single-file retry (after a genuine failure narrows to a small re-runnable set) and its transient-kill " +
-        "retry (after a timeout/kill) each re-admit as their OWN, SEPARATE `runExclusive` cycle for the SAME " +
-        "op — before this card, that re-admission was structurally IDENTICAL, on every other field, to a " +
-        "first-time `queued` entry that has done zero seconds of work. `attempt:2` means this is that retry's " +
-        "re-admission, and `priorAttemptMs` is how long attempt 1 actually ran before settling — so a `queued` " +
-        "merge showing `attempt:2, priorAttemptMs:1129000` has already done real, substantial work and is " +
-        "waiting on its OWN retry, not sitting untouched. `attempt:3` (card 7ad12202, both the solo AND batch " +
-        "merge paths) is a further, rarer re-admission: the single-file retry above already passed, but the original gate had " +
-        "short-circuited on a non-final step, so this is resuming whatever step(s) never ran before a pass " +
-        "can be reported. This is the exact instrument gap the RESOLVED half " +
-        "of card 99a1cf6f identified: a `running`→`queued` transition read from two point-in-time samples, " +
-        "with no `attempt` field available to explain it, was misread as a lost verdict when it was actually " +
-        "a healthy retry re-queue — check `attempt` before concluding a `running`→`queued` swap needs " +
-        "escalating. " +
+        "retry (after a timeout/kill) CONTINUE the SAME admission (card 68155573) — the cap slot and the per-repo " +
+        "guard are held straight through the fail->retry gap and the retry is NEVER re-queued, so a retry reads " +
+        "`running` with `attempt:2`, not `queued`. `since` keeps the ORIGINAL admission time; `attemptStartedAt` " +
+        "(ISO; `null` while queued) is when the CURRENT attempt began, and `priorAttemptMs` is how long the attempts " +
+        "before it ran. `attempt:3` (card 7ad12202, both the solo AND batch merge paths) is a further link of the " +
+        "same admission: the single-file retry above already passed, but the original gate had short-circuited on a " +
+        "non-final step, so this is resuming whatever step(s) never ran before a pass can be reported. An " +
+        "`attempt>=2` entry can therefore only be QUEUED for a reason other than its own retry (none exists today); " +
+        "a `running`→`queued` swap for one op is no longer an expected retry shape — check `gate_status` before " +
+        "concluding a retry was lost. " +
         "IMPORTANT — `phase`/`queuePosition` reflect only what the semaphore BELIEVES, which can diverge " +
         "from reality: a gate timeout can settle (freeing the slot) without its process tree actually " +
         "dying, leaving an orphan the registry no longer tracks. So EVERY entry with a `branch` — OWN- " +

@@ -26,3 +26,7 @@ doc) — so at most one of the two notes is ever non-empty on a given nudge.
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts`, `confirmWorkerMerge`'s TRANSIENT-KILL AUTO-RETRY block (as of this tranche's HEAD; current line numbers, main moves under every tranche). A fuller doc of `gateRetried`'s own outer-scope declaration exists elsewhere in the same method (not edited by this tranche). Condensed and reworded, not verbatim.
+
+## Amended by 68155573
+
+The concurrency triple beside `transientRetried:true` now describes the single admission the retry continued, not a separate later one. See `68155573-a-retry-continues-its-admission-never-re-queues.md`.

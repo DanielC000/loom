@@ -56,3 +56,7 @@ decision as the `ConfirmMergeResult.cancelled` field doc above — the two happe
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`ConfirmMergeResult.cancelled`, single-file-retry caveat): lines 545-560, as of commit `f9caa77e30d5c1a6dd994b6203261968c0dbf94f`. Relocated by card `8f4c8a8f`; no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+## Amended by 68155573
+
+The single-file retry can no longer be cancelled while queued — it never queues (it continues attempt 1's admission). The `GateCancelledError` catch this record describes was deleted; the test that pinned it now proves a retry cannot be queued. See `68155573-a-retry-continues-its-admission-never-re-queues.md`.

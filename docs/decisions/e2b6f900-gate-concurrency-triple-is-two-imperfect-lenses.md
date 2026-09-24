@@ -23,3 +23,7 @@ manager comparing a green run against a red one never has to pivot to `gate_stat
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`ConfirmMergeResult` gate-concurrency-triple fields): lines 587-609, as of commit `f9caa77e30d5c1a6dd994b6203261968c0dbf94f`. Relocated by card `8f4c8a8f`; no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. The RESOLVED section above is from the outer-scope capture comment in `confirmWorkerMerge` (as of this tranche's HEAD; current line numbers, main moves under every tranche). Condensed and reworded, not verbatim.
+
+## Amended by 68155573
+
+The concurrency triple now always describes the ONE admission of the op; it no longer re-describes a later retry admission. See `68155573-a-retry-continues-its-admission-never-re-queues.md`.
