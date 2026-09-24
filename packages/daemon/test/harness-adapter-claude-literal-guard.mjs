@@ -113,6 +113,10 @@ const ALLOWLIST = new Map([
   // `.claude` PATH literal — that arm stays armed.
   ["db.ts", "bare"],                      // harness column DEFAULT/comment prose + toProfile/toSession's `?? undefined` cast
   ["profiles/validate.ts", "bare"],       // harness: z.enum(["claude","codex"]) — the human-only write validator
+  // Card 961da6c6: the codex-incompatibility REASON strings (moved here from validate.ts so validate/spawn/default-
+  // guard share one source) tell the operator to `use harness "claude"` — user-facing prose inside template
+  // literals, no discriminator or path logic. "bare" only: a `.claude` PATH literal must never appear here.
+  ["profiles/codex-compat.ts", "bare"],
   // Card 353f6dc4 (this same epic, later in Phase 1): resolveAgentSpawn's own return-type signature names
   // the SAME two-way enum ("claude"|"codex") — generic spawn-resolution infra, not the adapter module.
   // "bare" only: this file has no business ever gaining a `.claude` PATH literal.

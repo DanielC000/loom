@@ -13,10 +13,11 @@ import {
 // Card 66b1b40d: its own statement (not folded into the import above) — orchestration-mcp-role-guard.mjs regex-scans
 // that import within a fixed window of `usesOrchestrationMcp`, which a longer name list would push out of range.
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
+import { codexIncompatibilities, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
-import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
+import { CODEX_CODESCAPE_REASON, modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
@@ -2454,7 +2455,7 @@ export class SessionService {
   // re-resolve the profile's skills subset on resume/fork/recycle — read the PINNED value off the row.
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false, companionName?: string,
-  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean; harness: "claude" | "codex" | undefined } {
+  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean; harness: "claude" | "codex" | undefined; harnessDefaultSkipped: CodexIncompatibility[] | undefined } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
@@ -2477,6 +2478,7 @@ export class SessionService {
     // An explicit caller role still wins; then the (clamped) profile role (null under forcePlain), then
     // undefined (today's plain). The force-plain path passes no explicitRole, so it resolves null.
     const role = explicitRole ?? profileRole ?? undefined;
+    const harnessFromDefault = resolved.harness ? { harness: undefined, skipped: undefined } : this.defaultHarnessForSpawn(agent, role, resolved);
     // @decision 760cd01d — do not let config.permission.startupModeCycles determine a worker's boot-cycle
     // target: a spawned worker has no human at its TUI to answer an acceptEdits-only prompt, so it is
     // pinned to `auto` independent of that project-level knob, via withRolePermissionModeCyclesPin.
@@ -2530,7 +2532,8 @@ export class SessionService {
       // spawn recipe. `|| undefined` mirrors the model coercion (null/absent ⇒ "engine default", i.e.
       // "claude") — RESOLVED ONCE HERE, at the same chokepoint as every other profile-conferred field;
       // see `createPty`'s own doc comment for where this feeds the actual binary choice.
-      harness: resolved.harness || this.defaultHarnessForSpawn(agent, role),
+      harness: resolved.harness || harnessFromDefault.harness,
+      harnessDefaultSkipped: resolved.harness ? undefined : harnessFromDefault.skipped,
     };
   }
 
@@ -2541,10 +2544,41 @@ export class SessionService {
    * would silently drop the fleet default. `undefined` means claude, keeping the session column NULL and every
    * existing spawn byte-identical. Only a FRESH worker spawn consults this — resume/fork/recycle read the
    * pinned row value, so a default flip never migrates a live session.
+   *
+   * @decision 961da6c6 — a DEFAULT-derived codex harness applies ONLY to a codex-compatible profile; never apply it
+   * and rely on the spawn-time `onCodexUnsupportedCapability` report (a signal, not a guard: codex ignores `restrictedTools`).
    */
-  private defaultHarnessForSpawn(agent: Agent, role: SessionRole | undefined): "claude" | "codex" | undefined {
-    const projectConfig = this.db.getProject(agent.projectId)?.config;
-    return harnessDefaultForRole(resolveHarnessConfig(projectConfig, this.db.getPlatformConfig()), role);
+  private defaultHarnessForSpawn(
+    agent: Agent, role: SessionRole | undefined, resolved: CodexCompatInput,
+  ): { harness: "claude" | "codex" | undefined; skipped: CodexIncompatibility[] | undefined } {
+    const project = this.db.getProject(agent.projectId);
+    const candidate = harnessDefaultForRole(resolveHarnessConfig(project?.config, this.db.getPlatformConfig()), role);
+    if (candidate !== "codex") return { harness: candidate, skipped: undefined };
+    const items = codexIncompatibilities({
+      restrictedTools: resolved.restrictedTools, browserTesting: resolved.browserTesting,
+      documentConversion: resolved.documentConversion, capabilities: resolved.capabilities,
+    });
+    if (project && resolveCodescapeConfig(project.config).enabled) items.push({ id: "codescape", reason: CODEX_CODESCAPE_REASON });
+    return items.length > 0 ? { harness: undefined, skipped: items } : { harness: candidate, skipped: undefined };
+  }
+
+  /**
+   * Card 961da6c6: file the durable `harness_default_skipped` audit row for a FRESH spawn whose default-derived
+   * codex harness was skipped (see `defaultHarnessForSpawn`). Attribution is exact, not approximate: the caller
+   * invokes this after the new session's row exists, so `workerSessionId` is the affected session and
+   * `managerSessionId` its spawning manager. Never throws — an audit failure must not fail a spawn.
+   */
+  private recordHarnessDefaultSkipped(session: { id: string; taskId?: string | null }, managerSessionId: string, items: CodexIncompatibility[] | undefined): void {
+    if (!items || items.length === 0) return;
+    try {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId: session.id,
+        taskId: session.taskId ?? null, kind: "harness_default_skipped", detail: { items },
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[harness-default-skipped] ${session.id} failed to record audit event — swallowed: ${(err as Error)?.message ?? String(err)}`);
+    }
   }
 
   /**
@@ -6737,6 +6771,7 @@ export class SessionService {
         repoKey: targetRepo.key === "primary" ? null : targetRepo.key, // stamped once — see Session.repoKey's doc
       };
       this.db.insertSession(worker);
+      this.recordHarnessDefaultSkipped(worker, managerSessionId, workerSpawn.harnessDefaultSkipped);
       // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
       this.db.setProcessState(worker.id, "live");
       // @decision 16637a9e — release the cap-count claim HERE, synchronously, the instant the row is

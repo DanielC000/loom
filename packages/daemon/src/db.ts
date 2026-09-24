@@ -1526,7 +1526,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   "manager_exited_with_live_workers", "fleet_resume_failed", "manager_crash_resume_failed",
   "parked_manager_workers_unresumed", "rate_limit_bailed", "usage_latch_cleared", "session_message_gave_up",
   "paste_length_loss", "paste_tripwire_give_up", "prompt_mismatch_unresolved", "repeated_tool_call",
-  "codex_submit_unconfirmed", "codex_boot_stuck", "codex_unsupported_capability", "companion_zero_reply_detected",
+  "codex_submit_unconfirmed", "codex_boot_stuck", "codex_unsupported_capability", "harness_default_skipped", "companion_zero_reply_detected",
   // Owner-interaction records (ruled durable — lead gen 345, low volume, provenance IS the value)
   "question_asked", "question_amended", "request_escalated", "task_held_cleared",
 ]);

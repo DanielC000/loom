@@ -25,6 +25,12 @@ import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, i
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, RESERVED_CAPABILITY_SLUGS, type CapabilityDefRow } from "../capabilities/registry.js";
+
+/**
+ * @decision b987f086 — the project-level codex-incompatibility reason, named distinctly from the profile-field reasons in
+ * `profiles/codex-compat.ts`. One string for the spawn-time report below AND `SessionService`'s default-harness guard (card 961da6c6).
+ */
+export const CODEX_CODESCAPE_REASON = `codescape is enabled for this project but codex has no per-tool allow/disallow mechanism to pair with its write-tool restriction — never mounted for this harness, use harness "claude" for codescape access`;
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
 import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail } from "./codex-host.js";
 import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
@@ -4853,7 +4859,7 @@ export class PtyHost {
     if (opts.codescapeEnabled) {
       // eslint-disable-next-line no-console
       console.warn(`[pty] ${opts.sessionId} codescape is enabled for this project but is NOT mounted for harness "codex" — codex has no per-tool allow/disallow mechanism to pair with codescape's write-tool restriction (see createCodexPty's own doc). Use harness "claude" for codescape access.`);
-      unsupportedItems.push({ id: "codescape", reason: "codescape is enabled for this project but codex has no per-tool allow/disallow mechanism to pair with its write-tool restriction — never mounted for this harness, use harness \"claude\" for codescape access" });
+      unsupportedItems.push({ id: "codescape", reason: CODEX_CODESCAPE_REASON });
     }
     const mcpServers = buildMcpServers({
       sessionId: opts.sessionId, port: PORT, role: opts.role,

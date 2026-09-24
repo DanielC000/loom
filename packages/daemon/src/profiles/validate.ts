@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Profile } from "@loom/shared";
 import { RESERVED_CAPABILITY_SLUGS } from "../capabilities/registry.js";
+import { CODEX_RESTRICTED_TOOLS_REASON, codexStdioCapabilityReason, codexStdioOffenders } from "./codex-compat.js";
 
 /**
  * The ONE spelling of the harness enum's runtime values. Shared by the profile validator below and the
@@ -250,7 +251,7 @@ function assistantRestrictedToolsOmittedError(
  */
 function codexRestrictedToolsUnsupportedError(harness: string | undefined, restrictedTools: boolean | undefined): string | null {
   if (harness === "codex" && restrictedTools === true) {
-    return `restrictedTools is not supported on harness "codex" — codex has no per-native-tool disallow mechanism (only coarse sandbox_mode/approval_policy session-wide levers), so this combination cannot be honoured. Leave restrictedTools unset/false for a codex profile, or use harness "claude".`;
+    return CODEX_RESTRICTED_TOOLS_REASON;
   }
   return null;
 }
@@ -270,13 +271,9 @@ function codexStdioCapabilityUnsupportedError(
   capabilities: { slug: string; connectionId?: string }[] | undefined,
 ): string | null {
   if (harness !== "codex") return null;
-  const offending = [
-    browserTesting === true ? "browserTesting" : null,
-    documentConversion === true ? "documentConversion" : null,
-    capabilities && capabilities.length > 0 ? "capabilities" : null,
-  ].filter((f): f is string => f !== null);
+  const offending = codexStdioOffenders({ browserTesting, documentConversion, capabilities });
   if (offending.length === 0) return null;
-  return `${offending.join(" and ")} ${offending.length > 1 ? "are" : "is"} not supported on harness "codex" — ${offending.length > 1 ? "these all resolve" : "this resolves"} to a stdio MCP server (Playwright/markitdown/any registry capability), and codex can only mount {type:"http"} servers, so this combination cannot be honoured. Leave ${offending.join(" and ")} unset/false/empty for a codex profile, or use harness "claude".`;
+  return codexStdioCapabilityReason(offending);
 }
 
 export function validateProfile(

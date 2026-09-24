@@ -48,7 +48,8 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
   `rate_limit_bailed`, `usage_latch_cleared`, `session_message_gave_up`, `paste_length_loss`,
   `paste_tripwire_give_up`, `prompt_mismatch_unresolved`, `repeated_tool_call`,
   `codex_submit_unconfirmed`, `codex_boot_stuck`, `codex_unsupported_capability`,
-  `companion_zero_reply_detected`.
+  `harness_default_skipped` (card `961da6c6`: the only durable trace that a safety-scoped agent was kept on
+  claude instead of the fleet's codex default), `companion_zero_reply_detected`.
 - **Owner-interaction records** (ruled durable by the manager, `gen 345`: each is a record of an
   *owner* interaction — a decision asked for, an escalation crossing a board boundary, the owner's own
   brake being released; low volume, provenance is the whole value): `question_asked`,

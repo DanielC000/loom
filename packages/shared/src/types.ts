@@ -1513,6 +1513,12 @@ export type OrchestrationEventKind =
   // "notify whoever can act" convention as `codex_boot_stuck` above), workerSessionId = the affected codex
   // session itself; `detail` carries { items: { id, reason }[] }.
   | "codex_unsupported_capability"
+  // Card 961da6c6 — a FRESH spawn's DEFAULT-derived codex harness (the human `harness.default`, never a profile's
+  // own pin) was SKIPPED because the resolved profile/project needs something codex cannot honour
+  // (restrictedTools, browserTesting, documentConversion, capabilities, codescape); the agent stays claude.
+  // managerSessionId = the spawning manager, workerSessionId = the affected (claude) session;
+  // `detail` carries { items: { id, reason }[] }.
+  | "harness_default_skipped"
   // Card 9e4205f5 — `resumeFleetOnBoot` found ≥1 fleet-wide resume failure on a daemon restart (the SAME
   // `failed`/`failedDetail` this method already computes for the requester's own count-only notice — see
   // its doc). Filed under the RESTART REQUESTER (managerSessionId = `reqId`, a manager or platform-Lead
@@ -1633,7 +1639,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true,
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_dropped: true, engine_session_rotated: true,
   discovery_block_injection: true,
-  codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true,
+  codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true,
   codex_auto_commit: true,
   credential_revoked: true,
 };
