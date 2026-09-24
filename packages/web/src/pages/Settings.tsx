@@ -33,6 +33,7 @@ import { useAllAgents } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Badge, Chip, StatusPill, StaleStartupPromptWarning } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
 import { color, font, tone, type Tone } from "../theme";
+import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 
 // Project-scoped settings — edit the per-project config OVERRIDE (deep-partial of ResolvedConfig).
 // Scoped to the header's active project; switching it re-scopes (the editor is keyed by project id).
@@ -1483,12 +1484,12 @@ function ConnectionsPanel() {
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteConnection(id),
     onSuccess: () => invalidate(),
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
   const consent = useMutation({
     mutationFn: (id: string) => api.initiateOAuthConsent(id),
     onSuccess: (r) => { window.open(r.authUrl, "_blank", "noopener,noreferrer"); },
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
 
   const rows = data ?? [];
@@ -1971,7 +1972,7 @@ function ProjectLinksPanel() {
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteProjectLink(id),
     onSuccess: () => invalidate(),
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
 
   const rows = data ?? [];
@@ -2363,12 +2364,12 @@ function PollJobsPanel() {
   const toggle = useMutation({
     mutationFn: (v: { id: string; enabled: boolean }) => api.updatePollJob(v.id, { enabled: v.enabled }),
     onSuccess: () => invalidate(),
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
   const remove = useMutation({
     mutationFn: (id: string) => api.deletePollJob(id),
     onSuccess: () => invalidate(),
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
 
   const rows = jobs.data ?? [];
@@ -2673,7 +2674,7 @@ function CapabilitiesPanel() {
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteCapability(id),
     onSuccess: () => invalidate(),
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
 
   const rows = data ?? [];

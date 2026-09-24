@@ -23,6 +23,7 @@ import {
 import { ReviewQueue } from "../components/reviewQueue";
 import { color, font, tone } from "../theme";
 import { RoleBadge } from "../lib/roleDisplay";
+import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 
 // PROJECT OVERVIEW — the project-scoped analog of the Platform page: one scrolling cockpit for the
 // active project (header-selected via useActiveProject). It composes the SAME fleet widgets Mission
@@ -390,7 +391,7 @@ function FleetAccordion({ managers, workers, looseWorkers, archivedHidden }: {
   const end = useEndSession();
   const clearRl = useMutation({
     mutationFn: (id: string) => api.clearSessionRateLimit(id),
-    onSuccess: invalidate, onError: (e) => window.alert((e as Error).message),
+    onSuccess: invalidate, onError: alertUnlessCredentialGuard,
   });
 
   // Build the SessionActions props for a row. Manual archive was removed (archiving is automatic on

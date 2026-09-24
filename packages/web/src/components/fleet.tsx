@@ -11,6 +11,7 @@ import { HarnessTag } from "./HarnessPicker";
 import { useOpenRequest } from "./requests";
 import { Panel, StatusPill, Chip, Meter, Button, Dot } from "./ui";
 import { color, font, radius, tone, type Tone } from "../theme";
+import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 
 // The pure roll-up math lives in lib/fleet.ts (JSX-free, so the hermetic node test can import it); the
 // widgets re-export it so existing consumers (Overview) keep importing from the components/fleet barrel.
@@ -163,7 +164,7 @@ function ClearRateLimitButton({ sessionId }: { sessionId: string }) {
   const clear = useMutation({
     mutationFn: () => api.clearSessionRateLimit(sessionId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
   return (
     <Button variant="default" disabled={clear.isPending}
@@ -186,7 +187,7 @@ function SnoozeButton({ questionId }: { questionId: string }) {
   const snooze = useMutation({
     mutationFn: (ms: number) => api.acknowledgeQuestion(questionId, new Date(Date.now() + ms).toISOString()),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["openQuestions"] }),
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
   return (
     <select disabled={snooze.isPending} defaultValue=""

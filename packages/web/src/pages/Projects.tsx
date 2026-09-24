@@ -7,6 +7,7 @@ import { Panel, Button, Input, Select, SectionLabel, Chip, Dot, PresetAccentDots
 import { color, font, radius } from "../theme";
 import { roleDisplay, roleColor } from "../lib/roleDisplay";
 import type { SessionRole } from "@loom/shared";
+import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 
 // Starter agents seeded on project creation (editable afterward via the preset editor). Generic
 // role scaffolds — the canonical, project-specific prompts get filled in per project.
@@ -104,7 +105,7 @@ export default function Projects() {
   const updateProject = useMutation({
     mutationFn: (v: { id: string; patch: { name?: string; vaultPath?: string } }) => api.updateProject(v.id, v.patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
   const archiveProject = useMutation({
     mutationFn: (id: string) => api.archiveProject(id),
@@ -113,7 +114,7 @@ export default function Projects() {
       qc.invalidateQueries({ queryKey: ["projects"] });
       qc.invalidateQueries({ queryKey: ["archivedProjects"] });
     },
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
   const restoreProject = useMutation({
     mutationFn: (id: string) => api.restoreProject(id),
@@ -121,7 +122,7 @@ export default function Projects() {
       qc.invalidateQueries({ queryKey: ["projects"] });
       qc.invalidateQueries({ queryKey: ["archivedProjects"] });
     },
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
   const deleteProject = useMutation({
     mutationFn: (id: string) => api.deleteProjectPermanent(id),
@@ -130,7 +131,7 @@ export default function Projects() {
       qc.invalidateQueries({ queryKey: ["projects"] });
       qc.invalidateQueries({ queryKey: ["archivedProjects"] });
     },
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
   const deleteAgent = useMutation({
     mutationFn: (id: string) => api.deleteAgent(id),
@@ -139,7 +140,7 @@ export default function Projects() {
       qc.invalidateQueries({ queryKey: ["agents", projectId] });
       qc.invalidateQueries({ queryKey: ["allSessions"] });
     },
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
 
   const selectedProject = projects.data?.find((p) => p.id === projectId) ?? null;

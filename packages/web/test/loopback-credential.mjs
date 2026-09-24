@@ -4,6 +4,7 @@
 //   node --experimental-strip-types packages/web/test/loopback-credential.mjs
 import assert from "node:assert/strict";
 import {
+  alertUnlessCredentialGuard,
   isCredentialGuardFailure, isCredentialGuardMessage, isCredentialSocketFailure,
   credentialLock, noteCredentialLock, clearCredentialLock, subscribeCredentialLock,
   resetCredentialLockForTest,
@@ -51,6 +52,25 @@ check("the message-only predicate agrees with the status-aware one", () => {
   assert.equal(isCredentialGuardMessage(UNDETERMINABLE_401), false);
   assert.equal(isCredentialGuardMessage(TRUST_TIER_401), false);
   assert.equal(isCredentialGuardMessage("/api/projects -> 500"), false, "an unrelated failure must still alert");
+});
+
+// The shared per-call-site onError. 26 mutations across 10 files alerted their raw message directly,
+// bypassing main.tsx's global handler entirely — the live repro caught one still firing the daemon's
+// unrunnable `loom open` advice after the global suppression alone looked sufficient.
+check("alertUnlessCredentialGuard swallows the guard 401 and alerts everything else", () => {
+  const alerted = [];
+  globalThis.window = { alert: (m) => alerted.push(m) };
+  try {
+    alertUnlessCredentialGuard(new Error(GUARD_401));
+    assert.deepEqual(alerted, [], "the banner owns this class — no modal");
+    alertUnlessCredentialGuard(new Error(TRUST_TIER_401));
+    alertUnlessCredentialGuard(new Error("boom"));
+    alertUnlessCredentialGuard("a bare string, not an Error");
+    assert.deepEqual(alerted, [TRUST_TIER_401, "boom", "a bare string, not an Error"],
+      "every other failure must still alert, with its RAW message (byte-identical to the old inline call)");
+  } finally {
+    delete globalThis.window;
+  }
 });
 
 // ── socket inference ──────────────────────────────────────────────────────────

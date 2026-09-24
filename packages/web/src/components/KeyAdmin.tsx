@@ -4,6 +4,7 @@ import type { Agent, ApiKey, ApiKeyCaps, ApiKeyStatus } from "@loom/shared";
 import { api } from "../lib/api";
 import { Panel, Button, SectionLabel, StatusPill, Chip, Input, Select } from "./ui";
 import { color, font, radius, type Tone } from "../theme";
+import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 
 // Agent Runs key & endpoint admin — the per-project trust-boundary WRITE surface, the second view of the
 // Runs page ("Keys & Endpoints", beside the read-only "Runs" observability). Wires the human/loopback key
@@ -48,7 +49,7 @@ export function KeyAdmin({ projectId }: { projectId: string }) {
   const toggleEndpoint = useMutation({
     mutationFn: (v: { id: string; endpoint: boolean }) => api.updateAgent(v.id, { endpoint: v.endpoint }),
     onSuccess: () => { invalidateAgents(); invalidateKeys(); },
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
 
   const create = useMutation({
@@ -62,17 +63,17 @@ export function KeyAdmin({ projectId }: { projectId: string }) {
   const rotate = useMutation({
     mutationFn: (keyId: string) => api.rotateKey(keyId),
     onSuccess: (res) => { setSecret({ name: res.key.name, plaintext: res.plaintext }); invalidateKeys(); },
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
   const kill = useMutation({
     mutationFn: (keyId: string) => api.killKey(keyId),
     onSuccess: (res) => { window.alert(`Kill-switch fired — ${res.cancelled} in-flight run${res.cancelled === 1 ? "" : "s"} cancelled, key paused.`); invalidateKeys(); },
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
   const remove = useMutation({
     mutationFn: (keyId: string) => api.deleteKey(keyId),
     onSuccess: () => invalidateKeys(),
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
 
   const rows = keys.data ?? [];

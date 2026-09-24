@@ -13,6 +13,7 @@ import { Stat, PlanUsageStrip, AttentionRow, FleetRow, FleetCard, EventRow, Wave
 import { archivedOnlyProjects, ARCHIVED_ONLY_CAP, type ArchivedOnlyProject } from "../lib/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
 import { AuditReplayPanel } from "../components/auditReplay";
+import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 
 // Attention severity ranking — surfaces the REVIEW/decision bottleneck at the top of the queue. Merge
 // requests already live in the dedicated Review queue above; among the rest, a pending human Request (any
@@ -374,7 +375,7 @@ function ClearUsageHoldButton({ onCleared }: { onCleared: () => void }) {
   const clear = useMutation({
     mutationFn: () => api.clearUsageHold(),
     onSuccess: () => { setDone(true); onCleared(); window.setTimeout(() => setDone(false), 4000); },
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
   return (
     <Button variant="default" disabled={clear.isPending}

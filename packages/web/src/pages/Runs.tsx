@@ -7,6 +7,7 @@ import { TranscriptPane } from "../components/TranscriptPane";
 import { KeyAdmin } from "../components/KeyAdmin";
 import { Panel, Button, SectionLabel, StatusPill, Chip, Segmented } from "../components/ui";
 import { color, font, tone, type Tone } from "../theme";
+import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 
 // Agent Runs R4b — the project-scoped Runs observability view. Reads R4a's HUMAN run REST
 // (GET /api/projects/:id/runs[/:runId], POST .../cancel — unauthed loopback, full AgentRun rows
@@ -96,7 +97,7 @@ function RunsView({ projectId }: { projectId: string }) {
   const cancel = useMutation({
     mutationFn: (id: string) => api.cancelRun(projectId, id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["runs", projectId] }),
-    onError: (e) => window.alert((e as Error).message),
+    onError: alertUnlessCredentialGuard,
   });
 
   return (
