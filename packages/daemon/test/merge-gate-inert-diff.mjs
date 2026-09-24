@@ -71,6 +71,10 @@ import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// This file asserts merge/gate-skip behavior, never the pre-removal process reap. The real reap runs a win32
+// powershell Get-CimInstance enumeration (pty/host.ts enumerateProcessesWin32, ~1-2s under load) per worktree
+// removal — pure fixed cost here since no worker-rooted process exists — so inject the SessionService seam.
+const noReap = async () => ({ killedPids: [] });
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgid-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -194,7 +198,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
     const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
     A.worktreePath = worktreePath; A.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "docs", "investigations"));
@@ -227,7 +231,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     B.worktreePath = worktreePath; B.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "packages", "daemon", "assets", "skills", "some-skill"));
@@ -255,7 +259,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "docs"));
@@ -280,7 +284,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     D.worktreePath = worktreePath; D.branch = branch; worktrees.push(worktreePath);
     // No commits on the branch at all — a genuinely empty diff against main.
@@ -305,7 +309,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
     const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
     E.worktreePath = worktreePath; E.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "brand-new-unknown-dir"));
@@ -341,7 +345,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
     const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "docs"));
@@ -364,7 +368,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
     const { worktreePath, branch } = await createWorktree(G.repo, G.projId, G.taskId);
     G.worktreePath = worktreePath; G.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "docs-internal"));
@@ -411,7 +415,7 @@ try {
       await new Promise((res) => { releaseGate1 = res; });
       return { passed: true };
     };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
 
     db.insertProject({ id: H.projId, name: "MGID-H", repoPath: H.repo, vaultPath: H.repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
     db.insertAgent({ id: H.agentId, projectId: H.projId, name: "t", startupPrompt: "", position: 0 });
@@ -555,7 +559,7 @@ try {
       await new Promise((res) => { releaseGate1 = res; });
       return { passed: true };
     };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
 
     db.insertProject({ id: I.projId, name: "MGID-I", repoPath: I.repo, vaultPath: I.repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
     db.insertAgent({ id: I.agentId, projectId: I.projId, name: "t", startupPrompt: "", position: 0 });
@@ -697,7 +701,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
     const { worktreePath, branch } = await createWorktree(J.repo, J.projId, J.taskId);
     J.worktreePath = worktreePath; J.branch = branch; worktrees.push(worktreePath);
     // Start docs-only — provably inert against main BEFORE the wait, exactly like (A).
@@ -808,7 +812,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
     const { worktreePath, branch } = await createWorktree(K.repo, K.projId, K.taskId);
     K.worktreePath = worktreePath; K.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "docs"));
@@ -839,7 +843,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
     const { worktreePath, branch } = await createWorktree(L.repo, L.projId, L.taskId);
     L.worktreePath = worktreePath; L.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "docs", "investigations"));
@@ -876,7 +880,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, reapWorktreeProcesses: noReap });
     const { worktreePath, branch } = await createWorktree(M.repo, M.projId, M.taskId);
     M.worktreePath = worktreePath; M.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "CLAUDE.md"), "# Loom\n\nsome repo-root doc content\n");
