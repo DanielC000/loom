@@ -7,8 +7,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (1) codexIncompatibilities matrix (pure): each field alone, in combination, none; reasons are the SAME strings
 //       validateProfile uses (one source).
 //   (2) spawnWorker under a codex default: a worker profile needing restrictedTools / browserTesting /
-//       documentConversion / capabilities / codescape STAYS claude + files a durable harness_default_skipped event
-//       (exact attribution); a compatible profile still gets codex; an EXPLICIT codex profile is untouched.
+//       documentConversion / capabilities STAYS claude + files a durable harness_default_skipped event
+//       (exact attribution); a compatible profile still gets codex; an EXPLICIT codex profile is untouched; codescape is NOT a skip reason (fail-closed).
 //   (3) HARNESS_FLEET_ROLES: scope:'fleet' rejected while it is ["worker"]; a temporarily WIDENED list flips the
 //       validator AND harnessDefaultForRole (negative control: the refinement really keys off the const).
 //   (4) forkSession refuses a codex-pinned source (typed error, no spawn); a claude source still forks
@@ -35,6 +35,7 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 process.env.LOOM_CODEX_BIN = path.join(tmpHome, "no-such-codex-binary");
+delete process.env.CODEX_HOME; // never let an ambient real ~/.codex leak into a spawn under test
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
@@ -148,6 +149,7 @@ try {
   for (const [agentId, field] of [["agRestricted", "restrictedTools"], ["agBrowser", "browserTesting"], ["agDoc", "documentConversion"], ["agCaps", "capabilities"]]) {
     const r = await spawn(agentId);
     check(`(2) ${field} worker STAYS claude under a codex default (opts.harness undefined)`, r.opts?.harness === undefined);
+    check(`(2) ${field}: spawnWorker's result carries harnessDefaultSkipped naming it (what worker_spawn surfaces)`, r.w.harnessDefaultSkipped?.some((i) => i.id === field) === true);
     check(`(2) ${field} worker's session column is NULL (claude)`, r.row.harness === undefined || r.row.harness === null);
     check(`(2) ${field}: exactly one harness_default_skipped event naming it`, r.skipped.length === 1 && r.skipped[0].detail.items.some((i) => i.id === field));
     check(`(2) ${field}: event attribution — manager = spawning manager, worker = the new session`,
@@ -157,8 +159,17 @@ try {
   }
 
   const cs = await spawn("agPlainCS", "pCS");
-  check("(2) a codescape-enabled project's worker STAYS claude", cs.opts?.harness === undefined && cs.skipped.length === 1 && cs.skipped[0].detail.items[0].id === "codescape");
-  check("(2) the codescape item carries host.ts's one reason string", cs.skipped[0]?.detail.items[0].reason === CODEX_CODESCAPE_REASON);
+  check("(2) a codescape-enabled project's worker STILL gets codex (fail-CLOSED: a loud spawn-time degrade, not a skip) and files no skipped event", cs.opts?.harness === "codex" && cs.row.harness === "codex" && cs.skipped.length === 0);
+
+  check("(2) a compatible worker's result has NO harnessDefaultSkipped", plain.w.harnessDefaultSkipped === undefined);
+
+  // startNew (human "+New") on a worker-role agent: guarded AND files the event, manager = the session itself
+  const sn = svc.startNew("agRestricted");
+  const snEvents = db.listEventsForWorker(sn.id).filter((e) => e.kind === "harness_default_skipped");
+  check("(2) startNew on a restricted worker-role agent STAYS claude", optsFor(sn.id)?.harness === undefined);
+  check("(2) startNew files the skipped event with manager = the session itself", snEvents.length === 1 && snEvents[0].managerSessionId === sn.id && snEvents[0].detail.items.some((i) => i.id === "restrictedTools"));
+  const snOk = svc.startNew("agPlain");
+  check("(2) CONTROL: startNew on a compatible worker-role agent gets codex and files no event", optsFor(snOk.id)?.harness === "codex" && db.listEventsForWorker(snOk.id).filter((e) => e.kind === "harness_default_skipped").length === 0);
 
   const explicit = await spawn("agExplicit");
   check("(2) an EXPLICIT harness:'codex' profile is unchanged (still codex)", explicit.opts?.harness === "codex" && explicit.row.harness === "codex");

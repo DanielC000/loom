@@ -17,7 +17,7 @@ import { codexIncompatibilities, type CodexCompatInput, type CodexIncompatibilit
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
-import { CODEX_CODESCAPE_REASON, modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
@@ -2555,6 +2555,7 @@ export class SessionService {
    *
    * @decision 961da6c6 — a DEFAULT-derived codex harness applies ONLY to a codex-compatible profile; never apply it
    * and rely on the spawn-time `onCodexUnsupportedCapability` report (a signal, not a guard: codex ignores `restrictedTools`).
+   * Codescape is deliberately NOT a skip reason: it is fail-CLOSED (simply not mounted, and reported loudly at spawn).
    */
   private defaultHarnessForSpawn(
     agent: Agent, role: SessionRole | undefined, resolved: CodexCompatInput,
@@ -2566,7 +2567,6 @@ export class SessionService {
       restrictedTools: resolved.restrictedTools, browserTesting: resolved.browserTesting,
       documentConversion: resolved.documentConversion, capabilities: resolved.capabilities,
     });
-    if (project && resolveCodescapeConfig(project.config).enabled) items.push({ id: "codescape", reason: CODEX_CODESCAPE_REASON });
     return items.length > 0 ? { harness: undefined, skipped: items } : { harness: candidate, skipped: undefined };
   }
 
@@ -2661,7 +2661,7 @@ export class SessionService {
     // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessDefaultSkipped } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -2689,6 +2689,9 @@ export class SessionService {
       harness, // multi-harness epic df1f94b0 P1: profile-conferred vendor CLI, pinned (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
+    // Card 961da6c6: a human "+New" on a worker-role agent also takes the default harness and is guarded, so it files the same
+    // event — with NO manager, attributed to the session itself (the handleCodexUnsupportedCapability convention).
+    this.recordHarnessDefaultSkipped(session, session.id, harnessDefaultSkipped);
     // M5: flip to live BEFORE wiring the pty, so onExit ('exited') from a fast-failing spawn always
     // wins — there is no post-spawn 'live' write left to clobber it back to live.
     this.db.setProcessState(session.id, "live");
@@ -6491,7 +6494,7 @@ export class SessionService {
      *  FIFO position instead of letting a fresh `record()` mint a new one at the back). Every OTHER caller
      *  (worker_spawn/spawnWorkerTracked) omits this — byte-identical cap-reject behavior for them. */
     internal?: { skipCapQueueRecord?: boolean },
-  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; capacity: WorkerCapacity }> {
+  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
     const project = this.db.getProject(manager.projectId);
@@ -6919,7 +6922,7 @@ export class SessionService {
       // genuinely-still-in-flight sibling spawn; excluding "this call's own claim" would wrongly subtract
       // 1 from that (docs/decisions/16637a9e-worker-spawn-cap-claim-released-on-live-not-finally.md)
       const capacity = this.getWorkerCapacity(managerSessionId);
-      return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree, discardedOnRecut, staleBase, reviewOf, capacity };
+      return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree, discardedOnRecut, staleBase, reviewOf, harnessDefaultSkipped: workerSpawn.harnessDefaultSkipped, capacity };
     } finally {
       // Release the per-taskId (or taskless per-call) claim. By here the row is either live (liveHolder now
       // rejects re-spawns for a real task) or the spawn threw before any persistent state — either way the
@@ -6973,10 +6976,10 @@ export class SessionService {
   async spawnWorkerTracked(
     managerSessionId: string,
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string; reviewOfWorkerSessionId?: string; reviewOfTaskId?: string },
-  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; capacity: WorkerCapacity }>> {
+  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity }>> {
     const taskRef = (opts.taskId ?? "").trim();
     const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
-    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; capacity: WorkerCapacity }>(
+    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity }>(
       key, "spawn", managerSessionId, this.syncAttachBudgetMs,
       () => this.spawnWorker(managerSessionId, opts),
       undefined,

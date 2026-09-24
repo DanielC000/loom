@@ -8,11 +8,15 @@ Card `961da6c6` (C5 of the codex non-worker parity design; gate card `4c4eb9af`;
 
 Checked at source (card `961da6c6`, this worktree): **codex ignores `restrictedTools` entirely.** `git grep -n restrictedTools -- packages/daemon/src/pty` returns hits only in the `SpawnOpts` field, `RESTRICTED_NATIVE_TOOLS`/`disallowedToolsForSpawn`, and its single call site in the CLAUDE `createPty` path (`host.ts` ~6058, after the `if (opts.harness === "codex") { this.spawnCodexProcess(opts); return; }` dispatch at ~4411). Nothing in `createCodexPty` (~4802-4940) or `spawnCodexProcess` reads it. Positive control: the same pattern DOES hit the claude call site. So a restricted worker under a codex default would run with codex's full workspace-write shell/file access while its profile still read "restricted" — the gap `validate.ts`'s own doc comment names as the reason for the save-time rejection, reachable through the default layer instead.
 
-The other three stdio fields are dropped at `mcpServersToCodexArgs` and reported via `onCodexUnsupportedCapability` (a signal, not a guard); codescape is deliberately not mounted for codex (decisions `7fbd1ba5`, `d7657543`).
+The other three stdio fields are dropped at `mcpServersToCodexArgs` and reported via `onCodexUnsupportedCapability`.
 
 ## 2. Decision: skip-and-record
 
-`defaultHarnessForSpawn` applies a default-derived codex harness only when `codexIncompatibilities(...)` (`profiles/codex-compat.ts`, the ONE source of the reason strings, shared with `validate.ts` and `pty/host.ts`) is empty for the resolved profile + the project's `codescape.enabled`. An incompatible agent stays claude; the reasons are returned as `harnessDefaultSkipped` and the FRESH-spawn caller (`spawnWorker`) files a durable `harness_default_skipped` orchestration event with exact attribution (`managerSessionId` = the spawning manager, `workerSessionId` = the new session — filed after the row exists, never at resolve time, since resume/fork/recycle also call the resolver). An EXPLICIT `harness:"codex"` profile is unchanged (human-chosen; validate-rejected; spawn-time signal remains as defense-in-depth per `b987f086`).
+`defaultHarnessForSpawn` applies a default-derived codex harness only when `codexIncompatibilities(...)` (`profiles/codex-compat.ts`, the ONE source of the reason strings for the profile fields, shared with `validate.ts`) is empty for the resolved profile. An incompatible agent stays claude; the reasons are returned as `harnessDefaultSkipped` and the FRESH-spawn caller (`spawnWorker`) files a durable `harness_default_skipped` orchestration event with exact attribution (`managerSessionId` = the spawning manager, `workerSessionId` = the new session — filed after the row exists, never at resolve time, since resume/fork/recycle also call the resolver). An EXPLICIT `harness:"codex"` profile is unchanged (human-chosen; validate-rejected; spawn-time signal remains as defense-in-depth per `b987f086`).
+
+**Codescape is deliberately NOT a skip reason** (manager ruling, code-review of card `961da6c6`): it is fail-CLOSED — simply not mounted for codex (decisions `7fbd1ba5`, `d7657543`) and already reported loudly at spawn via `onCodexUnsupportedCapability` (`CODEX_CODESCAPE_REASON`, `pty/host.ts`). Skipping on it would make a codex default a no-op on every codescape-enabled project, Loom itself included. Only FAIL-OPEN items (`restrictedTools`) and PURPOSE-DEFEATING ones (the stdio capabilities: a browser/document rig without its browser/converter cannot do its job) keep a worker on claude.
+
+A human "+New" (`startNew`) on a worker-role agent takes the same default and the same guard, and files the event with manager = the session itself; `worker_spawn`'s result carries `harnessDefaultSkipped:{items,note}` (additive) so the spawning manager sees it without searching events.
 
 Rejected: refusing at config-write time (a global knob would refuse over one agent of N), and signal-only (fail-open for `restrictedTools`).
 
@@ -20,7 +24,7 @@ Rejected: refusing at config-write time (a global knob would refuse over one age
 
 One shared const read by BOTH the `scope:"fleet"` validator refinement and `harnessDefaultForRole`, so they cannot diverge. It is `["worker"]` — identical to today's behaviour; this card widens nothing. A free-form `roles` config key was rejected: roles are the security spine, not user toggles.
 
-Intended rollout SEQUENCE (not a commitment; each widening is its own card and may need an owner Request): worker (today) → plain/run → manager, assistant (after a doctrine-parity + fork/codescape-degrade card) → setup, auditor, workspace-auditor (they carry safety doctrine — last) → platform lead (human-driven, elevated — very last).
+Note: the "plain" role (`undefined`) has no representation in a `SessionRole[]` allowlist, so it needs one designed before it can be listed. Intended rollout SEQUENCE (not a commitment; each widening is its own card and may need an owner Request): worker (today) → plain/run → manager, assistant (after a doctrine-parity + fork/codescape-degrade card) → setup, auditor, workspace-auditor (they carry safety doctrine — last) → platform lead (human-driven, elevated — very last).
 
 ## 4. Fork on codex refuses
 
@@ -29,6 +33,7 @@ Codex has no `--fork-session` equivalent (memory `codex-fork-has-no-engine-equiv
 ## Do not
 
 - Do not apply a default-derived codex harness without the compatibility check and rely on the spawn-time `onCodexUnsupportedCapability` report — it is a signal, and codex silently ignores `restrictedTools`.
+- Do not add codescape (fail-closed) back to the skip list.
 - Do not copy the reason strings; import them from `profiles/codex-compat.ts` so validate, spawn and the default guard cannot drift.
 - Do not widen `HARNESS_FLEET_ROLES` in an unrelated change, or add a free-form roles config key.
 - Do not turn the codex-fork refusal back into a degrade-to-fresh-spawn on the human route.

@@ -879,8 +879,9 @@ export interface RemoteAccessConfig {
 /**
  * Which roles a default-harness setting applies to (multi-harness epic df1f94b0, card 66b1b40d). The type
  * names both values so card 4c4eb9af (codex non-worker readiness) relaxes ONE validator refinement rather
- * than widening a type — but until that card lands `"fleet"` is REJECTED at both write layers
- * (`mcp/platform.ts`) and IGNORED by `harnessDefaultForRole` below: the default applies to `worker` only.
+ * than widening a type — `"fleet"` is REJECTED at both write layers (`mcp/platform.ts`) until the shared
+ * `HARNESS_FLEET_ROLES` allowlist below reaches beyond `worker`, and `harnessDefaultForRole` applies `"fleet"` to exactly
+ * that list (today `["worker"]`, i.e. the same as `"workers"`).
  */
 export type HarnessDefaultScope = "workers" | "fleet";
 

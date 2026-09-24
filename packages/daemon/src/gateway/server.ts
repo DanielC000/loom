@@ -5027,7 +5027,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.sessions.resume((req.params as { id: string }).id, { allowSuperseded: true }));
   app.post("/api/sessions/:id/fork", async (req, reply) => {
     try {
-      return deps.sessions.forkSession((req.params as { id: string }).id);
+      return await deps.sessions.forkSession((req.params as { id: string }).id);
     } catch (e) {
       // Card 961da6c6: an honest 4xx (not a generic 500) so the UI's global mutation-error alert names the reason.
       if (e instanceof CodexForkUnsupportedError) return reply.code(409).send({ error: e.message });
