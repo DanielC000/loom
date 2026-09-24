@@ -55,6 +55,10 @@ import { randomUUID } from "node:crypto";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
+// Asserts merge/gate behavior, never the pre-removal process reap. The real reap runs a win32 powershell
+// Get-CimInstance enumeration (pty/host.ts enumerateProcessesWin32, ~1-2s under load) per worktree removal —
+// pure fixed cost here since no worker-rooted process exists — so inject the SessionService seam.
+const noReap = async () => ({ killedPids: [] });
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
@@ -95,7 +99,7 @@ const host = new SeamHost(events);
 // "race"/"stale"/"retain" assertion wants the SYNCHRONOUS-settle shape, not a host-speed race — so widen it
 // here, test-only; production's own SYNC_ATTACH_BUDGET_MS is untouched (not the banned "raise the budget").
 const GENEROUS_SYNC_BUDGET_MS = 60_000;
-const svc = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
+const svc = new SessionService(db, host, new OrchestrationControl(), { reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
 // One project shared across scenarios; a fresh repo/agents/manager per scenario keeps them isolated.
 function makeRepo() {
@@ -198,7 +202,7 @@ try {
     // wall-clock wait: sleeping to a comfortable fraction of a small window is the same proof as sleeping
     // to that same fraction of the real production window (mirrors pending-ops-registry.mjs's own "m6"
     // partway-through-the-window scenario). Shares the SAME db/host as `svc` — only the window differs.
-    const svcRetain = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, spawnOpRetainMs: 500 });
+    const svcRetain = new SessionService(db, host, new OrchestrationControl(), { reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, spawnOpRetainMs: 500 });
 
     const first = await svcRetain.spawnWorkerTracked(`${P}-mgr1`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
     check("(spawn retain) first call settles + creates the live worker", first.settled && first.ok);
@@ -233,7 +237,7 @@ try {
     // A SEPARATE SessionService instance with a tiny spawnOpRetainMs — proving the window is bounded, not
     // a permanent cache, without a real 10min wall-clock wait (mirrors pending-ops-registry.mjs's own "past
     // retainMs" scenarios). Shares the SAME db/host as `svc` — only the retention window differs.
-    const svcShortRetain = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, spawnOpRetainMs: 30 });
+    const svcShortRetain = new SessionService(db, host, new OrchestrationControl(), { reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, spawnOpRetainMs: 30 });
 
     const first = await svcShortRetain.spawnWorkerTracked(`${P}-mgr1`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
     check("(spawn stale) first call settles + creates the live worker", first.settled && first.ok);
