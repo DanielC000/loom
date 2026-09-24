@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { resolveConfig, contextWindowForModel } from "@loom/shared";
 import type { OrchestrationConfig, Session } from "@loom/shared";
 import type { Db } from "../db.js";
+import { claudeAdapter } from "../pty/claude-adapter.js";
+import { codexAdapter } from "../pty/codex-adapter.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
 export interface ContextPty {
@@ -101,6 +103,10 @@ export const CONTEXT_EMERGENCY_REDIRECT_TAG = "loom:context-emergency:redirect";
  * queue once a second, harder floor is crossed; Trigger B deliberately never escalates into it.
  * @decision 9f279c7b — reuses `worker_redirect`'s deliverRedirect primitive; refuses during merge-danger.
  */
+/** Whether a session's harness ever populates `ctxInputTokens` — the adapter capability, the same source `mcp/orchestration.ts`'s `contextTelemetryFor` reads. */
+const contextTelemetryFor = (harness: Session["harness"]): boolean =>
+  (harness === "codex" ? codexAdapter : claudeAdapter).capabilities.contextTelemetry;
+
 export class ContextWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   constructor(private deps: ContextWatcherDeps) {}
@@ -120,7 +126,14 @@ export class ContextWatcher {
       // ctxInputTokens null-skip just below — that skip is exactly the blind spot this closes.
       this.checkBlindTurn(db, pty, m, cfg, nowMs, nowIso);
 
-      if (m.ctxInputTokens == null) continue;
+      // TURN-COUNT FALLBACK (card 5b1f7ec6): a harness with `contextTelemetry:false` (codex) NEVER measures
+      // `ctxInputTokens`, so the ratio path below can never fire for it. Gated on the ADAPTER capability, not
+      // on the null alone — a claude manager that merely hasn't completed a Stop yet is also null and must
+      // stay on the plain `continue` (claude behaviour byte-identical).
+      if (m.ctxInputTokens == null) {
+        if (!contextTelemetryFor(m.harness)) this.checkTurnCountRecycle(db, pty, m, cfg, envOverride, nowMs, nowIso);
+        continue;
+      }
 
       const window = contextWindowForModel(m.model);
       const r = m.ctxInputTokens / window;
@@ -203,6 +216,62 @@ export class ContextWatcher {
       // eslint-disable-next-line no-console
       console.log(`[context-watcher] nudged manager ${m.id} to recycle (${result.delivered ? "delivered" : "queued, lands next turn"}; ~${pct}% of ${kw}k window, unanswered→${state.unanswered + 1})`);
     }
+  }
+
+  /**
+   * TURN-COUNT recycle fallback for a manager whose harness has no context telemetry (card 5b1f7ec6). Sends
+   * the SAME ordinary, queued recycle nudge (`CONTEXT_RECYCLE_NUDGE_PREFIX`) as the ratio path — never the
+   * emergency interrupt (that needs a real occupancy reading, see `checkEmergencyOccupancy`) — with the same
+   * per-project cadence, unanswered-cap escalation and DoD-4 purge behaviour. Signal: `turnSeq`, the
+   * completed-turn counter codex's own turn-completion chokepoint bumps (pty/host.ts `onTurnCompleted`), vs
+   * `recycleAtTurnsNoTelemetry`. A project that disabled recycle nudging (`recycleAtContextRatio` 0, no env
+   * force) disables this too.
+   */
+  private checkTurnCountRecycle(db: Db, pty: ContextPty, m: Session, cfg: OrchestrationConfig, envOverride: number | undefined, nowMs: number, nowIso: string): void {
+    const limit = cfg.recycleAtTurnsNoTelemetry;
+    if (limit <= 0) return; // fallback disabled for this project
+    if (!(envOverride && envOverride > 0) && cfg.recycleAtContextRatio <= 0) return; // recycle nudging disabled
+    const turns = m.turnSeq ?? 0;
+    if (turns < limit) return;
+
+    const state = db.getContextNudgeState(m.id);
+    if (!state) return;
+    if (state.policy !== "watching") return; // already escalated → silent
+    if (state.lastContextNudgeAt) {
+      const sinceMin = (nowMs - Date.parse(state.lastContextNudgeAt)) / 60_000;
+      if (sinceMin < cfg.recycleNudgeIntervalMinutes) return;
+    }
+    if (!pty.isAlive(m.id)) return;
+
+    if (state.unanswered >= cfg.maxUnansweredRecycleNudges) {
+      db.appendEvent({
+        id: randomUUID(), ts: nowIso, managerSessionId: m.id, kind: "context_escalated",
+        detail: { reason: "unanswered_cap", unanswered: state.unanswered, pct: null, turns },
+      });
+      db.setContextNudgePolicy(m.id, "escalated");
+      // eslint-disable-next-line no-console
+      console.log(`[context-watcher] ESCALATED manager ${m.id} (${state.unanswered} unanswered recycle nudges → escalated, ${turns} turns, no context telemetry)`);
+      return;
+    }
+
+    const msg =
+      `${CONTEXT_RECYCLE_NUDGE_PREFIX} You have completed ${turns} turns this session and your harness reports no ` +
+      `context telemetry, so your context can't be measured — hand off before it fills. ` +
+      `Wind down NOW: run /loom-session-end to log progress to the vault, then call recycle_me with a ` +
+      `self-contained continuation prompt for your successor (current goal, what's done, your in-flight ` +
+      `workers + their tasks/status, next steps, key decisions). Your successor boots with this agent's ` +
+      `warm-up + your continuation and inherits your workers — finish merges/reviews you can close quickly first.`;
+    let result: { delivered: boolean; queued?: boolean };
+    let threw = false;
+    try { result = pty.enqueueStdin(m.id, msg); } catch { threw = true; result = { delivered: false, queued: false }; }
+    if (!result.delivered && !result.queued) {
+      // eslint-disable-next-line no-console
+      console.log(`[context-watcher] turn-count nudge to manager ${m.id} was NOT accepted (${threw ? "enqueueStdin threw" : "enqueueStdin reported neither delivered nor queued"}) — not recording a sent nudge, not counting a strike`);
+      return;
+    }
+    db.recordContextNudge(m.id, nowIso);
+    // eslint-disable-next-line no-console
+    console.log(`[context-watcher] nudged manager ${m.id} to recycle by turn count (${result.delivered ? "delivered" : "queued, lands next turn"}; ${turns} turns >= ${limit}, no context telemetry, unanswered→${state.unanswered + 1})`);
   }
 
   /**

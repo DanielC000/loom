@@ -235,6 +235,7 @@ const orchestrationOverride = z.object({
   // twin of stuckWorkerMinutes, same 0-floor rationale, benign leash (no host-launch/exfil capability) so
   // it stays on the agent path too.
   managerBlindTurnMinutes: z.number().int().min(0).optional(),
+  recycleAtTurnsNoTelemetry: z.number().int().min(0).optional(),
   // Crash-recovery auto-resume cap (whole number; 0 disables the watcher, serves as enable + cap). A
   // generous ceiling guards a fat-fingered value from authorizing an unbounded resume loop. 0-floor
   // honored as a real value (disable), same rationale as the leashes above.

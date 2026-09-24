@@ -451,6 +451,18 @@ export interface OrchestrationConfig {
    */
   managerBlindTurnMinutes: number;
   /**
+   * Turn-count recycle FALLBACK for a manager/platform lead whose harness reports `contextTelemetry:false`
+   * (codex today — no hooks, so `ctxInputTokens` is never measured and the ratio-based nudge above can
+   * never fire). ContextWatcher sends the SAME ordinary recycle nudge once that session's completed-turn
+   * counter (`turnSeq`) reaches this many turns. Never consulted for a harness WITH telemetry (claude) —
+   * its behaviour is unchanged. Still gated by `recycleAtContextRatio` (0 there disables recycle nudging
+   * for the project, this fallback included) and paced by `recycleNudgeIntervalMinutes` /
+   * `maxUnansweredRecycleNudges`. Default 150 — a CONSERVATIVE guess, NOT derived from measured
+   * turns-to-80% data (the local claude corpus can't supply it: most rows carry no model, so the window
+   * is mis-sized); tune per project. 0 disables the fallback.
+   */
+  recycleAtTurnsNoTelemetry: number;
+  /**
    * Asleep-at-the-Wheel idle-manager watchdog. Minutes a LIVE manager may sit idle (busy=false, no live
    * workers, not snoozed/suppressed) before the watcher nudges it once. Default 45; 0 disables the
    * watcher entirely. Env LOOM_IDLE_NUDGE_MINUTES sets the platform default here (a per-project
@@ -1196,7 +1208,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -1715,6 +1727,7 @@ export function resolveConfig(
       maxUnansweredRecycleNudges: override.orchestration?.maxUnansweredRecycleNudges ?? d.orchestration.maxUnansweredRecycleNudges,
       // `??` (not `||`) so an explicit 0 (disables the manager blind-turn watchdog) survives the merge.
       managerBlindTurnMinutes: override.orchestration?.managerBlindTurnMinutes ?? d.orchestration.managerBlindTurnMinutes,
+      recycleAtTurnsNoTelemetry: override.orchestration?.recycleAtTurnsNoTelemetry ?? d.orchestration.recycleAtTurnsNoTelemetry,
       // Precedence: per-project override > LOOM_IDLE_NUDGE_MINUTES env > hardcoded default. `??` (not
       // `||`) so an explicit 0 at any layer is preserved (0 disables the watcher).
       idleNudgeMinutes: override.orchestration?.idleNudgeMinutes ?? envIdle ?? d.orchestration.idleNudgeMinutes,
