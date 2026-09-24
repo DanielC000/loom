@@ -71,6 +71,10 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, mergeBranch } = await import("../dist/git/worktrees.js");
 
+// Asserts merge/gate behavior, never the pre-removal process reap. The real reap runs a win32 powershell
+// Get-CimInstance enumeration (pty/host.ts enumerateProcessesWin32, ~1-2s under load) per worktree removal —
+// pure fixed cost here since no worker-rooted process exists — so inject the SessionService seam.
+const noReap = async () => ({ killedPids: [] });
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const GIT_ID = "-c user.email=mciw@loom -c user.name=mciw";
@@ -135,7 +139,7 @@ try {
     makeRepo(A);
     const db = new Db(); dbs.push(db);
     const pty = fullPtyStub({});
-    const sessions = new SessionService(db, pty, new OrchestrationControl(), { runGate: async () => ({ passed: true, steps: [] }) });
+    const sessions = new SessionService(db, pty, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: async () => ({ passed: true, steps: [] }) });
     const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
     A.worktreePath = worktreePath; A.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-a.txt"), "work\n");
@@ -154,7 +158,7 @@ try {
     const db = new Db(); dbs.push(db);
     const signals = { fusion: {} };
     const pty = fullPtyStub(signals);
-    const sessions = new SessionService(db, pty, new OrchestrationControl(), { runGate: async () => ({ passed: true, steps: [] }) });
+    const sessions = new SessionService(db, pty, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: async () => ({ passed: true, steps: [] }) });
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     B.worktreePath = worktreePath; B.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-b.txt"), "work\n");
@@ -178,7 +182,7 @@ try {
     const db = new Db(); dbs.push(db);
     const signals = { replay: {}, fusion: {}, unmatched: {}, tripwire: {} };
     const pty = fullPtyStub(signals);
-    const sessions = new SessionService(db, pty, new OrchestrationControl(), { runGate: async () => ({ passed: true, steps: [] }) });
+    const sessions = new SessionService(db, pty, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: async () => ({ passed: true, steps: [] }) });
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-c.txt"), "work\n");
@@ -206,7 +210,7 @@ try {
     const db = new Db(); dbs.push(db);
     const signals = { fusion: {}, unmatched: {} };
     const pty = fullPtyStub(signals);
-    const sessions = new SessionService(db, pty, new OrchestrationControl(), { runGate: async () => ({ passed: true, steps: [] }) });
+    const sessions = new SessionService(db, pty, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: async () => ({ passed: true, steps: [] }) });
     const { worktreePath, branch } = await createWorktree(C2.repo, C2.projId, C2.taskId);
     C2.worktreePath = worktreePath; C2.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-c2.txt"), "work\n");
@@ -232,7 +236,7 @@ try {
     const db = new Db(); dbs.push(db);
     const signals = { fusion: {} };
     const pty = fullPtyStub(signals);
-    const sessions = new SessionService(db, pty, new OrchestrationControl(), { runGate: async () => ({ passed: true, steps: [] }) });
+    const sessions = new SessionService(db, pty, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: async () => ({ passed: true, steps: [] }) });
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     D.worktreePath = worktreePath; D.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-d.txt"), "already merged work\n");
@@ -258,7 +262,7 @@ try {
     // / most of this suite's other merge tests already use — no lastMismatch*/lastPasteTripwireGiveUp
     // getters at all.
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => ({ passed: true, steps: [] }) });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: async () => ({ passed: true, steps: [] }) });
     const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
     E.worktreePath = worktreePath; E.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-e.txt"), "work\n");
@@ -280,7 +284,7 @@ try {
     const db = new Db(); dbs.push(db);
     const signals = { fusion: {} };
     const pty = fullPtyStub(signals);
-    const sessions = new SessionService(db, pty, new OrchestrationControl(), { runGate: async () => ({ passed: true, steps: [] }) });
+    const sessions = new SessionService(db, pty, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: async () => ({ passed: true, steps: [] }) });
     const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-f.txt"), "work\n");
@@ -311,7 +315,7 @@ try {
     const signals = { fusion: {} };
     const pty = fullPtyStub(signals);
     const gate = deferred(); // the test controls exactly when the "gate" resolves
-    const sessions = new SessionService(db, pty, new OrchestrationControl(), {
+    const sessions = new SessionService(db, pty, new OrchestrationControl(), { reapWorktreeProcesses: noReap,
       runGate: async () => gate.promise,
       syncAttachBudgetMs: 20, // tiny — the deferred gate will not have resolved by the time this elapses
     });
