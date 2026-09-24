@@ -121,6 +121,10 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, buildReducedGateCommand, computeEmitCompareGate } = await import("../dist/git/worktrees.js");
 
+// Asserts merge/gate behavior, never the pre-removal process reap. The real reap runs a win32 powershell
+// Get-CimInstance enumeration (pty/host.ts enumerateProcessesWin32, ~1-2s under load) per worktree removal —
+// pure fixed cost here since no worker-rooted process exists — so inject the SessionService seam.
+const noReap = async () => ({ killedPids: [] });
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
@@ -135,7 +139,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
     A.worktreePath = worktreePath; A.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
@@ -182,7 +186,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     B.worktreePath = worktreePath; B.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"), BASE_SRC.replace("x === 0", "x === 1"));
@@ -218,7 +222,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"), `\n\n${BASE_SRC}`);
@@ -256,7 +260,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     D.worktreePath = worktreePath; D.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "placeholder.mjs"),
@@ -392,7 +396,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
     E.worktreePath = worktreePath; E.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "second.ts"), "export const y = 1;\n");
@@ -414,7 +418,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
@@ -457,7 +461,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(P.repo, P.projId, P.taskId);
     P.worktreePath = worktreePath; P.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "example.mjs"),
@@ -491,7 +495,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(Q.repo, Q.projId, Q.taskId);
     Q.worktreePath = worktreePath; Q.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "packages", "daemon", "scripts"));
@@ -516,7 +520,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(R.repo, R.projId, R.taskId);
     R.worktreePath = worktreePath; R.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "example.mjs"),
@@ -541,7 +545,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(G.repo, G.projId, G.taskId);
     G.worktreePath = worktreePath; G.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
@@ -567,7 +571,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(N.repo, N.projId, N.taskId);
     N.worktreePath = worktreePath; N.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
@@ -608,7 +612,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(N2.repo, N2.projId, N2.taskId);
     N2.worktreePath = worktreePath; N2.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"), BASE_SRC.replace("x === 0", "x === 1"));
@@ -650,7 +654,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(O.repo, O.projId, O.taskId);
     O.worktreePath = worktreePath; O.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
