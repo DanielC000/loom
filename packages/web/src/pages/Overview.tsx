@@ -24,6 +24,7 @@ import { ReviewQueue } from "../components/reviewQueue";
 import { color, font, tone } from "../theme";
 import { RoleBadge } from "../lib/roleDisplay";
 import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
+import { errorText } from "../lib/loopbackCredential";
 
 // PROJECT OVERVIEW — the project-scoped analog of the Platform page: one scrolling cockpit for the
 // active project (header-selected via useActiveProject). It composes the SAME fleet widgets Mission
@@ -341,7 +342,7 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
             onClick={() => stop.mutate(session!.id)}>{stop.isPending ? "Stopping…" : "Stop"}</Button>
         )}
       </div>
-      {spawn.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{(spawn.error as Error).message}</span>}
+      {spawn.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{errorText(spawn.error)}</span>}
     </Panel>
   );
 }

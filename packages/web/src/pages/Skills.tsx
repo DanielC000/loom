@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type SkillMergePreview, type SkillFileState } from "../lib/api";
 import { Panel, Button, Input, SectionLabel, Badge } from "../components/ui";
 import { color, font, radius, type Tone } from "../theme";
+import { errorText } from "../lib/loopbackCredential";
 
 // Loom's OWN skill set — the editable store (~/.loom/skills) that the daemon injects into every
 // session as project-local skills, leaving the user's personal ~/.claude/skills untouched. Edits
@@ -274,7 +275,7 @@ function UpdateBanner({ name, onAdopt, adoptBusy, error }: { name: string; onAdo
           {adoptBusy ? "Adopting…" : "Adopt update"}
         </Button>
       </div>
-      {error && <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{error.message}</span>}
+      {error && <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{errorText(error)}</span>}
       {showDiff && (
         diff.isLoading ? <span style={{ color: color.textMuted, fontSize: 12 }}>Loading diff…</span>
         : diff.data ? <FileDiffList name={name} files={diff.data.files} />
@@ -397,7 +398,7 @@ function FileDiffRow({ name, file }: { name: string; file: SkillFileState }) {
           )}
 
           {resolve.error && (
-            <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{(resolve.error as Error).message}</span>
+            <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{errorText(resolve.error)}</span>
           )}
 
           {resolvable && d && file.customized && (
@@ -559,7 +560,7 @@ function ConflictResolver({
             )}
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <Button onClick={() => setShowPreview((v) => !v)}>{showPreview ? "Hide result" : "Preview result"}</Button>
-              {error && <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{error.message}</span>}
+              {error && <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{errorText(error)}</span>}
               <span style={{ flex: 1 }} />
               <Button variant="primary" disabled={applying} onClick={() => onApply(resolved)}>
                 {applying ? "Adopting…" : "Adopt resolved"}

@@ -34,6 +34,7 @@ import { Panel, Button, Input, Select, SectionLabel, Badge, Chip, StatusPill, St
 import { ColumnManager } from "../components/ColumnManager";
 import { color, font, tone, type Tone } from "../theme";
 import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
+import { errorText } from "../lib/loopbackCredential";
 
 // Project-scoped settings — edit the per-project config OVERRIDE (deep-partial of ResolvedConfig).
 // Scoped to the header's active project; switching it re-scopes (the editor is keyed by project id).
@@ -194,7 +195,7 @@ function RepoPathEditor({ project }: { project: Project }) {
         <span style={{ flex: 1 }} />
         {save.isError && (
           <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
-            {(save.error as Error).message}
+            {errorText(save.error)}
           </span>
         )}
       </div>
@@ -796,7 +797,7 @@ function ConfigEditor({ project }: { project: Project }) {
           </span>
         ) : save.isError && (
           <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
-            {(save.error as Error).message}
+            {errorText(save.error)}
           </span>
         )}
       </div>
@@ -1411,7 +1412,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         <span style={{ flex: 1 }} />
         {save.isError && (
           <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
-            {(save.error as Error).message}
+            {errorText(save.error)}
           </span>
         )}
       </div>
@@ -1518,7 +1519,7 @@ function ConnectionsPanel() {
           <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
             <ConnectionForm
               pending={create.isPending || createOAuth.isPending}
-              error={(create.error ? (create.error as Error).message : null) ?? (createOAuth.error ? (createOAuth.error as Error).message : null)}
+              error={(create.error ? errorText(create.error) : null) ?? (createOAuth.error ? errorText(createOAuth.error) : null)}
               projects={projects ?? []}
               onSubmit={(v) => create.mutate(v)}
               onSubmitOAuth={(v) => createOAuth.mutate(v)}
@@ -1923,7 +1924,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
 
       {(localErr || error || validateSonar.error) && (
         <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>
-          {localErr ?? error ?? (validateSonar.error as Error)?.message}
+          {localErr ?? error ?? errorText(validateSonar.error)}
         </div>
       )}
 
@@ -2018,7 +2019,7 @@ function ProjectLinksPanel() {
             Link
           </Button>
         </div>
-        {create.error && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, display: "block", marginBottom: 8 }}>{(create.error as Error).message}</span>}
+        {create.error && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, display: "block", marginBottom: 8 }}>{errorText(create.error)}</span>}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {rows.length === 0 && !isLoading && (
@@ -2281,7 +2282,7 @@ function NodeModulesReclaimPanel() {
 
         {reclaim.isError && (
           <span style={{ display: "block", marginTop: 8, color: color.red, fontSize: 12, fontFamily: font.mono }}>
-            {(reclaim.error as Error)?.message ?? "reclaim failed"}
+            {errorText(reclaim.error) ?? "reclaim failed"}
           </span>
         )}
 
@@ -2417,7 +2418,7 @@ function PollJobsPanel() {
           <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
             <PollJobForm connections={conns} sessions={sessionOpts} agents={agentOpts}
               agentsLoading={agents.isLoading} sessionsLoading={sessions.isLoading}
-              pending={create.isPending} error={create.error ? (create.error as Error).message : null}
+              pending={create.isPending} error={create.error ? errorText(create.error) : null}
               onSubmit={(v) => create.mutate(v)} onCancel={() => { setAdding(false); create.reset(); }} />
           </div>
         )}
@@ -2432,7 +2433,7 @@ function PollJobsPanel() {
                 <PollJobForm initial={job} connections={conns} sessions={sessionOpts} agents={agentOpts}
                   agentsLoading={agents.isLoading} sessionsLoading={sessions.isLoading}
                   connName={connName(job.connectionId)}
-                  pending={update.isPending} error={update.error ? (update.error as Error).message : null}
+                  pending={update.isPending} error={update.error ? errorText(update.error) : null}
                   onSubmit={(v) => update.mutate({ id: job.id, patch: v })} onCancel={() => { setEditingId(null); update.reset(); }} />
               </div>
             ) : (
@@ -2701,7 +2702,7 @@ function CapabilitiesPanel() {
 
         {adding && (
           <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
-            <CapabilityForm pending={create.isPending} error={create.error ? (create.error as Error).message : null}
+            <CapabilityForm pending={create.isPending} error={create.error ? errorText(create.error) : null}
               onSubmit={(v) => create.mutate(v)} onCancel={() => { setAdding(false); create.reset(); }} />
           </div>
         )}

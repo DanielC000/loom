@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { errorText } from "../lib/loopbackCredential";
 import type { EventTrigger, EventTriggerEventKind } from "@loom/shared";
 import { EVENT_TRIGGER_EVENT_KINDS } from "@loom/shared";
 import { api } from "../lib/api";
@@ -309,7 +310,7 @@ function EventTriggerModal({
           </span>
         </label>
 
-        {mutError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{mutError.message}</span>}
+        {mutError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{errorText(mutError)}</span>}
 
         {/* Actions */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>

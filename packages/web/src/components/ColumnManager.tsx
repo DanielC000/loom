@@ -15,6 +15,7 @@ import { resolveConfig, COLUMN_PRESETS, presetById, presetToDesired, ACCENT_PALE
 import { api, type DesiredColumn } from "../lib/api";
 import { Button, Input, Select, Badge, PresetAccentDots } from "./ui";
 import { color, font, radius, tone, roleTone, type Tone } from "../theme";
+import { errorText } from "../lib/loopbackCredential";
 
 // The eight lifecycle roles, in board order, with a human label and which two are REQUIRED exactly once
 // (defaultLanding + terminal — the server's hard floor). Kept here so the badge, the assignment dropdown,
@@ -240,7 +241,7 @@ export function ColumnManager({ project }: { project: Project }) {
         <span style={{ flex: 1 }} />
         {save.isError && (
           <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
-            {(save.error as Error).message}
+            {errorText(save.error)}
           </span>
         )}
       </div>
@@ -270,7 +271,7 @@ export function ColumnManager({ project }: { project: Project }) {
             <Button onClick={() => setResetConfirming(true)} disabled={applyPreset.isPending}>Reset board</Button>
           )}
           {applyPreset.isError && (
-            <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(applyPreset.error as Error).message}</span>
+            <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{errorText(applyPreset.error)}</span>
           )}
         </div>
         <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>

@@ -10,6 +10,7 @@ import { RolePicker } from "../components/RolePicker";
 import { HarnessPicker, HarnessDropSummary, HarnessFieldDrop, HarnessTag, dropStyle } from "../components/HarnessPicker";
 import { harnessOf, type Harness } from "../lib/harnessFields";
 import { RoleBadge, roleDisplay, roleColor } from "../lib/roleDisplay";
+import { errorText } from "../lib/loopbackCredential";
 
 // Loom's Profiles — the reusable, platform-level rig (role + model + permission deltas + icon) an
 // agent runs under via its profileId. The injected prompt comes from the AGENT; a profile's
@@ -233,7 +234,7 @@ function MarkitdownProvisioning() {
       {state === "idle" && (
         <span style={labelStyle}>Loom installs the shared venv on the first document-conversion session, or you can pre-warm it by saving a profile with this on.</span>
       )}
-      {retry.isError && <span style={{ ...labelStyle, color: color.red }}>retry failed: {(retry.error as Error).message}</span>}
+      {retry.isError && <span style={{ ...labelStyle, color: color.red }}>retry failed: {errorText(retry.error)}</span>}
 
       {/* The captured pip/venv output tail — the real proxy / SSL / resolver cause, shown on demand. */}
       {showTail && s?.errorTail && (
@@ -668,7 +669,7 @@ function UpdateBanner({ id, onAdopt, adoptBusy, error }: { id: string; onAdopt: 
           {adoptBusy ? "Adopting…" : "Adopt update"}
         </Button>
       </div>
-      {error && <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{error.message}</span>}
+      {error && <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{errorText(error)}</span>}
       {showDiff && (
         diff.isLoading ? <span style={{ color: color.textMuted, fontSize: 12 }}>Loading diff…</span>
         : diff.data ? <FieldDiff changed={diff.data.changed} />
@@ -749,7 +750,7 @@ function ConflictResolver({
           </div>
 
           <div style={{ borderTop: `1px solid ${color.border}`, padding: "10px 14px", display: "flex", alignItems: "center", gap: 8 }}>
-            {error && <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{error.message}</span>}
+            {error && <span style={{ color: color.red, fontFamily: font.mono, fontSize: 11 }}>{errorText(error)}</span>}
             <span style={{ flex: 1 }} />
             <Button variant="primary" disabled={applying} onClick={() => onApply(choices)}>
               {applying ? "Adopting…" : "Adopt resolved"}

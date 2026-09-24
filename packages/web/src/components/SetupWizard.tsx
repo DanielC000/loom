@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { errorText } from "../lib/loopbackCredential";
 import { useNavigate } from "react-router-dom";
 import type { Profile, RepoRegistryEntry } from "@loom/shared";
 import { api, type SetupTemplate, type TemplateApplyResult } from "../lib/api";
@@ -191,7 +192,7 @@ function WizardBody({ onClose }: { onClose: () => void }) {
             mode={mode} name={name.trim()} repoPath={repoPath.trim()} vaultPath={vaultPath.trim()}
             referenceRepos={cleanRefs} registeredRepos={cleanRepos}
             template={chosenTemplate} isEmpty={choice === "empty"} profileByName={profileByName}
-            error={apply.isError ? (apply.error as Error).message : null}
+            error={apply.isError ? errorText(apply.error) : null}
           />
         )}
         {step === 4 && created && (

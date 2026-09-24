@@ -1,5 +1,6 @@
 import { useMemo, useState, type CSSProperties } from "react";
 import { Link } from "react-router-dom";
+import { errorText } from "../lib/loopbackCredential";
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Schedule, CronBuilderState, CronFrequency, ScheduleHistoryEntry } from "@loom/shared";
 import { cronFromBuilder, describeCron, parseCronToBuilder, defaultBuilderState } from "@loom/shared";
@@ -611,7 +612,7 @@ function ScheduleBuilderModal({
             value={prompt} onChange={(e) => setPrompt(e.target.value)} />
         </label>
 
-        {mutError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{mutError.message.includes("400") ? "Daemon rejected the request (check the cron and name)." : mutError.message}</span>}
+        {mutError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{errorText(mutError).includes("400") ? "Daemon rejected the request (check the cron and name)." : errorText(mutError)}</span>}
 
         {/* Actions */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>

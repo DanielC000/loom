@@ -16,6 +16,7 @@ import { isDoneColumn } from "../lib/columnSort";
 import { taskMatchesSearch } from "../lib/taskFilter";
 // Priority chip + metadata live in one place so the board and the /terminals task card never drift.
 import { PRIORITY_META, PriorityChip, prio } from "../components/priority";
+import { errorText } from "../lib/loopbackCredential";
 
 const PRIORITIES: TaskPriority[] = ["p0", "p1", "p2", "p3"];
 // Sort a column's cards high→low priority (p0 first), then by position — strings p0<p1<p2<p3 sort right.
@@ -161,7 +162,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
       {projectId && board.data && (
         <>
           <NewTask repos={repos} onCreate={(title, repoKey) => create.mutate({ title, repoKey })}
-            error={create.error ? (create.error as Error).message : null} />
+            error={create.error ? errorText(create.error) : null} />
           <FilterBar search={search} onSearch={setSearch} columns={board.data.columns}
             priFilter={priFilter} onTogglePri={togglePri} colFilter={colFilter} onToggleCol={toggleCol}
             shown={shownTasks.length} total={allTasks.length} active={filterActive} onClear={clearFilters} />
@@ -198,7 +199,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
           saveError={edit.error as TaskUpdateConflictError | null}
           onDismissConflict={() => edit.reset()}
           onDelete={() => del.mutate(openTask.id)} deleting={del.isPending}
-          deleteError={del.error ? (del.error as Error).message : null} />
+          deleteError={del.error ? errorText(del.error) : null} />
       )}
     </div>
   );

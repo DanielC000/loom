@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { errorText } from "../lib/loopbackCredential";
 import type { RepoRegistryEntry } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -344,7 +345,7 @@ function RegisteredRepoLog({ projectId, index, entry }: { projectId: string; ind
 // panels and both secondary (reference/registered repo) panels, so the four surfaces render consistently
 // instead of three different not-quite-matching shapes (card 60b53c8d).
 function ErrorLine({ error }: { error: unknown }) {
-  return <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error).message}</span>;
+  return <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{errorText(error)}</span>;
 }
 
 function Hint({ children }: { children: ReactNode }) {

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { errorText } from "../lib/loopbackCredential";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api, workerDiffQuery } from "../lib/api";
@@ -41,7 +42,7 @@ function ReviewPanelInner({ workerId }: { workerId: string }) {
     // "rejected — …" for a merge that was never actually refused (the exact re-click bait this card's
     // dedupe exists to prevent).
     onSuccess: (r) => { setResult(r.pending ? `still running — ${r.reason}` : r.merged ? "✓ merged to main" : `rejected — ${r.reason}`); qc.invalidateQueries({ queryKey: ["allSessions"] }); },
-    onError: (e) => setResult(`error — ${(e as Error).message}`),
+    onError: (e) => setResult(`error — ${errorText(e)}`),
   });
   const requestChanges = useMutation({
     mutationFn: () => api.sendInput(workerId, `[loom:review] Changes requested before merge:\n${note}`),

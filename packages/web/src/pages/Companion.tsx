@@ -18,6 +18,7 @@ import { CompanionChatPanel } from "../components/CompanionChat";
 import { TerminalCard } from "../components/TerminalCard";
 import { IN_APP_CHANNEL, isArmedInApp } from "../lib/companionChat";
 import { color, font, radius } from "../theme";
+import { errorText } from "../lib/loopbackCredential";
 
 // Loom Companion management (Companion epic Phase 3). The HUMAN-only cockpit surface over the loopback
 // companion REST: create/configure a companion (masked bot token, cadence, home, enabled), manage its
@@ -304,7 +305,7 @@ function ProactiveHomeSection({ sessionId }: { sessionId: string }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <Field label="Channel"><Input value={channel} onChange={(e) => setChannel(e.target.value)} placeholder="telegram" spellCheck={false} /></Field>
           <Field label="Chat id"><Input value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="home chat id" spellCheck={false} /></Field>
-          {(localErr || save.error) && <span style={errStyle}>{localErr ?? (save.error as Error).message}</span>}
+          {(localErr || save.error) && <span style={errStyle}>{localErr ?? errorText(save.error)}</span>}
           <div style={{ display: "flex", gap: 8 }}>
             <Button variant="primary" disabled={save.isPending} onClick={submit}>{save.isPending ? "Saving…" : "Save home"}</Button>
             <Button variant="ghost" disabled={save.isPending} onClick={() => { setEditing(false); save.reset(); setLocalErr(null); }}>Cancel</Button>
@@ -317,7 +318,7 @@ function ProactiveHomeSection({ sessionId }: { sessionId: string }) {
             <Button variant="primary" onClick={beginEdit}>{home.data ? "Change home" : "Set home"}</Button>
             {home.data && <Button variant="danger" disabled={clear.isPending} onClick={() => clear.mutate()}>Clear</Button>}
           </div>
-          {clear.error && <span style={errStyle}>{(clear.error as Error).message}</span>}
+          {clear.error && <span style={errStyle}>{errorText(clear.error)}</span>}
         </div>
       )}
     </section>
@@ -360,7 +361,7 @@ function VoiceProvisioningSection() {
           </Button>
         </div>
       )}
-      {save.isError && <span style={errStyle}>{(save.error as Error).message}</span>}
+      {save.isError && <span style={errStyle}>{errorText(save.error)}</span>}
     </section>
   );
 }
@@ -667,7 +668,7 @@ function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onCh
       {editing ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <ConfigFields form={form} set={set} mode={cfg ? "edit" : "create"} currentToken={cfg ? maskedToken(cfg) : undefined} />
-          {(localErr || save.error) && <span style={errStyle}>{localErr ?? (save.error as Error).message}</span>}
+          {(localErr || save.error) && <span style={errStyle}>{localErr ?? errorText(save.error)}</span>}
           <div style={{ display: "flex", gap: 8 }}>
             <Button variant="primary" disabled={save.isPending} onClick={submit}>{save.isPending ? "Saving…" : "Save"}</Button>
             <Button variant="ghost" disabled={save.isPending} onClick={() => { setEditing(false); save.reset(); }}>Cancel</Button>
@@ -765,7 +766,7 @@ function ChannelRow({ sessionId, binding, onChanged }: { sessionId: string; bind
         )}
       </div>
       {inApp && <span style={hint}>The cockpit chat panel — always this companion's own loopback route.</span>}
-      {remove.error && <span style={errStyle}>{(remove.error as Error).message}</span>}
+      {remove.error && <span style={errStyle}>{errorText(remove.error)}</span>}
       {binding.scope === "group" && <AllowedSenders sessionId={sessionId} channel={binding.channel} />}
     </div>
   );
@@ -827,7 +828,7 @@ function ConnectTelegram({ companion, onChanged }: { companion: CompanionRow; on
       <Field label="Chat id" sub="the DM this bot messages">
         <Input value={form.chatId} onChange={(e) => set("chatId", e.target.value)} placeholder="e.g. 123456789" spellCheck={false} />
       </Field>
-      {(localErr || connect.error) && <span style={errStyle}>{localErr ?? (connect.error as Error).message}</span>}
+      {(localErr || connect.error) && <span style={errStyle}>{localErr ?? errorText(connect.error)}</span>}
       <div style={{ display: "flex", gap: 8 }}>
         <Button variant="primary" disabled={connect.isPending} onClick={submit}>{connect.isPending ? "Connecting…" : "Connect"}</Button>
         <Button variant="ghost" disabled={connect.isPending} onClick={() => { setOpen(false); connect.reset(); setForm(emptyTelegramForm()); setLocalErr(null); }}>Cancel</Button>
@@ -884,7 +885,7 @@ function AdvancedAddBinding({ companion, onChanged }: { companion: CompanionRow;
         A <strong style={{ color: color.text }}>group</strong> binding trusts only the allowlisted senders on
         its row — an unlisted speaker is hard-rejected. A bare bot token is set under Run configuration.
       </span>
-      {(localErr || createBinding.error) && <span style={errStyle}>{localErr ?? (createBinding.error as Error).message}</span>}
+      {(localErr || createBinding.error) && <span style={errStyle}>{localErr ?? errorText(createBinding.error)}</span>}
       <div style={{ display: "flex", gap: 8 }}>
         <Button variant="primary" disabled={createBinding.isPending} onClick={submit}>{createBinding.isPending ? "Binding…" : "Bind"}</Button>
         <Button variant="ghost" onClick={() => { setOpen(false); createBinding.reset(); setLocalErr(null); }}>Cancel</Button>
@@ -933,7 +934,7 @@ function AllowedSenders({ sessionId, channel }: { sessionId: string; channel: st
         <Field label="Label" sub="optional"><Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="who this is" spellCheck={false} /></Field>
         <Button variant="primary" disabled={add.isPending} onClick={submit}>Add</Button>
       </div>
-      {(localErr || add.error) && <span style={errStyle}>{localErr ?? (add.error as Error).message}</span>}
+      {(localErr || add.error) && <span style={errStyle}>{localErr ?? errorText(add.error)}</span>}
     </div>
   );
 }
@@ -1011,7 +1012,7 @@ function PersonaSection({ sessionId }: { sessionId: string }) {
             <Button variant="primary" disabled={save.isPending} onClick={submit}>{save.isPending ? "Saving…" : "Save prompt"}</Button>
             <Button variant="ghost" disabled={save.isPending} onClick={() => { setEditing(false); save.reset(); setLocalErr(null); }}>Cancel</Button>
           </div>
-          {(localErr || save.error) && <span style={errStyle}>{localErr ?? (save.error as Error).message}</span>}
+          {(localErr || save.error) && <span style={errStyle}>{localErr ?? errorText(save.error)}</span>}
         </div>
       ) : (
         <>
@@ -1067,7 +1068,7 @@ function SkillsSection({ sessionId }: { sessionId: string }) {
           ))}
         </div>
       )}
-      {del.error && <span style={errStyle}>{(del.error as Error).message}</span>}
+      {del.error && <span style={errStyle}>{errorText(del.error)}</span>}
     </section>
   );
 }
@@ -1140,7 +1141,7 @@ function MemorySection({ sessionId }: { sessionId: string }) {
           ))}
         </div>
       )}
-      {del.error && <span style={errStyle}>{(del.error as Error).message}</span>}
+      {del.error && <span style={errStyle}>{errorText(del.error)}</span>}
     </section>
   );
 }
@@ -1214,7 +1215,7 @@ function RemindersSection({ sessionId }: { sessionId: string }) {
           ))}
         </div>
       )}
-      {del.error && <span style={errStyle}>{(del.error as Error).message}</span>}
+      {del.error && <span style={errStyle}>{errorText(del.error)}</span>}
     </section>
   );
 }
@@ -1317,7 +1318,7 @@ function RestrictToolsSection({ sessionId }: { sessionId: string }) {
           </span>
         </label>
       )}
-      {save.error && <span style={errStyle}>{(save.error as Error).message}</span>}
+      {save.error && <span style={errStyle}>{errorText(save.error)}</span>}
       <p style={{ ...hint, margin: 0 }}>
         A spawn-time setting — it's re-applied every time this companion (re)starts, but a change here has{" "}
         <strong style={{ color: color.text }}>no effect on the currently running session</strong> until it's
@@ -2315,7 +2316,7 @@ function DeleteCompanionSection({ companion, label, onDeleted }: { companion: Co
               companion on the next daemon restart. Unset the env to delete it for good.
             </Callout>
           )}
-          {remove.error && <span style={errStyle}>{(remove.error as Error).message}</span>}
+          {remove.error && <span style={errStyle}>{errorText(remove.error)}</span>}
           <div style={{ display: "flex", gap: 8 }}>
             <Button variant="danger" disabled={remove.isPending} onClick={() => remove.mutate()} data-testid="companion-delete-go">
               {remove.isPending ? "Deleting…" : `Delete ${label}`}

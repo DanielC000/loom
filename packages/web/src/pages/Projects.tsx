@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { errorText } from "../lib/loopbackCredential";
 import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, type Agent, type Project, type RepoRegistryEntry, type StalePromptWarning } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -478,7 +479,7 @@ function ReferenceReposEditor({ project }: { project: Project }) {
     onMutate: () => setError(null),
     // Sync local rows to what the server actually stored (the source of truth) so `dirty` settles cleanly.
     onSuccess: (updated) => { setRepos(updated.referenceRepos ?? []); qc.invalidateQueries({ queryKey: ["projects"] }); },
-    onError: (e) => setError((e as Error).message),
+    onError: (e) => setError(errorText(e)),
   });
 
   // Any edit clears a stale server error so it never lingers past the input it referred to.
@@ -567,7 +568,7 @@ function RepoRegistryEditor({ project }: { project: Project }) {
     onMutate: () => setError(null),
     // Resync to what the server STORED (canonicalized paths), not what was typed — see the note above.
     onSuccess: (updated) => { setRepos(updated.repos ?? []); qc.invalidateQueries({ queryKey: ["projects"] }); },
-    onError: (e) => setError((e as Error).message),
+    onError: (e) => setError(errorText(e)),
   });
 
   // Any edit clears a stale server error so it never lingers past the input it referred to.

@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import { Panel, Button, SectionLabel, StatusPill, Chip, Input, Select } from "./ui";
 import { color, font, radius, type Tone } from "../theme";
 import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
+import { errorText } from "../lib/loopbackCredential";
 
 // Agent Runs key & endpoint admin — the per-project trust-boundary WRITE surface, the second view of the
 // Runs page ("Keys & Endpoints", beside the read-only "Runs" observability). Wires the human/loopback key
@@ -113,7 +114,7 @@ export function KeyAdmin({ projectId }: { projectId: string }) {
           <Panel style={{ padding: 12, marginBottom: 10 }}>
             <SectionLabel style={{ margin: "0 0 8px" }}>New key</SectionLabel>
             <KeyForm endpointAgents={endpointAgents} submitLabel="Create key"
-              pending={create.isPending} error={create.error ? (create.error as Error).message : null}
+              pending={create.isPending} error={create.error ? errorText(create.error) : null}
               onSubmit={(p) => create.mutate(p)} onCancel={() => { setCreating(false); create.reset(); }} />
           </Panel>
         )}
@@ -129,7 +130,7 @@ export function KeyAdmin({ projectId }: { projectId: string }) {
               <Panel key={k.id} style={{ padding: 12 }}>
                 <SectionLabel style={{ margin: "0 0 8px" }}>Edit · {k.name || k.id.slice(0, 8)}</SectionLabel>
                 <KeyForm endpointAgents={endpointAgents} initial={k} showStatus submitLabel="Save"
-                  pending={update.isPending} error={update.error ? (update.error as Error).message : null}
+                  pending={update.isPending} error={update.error ? errorText(update.error) : null}
                   onSubmit={(p) => update.mutate({ keyId: k.id, patch: p })}
                   onCancel={() => { setEditId(null); update.reset(); }} />
               </Panel>

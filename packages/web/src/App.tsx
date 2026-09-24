@@ -18,6 +18,7 @@ import { ActiveProjectProvider } from "./lib/activeProject";
 import { color, font, radius, tone } from "./theme";
 import { Dot } from "./components/ui";
 import { page } from "./ui";
+import { errorText } from "./lib/loopbackCredential";
 
 // Epic 2c-2 — the "Update available" banner. Unobtrusive slim bar ABOVE the page content, shown ONLY when
 // the daemon reports a packaged install that is behind its channel's npm dist-tag (a from-source daemon
@@ -62,7 +63,7 @@ function UpdateBanner() {
           </span>
           <span style={{ flex: 1 }} />
           {mut.isError && !started && (
-            <span title={(mut.error as Error)?.message} style={{ color: color.red, fontSize: 11 }}>update failed — see daemon log</span>
+            <span title={errorText(mut.error)} style={{ color: color.red, fontSize: 11 }}>update failed — see daemon log</span>
           )}
           <Button variant="primary" disabled={mut.isPending} onClick={() => mut.mutate()}
             style={{ padding: "4px 12px", fontSize: 12 }}>

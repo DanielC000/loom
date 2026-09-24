@@ -12,6 +12,7 @@ import { SetupWizard } from "../components/SetupWizard";
 import { LogoMark } from "../components/Logo";
 import { looksLikeCron } from "./Schedules";
 import { color, font } from "../theme";
+import { errorText } from "../lib/loopbackCredential";
 import { roleDisplay } from "../lib/roleDisplay";
 import {
   type PlatformEdition, type PlatformSpawnRole, type AgentCardCopy, type HistoryCopy,
@@ -247,7 +248,7 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
             onClick={() => stop.mutate(session!.id)}>{stop.isPending ? "Stopping…" : "Stop"}</Button>
         )}
       </div>
-      {spawn.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{(spawn.error as Error).message}</span>}
+      {spawn.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{errorText(spawn.error)}</span>}
       {/* View / edit this reserved-home agent's startup prompt (the spawn kickoff). */}
       <AgentPromptEditor key={`prompt-${agent.id}`} agent={agent} homeKey={[edition.homeQueryKey]} />
       {footer}
@@ -340,7 +341,7 @@ function AuditorScheduleList({ auditorId }: { auditorId?: string }) {
         <Button variant="primary" disabled={!cronValid || create.isPending} onClick={() => create.mutate()}>
           {create.isPending ? "Adding…" : "Add cadence"}
         </Button>
-        {create.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{(create.error as Error).message.includes("400") ? "Daemon rejected the cron expression." : (create.error as Error).message}</span>}
+        {create.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{errorText(create.error).includes("400") ? "Daemon rejected the cron expression." : errorText(create.error)}</span>}
       </div>
     </Panel>
   );

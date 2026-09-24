@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { errorText } from "../lib/loopbackCredential";
 import type { SessionListItem, SessionRole, Schedule, BoardTask } from "@loom/shared";
 import { api } from "../lib/api";
 import { TranscriptPane } from "./TranscriptPane";
@@ -166,7 +167,7 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
 
       {resumeM.isError && (
         <div style={{ padding: "0 10px 8px 30px", color: color.red, fontFamily: font.mono, fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-          resume failed: {resumeM.error instanceof Error ? resumeM.error.message : String(resumeM.error)}
+          resume failed: {errorText(resumeM.error)}
         </div>
       )}
 

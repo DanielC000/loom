@@ -4,6 +4,7 @@ import type { Agent } from "@loom/shared";
 import { api } from "../lib/api";
 import { Button } from "./ui";
 import { color, font, radius } from "../theme";
+import { errorText } from "../lib/loopbackCredential";
 
 // Reserved-home agent prompt editor (card 7cffd759) — the view/edit surface for a reserved-home agent's
 // `startupPrompt`: the kickoff injected as the FIRST turn of that agent's NEXT new session (never on
@@ -86,7 +87,7 @@ export function AgentPromptEditor({ agent, homeKey }: { agent: Agent; homeKey: r
             <span style={{ flex: 1 }} />
             {save.isError && (
               <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono, textAlign: "right" }}>
-                {(save.error as Error).message}
+                {errorText(save.error)}
               </span>
             )}
           </div>

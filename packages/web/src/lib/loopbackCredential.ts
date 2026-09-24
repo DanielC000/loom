@@ -80,6 +80,26 @@ export function isCredentialGuardMessage(message: string): boolean {
   return message.includes("loom open");
 }
 
+/** What an inline error shows in place of the daemon's unrunnable "see `loom open`" text. */
+export const CREDENTIAL_LOCKED_TEXT = "Writes are locked — see the banner.";
+
+/**
+ * The text an INLINE mutation error should render: the raw message for every failure except the credential
+ * guard's, which becomes a short pointer at the banner. Nullish in → undefined out, so it drops into the
+ * existing `x.error?.message ?? fallback` shapes.
+ *
+ * @decision 093981dd — a mutation error rendered inline (`meta.inlineError`, or a child component handed
+ * the Error) must go through THIS, not `.message`, or a token-less browser reads the daemon's "see
+ * `loom open`" advice it cannot act on. Do not use it for GET/query errors: the guard exempts reads.
+ */
+export function errorText(e: null | undefined): undefined;
+export function errorText(e: unknown): string;
+export function errorText(e: unknown): string | undefined {
+  if (e === null || e === undefined) return undefined;
+  const message = e instanceof Error ? e.message : String(e);
+  return isCredentialGuardMessage(message) ? CREDENTIAL_LOCKED_TEXT : message;
+}
+
 /**
  * The shared `onError` for a mutation that alerts its raw message at its own call site, bypassing the
  * global handler in main.tsx. Byte-identical for every Error except the credential guard's, which the

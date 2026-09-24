@@ -3,8 +3,9 @@
 // it can't drift from what renders. Run:
 //   node --experimental-strip-types packages/web/test/loopback-credential.mjs
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
-  alertUnlessCredentialGuard,
+  alertUnlessCredentialGuard, errorText, CREDENTIAL_LOCKED_TEXT,
   isCredentialGuardFailure, isCredentialGuardMessage, isCredentialSocketFailure,
   credentialLock, noteCredentialLock, clearCredentialLock, subscribeCredentialLock,
   resetCredentialLockForTest,
@@ -71,6 +72,32 @@ check("alertUnlessCredentialGuard swallows the guard 401 and alerts everything e
   } finally {
     delete globalThis.window;
   }
+});
+
+// Inline mutation errors (card 353df47a): the same classifier, applied where the text is RENDERED.
+check("errorText swaps the guard 401 for the banner pointer and passes everything else through raw", () => {
+  assert.equal(errorText(new Error(GUARD_401)), CREDENTIAL_LOCKED_TEXT);
+  assert.ok(!errorText(new Error(GUARD_401)).includes("loom open"), "the unrunnable advice must not survive");
+  assert.equal(errorText(new Error(TRUST_TIER_401)), TRUST_TIER_401, "a non-credential 401 keeps its text");
+  assert.equal(errorText(new Error(UNDETERMINABLE_401)), UNDETERMINABLE_401);
+  assert.equal(errorText(new Error("boom")), "boom");
+  assert.equal(errorText("a bare string"), "a bare string");
+  assert.equal(errorText(null), undefined, "nullish stays nullish so `?? fallback` shapes still work");
+  assert.equal(errorText(undefined), undefined);
+});
+
+// SOURCE SCAN (not a render test): a mutation error rendered via a raw `.message` bypasses errorText. Scope =
+// the mutation variable names converted by this card, in src/**/*.tsx; a NEW mutation with another name is not covered.
+check("no src file renders a converted mutation's error via a raw .message", () => {
+  const root = new URL("../src/", import.meta.url);
+  const re = /\((save|clear|remove|connect|createBinding|add|del|applyPreset|spawn|create|update|retry|reclaim|validateSonar|createOAuth|resolve|adopt|mut)\.error as Error\)\??\.message/;
+  const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+    d.isDirectory() ? walk(new URL(`${d.name}/`, dir)) : d.name.endsWith(".tsx") ? [new URL(d.name, dir)] : []);
+  const files = walk(root);
+  assert.ok(files.length > 20, "the scan must actually see the source tree");
+  const bad = files.filter((f) => re.test(fs.readFileSync(f, "latin1"))).map((f) => f.pathname);
+  assert.deepEqual(bad, [], "raw mutation-error .message render(s) — use errorText()");
+  assert.ok(re.test("x{(save.error as Error).message}"), "negative control: the pattern matches the bad shape");
 });
 
 // ── socket inference ──────────────────────────────────────────────────────────
