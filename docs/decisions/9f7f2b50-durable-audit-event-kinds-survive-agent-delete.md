@@ -37,6 +37,8 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
   the same reason).
 - **Gate / merge history** (feeds the Gates page; the historical record of what happened to code):
   `build_gate`, `build_gate_retry_attempt`, `build_gate_retry`, `build_gate_single_file_retry`,
+  `build_gate_single_file_retry_attempt` (card 2ec00f6a — attempt 1's own verdict, written before the
+  retry re-queues; the only durable record of attempt 1 while the retry waits),
   `merge_request`, `merge_done`, `merge_rejected`, `merge_cancelled`, `batch_merge_forfeited`,
   `kill_switch`.
 - **Incident / forensic record** (each one's own comment says it previously left no trace, or is the

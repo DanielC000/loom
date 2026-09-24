@@ -94,6 +94,14 @@ function gateWorkerLabel(agentName?: string, taskTitle?: string): string | null 
   return agentName ?? title ?? null;
 }
 
+/** Card 2ec00f6a: attempt 1's own verdict while a single/multi-file retry is queued or running — the live
+ *  `gate_status` echo of the `build_gate_single_file_retry_attempt` event. `failingTest`/`retriedFile` are
+ *  content-bearing and dropped on a cross-project read. */
+export interface PriorAttemptVerdict {
+  attempt: 1; passed: false; durationMs: number; retriedFile: string; failingTest?: string;
+}
+const PRIOR_ATTEMPT_VERDICT_MAX = 64;
+
 /** One entry in {@link SessionService.gateQueueForManager}'s result — `taskId`/`branch`/`workerLabel` are
  *  present ONLY for an entry belonging to the CALLING manager's own project; a cross-project entry omits
  *  them entirely (never redacted-to-null, so "field absent" always means "not your project", never "this
@@ -2029,6 +2037,21 @@ export class SessionService {
   // scoped on purpose (never persist), keyed by branch not workerSessionId, cleared only when the
   // worktree HEAD advances
   private readonly gateTimeoutStreak = new Map<string, { count: number; sha: string | null }>();
+  /** Card 2ec00f6a: attempt 1's own verdict for an op whose single/multi-file retry is queued or running,
+   *  read by {@link gateStatus}'s LIVE branch (in-memory only — the durable copy is the
+   *  `build_gate_single_file_retry_attempt` event). Insertion-order bounded ({@link PRIOR_ATTEMPT_VERDICT_MAX})
+   *  so an op that never reads it back can't leak; an evicted entry only loses the live echo. */
+  private readonly priorAttemptVerdicts = new Map<string, PriorAttemptVerdict>();
+
+  private notePriorAttemptVerdict(opId: string, v: PriorAttemptVerdict): void {
+    this.priorAttemptVerdicts.delete(opId);
+    this.priorAttemptVerdicts.set(opId, v);
+    while (this.priorAttemptVerdicts.size > PRIOR_ATTEMPT_VERDICT_MAX) {
+      const oldest = this.priorAttemptVerdicts.keys().next().value;
+      if (oldest === undefined) break;
+      this.priorAttemptVerdicts.delete(oldest);
+    }
+  }
   /** Read-only accessor for {@link gateTimeoutStreak} (card fa359824 follow-up, escalation 4f151331) — the
    *  live registry a `gate_queue` entry is built from only ever reflects what {@link GateSemaphore} BELIEVES
    *  is running/queued; it cannot see a gate whose `runGateStep` timeout fired but whose process TREE wasn't
@@ -3854,6 +3877,11 @@ export class SessionService {
      *  `queued`/`running` — a LIVE-entry-only concept, omitted for every settled/tombstone/no-row state,
      *  same population scope as `extended` immediately above. */
     attempt?: number | null; priorAttemptMs?: number | null;
+    /** Card 2ec00f6a: attempt 1's own failed verdict while this op's single/multi-file retry is
+     *  `queued`/`running` (`attempt >= 2`) — before this, a re-queued retry showed only `priorAttemptMs`
+     *  and its attempt-1 verdict was invisible until the retry settled. LIVE-entry-only, same population
+     *  scope as `attempt`; absent otherwise. `retriedFile`/`failingTest` are omitted on a cross-project read. */
+    priorAttemptVerdict?: PriorAttemptVerdict | Omit<PriorAttemptVerdict, "retriedFile" | "failingTest">;
     /** @decision 4c5bf820 — settled-verdict fields are scoped PER FIELD, not uniformly "gate"-only
      *  @decision a228dfb5 — passed reads false for a "merge" row with outcome:"skipped" (inert-diff,
      *  no gate spawned) — never map a skipped merge to "pass" */
@@ -4000,7 +4028,12 @@ export class SessionService {
     if (r.kind === "found") {
       const entry = r.record;
       const liveness: "pending" | "observed" = entry.lastOutputAt != null ? "observed" : "pending";
+      const prior = entry.opId != null && (entry.attempt ?? 1) >= 2 ? this.priorAttemptVerdicts.get(entry.opId) : undefined;
+      // Fail-SAFE polarity (mirrors isCrossProjectGateOp): content fields ride only when the caller's
+      // project is provably the op's own project, or redaction was never requested (worker scope).
+      const foreign = redactCrossProject !== undefined && entry.projectId !== redactCrossProject.callerProjectId;
       return {
+        ...(prior ? { priorAttemptVerdict: foreign ? { attempt: prior.attempt, passed: prior.passed, durationMs: prior.durationMs } : prior } : {}),
         state: entry.phase, gateType: entry.gateType, elapsedMs: Date.now() - entry.since,
         idleMs: entry.lastOutputAt != null ? Date.now() - entry.lastOutputAt : null,
         extended: entry.extended,
@@ -14352,6 +14385,15 @@ export class SessionService {
         if (identification.eligible) {
           const candidate = identification;
           retriedFile = candidate.names.join(",");
+          // Card 2ec00f6a: attempt 1's verdict is durable NOW, before the retry re-queues — this method's
+          // own `build_gate` row is only written after the whole retry settles, so a starved/orphaned
+          // retry (specimens: solo `ff93dce4` 253 s then re-queued; batch `36c08174` 29.5 min then an
+          // 87 min wait) used to leave attempt 1 with no event and no `gate_status` echo at all.
+          evt("build_gate_single_file_retry_attempt", {
+            attempt: 1, passed: false, durationMs: gateAttempt1DurationMs, failingTest: gateResult.failingTest, retriedFile,
+            gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
+          });
+          this.notePriorAttemptVerdict(thisOpId, { attempt: 1, passed: false, durationMs: gateAttempt1DurationMs, retriedFile, ...(gateResult.failingTest ? { failingTest: gateResult.failingTest } : {}) });
           // CARD 7ad12202: computed HERE, before the retry even runs — `remaining` depends only on
           // ATTEMPT 1's own outcome (`effectiveGate`/`gateResult.steps.length`), never on whether the
           // retry itself passes, so there is nothing to gain by waiting. Needed this early for one reason:
@@ -15744,6 +15786,13 @@ export class SessionService {
               const identification = identifyRetriableTestFiles(r.failTierAll, worktreePath, r.failTierTestCount, r.harnessNotExecutedDetected ?? false);
               if (identification.eligible) {
                 retriedFile = identification.names.join(",");
+                // Card 2ec00f6a: same durable attempt-1 trace as the solo path — see its comment.
+                evtBatch("build_gate_single_file_retry_attempt", {
+                  attempt: 1, passed: false, durationMs: batchGateAttempt1DurationMs, failingTest: r.failingTest, retriedFile,
+                  batched: true, branchCount: landedCount, gateCap: orchestration.maxConcurrentGates,
+                  concurrentGates: concurrentAtStart, concurrentGatesMax: getConcurrentGatesMax?.() ?? concurrentAtStart,
+                });
+                this.notePriorAttemptVerdict(opId, { attempt: 1, passed: false, durationMs: batchGateAttempt1DurationMs, retriedFile, ...(r.failingTest ? { failingTest: r.failingTest } : {}) });
                 // CARD 7ad12202: computed BEFORE the retry runs, same reasoning as the solo path's own
                 // identical computation above — depends only on attempt 1's outcome, and is needed early
                 // to decide which admission below is the one that actually holds the per-repo guard

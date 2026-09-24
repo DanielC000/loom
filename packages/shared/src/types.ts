@@ -986,6 +986,14 @@ export type OrchestrationEventKind =
   // `retriedFile`/`retryPassed`, never a second history row). `detail` carries { retriedFile, retryPassed,
   // priorFailingTest }.
   | "build_gate_single_file_retry"
+  // Card 2ec00f6a: attempt 1's OWN verdict, written the instant a single/multi-file retry is DECIDED and
+  // BEFORE that retry's own `runExclusive` re-queue. Without it a failed attempt 1 left no durable trace
+  // until the retry settled (live specimens: batch `36c08174`, 29.5 min attempt 1 then an 87 min re-queue;
+  // solo `ff93dce4`, 253 s attempt 1 re-queued as attempt 2). `detail` carries { attempt:1, passed:false,
+  // durationMs, failingTest, retriedFile }. Audit-only — like `build_gate_single_file_retry`, deliberately
+  // NOT in GATE_HISTORY_KINDS (the outcome still folds onto the ONE `build_gate` row) nor
+  // EVENT_TRIGGER_EVENT_KINDS.
+  | "build_gate_single_file_retry_attempt"
   // A scheduled fire FAILED to spawn (startManager/startAuditor threw). The durable mirror of
   // `schedule_fired`: without it a spawn failure ONLY hit stderr, so a cadence could silently never run
   // with no surfaced reason. Filed under the SCHEDULE id (managerSessionId = the schedule — no session was
@@ -1600,7 +1608,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   recycle_fleet_stranded_across_restart: true, recycle_successor_retired: true, merge_request: true,
   merge_done: true, merge_rejected: true, merge_cancelled: true, build_gate: true,
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
-  build_gate_single_file_retry: true, schedule_fire_failed: true, schedule_fire_deferred: true,
+  build_gate_single_file_retry: true, build_gate_single_file_retry_attempt: true, schedule_fire_failed: true, schedule_fire_deferred: true,
   schedule_fire_missed: true,
   worker_report_rejected: true, wake_scheduled: true, wake_fired: true, wake_dropped: true,
   idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, context_emergency_interrupt: true, worker_stuck: true,

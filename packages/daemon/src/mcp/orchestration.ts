@@ -335,7 +335,7 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
       "id-prefix (the short id Loom displays everywhere else — same resolution as `tasks_get`/" +
       "`worker_spawn`/`escalation_status`). Returns {state:\"queued\"|\"running\"|\"pending\"|\"settled\"|" +
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"unknown\"|\"ambiguous\", gateType, elapsedMs, " +
-      "idleMs, extended?, attempt?, priorAttemptMs?, error?, note?, admittedAt?, ownerSessionAlive?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
+      "idleMs, extended?, attempt?, priorAttemptMs?, priorAttemptVerdict?, error?, note?, admittedAt?, ownerSessionAlive?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
       "outputTail?, outputFile?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?, emitCompareReduced?, " +
       "emitCompareNotApplicableKind?, " +
       "this tool is UNSCOPED for a manager — a real opId from ANY project on this daemon resolves here, not " +
@@ -366,7 +366,11 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
       "to run, so a pass can be reported without a configured step ever silently going unexecuted. `priorAttemptMs` alongside " +
       "either is how long everything BEFORE this admission already ran, so a `state:\"queued\"` reading with " +
       "`attempt:2`/`attempt:3` doesn't read as an unexplained zero-progress wait: this op has already done " +
-      "real work, just not on THIS admission. Read this before concluding a long-`queued` merge op is stuck — " +
+      "real work, just not on THIS admission. `priorAttemptVerdict` (card 2ec00f6a) is attempt 1's own failed " +
+      "verdict {attempt:1, passed:false, durationMs, retriedFile, failingTest?} — present ONLY on a live " +
+      "`attempt>=2` single/multi-file retry (queued or running), so a re-queued retry no longer hides that " +
+      "attempt 1 FAILED; the same fact is durable as a `build_gate_single_file_retry_attempt` event. `retriedFile`/" +
+      "`failingTest` are omitted on a cross-project read (`attempt`/`passed`/`durationMs` stay). Read this before concluding a long-`queued` merge op is stuck — " +
       "a re-queue for a real retry is routine, not evidence of a wedge (the SAME distinction the resolution " +
       "half of card 99a1cf6f itself was filed to close: a two-sample `gate_queue` read of a running→queued " +
       "swap, with no `attempt` field to explain it, was mistaken for a lost verdict when it was actually this). " +
