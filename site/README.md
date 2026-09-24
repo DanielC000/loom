@@ -34,8 +34,9 @@ the merge is owner-gated.
   self-contained JS for reveal-on-scroll and the quickstart copy buttons (both progressive enhancement;
   the page is fully usable with JS disabled).
 - `remote-access.html` — a docs subpage covering how to reach the daemon from another device
-  (Tailscale Serve / SSH as the recommended primary; a direct authenticated bind with a gateway token +
-  TLS as the co-equal alternative). Reuses `styles.css` and the same inline reveal/copy JS; linked from
+  (an SSH port-forward as the recommended path; a direct authenticated bind with a gateway token +
+  TLS as the alternative; a callout explains that Tailscale Serve and other reverse proxies don't work
+  today). Reuses `styles.css` and the same inline reveal/copy JS; linked from
   the header nav. Its `.doc-*` / `.opt-*` / `.callout` styles are additive, so `index.html` is unaffected.
 - `styles.css` — tokens mirrored from `packages/web/src/styles/global.css` so it reads as the same
   product. The brand type (Space Grotesk + JetBrains Mono, both OFL-1.1) is embedded as base64 `woff2`
