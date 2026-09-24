@@ -93,6 +93,10 @@ import { detectIntegrations } from "../integrations/detect.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
+// @decision cda454c8 — the ONLY writes exempt from the loopback-secret guard (they carry the run API key
+// in the same Bearer header). Never widen: a new entry needs an exact pattern AND authRunKey called first.
+export const LOOPBACK_GUARD_KEY_AUTHED_EXEMPT: readonly string[] = ["/api/runs", "/api/runs/:id/cancel"];
+
 /** Upper bound for the raw vault-file serving route. Vault attachments are normally small (images,
  *  PDFs); this is a guard against streaming a pathologically large file, not a real working limit —
  *  a file over the cap is refused with 413 rather than streamed. */
@@ -542,7 +546,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     app.addHook("onRequest", async (req, reply) => {
       const routePattern = req.routeOptions.url;
       if (routePattern === undefined) return;
-      const isGuardedApiWrite = req.method !== "GET" && req.method !== "HEAD" && routePattern.startsWith("/api/");
+      const isGuardedApiWrite = req.method !== "GET" && req.method !== "HEAD" && routePattern.startsWith("/api/") &&
+        !(req.method === "POST" && LOOPBACK_GUARD_KEY_AUTHED_EXEMPT.includes(routePattern));
       const isTermSocket = routePattern === "/ws/term/:sessionId";
       // Card 351e89af: the identical predicate as isTermSocket above, applied to the Companion's OWN
       // inbound chat socket — gating the whole upgrade (not per-message) so reaching the handler at all
