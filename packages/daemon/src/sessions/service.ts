@@ -2614,12 +2614,20 @@ export class SessionService {
     target: "claude" | "codex";
     scope: "fleet" | { projectId: string };
     pending: { sessionId: string; role: SessionRole | null; harness: "claude" | "codex"; projectId: string }[];
+    /**
+     * Card c17ba928: sessions whose harness differs from what a spawn resolves to, but that a RECYCLE will never
+     * move — a manager/platform-lead whose OLD ROW carries codex-incompatible fields (see `recycleHarness`).
+     * Not `pending` (nothing in the drain will ever land them); `reasons` are the `codexIncompatibilities` items.
+     */
+    blocked: { sessionId: string; role: SessionRole | null; harness: "claude" | "codex"; projectId: string; wanted: "claude" | "codex"; reasons: CodexIncompatibility[] }[];
+    /** True only when NOTHING is off target: `pending` AND `blocked` are both empty. */
     done: boolean;
   } {
     const platformConfig = this.db.getPlatformConfig();
     const targetProjectConfig = scope === "fleet" ? undefined : this.db.getProject(scope.projectId)?.config;
     const target = harnessDefaultForRole(resolveHarnessConfig(targetProjectConfig, platformConfig), "worker") ?? "claude";
     const pending: { sessionId: string; role: SessionRole | null; harness: "claude" | "codex"; projectId: string }[] = [];
+    const blocked: { sessionId: string; role: SessionRole | null; harness: "claude" | "codex"; projectId: string; wanted: "claude" | "codex"; reasons: CodexIncompatibility[] }[] = [];
     for (const s of this.db.listAllSessions()) {
       if (s.processState !== "live") continue;
       if (scope !== "fleet" && s.projectId !== scope.projectId) continue;
@@ -2627,10 +2635,16 @@ export class SessionService {
       const project = this.db.getProject(s.projectId);
       if (!agent || !project) continue;
       const current = s.harness ?? "claude";
-      const wanted = this.resolveAgentSpawn(agent, resolveConfig(project.config), s.role ?? undefined).harness ?? "claude";
-      if (current !== wanted) pending.push({ sessionId: s.id, role: s.role ?? null, harness: current, projectId: s.projectId });
+      const spawn = this.resolveAgentSpawn(agent, resolveConfig(project.config), s.role ?? undefined);
+      const wanted = spawn.harness ?? "claude";
+      if (current === wanted) continue;
+      // A manager/platform-lead lands via RECYCLE, which is row-aware (`recycleHarness`) — ask the same helper.
+      // Other roles land via a fresh spawn, whose profile-derived answer (`spawn.harness`) is already the truth.
+      const recycled = s.role === "manager" || s.role === "platform" ? this.recycleHarness(s, spawn) : undefined;
+      if (recycled?.skipped) blocked.push({ sessionId: s.id, role: s.role ?? null, harness: current, projectId: s.projectId, wanted, reasons: recycled.skipped });
+      else pending.push({ sessionId: s.id, role: s.role ?? null, harness: current, projectId: s.projectId });
     }
-    return { target, scope, pending, done: pending.length === 0 };
+    return { target, scope, pending, blocked, done: pending.length === 0 && blocked.length === 0 };
   }
 
   /**

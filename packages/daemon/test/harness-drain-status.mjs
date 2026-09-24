@@ -53,8 +53,8 @@ prof("profMgr", "manager");
 const agent = (id, projectId, profileId) => db.insertAgent({ id, projectId, name: id, startupPrompt: id, position: 0, profileId });
 agent("aPlainA", "pA", null); agent("aClaudeA", "pA", "profWClaude"); agent("aCodexA", "pA", "profWCodex"); agent("aMgrA", "pA", "profMgr"); agent("aPlainB", "pB", null);
 
-const sess = (id, projectId, agentId, role, harness, processState = "live") =>
-  db.insertSession({ id, projectId, agentId, engineSessionId: null, title: null, cwd: TMP, processState, resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role, ...(harness ? { harness } : {}) });
+const sess = (id, projectId, agentId, role, harness, processState = "live", extra = {}) =>
+  db.insertSession({ id, projectId, agentId, engineSessionId: null, title: null, cwd: TMP, processState, resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role, ...(harness ? { harness } : {}), ...extra });
 sess("s1-worker-plain-claude", "pA", "aPlainA", "worker", null);
 sess("s2-worker-plain-codex", "pA", "aPlainA", "worker", "codex");
 sess("s3-worker-claudepin-claude", "pA", "aClaudeA", "worker", null);
@@ -130,6 +130,31 @@ try {
   check("(4) unknown projectId → 404", restBad.statusCode === 404);
   check("(4) the route is Tier 0 (loopback-only, never allowlisted for a remote bind)", routeTier("GET", "/api/harness/drain") === 0);
   check("(4) POSITIVE CONTROL: routeTier really returns 1 for an allowlisted read", routeTier("GET", "/api/sessions") === 1);
+
+  // (5) card c17ba928: a manager whose OLD ROW carries restrictedTools under a codex profile is BLOCKED (a recycle
+  // keeps it on claude — `recycleHarness`), never pending; a same-shaped manager without the field stays pending.
+  // Isolated in its own project so the exact sets above are untouched.
+  db.insertProject({ id: "pC", name: "pC", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: now, archivedAt: null });
+  prof("profMgrCodex", "manager", "codex");
+  agent("aMgrCodexC", "pC", "profMgrCodex");
+  sess("s10-mgr-claude-restricted", "pC", "aMgrCodexC", "manager", null, "live", { restrictedTools: true });
+  sess("s11-mgr-claude-plain", "pC", "aMgrCodexC", "manager", null);
+  const rC = svc.harnessDrainStatus({ projectId: "pC" });
+  check("(5) row WITHOUT carried fields is pending (recycle WILL move it)", same(ids(rC), ["s11-mgr-claude-plain"]));
+  check("(5) row WITH restrictedTools is blocked, not pending, with the compat reason",
+    rC.blocked.length === 1 && rC.blocked[0].sessionId === "s10-mgr-claude-restricted" && rC.blocked[0].wanted === "codex" &&
+    rC.blocked[0].harness === "claude" && rC.blocked[0].reasons.some((r) => r.id === "restrictedTools" && r.reason.length > 0));
+  check("(5) done false while s11 pending", rC.done === false);
+  db.setProcessState("s11-mgr-claude-plain", "exited");
+  const rCb = svc.harnessDrainStatus({ projectId: "pC" });
+  check("(5) blocked-only scope ⇒ pending empty, blocked 1, done FALSE", rCb.pending.length === 0 && rCb.blocked.length === 1 && rCb.done === false);
+  db.setProcessState("s10-mgr-claude-restricted", "exited");
+  check("(5) CONTROL: nothing pending or blocked ⇒ done true", svc.harnessDrainStatus({ projectId: "pC" }).done === true);
+  db.setProcessState("s10-mgr-claude-restricted", "live");
+  db.setProcessState("s11-mgr-claude-plain", "live");
+  const restC = JSON.parse((await get("/api/harness/drain?projectId=pC")).body);
+  check("(5) REST carries the same blocked list", restC.blocked?.length === 1 && restC.blocked[0].sessionId === "s10-mgr-claude-restricted");
+  check("(5) NEGATIVE CONTROL: earlier scopes have no blocked rows", svc.harnessDrainStatus({ projectId: "pA" }).blocked.length === 0);
 } finally {
   try { await app.close(); } catch { /* ignore */ }
   db.close();
