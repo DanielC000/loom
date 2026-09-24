@@ -48,6 +48,13 @@ const check = (label, cond, diagnostic) => {
   direct.stdout.on("data", (d) => { stdout += d; });
   const status = await new Promise((resolve) => direct.on("close", resolve));
   check("[prerequisite] the real guard, run directly, still exits 0 (a declared gap is non-blocking)", status === 0);
+  // Card 3fdfc2d6 closed the registry's LAST real gap (the codex `model` pin). With zero real gaps this
+  // file has no specimen to observe; the WARN-surfacing mechanism itself stays proven synthetically by
+  // warn-marker-surfaces-on-pass.mjs (card 22d995ca). Skip loudly rather than pass vacuously or fail.
+  if (!stdout.includes("WARN  card ")) {
+    console.log("WARN  SKIP  field-consumer-guard-warnings-surface.mjs — the real registry currently declares NO open gap (last one closed by card 3fdfc2d6), so there is no real specimen to drive through the runner; the mechanism remains covered by warn-marker-surfaces-on-pass.mjs. Re-enable by pointing TRACKING_CARD_ID at the next real gap.");
+    process.exit(0);
+  }
   check(
     `[prerequisite] the real guard, run directly, still declares a gap tracked by card ${TRACKING_CARD_ID}`,
     stdout.includes(`WARN  card ${TRACKING_CARD_ID}:`),

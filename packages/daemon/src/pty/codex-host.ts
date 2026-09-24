@@ -209,6 +209,26 @@ export function unsupportedCodexMcpServers(mcpServers: Record<string, unknown>):
 }
 
 /**
+ * Card `3fdfc2d6` (C4): translate a profile's `model` pin into codex's per-invocation `-c model="<id>"`
+ * override (codex's own `-c, --config <key=value>` lever; `codex --help` / `codex resume --help` both list
+ * `-c` as a plain option, so it is valid after the `resume <uuid>` subcommand exactly as after a fresh
+ * spawn). The value is a TOML string; the id is validated against a conservative charset first, so a
+ * malformed pin can never inject a quote/escape into the TOML value (it is always ONE argv element, never
+ * shell-interpreted). An unset pin yields no args (byte-identical to before); an INVALID pin is dropped
+ * and reported via `console.warn` (falls back to codex's configured default model, the pre-change behavior).
+ */
+export const CODEX_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
+export function buildCodexModelArgs(model: string | undefined | null): string[] {
+  if (!model) return [];
+  if (!CODEX_MODEL_ID_RE.test(model)) {
+    // eslint-disable-next-line no-console
+    console.warn(`[pty] codex model pin ${JSON.stringify(model)} is not a plausible model id (allowed: ${CODEX_MODEL_ID_RE}) — NOT passed to codex; spawning with codex's configured default model.`);
+    return [];
+  }
+  return ["-c", `model="${model}"`];
+}
+
+/**
  * Card c6ce2804 (DoD-1): decide the resume-related PREFIX of a codex spawn's argv — pure, so the exact
  * fresh-vs-resume-vs-fork decision can be asserted directly (codex-resume-argv.mjs) with no real spawn
  * required, mirroring why `mcpServersToCodexArgs` above lives here rather than inline in `createCodexPty`.

@@ -239,24 +239,16 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         pattern: `model: opts.model, disallowedTools, sessionName`,
         note: "createPty threads opts.model into buildSpawnArgs, which emits --model <id>.",
       },
+      {
+        harnesses: ["codex"],
+        file: "packages/daemon/src/pty/host.ts",
+        region: "codex-spawn",
+        pattern: `...buildCodexModelArgs(opts.model)`,
+        note: "createCodexPty appends buildCodexModelArgs(opts.model) (-c model=\"<id>\") to the argv, for fresh and resume spawns alike.",
+      },
     ],
-    // `model` IS mechanically connectable on codex (the CLI has its own model-override lever — `-c
-    // model=<id>` / config.toml `model`, per docs/investigations/049e4a7b-codex-cli-capability-probe/
-    // findings.md point 5) — there is just nothing threading `opts.model` to it yet. remedy: "connect".
-    // DELIBERATELY LEFT OPEN in card 0770d916's own landing (the other four fields' gaps for this same
-    // card ARE closed in that change): test/field-consumer-guard-warnings-surface.mjs (card 10787759's
-    // DoD acceptance evidence) drives the REAL PROFILE_FIELD_CONSUMERS registry end-to-end to prove a
-    // declared gap surfaces a WARN line on a PASSING gate run — it needs at least one real, currently-open
-    // gap to exist as its specimen (by its own header's design: "not a synthetic fixture"). Closing every
-    // gap in this registry in the same change would leave that test with zero real gaps to observe,
-    // breaking an unrelated card's regression coverage as a side effect. `model` is the LOWEST-severity of
-    // the five (an ignored pin, not a safety issue — see restrictedTools below for the one that mattered
-    // enough to fix regardless), so it is the one left as the specimen. Whoever closes this LAST gap must
-    // also update field-consumer-guard-warnings-surface.mjs's TRACKING_CARD_ID/specimen in the same change
-    // (its own header already anticipates this).
-    gaps: [
-      { harness: "codex", gap: { cardId: "0770d916", remedy: "connect", note: "createCodexPty never threads opts.model into codex's own model-override lever (-c model=<id> / config.toml). Falls back to codex's configured default model, not a safety issue — just an ignored pin." } },
-    ],
+    // Card 3fdfc2d6 (C4): closed card 0770d916's last open gap — codex now consumes the pin via
+    // `-c model="<id>"` (buildCodexModelArgs, codex-host.ts).
   },
 
   restrictedTools: {

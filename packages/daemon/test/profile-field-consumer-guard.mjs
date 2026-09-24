@@ -95,8 +95,11 @@ check("codex-spawn region is non-trivially sized (>500 chars)", CODEX_SPAWN_REGI
 // Positive control: the two regions must actually be DISJOINT in content, or every "scoped to claude
 // only" / "scoped to codex only" proof below would be meaningless (a claude-only token leaking into the
 // codex region would make an unexempted codex gap invisible to this guard).
-check("(control) a known claude-only token (opts.model) is ABSENT from the codex-spawn region", !CODEX_SPAWN_REGION.includes("opts.model"));
+// Card 3fdfc2d6: opts.model is now consumed on BOTH harnesses, so it is no longer a claude-only token;
+// buildSpawnArgs( is (codex builds its argv inline + via codex-host helpers, never through it).
+check("(control) a known claude-only token (buildSpawnArgs() is ABSENT from the codex-spawn region", !CODEX_SPAWN_REGION.includes("buildSpawnArgs("));
 check("(control) a known claude-only token (opts.model) IS PRESENT in the claude-create-pty region", CLAUDE_CREATE_PTY_REGION.includes("opts.model"));
+check("(control) a known claude-only token (buildSpawnArgs() IS PRESENT in the claude-create-pty region", CLAUDE_CREATE_PTY_REGION.includes("buildSpawnArgs("));
 check("(control) a known codex-only token (trustDialogAnswered) is ABSENT from the claude-create-pty region", !CLAUDE_CREATE_PTY_REGION.includes("trustDialogAnswered"));
 check("(control) a known codex-only token (trustDialogAnswered) IS PRESENT in the codex-spawn region", CODEX_SPAWN_REGION.includes("trustDialogAnswered"));
 

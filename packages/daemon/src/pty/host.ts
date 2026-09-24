@@ -26,7 +26,7 @@ import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, RESERVED_CAPABILITY_SLUGS, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
-import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail } from "./codex-host.js";
+import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail } from "./codex-host.js";
 import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
 
 /** @decision 702f2197 — the ONLY server ids passed as `mcpServersToCodexArgs`'s `autoApproveServerIds` at
@@ -4775,14 +4775,12 @@ export class PtyHost {
    *
    * 🔴 Card `7fa73e2c` correction: this call site does NOT pass every field `createPty`'s own call does, and
    * that is now a DELIBERATE, DOCUMENTED difference, not the drift the sentence above used to (wrongly)
-   * claim away. Two independent reasons a field is missing here:
+   * claim away. The reason a field is missing here:
    *  - `opts.codescapeEnabled`/`repoPath`/`worktreeId`/the codescape-supervisor state/`integrationPaths` are
    *    withheld ON PURPOSE — see the comment at this method's `buildMcpServers` call below for why (a real
    *    security gap, not an oversight).
-   *  - `opts.model` is DELIBERATELY NOT threaded here yet, despite being mechanically wirable (codex's own
-   *    `-c model=<id>` inline override, per `docs/investigations/049e4a7b-codex-cli-capability-probe/
-   *    findings.md` point 5) — see field-consumers.ts's `model` entry for why it stays a declared, tracked
-   *    gap.
+   *  - `opts.model` IS threaded (card `3fdfc2d6`): `buildCodexModelArgs` emits `-c model="<id>"` for a fresh
+   *    AND a `resume <uuid>` spawn (codex-host.ts).
    *
    * @decision 0770d916 — opts.browserTesting/documentConversion/capabilities ARE threaded into codex's
    * buildMcpServers call; threading the argument is NOT the same as the capability mounting for codex,
@@ -4896,7 +4894,7 @@ export class PtyHost {
     // @decision d7657543 — no writable-roots lever (`--add-dir`) fixes a codex worktree's `git commit`
     // denial on Windows — the sandbox's DENY ACE on `.git` wins over any inherited ALLOW. Do not reach for
     // `-s danger-full-access`/`--dangerously-bypass-approvals-and-sandbox` to route around it; report up.
-    const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...CODEX_UPDATE_CHECK_OVERRIDE_ARGS, ...mcpArgs];
+    const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...CODEX_UPDATE_CHECK_OVERRIDE_ARGS, ...mcpArgs, ...buildCodexModelArgs(opts.model)];
     // eslint-disable-next-line no-console
     console.log(`[pty] spawnCodex ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${isCodexResume ? opts.resumeId : "none"} mcpServers=${Object.keys(mcpServers).join(",")}`);
     return spawn(bin, args, {
