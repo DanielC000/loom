@@ -93,7 +93,11 @@ db.insertSession({
 // leaving it un-overridden would launch the REAL codex binary. LOOM_CODEX_BIN points at a path that does not
 // exist as a second, loud backstop — a real spawn attempt would fail visibly instead of booting codex.
 process.env.LOOM_CODEX_BIN = path.join(tmpHome, "no-such-codex-binary");
-const fakePty = () => ({ pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} });
+// kill() fires the registered onExit callback (the shape onexit-discard-guard.mjs requires of a fake-pty handle).
+const fakePty = () => {
+  let exitCb = null;
+  return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit(cb) { exitCb = cb; return { dispose() {} }; }, kill() { exitCb?.({ exitCode: 0 }); }, resize() {} };
+};
 class SeamHost extends PtyHost {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) { this.capture.push(opts); return fakePty(); }
