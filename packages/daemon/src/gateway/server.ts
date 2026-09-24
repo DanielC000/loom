@@ -22,7 +22,7 @@ import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
-import { filterRetainedWorktreesByProject } from "../sessions/service.js";
+import { filterRetainedWorktreesByProject, CodexForkUnsupportedError } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
@@ -5025,8 +5025,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // may deliberately bring a retired session back, to inspect or recover it.
   app.post("/api/sessions/:id/resume", async (req) =>
     deps.sessions.resume((req.params as { id: string }).id, { allowSuperseded: true }));
-  app.post("/api/sessions/:id/fork", async (req) =>
-    deps.sessions.forkSession((req.params as { id: string }).id));
+  app.post("/api/sessions/:id/fork", async (req, reply) => {
+    try {
+      return deps.sessions.forkSession((req.params as { id: string }).id);
+    } catch (e) {
+      // Card 961da6c6: an honest 4xx (not a generic 500) so the UI's global mutation-error alert names the reason.
+      if (e instanceof CodexForkUnsupportedError) return reply.code(409).send({ error: e.message });
+      throw e;
+    }
+  });
   // Pending one-shot wake-ups scheduled for a session (the wake_me primitive) — read-only.
   app.get("/api/sessions/:id/wakes", async (req) =>
     deps.db.listWakesForSession((req.params as { id: string }).id));

@@ -1984,6 +1984,14 @@ export function withRolePermissionModeCyclesPin(permission: PermissionPolicy, ro
     : permission;
 }
 
+/** Card 961da6c6: `forkSession` on a codex-pinned source — codex has no fork primitive, so nothing is created. */
+export class CodexForkUnsupportedError extends Error {
+  constructor() {
+    super('cannot fork a codex session — codex has no fork/branch primitive (a "fork" would be a fresh, empty conversation, not a copy of this one). Start a new session instead, or use harness "claude" if forking a live conversation is required.');
+    this.name = "CodexForkUnsupportedError";
+  }
+}
+
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
   /**
@@ -5911,6 +5919,8 @@ export class SessionService {
   forkSession(sourceId: string): Session {
     const src = this.db.getSession(sourceId);
     if (!src) throw new Error("session not found");
+    // @decision 961da6c6 — refuse, never degrade to a fresh spawn: codex has no fork primitive, so a "fork" would silently be an empty conversation.
+    if (src.harness === "codex") throw new CodexForkUnsupportedError();
     if (!src.engineSessionId) throw new Error("session has no engine context to fork (it never started)");
     if (src.busy) throw new Error("cannot fork a busy session — wait until it's idle");
     // The fork reads the source's transcript; if it's gone there's nothing to branch from.
