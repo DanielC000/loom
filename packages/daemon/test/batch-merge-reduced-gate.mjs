@@ -64,6 +64,10 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, buildReducedGateCommand } = await import("../dist/git/worktrees.js");
 
+// Asserts merge/gate behavior, never the pre-removal process reap. The real reap runs a win32 powershell
+// Get-CimInstance enumeration (pty/host.ts enumerateProcessesWin32, ~1-2s under load) per worktree removal —
+// pure fixed cost here since no worker-rooted process exists — so inject the SessionService seam.
+const noReap = async () => ({ killedPids: [] });
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
@@ -123,7 +127,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     seedBatchProject(db, P);
 
     const wA = await createWorktree(P.repo, P.projId, `${P.taskId}-a`);
@@ -188,7 +192,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     seedBatchProject(db, N);
 
     const wTest = await createWorktree(N.repo, N.projId, `${N.taskId}-test`);
@@ -235,7 +239,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     seedBatchProject(db, A);
 
     const wAsset = await createWorktree(A.repo, A.projId, `${A.taskId}-asset`);
@@ -284,7 +288,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     seedBatchProject(db, T);
 
     const wTs = await createWorktree(T.repo, T.projId, `${T.taskId}-ts`);
@@ -339,7 +343,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     seedBatchProject(db, SC);
 
     const wScript = await createWorktree(SC.repo, SC.projId, `${SC.taskId}-script`);
@@ -402,7 +406,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     seedBatchProject(db, NA);
 
     const wTest = await createWorktree(NA.repo, NA.projId, `${NA.taskId}-test`);
