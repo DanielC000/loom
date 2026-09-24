@@ -98,8 +98,8 @@ function freshMintNote(freshMint: FreshMintInfo): string {
   switch (freshMint.reason) {
     case "identity-mismatch":
       return `a prior verdict for this worker exists but describes commit ${freshMint.priorIdentity ?? "an earlier state"}; ` +
-        `this call found the branch now at ${freshMint.currentIdentity ?? "a different commit"} (often this call's own ` +
-        "pre-gate union-merge advancing it to catch up with main) — so it is being gated FOR REAL, not replayed from " +
+        `this call found the branch now at ${freshMint.currentIdentity ?? "a different commit"} (e.g. the worker pushed a new commit, a sibling's squash moved it, or sometimes this call's own union-merge ` +
+        "since that verdict) — so it is being gated FOR REAL, not replayed from " +
         "cache. This is a genuinely new gate run, not a cache hit.";
     case "forced":
       return "forceRemoveWorktree:true bypassed any cached verdict" +

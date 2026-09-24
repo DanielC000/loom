@@ -793,6 +793,25 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(identity mismatch skips TTL fallback too) a different-identity re-call runs fresh even WITHIN the retainMs window — never falls back to the equally-stale TTL'd cache", calls === 2 && r2.value.opId === "op-2");
 }
 
+// identityFromValue (card 8b1fb28f): the verdict is cached under the identity DERIVED FROM THE SETTLED VALUE
+// (merge: the post-forward tip the gate validated) when it returns a string; when it returns undefined (gate
+// never ran / error path) the minting call's own verdictIdentity stands, byte-identical to before.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const opts = { retainMs: 30, retainVerdictUntilSuperseded: true, identityFromValue: (v) => v.gated };
+  await reg.attach("ifv1", "merge", "mgr1", 200, async () => { calls++; return { merged: false, opId: "op-1", gated: "sha-POST" }; }, undefined, { ...opts, verdictIdentity: "sha-PRE" });
+  const hit = await reg.attach("ifv1", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, { ...opts, verdictIdentity: "sha-POST" });
+  check("(identityFromValue) a re-call at the value-derived (post-forward) identity dedupe-hits", calls === 1 && hit.value.opId === "op-1" && hit.cacheHit?.identity === "sha-POST");
+  const miss = await reg.attach("ifv1", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-3" }; }, undefined, { ...opts, verdictIdentity: "sha-PRE" });
+  check("(identityFromValue) NEGATIVE CONTROL: a re-call at the superseded pre-forward identity no longer hits (it names a commit the gate never validated) — mints fresh", calls === 2 && miss.value.opId === "op-3" && miss.freshMint?.reason === "identity-mismatch" && miss.freshMint?.priorIdentity === "sha-POST");
+  const reg2 = new PendingOpRegistry();
+  let c2 = 0;
+  await reg2.attach("ifv2", "merge", "mgr1", 200, async () => { c2++; return { merged: false, opId: "op-1" }; }, undefined, { ...opts, verdictIdentity: "sha-PRE" });
+  const hit2 = await reg2.attach("ifv2", "merge", "mgr1", 200, async () => { c2++; return { merged: true, opId: "op-2" }; }, undefined, { ...opts, verdictIdentity: "sha-PRE" });
+  check("(identityFromValue) value carries no derived identity (gate never ran) → the minting call's verdictIdentity stands and still dedupe-hits", c2 === 1 && hit2.value.opId === "op-1" && hit2.cacheHit?.identity === "sha-PRE");
+}
+
 // Identity-agnostic backward compat: a caller that opts into retainVerdictUntilSuperseded but never passes
 // verdictIdentity (undefined on every call) behaves exactly as before this option existed — undefined
 // matches undefined, so the durable dedupe still fires unconditionally.

@@ -89,7 +89,7 @@ async function setupWorkerProject(sfx, reposDir) {
   const { db, mgrId, workerId, workerSha } = await setupWorkerProject(sfx, reposDir);
   let gateCalls = 0;
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
-    runGate: async () => { gateCalls++; return { passed: false, failedStep: "test", failedStatus: 1, steps: [] }; },
+    syncAttachBudgetMs: 60_000, runGate: async () => { gateCalls++; return { passed: false, failedStep: "test", failedStatus: 1, steps: [] }; },
   });
 
   const r1 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
@@ -151,21 +151,25 @@ async function setupWorkerProject(sfx, reposDir) {
   const shaAfterOp1 = headSha(worktreePath);
   check("(identity-mismatch/main-advanced) op 1's own union-merge advanced the branch tip past the worker's original commit", shaAfterOp1 !== workerSha);
 
-  // The worker pushed NOTHING new — this re-call's only difference from a plain poll is that the branch
-  // tip moved underneath the cache, entirely via Loom's own prior confirm.
+  // The worker pushed NOTHING new — the branch tip moved underneath the cache entirely via Loom's own
+  // prior confirm. Card 8b1fb28f: the gate op 1 ran validated shaAfterOp1 (the POST-forward tip), so the
+  // cache records THAT as the verdict's identity and this plain re-call — same commit — is a cache hit,
+  // NOT a second gate (before the fix it recorded the pre-forward workerSha and re-gated the same commit).
   const r2 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
-  check("(identity-mismatch/main-advanced) op 2 settled", r2.settled === true && r2.ok === true);
-  check("(identity-mismatch/main-advanced) the gate genuinely ran a SECOND time — this is real re-gating, not a cache replay", gateCalls === 2);
-  check("(identity-mismatch/main-advanced) op 2 is a genuinely fresh op (different opId from op 1)", r2.ok && r1.ok && r2.value.opId !== r1.value.opId);
-  check("(identity-mismatch/main-advanced) op 2 announces identity-mismatch", r2.freshMint?.reason === "identity-mismatch");
-  check("(identity-mismatch/main-advanced) op 2's priorIdentity is the CACHED verdict's identity (the worker's original commit, resolved BEFORE op 1's union-merge ran)", r2.freshMint?.priorIdentity === workerSha);
-  check("(identity-mismatch/main-advanced) op 2's currentIdentity is the branch's tip AS OF op 2's own call (op 1's union-merge result)", r2.freshMint?.currentIdentity === shaAfterOp1);
-  // DoD-4(ii), card 4aedde84 — the OTHER polarity in this SAME run: a genuinely fresh re-gate (this is a
-  // REAL second gate run, asserted above via gateCalls === 2) must NEVER carry the cache marker either —
-  // proves cacheHit isn't just "always absent" by some unrelated bug, it's absent specifically because a
-  // gate genuinely ran, mirroring the freshMint assertion right above it.
-  check("(identity-mismatch/main-advanced) op 1 (genuine fresh mint) carries NO cacheHit", r1.cacheHit === undefined);
-  check("(identity-mismatch/main-advanced) op 2 (genuine re-gate, NOT a cache hit) carries NO cacheHit either", r2.cacheHit === undefined);
+  check("(same-commit-after-forward) op 2 settled", r2.settled === true && r2.ok === true);
+  check("(same-commit-after-forward) the gate did NOT run a second time — the forwarded tip is the commit op 1 already validated", gateCalls === 1);
+  check("(same-commit-after-forward) op 2 returns the SAME cached opId", r2.ok && r1.ok && r2.value.opId === r1.value.opId);
+  check("(same-commit-after-forward) op 2 carries NO freshMint", r2.freshMint === undefined);
+  check("(same-commit-after-forward) op 2's cacheHit names the POST-forward tip the gate actually validated", r2.cacheHit?.identity === shaAfterOp1);
+  check("(same-commit-after-forward) op 1 (genuine fresh mint) carries NO cacheHit", r1.cacheHit === undefined);
+
+  // (d) Card 8b1fb28f DoD-3 — a behaviour PIN, not a design endorsement: identity is branch-tip-only, so if
+  // MAIN advances AGAIN after op 1 (worker pushes nothing) a re-call still replays the cached rejection.
+  fs.writeFileSync(path.join(repo, "main-advance-2.txt"), "advanced again\n");
+  commitAll(repo, "main advanced again", GIT_ID);
+  const r3 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
+  check("(main-advanced-again) re-call settled", r3.settled === true && r3.ok === true);
+  check("(main-advanced-again) PIN: the cached rejection is replayed (no second gate) even though main moved again", gateCalls === 1 && r3.cacheHit?.identity === shaAfterOp1);
 }
 
 // ── (c) IDENTITY-MISMATCH VIA THE WORKER'S OWN NEW COMMIT (card a98f97bd DoD-6): the registry compares an
@@ -180,7 +184,7 @@ async function setupWorkerProject(sfx, reposDir) {
   const { db, mgrId, workerId, worktreePath, workerSha } = await setupWorkerProject(sfx, reposDir);
   let gateCalls = 0;
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
-    runGate: async () => { gateCalls++; return { passed: false, failedStep: "test", failedStatus: 1, steps: [] }; },
+    syncAttachBudgetMs: 60_000, runGate: async () => { gateCalls++; return { passed: false, failedStep: "test", failedStatus: 1, steps: [] }; },
   });
 
   const r1 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
@@ -205,6 +209,102 @@ async function setupWorkerProject(sfx, reposDir) {
   check("(identity-mismatch/own-commit) op 2's currentIdentity is the branch tip AFTER the worker's own new commit", r2.freshMint?.currentIdentity === shaAfterWorkerCommit);
   check("(identity-mismatch/own-commit) op 1 (genuine fresh mint) carries NO cacheHit", r1.cacheHit === undefined);
   check("(identity-mismatch/own-commit) op 2 (genuine re-gate, NOT a cache hit) carries NO cacheHit either", r2.cacheHit === undefined);
+}
+
+// ── (e) THE TIP MOVES DURING THE GATE (card 8b1fb28f, Code Review MAJOR 1): the worker is live while its merge
+//        gate runs, so it can commit a FIX mid-gate. The gate then FAILS — but on the tree it started with. The
+//        rejection must NOT be cached under the fix commit (never gated): a re-confirm to test the fix must
+//        re-gate for real. Behind-main branch (forwarded) so the stamp path is the one exercised.
+{
+  const sfx = `mid-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-mcvc-mid-${sfx}`);
+  const { db, mgrId, workerId, repo, worktreePath, workerSha } = await setupWorkerProject(sfx, reposDir);
+  let gateCalls = 0;
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    syncAttachBudgetMs: 60_000, runGate: async () => {
+      gateCalls++;
+      if (gateCalls === 1) { fs.writeFileSync(path.join(worktreePath, "fix.txt"), "fix\n"); commitAll(worktreePath, "fix mid-gate", GIT_ID); }
+      return { passed: false, failedStep: "test", failedStatus: 1, steps: [] };
+    },
+  });
+  fs.writeFileSync(path.join(repo, "main-advance.txt"), "advanced\n");
+  commitAll(repo, "main advanced", GIT_ID);
+  const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  check("(tip-moves-during-gate) op 1 settled + rejected", r1.settled === true && r1.ok && r1.value.merged === false && gateCalls === 1);
+  const fixSha = headSha(worktreePath);
+  check("(tip-moves-during-gate setup) the worker's mid-gate commit moved the tip", fixSha !== workerSha);
+  const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  check("(tip-moves-during-gate) the re-call RE-GATES the fix commit for real — the rejection was never cached under a commit the gate never ran on", gateCalls === 2 && r2.cacheHit === undefined);
+  check("(tip-moves-during-gate) op 2 announces identity-mismatch", r2.freshMint?.reason === "identity-mismatch");
+}
+
+// ── (f) THE GATE PASSES, THEN THE SQUASH REFUSES (Code Review MAJOR 2): a forwarded branch whose gate PASSED but
+//        whose squash was refused by the canonical checkout (dirty overlap) is NOT a gate-failed rejection and
+//        must not get the new stamp — after the human cleans the checkout the re-call must re-gate + merge, not
+//        replay the refusal. Doubles as the UNSTAMPED-FALLBACK case: op 2's freshMint.priorIdentity is the OLD
+//        pre-forward identity (workerSha), proving `identityFromValue` returned undefined and verdictIdentity stood.
+{
+  const sfx = `sq-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-mcvc-sq-${sfx}`);
+  const { db, mgrId, workerId, repo, workerSha } = await setupWorkerProject(sfx, reposDir);
+  let gateCalls = 0;
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    syncAttachBudgetMs: 60_000, runGate: async () => { gateCalls++; if (gateCalls === 1) fs.writeFileSync(path.join(repo, "feature.txt"), "live overlap appeared DURING the gate\n"); return { passed: true, steps: [] }; },
+  });
+  fs.writeFileSync(path.join(repo, "main-advance.txt"), "advanced\n");
+  commitAll(repo, "main advanced", GIT_ID);
+  // The gate stub itself dirties the canonical checkout at a path the branch also touches WHILE the gate runs, so the
+  // refusal lands in the squash phase AFTER a passing gate (an admission-time refusal would never reach the gate).
+  const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  check("(gate-pass-squash-refused) op 1 settled, NOT merged (squash refused after a PASSING gate) — fixture sanity", r1.settled === true && r1.ok && r1.value.merged === false && gateCalls === 1);
+  check("(gate-pass-squash-refused) op 1 carries NO gatedIdentity (only a gate-FAILED rejection is stamped)", r1.ok && r1.value.gatedIdentity === undefined);
+  fs.rmSync(path.join(repo, "feature.txt"));
+  const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  check("(gate-pass-squash-refused) after the human cleans the checkout the re-call does NOT replay the refusal — it re-gates", gateCalls === 2 && r2.cacheHit === undefined);
+  check("(gate-pass-squash-refused) UNSTAMPED FALLBACK: the old pre-forward identity was cached (priorIdentity === workerSha)", r2.freshMint?.priorIdentity === workerSha);
+}
+
+// ── (g) TIP MOVES DURING THE GATE, THEN IS RESET BACK TO WHERE IT STARTED (card 8b1fb28f re-review: the ABA shape).
+//        Two variants, deliberately separated because they need DIFFERENT machinery:
+//        (g1) reset AFTER op 1 settles, before the re-call: settle-time tip (F) != captured tip (T), so
+//             `confirmGatedIdentity` drops the stamp (the verdict describes a tree the gate saw moving); the old pre-forward
+//             identity stands, T != it, so the re-call re-gates. This is the case that goes RED when
+//             `confirmGatedIdentity` is mutated to `return v` (without the drop the stamp T matches the reset tip → cache hit).
+//        (g2) reset INSIDE the gate stub, before it fails: settle-time tip == captured tip, so NOTHING observable at settle
+//             distinguishes it from a gate that never saw movement — the stamp survives and the re-call is a cache hit.
+//             Pinned as the known LIMIT of a tip-compare (not an endorsement).
+{
+  for (const variant of ["g1-reset-after-settle", "g2-reset-inside-gate"]) {
+    const sfx = `aba-${variant}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const reposDir = path.join(os.tmpdir(), `loom-mcvc-aba-${sfx}`);
+    const { db, mgrId, workerId, repo, worktreePath } = await setupWorkerProject(sfx, reposDir);
+    let gateCalls = 0;
+    let capturedTip;
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      syncAttachBudgetMs: 60_000,
+      runGate: async () => {
+        gateCalls++;
+        if (gateCalls === 1) {
+          capturedTip = headSha(worktreePath); // == the tip captured just before this spawn
+          fs.writeFileSync(path.join(worktreePath, "fix.txt"), "fix\n"); commitAll(worktreePath, "fix mid-gate", GIT_ID);
+          if (variant === "g2-reset-inside-gate") execSync(`git reset --hard ${capturedTip}`, { cwd: worktreePath });
+        }
+        return { passed: false, failedStep: "test", failedStatus: 1, steps: [] };
+      },
+    });
+    fs.writeFileSync(path.join(repo, "main-advance.txt"), "advanced\n");
+    commitAll(repo, "main advanced", GIT_ID);
+    const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    check(`(${variant}) op 1 settled + rejected`, r1.settled === true && r1.ok && r1.value.merged === false && gateCalls === 1);
+    if (variant === "g1-reset-after-settle") execSync(`git reset --hard ${capturedTip}`, { cwd: worktreePath });
+    check(`(${variant} setup) the branch tip is back at the tip the gate started on`, headSha(worktreePath) === capturedTip);
+    const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    if (variant === "g1-reset-after-settle") {
+      check("(g1) the re-call RE-GATES: the stamp was dropped because the tip had moved at settle (RED if confirmGatedIdentity is mutated to return v)", gateCalls === 2 && r2.cacheHit === undefined);
+    } else {
+      check("(g2) PIN (known limit): a move-and-reset entirely inside the gate is invisible to a settle-time tip compare — cache hit at the captured tip", gateCalls === 1 && r2.cacheHit?.identity === capturedTip);
+    }
+  }
 }
 
 console.log(failures === 0

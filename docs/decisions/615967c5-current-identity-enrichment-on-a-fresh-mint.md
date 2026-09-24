@@ -13,10 +13,18 @@ Left unaddressed, an accidental re-run is a free extra sample of a non-determini
 eventually launder a red into a merge with no manager choosing to retry and nobody seeing the rejection
 overruled.
 
-FIX IS SELF-ANNOUNCING, NOT A CACHING CHANGE: the re-gating itself is semantically correct (the
-union-merge changed what is under test, so the old verdict genuinely doesn't describe the new tree) — the
-fix does not change the cache key, suppress the re-gate, or widen `identityOptional`; it only makes a
-fresh mint say what identity it is now describing.
+FIX IS SELF-ANNOUNCING: a mismatch that is a REAL change (the worker pushed, or a sibling's squash moved
+the tip) is correctly re-gated, and the fix makes that fresh mint say what identity it is now describing.
+
+CORRECTION (card 8b1fb28f): this record originally also claimed a re-call after a behind-main branch's OWN
+first confirm SHOULD re-gate because "the union-merge changed what is under test". That was wrong for the
+common case: op 1's gate ran AFTER its own union-merge, on the post-forward tip, but the verdict was cached
+under the PRE-forward tip (`verdictIdentity` is resolved before the op runs), so a plain re-call at the very
+commit the gate had already validated minted a second real gate — reopening the anti-laundering trap
+(`1555e361`) for every forwarded branch. The cache now records the tip the gate actually validated
+(`ConfirmMergeResult.gatedIdentity`, folded into the cache write via the registry's `identityFromValue`), so
+that re-call is a cache hit. Identity remains branch-tip-only: a later advance of MAIN alone (worker pushed
+nothing) does not change it, so a re-call still replays the cached rejection.
 
 ## `result.freshMint` gets `currentIdentity` folded in (site: `confirmWorkerMergeTracked`)
 

@@ -599,6 +599,14 @@ type ConfirmMergeResult = {
    *  union-merge failure, circuit breaker), where a gate genuinely never ran. Read by
    *  confirmWorkerMergeTracked's onSettle to persist the durable per-op record `gate_status` exposes. */
   gateExtended?: boolean;
+  /** Card 8b1fb28f: the branch tip captured immediately BEFORE the FINAL gate spawn (`captureGatedTip`, after the
+   *  op's own union-merge and any admission-time reunion) — the tip that gate actually ran on. Set ONLY on the
+   *  genuine gate-FAILED rejection return (never a post-gate-pass squash refusal, a breaker/preflight
+   *  rejection or a reused result), and dropped by `confirmGatedIdentity` if the branch tip has since moved.
+   *  Read back by the registry's `identityFromValue` as the identity the until-superseded verdict is cached
+   *  under, so a plain re-call at that same tip is a cache hit rather than a second gate. `undefined` on every
+   *  other path, and after any failed read (fail-safe: the pre-forward `verdictIdentity` then stands). */
+  gatedIdentity?: string;
   /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs`, for whichever gate run(s)
    *  actually spawned for THIS merge — see {@link GateProximity}'s own doc. Same "nothing to report"
    *  discipline as `gateExtended`: `undefined` when no gate actually spawned (gateless project, or a
@@ -13554,6 +13562,9 @@ export class SessionService {
     // onSettle to persist the durable per-op record `gate_status` exposes after settle.
     let anyExtended = false;
     let gateExtended: boolean | undefined;
+    // Card 8b1fb28f: the branch tip captured immediately BEFORE each gate spawn (see `captureGatedTip`) — i.e.
+    // the tip the FINAL gate attempt actually ran on. `undefined` until a gate spawns, and again after any failed read.
+    let gatedTip: string | undefined;
     // Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs` for whichever gate run actually
     // settles below — declared at THIS outer scope for the same reason `gateExtended` is (the plain GREEN
     // return sits OUTSIDE the `if (gate)` block). Derived from `gateStepsResult` right after it's set,
@@ -14108,6 +14119,12 @@ export class SessionService {
       let effectiveGate = emitCompareSkip ? buildReducedGateCommand({ changedTestFiles: emitCompareTestFiles, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths, changedScriptFiles: emitCompareScriptFiles }) : gate;
 
       const runGateSeq = this.runGate ?? runGateSequential;
+      // Card 8b1fb28f: call right before EVERY gate spawn (attempt 1, the single-file / resumed-step retries, the
+      // transient-kill retry) so `gatedTip` names the tip the last-run gate saw — never re-derived at settle
+      // time, when a live worker may have committed since. Any read failure ⇒ undefined ⇒ unstamped (fail-safe).
+      const captureGatedTip = async (): Promise<void> => {
+        try { gatedTip = (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined; } catch { gatedTip = undefined; }
+      };
       // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
       // rather than running alongside it unbounded. See GateSemaphore's class doc. Held only across the
       // actual gate spawn (and its retry below), not the surrounding git/notify bookkeeping. "high"
@@ -14490,7 +14507,7 @@ export class SessionService {
             // Card b798e706: re-union onto a moved main; safe here because this retry re-runs the WHOLE gate.
             await reunionAtAdmission();
             // allowExtend:false (card 24642c3d) — attempt 1 already got its one auto-extend.
-            const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
+            await captureGatedTip(); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
             if (r.passed) holdRepoGuardOnExit();
             return r;
           },
@@ -14540,7 +14557,7 @@ export class SessionService {
             // DELIBERATELY NO `reunionAtAdmission()` (card b9e07a4a): this runs ONE test file, so re-unioning
             // onto a moved main would let the squash land on a base the other files never ran against; a
             // moved base instead fails closed via `requireCanonicalHead` at squash time.
-            const rr = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
+            await captureGatedTip(); const rr = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
             // Only the LAST link's hold counts (the semaphore resets it per link), so a pass here that a
             // resume then follows is simply superseded — the card 7ad12202 self-deadlock cannot occur.
             if (rr.passed) holdRepoGuardOnExit();
@@ -14567,7 +14584,7 @@ export class SessionService {
                 resumeStartedAt = startedAt;
                 // No re-union (same reason as the retry above). `allowExtend` stays at its default: every
                 // step in `remaining` is running for the FIRST time here (card 7ad12202).
-                const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, hooks, gateSpillFile);
+                await captureGatedTip(); const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, hooks, gateSpillFile);
                 if (resumed.passed) holdRepoGuardOnExit();
                 return resumed;
               },
@@ -14605,7 +14622,7 @@ export class SessionService {
             // Card 9f6598dd: mirror the semaphore's own onExtend into `anyExtended` too — an ADDITIONAL
             // observer of the SAME event, never a replacement for the live registry's `entry.extended`.
             const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-            const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, mirroredHooks, gateSpillFile);
+            await captureGatedTip(); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, mirroredHooks, gateSpillFile);
             // CARD c24dd48a: a passing gate hands off to this method's own squash phase — keep the per-repo
             // guard held (`beginSquash`/`endSquash` extend then release it). A failing gate never squashes.
             if (r.passed) holdRepoGuardOnExit();
@@ -14824,6 +14841,9 @@ export class SessionService {
           opId: thisOpId,
           gateExtended,
           gateProximity,
+          // Card 8b1fb28f: ONLY a genuine gate-FAILED rejection carries it (this `!gateResult.passed` return) —
+          // a post-gate-pass squash refusal, a breaker/preflight rejection or a reused result never does.
+          ...(gatedTip ? { gatedIdentity: gatedTip } : {}),
           outputTail: gateOutputTailForRecord,
           ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}),
           // Card e2b6f900: mirrors the plain-GREEN return's own `gateCap`/`concurrentGates`/
@@ -16235,6 +16255,24 @@ export class SessionService {
     );
   }
 
+  /** Card 8b1fb28f: validates {@link ConfirmMergeResult.gatedIdentity} (captured pre-spawn inside `confirmWorkerMerge`)
+   *  against the branch tip NOW: a live worker may have committed while the gate ran, in which case the verdict
+   *  describes a commit that is no longer the branch tip AND the new tip was never gated — so the stamp is
+   *  dropped and the pre-forward `verdictIdentity` stands (the re-call then mismatches and re-gates for real).
+   *  Absent stamp, or ANY doubt (resolve failure, mismatch) ⇒ unstamped. Never adds a stamp itself. */
+  private async confirmGatedIdentity(v: ConfirmMergeResult, workerSessionId: string): Promise<ConfirmMergeResult> {
+    if (!v.gatedIdentity) return v;
+    try {
+      const w = this.db.getSession(workerSessionId);
+      const project = w ? this.db.getProject(w.projectId) : undefined;
+      if (w?.branch && project) {
+        const tip = await resolveGitRef(resolveRepoByKey(project, w.repoKey).path, w.branch, { timeoutMs: this.gitOpMs });
+        if (tip === v.gatedIdentity) return v;
+      }
+    } catch { /* fail-safe: fall through to unstamped */ }
+    return { ...v, gatedIdentity: undefined };
+  }
+
   async confirmWorkerMergeTracked(
     managerSessionId: string, workerSessionId: string, forceRemoveWorktree?: boolean,
     opts?: {
@@ -16403,7 +16441,7 @@ export class SessionService {
       // (as "unknown", not "failed" — see that doc).
       async (opId) => {
         try {
-          return await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt, opts?.fallbackOfBatchOpId);
+          return await this.confirmGatedIdentity(await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt, opts?.fallbackOfBatchOpId), workerSessionId);
         } catch (err) {
           const worker = this.db.getSession(workerSessionId);
           const project = worker ? this.db.getProject(worker.projectId) : undefined;
@@ -16588,6 +16626,10 @@ export class SessionService {
         // breaking the pre-existing "re-poll returns the EXACT SAME opId" invariant. `identityOptional`
         // tells attach() to trust the cached verdict regardless in exactly (and only) this case.
         identityOptional: alreadyFinished,
+        // Card 8b1fb28f: cache a gate-FAILED rejection under the tip captured just before the FINAL gate spawn (see
+        // `gatedIdentity`), not the pre-forward `verdictIdentity` above (which can name a commit the gate never ran on).
+        // Dropped (unstamped) if the branch tip has since moved; every other outcome keeps `verdictIdentity`.
+        identityFromValue: (v) => v.gatedIdentity,
         // @decision 99a1cf6f — `gateBaseInvalidated` classifies distinctly from an ordinary "rejected",
         // checked before the plain merged-else-rejected fallback — a real test failure is safe to replay,
         // a stale-base one is not.

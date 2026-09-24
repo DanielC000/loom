@@ -89,9 +89,12 @@ interface Entry<T> {
  *  - `"forced"`: `opts.bypassRetained` — the caller explicitly asked to skip every cache and run for real.
  *  - `"identity-mismatch"`: a cached verdict existed for this `key` but its `identity` did not match this
  *    call's `opts.verdictIdentity` — e.g. for merge, the branch tip moved. This is an OBSERVATION about
- *    the identity string, never a claim about WHY it moved: it collapses several distinct causes — main
- *    advanced under the branch (often via Loom's OWN pre-gate union-merge catching it up), a sibling's
- *    squash landed, or the worker itself pushed a new commit — that this registry has no way to tell apart.
+ *    the identity string, never a claim about WHY it moved: it collapses several distinct causes — a
+ *    sibling's squash landed, the worker itself pushed a new commit, or (sometimes) a merge op's OWN pre-gate
+ *    union-merge — that this registry has no way to tell apart. (Card 8b1fb28f narrowed that last cause: a
+ *    gate-FAILED rejection is cached under the tip the final gate ran on — `opts.identityFromValue` — so the
+ *    union-merge no longer causes one THERE; it still can for a forwarded op whose gate never ran/passed, or
+ *    whose stamp was dropped.)
  *  - `"genuinely-new"`: no cached verdict has ever been recorded for this `key` (in this daemon process —
  *    see the class doc's PROCESS-LOCAL note; a restart also produces this).
  *  `priorIdentity` is the identity recorded on the verdict this mint superseded/bypassed, when one
@@ -496,6 +499,14 @@ export class PendingOpRegistry {
       retainVerdictUntilSuperseded?: boolean;
       verdictIdentity?: string;
       identityOptional?: boolean;
+      /** Card 8b1fb28f: derives the identity a genuine `ok:true` settle is CACHED under from the settled value
+       *  itself, overriding `verdictIdentity` for that write ONLY when it returns a string. For merge, the
+       *  minting call's `verdictIdentity` is read BEFORE the op's own pre-gate union-merge moves the branch tip,
+       *  so for a forwarded branch it can name a commit the gate never ran on; the tip the FINAL gate attempt ran on
+       *  is known only to the op itself and is captured pre-spawn. Absent / returns `undefined` (no gate-failed
+       *  stamp: gate never ran, gate passed, error path, stamp dropped) → `verdictIdentity` stands,
+       *  byte-identical to before. Never consulted for a re-call's own comparison (that is `verdictIdentity`). */
+      identityFromValue?: (value: T) => string | undefined;
       isRetainedResultUsable?: (value: T) => boolean;
       /** Card b1fcb6a7 — gates the TTL'd `retained`-map WRITE (never the read) on an `ok:false` settle
        *  only: `undefined`/`true` (every existing caller) is byte-identical to before this opt existed —
@@ -653,10 +664,10 @@ export class PendingOpRegistry {
       fresh.settle = run(fresh.opId).then(
         (value) => {
           fresh.state = "done"; fresh.result = value;
-          fresh.outcome = opts?.classifyOutcome?.({ ok: true, value });
+          fresh.outcome = opts?.classifyOutcome?.({ ok: true, value }); const settledIdentity = opts?.identityFromValue?.(value) ?? opts?.verdictIdentity;
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
-            if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: true, value }, opts.verdictIdentity);
+            if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: true, value }, settledIdentity);
             // UNTIL-SUPERSEDED WRITE (card 1555e361): same identity-guarded branch as the TTL'd retain()
             // above, same reason (an evicted dead-owner op's late settle must never resurrect/overwrite a
             // live successor's verdict) — see the class doc's "UNTIL-SUPERSEDED VERDICT CACHE" section
@@ -672,7 +683,7 @@ export class PendingOpRegistry {
             // see this file's own top-level `NEVER_CACHED_OUTCOMES` doc. Every other classified outcome (or
             // no classifyOutcome at all) is unaffected — byte-identical to the unconditional write this line
             // used to be.
-            if (opts?.retainVerdictUntilSuperseded && !NEVER_CACHED_OUTCOMES.has(fresh.outcome ?? "")) this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: true, value }, identity: opts.verdictIdentity });
+            if (opts?.retainVerdictUntilSuperseded && !NEVER_CACHED_OUTCOMES.has(fresh.outcome ?? "")) this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: true, value }, identity: settledIdentity });
             opts?.onSettle?.({ ok: true, value }, fresh.opId);
             if (fresh.surfacedPending) onSettledAfterPending?.({ ok: true, value }, fresh.opId);
           }

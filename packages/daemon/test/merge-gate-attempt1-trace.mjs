@@ -90,6 +90,9 @@ try {
     const w = await seedWorker(db, P, "solo", "flaky-solo"); worktrees.push(w.worktreePath);
     const p = sessions.confirmWorkerMerge(P.mgrId, w.workerId);
     const live = await waitUntil(() => sessions.gateQueueForManager(P.projId).running.find((e) => e.gateType === "merge" && e.attempt === 2), { timeoutMs: 20000, label: "solo retry admitted as attempt 2" });
+    // Card 8b1fb28f: the retry link awaits `captureGatedTip` (a git rev-parse) AFTER it is admitted and BEFORE the
+    // spawn, so "admitted as attempt 2" no longer implies the gate fn has been called — wait for the spawn itself.
+    await waitUntil(() => calls === 2, { timeoutMs: 20000, label: "solo retry gate spawned" });
     check("(A) setup: the retry is live as attempt:2 (attempt 1 has already failed)", !!live && calls === 2);
     const evs = eventsOfKind(db, P.mgrId, EVT);
     check("(A) attempt-1 event exists WHILE the retry is still running (pre-fix: nothing until the retry settled)", evs.length === 1);
