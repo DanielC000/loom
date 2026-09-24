@@ -84,7 +84,8 @@ Options:
       --print-url  (open) Print the cockpit URL with the access token embedded
                    and do NOT open a browser. -p/--port is then the tunnel's
                    LOCAL port on the device you will browse from.
-      --host <h>   (open --print-url) Host in the printed URL (default 127.0.0.1)
+      --host <h>   (open --print-url) Host in the printed URL: 127.0.0.1 (default)
+                   or localhost — the only two the daemon serves the cockpit on
       --channel <c> (update) Release channel: stable | beta. Switches and
                    persists the channel; a bare 'loom update' reuses the last.
   -v, --version    Print the loom version and exit
@@ -141,7 +142,7 @@ export function parseArgs(argv) {
     out.error = "--host requires --print-url"; out.exitCode = 2; return out;
   }
   if (out.host !== undefined && normalizeUrlHost(out.host) === null) {
-    out.error = `invalid host '${out.host}' (expected a hostname, IPv4 or IPv6 address — no scheme, port, path or userinfo)`; out.exitCode = 2; return out;
+    out.error = `invalid host '${out.host}' (expected 127.0.0.1 or localhost — the daemon's DNS-rebind guard 403s the cockpit on any other Host, so a URL for it would not load)`; out.exitCode = 2; return out;
   }
   // A supplied --channel must be a known channel (a bare 'loom update' leaves it null → use persisted).
   if (out.channel !== null && !isValidChannel(out.channel)) {
@@ -150,17 +151,13 @@ export function parseArgs(argv) {
   return out;
 }
 
-// Strict allowlist for the host that gets interpolated into a printed credential URL: an IP literal or
-// an RFC-1123 hostname, nothing else (no scheme, port, path, query, userinfo, whitespace). Returns the
-// URL-ready form (IPv6 bracketed) or null. Optional surrounding [] on an IPv6 literal is accepted.
-const HOSTNAME_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+// Allowlist for the host in a printed credential URL: exactly the two names the daemon's DNS-rebind guard
+// (`isLoopbackHostname`, gateway/server.ts) accepts for the cockpit. Anything else — `[::1]`, a hostname,
+// a zone-id (`%`) — would print a URL the daemon itself 403s, so it is rejected up front. Returns the host
+// or null. (`localhost` and `127.0.0.1` are different browser origins: each keeps its own token.)
+const PRINT_URL_HOSTS = new Set(["127.0.0.1", "localhost"]);
 export function normalizeUrlHost(h) {
-  if (typeof h !== "string" || !h) return null;
-  const bare = h.startsWith("[") && h.endsWith("]") ? h.slice(1, -1) : h;
-  if (net.isIPv6(bare)) return `[${bare}]`;
-  if (bare !== h) return null;
-  if (net.isIPv4(h) || HOSTNAME_RE.test(h)) return h;
-  return null;
+  return typeof h === "string" && PRINT_URL_HOSTS.has(h) ? h : null;
 }
 
 function isValidPort(p) { return Number.isInteger(p) && p >= 1 && p <= 65535; }
@@ -218,12 +215,17 @@ const urlFor = (port) => `http://127.0.0.1:${port}`;
 // below is the console-safe counterpart: it prints the bare URL plus a pointer to the secret FILE PATH,
 // never the secret itself.
 function loopbackSecretPath() { return path.join(loomHome(), "gateway-loopback.key"); }
-function readLoopbackSecret() {
-  try { const s = fs.readFileSync(loopbackSecretPath(), "utf8").trim(); return s || null; } catch { return null; }
+// → { secret, error }: `error` is the fs error for an unreadable file (ENOENT = not created yet).
+function readLoopbackSecretResult() {
+  try { const s = fs.readFileSync(loopbackSecretPath(), "utf8").trim(); return { secret: s || null, error: null }; }
+  catch (error) { return { secret: null, error }; }
 }
+function readLoopbackSecret() { return readLoopbackSecretResult().secret; }
+// The ONE tokenized-URL builder (origin like `http://127.0.0.1:4317`, no trailing slash).
+const tokenizedUrl = (origin, secret) => `${origin}/?token=${encodeURIComponent(secret)}`;
 function urlWithToken(url) {
   const secret = readLoopbackSecret();
-  return secret ? `${url}?token=${secret}` : url;
+  return secret ? tokenizedUrl(url, secret) : url;
 }
 function urlHint(url) {
   return readLoopbackSecret()
@@ -562,16 +564,22 @@ async function openCmd({ port, printUrl, host }) {
 // urlWithToken note above) and warns on stderr that the URL is a live credential. `port` here is the
 // address the URL will be opened at (the tunnel's local port), so no daemon probe is made.
 function printUrlCmd({ port, host }) {
-  const secret = readLoopbackSecret();
+  const { secret, error } = readLoopbackSecretResult();
   if (!secret) {
-    console.error(`loom: no access credential found at ${loopbackSecretPath()} — start the daemon once (it creates the file), then retry.`);
+    if (error && error.code !== "ENOENT") {
+      console.error(`loom: could not read the access credential at ${loopbackSecretPath()} (${error.code ?? error.message}) — check the file's permissions/ownership, then retry.`);
+    } else if (error) {
+      console.error(`loom: no access credential found at ${loopbackSecretPath()} — start the daemon once (it creates the file), then retry.`);
+    } else {
+      console.error(`loom: the access credential file at ${loopbackSecretPath()} is empty — restart the daemon so it regenerates it, then retry.`);
+    }
     return 1;
   }
   const rec = readPidFile();
   const p = port ?? rec?.port ?? resolvePort(undefined);
   const h = host === undefined ? "127.0.0.1" : normalizeUrlHost(host);
   console.error("loom: WARNING — this URL embeds the loopback access credential. Anyone holding it can drive the full local API. Treat it like a password: don't paste it into chat, tickets or logs.");
-  console.log(`http://${h}:${p}/?token=${encodeURIComponent(secret)}`);
+  console.log(tokenizedUrl(`http://${h}:${p}`, secret));
   return 0;
 }
 

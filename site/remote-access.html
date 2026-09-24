@@ -169,7 +169,11 @@
             </p>
             <p>
               <code>--port</code> (and optional <code>--host</code>) are the address
-              you'll browse at on the far device — your tunnel's local end. The URL
+              you'll browse at on the far device — your tunnel's local end.
+              <code>--host</code> accepts only <code>127.0.0.1</code> (the default)
+              or <code>localhost</code>, the two names the daemon serves the cockpit
+              on. They are different browser origins, each with its own token, so
+              stick to one. The URL
               goes to stdout and a live-credential warning to stderr; it's read from
               the same key file, so it adds no network surface. Don't paste it into
               chat or tickets.

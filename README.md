@@ -167,10 +167,10 @@ To print that URL for you, run this **on the host** (never from `loom start` or 
 
 ```sh
 loom open --print-url --port 4317                 # http://127.0.0.1:4317/?token=…
-loom open --print-url --host 127.0.0.1 --port 4317
+loom open --print-url --host localhost --port 4317
 ```
 
-`--port` (and `--host`) are the address you'll browse at on the far device — your tunnel's local end — so use the local port you gave `ssh -L`. The URL goes to stdout; a warning that it is a live credential goes to stderr. It's read straight from `gateway-loopback.key`, so it adds no network surface, but don't paste it into chat or tickets.
+`--port` (and `--host`) are the address you'll browse at on the far device — your tunnel's local end — so use the local port you gave `ssh -L`. `--host` accepts only `127.0.0.1` (the default) or `localhost`, the two names the daemon serves the cockpit on; anything else is rejected, since the daemon would refuse it. They are different browser origins, so each keeps its own token — use the same one every time. The URL goes to stdout; a warning that it is a live credential goes to stderr. It's read straight from `gateway-loopback.key`, so it adds no network surface, but don't paste it into chat or tickets.
 
 Either way the browser keeps it and strips it from the address bar. It's stored per browser origin, so each URL you reach the cockpit by needs it once of its own — and anything holding it can drive the full loopback API, so treat it like a password.
 

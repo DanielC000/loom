@@ -44,12 +44,16 @@ try {
     check("stderr warns it is a live credential", /WARNING/.test(r.stderr) && /credential/.test(r.stderr));
     check("the token never appears on stderr", !r.stderr.includes(SECRET));
   }
-  // (2) --host / --port (tunnel's local address), incl. a hostname and IPv6.
+  // (2) --host is restricted to the two names the daemon's rebind guard serves (127.0.0.1, localhost).
   {
-    const r = await runLoom(["open", "--print-url", "--host", "my-box.example.com", "--port=4400"]);
-    check("--host hostname + --port=", r.stdout.trim() === `http://my-box.example.com:4400/?token=${SECRET}`);
-    const r6 = await runLoom(["open", "--print-url", "--host", "::1", "-p", "4317"]);
-    check("--host IPv6 is bracketed", r6.stdout.trim() === `http://[::1]:4317/?token=${SECRET}`);
+    const r = await runLoom(["open", "--print-url", "--host", "localhost", "--port=4400"]);
+    check("--host localhost + --port=", r.code === 0 && r.stdout.trim() === `http://localhost:4400/?token=${SECRET}`);
+    const r4 = await runLoom(["open", "--print-url", "--host=127.0.0.1", "-p", "4317"]);
+    check("--host=127.0.0.1", r4.code === 0 && r4.stdout.trim() === `http://127.0.0.1:4317/?token=${SECRET}`);
+    for (const bad of ["::1", "[::1]", "my-box.example.com", "fe80::1%eth0", "10.0.0.5", "LOCALHOST"]) {
+      const rb = await runLoom(["open", "--print-url", "--host", bad]);
+      check(`subprocess: --host ${JSON.stringify(bad)} → exit 2, nothing on stdout`, rb.code === 2 && rb.stdout === "" && /127\.0\.0\.1 or localhost/.test(rb.stderr));
+    }
   }
   // (3) the token is percent-encoded so an odd credential cannot break out of the query string.
   {
@@ -64,6 +68,10 @@ try {
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), "loom-print-url-empty-"));
     const r = await runLoom(["open", "--print-url", "--port", "1234"], empty);
     check("no credential file → exit 1, empty stdout", r.code === 1 && r.stdout === "" && /no access credential/.test(r.stderr));
+    // an unreadable key (a directory in its place → EISDIR, portable stand-in for EACCES) is NOT "missing".
+    fs.mkdirSync(path.join(empty, "gateway-loopback.key"));
+    const re = await runLoom(["open", "--print-url", "--port", "1234"], empty);
+    check("unreadable credential → exit 1, honest read-error message (not 'start the daemon')", re.code === 1 && re.stdout === "" && /could not read/.test(re.stderr) && /EISDIR/.test(re.stderr) && !/start the daemon/.test(re.stderr));
     fs.rmSync(empty, { recursive: true, force: true });
   }
   // (5) `status` never carries the token — against a fake running daemon AND with nothing running.
@@ -82,8 +90,9 @@ try {
   {
     const src = fs.readFileSync(BIN, "utf8");
     check("no console.* call takes urlWithToken(", !/console\.\w+\([^;\n]*urlWithToken\(/.test(src));
-    const printers = src.match(/console\.log\([^;\n]*\?token=\$\{[^;\n]*\)/g) || [];
-    check("exactly one console.log embeds ?token= (the print-url path)", printers.length === 1);
+    const printers = src.match(/console\.log\([^;\n]*tokenizedUrl\(/g) || [];
+    check("exactly one console.log prints tokenizedUrl( (the print-url path)", printers.length === 1);
+    check("exactly one `?token=` builder (shared by print-url and openBrowser)", (src.match(/`[^`\n]*\?token=\$\{/g) || []).length === 1);
     // negative control: the scan pattern DOES match a known-bad line.
     check("control: scan pattern flags console.log(urlWithToken(url))", /console\.\w+\([^;\n]*urlWithToken\(/.test("console.log(urlWithToken(url));"));
   }
@@ -91,12 +100,12 @@ try {
   {
     check("--print-url only on open", parseArgs(["start", "--print-url"]).exitCode === 2 && parseArgs(["--print-url"]).exitCode === 2);
     check("--host requires --print-url", parseArgs(["open", "--host", "x.com"]).exitCode === 2);
-    check("valid combo parses", (() => { const r = parseArgs(["open", "--print-url", "--host", "h.example", "--port", "80"]); return r.error === null && r.printUrl === true && r.host === "h.example" && r.port === 80; })());
-    for (const bad of ["evil.com/path", "a@b.com", "a.com:80", "a.com?x=1", "a.com#f", "http://a.com", "a b", "a.com\n", "", "-a.com", "a..com", "[a.com]", "a.com/", "%41.com", "::1]"]) {
+    check("valid combo parses", (() => { const r = parseArgs(["open", "--print-url", "--host", "localhost", "--port", "80"]); return r.error === null && r.printUrl === true && r.host === "localhost" && r.port === 80; })());
+    for (const bad of ["evil.com/path", "a@b.com", "a.com:80", "a.com?x=1", "a.com#f", "http://a.com", "a b", "a.com\n", "", "-a.com", "a..com", "[a.com]", "a.com/", "%41.com", "::1]", "::1", "[::1]", "fe80::1%eth0", "h.example", "10.0.0.5"]) {
       check(`rejects host ${JSON.stringify(bad)}`, normalizeUrlHost(bad) === null && parseArgs(["open", "--print-url", "--host", bad]).exitCode === 2);
     }
     check("host missing its value → exit 2", parseArgs(["open", "--print-url", "--host"]).exitCode === 2);
-    check("accepts IPv4 / bracketed IPv6", normalizeUrlHost("10.0.0.5") === "10.0.0.5" && normalizeUrlHost("[::1]") === "[::1]");
+    check("accepts exactly 127.0.0.1 and localhost", normalizeUrlHost("127.0.0.1") === "127.0.0.1" && normalizeUrlHost("localhost") === "localhost");
     check("bad port rejected", parseArgs(["open", "--print-url", "--port", "0"]).exitCode === 2 && parseArgs(["open", "--print-url", "--port", "x"]).exitCode === 2);
     const r = await runLoom(["open", "--print-url", "--host", "a.com/x"]);
     check("subprocess: bad host → exit 2, nothing on stdout", r.code === 2 && r.stdout === "");
