@@ -55,6 +55,26 @@ test("the skills list renders the seeded bundled skills", async ({ page, loomDae
   }
 });
 
+// Card bcc7f024: the list blurb used to tell the user Loom's project-local skills "shadow your personal
+// ~/.claude/skills". Claude Code's precedence is the OPPOSITE (@decision d63585ca) — a personal skill of the
+// same name WINS, which is why Loom's own names are chosen not to collide. Both polarities are asserted, so
+// a future reword that drops the correction (or reinstates the old claim) fails rather than passing on a
+// partial match.
+test("the skills blurb states the real precedence, not the inverted 'shadow' claim", async ({ page, loomDaemon }) => {
+  await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
+
+  const blurb = page.getByText(/injected into every session as project-local/);
+  await expect(blurb).toBeVisible();
+
+  // POSITIVE: the corrected claim is on the page — personal wins, so Loom's names avoid collisions.
+  await expect(blurb).toContainText(/takes precedence/);
+  await expect(blurb).toContainText(/not to collide/);
+
+  // NEGATIVE: the inverted claim is gone. Scoped to the blurb (not the whole page) so an unrelated use of
+  // the word elsewhere can never mask a regression here.
+  await expect(blurb).not.toContainText(/shadow/i);
+});
+
 test("opening a skill loads its SKILL.md body", async ({ page, loomDaemon }) => {
   await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
 

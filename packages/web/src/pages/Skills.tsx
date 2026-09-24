@@ -5,8 +5,11 @@ import { Panel, Button, Input, SectionLabel, Badge } from "../components/ui";
 import { color, font, radius, type Tone } from "../theme";
 
 // Loom's OWN skill set — the editable store (~/.loom/skills) that the daemon injects into every
-// session as project-local skills (shadowing the user's personal ~/.claude/skills). Edits apply on
-// the next spawn (skills are read at session start).
+// session as project-local skills, leaving the user's personal ~/.claude/skills untouched. Edits
+// apply on the next spawn (skills are read at session start).
+//
+// @decision d63585ca — a PERSONAL skill beats a project-local one of the same name, so the copy on
+// this page must never tell the user Loom's skills shadow theirs; it is the opposite.
 //
 // Bundled skills carry a precise customization state derived server-side from three versions —
 // `base` (shipped content at last sync), `mine` (the user's store copy, what sessions use), and the
@@ -85,8 +88,9 @@ export default function Skills() {
       <Panel style={{ alignSelf: "start" }}>
         <SectionLabel>Skills</SectionLabel>
         <p style={{ color: color.textMuted, fontSize: 11, margin: "0 0 10px", fontFamily: font.mono, lineHeight: 1.5 }}>
-          Loom's own skills, injected into every session as project-local — they shadow your personal
-          <code> ~/.claude/skills</code>. Edits apply on the next spawn.
+          Loom's own skills, injected into every session as project-local — your personal
+          <code> ~/.claude/skills</code> is untouched and takes precedence, so Loom's names are chosen
+          not to collide. Edits apply on the next spawn.
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {skills.data?.map((s) => (
