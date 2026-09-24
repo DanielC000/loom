@@ -137,14 +137,16 @@
               Loom's loopback API requires a <strong>local access credential</strong>
               on every write and on the terminal socket, even over a tunnel. On the
               host, <code>loom open</code> appends it for you; a tunnelled browser
-              has never seen it — so it arrives in a
-              <strong>writes-locked</strong> state rather than a broken one. The
-              cockpit loads and reads normally, a banner tells you writes are locked
-              and gives you a field to paste the credential into, and each terminal
-              or companion pane carries a reason line instead of sitting blank.
-              Paste it and the write you were locked out of goes through; paste a
-              wrong or stale one and the banner tells you that credential was
-              refused.
+              has never seen it — so you get a <strong>writes-locked</strong> state
+              rather than a broken one. The cockpit loads and reads normally, and
+              the moment the daemon turns down a write or a socket it switches to
+              that state: a banner saying writes are locked, with a field to paste
+              the credential into. A terminal pane also prints its own reason line
+              in place of staying blank. Paste the credential and writes work
+              again — nothing is replayed, so redo whatever was refused; terminals
+              re-attach by themselves. Paste a wrong or stale one and the banner
+              tells you that credential was refused, and keeps the field so you can
+              try the right one.
             </p>
             <p>
               The credential is the contents of
@@ -252,7 +254,12 @@
               <code>loom status</code>, <code>loom stop</code>,
               <code>loom open</code> and the <code>http://127.0.0.1:4317</code>
               admin calls on this page — all of which speak plain HTTP to loopback
-              — stop working.
+              — stop working. The readiness probe goes with them, so
+              <code>loom start</code> and <code>loom restart</code> report that the
+              daemon never answered within 30s and exit non-zero
+              <em>while it is running perfectly well</em>. Once you've bound a
+              specific address, treat that message as expected and check the
+              daemon's own log rather than the exit code.
             </p>
           </div>
 
@@ -267,13 +274,14 @@
               </p>
               <p>
                 Note the <code>Authorization</code> header: this is a write, and
-                every write on the loopback API needs the
+                every UI write on the loopback API needs the
                 <strong>local access credential</strong> — the contents of
                 <code>~/.loom/gateway-loopback.key</code> under
                 <code>LOOM_HOME</code>. That's a different secret from the gateway
                 token you're minting here, and it's required on every mutating call
-                on this page. Without it you get
-                <code>401 unauthorized</code>.
+                on this page. Without it the call comes back <code>401</code>, with
+                a body pointing you at <code>loom open</code> for how to obtain the
+                credential.
               </p>
               <div class="term">
                 <div class="term-bar">
@@ -345,6 +353,14 @@
                 is satisfied. If any of those is missing it logs why and stays on
                 loopback — it never opens a public interface as plain HTTP.
               </p>
+              <p>
+                Expect <code>loom restart</code> to report failure here and exit
+                non-zero: it waits for the daemon on
+                <code>http://127.0.0.1:4317</code>, which a specific-address or TLS
+                bind no longer answers, so after 30s it says the daemon didn't come
+                up even though it did. Read the daemon's own log to confirm the
+                bind, not the exit code — see the sharp-edges note above.
+              </p>
               <div class="term">
                 <div class="term-bar">
                   <span class="instrument-dot"></span>
@@ -374,6 +390,10 @@
               live terminal WebSockets — which can't set an
               <code>Authorization</code> header on the upgrade — accept it as a
               WebSocket subprotocol or a <code>?token=</code> query parameter.
+              Dial the <em>exact</em> <code>bindHost</code> you configured: the
+              DNS-rebinding guard compares the <code>Host</code> header against it
+              character for character, so an alias, a different DNS name, or a bare
+              IP for a hostname bind is refused with <code>403</code>.
             </p>
           </div>
 
@@ -385,7 +405,7 @@
             <div class="term-body">
               <p class="term-comment"># REST: Authorization: Bearer &lt;plaintext&gt;</p>
               <div class="term-line">
-                <code class="term-cmd" data-copy="curl https://your-host:4317/api/projects -H 'Authorization: Bearer <plaintext>'"><span class="term-prompt">$</span> curl https://your-host:4317/api/projects \
+                <code class="term-cmd" data-copy="curl https://192.168.1.10:4317/api/projects -H 'Authorization: Bearer <plaintext>'"><span class="term-prompt">$</span> curl https://192.168.1.10:4317/api/projects \
     -H 'Authorization: Bearer &lt;plaintext&gt;'</code>
                 <button class="copy" type="button" aria-label="Copy the authenticated curl command">Copy</button>
               </div>
@@ -465,8 +485,8 @@
               All token management is loopback-only and human-only. List shows
               metadata only — never the secret. Every call that changes something
               carries the <strong>local access credential</strong> as a bearer
-              token, the same as the mint call above; the plain list read doesn't
-              need it.
+              token, the same as the mint call above; the plain list read is a GET
+              and doesn't need it.
             </p>
           </div>
 

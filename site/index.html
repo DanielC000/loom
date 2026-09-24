@@ -347,11 +347,13 @@
               <p class="card-body">
                 Everything Loom keeps is local: a loopback-bound daemon, an SQLite
                 store, your git checkouts, transcripts, and vault. Loom adds no
-                cloud service of its own — no account, no Loom server, nothing
-                phoning home; every outbound path is one you turn on yourself.
-                Every write route needs a local access credential, so another
-                process on the box can't drive the API just by reaching the
-                socket.
+                cloud service of its own — no account, no Loom server, and your
+                code and history are never uploaded anywhere. Every UI write route
+                needs a local access credential, so another process on the box
+                can't drive the API just by reaching the socket. Two small calls do
+                go out by default — a plan-usage poll to Anthropic and, on an
+                npm install, an update check to the npm registry; the README lists
+                them and how to stop them.
               </p>
             </li>
 
