@@ -172,7 +172,7 @@ export interface GateQueueEntry {
   /** Card 99a1cf6f — echoed from {@link GateDescriptor.attempt}/{@link GateDescriptor.priorAttemptMs}: see
    *  their shared doc. Unconditional (never gated on caller project, same tier as `idleMs`/`extended`/
    *  `repoContended`) — `null`/`null` on a first admission, `2`/`<ms>` while `confirmWorkerMerge`'s own
-   *  single-file or transient-kill retry is queued for (or running) its OWN, separate re-admission. This
+   *  single-file or transient-kill retry is RUNNING as a continuation of the same admission (card 68155573). This
    *  is what lets a manager tell a genuine first-time queue wait apart from a retry re-queue, which was
    *  otherwise structurally identical on this same field set. */
   attempt: number | null;
@@ -616,10 +616,9 @@ type ConfirmMergeResult = {
   detailText?: string;
   /** @decision 361520a0 — `cancelled` is a "no verdict" outcome, never a rejection; only reachable while
    *  QUEUED.
-   *  @decision 318ac7b2 — the single-file retry's cancel-while-queued path doesn't lose attempt 1's real
-   *  failure; it's on the sibling build_gate event.
-   *  @decision 518e7ff6 — the transient-kill retry's cancel-while-queued path uses its own
-   *  build_gate_retry row instead. */
+   *  @decision 318ac7b2 — HISTORICAL (rows before 68155573; a retry can no longer queue, so no longer produced):
+   *  the single-file retry's cancel-while-queued path recorded attempt 1's real failure on the sibling build_gate
+   *  event; 518e7ff6's transient-kill sibling used its own build_gate_retry row. */
   cancelled?: boolean;
   cancelKind?: GateCancelKind;
   /** @decision 99a1cf6f — `gateBaseInvalidated` is a real, resolved verdict about canonical main, never
@@ -657,8 +656,8 @@ type ConfirmMergeResult = {
   transientRetried?: boolean;
   /** @decision e2b6f900 — the gate concurrency triple (`gateCap`/`concurrentGates`/`concurrentGatesMax`)
    *  is two imperfect lenses on contention, never THE condition itself.
-   *  @decision b9e07a4a — RESOLVED: the single-file retry now re-admits through `runExclusive` like the
-   *  transient-kill retry, so this triple always describes the admission the final verdict is about. */
+   *  @decision b9e07a4a — SUPERSEDED by 68155573: a retry is now a link of the first attempt's own admission, so
+   *  this triple describes that ONE admission (`concurrentGates` = attempt 1's snapshot, `concurrentGatesMax` = chain max). */
   gateCap?: number;
   concurrentGates?: number;
   concurrentGatesMax?: number;
@@ -14377,6 +14376,9 @@ export class SessionService {
       // Attempt 1's verdict, then each link's own, are folded into `gateResult` by the `next` callbacks below.
       let gateResult!: GateSequentialResult;
       let gateAttempt1DurationMs = 0;
+      // Live attempt number of the chain's CURRENT link (1 = attempt 1); every further link is `++linkAttempt`, so
+      // a transient-kill retry that follows a resume reads attempt 4 — the number never goes backwards.
+      let linkAttempt = 1;
       let chainRemaining: string[] = [];
       let attempt1VerdictEmitted = false;
       let gateRetrySkippedFutile = false;
@@ -14454,7 +14456,8 @@ export class SessionService {
         await new Promise((resolve) => setTimeout(resolve, orchestration.gateRetry.settleMs));
         let retryStartedAt = 0;
         return {
-          descriptorPatch: { attempt: 2, priorAttemptMs: gateAttempt1DurationMs },
+          // `priorAttemptMs`: cumulative wall-clock since attempt 1 was admitted (covers any earlier links).
+          descriptorPatch: { attempt: ++linkAttempt, priorAttemptMs: Date.now() - gateStartedAt },
           fn: async (startedAt, _cancelSignal, hooks, _getMaxConcurrentGates, holdRepoGuardOnExit) => {
             retryStartedAt = startedAt;
             // Card b798e706: re-union onto a moved main; safe here because this retry re-runs the WHOLE gate.
@@ -14504,7 +14507,7 @@ export class SessionService {
         chainRemaining = gateResult.steps ? remainingGateSteps(effectiveGate, gateResult.steps.length) : [];
         let singleFileRetryStartedAt = 0;
         return {
-          descriptorPatch: { attempt: 2, priorAttemptMs: gateAttempt1DurationMs },
+          descriptorPatch: { attempt: ++linkAttempt, priorAttemptMs: gateAttempt1DurationMs },
           fn: async (startedAt, _cancelSignal, hooks, _getMaxConcurrentGates, holdRepoGuardOnExit) => {
             singleFileRetryStartedAt = startedAt;
             // DELIBERATELY NO `reunionAtAdmission()` (card b9e07a4a): this runs ONE test file, so re-unioning
@@ -14532,7 +14535,7 @@ export class SessionService {
             let resumeStartedAt = 0;
             return {
               // Card 7ad12202: `attempt: 3` — the resumed-remaining-steps link, distinct from attempt 2.
-              descriptorPatch: { attempt: 3, priorAttemptMs: gateAttempt1DurationMs + (Date.now() - singleFileRetryStartedAt) },
+              descriptorPatch: { attempt: ++linkAttempt, priorAttemptMs: gateAttempt1DurationMs + (Date.now() - singleFileRetryStartedAt) },
               fn: async (startedAt, _cancelSignal, hooks, _getMaxConcurrentGates, holdRepoGuardOnExit) => {
                 resumeStartedAt = startedAt;
                 // No re-union (same reason as the retry above). `allowExtend` stays at its default: every
@@ -14647,7 +14650,7 @@ export class SessionService {
       gateOutputTailForRecord = gateRan && gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
       gateOutputFileForRecord = gateRan ? gateResult.outputFile : undefined;
       // @decision e2b6f900 — capture this triple once here, read from either branch; it always describes
-      //  whichever admission the final verdict is about, since retries re-admit through `runExclusive`.
+      //  the ONE admission the whole chain ran under (retries are links of it, card 68155573).
       //  `durationMs` on the same row is a SEPARATE field with its own scope — never read the two as one.
       gateCapForRecord = gateRan ? gateCap : undefined;
       concurrentGatesForRecord = gateRan ? concurrentAtStart : undefined;

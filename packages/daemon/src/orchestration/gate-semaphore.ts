@@ -79,7 +79,9 @@ export interface GateDescriptor {
    *  batch descriptor carries `taskId:null`/`branch:null` by design). `batchBranches` is the REQUESTED
    *  branch-name set, known when the descriptor is built; `batchLandedCount` is the POST-ASSEMBLY landed
    *  count, known only once `runBatchedMerge` calls back into the gate — so it is spread onto a COPY of
-   *  the descriptor at the `runExclusive` call site, never mutated in place. Both absent on every other
+   *  the descriptor at the `runExclusive` call site, never mutated in place by the CALLER — the semaphore itself
+   *  copies the descriptor on entry and only a chain link's `attempt`/`priorAttemptMs` patch touches that copy
+   *  (card 68155573). Both absent on every other
    *  gate (solo merge, worker self-check, deploy), which is what keeps those runs byte-identical. */
   batchBranches?: string[] | null;
   batchLandedCount?: number | null;
@@ -141,7 +143,9 @@ export type GateRunFn<T> = (
  * link follows this one.
  */
 export interface GateContinuation<T> {
-  descriptorPatch?: Partial<GateDescriptor>;
+  /** Narrowed to the two informational fields on purpose: `release()` keys on `worktreePath`/`repoPath`/
+   *  `opId`/`gateType`, so a link must never be able to patch any of THOSE mid-chain. */
+  descriptorPatch?: Pick<GateDescriptor, "attempt" | "priorAttemptMs">;
   fn: GateRunFn<T>;
   next?: (result: T) => GateContinuation<T> | null | Promise<GateContinuation<T> | null>;
 }
@@ -917,7 +921,7 @@ export class GateSemaphore {
     }
     this.lastKnownCap = cap;
     const entry: RegistryEntry = {
-      id: `gate-${++this.seq}`, descriptor, priority, enqueuedAt: Date.now(), startedAt: null, attemptStartedAt: null,
+      id: `gate-${++this.seq}`, descriptor: { ...descriptor }, priority, enqueuedAt: Date.now(), startedAt: null, attemptStartedAt: null,
       controller: new AbortController(), lastOutputAt: null, extended: false, maxConcurrent: 0,
     };
     this.registry.set(entry.id, entry);
@@ -951,7 +955,11 @@ export class GateSemaphore {
         entry.attemptStartedAt = Date.now();
         entry.lastOutputAt = null;
         entry.extended = false;
+        // A `cancelRunning` that landed while `next()` was awaited aborted the PREVIOUS controller; carry it
+        // onto the fresh one so the abort is never silently lost (a link that reads its signal sees it aborted).
+        const prevController = entry.controller;
         entry.controller = new AbortController();
+        if (prevController.signal.aborted) entry.controller.abort(prevController.signal.reason);
         holdRepoGuard = false;
         result = await link.fn(entry.attemptStartedAt, entry.controller.signal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit);
         link = link.next ? await link.next(result) : null;

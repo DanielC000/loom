@@ -235,6 +235,30 @@ async function assertDrained(sem, label) {
   await assertDrained(sem, "(L8)");
 }
 
+{ // L9: the CALLER's descriptor object is never mutated by a chain link's patch (the semaphore copies on entry)
+  const sem = new GateSemaphore();
+  const callerDesc = desc("l9a");
+  const p = sem.runExclusive(2, callerDesc, async () => ({ passed: false }), "high",
+    () => ({ descriptorPatch: { attempt: 2, priorAttemptMs: 7 }, fn: async () => ({ passed: false }) }));
+  await p;
+  check("(L9) caller descriptor untouched (no attempt/priorAttemptMs leaked onto it)", callerDesc.attempt === undefined && callerDesc.priorAttemptMs === undefined);
+  await assertDrained(sem, "(L9)");
+}
+{ // L10: a cancelRunning that lands WHILE next() is awaited is carried onto the next link's signal, not lost
+  const sem = new GateSemaphore();
+  const nextGate = deferred();
+  let link2Signal = null;
+  const p = sem.runExclusive(2, desc("l10a"), async () => ({ passed: false }), "high",
+    async () => { await nextGate.promise; return { descriptorPatch: { attempt: 2 }, fn: async (_s, sig) => { link2Signal = sig; return { passed: false }; } }; });
+  await waitUntil(() => sem.snapshot().entries.length === 1, { label: "(L10) entry registered" });
+  const id = sem.snapshot().entries[0].id;
+  await waitUntil(() => sem.cancelRunning(id, "cancel-during-next") === true, { label: "(L10) cancelRunning accepted while next() is pending" });
+  nextGate.resolve();
+  await p;
+  check("(L10) the abort is carried onto the next link's fresh signal (already aborted, reason preserved)", link2Signal?.aborted === true && link2Signal.reason === "cancel-during-next");
+  await assertDrained(sem, "(L10)");
+}
+
 // (S) SNAPSHOT: per-link liveness resets; single-attempt entries report attemptStartedAt === since.
 {
   const sem = new GateSemaphore();

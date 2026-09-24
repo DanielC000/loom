@@ -357,8 +357,8 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
       "`retryPassed`/`transientRetried`/" +
       "`transientRetryWarning` — this is a targeted redaction of content-bearing fields, not a refusal. " +
       "`attempt`/`priorAttemptMs`/`attemptStartedAt` (cards 99a1cf6f, 68155573) are present ONLY while `state` is `queued`/`running` " +
-      "(a live-entry-only concept, same population scope as `extended`), and ONLY for a `merge`-kind op — " +
-      "`undefined` on every ordinary first admission. `attempt:2` means this LIVE entry is `confirmWorkerMerge`'s " +
+      "(a live-entry-only concept, same population scope as `extended`). `attempt`/`priorAttemptMs` are ONLY for a `merge`-kind op — " +
+      "`undefined` on every ordinary first admission (`attemptStartedAt` is set for EVERY running entry). `attempt:2` means this LIVE entry is `confirmWorkerMerge`'s " +
       "OWN single-file or transient-kill retry — a CONTINUATION of the SAME admission (card 68155573): it keeps " +
       "the cap slot and the per-repo guard straight through the fail->retry gap and is NEVER re-queued, so it " +
       "reads `state:\"running\"`, never `queued`, and `elapsedMs` keeps counting from the ORIGINAL admission. " +
@@ -428,16 +428,15 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
       "is the TRUE max-over-run figure and OVERSTATES a brief overlap as full contention — it can't tell " +
       "\"contended the whole run\" from \"joined for the last few minutes\". Read them as two different, " +
       "imperfect lenses on the same question, never as a single settled answer — and never derive a combined " +
-      "\"contention score\" from them, which would hide exactly that span ambiguity. ⚠️ ON A NON-NULL " +
-      "`retriedFile` (below) this triple describes the RETRY's OWN admission, not the FIRST attempt's — " +
-      "DELIBERATELY (card b9e07a4a): a single-file or transient-kill retry re-admits through the SAME " +
-      "semaphore, so this triple always reflects whichever admission actually produced this row's verdict, " +
-      "never the first attempt once a retry has genuinely run (same exception as `gate_history`'s identical " +
-      "caveat: the card 318ac7b2 cancelled-retry shape, where the retry's own admission never happened at " +
-      "all, leaves this triple describing attempt 1's admission after all). A live `gate_queue` read taken " +
-      "WHILE the first attempt was still running can show real contention this settled triple will not " +
-      "reflect, if a later retry then ran uncontended — that is NOT the two tools disagreeing, it's two " +
-      "different admissions of the SAME op. Cross-check `retriedFile` before comparing a settled " +
+      "\"contention score\" from them, which would hide exactly that span ambiguity. ⚠️ RETRIES CONTINUE ONE ADMISSION (card 68155573): " +
+      "a single-file or transient-kill retry runs as a link of the FIRST attempt's own admission (it is never re-queued), so on every " +
+      "row written since card 68155573 this triple describes that ONE admission — `concurrentGates` is attempt 1's " +
+      "admission snapshot and `concurrentGatesMax` is the max across the WHOLE chain (attempt 1 plus its retry/resume " +
+      "links). HISTORICAL (rows written BEFORE 68155573): a retry re-admitted through the semaphore separately, so on a " +
+      "non-null `retriedFile` the triple described the RETRY's admission instead (and the card 318ac7b2 cancelled-retry " +
+      "shape left it describing attempt 1's). A live `gate_queue` read taken while the op ran now agrees with this " +
+      "settled triple by construction; cross-check `retriedFile` only for pre-68155573 rows before " +
+      "comparing a settled " +
       "`concurrentGates`/`concurrentGatesMax` against an earlier live `gate_queue` observation of this op. " +
       "Same `undefined`-for-" +
       "no-gate-spawned discipline as `steps`/`outputTail` above. `admittedAt` (ISO, when the op was MINTED — " +
@@ -922,8 +921,8 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "per-worktree guard from card 8d585277, which this field does NOT report on). Always `false` " +
         "while `running`, or for a `deploy`/other non-guarded entry. It's a LIVE read, recomputed on " +
         "every call — it can flip on a still-queued entry as sibling ops settle. " +
-        "`attempt`/`priorAttemptMs`/`attemptStartedAt` (cards 99a1cf6f, 68155573; `merge`-kind entries only, " +
-        "`null`/`null`/`null` on a first admission) describe a RETRY of the same op: `confirmWorkerMerge`'s own " +
+        "`attempt`/`priorAttemptMs`/`attemptStartedAt` (cards 99a1cf6f, 68155573; `attempt`/`priorAttemptMs` are `merge`-kind only, " +
+        "`null`/`null` on a first admission; `attemptStartedAt` is set for EVERY running entry, of any gate type) describe a RETRY of the same op: `confirmWorkerMerge`'s own " +
         "single-file retry (after a genuine failure narrows to a small re-runnable set) and its transient-kill " +
         "retry (after a timeout/kill) CONTINUE the SAME admission (card 68155573) — the cap slot and the per-repo " +
         "guard are held straight through the fail->retry gap and the retry is NEVER re-queued, so a retry reads " +
@@ -4415,30 +4414,28 @@ export class OrchestrationMcpRouter {
           "⚠️ THIS FIELD HAS NO `gate_status(opId)` EQUIVALENT — it is durable ONLY here. " +
           "⚠️ CARD 318ac7b2 EXCEPTION TO THAT PAIRING: `retriedFile` can now be non-null with " +
           "`retryPassed: null` (never `true`/`false`) — this is a single-file retry that was IDENTIFIED and " +
-          "attempted, then had its OWN admission cancelled while still queued, before it ever ran to a " +
+          "attempted, then had its OWN admission cancelled while still queued (HISTORICAL — rows written before card 68155573, when a retry could still queue), before it ever ran to a " +
           "verdict; the row's `outcome` reads `\"cancelled\"` in this shape (see below), never `\"pass\"`/" +
           "`\"reject\"`. Every OTHER non-null `retriedFile` row still pairs it with a real `true`/`false`. " +
           "⚠️ ON A NON-NULL `retriedFile` ROW, `durationMs` AND THE `gateCap`/`concurrentGates`/" +
-          "`concurrentGatesMax` TRIPLE DESCRIBE TWO DIFFERENT ADMISSIONS, DELIBERATELY — the SAME kind of " +
-          "trap `concurrentGates` vs `concurrentGatesMax` already carries below, one level up: `durationMs` " +
-          "is attempt 1's own run time ALONE (bounded to the failure that triggered the retry), while " +
-          "`passed` and the triple describe the RETRY's own admission (the one that actually produced this " +
-          "row's verdict) — never difference `durationMs` against the triple as if both described one run. " +
-          "EXCEPT on the card 318ac7b2 cancelled-retry shape just above: there the retry's OWN admission " +
-          "never happened at all (withdrawn while still queued, its callback never invoked), so `durationMs` " +
-          "AND the triple BOTH describe attempt 1's admission — the \"two different admissions\" framing " +
-          "only holds once the retry has genuinely run. " +
+          "`concurrentGatesMax` TRIPLE — SINCE CARD 68155573 both describe the SAME single admission: a retry is a link " +
+          "of attempt 1's own admission, never a second one. `durationMs` is still attempt 1's own run time ALONE " +
+          "(bounded to the failure that triggered the retry); `concurrentGates` is attempt 1's admission snapshot and " +
+          "`concurrentGatesMax` the max across the whole chain, while `passed` is the final (retry-inclusive) verdict. " +
+          "HISTORICAL (rows written BEFORE 68155573): the triple described the RETRY's separate, later admission, so " +
+          "`durationMs` and the triple described two different admissions — except on the 318ac7b2 cancelled-retry " +
+          "shape, where the retry never ran and both described attempt 1's. " +
           "On every other row (`retriedFile` null) both describe the same, single admission as usual. " +
           "⚠️ CARD 3a6f04cc — `\"cancelled\"` IS A DISTINCT OUTCOME, NEVER A REJECTION: a withdrawn run " +
           "(`gate_cancel`, queued or running) reached NO VERDICT — it was neither a pass nor a failure. " +
           "Before card 3a6f04cc a cancelled `\"worker\"` row (the only gate type whose cancel shared the " +
           "plain `worker_gate` event kind with a real run — a cancelled MERGE gate emitted a separate " +
           "excluded event kind and never reached this table at all) silently fell through to " +
-          "`outcome:\"reject\"`. CARD 318ac7b2 (later): a cancelled MERGE gate CAN now also reach this " +
+          "`outcome:\"reject\"`. CARD 318ac7b2 (HISTORICAL — rows written before 68155573; a retry can no longer queue, so this shape is no longer produced): a cancelled MERGE gate COULD also reach this " +
           "table, in ONE specific shape — the single-file-retry-cancellation just described above, where " +
           "attempt 1 already genuinely ran and failed before the retry's own (withdrawn) admission — so " +
           "that real run is recorded as `outcome:\"cancelled\"` instead of vanishing. " +
-          "⚠️ CARD 518e7ff6 — THE SIBLING SHAPE, HANDLED DIFFERENTLY: the transient-kill auto-retry's own " +
+          "⚠️ CARD 518e7ff6 (HISTORICAL — rows written before 68155573) — THE SIBLING SHAPE, HANDLED DIFFERENTLY: the transient-kill auto-retry's own " +
           "cancel-while-queued case ALSO now leaves a distinguishable record, but not by reclassifying " +
           "attempt 1's row — that `build_gate` row was already written, unconditionally, BEFORE this " +
           "retry ever starts, and stays a real, unmodified `outcome:\"reject\"` (a true, measured fact: " +

@@ -1518,7 +1518,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   "cross_project_message", "assistant_relay_message", "session_message", "session_steer_dropped",
   // Gate / merge history
   "build_gate", "build_gate_retry_attempt", "build_gate_retry", "build_gate_single_file_retry",
-  // Card 2ec00f6a: attempt 1's own verdict, written before the retry re-queues — see its types.ts doc.
+  // Card 2ec00f6a: attempt 1's own verdict, written before the retry runs (it is a link of the same admission, card 68155573) — see its types.ts doc.
   "build_gate_single_file_retry_attempt",
   "merge_request", "merge_done", "merge_rejected", "merge_cancelled", "batch_merge_forfeited", "batch_merge_dropped", "kill_switch",
   // Incident / forensic record
@@ -2223,9 +2223,9 @@ export interface PendingGateOpVerdict {
    *
    *  @decision e2b6f900
    *
-   *  On a "merge" row carrying `retriedFile`, the single-file retry now
-   *  re-admits through `runExclusive` so this correctly describes the retry's OWN admission, except when
-   *  the retry itself is cancelled while queued (@decision b9e07a4a; card 318ac7b2). */
+   *  On a "merge" row carrying `retriedFile`, since card 68155573 a retry
+   *  continues attempt 1's own admission, so this describes that ONE admission (`concurrentGates` = attempt 1's
+   *  snapshot, `concurrentGatesMax` = max across the chain). HISTORICAL rows (before 68155573) described the retry's own admission (@decision b9e07a4a; card 318ac7b2). */
   gateCap?: number;
   concurrentGates?: number;
   concurrentGatesMax?: number;
@@ -2265,7 +2265,7 @@ export interface PendingGateOpVerdict {
   retriedFile?: string | null;
   /** Card 6dcb9cd3, sibling of `retriedFile` immediately above — same measured-negative discipline: `null`
    *  whenever `retriedFile` is `null` (no retry at all). When `retriedFile` IS a real filename, this is
-   *  `true`/`false` UNLESS card 318ac7b2's exception applies (the retry was identified and queued but
+   *  `true`/`false` UNLESS card 318ac7b2's exception applies (HISTORICAL, rows before card 68155573 — a retry can no longer queue: the retry was identified and queued but
    *  cancelled before it ran to completion) — in that one case it stays `null` even though `retriedFile` is
    *  non-null, mirroring `gate_history`'s own documented pairing exactly (see mcp/orchestration.ts's
    *  `gate_history` tool description). A reader must never assume a non-null `retriedFile` implies

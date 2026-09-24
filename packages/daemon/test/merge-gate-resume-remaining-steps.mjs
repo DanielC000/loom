@@ -26,6 +26,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       own shape.
 //   (S) POSITIVE CONTROL — a clean, all-green multi-step gate: exactly ONE gate call, no retry, no resume,
 //       merged:true. Proves a genuinely passing gate is untouched.
+//   (T) card 68155573: the 4-LINK chain (retry passes, resume times out, transient-kill retry of the whole gate) —
+//       the live attempt number only goes up and nothing is held afterwards; (Q) also asserts retry-PASS-then-
+//       resume-FAIL frees the slot and repo guard at chain end.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-gate-resume-remaining-steps.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -35,6 +38,8 @@ import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
+// (T) drives the transient-kill retry: keep its settle wait tiny so the test never waits on the 5s default.
+process.env.LOOM_GATE_RETRY_SETTLE_MS = "20";
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rrs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
@@ -199,6 +204,7 @@ try {
     check("(Q) no cascading second rescue is attempted for the resumed step's own failure", calls === 3);
     check("(Q) worktree RETAINED (fail-closed)", fs.existsSync(worktreePath));
     check("(Q) task NOT moved to done", db.getTask(Q.taskId).columnKey !== "done");
+    check("(Q) retry PASS then resume FAIL frees slot + repo guard at chain end (nothing held, no squash hold)", sessions.gateSemaphore.active === 0 && sessions.gateSemaphore.activeMergeRepos.size === 0 && sessions.gateSemaphore.squashOnlySnapshot().length === 0);
     check("(Q) CODE REVIEW BLOCKING [1]: gate_status's retryWarning is NEVER 'WEAKER PASS' prose on a rejected op, even though the isolated retry itself genuinely passed (retryPassed:true)", (() => {
       const status = sessions.gateStatus(opIdQ);
       return typeof status.retryWarning === "string" && status.retryWarning.includes("RESCUED, THEN REJECTED") && !status.retryWarning.includes("WEAKER PASS");
@@ -207,6 +213,56 @@ try {
       const status = sessions.gateStatus(opIdQ);
       return status.passed === false;
     })());
+  }
+
+  // ── (T) THE 4-LINK CHAIN (card 68155573 review m3/m4): attempt 1 fails a non-final step, the isolated
+  //        retry passes, the RESUME then dies to a daemon timeout -> the transient-kill retry re-runs the whole
+  //        gate as a FOURTH link of the SAME admission. The live attempt number must only ever go UP
+  //        (null/1 -> 2 -> 3 -> 4, never back to 2), and the chain must leave nothing held. ──
+  {
+    const T = mk("t", "feature-t.txt");
+    makeRepo(T);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const seenGates = [];
+    let sessions;
+    const liveAttempts = [];
+    const fakeGate = async (gate) => {
+      calls++; seenGates.push(gate);
+      const live = sessions.gateSemaphore.snapshot().entries.find((e) => e.phase === "running");
+      liveAttempts.push({ attempt: live?.attempt ?? null, priorAttemptMs: live?.priorAttemptMs ?? null });
+      if (calls === 1) {
+        return {
+          passed: false, failedStep: "node packages/daemon/test/flaky-mid.mjs", failedStatus: 1, failedSignal: null, failedTimedOut: false,
+          outputTail: "", failingTest: "FAIL  flaky-mid", failingTestCount: 1, failTierTest: "FAIL  flaky-mid", failTierTestCount: 1, failTierAll: ["FAIL  flaky-mid"],
+          steps: [{ step: "pnpm build", durationMs: 10, status: 0 }, { step: "node packages/daemon/test/flaky-mid.mjs", durationMs: 20, status: 1 }],
+        };
+      }
+      if (calls === 2) return { passed: true, steps: [{ step: "node packages/daemon/scripts/test-daemon.mjs --only=flaky-mid", durationMs: 5, status: 0 }] };
+      // calls === 3: the resumed third step dies to the daemon's own timeout — retry-eligible, never "genuine".
+      if (calls === 3) return { passed: false, failedStep: "pnpm true-final", failedStatus: null, failedSignal: "SIGTERM", failedTimedOut: true, outputTail: "", steps: [{ step: "pnpm true-final", durationMs: 3, status: null }] };
+      // calls === 4: the transient-kill retry (whole gate) passes.
+      return { passed: true, steps: [{ step: "pnpm build", durationMs: 1, status: 0 }, { step: "node packages/daemon/test/flaky-mid.mjs", durationMs: 1, status: 0 }, { step: "pnpm true-final", durationMs: 1, status: 0 }] };
+    };
+    sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(T.repo, T.projId, T.taskId);
+    T.worktreePath = worktreePath; T.branch = branch; worktrees.push(worktreePath);
+    plantTestFile(worktreePath, "flaky-mid");
+    fs.writeFileSync(path.join(worktreePath, T.file), "work for T\n");
+    commitAll(worktreePath, `${T.file}`, GIT_ID);
+    seed(db, T, GATE_3STEP);
+
+    const confirm = await sessions.confirmWorkerMerge(T.mgrId, T.workerId);
+    check("(T) exactly 4 gate calls (attempt 1, single-file retry, resume, transient-kill retry of the whole gate)", calls === 4);
+    check("(T) call 4 is the WHOLE configured gate (the transient-kill retry)", seenGates[3] === GATE_3STEP);
+    check("(T) the live attempt number only ever goes UP across the chain (never back to 2 after the resume's 3)",
+      JSON.stringify(liveAttempts.map((a) => a.attempt)) === JSON.stringify([null, 2, 3, 4]));
+    check("(T) priorAttemptMs is cumulative and non-decreasing across links",
+      liveAttempts[1].priorAttemptMs <= liveAttempts[2].priorAttemptMs && liveAttempts[2].priorAttemptMs <= liveAttempts[3].priorAttemptMs && typeof liveAttempts[3].priorAttemptMs === "number");
+    check("(T) merged:true via the 4th link", confirm.merged === true && confirm.transientRetried === true);
+    check("(T) nothing held after the chain: slot, repo guard, worktree guard, squash hold all free",
+      sessions.gateSemaphore.active === 0 && sessions.gateSemaphore.activeMergeRepos.size === 0 && sessions.gateSemaphore.activeWorktrees.size === 0 && sessions.gateSemaphore.squashOnlySnapshot().length === 0);
   }
 
   // ── (R) POSITIVE CONTROL — failure on the LAST step is a byte-identical no-op (no third call) ──────────
