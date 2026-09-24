@@ -49,8 +49,10 @@ const app = await buildServer({
   db, pty: ptyStub, sessions: { killAllWorkers: () => 0 }, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub,
   userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, requestShutdown: () => {},
   verifyGatewayToken: (t) => t === TOKEN, loopbackSecret: LOOPBACK_SECRET,
+  // card 23496950: a remote peer's Origin must be the FULL remote origin (scheme + host + the remote listener's port).
+  remoteEndpoint: { current: { scheme: "https", port: 4444 } },
 });
-const H = { host: HOST, origin: `https://${HOST}` };
+const H = { host: HOST, origin: `https://${HOST}:4444` };
 const proto = (t) => `${WS_GENERIC_SUBPROTOCOL}, ${WS_BEARER_PREFIX}${t}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitFor(pred, ms = 2000) { const end = Date.now() + ms; while (Date.now() < end) { if (pred()) return true; await sleep(20); } return pred(); }

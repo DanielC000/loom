@@ -837,6 +837,22 @@ export interface RemoteAccessConfig {
    */
   bindHost: string;
   /**
+   * TCP port of the REMOTE listener (card 23496950). The loopback listener is ALWAYS plain HTTP on the
+   * daemon's own PORT and never moves; the remote listener is a SEPARATE server (TLS-terminating when
+   * `tls` loads), so it needs its own port. Default (unset) = PORT+1. Must differ from PORT — the daemon
+   * refuses to open the remote listener otherwise. HUMAN-only, like the rest of this block.
+   */
+  port?: number;
+  /**
+   * Extra exact hostnames/IPs a remote client may present as its Host/Origin (card 23496950), in addition
+   * to `bindHost` itself. ADDITIVE for every non-loopback bind (a tailnet client may reach both the
+   * MagicDNS name and the 100.x address) and REQUIRED — fail-closed — for a wildcard bind (`0.0.0.0`/`::`),
+   * where `bindHost` is not a name a client ever dials. Matched exactly, case-insensitively, brackets
+   * stripped; never a wildcard or suffix. The validator rejects wildcard-bind and loopback entries.
+   * HUMAN-only — never agent-writable (see platformConfigOverrideSchema).
+   */
+  allowedHosts?: string[];
+  /**
    * TLS material for the remote listener (Phase C). MANDATORY whenever `bindHost` is non-loopback AND
    * not a `.ts.net` tailnet address (a tailnet link is already encrypted; anything else is wss-only over
    * untrusted transport) — absent/unreadable in that case boot-refuses the remote bind and falls back to
@@ -1598,6 +1614,10 @@ function resolveRemoteAccess(po: PlatformConfigOverride | undefined): RemoteAcce
     enabled: po?.remoteAccess?.enabled ?? d.enabled,
     bindHost: po?.remoteAccess?.bindHost ?? d.bindHost,
   };
+  const port = po?.remoteAccess?.port ?? d.port;
+  if (port !== undefined) resolved.port = port;
+  const allowedHosts = po?.remoteAccess?.allowedHosts ?? d.allowedHosts;
+  if (allowedHosts !== undefined) resolved.allowedHosts = allowedHosts;
   const tls = po?.remoteAccess?.tls ?? d.tls;
   if (tls !== undefined) resolved.tls = tls;
   const rateLimit = po?.remoteAccess?.rateLimit ?? d.rateLimit;

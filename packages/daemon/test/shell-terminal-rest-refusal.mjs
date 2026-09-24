@@ -48,9 +48,11 @@ const app = await buildServer({
   db, pty: host, sessions: { killAllWorkers: () => 0 }, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub,
   userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, requestShutdown: () => {},
   verifyGatewayToken: (t) => t === TOKEN, loopbackSecret: SECRET,
+  // card 23496950: a remote peer's Origin must be the FULL remote origin (scheme + host + the remote listener's port).
+  remoteEndpoint: { current: { scheme: "https", port: 4444 } },
 });
 const remote = (method, url, payload) => app.inject({ method, url, remoteAddress: "203.0.113.7",
-  headers: { host: HOST, origin: `https://${HOST}`, authorization: `Bearer ${TOKEN}`, ...(payload ? { "content-type": "application/json" } : {}) }, payload });
+  headers: { host: HOST, origin: `https://${HOST}:4444`, authorization: `Bearer ${TOKEN}`, ...(payload ? { "content-type": "application/json" } : {}) }, payload });
 const loop = (method, url, payload) => app.inject({ method, url, remoteAddress: "127.0.0.1",
   headers: { host: "127.0.0.1", origin: "http://127.0.0.1", authorization: `Bearer ${SECRET}`, ...(payload ? { "content-type": "application/json" } : {}) }, payload });
 

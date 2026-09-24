@@ -15,7 +15,8 @@ import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, pullQuestionsForAgent, canc
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
-import { expandTilde } from "../paths.js";
+import { expandTilde, PORT } from "../paths.js";
+import { isForbiddenAllowedHost, canonicalHost } from "../gateway/trust-tier.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
 import { validateVaultPath } from "../projects/vault-path.js";
@@ -734,7 +735,18 @@ const isValidBindHostShape = (h: string): boolean => {
 };
 const remoteAccessOverride = z.object({
   enabled: z.boolean().optional(),
-  bindHost: z.string().min(1).max(253).refine(isValidBindHostShape, { message: "bindHost must be a valid IPv4/IPv6 address or hostname" }).optional(),
+  bindHost: z.string().min(1).max(253).refine(isValidBindHostShape, { message: "bindHost must be a valid IPv4/IPv6 address or hostname" })
+    .refine((h) => canonicalHost(h) !== null, { message: "bindHost is ambiguous (a numeric-looking name such as 0x7f.0.0.1 or a zero-padded IPv4 is not accepted — write the address in plain dotted-decimal)" }).optional(),
+  // Card 23496950: the REMOTE listener's own port (loopback stays plain HTTP on the daemon's PORT), and the
+  // extra exact hostnames a remote client may present as Host/Origin. HUMAN-only like the rest of this block
+  // (no agent-facing config surface reaches it — see remote-bind.mjs check (5)). The port must differ from
+  // the daemon's own PORT (also re-checked at boot, where the REAL bound loopback port is known).
+  port: z.number().int().min(1).max(65535).refine((p) => p !== PORT, { message: "remoteAccess.port must differ from the daemon's own listening port" }).optional(),
+  allowedHosts: z.array(
+    z.string().min(1).max(253)
+      .refine(isValidBindHostShape, { message: "allowedHosts entries must be a valid IPv4/IPv6 address or hostname" })
+      .refine((h) => !isForbiddenAllowedHost(h), { message: "allowedHosts must not contain a wildcard (0.0.0.0/::), a loopback address (any spelling), or an ambiguous numeric-looking name" }),
+  ).max(32).optional(),
   tls: z.object({ certPath: z.string().min(1), keyPath: z.string().min(1) }).strict().optional(),
   // rateLimit upper bounds (77ade04c): a human-settable cap large enough to be harmless, small enough
   // that a fat-fingered "0" or a stray extra zero can't silently defeat the limiter (e.g. a billion
@@ -824,6 +836,20 @@ const platformConfigOverrideSchema = z.object({
  * added — the redaction-field-drift guard `sanitizePlatformConfigForAgent`'s own doc points back to.
  */
 export const PLATFORM_CONFIG_TOP_LEVEL_KEYS: readonly string[] = Object.keys(platformConfigOverrideSchema.shape);
+
+/**
+ * The `remoteAccess` SUB-key set, derived from the same strict schema — the top-level guard above can't see a
+ * field added INSIDE `remoteAccess` (it passes through `sanitizePlatformConfigForAgent` verbatim except `tls`).
+ * `test/platform-config-redaction-drift.mjs` pins it against a hand-authored disposition list so the next
+ * addition (card 23496950 added `port`/`allowedHosts`) forces an explicit redact-or-expose decision.
+ */
+export const PLATFORM_CONFIG_REMOTE_ACCESS_KEYS: readonly string[] = Object.keys(remoteAccessOverride.shape);
+
+/** Test seam for the same drift guard: the `remoteAccess` redaction `sanitizePlatformConfigForAgent` applies to BOTH
+ *  the override and the resolved copy. Typed with plain records on purpose — exporting `sanitizePlatformConfigForAgent`
+ *  itself would drag the whole `PlatformConfigOverride` type (incl. its integrations block) into the published
+ *  `.d.ts`, which the privacy guard over `dist/` rejects as a new footprint). */
+export const redactRemoteAccessForAgentForTest: (remoteAccess: Record<string, unknown> | undefined) => Record<string, unknown> | undefined = redactRemoteAccessTls;
 
 /**
  * Validate a daemon-global platform override (the human REST `/api/platform/config` PATCH body).
@@ -1513,7 +1539,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "platform_config_get",
       {
-        description: "Read the daemon-GLOBAL platform config: the stored override blob PLUS the resolved platform group (same underlying data as the human REST GET /api/platform/config) — closes the gap where 'what is maxConcurrentGates/coalesceAgentMessages/etc actually set to right now' had no tool short of a raw sqlite read of the platform_config table. No args. REDACTED for the agent surface (audited every field — see the daemon source's sanitizePlatformConfigForAgent doc): `integrations` (incl. any codescape path) is DROPPED entirely (codescape has no user/agent-visible surface anywhere Loom ships), and `remoteAccess.tls.{certPath,keyPath}` (host paths to TLS private-key material) collapses to `{configured:true/false}`. Every other field — rate-limit numbers, watcher cadences, timeouts, backup/gateRetry tuning, the P2 authenticated-request rate/size bounds, coalesceAgentMessages/companionVoiceEnabled/operatorEnabled/schedulerEnabled, the concurrency caps, usage-sample cadence/retention, updateCheckIntervalMs, remoteAccess.enabled/bindHost/rateLimit — is plain operational tuning with no credential shape, returned as-is. Read-only: no platform_config WRITE tool exists on any agent surface (human REST PATCH only).",
+        description: "Read the daemon-GLOBAL platform config: the stored override blob PLUS the resolved platform group (same underlying data as the human REST GET /api/platform/config) — closes the gap where 'what is maxConcurrentGates/coalesceAgentMessages/etc actually set to right now' had no tool short of a raw sqlite read of the platform_config table. No args. REDACTED for the agent surface (audited every field — see the daemon source's sanitizePlatformConfigForAgent doc): `integrations` (incl. any codescape path) is DROPPED entirely (codescape has no user/agent-visible surface anywhere Loom ships), and `remoteAccess.tls.{certPath,keyPath}` (host paths to TLS private-key material) collapses to `{configured:true/false}`. Every other field — rate-limit numbers, watcher cadences, timeouts, backup/gateRetry tuning, the P2 authenticated-request rate/size bounds, coalesceAgentMessages/companionVoiceEnabled/operatorEnabled/schedulerEnabled, the concurrency caps, usage-sample cadence/retention, updateCheckIntervalMs, remoteAccess.enabled/bindHost/port/allowedHosts/rateLimit (network posture of the same class as bindHost — a port number and hostnames, no credential and no host path) — is plain operational tuning with no credential shape, returned as-is. Read-only: no platform_config WRITE tool exists on any agent surface (human REST PATCH only).",
         inputSchema: strictShape({}),
       },
       async () => {

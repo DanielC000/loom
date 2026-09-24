@@ -7,7 +7,7 @@ import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, LOOPBACK_SECRET_PATH, isUsagePol
 import { installCrashHandlers, installEpipeTolerantStdio, hadCrashLogAtBoot as computeHadCrashLogAtBoot } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { Db } from "./db.js";
-import { canOpenRemoteListener, isTrustTierHookActive, tlsRequirementSatisfied, isAllInterfacesBindHost } from "./gateway/trust-tier.js";
+import { startGatewayListeners, type RemoteEndpointRef } from "./gateway/remote-listener.js";
 import { getOrCreateLoopbackSecret } from "./gateway/loopback-secret.js";
 import { sweepDeadSessions, watchClaudeProjects, watchCodexSessions } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
@@ -921,16 +921,9 @@ async function main(): Promise<void> {
     }
   };
 
-  // Access-story Phase C (card 6bc02f50 CR): captured SYNCHRONOUSLY by buildServer's onHttpsResolved
-  // callback (fires before the `await` below even suspends — see that option's doc) — whether TLS material
-  // was ACTUALLY read and applied to the Fastify https option. This is the ONLY signal the boot-time bind
-  // decision below consults for "is TLS really live"; it deliberately does NOT re-derive an independent
-  // `fs.existsSync` check (a prior version of this code did, and a CR caught the resulting two-path
-  // asymmetry: existsSync passing does not imply readFileSync-then-TLS-construction inside buildServer
-  // actually succeeded — a present-but-unreadable key, a cert path that's a directory, or invalid PEM
-  // content would ALL pass existsSync yet leave the real server on plain HTTP, so gating the bind on
-  // existsSync could open a PUBLIC interface as PLAIN HTTP while believing it was HTTPS).
-  let httpsActive = false;
+  // Card 23496950: the remote listener's live endpoint — filled by `openRemoteListener` below once it is
+  // really listening, read per request by the gateway's peer-scoped Origin check, and closed by app.close().
+  const remoteEndpoint: RemoteEndpointRef = { current: null };
   // Pillar B cron Scheduler gate: OPT-IN, decided ONCE at boot (LOOM_SCHEDULER_ENABLED=1 env override OR
   // the resolved platform config). Consumed both here (surfaced on /api/orchestration/status so the
   // Schedules UI is honest about whether schedules will fire) and below, where the ticker starts — the
@@ -952,34 +945,19 @@ async function main(): Promise<void> {
     // gateway_tokens store — fail-closed (any non-"ok" reason, incl. malformed/unknown/bad-secret/
     // paused/revoked, is a plain false; the trust-tier hook never distinguishes why).
     verifyGatewayToken: (token) => db.authenticateGatewayToken(token).ok,
-    onHttpsResolved: (active) => { httpsActive = active; },
+    remoteEndpoint,
     loopbackSecret,
   });
-  // Access-story fail-closed boot check (Phase A card 766f8b50, extended by Phase C card 6bc02f50): a
-  // non-loopback bind is only ever actually opened when a gateway token exists AND the TLS mandate is
-  // satisfied by the REAL `httpsActive` signal above (never "bind, then warn"). `gatewayTokenExists` is
-  // Phase B: ANY minted row counts (a paused/revoked token still means the mechanism is provisioned — the
-  // human just needs to mint/rotate one that's live). The invariant this preserves: a non-loopback bind
-  // NEVER opens in the intended-TLS-but-actually-plain-HTTP state — a tailnet bindHost bypasses the TLS
-  // mandate entirely (already-encrypted transport; see tlsRequirementSatisfied), everything else needs
-  // httpsActive:true or the bind stays loopback.
+  // @decision 23496950 — loopback is plain HTTP on PORT in EVERY config and opens first (failure fatal); the
+  // remote listener opens second, fail-closed, and a refusal only warns. Do not fold TLS back into the app.
   const remoteAccessConfig = resolveConfig(undefined, db.getPlatformConfig()).remoteAccess;
   const gatewayTokenExists = (): boolean => db.listGatewayTokens().length > 0;
-  const remoteListenerOk = canOpenRemoteListener(remoteAccessConfig, gatewayTokenExists(), httpsActive);
-  if (isTrustTierHookActive(remoteAccessConfig) && !remoteListenerOk) {
-    const reasons: string[] = [];
-    if (!gatewayTokenExists()) reasons.push("no gateway token exists yet");
-    if (!tlsRequirementSatisfied(remoteAccessConfig, httpsActive)) {
-      reasons.push(remoteAccessConfig.tls
-        ? "the configured TLS cert/key did not load (see the earlier [gateway] warning for why)"
-        : "TLS is required for a non-tailnet remote bind but remoteAccess.tls is not configured");
-    }
-    console.warn(`[gateway] remoteAccess.enabled with bindHost=${remoteAccessConfig.bindHost} but ${reasons.join("; ")} — refusing to open a remote listener; staying on loopback (127.0.0.1).`);
-  }
-  // local-first default: loopback ONLY, unless the fail-closed boot check above cleared a real remote bind.
-  const boundAddress = await app.listen({ port: PORT, host: remoteListenerOk ? remoteAccessConfig.bindHost : "127.0.0.1" });
-  // eslint-disable-next-line no-console
-  console.log(`Loom daemon v${loomVersion()} listening on ${boundAddress}`); // boundAddress reflects the OS-assigned port when PORT is 0
+  // Both listeners come from ONE composition (gateway/remote-listener.ts `startGatewayListeners`) that the
+  // real-listen test also calls — the boot wiring itself is under test, not a copy of it.
+  await startGatewayListeners(app, {
+    port: PORT, remoteAccess: remoteAccessConfig, tokenExists: gatewayTokenExists, ref: remoteEndpoint,
+    onLoopbackListening: (addr) => console.log(`Loom daemon v${loomVersion()} listening on ${addr}`), // addr reflects the OS-assigned port when PORT is 0
+  });
   // Card 9ccedbee follow-up (manager review, same card): `loom open`/`loom start` (bin/loom.mjs)
   // constructs the tokenized browser URL itself by reading the SAME secret file directly, so console
   // output is not that flow's only path to it. This line exists for the dev/self-host workflow (`pnpm
@@ -1005,13 +983,6 @@ async function main(): Promise<void> {
     // eslint-disable-next-line no-console
     console.log(`[gateway] dev workflow (pnpm web on a separate origin): ALSO visit http://127.0.0.1:5317/?token=<secret> once (same <secret> as above) — its localStorage is separate from the daemon's own origin.`);
   }
-  // P5b hardening follow-up (card 80e2093f, item 2): 0.0.0.0/:: is an explicit, owner-decided supported
-  // LAN-in-scope bind mode (still gated by the token+TLS wall above) — but binding every interface should
-  // never be SILENT. Log it plainly the one time it's actually opened, distinct from the routine listen line.
-  if (remoteListenerOk && isAllInterfacesBindHost(remoteAccessConfig.bindHost)) {
-    console.warn(`[gateway] Loom gateway bound to all interfaces (${remoteAccessConfig.bindHost}) — reachable from your local network (still gated by the access token + TLS).`);
-  }
-
   // Boot-time orchestration reconcile (#22 run-2 + audit M4): finish any merge whose bookkeeping was
   // interrupted (branch merged but task/worktree not reconciled) and GC orphaned worktrees from
   // crashed workers. Runs AFTER recoverStaleSessions (no live pty holds a worktree) — pure git + db.

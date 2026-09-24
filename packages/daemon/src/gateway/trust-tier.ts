@@ -1,3 +1,4 @@
+import { isIP as netIsIP } from "node:net";
 import type { RemoteAccessConfig } from "@loom/shared";
 
 /**
@@ -208,16 +209,87 @@ export function tlsRequirementSatisfied(remoteAccess: RemoteAccessConfig, tlsFil
 }
 
 /**
- * Fail-closed boot guard (BUILD item 4, extended by Phase C item 2): may a later phase actually open a
- * non-loopback listener? Only when `remoteAccess` requests one AND a gateway token already exists AND the
- * TLS mandate is satisfied — never "bind, then warn". `tokenExists` is Phase B's concern; `tlsFilesExist`
- * is Phase C's (see `tlsRequirementSatisfied`) — pass real checks once each mechanism exists; a stub that
- * always returns false is the conservative default until then (no token / no TLS ⇒ never able to open a
- * remote listener).
+ * Canonical form of a host for allowlist matching (card 23496950): brackets stripped, lower-cased, and IPv6
+ * literals compressed exactly as the WHATWG URL parser (which produces the request's Host/Origin hostname)
+ * would — so `2001:db8:0:0:0:0:0:1` matches a client that sent `[2001:db8::1]`. Returns `null` for anything
+ * that can't be canonicalised UNAMBIGUOUSLY: notably a hostname-shaped string the URL parser would silently
+ * reinterpret as an IPv4 address (`0x7f.0.0.1` and `2130706433` both become 127.0.0.1; `192.168.001.050` is
+ * read as OCTAL, i.e. 192.168.1.40), which would let a loopback address through a naive loopback check or
+ * make an entry match a different machine than the human typed.
  */
-export function canOpenRemoteListener(remoteAccess: RemoteAccessConfig, tokenExists: boolean, tlsFilesExist: boolean): boolean {
-  return remoteAccess.enabled && !isLoopbackBindHost(remoteAccess.bindHost) && tokenExists
-    && tlsRequirementSatisfied(remoteAccess, tlsFilesExist);
+export function canonicalHost(host: string): string | null {
+  const h = host.trim().replace(/^\[(.*)\]$/, "$1");
+  if (h === "") return null;
+  const kind = netIsIP(h);
+  let parsed: string;
+  try { parsed = new URL(`http://${kind === 6 ? `[${h}]` : h}`).hostname; } catch { return null; }
+  parsed = parsed.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+  if (kind === 0 && netIsIP(parsed) !== 0) return null; // a name the URL parser turned into an IP — ambiguous
+  return parsed;
+}
+
+/**
+ * A host that may NEVER appear in `remoteAccess.allowedHosts` (card 23496950): anything that cannot be
+ * canonicalised unambiguously, the all-interfaces literals (a client never dials them, and matching them
+ * would re-open the `Host: 0.0.0.0` hole) and every loopback-equivalent form (loopback has its own, stricter,
+ * peer-scoped rule — an allowlist entry for it would only blur that). The check runs on the CANONICAL form, so
+ * `::0:1`, `::ffff:7f00:1` and `0:0:0:0:0:0:0:1` are caught as well as the plain spellings.
+ */
+export function isForbiddenAllowedHost(host: string): boolean {
+  const c = canonicalHost(host);
+  if (c === null) return true;
+  if (c === "localhost" || c.endsWith(".localhost")) return true;
+  if (c === "0.0.0.0" || c === "::" || c === "::1") return true;
+  if (/^127\./.test(c) || /^0\./.test(c)) return true;
+  if (/^::ffff:(7f[0-9a-f]{2}:[0-9a-f]{1,4}|0:0)$/.test(c)) return true; // IPv4-mapped 127.x / 0.0.0.0
+  if (/^::7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(c)) return true; // deprecated IPv4-compatible 127.x
+  return false;
+}
+
+/** The exact (canonical) hostnames a NON-loopback peer may present as Host/Origin: the configured `bindHost`
+ *  (unless it is an all-interfaces literal, which no client dials) plus `allowedHosts`. An entry that cannot
+ *  be canonicalised is dropped — fail-closed. */
+export function remoteHostAllowlist(remoteAccess: RemoteAccessConfig): string[] {
+  const out = new Set<string>();
+  if (!isAllInterfacesBindHost(remoteAccess.bindHost)) {
+    const c = canonicalHost(remoteAccess.bindHost);
+    if (c !== null) out.add(c);
+  }
+  for (const h of remoteAccess.allowedHosts ?? []) {
+    const c = canonicalHost(h);
+    if (c !== null) out.add(c);
+  }
+  return [...out];
+}
+
+/**
+ * Why a requested remote listener may not open — empty when it may. The ONE place the fail-closed rules
+ * live (`canOpenRemoteListener` is `enabled && reasons.length === 0`), so the boot log can name every real
+ * reason honestly instead of re-deriving them. `tlsLoaded` is the REAL signal that the remote server's TLS
+ * material was read and accepted (see gateway/remote-listener.ts) — never a file-existence guess.
+ */
+export function remoteListenerRefusalReasons(remoteAccess: RemoteAccessConfig, tokenExists: boolean, tlsLoaded: boolean): string[] {
+  const reasons: string[] = [];
+  if (!tokenExists) reasons.push("no gateway token exists yet");
+  if (!tlsRequirementSatisfied(remoteAccess, tlsLoaded)) {
+    reasons.push(remoteAccess.tls
+      ? "the configured TLS cert/key did not load (see the earlier [gateway] warning for why)"
+      : "TLS is required for a non-tailnet remote bind but remoteAccess.tls is not configured");
+  }
+  if (isAllInterfacesBindHost(remoteAccess.bindHost) && remoteHostAllowlist(remoteAccess).length === 0) {
+    reasons.push("a wildcard bindHost needs remoteAccess.allowedHosts (the exact hostnames/IPs clients will use) — without it no remote Host could ever pass the DNS-rebind check");
+  }
+  return reasons;
+}
+
+/**
+ * Fail-closed boot guard: may the daemon actually open its remote listener? Only when `remoteAccess`
+ * requests a non-loopback bind AND a gateway token already exists AND the TLS mandate is satisfied AND (for
+ * a wildcard bind) an explicit host allowlist exists — never "bind, then warn".
+ */
+export function canOpenRemoteListener(remoteAccess: RemoteAccessConfig, tokenExists: boolean, tlsLoaded: boolean): boolean {
+  return remoteAccess.enabled && !isLoopbackBindHost(remoteAccess.bindHost)
+    && remoteListenerRefusalReasons(remoteAccess, tokenExists, tlsLoaded).length === 0;
 }
 
 /**

@@ -43,6 +43,8 @@ const { Db } = await import("../dist/db.js");
 const { buildServer, GATEWAY_LOG_SERIALIZERS } = await import("../dist/gateway/server.js");
 const { canOpenRemoteListener, tlsRequirementSatisfied, isTailnetHost, isTrustTierHookActive, isAllInterfacesBindHost } = await import("../dist/gateway/trust-tier.js");
 const { validatePlatformConfigOverride, validateProjectConfigOverride } = await import("../dist/mcp/platform.js");
+const { openRemoteListener } = await import("../dist/gateway/remote-listener.js");
+const { remoteHostAllowlist, remoteListenerRefusalReasons, isForbiddenAllowedHost, canonicalHost } = await import("../dist/gateway/trust-tier.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -83,72 +85,45 @@ const buildApp = (db, overrides = {}) => buildServer({
 
 // ===================== (6) CR follow-up — the existsSync-vs-readFileSync two-path asymmetry ================
 // A cert/key that EXISTS but is UNREADABLE (or a directory, or invalid PEM content) must NEVER leave the
-// server silently on plain HTTP while a caller's boot decision believes TLS is live. buildServer's
-// `onHttpsResolved` callback is the ONE real signal for this — prove it fires `false` (not a throw) for
-// every one of these failure shapes, and that the resulting boot decision (mirroring index.ts) stays
-// loopback rather than opening a public interface as plain HTTP.
+// remote listener silently on plain HTTP while a caller's boot decision believes TLS is live. Since card
+// 23496950 TLS belongs to the REMOTE listener (gateway/remote-listener.ts `openRemoteListener`), not to the
+// Fastify app: its `httpsActive` result is the ONE real signal. Prove every failure shape refuses to open
+// (never a throw, never plain HTTP on a non-tailnet host) AND that the app itself — the loopback listener
+// every in-host consumer dials — is untouched and still serves.
 {
   const NON_TAILNET_REMOTE_HOST = "loom-tls-fail-test.example.com";
-
-  // (6a) certPath is a DIRECTORY (readFileSync throws EISDIR) — a portable stand-in for "unreadable"
-  // that doesn't depend on chmod semantics differing across Windows/POSIX.
-  {
-    const dirAsCert = path.join(TMP, "cert-is-a-dir");
-    fs.mkdirSync(dirAsCert, { recursive: true });
-    const keyFile = path.join(TMP, "some-key.pem");
-    fs.writeFileSync(keyFile, "irrelevant — cert read throws first");
-    const remoteAccessCfg = { enabled: true, bindHost: NON_TAILNET_REMOTE_HOST, tls: { certPath: dirAsCert, keyPath: keyFile } };
-    const db = new Db(path.join(TMP, "loom-tls-dir.db"));
+  const refusal = async (label, remoteAccessCfg) => {
+    const db = new Db(path.join(TMP, `loom-tls-${label}.db`));
     db.setPlatformConfig({ remoteAccess: remoteAccessCfg });
-    let httpsActive = "not called";
-    let threw = false;
-    let app;
-    try {
-      app = await buildApp(db, { onHttpsResolved: (active) => { httpsActive = active; } });
-    } catch { threw = true; }
-    check("(6a) certPath-is-a-directory: buildServer does NOT throw", threw === false);
-    check("(6a) certPath-is-a-directory: onHttpsResolved fires false (not left uncalled)", httpsActive === false);
-    check("(6a) certPath-is-a-directory: the boot decision (mirroring index.ts) stays loopback (canOpenRemoteListener false)",
-      canOpenRemoteListener(remoteAccessCfg, true, httpsActive) === false);
-    if (app) await app.close();
+    const app = await buildApp(db);
+    const ref = { current: null };
+    let threw = false, result;
+    try { result = await openRemoteListener(app, remoteAccessCfg, { loopbackPort: 4317, tokenExists: true, ref }); } catch { threw = true; }
+    check(`(6${label}) openRemoteListener does NOT throw`, threw === false);
+    check(`(6${label}) httpsActive is false (TLS material did not load)`, result?.httpsActive === false);
+    check(`(6${label}) the listener is REFUSED (never opened as plain HTTP on a non-tailnet host)`, result?.opened === false && ref.current === null);
+    check(`(6${label}) the refusal names the TLS reason (honest log line)`, (result?.reasons ?? []).some((r) => /TLS/.test(r)));
+    const r = await app.inject({ method: "GET", url: "/api/version" }); // default loopback Host/remoteAddress
+    check(`(6${label}) the app (loopback listener) still serves normally`, r.statusCode === 200);
+    await app.close();
     db.close();
-  }
-
-  // (6b) cert/key files EXIST and are readable, but their CONTENT is not valid PEM material — the failure
-  // only surfaces once Node's TLS layer parses the bytes, i.e. at Fastify's https construction, AFTER the
-  // readFileSync try/catch has already succeeded. Must degrade the SAME way, not crash buildServer.
-  {
-    const garbageCert = path.join(TMP, "garbage-cert.pem");
-    const garbageKey = path.join(TMP, "garbage-key.pem");
-    fs.writeFileSync(garbageCert, "this is not a certificate\n");
-    fs.writeFileSync(garbageKey, "this is not a key\n");
-    const db = new Db(path.join(TMP, "loom-tls-garbage.db"));
-    db.setPlatformConfig({ remoteAccess: { enabled: true, bindHost: NON_TAILNET_REMOTE_HOST, tls: { certPath: garbageCert, keyPath: garbageKey } } });
-    let httpsActive = "not called";
-    let threw = false;
-    let app;
-    try {
-      app = await buildApp(db, { onHttpsResolved: (active) => { httpsActive = active; } });
-    } catch { threw = true; }
-    check("(6b) invalid PEM content: buildServer does NOT throw (caught at Fastify construction, not left to crash boot)", threw === false);
-    check("(6b) invalid PEM content: onHttpsResolved fires false", httpsActive === false);
-    check("(6b) invalid PEM content: the boot decision stays loopback", canOpenRemoteListener({ enabled: true, bindHost: NON_TAILNET_REMOTE_HOST, tls: { certPath: garbageCert, keyPath: garbageKey } }, true, httpsActive) === false);
-    // And the server still WORKS over plain HTTP for a loopback caller — a TLS failure degrades gracefully,
-    // it doesn't take the whole daemon down.
-    if (app) {
-      const r = await app.inject({ method: "GET", url: "/api/version" }); // default loopback Host/remoteAddress
-      check("(6b) the degraded (plain-HTTP) server still serves loopback requests normally", r.statusCode === 200);
-      await app.close();
-    }
-    db.close();
-  }
-  // NOTE: the happy path (valid TLS material actually applied → onHttpsResolved fires TRUE) is NOT
-  // exercised end-to-end here — Node has no built-in "mint a self-signed X.509 cert" helper, and this
-  // repo bundles no cert-generation tool, so a real readable-and-VALID PEM pair isn't hermetically
-  // producible in this test. Section (1)'s pure-function coverage already proves the happy-path GATING
-  // logic (`canOpenRemoteListener(remoteWithTls, true, true) === true`) independent of real PEM bytes;
-  // 6a/6b above are the security-relevant regression this CR asked for (a present-but-broken cert/key
-  // must never silently leave the server on plain HTTP while the boot decision believes TLS is live).
+  };
+  // (6a) certPath is a DIRECTORY (readFileSync throws EISDIR) — a portable stand-in for "unreadable".
+  const dirAsCert = path.join(TMP, "cert-is-a-dir");
+  fs.mkdirSync(dirAsCert, { recursive: true });
+  const keyFile = path.join(TMP, "some-key.pem");
+  fs.writeFileSync(keyFile, "irrelevant — cert read throws first");
+  await refusal("a", { enabled: true, bindHost: NON_TAILNET_REMOTE_HOST, tls: { certPath: dirAsCert, keyPath: keyFile } });
+  // (6b) files EXIST and are readable but the CONTENT is not valid PEM — the failure only surfaces once
+  // Node's TLS layer parses the bytes (https.createServer), AFTER the readFileSync try/catch succeeded.
+  const garbageCert = path.join(TMP, "garbage-cert.pem");
+  const garbageKey = path.join(TMP, "garbage-key.pem");
+  fs.writeFileSync(garbageCert, "this is not a certificate\n");
+  fs.writeFileSync(garbageKey, "this is not a key\n");
+  await refusal("b", { enabled: true, bindHost: NON_TAILNET_REMOTE_HOST, tls: { certPath: garbageCert, keyPath: garbageKey } });
+  // NOTE: the happy path (valid TLS material actually applied) is not minted here — no hermetic X.509 helper;
+  // section (1)'s pure-function coverage proves the GATING independent of real PEM bytes, and
+  // remote-listener-real.mjs covers the real-listen plain-HTTP (tailnet-shaped) path.
 }
 
 // ===================== (7) CR follow-up — rate-limiter Map eviction (unbounded growth) ======================
@@ -194,6 +169,12 @@ const buildApp = (db, overrides = {}) => buildServer({
   check("(5) the human-only platform override accepts remoteAccess", validatePlatformConfigOverride({ remoteAccess: { enabled: true, bindHost: "example.com" } }).ok === true);
   const agentAttempt = validateProjectConfigOverride({ remoteAccess: { enabled: true, bindHost: "example.com" } });
   check("(5) the project-config override (the agent-reachable schema) REJECTS remoteAccess as an unknown key", agentAttempt.ok === false);
+  check("(5) ...including the card-23496950 keys (allowedHosts / port) — no agent-reachable schema can set them",
+    validateProjectConfigOverride({ remoteAccess: { allowedHosts: ["example.com"] } }).ok === false
+    && validateProjectConfigOverride({ remoteAccess: { port: 4444 } }).ok === false
+    && validateProjectConfigOverride({ allowedHosts: ["example.com"] }).ok === false
+    && validateProjectConfigOverride({ port: 4444 }).ok === false);
+  check("(5) the human-only platform override accepts allowedHosts + port", validatePlatformConfigOverride({ remoteAccess: { enabled: true, bindHost: "0.0.0.0", allowedHosts: ["192.168.1.50", "loom.lan"], port: 4999 } }).ok === true);
 }
 
 // ===================== (2) rate limiter + (3) CSRF-Host reconciliation, over a real buildServer =============
@@ -206,7 +187,8 @@ dbOn.setPlatformConfig({
     rateLimit: { perIpPerMin: 3, perTokenPerMin: 3, authFailLockout: { maxAttempts: 2, windowMs: 600000, lockoutMs: 900000 } },
   },
 });
-const appOn = await buildApp(dbOn, { verifyGatewayToken: (token) => token === GOOD_TOKEN });
+const REMOTE_PORT = 4444; // card 23496950: a remote peer's Origin must be the FULL remote origin (scheme + host + port)
+const appOn = await buildApp(dbOn, { verifyGatewayToken: (token) => token === GOOD_TOKEN, remoteEndpoint: { current: { scheme: "https", port: REMOTE_PORT } } });
 const REMOTE_IP = "203.0.113.9";
 try {
   // --- (3) CSRF-Host reconciliation ---
@@ -222,12 +204,16 @@ try {
   check("(3) a remote request with a MISMATCHED Host (attacker.example.com) still 403s (DNS-rebind defence intact)", remoteHostMismatch.statusCode === 403);
   const remoteOriginOk = await appOn.inject({
     method: "GET", url: "/api/version", remoteAddress: REMOTE_IP,
-    headers: { host: REMOTE_BIND_HOST, origin: `https://${REMOTE_BIND_HOST}`, authorization: `Bearer ${GOOD_TOKEN}` },
+    headers: { host: REMOTE_BIND_HOST, origin: `https://${REMOTE_BIND_HOST}:${REMOTE_PORT}`, authorization: `Bearer ${GOOD_TOKEN}` },
   });
-  check("(3) a remote request whose Origin ALSO matches the configured bindHost passes the CSRF Origin check", remoteOriginOk.statusCode === 200);
+  check("(3) a remote request whose Origin is the FULL remote origin (scheme+bindHost+port) passes the CSRF Origin check", remoteOriginOk.statusCode === 200);
+  for (const [label, origin] of [["port-less", `https://${REMOTE_BIND_HOST}`], ["wrong port", `https://${REMOTE_BIND_HOST}:8080`], ["wrong scheme", `http://${REMOTE_BIND_HOST}:${REMOTE_PORT}`]]) {
+    const r = await appOn.inject({ method: "GET", url: "/api/version", remoteAddress: REMOTE_IP, headers: { host: REMOTE_BIND_HOST, origin, authorization: `Bearer ${GOOD_TOKEN}` } });
+    check(`(3) a remote Origin with the right host but a ${label} (${origin}) 403s — Origin is full-origin, not host-only`, r.statusCode === 403);
+  }
   const remoteOriginMismatch = await appOn.inject({
     method: "GET", url: "/api/version", remoteAddress: REMOTE_IP,
-    headers: { host: REMOTE_BIND_HOST, origin: "https://evil.example.com", authorization: `Bearer ${GOOD_TOKEN}` },
+    headers: { host: REMOTE_BIND_HOST, origin: `https://evil.example.com:${REMOTE_PORT}`, authorization: `Bearer ${GOOD_TOKEN}` },
   });
   check("(3) a remote request with a cross-origin Origin (not the bindHost) still 403s", remoteOriginMismatch.statusCode === 403);
 
@@ -298,7 +284,7 @@ try {
   const IPV6_BIND_HOST = "2001:db8::1234";
   const dbV6 = new Db(path.join(TMP, "loom-ipv6.db"));
   dbV6.setPlatformConfig({ remoteAccess: { enabled: true, bindHost: IPV6_BIND_HOST } });
-  const appV6 = await buildApp(dbV6, { verifyGatewayToken: () => true });
+  const appV6 = await buildApp(dbV6, { verifyGatewayToken: () => true, remoteEndpoint: { current: { scheme: "https", port: 4444 } } });
   try {
     const okBracketedHost = await appV6.inject({
       method: "GET", url: "/api/version", remoteAddress: "203.0.113.20",
@@ -307,7 +293,7 @@ try {
     check("(8) a bracketed IPv6 Host header ([2001:db8::1234]) matching the bare-stored bindHost is NOT 403'd", okBracketedHost.statusCode === 200);
     const okBracketedOrigin = await appV6.inject({
       method: "GET", url: "/api/version", remoteAddress: "203.0.113.20",
-      headers: { host: `[${IPV6_BIND_HOST}]`, origin: `https://[${IPV6_BIND_HOST}]`, authorization: "Bearer anything" },
+      headers: { host: `[${IPV6_BIND_HOST}]`, origin: `https://[${IPV6_BIND_HOST}]:4444`, authorization: "Bearer anything" },
     });
     check("(8) a bracketed IPv6 Origin matching the bare-stored bindHost is NOT 403'd", okBracketedOrigin.statusCode === 200);
     const mismatchedV6 = await appV6.inject({
@@ -347,6 +333,99 @@ try {
 
   const reqNoAuth = GATEWAY_LOG_SERIALIZERS.req({ method: "GET", url: "/api/version", headers: { host: "example.com" } });
   check("(9) GATEWAY_LOG_SERIALIZERS.req is a no-op when no sensitive header is present", reqNoAuth.headers.authorization === undefined && reqNoAuth.headers["sec-websocket-protocol"] === undefined);
+}
+
+// ===================== (10) card 23496950 — wildcard bind: allowedHosts, Host allowlist, peer-scoped Origin ===
+{
+  // --- validator ---
+  const V = (remoteAccess) => validatePlatformConfigOverride({ remoteAccess }).ok;
+  check("(10) allowedHosts rejects 0.0.0.0", V({ allowedHosts: ["0.0.0.0"] }) === false);
+  check("(10) allowedHosts rejects ::", V({ allowedHosts: ["::"] }) === false);
+  check("(10) allowedHosts rejects 127.0.0.1 / localhost / ::1 / 127.5.5.5 / ::ffff:127.0.0.1 / 0:0:0:0:0:0:0:1",
+    ["127.0.0.1", "localhost", "::1", "127.5.5.5", "::ffff:127.0.0.1", "0:0:0:0:0:0:0:1"].every((h) => V({ allowedHosts: [h] }) === false));
+  check("(10) allowedHosts rejects a URL-shaped / spaced / bracketed entry", ["http://a.com", "a b", "[2001:db8::1]"].every((h) => V({ allowedHosts: [h] }) === false));
+  check("(10) allowedHosts accepts a LAN IP, a bare IPv6, and a hostname", V({ allowedHosts: ["192.168.1.50", "2001:db8::1", "loom.lan"] }) === true);
+  check("(10) allowedHosts caps at 32 entries", V({ allowedHosts: Array.from({ length: 33 }, (_, i) => `h${i}.example.com`) }) === false);
+  check("(10) port must be an int in 1..65535", V({ port: 0 }) === false && V({ port: 70000 }) === false && V({ port: 1.5 }) === false && V({ port: 4999 }) === true);
+  check("(10) port equal to the daemon's own PORT is rejected", V({ port: Number(PORT) }) === false);
+  check("(10) isForbiddenAllowedHost is the shared predicate (wildcard + loopback true, a LAN name false)",
+    isForbiddenAllowedHost("0.0.0.0") && isForbiddenAllowedHost("LOCALHOST") && !isForbiddenAllowedHost("loom.lan"));
+
+  // --- canonicalisation (card 23496950 re-review): entries are matched in the form the URL parser gives a request's
+  // Host/Origin, so a non-canonical spelling still matches, and an AMBIGUOUS numeric-looking name is refused.
+  check("(10) canonicalHost compresses a fully-written IPv6 literal", canonicalHost("2001:db8:0:0:0:0:0:1") === "2001:db8::1");
+  check("(10) canonicalHost strips brackets and lower-cases", canonicalHost("[2001:DB8::1]") === "2001:db8::1" && canonicalHost("LOOM.Lan") === "loom.lan");
+  check("(10) canonicalHost REFUSES a name the URL parser would silently turn into an IPv4 (hex / decimal / zero-padded-octal)",
+    ["0x7f.0.0.1", "2130706433", "192.168.001.050", "0300.0.0.1"].every((h) => canonicalHost(h) === null));
+  check("(10) a plain dotted-decimal IPv4 canonicalises to itself", canonicalHost("192.168.1.50") === "192.168.1.50");
+  check("(10) allowedHosts accepts a NON-canonical IPv6 spelling (it will match — see the inject check below)", V({ allowedHosts: ["2001:db8:0:0:0:0:0:1"] }) === true);
+  check("(10) allowedHosts REJECTS ambiguous numeric names (0x7f.0.0.1 / 2130706433 / 192.168.001.050 — the last is octal 192.168.1.40)",
+    ["0x7f.0.0.1", "2130706433", "192.168.001.050"].every((h) => V({ allowedHosts: [h] }) === false));
+  check("(10) bindHost REJECTS the same ambiguous names", ["0x7f.0.0.1", "192.168.001.050"].every((h) => V({ bindHost: h }) === false));
+  check("(10) loopback-EQUIVALENT forms are forbidden AFTER canonicalisation (::0:1, ::ffff:7f00:1, ::7f00:1, ::ffff:0:0, 0:0:0:0:0:0:0:1, 0.1.2.3)",
+    ["::0:1", "::ffff:7f00:1", "::7f00:1", "::ffff:0:0", "0:0:0:0:0:0:0:1", "0.1.2.3"].every((h) => isForbiddenAllowedHost(h) === true && V({ allowedHosts: [h] }) === false));
+  check("(10) ...while a real LAN IPv6 / IPv4-mapped LAN address is NOT forbidden", ["2001:db8::1", "::ffff:c0a8:132", "fe80::1"].every((h) => isForbiddenAllowedHost(h) === false));
+  check("(10) remoteHostAllowlist canonicalises bindHost AND allowedHosts",
+    JSON.stringify(remoteHostAllowlist({ enabled: true, bindHost: "2001:db8:0:0:0:0:0:1234", allowedHosts: ["2001:DB8:0:0:0:0:0:1"] }).sort()) === JSON.stringify(["2001:db8::1", "2001:db8::1234"]));
+  check("(10) remoteHostAllowlist DROPS an ambiguous entry (fail-closed) rather than matching something else",
+    remoteHostAllowlist({ enabled: true, bindHost: "0.0.0.0", allowedHosts: ["192.168.001.050"] }).length === 0);
+  {
+    const dbC = new Db(path.join(TMP, "loom-canon.db"));
+    dbC.setPlatformConfig({ remoteAccess: { enabled: true, bindHost: "2001:db8:0:0:0:0:0:1234", allowedHosts: ["2001:db8:0:0:0:0:0:1"] } });
+    const appC = await buildApp(dbC, { verifyGatewayToken: () => true, remoteEndpoint: { current: { scheme: "https", port: 4444 } } });
+    try {
+      const C = (host, origin) => appC.inject({ method: "GET", url: "/api/version", remoteAddress: "203.0.113.31", headers: { host, authorization: "Bearer x", ...(origin ? { origin } : {}) } }).then((r) => r.statusCode);
+      check("(10) a client's compressed Host [2001:db8::1] matches the NON-canonical allowedHosts entry → 200", (await C("[2001:db8::1]:4444")) === 200);
+      check("(10) ...and the non-canonical bindHost's compressed Host [2001:db8::1234] → 200", (await C("[2001:db8::1234]:4444")) === 200);
+      check("(10) ...and the full remote Origin on the compressed form → 200", (await C("[2001:db8::1]:4444", "https://[2001:db8::1]:4444")) === 200);
+      check("(10) ...a different IPv6 Host still 403s", (await C("[2001:db8::2]:4444")) === 403);
+    } finally { await appC.close(); dbC.close(); }
+  }
+
+  // --- fail-closed boot rule: a wildcard bind needs allowedHosts ---
+  const wild = { enabled: true, bindHost: "0.0.0.0", tls: { certPath: "/a/c.pem", keyPath: "/a/k.pem" } };
+  check("(10) wildcard bind + token + TLS but NO allowedHosts → refused (fail-closed)", canOpenRemoteListener(wild, true, true) === false);
+  check("(10) ...the refusal reason names allowedHosts", remoteListenerRefusalReasons(wild, true, true).some((r) => /allowedHosts/.test(r)));
+  check("(10) wildcard bind + token + TLS + allowedHosts → allowed", canOpenRemoteListener({ ...wild, allowedHosts: ["192.168.1.50"] }, true, true) === true);
+  check("(10) '::' wildcard needs allowedHosts too", canOpenRemoteListener({ ...wild, bindHost: "::" }, true, true) === false);
+  check("(10) allowedHosts is ADDITIVE for a specific bind (bindHost + extras, normalised)",
+    JSON.stringify(remoteHostAllowlist({ enabled: true, bindHost: "Box.TS.net", allowedHosts: ["100.64.0.5"] }).sort()) === JSON.stringify(["100.64.0.5", "box.ts.net"]));
+  check("(10) a wildcard bindHost contributes NOTHING to the allowlist", remoteHostAllowlist({ enabled: true, bindHost: "0.0.0.0", allowedHosts: [] }).length === 0);
+
+  // --- Host allowlist over a real buildServer (wildcard bind) ---
+  const dbW = new Db(path.join(TMP, "loom-wild.db"));
+  dbW.setPlatformConfig({ remoteAccess: { enabled: true, bindHost: "0.0.0.0", allowedHosts: ["192.168.1.50", "Loom.LAN"] } });
+  const appW = await buildApp(dbW, { verifyGatewayToken: (t) => t === "wtok", remoteEndpoint: { current: { scheme: "https", port: 4444 } } });
+  const RIP = "203.0.113.30";
+  const W = (headers, remoteAddress = RIP) => appW.inject({ method: "GET", url: "/api/version", remoteAddress, headers: { authorization: "Bearer wtok", ...headers } });
+  try {
+    check("(10) REPRO B3 fixed: wildcard bind, remote Host = an allowedHosts IP → 200 (was 403)", (await W({ host: "192.168.1.50:4444" })).statusCode === 200);
+    check("(10) ...an allowedHosts hostname, case-insensitively → 200", (await W({ host: "LOOM.lan:4444" })).statusCode === 200);
+    check("(10) ...a Host NOT on the list → 403 (DNS-rebind defence intact)", (await W({ host: "192.168.1.51:4444" })).statusCode === 403);
+    check("(10) ...the literal 'Host: 0.0.0.0' no longer passes on a wildcard bind (was the only Host that did)", (await W({ host: "0.0.0.0:4444" })).statusCode === 403);
+    check("(10) ...an attacker suffix of an allowed name (loom.lan.evil.com) → 403 (exact match, no suffix)", (await W({ host: "loom.lan.evil.com" })).statusCode === 403);
+    check("(10) ...remote peer + full remote Origin on an allowed host → 200", (await W({ host: "192.168.1.50:4444", origin: "https://192.168.1.50:4444" })).statusCode === 200);
+    check("(10) ...remote peer + Origin on the allowed host but another port → 403", (await W({ host: "192.168.1.50:4444", origin: "https://192.168.1.50:8080" })).statusCode === 403);
+    // Origin PEER-scoping: a LOOPBACK peer must never be handed a remote Origin, or another local web
+    // service at http://<allowedHost>:8080 in a browser on the daemon host could read loopback-exempt GETs.
+    check("(10) MAJOR: a LOOPBACK peer with Origin http://<allowedHost>:8080 → 403 (Origin is peer-scoped)",
+      (await W({ host: "192.168.1.50:4444", origin: "http://192.168.1.50:8080" }, "127.0.0.1")).statusCode === 403);
+    check("(10) ...even the EXACT remote origin is refused from a loopback peer (remote origins are for remote peers only)",
+      (await W({ host: "192.168.1.50:4444", origin: "https://192.168.1.50:4444" }, "127.0.0.1")).statusCode === 403);
+    check("(10) ...a loopback peer with a loopback Origin still works (the dev/CLI path is unchanged)",
+      (await W({ host: "127.0.0.1", origin: "http://127.0.0.1:5317" }, "127.0.0.1")).statusCode === 200);
+  } finally {
+    await appW.close();
+    dbW.close();
+  }
+  // No remote endpoint yet (listener not open) => no remote Origin can match, even from a "remote" peer.
+  const dbN = new Db(path.join(TMP, "loom-noep.db"));
+  dbN.setPlatformConfig({ remoteAccess: { enabled: true, bindHost: "0.0.0.0", allowedHosts: ["192.168.1.50"] } });
+  const appN = await buildApp(dbN, { verifyGatewayToken: () => true });
+  try {
+    const r = await appN.inject({ method: "GET", url: "/api/version", remoteAddress: RIP, headers: { host: "192.168.1.50:4444", origin: "https://192.168.1.50:4444", authorization: "Bearer x" } });
+    check("(10) no remoteEndpoint (remote listener not open) => a remote Origin never matches (fail-closed)", r.statusCode === 403);
+  } finally { await appN.close(); dbN.close(); }
 }
 
 console.log(failures === 0

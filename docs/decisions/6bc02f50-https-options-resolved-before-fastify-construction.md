@@ -1,5 +1,7 @@
 # 6bc02f50 — `remoteAccess`/TLS resolved once, before `Fastify()` is constructed
 
+> **Superseded in part by `23496950`:** TLS is no longer a `Fastify()` construction option — the remote listener is a separate server (`gateway/remote-listener.ts`) and the app is always plain HTTP. The two-failure-point rule (file read vs. Node rejecting the material, both degrading to `httpsActive:false`) still holds and now lives in `openRemoteListener`; the "resolve before construction" rule below is historical.
+
 ## Narrative
 
 Access-story Phase C (card `6bc02f50`): `remoteAccessConfig` is resolved via `resolveConfig` ONCE, at the very top of `buildServer`, before `Fastify()` is even constructed — the `https` option can only be set at construction time, so this can't wait until the trust-tier-hook block further down (where Phase A originally resolved it; that resolution is now just a reference to this one). Ships inert: `isTrustTierHookActive` is false by default (enabled:false ⇒ loopback), so `httpsOptions` stays undefined and `Fastify({logger:false})` is byte-identical to pre-Phase-C behavior.

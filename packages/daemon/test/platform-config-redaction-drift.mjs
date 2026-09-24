@@ -30,7 +30,7 @@ process.env.HOME = sandboxHome;
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv();
 
-const { PLATFORM_CONFIG_TOP_LEVEL_KEYS } = await import("../dist/mcp/platform.js");
+const { PLATFORM_CONFIG_TOP_LEVEL_KEYS, PLATFORM_CONFIG_REMOTE_ACCESS_KEYS, redactRemoteAccessForAgentForTest } = await import("../dist/mcp/platform.js");
 
 try {
   // Hand-authored: every top-level PlatformConfigOverride key `sanitizePlatformConfigForAgent` has been
@@ -74,6 +74,34 @@ try {
     JSON.stringify(actual) === JSON.stringify(expected),
   );
   check("sanity: the key set is non-empty (a vacuous pass would hide a broken import)", actual.length > 0);
+
+  // ---- remoteAccess SUB-keys (card 23496950): the top-level pin above cannot see a field added INSIDE
+  // remoteAccess, which `sanitizePlatformConfigForAgent` spreads verbatim except `tls`. Every sub-key needs an
+  // explicit decision here: REDACT (tls — host paths to TLS private-key material) or EXPOSE. `port` and
+  // `allowedHosts` are EXPOSED, the same class as `bindHost`: a port number and hostnames — network posture the
+  // Lead legitimately reads, no credential, no host filesystem path.
+  const EXPECTED_REMOTE_ACCESS_KEYS = [
+    "enabled",
+    "bindHost",
+    "port", // EXPOSED — a port number, same class as bindHost
+    "allowedHosts", // EXPOSED — hostnames/IPs clients dial, same class as bindHost
+    "tls", // REDACTED — {certPath,keyPath} collapses to {configured:true}
+    "rateLimit",
+  ];
+  const raActual = [...PLATFORM_CONFIG_REMOTE_ACCESS_KEYS].sort();
+  const raExpected = [...EXPECTED_REMOTE_ACCESS_KEYS].sort();
+  if (JSON.stringify(raActual) !== JSON.stringify(raExpected)) {
+    console.log(`  drift: expected-only=[${raExpected.filter((k) => !raActual.includes(k)).join(",")}] schema-only=[${raActual.filter((k) => !raExpected.includes(k)).join(",")}]`);
+  }
+  check("PLATFORM_CONFIG_REMOTE_ACCESS_KEYS matches the audited EXPECTED_REMOTE_ACCESS_KEYS — no un-reviewed remoteAccess sub-key has been added", JSON.stringify(raActual) === JSON.stringify(raExpected));
+  check("sanity: the remoteAccess sub-key set is non-empty", raActual.length > 0);
+  // Behaviour, not just names: the real agent-facing redaction collapses tls but passes port/allowedHosts through.
+  const ra = { enabled: true, bindHost: "0.0.0.0", port: 4318, allowedHosts: ["192.168.1.50"], tls: { certPath: "/secret/cert.pem", keyPath: "/secret/key.pem" } };
+  const shown = redactRemoteAccessForAgentForTest(ra);
+  check("agent redaction: tls host paths are collapsed to {configured:true}",
+    JSON.stringify(shown.tls) === '{"configured":true}' && !JSON.stringify(shown).includes("/secret/"));
+  check("agent redaction: port and allowedHosts pass through unredacted (the recorded EXPOSE decision)",
+    shown.port === 4318 && JSON.stringify(shown.allowedHosts) === '["192.168.1.50"]' && shown.enabled === true && shown.bindHost === "0.0.0.0");
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }

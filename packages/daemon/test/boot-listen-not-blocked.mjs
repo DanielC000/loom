@@ -70,11 +70,25 @@ const TIMER_SLACK_MS = 50;
     return outer;
   }
 
-  const listenCalls = findMethodCalls("listen", "app");
+  // Card 23496950: index.ts no longer calls `app.listen(` inline — the loopback bind happens INSIDE
+  // `startGatewayListeners(app, …)` (gateway/remote-listener.ts), which is the single boot call that binds the
+  // port. That call is the "listen" for the ordering assertions below; a literal `app.listen(` (if one is ever
+  // reintroduced) still counts too. Sorted so `listenCalls[0]` is the EARLIEST bind in source order.
+  const findIdentifierCalls = (name) => {
+    const out = [];
+    const visit = (node) => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name) out.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    return out;
+  };
+  const listenCalls = [...findMethodCalls("listen", "app"), ...findIdentifierCalls("startGatewayListeners")]
+    .sort((a, b) => a.getStart(sourceFile) - b.getStart(sourceFile));
   const reconcileCalls = findMethodCalls("reconcileOrchestrationOnBoot");
   const runsCalls = findMethodCalls("reconcileRunsOnBoot");
 
-  check("(1) src/index.ts calls app.listen(", listenCalls.length > 0);
+  check("(1) src/index.ts binds the port (app.listen( or startGatewayListeners()", listenCalls.length > 0);
   check("(1) src/index.ts calls sessions.reconcileOrchestrationOnBoot( exactly once", reconcileCalls.length === 1);
   check("(1) src/index.ts calls sessions.reconcileRunsOnBoot( exactly once", runsCalls.length === 1);
 

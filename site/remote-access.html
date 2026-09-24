@@ -256,29 +256,51 @@
           </div>
 
           <div class="callout reveal">
-            <p class="callout-title"><span class="dot dot-amber"></span> Two sharp edges before you turn it on</p>
+            <p class="callout-title"><span class="dot dot-amber"></span> Three things to know before you turn it on</p>
             <p>
-              <strong><code>bindHost: "0.0.0.0"</code> doesn't currently work.</strong>
-              The DNS-rebinding guard requires a request's <code>Host</code> to
-              match the configured <code>bindHost</code> exactly, and a real
-              client's <code>Host</code> is the address it dialled — never the
-              literal <code>0.0.0.0</code> — so every remote request is refused
-              with <code>403</code>. Bind the specific address you mean instead.
+              <strong>The remote bind is a second listener on its own port —
+              loopback never changes.</strong> The daemon keeps answering on
+              <code>http://127.0.0.1:4317</code>, plain HTTP, whatever you
+              configure, so <code>loom status</code>, <code>loom stop</code>,
+              <code>loom open</code>, every agent's tool connection and the
+              <code>http://127.0.0.1:4317</code> admin calls on this page keep
+              working. The remote listener is separate: it binds
+              <code>remoteAccess.bindHost</code> on <code>remoteAccess.port</code>
+              (default: the daemon port + 1, so <code>4318</code>), terminates TLS
+              when <code>remoteAccess.tls</code> is set, and must use a different
+              port from the daemon's. Remote clients dial
+              <code>&lt;scheme&gt;://&lt;host&gt;:&lt;remote port&gt;</code>, where
+              <code>&lt;host&gt;</code> is the <code>bindHost</code> (for a wildcard
+              bind, any <code>allowedHosts</code> entry) and the scheme is
+              <code>https</code> whenever <code>remoteAccess.tls</code> is
+              configured — plain <code>http</code> only for a <code>.ts.net</code>
+              tailnet bind with no TLS configured. If the
+              remote listener can't open — no gateway token yet, TLS material that
+              won't load, a wildcard bind without <code>allowedHosts</code>, a port
+              clash, or a bind failure — the daemon logs exactly why and carries on
+              loopback-only.
             </p>
             <p>
-              <strong>A non-loopback or TLS bind takes your local tooling with
-              it.</strong> The daemon opens one listener. Bind a specific address
-              and it stops answering on <code>127.0.0.1</code> at all; turn on TLS
-              and the whole listener becomes HTTPS. Either way
-              <code>loom status</code>, <code>loom stop</code>,
-              <code>loom open</code> and the <code>http://127.0.0.1:4317</code>
-              admin calls on this page — all of which speak plain HTTP to loopback
-              — stop working. The readiness probe goes with them, so
-              <code>loom start</code> and <code>loom restart</code> report that the
-              daemon never answered within 30s and exit non-zero
-              <em>while it is running perfectly well</em>. Once you've bound a
-              specific address, treat that message as expected and check the
-              daemon's own log rather than the exit code.
+              <strong>A wildcard bind needs <code>allowedHosts</code>.</strong>
+              <code>bindHost: "0.0.0.0"</code> (or <code>::</code>) listens on every
+              interface, but a real client's <code>Host</code> is the address or
+              name it dialled — never the literal <code>0.0.0.0</code> — and the
+              DNS-rebinding guard matches <code>Host</code> exactly. List every
+              hostname or IP your clients will use in
+              <code>remoteAccess.allowedHosts</code>; a wildcard bind with an empty
+              list <strong>does not open at all</strong>. It also works alongside
+              a specific <code>bindHost</code> (a tailnet client may reach both the
+              MagicDNS name and the <code>100.x</code> address). Matching is exact
+              and case-insensitive — no wildcards or suffixes — and
+              <code>0.0.0.0</code>, <code>::</code> and loopback addresses are
+              rejected as entries.
+            </p>
+            <p>
+              <strong>A browser's <code>Origin</code> must be the full remote
+              origin</strong> — <code>&lt;scheme&gt;://&lt;allowed host&gt;:&lt;remote port&gt;</code>,
+              the same scheme and port the client dialled —
+              and only a request that actually arrives from a non-loopback address
+              may present one. A loopback caller keeps the loopback-only rule.
             </p>
           </div>
 
@@ -335,9 +357,10 @@
               <h3>Enable the remote bind</h3>
               <p>
                 Set the daemon-global <code>remoteAccess</code> config over the
-                loopback API: turn it on, choose the interface to bind, and supply
-                the TLS paths. <code>remoteAccess</code> is daemon-global (not
-                per-project), so this is a one-time setting.
+                loopback API: turn it on, choose the interface to bind, supply
+                the TLS paths, and (for a wildcard bind) list the hostnames clients
+                will use. <code>remoteAccess</code> is daemon-global (not
+                per-project) and human-only, so this is a one-time setting.
               </p>
               <div class="term">
                 <div class="term-bar">
@@ -346,17 +369,19 @@
                 </div>
                 <div class="term-body">
                   <div class="term-line">
-                    <code class="term-cmd" data-copy="curl -X PATCH http://127.0.0.1:4317/api/platform/config -H &quot;Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)&quot; -H 'content-type: application/json' -d '{&quot;config&quot;:{&quot;remoteAccess&quot;:{&quot;enabled&quot;:true,&quot;bindHost&quot;:&quot;192.168.1.10&quot;,&quot;tls&quot;:{&quot;certPath&quot;:&quot;/etc/loom/cert.pem&quot;,&quot;keyPath&quot;:&quot;/etc/loom/key.pem&quot;}}}}'"><span class="term-prompt">$</span> curl -X PATCH http://127.0.0.1:4317/api/platform/config \
+                    <code class="term-cmd" data-copy="curl -X PATCH http://127.0.0.1:4317/api/platform/config -H &quot;Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)&quot; -H 'content-type: application/json' -d '{&quot;config&quot;:{&quot;remoteAccess&quot;:{&quot;enabled&quot;:true,&quot;bindHost&quot;:&quot;0.0.0.0&quot;,&quot;allowedHosts&quot;:[&quot;192.168.1.10&quot;],&quot;port&quot;:4318,&quot;tls&quot;:{&quot;certPath&quot;:&quot;/etc/loom/cert.pem&quot;,&quot;keyPath&quot;:&quot;/etc/loom/key.pem&quot;}}}}'"><span class="term-prompt">$</span> curl -X PATCH http://127.0.0.1:4317/api/platform/config \
     -H "Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)" \
     -H 'content-type: application/json' \
     -d '{"config":{"remoteAccess":{
           "enabled": true,
-          "bindHost": "192.168.1.10",
+          "bindHost": "0.0.0.0",
+          "allowedHosts": ["192.168.1.10"],
+          "port": 4318,
           "tls": { "certPath": "/etc/loom/cert.pem", "keyPath": "/etc/loom/key.pem" }
         }}}'</code>
                     <button class="copy" type="button" aria-label="Copy the configure-remoteAccess curl command">Copy</button>
                   </div>
-                  <p class="term-comment term-comment-sp"># bindHost must be the SPECIFIC address clients will dial — 0.0.0.0 currently 403s every remote request</p>
+                  <p class="term-comment term-comment-sp"># a specific bindHost also works (allowedHosts is then optional); port defaults to the daemon port + 1</p>
                 </div>
               </div>
             </li>
@@ -368,17 +393,16 @@
                 effect on the next restart. On boot Loom runs a
                 <strong>fail-closed</strong> check: it only opens the remote
                 interface when it's enabled, the <code>bindHost</code> is
-                non-loopback, a gateway token exists, <em>and</em> the TLS mandate
-                is satisfied. If any of those is missing it logs why and stays on
-                loopback — it never opens a public interface as plain HTTP.
+                non-loopback, a gateway token exists, the TLS mandate is
+                satisfied, <em>and</em> (for a wildcard bind) <code>allowedHosts</code>
+                is set. If any of those is missing it logs why and stays
+                loopback-only — it never opens a public interface as plain HTTP.
               </p>
               <p>
-                Expect <code>loom restart</code> to report failure here and exit
-                non-zero: it waits for the daemon on
-                <code>http://127.0.0.1:4317</code>, which a specific-address or TLS
-                bind no longer answers, so after 30s it says the daemon didn't come
-                up even though it did. Read the daemon's own log to confirm the
-                bind, not the exit code — see the sharp-edges note above.
+                <code>loom restart</code> works as usual: it waits for the daemon on
+                <code>http://127.0.0.1:4317</code>, which stays plain HTTP whatever
+                you bound. The daemon's own log names the remote listener's
+                address and port once it is open.
               </p>
               <div class="term">
                 <div class="term-bar">
@@ -409,10 +433,13 @@
               live terminal WebSockets — which can't set an
               <code>Authorization</code> header on the upgrade — accept it as a
               WebSocket subprotocol or a <code>?token=</code> query parameter.
-              Dial the <em>exact</em> <code>bindHost</code> you configured: the
-              DNS-rebinding guard compares the <code>Host</code> header against it
-              character for character, so an alias, a different DNS name, or a bare
-              IP for a hostname bind is refused with <code>403</code>.
+              Dial <code>&lt;scheme&gt;://&lt;host&gt;:&lt;remote port&gt;</code> (<code>https</code>
+              whenever you configured TLS) using a
+              host you configured — the <code>bindHost</code> itself (unless it's a
+              wildcard) or an <code>allowedHosts</code> entry. The DNS-rebinding
+              guard matches the <code>Host</code> header against that list
+              exactly (ignoring letter case, with no wildcards or suffixes), so an alias, a different DNS name, or a bare
+              IP that isn't listed is refused with <code>403</code>.
             </p>
           </div>
 
@@ -424,7 +451,7 @@
             <div class="term-body">
               <p class="term-comment"># REST: Authorization: Bearer &lt;plaintext&gt;</p>
               <div class="term-line">
-                <code class="term-cmd" data-copy="curl https://192.168.1.10:4317/api/projects -H 'Authorization: Bearer <plaintext>'"><span class="term-prompt">$</span> curl https://192.168.1.10:4317/api/projects \
+                <code class="term-cmd" data-copy="curl https://192.168.1.10:4318/api/projects -H 'Authorization: Bearer <plaintext>'"><span class="term-prompt">$</span> curl https://192.168.1.10:4318/api/projects \
     -H 'Authorization: Bearer &lt;plaintext&gt;'</code>
                 <button class="copy" type="button" aria-label="Copy the authenticated curl command">Copy</button>
               </div>
