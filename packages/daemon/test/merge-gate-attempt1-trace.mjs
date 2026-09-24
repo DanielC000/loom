@@ -82,7 +82,7 @@ try {
     const retryHeld = new Promise((res) => { releaseRetry = res; });
     const fakeGate = async () => {
       calls++;
-      if (calls === 1) { await new Promise((r) => setTimeout(r, 50)); return FAIL1("flaky-solo"); }
+      if (calls === 1) return FAIL1("flaky-solo");
       await retryHeld; // the retry is admitted and RUNNING until the test lets it go
       return { passed: true };
     };
@@ -118,7 +118,7 @@ try {
     const retryHeld = new Promise((res) => { releaseRetry = res; });
     const fakeGate = async (_gate, worktreePath) => {
       calls++;
-      if (calls === 1) { plantTestFile(worktreePath, "flaky-batch"); await new Promise((r) => setTimeout(r, 50)); return FAIL1("flaky-batch"); }
+      if (calls === 1) { plantTestFile(worktreePath, "flaky-batch"); return FAIL1("flaky-batch"); }
       await retryHeld;
       return { passed: true };
     };
