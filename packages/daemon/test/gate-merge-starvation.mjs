@@ -19,7 +19,7 @@ const REPO = "/repo/eb491463";
 const OTHER = "/repo/eb491463-other";
 
 /** A fake gate: holds its slot until `finish()`. */
-function job(sem, cap, gateType, name, repoPath) {
+function job(sem, cap, gateType, name, repoPath, { hold = false, priority = "high" } = {}) {
   const d = deferred();
   // `started` = ADMITTED (phase "running" in the live registry): admission is synchronous, whereas `fn`
   // itself only runs a microtask later, so a flag set inside `fn` would lag the state under test.
@@ -27,7 +27,8 @@ function job(sem, cap, gateType, name, repoPath) {
   j.done = sem.runExclusive(
     cap,
     { gateType, projectId: "p", sessionId: `sess-${name}`, opId: `op-${name}`, repoPath },
-    async () => d.promise,
+    async (_startedAt, _signal, _hooks, _getMax, holdRepoGuardOnExit) => { if (hold) holdRepoGuardOnExit(); return d.promise; },
+    priority,
   );
   return j;
 }
@@ -156,6 +157,54 @@ const queuedMergeEntry = (sem) => sem.snapshot().entries.find((e) => e.phase ===
   await waitUntil(() => m2.started, { label: "(7) second merge admitted after the first" });
   m2.finish();
   await Promise.all([m1.done, m2.done]);
+}
+
+// (8) PRODUCTION SHAPE: a passing merge holds the repo guard PAST its own release() (holdRepoGuardOnExit)
+// and frees it via endSquash — that call, not release(), is what wakes held-back workers. Workers are
+// "low" priority, as service.ts queues them. Two workers must BOTH be admitted by the one endSquash.
+{
+  const sem = new GateSemaphore();
+  const m = job(sem, 3, "merge", "hm", REPO, { hold: true });
+  const w2 = job(sem, 3, "worker", "h2", REPO, { priority: "low" });
+  const w3 = job(sem, 3, "worker", "h3", REPO, { priority: "low" });
+  check("(8) merge admitted; low-priority workers queued behind it", m.started && !w2.started && !w3.started);
+  m.finish();
+  await m.done;
+  check("(8) gate settled but the squash hold keeps both workers out", !w2.started && !w3.started && sem.snapshot().active === 0);
+  sem.endSquash(REPO, "op-hm");
+  check("(8) ONE endSquash admits BOTH held-back workers (drain, not a single grant)", w2.started && w3.started);
+  w2.finish(); w3.finish();
+  await Promise.all([w2.done, w3.done]);
+}
+
+// (9) acquireRepoGuardOnly holder (inert-diff skip): its release closure must also drain every eligible waiter.
+{
+  const sem = new GateSemaphore();
+  const w1 = job(sem, 3, "worker", "g0", OTHER, { priority: "low" }); // sets lastKnownCap; unrelated repo
+  const release = await sem.acquireRepoGuardOnly({ repoPath: REPO, projectId: "p", sessionId: "sess-rgo", opId: "op-rgo" });
+  const w2 = job(sem, 3, "worker", "g2", REPO, { priority: "low" });
+  const w3 = job(sem, 3, "worker", "g3", REPO, { priority: "low" });
+  check("(9) workers queued behind the repo-guard-only hold", !w2.started && !w3.started);
+  release();
+  check("(9) releasing the repo-guard-only hold admits BOTH workers", w2.started && w3.started);
+  w1.finish(); w2.finish(); w3.finish();
+  await Promise.all([w1.done, w2.done, w3.done]);
+}
+
+// (10) The specimen (case 1) with LOW-priority workers — the tier production workers actually use.
+{
+  const sem = new GateSemaphore();
+  const w1 = job(sem, 2, "worker", "l1", REPO, { priority: "low" });
+  const m = job(sem, 2, "merge", "lm", REPO);
+  const w2 = job(sem, 2, "worker", "l2", REPO, { priority: "low" });
+  check("(10) low-priority W2 is held behind the queued (high) merge despite cap headroom", w1.started && !m.started && !w2.started);
+  w1.finish();
+  await waitUntil(() => m.started, { label: "(10) M admitted once W1 releases" });
+  check("(10) merge first, low worker still held", !w2.started);
+  m.finish();
+  await waitUntil(() => w2.started, { label: "(10) W2 admitted after M" });
+  w2.finish();
+  await Promise.all([w1.done, m.done, w2.done]);
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
