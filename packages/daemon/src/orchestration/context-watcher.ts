@@ -216,6 +216,18 @@ export class ContextWatcher {
       // eslint-disable-next-line no-console
       console.log(`[context-watcher] nudged manager ${m.id} to recycle (${result.delivered ? "delivered" : "queued, lands next turn"}; ~${pct}% of ${kw}k window, unanswered→${state.unanswered + 1})`);
     }
+
+    // PLATFORM LEAD turn-count fallback (card a1263b45). The Lead is `role:'platform'`, so the manager loop
+    // above never sees it — and it has NO ratio-based nudge either (claude Leads are deliberately unwatched
+    // here; only IdleWatcher covers them). So this loop runs ONLY the telemetry-less turn-count fallback,
+    // gated on the adapter capability: a claude Lead is skipped outright (byte-identical to before).
+    for (const lead of db.listLivePlatformSessions()) {
+      if (contextTelemetryFor(lead.harness)) continue;
+      const project = db.getProject(lead.projectId);
+      if (!project) continue;
+      const cfg = resolveConfig(project.config).orchestration;
+      this.checkTurnCountRecycle(db, pty, lead, cfg, envOverride, nowMs, nowIso);
+    }
   }
 
   /**
