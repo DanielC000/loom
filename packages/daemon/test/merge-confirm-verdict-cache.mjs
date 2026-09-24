@@ -1,4 +1,9 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
+// SPLIT (card 4e8e2d82): 801b6b39's retry-link block (h/i/j) took this file to 1m59s against the 120s per-file
+// ceiling in its own merge gate; a further split followed since ~70s solo left too little in-suite margin. This file
+// keeps (a)-(c) and (e); (f)/(g) moved verbatim to merge-confirm-verdict-cache-squash-refusal.mjs and (h/i/j) to
+// merge-confirm-verdict-cache-retry-links.mjs. The description below covers all three.
+//
 // Regression/behavioral tests for card 615967c5 — the until-superseded merge verdict cache is keyed on a
 // branch tip that Loom's OWN pre-gate union-merge advances, so the cached-verdict guarantee silently never
 // applied to a branch that was behind main. The fix does NOT change the caching (a re-gate of a moved base
@@ -239,175 +244,8 @@ async function setupWorkerProject(sfx, reposDir, gateCommand = "pnpm gate") {
   check("(tip-moves-during-gate) op 2 announces identity-mismatch", r2.freshMint?.reason === "identity-mismatch");
 }
 
-// ── (f) THE GATE PASSES, THEN THE SQUASH REFUSES (Code Review MAJOR 2): a forwarded branch whose gate PASSED but
-//        whose squash was refused by the canonical checkout (dirty overlap) is NOT a gate-failed rejection and
-//        must not get the new stamp — after the human cleans the checkout the re-call must re-gate + merge, not
-//        replay the refusal. Doubles as the UNSTAMPED-FALLBACK case: op 2's freshMint.priorIdentity is the OLD
-//        pre-forward identity (workerSha), proving `identityFromValue` returned undefined and verdictIdentity stood.
-{
-  const sfx = `sq-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-  const reposDir = path.join(os.tmpdir(), `loom-mcvc-sq-${sfx}`);
-  const { db, mgrId, workerId, repo, workerSha } = await setupWorkerProject(sfx, reposDir);
-  let gateCalls = 0;
-  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
-    syncAttachBudgetMs: 60_000, runGate: async () => { gateCalls++; if (gateCalls === 1) fs.writeFileSync(path.join(repo, "feature.txt"), "live overlap appeared DURING the gate\n"); return { passed: true, steps: [] }; },
-  });
-  fs.writeFileSync(path.join(repo, "main-advance.txt"), "advanced\n");
-  commitAll(repo, "main advanced", GIT_ID);
-  // The gate stub itself dirties the canonical checkout at a path the branch also touches WHILE the gate runs, so the
-  // refusal lands in the squash phase AFTER a passing gate (an admission-time refusal would never reach the gate).
-  const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
-  check("(gate-pass-squash-refused) op 1 settled, NOT merged (squash refused after a PASSING gate) — fixture sanity", r1.settled === true && r1.ok && r1.value.merged === false && gateCalls === 1);
-  check("(gate-pass-squash-refused) op 1 carries NO gatedIdentity (only a gate-FAILED rejection is stamped)", r1.ok && r1.value.gatedIdentity === undefined);
-  fs.rmSync(path.join(repo, "feature.txt"));
-  const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
-  check("(gate-pass-squash-refused) after the human cleans the checkout the re-call does NOT replay the refusal — it re-gates", gateCalls === 2 && r2.cacheHit === undefined);
-  check("(gate-pass-squash-refused) UNSTAMPED FALLBACK: the old pre-forward identity was cached (priorIdentity === workerSha)", r2.freshMint?.priorIdentity === workerSha);
-}
-
-// ── (g) TIP MOVES DURING THE GATE, THEN IS RESET BACK TO WHERE IT STARTED (card 8b1fb28f re-review: the ABA shape).
-//        Two variants, deliberately separated because they need DIFFERENT machinery:
-//        (g1) reset AFTER op 1 settles, before the re-call: settle-time tip (F) != captured tip (T), so
-//             `confirmGatedIdentity` drops the stamp (the verdict describes a tree the gate saw moving); the old pre-forward
-//             identity stands, T != it, so the re-call re-gates. This is the case that goes RED when
-//             `confirmGatedIdentity` is mutated to `return v` (without the drop the stamp T matches the reset tip → cache hit).
-//        (g2) reset INSIDE the gate stub, before it fails: settle-time tip == captured tip, so NOTHING observable at settle
-//             distinguishes it from a gate that never saw movement — the stamp survives and the re-call is a cache hit.
-//             Pinned as the known LIMIT of a tip-compare (not an endorsement).
-{
-  for (const variant of ["g1-reset-after-settle", "g2-reset-inside-gate"]) {
-    const sfx = `aba-${variant}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const reposDir = path.join(os.tmpdir(), `loom-mcvc-aba-${sfx}`);
-    const { db, mgrId, workerId, repo, worktreePath } = await setupWorkerProject(sfx, reposDir);
-    let gateCalls = 0;
-    let capturedTip;
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
-      syncAttachBudgetMs: 60_000,
-      runGate: async () => {
-        gateCalls++;
-        if (gateCalls === 1) {
-          capturedTip = headSha(worktreePath); // == the tip captured just before this spawn
-          fs.writeFileSync(path.join(worktreePath, "fix.txt"), "fix\n"); commitAll(worktreePath, "fix mid-gate", GIT_ID);
-          if (variant === "g2-reset-inside-gate") execSync(`git reset --hard ${capturedTip}`, { cwd: worktreePath });
-        }
-        return { passed: false, failedStep: "test", failedStatus: 1, steps: [] };
-      },
-    });
-    fs.writeFileSync(path.join(repo, "main-advance.txt"), "advanced\n");
-    commitAll(repo, "main advanced", GIT_ID);
-    const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
-    check(`(${variant}) op 1 settled + rejected`, r1.settled === true && r1.ok && r1.value.merged === false && gateCalls === 1);
-    if (variant === "g1-reset-after-settle") execSync(`git reset --hard ${capturedTip}`, { cwd: worktreePath });
-    check(`(${variant} setup) the branch tip is back at the tip the gate started on`, headSha(worktreePath) === capturedTip);
-    const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
-    if (variant === "g1-reset-after-settle") {
-      check("(g1) the re-call RE-GATES: the stamp was dropped because the tip had moved at settle (RED if confirmGatedIdentity is mutated to return v)", gateCalls === 2 && r2.cacheHit === undefined);
-    } else {
-      check("(g2) PIN (known limit): a move-and-reset entirely inside the gate is invisible to a settle-time tip compare — cache hit at the captured tip", gateCalls === 1 && r2.cacheHit?.identity === capturedTip);
-    }
-  }
-}
-
-// ── (h/i/j) THE RETRY-LINK CAPTURES (card 801b6b39). Every fixture above returns `{failedStatus:1, steps:[]}`, which is
-//        never retry-eligible, so only attempt 1's `captureGatedTip` was ever exercised. Each scenario here drives ONE
-//        retry link of the chain and asserts the cached identity is the tip THAT link's gate ran on:
-//          (h) transient-kill link  — attempt 1 is a SIGKILL classification; main advances during it, so the link's own
-//              admission-time re-union forwards the branch tip before the retry gate spawns.
-//          (i) single-file link     — attempt 1 is a genuine failure naming one re-runnable test file; the worker
-//              commits mid-attempt-1, so the retry gate (which runs NO re-union) sees a newer tip.
-//          (j) resumed-steps link   — same as (i) but the retry passes and a never-run step is resumed; the worker
-//              commits mid-retry, so only the resume link's own capture names the tip it ran on.
-//        Two variants each. "moved": the tip differs between the previous link and the final one and STAYS there, so
-//        a missing final-link capture leaves a stamp that mismatches the settle-time tip and is dropped — the re-call
-//        re-gates instead of hitting the cache. "aba": the final link's stub puts the tip BACK where the previous
-//        link's capture saw it before failing, so a missing capture leaves a stamp that MATCHES the settle-time tip
-//        and survives — the one shape where the missing capture is NOT fail-safe (a verdict cached under a tip the
-//        final gate never ran on). Both variants go RED if that link's `captureGatedTip` is removed.
-{
-  const GATE_3STEP = "pnpm build && node packages/daemon/test/flaky-mid.mjs && pnpm true-final";
-  const GATE_2STEP = "pnpm build && node packages/daemon/test/flaky-mid.mjs";
-  const plantTestFile = (worktreePath, name) => {
-    fs.mkdirSync(path.join(worktreePath, "packages", "daemon", "scripts"), { recursive: true });
-    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs"), "// stub\n");
-    fs.mkdirSync(path.join(worktreePath, "packages", "daemon", "test"), { recursive: true });
-    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", `${name}.mjs`), "// stub\n");
-  };
-  const commitFile = (worktreePath, name) => { fs.writeFileSync(path.join(worktreePath, name), `${name}\n`); commitAll(worktreePath, name, GIT_ID); };
-  const genuineFail = (steps) => ({
-    passed: false, failedStep: "node packages/daemon/test/flaky-mid.mjs", failedStatus: 1, failedSignal: null, failedTimedOut: false,
-    outputTail: "FAIL  flaky-mid", failingTest: "FAIL  flaky-mid", failingTestCount: 1, failTierTest: "FAIL  flaky-mid", failTierTestCount: 1, failTierAll: ["FAIL  flaky-mid"],
-    steps,
-  });
-  const killed = { passed: false, failedStep: "pnpm gate", failedStatus: null, failedSignal: "SIGKILL", failedTimedOut: false, steps: [] };
-
-  // `stubs[n]` runs on gate call n+1 with (tipAtEntry, worktreePath, repo) and returns that call's GateSequentialResult; a call
-  // past the end (only the re-call in an "aba" variant reaches it) is a plain non-retriable failure. `tipAtEntry` is read
-  // from the real worktree the instant the stub is entered — i.e. exactly the tip `captureGatedTip` would have captured.
-  const scenarios = [
-    { link: "h-transient-kill", gate: "pnpm gate", plant: false, calls: 2,
-      stubs: [
-        (_t, _w, repo) => { fs.writeFileSync(path.join(repo, "main-advance.txt"), "advanced\n"); commitAll(repo, "main advanced mid-attempt-1", GIT_ID); return killed; },
-        () => killed,
-      ] },
-    { link: "i-single-file", gate: GATE_2STEP, plant: true, calls: 2, lastCommand: "node packages/daemon/scripts/test-daemon.mjs --only=flaky-mid",
-      stubs: [
-        (_t, w) => { commitFile(w, "fix-i.txt"); return genuineFail([{ step: "pnpm build", durationMs: 1, status: 0 }, { step: "node packages/daemon/test/flaky-mid.mjs", durationMs: 1, status: 1 }]); },
-        () => ({ passed: false, failedStep: "node packages/daemon/scripts/test-daemon.mjs --only=flaky-mid", failedStatus: 1, failedSignal: null, failedTimedOut: false, steps: [] }),
-      ] },
-    { link: "j-resumed-steps", gate: GATE_3STEP, plant: true, calls: 3, lastCommand: "pnpm true-final",
-      stubs: [
-        () => genuineFail([{ step: "pnpm build", durationMs: 1, status: 0 }, { step: "node packages/daemon/test/flaky-mid.mjs", durationMs: 1, status: 1 }]),
-        (_t, w) => { commitFile(w, "fix-j.txt"); return { passed: true, steps: [{ step: "node packages/daemon/scripts/test-daemon.mjs --only=flaky-mid", durationMs: 1, status: 0 }] }; },
-        () => ({ passed: false, failedStep: "pnpm true-final", failedStatus: 1, failedSignal: null, failedTimedOut: false, steps: [{ step: "pnpm true-final", durationMs: 1, status: 1 }] }),
-      ] },
-  ];
-
-  for (const sc of scenarios) for (const variant of ["moved", "aba"]) {
-    const tag = `(${sc.link}/${variant})`;
-    const sfx = `retry-${sc.link}-${variant}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const reposDir = path.join(os.tmpdir(), `loom-mcvc-${sfx}`);
-    const { db, mgrId, workerId, repo, worktreePath, workerSha } = await setupWorkerProject(sfx, reposDir, sc.gate);
-    if (sc.plant) plantTestFile(worktreePath, "flaky-mid");
-    // Main advances BEFORE op 1 in every scenario so the branch is forwarded: the pre-forward tip (`workerSha`) is then the
-    // verdict's unstamped fallback identity and can never coincide with a tip a gate actually ran on.
-    fs.writeFileSync(path.join(repo, "main-advance-0.txt"), "advanced\n");
-    commitAll(repo, "main advanced before op 1", GIT_ID);
-    const tips = [];
-    let gateCalls = 0;
-    const gateCommands = [];
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
-      syncAttachBudgetMs: 60_000,
-      runGate: async (gate) => {
-        const n = gateCalls++;
-        gateCommands.push(gate);
-        tips.push(headSha(worktreePath));
-        if (n >= sc.calls) return { passed: false, failedStep: "x", failedStatus: 1, failedSignal: null, failedTimedOut: false, steps: [] };
-        const res = sc.stubs[n](tips[n], worktreePath, repo);
-        // "aba": the FINAL link puts the tip back where the previous link's capture saw it, then fails.
-        if (variant === "aba" && n === sc.calls - 1) execSync(`git reset --hard ${tips[n - 1]}`, { cwd: worktreePath });
-        return res;
-      },
-    });
-    const r1 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
-    check(`${tag} op 1 settled + rejected after exactly ${sc.calls} gate calls (the chain reached the ${sc.link} link)`, r1.settled === true && r1.ok && r1.value.merged === false && gateCalls === sc.calls);
-    if (sc.lastCommand) check(`${tag} the final call ran the ${sc.link} link's own command`, gateCommands[sc.calls - 1] === sc.lastCommand);
-    check(`${tag} setup: the tip the final link ran on differs from the previous link's`, tips[sc.calls - 1] !== tips[sc.calls - 2]);
-    check(`${tag} setup: the branch was forwarded, so no gate tip is the pre-forward tip`, tips.every((t) => t !== workerSha));
-    const callsAfterOp1 = gateCalls;
-    const tipAtSettle = headSha(worktreePath);
-    const r2 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
-    if (variant === "moved") {
-      check(`${tag} the re-call is a cache hit — no further gate call`, r2.settled === true && gateCalls === callsAfterOp1);
-      check(`${tag} the cached identity is the tip the FINAL link ran on (RED if that link's captureGatedTip is removed)`, r2.cacheHit?.identity === tips[sc.calls - 1]);
-    } else {
-      check(`${tag} setup: the final link's stub put the tip back where the previous link saw it`, tipAtSettle === tips[sc.calls - 2]);
-      check(`${tag} the re-call RE-GATES — a verdict from a tip the final link never ran on is not cached (RED if that link's captureGatedTip is removed)`, r2.cacheHit === undefined && gateCalls > callsAfterOp1);
-    }
-  }
-}
-
 console.log(failures === 0
-  ? "\n✅ ALL PASS — confirmWorkerMergeTracked verdict cache (card 615967c5): a settled verdict on a branch that was NEVER behind main, re-called with no new commits, still returns the CACHED verdict (no second gate run, no freshMint) — DoD-4a, previously unverified behaviorally; and a behind-main branch's own pre-gate union-merge advances the identity the cache is keyed on, so a re-call genuinely re-gates and SELF-ANNOUNCES it via freshMint:{reason:\"identity-mismatch\", priorIdentity, currentIdentity} instead of looking like an invisible re-run — DoD-4b. CARD 4aedde84: the cache-hit branch above now ALSO carries a POSITIVE `cacheHit` marker (never inferred from freshMint's absence), and BOTH polarities are proven in this one run — a cache hit is positively marked, and a genuinely fresh/re-gated run carries freshMint and NEVER the cache marker. CARD a98f97bd: the reason was renamed from \"base-advanced\" to \"identity-mismatch\" (an OBSERVED field, not an assertion of cause), and (c) above proves the renamed value ALSO fires when the mismatch is caused by the worker pushing its own new commit — not just main advancing — since the registry cannot and should not try to tell the two apart."
+  ? "\n✅ ALL PASS — confirmWorkerMergeTracked verdict cache (card 615967c5), scenarios (a)-(c)/(e): cached-verdict replay on an unmoved branch, identity-mismatch announcements, and tip-moves-during-the-gate. Scenarios (f)/(g) are in merge-confirm-verdict-cache-squash-refusal.mjs and (h/i/j) in merge-confirm-verdict-cache-retry-links.mjs."
   : `\n❌ ${failures} FAILURE(S).`);
 
 // Card 82bb198a: this file previously had NO exit-code decision at all — Node's default exit(0)

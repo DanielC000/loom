@@ -863,6 +863,11 @@ const TEST_TIMEOUT_MS = 120_000;
 // a same-window correlation can no longer be checked) and both stub the actual gate call (fakeGate)
 // rather than exercise real merge-gate machinery — margin alone, absent either, is not sufficient
 // warrant per cc595ca7's per-file-curated design; do not add an override for either on margin alone.
+// card 4e8e2d82 — batch-merge-gate-history's later growth (max pass 119,740ms, 1 SIGTERM at the ceiling,
+// n=11) did exactly what that paragraph's margin rule anticipated, so it was SPLIT (not given an override):
+// batch-merge-gate-history.mjs + batch-merge-gate-history-edge.mjs. Same card split batch-merge-robustness
+// (max pass 116,925ms, 3 SIGTERMs, n=12 -> +batch-merge-robustness-redundancy.mjs) and emit-compare-gate-scope
+// (max pass 101,446ms, 2 SIGTERMs, n=11 -> +emit-compare-gate-scope-reclassify.mjs); no override entries added.
 const TEST_TIMEOUT_OVERRIDES = {
   "merge-repo-mutex": 300_000, // 15 trials x 2 concurrent real merges + a full content-integrity sweep
   "merge-stranded-backstop": 300_000, // 2x createWorktree + reviewWorkerMerge/confirmWorkerMerge, all real git
