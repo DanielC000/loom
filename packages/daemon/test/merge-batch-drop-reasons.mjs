@@ -98,7 +98,9 @@ try {
   // fast so fallback confirms drain instead of holding the shared gate slot.
   const known = new Set();
   const fakeGate = async (_cmd, wt) => (known.has(wt) ? { passed: false, reason: "test: fallback gate rejected" } : { passed: true });
-  const svcSync = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0 });
+  // Card 7c0e1e36: a 120s sync budget so scenario (1)/(2) never degrades and never re-calls; under host load a
+  // re-call minted a SECOND real op (8 dropped lines under two opIds, root cause not isolated), failing (2).
+  const svcSync = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0, syncAttachBudgetMs: 120_000 });
   const svcAsync = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0, syncAttachBudgetMs: 1 });
 
   // ── (1)+(2) ALL-DROPPED batch: c = hand-resolved conflict merge, d = merge of a branch NOT on main ──

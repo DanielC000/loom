@@ -161,8 +161,9 @@ try {
   // Seed a quickly-SETTLING (not never-settling) op under the predecessor's key, with retention on — the
   // shape `peekPendingMerge` shows briefly after any real merge settles (card d1aee5f1's RETAINED TERMINAL
   // VIEW), here standing in for "the predecessor's op already finished before this successor's own confirm".
+  // Card 7c0e1e36: retainMs must outlast the real git merge below (3.8-6 s under load) or (6) races the TTL.
   const pred6Key = `merge:${pred6Id}`;
-  void sessions.pendingOps.attach(pred6Key, "merge", `${liveMgrId}-6`, 10, () => Promise.resolve({ merged: false, reason: "retained-precondition" }), undefined, { retainMs: 5000 });
+  void sessions.pendingOps.attach(pred6Key, "merge", `${liveMgrId}-6`, 10, () => Promise.resolve({ merged: false, reason: "retained-precondition" }), undefined, { retainMs: 600_000 });
   await waitUntil(() => sessions.pendingOps.peek(pred6Key)?.state !== "running", { label: "(6) predecessor's op observable as SETTLED (retained)" });
   const retainedPred = sessions.pendingOps.peek(pred6Key);
   check("(6) precondition: predecessor's op settled into a RETAINED terminal view (not running)", retainedPred !== undefined && retainedPred.state !== "running");
