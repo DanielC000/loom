@@ -15,7 +15,9 @@ import type { RemoteAccessConfig } from "@loom/shared";
 
 /** Tier 0 = loopback-only (fail-closed default). Tier 1 = safe to allow over an authenticated remote
  *  bind — reads, plus the human answer/steer surfaces (Requests inbox answer, session input/stop/resume/
- *  end, rate-limit clear) and their two read-only WS terminals. Tier 2 (agent-tooling epic P5b, card
+ *  end, rate-limit clear) and the three WS routes (/ws/term, /ws/companion, /ws/fleet). Being Tier 1 does
+ *  NOT make a WS read-only: /ws/term gives a remote peer a view plus a repaint only and refuses host shells
+ *  outright (@decision 710a34fa), /ws/companion deliberately accepts remote chat, /ws/fleet is a push feed. Tier 2 (agent-tooling epic P5b, card
  *  8fbedcac) = the inbound webhook ingress: a DIFFERENT trust model from Tier 1 — PUBLIC (no gateway
  *  token accepted at all) but SIGNATURE-gated (the route's own per-endpoint HMAC verify is the real
  *  authorization, see webhooks/ingress.ts). A Tier-1 gateway token has no effect on a Tier-2 route, and a
