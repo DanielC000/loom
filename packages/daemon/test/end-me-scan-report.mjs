@@ -26,6 +26,10 @@ import { randomUUID } from "node:crypto";
 const tmpHome = path.join(os.tmpdir(), `loom-endme-scanreport-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// The Platform home this test files auditor findings onto is only seeded under LOOM_DEV=1 (paths.ts ›
+// isLoomDev; platform/seed.ts returns [] otherwise). Pin it here rather than inherit the host's: the
+// self-host gate runs with LOOM_DEV=1 (passes), a clean CI runner has it unset (`platformHome` undefined).
+process.env.LOOM_DEV = "1";
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");

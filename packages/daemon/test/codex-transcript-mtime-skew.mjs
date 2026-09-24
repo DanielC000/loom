@@ -35,8 +35,16 @@ function writeRolloutFile(dayDir, name, sessionId, cwd, mtimeMs) {
   const file = path.join(dayDir, name);
   const line = JSON.stringify({ type: "session_meta", payload: { session_id: sessionId, cwd, originator: "codex-tui" } });
   fs.writeFileSync(file, line + "\n");
-  const seconds = mtimeMs / 1000;
+  // libuv converts the double-seconds argument to a timespec by TRUNCATING to whole nanoseconds, so
+  // `mtimeMs / 1000` (not exactly representable) can land a hair BELOW the intended integer ms on a
+  // filesystem that keeps ns (ext4: ~50% of writes, measured n=2000 in a node:22 container; NTFS's 100ns
+  // granularity happened to round it back up, which is why the Windows gate never saw it). Nudge up by
+  // 1µs (far smaller than the 1ms the past-boundary case is off by) so the stored mtime is >= intended
+  // on every filesystem, then assert that precondition so a fixture that misses fails loudly here.
+  const seconds = (mtimeMs + 0.001) / 1000;
   fs.utimesSync(file, seconds, seconds); // controls the file's REPORTED mtime directly — no dependency on real timing
+  const stored = fs.statSync(file).mtimeMs;
+  if (!(stored >= mtimeMs && stored < mtimeMs + 0.5)) throw new Error(`fixture mtime not stored as intended: want ${mtimeMs}, got ${stored}`);
   return file;
 }
 
