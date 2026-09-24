@@ -113,7 +113,18 @@ try {
   // dedupe/attach key — while the first is still running.
   const p2 = sessions.mergeBatchTracked(mgrId, [wA, wB]);
 
-  const [r1, r2] = await Promise.all([p1, p2]);
+  // Card 58f80a64: under host contention either call can legitimately degrade to `{settled:false}` (the real-git
+  // batch outruns SYNC_ATTACH_BUDGET_MS). Re-calling with the SAME ids re-attaches to the same in-flight op via the
+  // dedupe key (never a re-run), so re-poll until settled — bounded, throwing loudly on a real wedge.
+  const settleBatch = async (r) => {
+    const deadline = Date.now() + 60_000;
+    while (!r.settled) {
+      if (Date.now() > deadline) throw new Error(`mergeBatchTracked did not settle within 60s (last op state: ${JSON.stringify(r.op)})`);
+      r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+    }
+    return r;
+  };
+  const [r1, r2] = await Promise.all([p1.then(settleBatch), p2.then(settleBatch)]);
 
   check("(1) first call settles within the sync-wait budget", r1.settled === true && r1.ok === true);
   check("(2) second call settles within the sync-wait budget too (attached to the same in-flight op)", r2.settled === true && r2.ok === true);

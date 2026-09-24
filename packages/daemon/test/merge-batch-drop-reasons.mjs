@@ -41,6 +41,23 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const write = (dir, f, c) => fs.writeFileSync(path.join(dir, f), c);
 
+// Card 58f80a64: under full-suite host contention this file's REAL-git batch (worktree cut, assembly, and the
+// sequential per-candidate fallback confirms) can outrun SYNC_ATTACH_BUDGET_MS (12s), so a call legitimately
+// degrades to `{settled:false}` — the documented, supported path (see pending-ops.ts), not a failure.
+// `PendingOpRegistry.attach` dedupes by key, so re-calling with the SAME ids re-attaches to the identical
+// in-flight op and never re-runs it; each call blocks on the real op (up to the budget), so this is a condition
+// wait on genuine settlement, bounded so a real wedge still throws loudly. NEVER fabricate a value for the
+// unsettled case — that fails a later assertion for an unrelated reason.
+async function batchUntilSettled(svc, mgr, ids) {
+  const deadline = Date.now() + 60_000;
+  let r = await svc.mergeBatchTracked(mgr, ids);
+  while (!r.settled) {
+    if (Date.now() > deadline) throw new Error(`mergeBatchTracked did not settle within 60s (last op state: ${JSON.stringify(r.op)})`);
+    r = await svc.mergeBatchTracked(mgr, ids);
+  }
+  return r;
+}
+
 function makeRepo(name) {
   const repo = path.join(os.tmpdir(), `loom-mbdr-${name}-${sfx}`);
   fs.mkdirSync(repo, { recursive: true });
@@ -96,7 +113,7 @@ try {
   commitAll(c.worktreePath, "Merge main into branch (resolved)", GIT_ID);
   execSync(`git ${GIT_ID} merge --no-edit ${side.branch}`, { cwd: d.worktreePath, stdio: "pipe" });
 
-  const r1 = await svcSync.mergeBatchTracked(mgrId, [c.workerId, d.workerId]);
+  const r1 = await batchUntilSettled(svcSync, mgrId, [c.workerId, d.workerId]);
   const v1 = r1.value ?? r1;
   const opId1 = v1.opId;
   check("(1) precondition: a batch ran, nothing landed, ok:false with a batch-level reason", r1.settled === true && v1.ok === false && v1.landed.length === 0 && typeof opId1 === "string");

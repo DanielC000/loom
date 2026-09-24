@@ -39,6 +39,26 @@ const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const write = (dir, f, c) => fs.writeFileSync(path.join(dir, f), c);
 
+// Card 58f80a64: under full-suite host contention this file's REAL-git batch (worktree cut, assembly, and the
+// sequential per-candidate fallback confirms) can outrun SYNC_ATTACH_BUDGET_MS (12s), so a call legitimately
+// degrades to `{settled:false}` — the documented, supported path (see pending-ops.ts), not a failure.
+// `PendingOpRegistry.attach` dedupes by key, so re-calling with the SAME ids re-attaches to the identical
+// in-flight op and never re-runs it; each call blocks on the real op (up to the budget), so this is a condition
+// wait on genuine settlement, bounded so a real wedge still throws loudly. NEVER fabricate a value for the
+// unsettled case — that fails a later assertion for an unrelated reason.
+// `reCaller()` names who re-polls: after the recycle hook reparents the workers to the successor, the
+// ownership check (worker.parentSessionId === caller) only accepts the CURRENT owner; the dedupe key is
+// lineage-rooted so predecessor and successor attach to the same op.
+async function batchUntilSettled(svc, mgr, ids, reCaller = () => mgr) {
+  const deadline = Date.now() + 60_000;
+  let r = await svc.mergeBatchTracked(mgr, ids);
+  while (!r.settled) {
+    if (Date.now() > deadline) throw new Error(`mergeBatchTracked did not settle within 60s (last op state: ${JSON.stringify(r.op)})`);
+    r = await svc.mergeBatchTracked(reCaller(), ids);
+  }
+  return r;
+}
+
 const repo = path.join(os.tmpdir(), `loom-mbfor-repo-${sfx}`);
 fs.mkdirSync(repo, { recursive: true });
 registerForCleanup(repo);
@@ -99,9 +119,12 @@ try {
     const s = await scenario();
     let mgr2 = null;
     onBatchGate = async () => { mgr2 = s.mkSuccessor(); s.retire(s.mgr1); for (const w of s.workers) db.relinkWorkerToManager(w.workerId, mgr2); };
-    const r = await svcSync.mergeBatchTracked(s.mgr1, s.workers.map((w) => w.workerId));
+    const r = await batchUntilSettled(svcSync, s.mgr1, s.workers.map((w) => w.workerId), () => mgr2 ?? s.mgr1);
     const v = r.value ?? r;
     check("(A) precondition: batch ran and settled RED with both candidates in fallback[]", r.settled === true && v.ok === false && v.fallback.length === 2 && mgr2 !== null);
+    // A fallback confirm's own attach can ALSO degrade to pending under load (its own 12s budget), in which
+    // case its gate runs after the batch result is returned — wait for the observable gate call (positive wait).
+    await waitUntil(() => s.workers.every((w) => fallbackGateCalls.includes(w.worktreePath)), { timeoutMs: 30_000, intervalMs: 50, label: "every fallback gate (A)" });
     check("(A) every fallback confirm actually STARTED (its own gate ran)", s.workers.every((w) => fallbackGateCalls.includes(w.worktreePath)));
     check("(A) every fallback entry is started:true", v.fallback.length === 2 && v.fallback.every((f) => f.started === true));
   }
@@ -111,9 +134,10 @@ try {
     reset();
     const s = await scenario();
     onBatchGate = async () => { s.mkSuccessor(); s.retire(s.mgr1); };
-    const r = await svcSync.mergeBatchTracked(s.mgr1, s.workers.map((w) => w.workerId));
+    const r = await batchUntilSettled(svcSync, s.mgr1, s.workers.map((w) => w.workerId));
     const v = r.value ?? r;
     check("(B) precondition: settled RED, both in fallback[]", r.settled === true && v.ok === false && v.fallback.length === 2);
+    await waitUntil(() => s.workers.every((w) => fallbackGateCalls.includes(w.worktreePath)), { timeoutMs: 30_000, intervalMs: 50, label: "every fallback gate (B)" });
     check("(B) parent still the original id, and every fallback confirm STARTED", s.workers.every((w) => fallbackGateCalls.includes(w.worktreePath)) && v.fallback.every((f) => f.started === true));
   }
 
@@ -144,7 +168,7 @@ try {
     let mgr2 = null;
     batchPasses = true;
     onBatchGate = async () => { mgr2 = s.mkSuccessor(); s.retire(s.mgr1); for (const w of s.workers) db.relinkWorkerToManager(w.workerId, mgr2); };
-    const r = await svcSync.mergeBatchTracked(s.mgr1, s.workers.map((w) => w.workerId));
+    const r = await batchUntilSettled(svcSync, s.mgr1, s.workers.map((w) => w.workerId), () => mgr2 ?? s.mgr1);
     const v = r.value ?? r;
     check("(D) precondition: green batch landed both", r.settled === true && v.ok === true && v.landed.length === 2);
     const done = s.workers.map((w) => db.listEventsForWorker(w.workerId).find((e) => e.kind === "merge_done"));
