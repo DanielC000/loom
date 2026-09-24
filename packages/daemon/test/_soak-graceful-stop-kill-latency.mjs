@@ -63,7 +63,7 @@ async function runCycle(host, id) {
   // reads alive BEFORE kill, so a later `false` is a real transition, not a broken `isAlive` query.
   const aliveBeforeKill = host.isAlive(id);
   const killedAt = Date.now();
-  host.stop(id, "hard"); // sets killed=true, then live.pty.kill() — same call this card is about
+  host.stop(id, "hard", { shell: true }); // sets killed=true, then live.pty.kill() — same call this card is about
   const samples = [];
   let clearedAtMs = null;
   for (const checkpointMs of CHECKPOINTS_MS) {

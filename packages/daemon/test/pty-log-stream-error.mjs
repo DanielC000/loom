@@ -114,7 +114,7 @@ try {
   check("logBroken stays true (no spurious reset)", host.live.get(SID)?.logBroken === true);
   check("the session is still alive after further post-break output", host.isAlive(SID) === true);
 
-  host.stop(SID, "hard");
+  host.stop(SID, "hard", { shell: true });
   check("the session still exits cleanly (kill -> onExit -> logStream.end()) with no new crash", uncaught.length === 0);
 } finally {
   process.off("uncaughtException", onUncaught);

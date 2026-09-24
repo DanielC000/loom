@@ -253,7 +253,7 @@ async function runTrial(label, { useDllFlag, mode, expectForkAtLeastOne, failOnC
   let parentGone = false;
   let childGone = true;
   try {
-    host.stop(id, mode);
+    host.stop(id, mode, { shell: true });
     stoppedIds.add(id);
 
     // ===== teardown: the process (and its real child, where one exists) genuinely gone, not just that
@@ -335,7 +335,7 @@ try {
     // Safety net only — every trial above already stops its own session in runTrial's try/finally.
     for (const id of ["conptydll-baseline-hard", "conptydll-dll-hard", "conptydll-baseline-graceful", "conptydll-dll-graceful"]) {
       if (stoppedIds.has(id)) continue;
-      try { host.stop(id, "hard"); } catch { /* best-effort cleanup */ }
+      try { host.stop(id, "hard", { shell: true }); } catch { /* best-effort cleanup */ }
     }
   }
 } catch (err) {

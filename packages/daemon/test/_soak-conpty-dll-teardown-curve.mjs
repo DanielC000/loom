@@ -87,7 +87,7 @@ async function runCycle(host, id) {
   // see OpenConsole.exe before trusting any post-kill sample of it.
   const openConsoleWhileAlive = await psChildProcessCountByName(process.pid, "OpenConsole.exe");
   const killedAt = Date.now();
-  host.stop(id, "hard"); // TerminateProcess
+  host.stop(id, "hard", { shell: true }); // TerminateProcess
   const deadline = killedAt + 15000;
   while (await psAlive(pid) && Date.now() < deadline) await sleep(50);
 

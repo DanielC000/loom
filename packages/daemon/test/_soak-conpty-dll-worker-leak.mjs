@@ -131,7 +131,7 @@ async function runCycle(host, id) {
   // OpenConsole.exe at all (only relevant/expected non-zero on the DLL arm; see soakArm's self-check).
   const openConsoleWhileAlive = await psChildProcessCountByName(process.pid, "OpenConsole.exe");
   const killedAt = Date.now();
-  host.stop(id, "hard"); // TerminateProcess — the DLL arm's kill() defers worker dispose to a 'data' event that (Start-Sleep) should never come
+  host.stop(id, "hard", { shell: true }); // TerminateProcess — the DLL arm's kill() defers worker dispose to a 'data' event that (Start-Sleep) should never come
   const deadline = killedAt + 15000;
   while (await psAlive(pid) && Date.now() < deadline) await sleep(50);
   // Card 579c88a9's dedicated multi-checkpoint curve soak (_soak-conpty-dll-teardown-curve.mjs) found the
