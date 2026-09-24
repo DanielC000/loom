@@ -25,6 +25,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { settleTracked } from "./_settle-tracked.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mcvc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -91,7 +92,7 @@ async function setupWorkerProject(sfx, reposDir) {
     runGate: async () => { gateCalls++; return { passed: false, failedStep: "test", failedStatus: 1, steps: [] }; },
   });
 
-  const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  const r1 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
   check("(same-identity) op 1 settled", r1.settled === true && r1.ok === true);
   check("(same-identity) op 1 was rejected (gate stub always fails)", r1.ok && r1.value.merged === false);
   check("(same-identity) op 1 announces genuinely-new (nothing cached yet)", r1.freshMint?.reason === "genuinely-new");
@@ -100,7 +101,7 @@ async function setupWorkerProject(sfx, reposDir) {
   // No new commits — main never moved (single-commit repo, no other branch touched it), the worker made no
   // further commits. A plain re-call with NOTHING changed must return the CACHED rejection, not run a
   // second real gate.
-  const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  const r2 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
   check("(same-identity) op 2 settled", r2.settled === true && r2.ok === true);
   check("(same-identity) the gate did NOT run a second time — POSITIVE CONTROL for the cache hit", gateCalls === 1);
   check("(same-identity) op 2 returns the SAME cached opId, not a fresh one", r2.ok && r1.ok && r2.value.opId === r1.value.opId);
@@ -125,7 +126,11 @@ async function setupWorkerProject(sfx, reposDir) {
   const reposDir = path.join(os.tmpdir(), `loom-mcvc-adv-${sfx}`);
   const { db, mgrId, workerId, repo, worktreePath, workerSha } = await setupWorkerProject(sfx, reposDir);
   let gateCalls = 0;
+  // GENEROUS per-instance sync budget (DI seam, NOT the production constant): op 1's own union-merge moves the
+  // branch identity, so a re-poll landing after op 1 settled would mint a SECOND op instead of re-attaching (see
+  // _settle-tracked.mjs's RE-MINT GUARD) — this fixture must not degrade in the first place.
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    syncAttachBudgetMs: 60_000,
     runGate: async () => { gateCalls++; return { passed: false, failedStep: "test", failedStatus: 1, steps: [] }; },
   });
 
@@ -135,7 +140,7 @@ async function setupWorkerProject(sfx, reposDir) {
   const mainShaAfterAdvance = headSha(repo);
   check("(identity-mismatch/main-advanced setup) main genuinely moved past the worker's branch point", mainShaAfterAdvance !== workerSha);
 
-  const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  const r1 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
   check("(identity-mismatch/main-advanced) op 1 settled", r1.settled === true && r1.ok === true);
   check("(identity-mismatch/main-advanced) op 1 was rejected (gate stub always fails)", r1.ok && r1.value.merged === false);
   check("(identity-mismatch/main-advanced) op 1 announces genuinely-new — nothing was cached before this call", r1.freshMint?.reason === "genuinely-new");
@@ -148,7 +153,7 @@ async function setupWorkerProject(sfx, reposDir) {
 
   // The worker pushed NOTHING new — this re-call's only difference from a plain poll is that the branch
   // tip moved underneath the cache, entirely via Loom's own prior confirm.
-  const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  const r2 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
   check("(identity-mismatch/main-advanced) op 2 settled", r2.settled === true && r2.ok === true);
   check("(identity-mismatch/main-advanced) the gate genuinely ran a SECOND time — this is real re-gating, not a cache replay", gateCalls === 2);
   check("(identity-mismatch/main-advanced) op 2 is a genuinely fresh op (different opId from op 1)", r2.ok && r1.ok && r2.value.opId !== r1.value.opId);
@@ -178,7 +183,7 @@ async function setupWorkerProject(sfx, reposDir) {
     runGate: async () => { gateCalls++; return { passed: false, failedStep: "test", failedStatus: 1, steps: [] }; },
   });
 
-  const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  const r1 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
   check("(identity-mismatch/own-commit) op 1 settled", r1.settled === true && r1.ok === true);
   check("(identity-mismatch/own-commit) op 1 was rejected (gate stub always fails)", r1.ok && r1.value.merged === false);
   check("(identity-mismatch/own-commit) op 1 announces genuinely-new — nothing was cached before this call", r1.freshMint?.reason === "genuinely-new");
@@ -191,7 +196,7 @@ async function setupWorkerProject(sfx, reposDir) {
   const shaAfterWorkerCommit = headSha(worktreePath);
   check("(identity-mismatch/own-commit setup) the worker's own new commit moved the branch tip", shaAfterWorkerCommit !== workerSha);
 
-  const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  const r2 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
   check("(identity-mismatch/own-commit) op 2 settled", r2.settled === true && r2.ok === true);
   check("(identity-mismatch/own-commit) the gate genuinely ran a SECOND time — this is real re-gating, not a cache replay", gateCalls === 2);
   check("(identity-mismatch/own-commit) op 2 is a genuinely fresh op (different opId from op 1)", r2.ok && r1.ok && r2.value.opId !== r1.value.opId);

@@ -34,6 +34,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { settleTracked } from "./_settle-tracked.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-morc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -86,7 +87,7 @@ const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
 
 // op1: a manager that does NOT own this worker calls confirm — a genuine, correct-at-the-time ownership
 // refusal. This is what must never get cached and replayed to someone else.
-const op1 = await sessions.confirmWorkerMergeTracked(wrongMgrId, workerId);
+const op1 = await settleTracked(() => sessions.confirmWorkerMergeTracked(wrongMgrId, workerId), { label: "op1" });
 check("(op1, wrong manager) settled", op1.settled === true);
 check("(op1, wrong manager) refused with a genuine ownership error, not some other failure", op1.settled && op1.ok === false && op1.error instanceof Error && op1.error.message === "not your worker");
 check("(op1, wrong manager) this is a genuinely fresh mint — nothing cached before this call", op1.settled && op1.freshMint?.reason === "genuinely-new");
@@ -97,7 +98,7 @@ check("(op1, wrong manager) no gate ever ran — the refusal fires before any gi
 // before the fix, this was served op1's cached "not your worker" rejection verbatim (same opId, a
 // cacheHit marker) even though this caller genuinely owns the worker. After the fix, this must run for
 // real and land a merge.
-const op2 = await sessions.confirmWorkerMergeTracked(rightMgrId, workerId);
+const op2 = await settleTracked(() => sessions.confirmWorkerMergeTracked(rightMgrId, workerId), { label: "op2" });
 check("(op2, rightful parent) settled", op2.settled === true);
 // THE CORE ASSERTION — verify the red would be for the RIGHT reason: a pre-fix run of this exact block
 // fails here specifically because op2.ok===false / op2.error.message==="not your worker", not because of

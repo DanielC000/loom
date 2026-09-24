@@ -60,6 +60,7 @@ import { execSync } from "node:child_process";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 import { deferred, waitUntil } from "./_wait.mjs";
+import { settleTracked } from "./_settle-tracked.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mciw-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -287,7 +288,7 @@ try {
     seed(db, F, { mgrProcessState: "live" }); // see seed()'s own doc — the r2 cache-reuse call can land while r1's real op is still running under host contention
     signals.fusion[F.workerId] = { gen: 1, spanGens: [0, 1], reportedLen: 30, intendedLen: 10, detectedAt: 1_000_000 };
 
-    const r1 = await sessions.confirmWorkerMergeTracked(F.mgrId, F.workerId);
+    const r1 = await settleTracked(() => sessions.confirmWorkerMergeTracked(F.mgrId, F.workerId), { label: "(F) op 1" });
     check("(F) op 1 settled + merged", r1.settled === true && r1.ok === true && r1.value.merged === true);
     check("(F) op 1 warning names gen=1", r1.ok && r1.value.warning?.includes("gen=1"));
     check("(F) op 1 announces genuinely-new (nothing cached yet)", r1.freshMint?.reason === "genuinely-new");
@@ -296,7 +297,7 @@ try {
     // session happening after the merge. A correct cache hit must NOT pick this up.
     signals.fusion[F.workerId] = { gen: 99, spanGens: [98, 99], reportedLen: 30, intendedLen: 10, detectedAt: 9_000_000 };
 
-    const r2 = await sessions.confirmWorkerMergeTracked(F.mgrId, F.workerId);
+    const r2 = await settleTracked(() => sessions.confirmWorkerMergeTracked(F.mgrId, F.workerId), { label: "(F) op 2" });
     check("(F) op 2 settled, same opId — CACHE HIT (no second gate/merge)", r2.settled === true && r2.ok === true && r2.value.opId === r1.value.opId);
     check("(F) op 2 carries NO freshMint — the cache-hit signal", r2.freshMint === undefined);
     check("(F) op 2's warning is the FROZEN gen=1 from op 1, NOT the mutated gen=99", r2.ok && r2.value.warning?.includes("gen=1") && !r2.value.warning?.includes("gen=99"));
