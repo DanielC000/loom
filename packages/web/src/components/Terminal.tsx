@@ -1,9 +1,9 @@
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
 import { getLoopbackToken } from "../lib/api";
-import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCredential";
+import { credentialLock, isCredentialSocketFailure, noteCredentialLock, subscribeCredentialLock } from "../lib/loopbackCredential";
 import { useIsCompanionSession } from "../lib/companionGuard";
 import "@xterm/xterm/css/xterm.css";
 import "./Terminal.css";
@@ -52,6 +52,19 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
   // Expose it via a ref so the budget-change effect below can re-invoke it WITHOUT re-running the
   // attach effect (which would tear down + rebuild the websocket).
   const applyFontSizeRef = useRef<(() => void) | null>(null);
+
+  // Card 093981dd: a pane that died on the credential guard must RE-ATTACH once the user unlocks, or it
+  // sits blank forever pointing at a banner that is no longer on screen. Watch the lock and bump a nonce
+  // on the locked -> unlocked transition only; the nonce is in the attach effect's deps, so the socket is
+  // rebuilt exactly once per unlock and never on the lock-being-SET edge (which would tear down a pane
+  // mid-failure for no benefit).
+  const lock = useSyncExternalStore(subscribeCredentialLock, credentialLock, () => null);
+  const prevLock = useRef(lock);
+  const [reattachNonce, setReattachNonce] = useState(0);
+  useEffect(() => {
+    if (prevLock.current !== null && lock === null) setReattachNonce((n) => n + 1);
+    prevLock.current = lock;
+  }, [lock]);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -276,7 +289,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       else ws.close();
       term.dispose();
     };
-  }, [sessionId, resizable, readOnly]);
+  }, [sessionId, resizable, readOnly, reattachNonce]);
 
   // Re-scale the font on a heightBudget CHANGE (HUG mode only — FILL passes a constant `undefined`, so
   // this never fires there). The budget GROWS when below-terminal chrome is reclaimed — most visibly

@@ -131,9 +131,14 @@ check("the guard answers FALSE while the session store is still resolving (a tes
 // writable PERMANENTLY for that mount, not briefly, and the window above would stop being harmless.
 check("TerminalPane's attach effect re-runs when the resolved flag flips", () => {
   const src = read("../src/components/Terminal.tsx");
-  assert.match(src, /\}\s*,\s*\[\s*sessionId\s*,\s*resizable\s*,\s*readOnly\s*\]\s*\)/,
+  // Pinned EXACTLY, not as a "contains readOnly" check: the deps list is the thing that decides when a
+  // live websocket is torn down and rebuilt, so any change to it deserves a deliberate review point.
+  // `reattachNonce` joined the list on card 093981dd (re-attach a pane that died on the credential guard,
+  // once the user unlocks). If you add another dep, widen this literal and say why — do not relax it into
+  // a substring match, which would stop noticing an over-broad dep such as `heightBudget`.
+  assert.match(src, /\}\s*,\s*\[\s*sessionId\s*,\s*resizable\s*,\s*readOnly\s*,\s*reattachNonce\s*\]\s*\)/,
     "the attach effect must list the DERIVED `readOnly` in its dependency array so xterm is rebuilt with " +
-    "disableStdin once the companion guard resolves");
+    "disableStdin once the companion guard resolves (and `reattachNonce`, so an unlock re-attaches)");
 });
 
 console.log(`\n${pass} passed — a companion's terminal is watch-only from every route; everything else is unchanged`);

@@ -1,48 +1,50 @@
 # 093981dd — the "writes are locked" credential state in the web UI
 
-Anchors: `packages/web/src/lib/loopbackCredential.ts`, `packages/web/src/components/CredentialBanner.tsx`.
-
 ## The problem this state exists for
 
-The daemon's loopback write guard (`gateway/server.ts`) requires `Authorization: Bearer <secret>` on every non-GET `/api/*`, plus the `/ws/term` and `/ws/companion` upgrades, for any caller arriving on the **loopback interface**. `loom open` (`bin/loom.mjs`, `urlWithToken`) embeds that secret as `?token=` in the URL it opens **on the host**, and `captureTokenFromUrl` is the only thing that ever puts it into localStorage.
+The loopback write guard (`gateway/server.ts`) requires `Authorization: Bearer <secret>` on every non-GET `/api/*` plus the `/ws/term` and `/ws/companion` upgrades, for any caller on the **loopback interface**. `loom open` embeds that secret as `?token=` in the URL it opens **on the host**; `captureTokenFromUrl` is the only thing that puts it into localStorage.
 
-A browser that reached the daemon through a **tunnel** — `ssh -L`, or any host-local reverse proxy, which is the path `site/remote-access.html` recommends — presents a loopback socket to the daemon while having its own separate origin storage. So it holds no token. The result, traced at source on this card: reads render fine, every write 401s, and both WebSocket panes fail their upgrade. Two things made that worse than a plain permission error:
+A browser reaching the daemon through an `ssh -L` **tunnel** presents a loopback socket while having its own origin storage, so it holds no token: reads render, every write 401s, both WebSocket panes fail their upgrade. Two things made that worse than a plain permission error — the guard's 401 says "see `loom open`", which that browser cannot run because the daemon is elsewhere; and `Terminal.tsx`/`CompanionChat.tsx` had no `onerror`/`onclose`, so a rejected upgrade was a permanently blank pane.
 
-- The guard's own 401 text says "see `loom open`" — but that browser **cannot** run `loom open`, because the daemon isn't on that machine. The one piece of guidance the user got pointed at the one thing that could not help.
-- `Terminal.tsx` and `CompanionChat.tsx` had no `onerror`/`onclose` handler at all, so a rejected upgrade rendered as a permanently blank pane with no message anywhere.
+The asymmetry: a **genuinely remote** socket skips this guard (`if (!LOOPBACK.has(ip)) return;`) and uses a gateway token instead. Only a tunnel both looks loopback *and* cannot obtain the secret.
 
-Note the asymmetry that makes tunnelling the uniquely trapped case: a **genuinely remote** socket skips the loopback guard entirely (`if (!LOOPBACK.has(ip)) return;`) and is authorized by a gateway token instead. Only a tunnel both looks loopback *and* has no way to obtain the loopback secret.
+Scope, measured here: a **reverse-proxied** origin (Tailscale Serve) is refused EARLIER by the CSRF/Host hook — `Host: x.ts.net` 403s every route including the SPA, and a browser `Origin` 403s every write even with a valid credential. This state cannot help that case, and stays silent for it (a 403 carries no pointer).
 
 ## Do not prompt for the credential unprompted, or print the secret
 
-The banner is reachable **only** from an observed refusal — a guard 401, or a rejected upgrade on a browser holding no token at all. Do not render the paste field on a browser that already holds a token: a healthy host browser captured one from `loom open`'s URL and must never be asked for it.
+The banner is reachable **only** from an observed refusal. Do not render the paste field merely *because* a browser holds no token — a healthy host browser is never asked, because nothing refused it.
 
-Do not print or embed the secret value anywhere in the instruction copy. The banner names the *file path* to read it from on the host, never the value — the same reasoning `bin/loom.mjs` documents for keeping `urlWithToken` out of `console.log` (a service manager captures a foregrounded service's stdout into a durable, broadly-readable log).
+Easy to over-tighten: a browser can hold a **wrong or stale** credential (two daemons with different `LOOM_HOME`s on one port; a rotated secret) and must still get the field, since pasting the right one is the recovery. Do not gate it on `getLoopbackToken() === null` — the gate is the refusal, not the absence of a token. Only the *wording* varies.
+
+Do not print or embed the secret value in the copy. The banner names the *file path* to read on the host, never the value — the reasoning `bin/loom.mjs` documents for keeping `urlWithToken` out of `console.log` (service managers capture stdout into durable, broadly-readable logs).
+
+## Do not verify a pasted credential with a read
+
+Clearing the lock requires a **guarded** round-trip. `invalidateQueries()` cannot serve as the check: the guard exempts GET/HEAD, so reads succeed without a credential — a wrong paste would clear the banner silently, with the UI claiming it was fixed. An earlier revision shipped exactly that comment, and that bug.
+
+The probe is `POST /api/agents/<fresh uuid>` with an empty patch. Three layers make it inert, all checked live: an **update-by-id** route, so no create path exists even if validation loosens; a fresh v4 uuid cannot name a real agent, so the 404 is structural; and an empty patch is a verified no-op even against a real id (200, zero fields changed). 401 ⇒ rejected. **403** ⇒ the CSRF/Host hook refused us before the guard ran, so the credential is *unverified*. Neither clears the lock.
 
 ## Why the matcher is coupled to the daemon's 401 text
 
 `isCredentialGuardFailure` keys off the literal substring `loom open` in the 401 body. That coupling is deliberate and load-bearing, because the server already draws exactly the distinction the UI needs:
 
-| 401 source | message | does a credential help? |
-| --- | --- | --- |
-| loopback guard (Bearer branch and WS branch) | ``unauthorized — see `loom open` for how to obtain the local access credential`` | **yes** |
-| loopback guard, undeterminable peer address | `unauthorized — peer address undeterminable` | no — and its own comment says the `loom open` pointer is omitted *because* no credential rescues it |
-| trust-tier wall (a genuinely remote socket) | bare `unauthorized` | no — that caller skips this guard and needs a gateway token |
+- loopback guard, Bearer + WS branches → ``unauthorized — see `loom open` …`` ⇒ **a credential helps**.
+- loopback guard, undeterminable peer → `unauthorized — peer address undeterminable`. Its own comment says the pointer is omitted *because* no credential rescues it.
+- trust-tier wall, genuinely remote → bare `unauthorized`. That caller needs a gateway token.
 
-So matching the `loom open` pointer selects precisely the cases where pasting a credential fixes the problem, by the server's own deliberate distinction rather than by coincidence.
-
-A machine-readable discriminator on the 401 body would be sturdier than a substring match. That is a **daemon** change and this card was scoped web-only; if one is ever added, switch to it and delete the matcher.
+So the pointer selects precisely the helpable cases, by the server's own distinction rather than by coincidence. A machine-readable discriminator on the 401 body would be sturdier; that is a **daemon** change, out of this card's web-only scope. If one lands, switch to it and delete the matcher.
 
 ## Do not widen the matcher to a bare status check
 
-Do not reduce `isCredentialGuardFailure` to `status === 401`. That re-introduces misdirection for remote and undeterminable-peer callers, for whom this secret is the wrong credential or no help at all — the same class of bug this card was filed to remove. `packages/web/test/loopback-credential.mjs` pins all three message shapes and goes red on exactly this widening.
+Do not reduce `isCredentialGuardFailure` to `status === 401`. That re-introduces misdirection for remote and undeterminable-peer callers, for whom this secret is the wrong credential or no help at all — the bug this card was filed to remove. `test/loopback-credential.mjs` pins all three message shapes and goes red on exactly this widening.
 
 ## Why a failed socket is a weaker signal than a failed write
 
-A browser cannot read an upgrade's HTTP status: a guard 401 and a dead daemon both surface as an abnormal close. `isCredentialSocketFailure` therefore infers the lock from the two facts the client does hold — the socket never reached `open` (so the handshake itself was rejected, not a mid-session drop), and this browser holds no token at all.
+A browser cannot read an upgrade's HTTP status: a guard 401 and a dead daemon both look like an abnormal close. `isCredentialSocketFailure` infers the lock from the two facts it holds — the handshake never reached `open`, and this browser has no token. Two limits, opposite directions:
 
-That inference has a stated false-positive: the guard is optional-dep-gated, so a daemon running **without** it needs no token, and a genuine connection failure there also has `token === null`. The socket-sourced copy is written conditionally ("if you reached this daemon through a tunnel") for exactly that reason.
+- **False positive.** The guard is optional-dep-gated, so a daemon running **without** it needs no token and a genuine connection failure there also has `token === null`. Hence the conditional copy ("if you reached this daemon through a tunnel").
+- **False negative.** A browser holding a **wrong/stale** token fails the upgrade for a real credential reason, but `token === null` is false, so no banner appears — just "could not connect to this session". Deliberate: guessing "credential" on every failed attach would show the field to everyone whose daemon merely stopped. Recovery: any *write* from that browser 401s and arms the banner properly.
 
 ## Do not let an inferred lock overwrite an observed one
 
-`noteCredentialLock` refuses a `write` → `socket` downgrade on purpose. The refused write is a direct observation; the refused socket is inferred, with the false-positive above. Once the strong signal exists, its wording is what stays on screen.
+`noteCredentialLock` refuses a `write` → `socket` downgrade on purpose: the refused write is observed, the refused socket inferred (see the limits above). Once the strong signal exists, its wording stays.

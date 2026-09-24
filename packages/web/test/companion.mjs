@@ -23,6 +23,10 @@ import {
 // same file would be hoisted and resolved before `register()` ever runs.
 register("./_tsxLoaderHook.mjs", import.meta.url);
 const { api } = await import("../src/lib/api.ts");
+// Card 093981dd: the credential-lock WIRING is exercised here rather than in loopback-credential.mjs,
+// because this is the file that already drives the REAL api.ts against a mocked fetch — the unit test
+// can only reach the predicates, never the guardedFetch chokepoint that has to call them.
+const { credentialLock, resetCredentialLockForTest } = await import("../src/lib/loopbackCredential.ts");
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -373,5 +377,38 @@ function maskedRow() {
     updatedAt: "2026-07-01T00:00:00.000Z",
   };
 }
+
+// ── credential-lock wiring through the real api.ts fetch chokepoint (card 093981dd) ────────────────
+// A 401 body is only reachable off a `clone()`, which is what guardedFetch uses so the caller's own body
+// stays unread — so the mock has to honour that much of the Response contract.
+const res401 = (error) => ({
+  ok: false, status: 401,
+  json: async () => ({ error }),
+  clone: () => ({ json: async () => ({ error }) }),
+});
+// guardedFetch arms the lock off the cloned body WITHOUT awaiting it (it must not delay the caller), so
+// let that microtask land before asserting.
+const settle = () => new Promise((r) => setTimeout(r, 0));
+const GUARD_401 = "unauthorized — see `loom open` for how to obtain the local access credential";
+
+await acheck("a guard 401 on a real api WRITE arms the credential lock", async () => {
+  resetCredentialLockForTest();
+  globalThis.fetch = async () => res401(GUARD_401);
+  await assert.rejects(() => api.provisionCompanion({ name: "x" }));
+  await settle();
+  assert.equal(credentialLock(), "write",
+    "the write path must arm the banner — if this is null, api.ts stopped routing through guardedFetch");
+  resetCredentialLockForTest();
+});
+
+await acheck("a trust-tier 401 (bare `unauthorized`) does NOT arm it", async () => {
+  resetCredentialLockForTest();
+  globalThis.fetch = async () => res401("unauthorized");
+  await assert.rejects(() => api.provisionCompanion({ name: "x" }));
+  await settle();
+  assert.equal(credentialLock(), null,
+    "a remote caller needs a gateway token, not this secret — offering the paste field would misdirect");
+  resetCredentialLockForTest();
+});
 
 console.log(`\n${pass} passed`);

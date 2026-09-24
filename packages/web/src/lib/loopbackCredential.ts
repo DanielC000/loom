@@ -82,8 +82,9 @@ export function isCredentialGuardMessage(message: string): boolean {
 
 /**
  * The shared `onError` for a mutation that alerts its raw message at its own call site, bypassing the
- * global handler in main.tsx. Byte-identical to the old inline `window.alert((e as Error).message)` for
- * every error EXCEPT the credential guard's, which the banner owns.
+ * global handler in main.tsx. Byte-identical for every Error except the credential guard's, which the
+ * banner owns. (A non-Error rejection is stringified here, where the old inline `(e as Error).message`
+ * would have read `undefined` — a deliberate improvement, not a byte-identical case.)
  *
  * @decision 093981dd — a mutation that alerts at its own call site must use THIS, not `window.alert`
  * directly, or a token-less browser gets the daemon's unrunnable "see `loom open`" advice once per
@@ -105,6 +106,37 @@ export function alertUnlessCredentialGuard(e: unknown): void {
  */
 export function isCredentialSocketFailure(everOpened: boolean, token: string | null): boolean {
   return !everOpened && token === null;
+}
+
+/**
+ * Prove a candidate credential against the daemon BEFORE storing it, by sending the cheapest guarded
+ * request that cannot change anything. `invalidateQueries()` can NOT do this job: the guard exempts
+ * GET/HEAD entirely, so every read succeeds without a credential and a wrong paste would clear the
+ * banner silently.
+ *
+ * The probe is `POST /api/agents/<fresh uuid>` with an empty patch — an UPDATE-by-id route, so there is
+ * no create path to trip even if its validation ever loosens; a fresh v4 uuid cannot name a real agent,
+ * so the 404 is structural; and an empty patch is a verified no-op even against a REAL id. All three
+ * were checked against a live daemon on card 093981dd.
+ *
+ * 401 ⇒ the guard rejected this credential. 403 ⇒ the CSRF/Host hook refused us BEFORE the guard ever
+ * ran (a reverse-proxied origin), so the credential is simply UNVERIFIED — either way we must not treat
+ * it as good. Anything else means the guard let us through.
+ *
+ * @decision 093981dd — never "verify" a pasted credential with a GET, and never clear the lock without
+ * a guarded round-trip: reads are ungated, so a GET proves nothing about whether writes will work.
+ */
+export async function verifyLoopbackToken(token: string): Promise<boolean> {
+  try {
+    const r = await fetch(`/api/agents/${crypto.randomUUID()}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token.trim()}` },
+      body: "{}",
+    });
+    return r.status !== 401 && r.status !== 403;
+  } catch {
+    return false; // network failure — unverified, so the lock stays
+  }
 }
 
 /** What put the UI into the locked state — a refused write, or a refused socket upgrade. */
