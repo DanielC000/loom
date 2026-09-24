@@ -10,10 +10,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // This induces a REAL hang — a genuine `git commit` child process blocked inside an actual pre-commit
 // hook (`sleep`), not a mocked/injected promise — so the proof exercises the ACTUAL production code path
 // (real `simple-git` spawn, real block-timeout kill, real repo state afterward), matching how a wedged
-// hook would hang in production. The hook is ONE-SHOT (a marker file gates it): it hangs on the FIRST
-// commit against this repo, then passes through instantly on any later commit — modeling a transient wedge
-// (a stuck lock, a disk hiccup), not a permanently broken hook, and letting the SECOND merge below be a
-// real, un-hung commit.
+// hook would hang in production. The hook hangs ONLY when the staged commit carries branch-a's file
+// (`file-a.txt`), so op1's commit hangs and op2's (branch-b, never `file-a.txt`) passes instantly — a
+// CONTENT-keyed discriminator, letting the SECOND merge below be a real, un-hung commit. It replaced a
+// one-shot marker file (`touch .git/hang-fired`) that assumed op1's hook always ran before op1's 500ms
+// kill: under host load the kill lands BEFORE the hook starts, the marker is never written, and op2's
+// commit then hit the still-armed hook and was killed at the 15s git-op bound (card 82549d79; reproduced
+// 12/12 under CPU load, marker absent after op1).
 //
 // RED PROOF (see the worker's own report for the exact observed output): reverting ONLY
 // `git/worktrees.ts` and re-running this unchanged test shows op1 taking the hook's FULL ~5s sleep instead
@@ -47,7 +50,7 @@ const HOOK_SLEEP_S = 20; // long enough to be unambiguously distinct from BOUND_
                           // quickly rather than lingering — no PID-tracking cleanup needed. Raising this
                           // is FREE on the green path: op1 is still killed at its own real BOUND_MS
                           // regardless of how long the hook would sleep, and op2 never waits on the sleep
-                          // at all (marker-file-gated — op1's hook writes the marker within ms of firing).
+                          // at all (content-gated: op2's staged tree has no file-a.txt).
 const BOUND_MS = 500; // this op's own configured timeout — comfortably < HOOK_SLEEP_S so the split is
                        // unambiguous, and comfortably > typical real-op latency so it isn't itself flaky.
 const GUARD_MS = 30_000; // this TEST's own patience for "did the op ever settle" — deliberately ABOVE
@@ -88,7 +91,7 @@ function makeWorktree(repo, branch, file, content) {
 // Windows invokes a shebang script via its bundled sh regardless of the exec bit; chmod is for POSIX hosts).
 function installHangingHook(repo) {
   const hookPath = path.join(repo, ".git", "hooks", "pre-commit");
-  fs.writeFileSync(hookPath, `#!/bin/sh\nif [ -f .git/hang-fired ]; then\n  exit 0\nfi\ntouch .git/hang-fired\nsleep ${HOOK_SLEEP_S}\n`);
+  fs.writeFileSync(hookPath, `#!/bin/sh\nif git diff --cached --name-only | grep -q '^file-a.txt$'; then\n  sleep ${HOOK_SLEEP_S}\nfi\nexit 0\n`);
   fs.chmodSync(hookPath, 0o755);
 }
 
@@ -109,10 +112,9 @@ try {
   const op1 = mergeBranch(repo, "loom/hang-a", "Card A title", { timeoutMs: BOUND_MS });
 
   // Op2: fired immediately after, for a DIFFERENT branch of the SAME repo — real git, default deps.
-  // withCanonicalIndexLock queues this behind op1 (same canonical repo path). By the time op2's OWN commit
-  // step runs (after op1 settles and op2's squash/checks complete), the hook's marker is already written
-  // (op1's hook wrote it within milliseconds of starting, long before op1's own bounded timeout elapses),
-  // so op2's commit passes the hook instantly and is a normal, unhung merge.
+  // withCanonicalIndexLock queues this behind op1 (same canonical repo path). op2's staged tree never
+  // contains file-a.txt, so its commit passes the hook instantly and is a normal, unhung merge whether or
+  // not op1's hook got to run before op1's kill.
   const op2 = mergeBranch(repo, "loom/hang-b", "Card B title");
 
   const op1Result = await Promise.race([op1, guard(GUARD_MS, "op1")]);
