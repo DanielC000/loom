@@ -74,8 +74,8 @@ export function CodexDefaultConfirm({ layer, scopeNote, onCancel, onConfirm }: {
           Make Codex CLI the {layer === "platform" ? "fleet-wide" : "project"} default?
         </span>
         <span style={{ fontFamily: font.mono, fontSize: 12, lineHeight: 1.6, color: color.textDim }}>
-          New {scopeNote} will spawn the codex binary instead of claude, unless their own profile pins a
-          harness. Two things are not settled yet:
+          This applies to {scopeNote}: they will spawn the codex binary instead of claude, unless their own
+          profile pins a harness. Two things are not settled yet:
         </span>
         <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 7 }}>
           <li style={{ fontFamily: font.mono, fontSize: 12, lineHeight: 1.6, color: color.amber }}>
@@ -137,7 +137,7 @@ export function HarnessDrainBanner({ projectId }: { projectId?: string }) {
   if (isError || !data) {
     return <DrainNote tone={color.red}>{(error as Error)?.message ?? "failed to load /api/harness/drain"}</DrainNote>;
   }
-  return <DrainReadout data={data} />;
+  return <DrainReadout data={data} scoped={projectId !== undefined} />;
 }
 
 /**
@@ -146,17 +146,29 @@ export function HarnessDrainBanner({ projectId }: { projectId?: string }) {
  * you wait: its row carries fields codex cannot honour, so the recycle keeps its old harness deliberately.
  * Folding the two into one count would tell the owner to wait for something that is never going to happen.
  */
-function DrainReadout({ data }: { data: HarnessDrainStatus }) {
+function DrainReadout({ data, scoped }: { data: HarnessDrainStatus; scoped: boolean }) {
+  // 🔴 `target` IS NOT EVERY LISTED ROW'S DESTINATION, and saying so was this banner's first real defect
+  // (caught by eyeballing, not by a test — the project-scoped case the e2e covers has the two agreeing).
+  // The endpoint's own doc is explicit: `target` is the worker-role default THIS SCOPE resolves to and is
+  // informational, while `pending` is decided PER SESSION by re-resolving each one through the real spawn
+  // path. In FLEET scope those diverge the moment any project carries its own override — a project-level
+  // codex default makes its claude worker pending while the fleet target is still claude, which read as
+  // "Draining to Claude Code … runs claude". So the headline names the POPULATION, never a destination,
+  // and the scope default is stated separately with its caveat.
+  const scopeLine = scoped
+    ? `Target: ${HARNESS_TITLE[data.target]} — this project's default.`
+    : `Fleet default: ${HARNESS_TITLE[data.target]}. A project can override it, so a session listed here may be heading somewhere else.`;
   // `done` is the endpoint's OWN verdict (pending AND blocked both empty) — read it rather than
   // re-deriving it from the two arrays, so this banner can never disagree with the daemon about it.
   if (data.done) {
     return (
       <div data-testid="harness-drain" data-done="true" role="status"
         style={{ border: `1px solid ${color.phosphorDim}`, borderRadius: radius.base, padding: "8px 10px",
-          background: color.panel2 }}>
+          background: color.panel2, display: "flex", flexDirection: "column", gap: 4 }}>
         <span style={{ fontFamily: font.mono, fontSize: 12, color: color.phosphor, lineHeight: 1.6 }}>
-          Drained — every live session in scope already runs {HARNESS_TITLE[data.target]}.
+          Drained — every live session in scope already runs the harness a fresh spawn would pick for it.
         </span>
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.6 }}>{scopeLine}</span>
       </div>
     );
   }
@@ -166,10 +178,11 @@ function DrainReadout({ data }: { data: HarnessDrainStatus }) {
       style={{ border: `1px solid ${accent}`, borderRadius: radius.base, padding: "8px 10px",
         background: color.panel2, display: "flex", flexDirection: "column", gap: 8 }}>
       <span style={{ fontFamily: font.mono, fontSize: 12, color: accent, lineHeight: 1.6 }}>
-        Draining to {HARNESS_TITLE[data.target]} — {data.pending.length} session
-        {data.pending.length === 1 ? "" : "s"} still to move
-        {data.blocked.length > 0 ? `, ${data.blocked.length} that never will` : ""}.
+        {data.pending.length} session{data.pending.length === 1 ? "" : "s"} still to move onto the harness a
+        fresh spawn would pick{data.blocked.length > 0 ? `, ${data.blocked.length} that never will` : ""}.
       </span>
+      <span data-testid="harness-drain-scope"
+        style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.6 }}>{scopeLine}</span>
       {data.pending.length > 0 && (
         <div data-testid="harness-drain-pending" style={{ display: "flex", flexDirection: "column", gap: 3 }}>
           <span style={{ fontFamily: font.mono, fontSize: 10, letterSpacing: "0.07em", textTransform: "uppercase", color: color.amber }}>

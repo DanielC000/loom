@@ -87,7 +87,7 @@ test.describe("default harness settings", () => {
     await pinActiveProject(page, project.id);
     await page.goto(`${loomDaemon.baseURL}/settings`);
 
-    const sel = selectIn(page, "platform", "Default harness");
+    const sel = selectIn(page, "platform", "Vendor CLI");
     await expect(sel).toBeVisible();
 
     // BEFORE — fixture identity: nothing stored at this layer, and the control agrees.
@@ -122,7 +122,7 @@ test.describe("default harness settings", () => {
 
     // …and a reload re-seeds the control from the persisted override, not from optimistic client state.
     await page.reload();
-    await expect(selectIn(page, "platform", "Default harness")).toHaveValue("codex");
+    await expect(selectIn(page, "platform", "Vendor CLI")).toHaveValue("codex");
     await expect(panelOf(page, "platform")).toContainText("effective: Codex CLI");
   });
 
@@ -138,7 +138,7 @@ test.describe("default harness settings", () => {
     });
 
     await page.goto(`${loomDaemon.baseURL}/settings`);
-    const sel = selectIn(page, "platform", "Default harness");
+    const sel = selectIn(page, "platform", "Vendor CLI");
     await expect(sel).toHaveValue("codex");
 
     await sel.selectOption("claude");
@@ -198,7 +198,7 @@ test.describe("default harness settings", () => {
     await expect(panel.getByTestId("harness-drain")).toHaveAttribute("data-done", "true");
 
     // ACT — flip this project's default to codex, through the same confirm the platform layer uses.
-    const sel = selectIn(page, "project", "Default harness");
+    const sel = selectIn(page, "project", "Vendor CLI");
     await expect(sel).toHaveValue("");
     await sel.selectOption("codex");
     const projectSave = page.getByRole("button", { name: "Save", exact: true }).first();
@@ -226,8 +226,24 @@ test.describe("default harness settings", () => {
     const drain = panel.getByTestId("harness-drain");
     await expect(drain).toHaveAttribute("data-done", "false");
     await expect(panel.getByTestId("harness-drain-pending")).toContainText(worker.sessionId.slice(0, 8));
-    await expect(drain).toContainText("Draining to Codex CLI");
     await expect(drain).toContainText("1 session still to move");
+    // ── The headline names the POPULATION, never a destination, and the scope default is stated
+    // separately with its own caveat. This pair is a REGRESSION PIN, found by eyeballing rather than by a
+    // test: the banner originally read "Draining to {target}", and `target` is NOT every listed row's
+    // destination. In FLEET scope they diverge exactly as they do right here — this project now defaults
+    // to codex, so its claude worker is pending, while the FLEET default is still claude. The old copy
+    // rendered that as "Draining to Claude Code … runs claude", a session listed as moving to the harness
+    // it already runs. The project-scoped case alone could never catch it, because there the scope default
+    // and the per-session answer always agree.
+    await expect(drain.getByTestId("harness-drain-scope")).toContainText("Target: Codex CLI");
+    await expect(drain.getByTestId("harness-drain-scope")).toContainText("this project's default");
+
+    const fleetDrain = panelOf(page, "platform").getByTestId("harness-drain");
+    await expect(fleetDrain).toHaveAttribute("data-done", "false");
+    await expect(fleetDrain.getByTestId("harness-drain-scope")).toContainText("Fleet default: Claude Code");
+    await expect(fleetDrain.getByTestId("harness-drain-scope")).toContainText("may be heading somewhere else");
+    // …and it must NOT present that fleet default as where the listed session is going.
+    await expect(fleetDrain).not.toContainText("Draining to");
     // Nothing is blocked, so that group must not render at all — otherwise "blocked" could be an empty
     // heading that always shows and the next test would prove nothing.
     await expect(panel.getByTestId("harness-drain-blocked")).toHaveCount(0);

@@ -3227,7 +3227,7 @@ function DefaultHarnessFields({ value, scope, setValue, setScope, effective, inh
   return (
     <div className="loom-field-grid loom-field-grid-2">
       <label style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
-        <span style={fieldLabel}>Default harness</span>
+        <span style={fieldLabel}>Vendor CLI</span>
         <Select value={value} onChange={(e) => setValue(e.target.value as DefaultValue)}>
           <option value="">inherit ({HARNESS_TITLE[inherited.default]})</option>
           <option value="claude">{HARNESS_TITLE.claude}</option>

@@ -77,7 +77,7 @@ async function expandFleetCard(page: Page, baseURL: string, projectName: string)
 const fleetRow = (page: Page, label: string) => page.getByText(label, { exact: true }).locator("xpath=..");
 
 test.describe("session harness in the fleet views", () => {
-  test("Mission Control badges the codex row and leaves the claude and unset rows unmarked", async ({ page, loomDaemon }) => {
+  test("Mission Control names each row's own harness in a mixed view, and the unset row reads exactly like the claude one", async ({ page, loomDaemon }) => {
     const { manager, claudeWorker, codexWorker } = await seedTrio(loomDaemon);
 
     // ── Fixture identity + the wire. All three rows must come back off /api/sessions carrying exactly the
