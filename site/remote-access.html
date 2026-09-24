@@ -132,31 +132,36 @@
           </div>
 
           <div class="callout reveal">
-            <p class="callout-title"><span class="dot dot-amber"></span> One extra step on each new device — do it first</p>
+            <p class="callout-title"><span class="dot dot-amber"></span> One extra step on each new device</p>
             <p>
               Loom's loopback API requires a <strong>local access credential</strong>
               on every write and on the terminal socket, even over a tunnel. On the
               host, <code>loom open</code> appends it for you; a tunnelled browser
-              has never seen it. <strong>Skip this step and the cockpit looks
-              broken rather than locked:</strong> the page loads and reads fine,
-              but every action fails with
-              <em>"unauthorized — see <code>loom open</code> for how to obtain the
-              local access credential"</em>, and every terminal pane stays blank —
-              and <code>loom open</code>, the one thing that message tells you to
-              run, is a command on the <em>host</em>, not on the device you're
-              holding. Fix it once per device by opening the URL with the token
-              appended; the browser stores it and strips it from the address bar:
+              has never seen it — so it arrives in a
+              <strong>writes-locked</strong> state rather than a broken one. The
+              cockpit loads and reads normally, a banner tells you writes are locked
+              and gives you a field to paste the credential into, and each terminal
+              or companion pane carries a reason line instead of sitting blank.
+              Paste it and the write you were locked out of goes through; paste a
+              wrong or stale one and the banner tells you that credential was
+              refused.
+            </p>
+            <p>
+              The credential is the contents of
+              <code>gateway-loopback.key</code> under <code>LOOM_HOME</code>
+              (<code>~/.loom/gateway-loopback.key</code> by default), read off the
+              <strong>host</strong> — the machine running Loom, not the one you're
+              sitting at. Paste it once per browser, or supply it once in the URL
+              instead:
             </p>
             <p>
               <code>http://127.0.0.1:4317/?token=&lt;credential&gt;</code>
             </p>
             <p>
-              The credential is the contents of
-              <code>~/.loom/gateway-loopback.key</code> (under
-              <code>LOOM_HOME</code>) on the host running Loom. It's stored per
-              browser <em>origin</em>, so each URL you reach the cockpit by needs it
-              once of its own. Treat it like a password: anything holding it can
-              drive the full loopback API.
+              Either way the browser keeps it and strips it from the address bar.
+              It's stored per browser <em>origin</em>, so each URL you reach the
+              cockpit by needs it once of its own. Treat it like a password:
+              anything holding it can drive the full loopback API.
             </p>
           </div>
 
@@ -176,15 +181,22 @@
             <p>
               <code>tailscale serve --bg 4317</code> is the same shape as the SSH
               forward and was recommended on this page previously. It does not
-              currently work, and the reason is on Loom's side, not Tailscale's.
-              The daemon's CSRF guard refuses any request whose <code>Origin</code>
-              isn't loopback, before it looks at anything else — and a browser on
-              <code>https://your-machine.your-tailnet.ts.net</code> sends exactly
-              that origin on every write and every WebSocket upgrade, so both come
-              back <code>403</code>. The DNS-rebinding guard applies the same rule
-              to the <code>Host</code> header on plain reads, so depending on how
-              Serve proxies it the cockpit may not load at all. Use the SSH forward
-              above until this is fixed.
+              currently work, and the reason is on Loom's side, not Tailscale's —
+              nor is it the credential step above, which is refused
+              <em>later</em> than this, so the writes-locked banner never gets a
+              chance to help. Two guards sit ahead of everything else, both keyed
+              to loopback: the CSRF guard rejects a request whose
+              <code>Origin</code> isn't loopback with
+              <code>403 cross-origin request refused</code>, and the DNS-rebinding
+              guard rejects one whose <code>Host</code> isn't with
+              <code>403 host header not allowed</code>. A browser on
+              <code>https://your-machine.your-tailnet.ts.net</code> sends that
+              hostname in both, so every write and every WebSocket upgrade is
+              refused outright — and a proxy that forwards the original
+              <code>Host</code>, which is the usual behaviour, is refused on plain
+              reads too, before the page renders. The same applies to any other
+              reverse proxy in front of the daemon. Use the SSH forward above until
+              this is fixed.
             </p>
             <p>
               This is about <em>Serve as a proxy in front of a loopback daemon</em>.
@@ -387,17 +399,26 @@
               A remote request is deliberately limited to a read-and-steer surface:
               the read-only views, the answer/steer actions on an already-running
               session (answer a question, send input, stop, resume, end), and the
-              live session sockets — the terminal and companion streams plus a
-              fleet-status feed. Those sockets are <strong>read-only to a remote
-              peer</strong>: stdin only ever arrives over the governed REST input
-              route, and a host shell isn't reachable remotely at all. Everything
-              else — the web app's own routes, vault and git writers, the internal
-              control endpoints, the MCP mounts, and even the gateway-token admin
-              itself — stays <strong>loopback-only by construction</strong>. A valid
-              remote token can never mint, rotate, or revoke tokens over the wire;
-              only the human at the local machine can. Remote requests are also
-              rate-limited per IP and per token, with an automatic lockout after
-              repeated auth failures; loopback traffic is exempt.
+              live session sockets — the terminal stream
+              (<strong>view-only to a remote peer</strong>: nothing but a repaint
+              goes down it, steering goes through the governed REST input route,
+              and a <strong>host shell is never reachable remotely</strong>, on
+              that socket or through the REST input and stop routes), the companion
+              chat stream, and a fleet-status feed. Everything else — the web app's
+              own routes, vault and git writers, the internal control endpoints, the
+              MCP mounts, and even the gateway-token admin itself — stays
+              <strong>loopback-only by construction</strong>. A valid remote token
+              can never mint, rotate, or revoke tokens over the wire; only the human
+              at the local machine can. Remote requests are also rate-limited per IP
+              and per token, with an automatic lockout after repeated auth failures;
+              loopback traffic is exempt.
+            </p>
+            <p>
+              The companion chat stream is the one deliberate exception to
+              "view-only": a remote token may send chat and audio on it, because
+              that arrives through the companion's own governed inbound path rather
+              than as a raw write to a terminal. Whether it should stay that way is
+              an open question we haven't settled yet.
             </p>
           </div>
         </div>

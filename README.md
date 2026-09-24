@@ -132,9 +132,10 @@ pnpm web            # the viewport on http://127.0.0.1:5317
 
 Open `http://127.0.0.1:5317` and you're in the cockpit. One catch on that dev origin: the **local access
 credential** every write route needs is stored per browser origin, and the Vite dev server is a different
-origin from the daemon's own — so a token you captured on `:4317` is invisible on `:5317`. Visit
-`http://127.0.0.1:5317/?token=<credential>` once (the daemon prints this instruction, and the path to the
-key file, on startup) or every write comes back `401` and the terminal panes stay blank. See
+origin from the daemon's own — so a token you captured on `:4317` is invisible on `:5317`. Without it the
+dev cockpit comes up writes-locked, with a banner and a paste field; visit
+`http://127.0.0.1:5317/?token=<credential>` once instead and it starts unlocked (the daemon prints this
+instruction, and the path to the key file, on startup). See
 [`docs/releasing.md`](docs/releasing.md) for the packaging and release flow.
 
 ## Reach Loom from another device
@@ -152,15 +153,17 @@ ssh -L 4317:127.0.0.1:4317 you@your-host
 
 The SSH key authenticates you and encrypts the link; Loom still only ever sees loopback traffic, arriving on the interface it already trusts. (Use the daemon port — `4317` by default, or whatever you set with `--port` / `LOOM_PORT`.)
 
-**Then do the one-time token step, or the cockpit looks broken.** The **local access credential** is required on every write and on the terminal socket, even over a tunnel, and a browser on the far end has never been handed it. Before you do this, the page loads and reads fine, but every action fails with *"unauthorized — see `loom open` for how to obtain the local access credential"* and every terminal pane sits blank — and `loom open`, the advice in that message, is a command on the *host*, which is not the machine you're sitting at. Fix it once per device by opening the URL with the token appended:
+**Then do the one-time token step.** The **local access credential** is required on every write and on the terminal socket, even over a tunnel, and a browser on the far end has never been handed it. It tells you so rather than failing silently: the cockpit loads and reads normally but comes up in a **writes-locked** state, with a banner explaining why and a field to paste the credential into, and each terminal or companion pane carries a reason line instead of sitting empty. Paste the credential and the locked write goes through; paste a wrong or stale one and the banner says that credential was refused.
+
+The credential is the contents of `gateway-loopback.key` under `LOOM_HOME` (`~/.loom/gateway-loopback.key` by default), read off the **host** — the machine running Loom, not the one you're sitting at. Paste it once per browser, or supply it once in the URL instead:
 
 ```
 http://127.0.0.1:4317/?token=<credential>
 ```
 
-The browser stores it and strips it from the address bar. The credential is the contents of `~/.loom/gateway-loopback.key` under `LOOM_HOME` on the host; it's stored per browser origin, and anything holding it can drive the full loopback API — so treat it like a password.
+Either way the browser keeps it and strips it from the address bar. It's stored per browser origin, so each URL you reach the cockpit by needs it once of its own — and anything holding it can drive the full loopback API, so treat it like a password.
 
-> **⚠ Tailscale `serve` does not work today.** `tailscale serve --bg 4317` looks like the same shape as the SSH tunnel and was recommended here previously, but the daemon's CSRF guard refuses a request whose `Origin` isn't loopback, before any other check — and a browser on `https://your-host.<tailnet>.ts.net` sends exactly that origin on every write and every WebSocket upgrade, so both come back `403`. The DNS-rebind guard applies the same rule to the `Host` header on reads, so depending on how Serve proxies it the cockpit may not load at all. This is a gap in Loom, not in Tailscale; it's tracked, and until it's fixed use the SSH forward above. (A `.ts.net` address as the `bindHost` of a *direct* bind, below, is a different thing and is unaffected.)
+> **⚠ Tailscale `serve` does not work today, and neither does any other reverse proxy.** `tailscale serve --bg 4317` looks like the same shape as the SSH forward and was recommended here previously. It is refused *earlier* than the credential step above, so the writes-locked banner never gets a chance to help. Two guards, both keyed to loopback and both ahead of everything else: the CSRF guard rejects a request whose `Origin` isn't loopback with `403 cross-origin request refused`, and the DNS-rebinding guard rejects one whose `Host` isn't with `403 host header not allowed`. A browser on `https://your-host.<tailnet>.ts.net` sends that hostname in both, so writes and WebSocket upgrades are refused outright, and a proxy that forwards the original `Host` — the usual behaviour — is refused on plain reads too, before the page renders. This is a gap in Loom, not in Tailscale; it's tracked, and until it's fixed use the SSH forward above. (A `.ts.net` address as the `bindHost` of a *direct* bind, below, is a different configuration and is unaffected.)
 
 ### A direct authenticated bind (an API surface, not a cockpit)
 
@@ -178,7 +181,7 @@ Loom can also bind a non-loopback interface itself. It is **off by default**, an
 - **TLS is mandatory** for any non-loopback bind that isn't a Tailscale `.ts.net` address (a tailnet link
   is already encrypted). Point `remoteAccess.tls` at a cert and key; without readable material the daemon **refuses to open the remote listener and stays on loopback** rather than serving plaintext.
 - **Routes are allowlisted, fail-closed.** Only an explicitly listed set — reads, plus the surfaces you
-  need to actually answer and steer (the Requests inbox, session input/stop/resume/end, and the live session sockets) — is reachable remotely. Everything else, including all configuration, every human-only writer, and the SPA's own static routes, is loopback-only by construction: a new route is unreachable from the remote bind until someone deliberately allowlists it.
+  need to actually answer and steer (the Requests inbox, session input/stop/resume/end), plus the live session sockets: the terminal stream (view-only to a remote peer; steering goes through the governed REST input route, and host shells are never reachable remotely), the companion chat stream, and a fleet-status feed. Everything else, including all configuration, every human-only writer, and the SPA's own static routes, is loopback-only by construction: a new route is unreachable from the remote bind until someone deliberately allowlists it.
 - **Remote requests are rate-limited** per caller IP and per token, with a lockout on repeated auth
   failures. The loopback path is exempt.
 
