@@ -2554,8 +2554,9 @@ export class SessionService {
    * override ?? built-in, applied to `worker` only (see `harnessDefaultForRole`). Reads BOTH layers here rather
    * than off `config`: every `resolveConfig(` caller in this file passes no platform layer, so `config.harness`
    * would silently drop the fleet default. `undefined` means claude, keeping the session column NULL and every
-   * existing spawn byte-identical. Only a FRESH worker spawn consults this — resume/fork/recycle read the
-   * pinned row value, so a default flip never migrates a live session.
+   * existing spawn byte-identical. Consulted by a FRESH worker spawn and by a manager/platform-lead RECYCLE
+   * (via resolveAgentSpawn, card 8d4b4433); resume/fork/worker-recycle/boot read the pinned row value, so a
+   * default flip never migrates a live session.
    *
    * @decision 961da6c6 — a DEFAULT-derived codex harness applies ONLY to a codex-compatible profile; never apply it
    * and rely on the spawn-time `onCodexUnsupportedCapability` report (a signal, not a guard: codex ignores `restrictedTools`).
@@ -2580,12 +2581,12 @@ export class SessionService {
    * invokes this after the new session's row exists, so `workerSessionId` is the affected session and
    * `managerSessionId` its spawning manager. Never throws — an audit failure must not fail a spawn.
    */
-  private recordHarnessDefaultSkipped(session: { id: string; taskId?: string | null }, managerSessionId: string, items: CodexIncompatibility[] | undefined): void {
+  private recordHarnessDefaultSkipped(session: { id: string; taskId?: string | null }, managerSessionId: string, items: CodexIncompatibility[] | undefined, trigger?: "recycle"): void {
     if (!items || items.length === 0) return;
     try {
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId: session.id,
-        taskId: session.taskId ?? null, kind: "harness_default_skipped", detail: { items },
+        taskId: session.taskId ?? null, kind: "harness_default_skipped", detail: { items, ...(trigger ? { trigger } : {}) },
       });
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -2622,6 +2623,25 @@ export class SessionService {
       if (current !== wanted) pending.push({ sessionId: s.id, role: s.role ?? null, harness: current, projectId: s.projectId });
     }
     return { target, scope, pending, done: pending.length === 0 };
+  }
+
+  /**
+   * Harness for a manager/platform-lead recycle successor (card 8d4b4433): the re-resolved one, unless it
+   * would be codex while the OLD ROW's carried restrictedTools / browserTesting / documentConversion /
+   * capabilities are codex-incompatible — then keep `old.harness` and return the skip items. Never mix
+   * sources: the harness and the carried fields must stay coherent (createCodexPty ignores restrictedTools,
+   * so a codex successor with restrictedTools:true would run UNrestricted). Same `codexIncompatibilities`
+   * (card 961da6c6) as `defaultHarnessForSpawn`, but fed the row's fields, since recycle carries the row's
+   * fields forward rather than re-deriving them from the profile. The caller files `harness_default_skipped`.
+   */
+  private recycleHarness(old: Session, spawn: { harness?: "claude" | "codex" } | undefined): { harness: "claude" | "codex" | undefined; skipped: CodexIncompatibility[] | undefined } {
+    const pinned = old.harness ?? undefined;
+    if (!spawn) return { harness: pinned, skipped: undefined };
+    if (spawn.harness === "codex") {
+      const items = codexIncompatibilities(old);
+      if (items.length > 0) return { harness: pinned, skipped: items };
+    }
+    return { harness: spawn.harness, skipped: undefined };
   }
 
   // @decision a92ea138 — companion "/new" reinject is COMPOSE-ONLY (never spawns/writes/re-arms): passes
@@ -11644,6 +11664,9 @@ export class SessionService {
     // model pin (mirrors recycleWorker; recycle used to drop them to bare config.permission / no model).
     // Agent-missing ⇒ bare config.permission + no model.
     const managerSpawn = agent ? this.resolveAgentSpawn(agent, config, "manager") : undefined;
+    // @decision 8d4b4433 — the harness is RE-RESOLVED here (unlike resume/fork, which stay row-pinned): an
+    // `undefined` re-resolve means claude, so a codex→claude flip lands; old.harness only when the agent is gone.
+    const { harness: managerHarness, skipped: managerHarnessSkipped } = this.recycleHarness(old, managerSpawn);
     const newGen = (old.gen ?? 0) + 1;
 
     this.db.appendEvent({
@@ -11694,7 +11717,7 @@ export class SessionService {
       skills: old.skills ?? null, // carry the pinned skill subset forward (null ⇒ all)
       connections: old.connections ?? [], // carry the authenticated-egress allowlist forward
       vaultWrite: old.vaultWrite ?? false, // carry the confined vault-write grant forward
-      harness: old.harness ?? undefined, // carry the pinned vendor CLI forward (undefined ⇒ "claude")
+      harness: managerHarness, // re-resolved on recycle (undefined ⇒ "claude"), not carried from old
       scheduledSpawn: old.scheduledSpawn ?? false, // card 53edd8d5: a scheduler-spawned manager can't
       // dodge its own manager-cap budget by self-recycling — the successor still counts against it.
       gen: newGen,
@@ -11704,6 +11727,7 @@ export class SessionService {
     // oldManagerId in the SAME transaction as fresh's own recycled_from link above, rather than a bare
     // insertSession — see that method's own doc for why any later point would leave a gap.
     this.db.insertRecycleSuccessor(fresh, oldManagerId);
+    this.recordHarnessDefaultSkipped(fresh, oldManagerId, managerHarnessSkipped, "recycle");
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
     // Card 6ca4155f: wrapped through pty.spawn so a synchronous throw in this window reconciles the row
@@ -11736,7 +11760,7 @@ export class SessionService {
         restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
         model: managerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
         skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
-        harness: old.harness ?? undefined, // carry the pinned vendor CLI forward across recycle (undefined ⇒ "claude")
+        harness: managerHarness, // same value as the fresh row above
         sessionName: composeRoleSessionName("manager", project.name), // card f9b47cd1: unchanged across recycle
       });
     } catch (e) {
@@ -11874,6 +11898,8 @@ export class SessionService {
     // Re-resolve the Lead's spawn so the successor keeps the profile's LAYERED allowlist + model pin
     // (mirrors recycleManager). Agent-missing ⇒ bare config.permission + no model.
     const leadSpawn = agent ? this.resolveAgentSpawn(agent, config, "platform") : undefined;
+    // @decision 8d4b4433 — re-resolved harness, same rule as recycleManager (old.harness only if agent gone).
+    const { harness: leadHarness, skipped: leadHarnessSkipped } = this.recycleHarness(old, leadSpawn);
     const newGen = (old.gen ?? 0) + 1;
 
     this.db.appendEvent({
@@ -11917,7 +11943,7 @@ export class SessionService {
       skills: old.skills ?? null, // carry the pinned skill subset forward (null ⇒ all)
       connections: old.connections ?? [], // carry the authenticated-egress allowlist forward
       vaultWrite: old.vaultWrite ?? false, // carry the confined vault-write grant forward
-      harness: old.harness ?? undefined, // carry the pinned vendor CLI forward (undefined ⇒ "claude")
+      harness: leadHarness, // re-resolved on recycle (undefined ⇒ "claude"), not carried from old
       gen: newGen,
       recycledFrom: old.id,
     };
@@ -11934,6 +11960,7 @@ export class SessionService {
     //
     // Still fully synchronous (no await), so it does not disturb the atomic handoff's own no-await guarantee.
     this.db.insertRecycleSuccessor(fresh, oldLeadId);
+    this.recordHarnessDefaultSkipped(fresh, oldLeadId, leadHarnessSkipped, "recycle");
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
     // Card 6ca4155f: wrapped so a synchronous throw in this window reconciles the fresh row to 'exited'
@@ -11958,7 +11985,7 @@ export class SessionService {
         restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
         model: leadSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`)
         skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
-        harness: old.harness ?? undefined, // carry the pinned vendor CLI forward across recycle (undefined ⇒ "claude")
+        harness: leadHarness, // same value as the fresh row above
         sessionName: PLATFORM_LEAD_SESSION_NAME, // card f9b47cd1: "loom-lead" — unchanged across recycle
       });
     } catch (e) {
