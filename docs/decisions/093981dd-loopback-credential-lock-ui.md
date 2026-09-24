@@ -13,17 +13,15 @@ A browser that reached the daemon through a **tunnel** — `ssh -L`, or any host
 
 Note the asymmetry that makes tunnelling the uniquely trapped case: a **genuinely remote** socket skips the loopback guard entirely (`if (!LOOPBACK.has(ip)) return;`) and is authorized by a gateway token instead. Only a tunnel both looks loopback *and* has no way to obtain the loopback secret.
 
-## Decision 1 — the lock state and its two prohibitions
+## Do not prompt for the credential unprompted, or print the secret
 
-The UI shows a "writes are locked" banner with a paste field for the credential, plus the host-side command that prints it.
+The banner is reachable **only** from an observed refusal — a guard 401, or a rejected upgrade on a browser holding no token at all. Do not render the paste field on a browser that already holds a token: a healthy host browser captured one from `loom open`'s URL and must never be asked for it.
 
-**Do not** render the paste field on a browser that already holds a token. A healthy host browser captured one from `loom open`'s URL and must never be prompted; the banner is reachable only from an observed refusal.
+Do not print or embed the secret value anywhere in the instruction copy. The banner names the *file path* to read it from on the host, never the value — the same reasoning `bin/loom.mjs` documents for keeping `urlWithToken` out of `console.log` (a service manager captures a foregrounded service's stdout into a durable, broadly-readable log).
 
-**Do not** print or embed the secret itself anywhere in the instruction copy. The banner names the *file path* to read it from, never the value — the same reasoning `bin/loom.mjs` documents for keeping `urlWithToken` out of `console.log` (a service manager captures stdout into a durable, broadly-readable log).
+## Why the matcher is coupled to the daemon's 401 text
 
-## Decision 2 — why the matcher is coupled to the daemon's 401 text
-
-`isCredentialGuardFailure` keys off the literal substring `loom open` in the 401 body. That coupling is deliberate, and it is load-bearing, because the server already draws exactly the distinction the UI needs:
+`isCredentialGuardFailure` keys off the literal substring `loom open` in the 401 body. That coupling is deliberate and load-bearing, because the server already draws exactly the distinction the UI needs:
 
 | 401 source | message | does a credential help? |
 | --- | --- | --- |
@@ -31,16 +29,20 @@ The UI shows a "writes are locked" banner with a paste field for the credential,
 | loopback guard, undeterminable peer address | `unauthorized — peer address undeterminable` | no — and its own comment says the `loom open` pointer is omitted *because* no credential rescues it |
 | trust-tier wall (a genuinely remote socket) | bare `unauthorized` | no — that caller skips this guard and needs a gateway token |
 
-So matching the `loom open` pointer selects precisely the cases where pasting a credential fixes the problem, by the server's own deliberate distinction rather than by coincidence. Offering the paste field on the other two would be a fresh piece of misdirection — the same class of bug this card was filed to remove.
-
-**Do not** widen this matcher to a bare `status === 401`. That re-introduces misdirection for remote and undeterminable-peer callers, for whom the loopback secret is the wrong credential or no credential at all.
+So matching the `loom open` pointer selects precisely the cases where pasting a credential fixes the problem, by the server's own deliberate distinction rather than by coincidence.
 
 A machine-readable discriminator on the 401 body would be sturdier than a substring match. That is a **daemon** change and this card was scoped web-only; if one is ever added, switch to it and delete the matcher.
 
-## Decision 3 — why a failed socket is a weaker signal than a failed write
+## Do not widen the matcher to a bare status check
+
+Do not reduce `isCredentialGuardFailure` to `status === 401`. That re-introduces misdirection for remote and undeterminable-peer callers, for whom this secret is the wrong credential or no help at all — the same class of bug this card was filed to remove. `packages/web/test/loopback-credential.mjs` pins all three message shapes and goes red on exactly this widening.
+
+## Why a failed socket is a weaker signal than a failed write
 
 A browser cannot read an upgrade's HTTP status: a guard 401 and a dead daemon both surface as an abnormal close. `isCredentialSocketFailure` therefore infers the lock from the two facts the client does hold — the socket never reached `open` (so the handshake itself was rejected, not a mid-session drop), and this browser holds no token at all.
 
 That inference has a stated false-positive: the guard is optional-dep-gated, so a daemon running **without** it needs no token, and a genuine connection failure there also has `token === null`. The socket-sourced copy is written conditionally ("if you reached this daemon through a tunnel") for exactly that reason.
 
-**Do not** let a socket-sourced lock overwrite a write-sourced one. `noteCredentialLock` refuses that downgrade on purpose: the refused write is the direct observation, the refused socket is the inferred one, so once the strong signal exists its wording is what stays on screen.
+## Do not let an inferred lock overwrite an observed one
+
+`noteCredentialLock` refuses a `write` → `socket` downgrade on purpose. The refused write is a direct observation; the refused socket is inferred, with the false-positive above. Once the strong signal exists, its wording is what stays on screen.
