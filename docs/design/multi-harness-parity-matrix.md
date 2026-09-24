@@ -55,7 +55,9 @@ own carry-forward pattern (`old.harness ?? undefined` on recycle/fork, `session.
 resume — never re-resolved from a possibly-changed profile). Deliberately EXCLUDED, matching `model`'s own
 exclusion for the same reasons: the ephemeral `run`-role session (`startRun`, always the engine default)
 and `upgradeCompanionCapabilities` (re-resolves the capability *surface* only, never the spawn binary —
-mirrors that function's own existing `model` exclusion). Verified: `pnpm --filter @loom/daemon build`
+mirrors that function's own existing `model` exclusion). Card `66b1b40d` later added a human-only fleet/project default
+(`harness: {default, scope}`) that fills an UNSET `harness` for a fresh `worker` spawn only — see CLAUDE.md's "Default
+harness" bullet; resume/fork/recycle still read the pinned row. Verified: `pnpm --filter @loom/daemon build`
 clean, `node test/browser-testing-spawn.mjs` (the exact e2e mirror this pattern reuses) still green
 end-to-end, `node test/entity-row-fields-guard.mjs` and both `harness-adapter-*.mjs` conformance tests
 green. **Still purely additive** — nothing in `pty/host.ts` reads `SpawnOpts.harness` yet (see §2), so

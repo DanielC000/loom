@@ -3,6 +3,12 @@ import type { Profile } from "@loom/shared";
 import { RESERVED_CAPABILITY_SLUGS } from "../capabilities/registry.js";
 
 /**
+ * The ONE spelling of the harness enum's runtime values. Shared by the profile validator below and the
+ * default-harness config validators (`mcp/platform.ts`, card 66b1b40d) so a third harness is added once.
+ */
+export const HARNESS_ID_SCHEMA = z.enum(["claude", "codex"]);
+
+/**
  * Strict zod validator for a Profile's WRITABLE shape (everything but the server-assigned id),
  * mirroring validateProjectConfigOverride (mcp/platform.ts): `.strict()` rejects unknown keys (typo
  * guard) and types are checked. ONE validator the future write paths (P3 REST + platform-MCP) share.
@@ -86,7 +92,7 @@ const profileSchema = z
     // below): selecting which BINARY gets spawned is the same trust class as gateCommand, not a
     // sandboxed capability — rejected even on the elevated Setup Assistant's/Platform Lead's own
     // profile-writing MCP tools, human REST is the ONLY grant path.
-    harness: z.enum(["claude", "codex"]).optional(),
+    harness: HARNESS_ID_SCHEMA.optional(),
   })
   .strict();
 

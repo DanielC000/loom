@@ -4,7 +4,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
-  usesOrchestrationMcp, contextPercentFor,
+  usesOrchestrationMcp, contextPercentFor, resolveHarnessConfig, harnessDefaultForRole,
   type Session, type StopMode, type OrchestrationEvent, type Task, type Project,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
@@ -2527,8 +2527,21 @@ export class SessionService {
       // spawn recipe. `|| undefined` mirrors the model coercion (null/absent ⇒ "engine default", i.e.
       // "claude") — RESOLVED ONCE HERE, at the same chokepoint as every other profile-conferred field;
       // see `createPty`'s own doc comment for where this feeds the actual binary choice.
-      harness: resolved.harness || undefined,
+      harness: resolved.harness || this.defaultHarnessForSpawn(agent, role),
     };
+  }
+
+  /**
+   * The DEFAULT-layer harness for a spawn whose Profile sets none (card 66b1b40d): project override ?? platform
+   * override ?? built-in, applied to `worker` only (see `harnessDefaultForRole`). Reads BOTH layers here rather
+   * than off `config`: every `resolveConfig(` caller in this file passes no platform layer, so `config.harness`
+   * would silently drop the fleet default. `undefined` means claude, keeping the session column NULL and every
+   * existing spawn byte-identical. Only a FRESH worker spawn consults this — resume/fork/recycle read the
+   * pinned row value, so a default flip never migrates a live session.
+   */
+  private defaultHarnessForSpawn(agent: Agent, role: SessionRole | undefined): "claude" | "codex" | undefined {
+    const projectConfig = this.db.getProject(agent.projectId)?.config;
+    return harnessDefaultForRole(resolveHarnessConfig(projectConfig, this.db.getPlatformConfig()), role);
   }
 
   // @decision a92ea138 — companion "/new" reinject is COMPOSE-ONLY (never spawns/writes/re-arms): passes

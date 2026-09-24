@@ -64,7 +64,7 @@ const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { PlatformMcpRouter, CONFIG_TOP_LEVEL_KEYS, AGENT_CONFIG_TOP_LEVEL_KEYS } = await import("../dist/mcp/platform.js");
+const { PlatformMcpRouter, CONFIG_TOP_LEVEL_KEYS, AGENT_CONFIG_TOP_LEVEL_KEYS, HUMAN_ONLY_PROJECT_CONFIG_KEYS } = await import("../dist/mcp/platform.js");
 const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -162,14 +162,18 @@ try {
   // sessionEnv is the ONE key the agent schema omits today; this is a schema-derived set difference, not
   // a hand-typed literal, so it tracks the validator if a future key is ever added/removed from either side.
   const agentRejectedKeys = CONFIG_TOP_LEVEL_KEYS.filter((k) => !AGENT_CONFIG_TOP_LEVEL_KEYS.includes(k));
-  check("sanity: the agent schema omits exactly sessionEnv relative to the full schema (today)", agentRejectedKeys.length === 1 && agentRejectedKeys[0] === "sessionEnv");
+  // Card 66b1b40d added `harness` (the human-only default-vendor-CLI key) to the omitted set.
+  check("sanity: the agent schema omits exactly sessionEnv + harness relative to the full schema (today)", agentRejectedKeys.length === 2 && agentRejectedKeys.includes("sessionEnv") && agentRejectedKeys.includes("harness"));
 
-  // --- platform.ts's project_configure (P3-elevated, FULL validator: nothing top-level is omitted, so
-  // there is no "rejected key" direction to check here — passing [] keeps the same shared assertion). ---
+  // --- platform.ts's project_configure (P3-elevated, FULL validator: nothing is omitted from the SCHEMA, but
+  // the route itself rejects HUMAN_ONLY_PROJECT_CONFIG_KEYS (card 66b1b40d) — schema-derived split, not a literal). ---
+  const platformRejectedKeys = CONFIG_TOP_LEVEL_KEYS.filter((k) => HUMAN_ONLY_PROJECT_CONFIG_KEYS.includes(k));
+  const platformAcceptedKeys = CONFIG_TOP_LEVEL_KEYS.filter((k) => !HUMAN_ONLY_PROJECT_CONFIG_KEYS.includes(k));
+  check("sanity: the platform route's human-only split is exactly [harness] and every entry is a real schema key", platformRejectedKeys.length === 1 && platformRejectedKeys[0] === "harness" && platformRejectedKeys.length === HUMAN_ONLY_PROJECT_CONFIG_KEYS.length);
   const platformClient = await connect(platformRouter.buildServer());
   const platformDesc = await describeTool(platformClient, "project_configure");
   check("platform: project_configure is registered on the platform surface", !!platformDesc.tool);
-  assertProjectConfigureDescription("platform", platformDesc.description, CONFIG_TOP_LEVEL_KEYS, []);
+  assertProjectConfigureDescription("platform", platformDesc.description, platformAcceptedKeys, platformRejectedKeys);
 
   // --- setup.ts's project_configure (AGENT validator: sessionEnv is omitted + strict-rejected). ---
   const setupClient = await connect(setupRouter.buildServer("SETUP"));

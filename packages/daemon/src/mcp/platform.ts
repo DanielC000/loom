@@ -26,7 +26,7 @@ import { writeVaultFile, ensureVaultRoot } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { recordBoardReadForProjects } from "../orchestration/board-read.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
-import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError, HARNESS_ID_SCHEMA } from "../profiles/validate.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { createAgentCore, cloneAgentCore } from "../agents/clone-core.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
@@ -268,6 +268,24 @@ const obsidianOverride = z.object({
   autoStart: z.boolean().optional(),
   path: z.string().min(1).optional(),
 }).strict();
+// Default vendor CLI (card 66b1b40d), shared by the PROJECT and PLATFORM layers. HUMAN-only at both: which
+// binary a spawn runs is the same trust class as `profile.harness` (see AGENT_FORBIDDEN_PROFILE_KEYS) and
+// gateCommand, so the project layer is dropped from the agent shape below and the platform layer has no
+// agent variant at all. `scope:"fleet"` is FAIL-CLOSED here — rejected with an error naming the gate card —
+// because codex has no doctrine/parity for non-worker roles yet; card 4c4eb9af relaxes this ONE refinement.
+const harnessScope = z.enum(["workers", "fleet"]).refine((v) => v !== "fleet", {
+  message: 'scope "fleet" is not supported yet — gated behind card 4c4eb9af (codex non-worker readiness); only "workers" is accepted',
+});
+/**
+ * Project-config top-level keys that stay HUMAN-only even on the platform route's elevated `project_configure`
+ * (which otherwise shares the FULL human validator). Single source for that route's rejection AND
+ * `test/project-configure-description-drift.mjs`'s "accepted vs advertised" split.
+ */
+export const HUMAN_ONLY_PROJECT_CONFIG_KEYS: readonly string[] = ["harness"];
+const harnessOverride = z.object({
+  default: HARNESS_ID_SCHEMA.optional(),
+  scope: harnessScope.optional(),
+}).strict();
 // Python tooling. `interpreterPath` is an arbitrary host INTERPRETER the daemon runs to BUILD its shared
 // venv — host-launch capable, so it's HUMAN-only (the whole `python` block is dropped from the agent shape
 // below, exactly like obsidian.path / gateCommand). `.strict()` then makes an agent's `python` a REJECTED
@@ -333,6 +351,7 @@ const projectConfigOverrideSchema = z.object({
   obsidian: obsidianOverride.optional(),
   python: pythonOverride.optional(),
   memory: memoryOverride.optional(),
+  harness: harnessOverride.optional(),
 }).strict();
 
 /**
@@ -363,8 +382,9 @@ const agentPythonOverride = pythonOverride.omit({ interpreterPath: true }).stric
 // and the default merge (config.ts) lets an agent-set raw value survive. Allowing raw `sessionEnv` would
 // re-open exactly the host-exec/exfil capability those field rejections close (NODE_OPTIONS=--require,
 // PATH, etc.). Agents have no business setting raw session env; the human/REST path keeps it.
+// `harness` (card 66b1b40d) is HUMAN-only too and dropped here, so `.strict()` REJECTS an agent's `harness`.
 const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
-  .omit({ sessionEnv: true })
+  .omit({ sessionEnv: true, harness: true })
   .extend({ orchestration: agentOrchestrationOverride.optional(), obsidian: agentObsidianOverride.optional(), python: agentPythonOverride.optional() })
   .strict();
 
@@ -755,6 +775,9 @@ const platformConfigOverrideSchema = z.object({
   integrations: integrationsOverride.optional(),
   coalesceAgentMessages: z.boolean().optional(),
   companionVoiceEnabled: z.boolean().optional(),
+  // Fleet default vendor CLI (card 66b1b40d). HUMAN-only like every platform key (no agent variant exists);
+  // `scope:"fleet"` is rejected — see harnessScope above.
+  harness: harnessOverride.optional(),
   // Bucket 2b Elevated Operator gate. HUMAN-only, like every other `platform` sub-group — there is no
   // agent-facing platform-config surface at all (see the function doc below), so this reaches an agent
   // no differently than gateCommand reaches one via the project schema: it simply isn't reachable.
@@ -841,6 +864,9 @@ const backupPatchOverride = z.object(nullableShape(backupOverride.shape)).strict
 // Sweep G3: gateRetry joins rateLimit/watchers/timeouts/backup as the 5th deep-partial group with a
 // per-field-nullable PATCH variant (see server.ts's DEEP_MERGE_GROUPS for the merge side of this).
 const gateRetryPatchOverride = z.object(nullableShape(gateRetryOverride.shape)).strict();
+// Card 66b1b40d: `harness` is a 6th deep-partial group (see server.ts's DEEP_MERGE_GROUPS) — per-field null
+// clears just `default` or `scope`; `scope:"fleet"` stays rejected because the shape derives from harnessOverride.
+const harnessPatchOverride = z.object(nullableShape(harnessOverride.shape)).strict();
 
 /**
  * Clear-to-inherit sentinel schema for the PATCH body (card fd55ac8a, widened by card ba9ccd75, sweep
@@ -869,6 +895,7 @@ const platformConfigPatchSchema = z.object({
   timeouts: timeoutsPatchOverride.nullable().optional(),
   backup: backupPatchOverride.nullable().optional(),
   gateRetry: gateRetryPatchOverride.nullable().optional(),
+  harness: harnessPatchOverride.nullable().optional(),
   connections: connectionsOverride.optional(),
   integrations: integrationsOverride.optional(),
   coalesceAgentMessages: z.boolean().nullable().optional(),
@@ -1236,7 +1263,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–3600000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset. A payload that both WRITES and UNSETS the same dot-path is REJECTED (not silently resolved either way) — drop one of the two. The returned config NEVER carries sessionEnv values, masked or real — instead it carries sessionEnvKeys (names + VALUE LENGTHS only, e.g. {\"FOO\":38}), so you can confirm a length without ever seeing anything value-shaped. sessionEnvKeys is NOT a settable key — feeding this response's config straight back as a later patch/replace is REJECTED (invalid config), never a silent write.",
+        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The default-harness key harness (which vendor CLI a worker spawns) is human-only EVEN HERE and is REJECTED, matching profile.harness. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–3600000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset. A payload that both WRITES and UNSETS the same dot-path is REJECTED (not silently resolved either way) — drop one of the two. The returned config NEVER carries sessionEnv values, masked or real — instead it carries sessionEnvKeys (names + VALUE LENGTHS only, e.g. {\"FOO\":38}), so you can confirm a length without ever seeing anything value-shaped. sessionEnvKeys is NOT a settable key — feeding this response's config straight back as a later patch/replace is REJECTED (invalid config), never a silent write.",
         inputSchema: strictShape({
           projectId: z.string(),
           config: z.object({}).passthrough().optional(),
@@ -1259,6 +1286,14 @@ export class PlatformMcpRouter {
         // keys are rejected and the stored config is left unchanged. This bypass is keyed STRICTLY to this
         // platform route (resolveRole 404s non-platform); the manager/worker orchestration MCP keeps using
         // validateAgentProjectConfigOverride, which still REJECTS gateCommand/alertWebhook (unchanged).
+        // Card 66b1b40d EXCEPTION to the elevation above: the default-harness key stays HUMAN-only even here,
+        // matching `profile.harness` (rejected on this router's profile writers too) — a Lead must not be able
+        // to route every future worker onto a different vendor CLI. Checked on the RAW payload so the human
+        // REST route (which shares the full validator) is untouched.
+        const humanOnlyKey = config && typeof config === "object" ? HUMAN_ONLY_PROJECT_CONFIG_KEYS.find((k) => Object.hasOwn(config, k)) : undefined;
+        if (humanOnlyKey) {
+          return ok({ error: `invalid config: ${humanOnlyKey} may not be set via an agent MCP tool — it selects which vendor CLI spawns (human-only, via the REST config PATCH / Settings UI)`, validTopLevelKeys: CONFIG_TOP_LEVEL_KEYS.filter((k) => !HUMAN_ONLY_PROJECT_CONFIG_KEYS.includes(k)) });
+        }
         const v = validateProjectConfigOverride(config ?? {});
         // List the valid top-level keys on rejection so a fat-fingered key (e.g. "columns" instead of
         // kanbanColumns) converges instead of giving up — mirrors the setup router's project_configure.

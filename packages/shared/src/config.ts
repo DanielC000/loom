@@ -860,6 +860,24 @@ export interface RemoteAccessConfig {
   };
 }
 
+/**
+ * Which roles a default-harness setting applies to (multi-harness epic df1f94b0, card 66b1b40d). The type
+ * names both values so card 4c4eb9af (codex non-worker readiness) relaxes ONE validator refinement rather
+ * than widening a type — but until that card lands `"fleet"` is REJECTED at both write layers
+ * (`mcp/platform.ts`) and IGNORED by `harnessDefaultForRole` below: the default applies to `worker` only.
+ */
+export type HarnessDefaultScope = "workers" | "fleet";
+
+/**
+ * Fleet/project default vendor CLI (card 66b1b40d). `default` is the harness a spawn takes when its
+ * Profile sets none; `scope` names which roles that covers. HUMAN-only at both layers (platform PATCH,
+ * project REST) — see `mcp/platform.ts`. A Profile's own `harness` always wins over this.
+ */
+export interface HarnessConfig {
+  default: NonNullable<Profile["harness"]>;
+  scope: HarnessDefaultScope;
+}
+
 /** The fully-resolved, effective config for a project. */
 export interface ResolvedConfig {
   kanbanColumns: KanbanColumn[];
@@ -880,6 +898,13 @@ export interface ResolvedConfig {
    * optional global override (2nd arg, same as `platform`), no per-project layer. See RemoteAccessConfig.
    */
   remoteAccess: RemoteAccessConfig;
+  /**
+   * Default vendor CLI + the roles it covers (card 66b1b40d). Layered profile > project override >
+   * platform override (2nd arg) > built-in `claude`/`workers` — see `resolveHarnessConfig`. The daemon's
+   * spawn path does NOT read this field off `config` (its `resolveConfig` callers pass no platform layer);
+   * `resolveAgentSpawn` calls `resolveHarnessConfig` directly with both layers.
+   */
+  harness: HarnessConfig;
   /**
    * Pillar D: wire the mechanical vault-lint PostToolUse hook into this project's sessions
    * (flags doc-hygiene anti-patterns on .md vault writes). Default true; set false to disable.
@@ -941,6 +966,8 @@ export interface ProjectConfigOverride {
   python?: Partial<PythonConfig>;
   /** See ResolvedConfig.memory. */
   memory?: Partial<MemoryConfig>;
+  /** See ResolvedConfig.harness. HUMAN-only: rejected by the agent-facing validators (mcp/platform.ts). */
+  harness?: Partial<HarnessConfig>;
 }
 
 /**
@@ -1071,6 +1098,8 @@ export interface PlatformConfigOverride {
   operatorEnabled?: boolean;
   /** See RemoteAccessConfig. Deep-partial: `tls`/`rateLimit` replace whole when present. */
   remoteAccess?: Partial<RemoteAccessConfig>;
+  /** See ResolvedConfig.harness. Daemon-global fleet default; deep-partial (`default`/`scope` each optional). */
+  harness?: Partial<HarnessConfig>;
   /**
    * See OrchestrationConfig.schedulerEnabled. Daemon-GLOBAL, like backup/coalesceAgentMessages — NOT
    * a per-project setting (there is no per-project equivalent; ProjectConfigOverride.orchestration
@@ -1155,13 +1184,14 @@ type NullableFields<T> = { [K in keyof T]?: T[K] | null };
  */
 export type PlatformConfigPatch = Omit<
   PlatformConfigOverride,
-  "rateLimit" | "watchers" | "timeouts" | "backup" | "gateRetry" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs"
+  "rateLimit" | "watchers" | "timeouts" | "backup" | "gateRetry" | "harness" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs"
 > & {
   rateLimit?: NullableFields<RateLimitConfig> | null;
   watchers?: NullableFields<WatcherConfig> | null;
   timeouts?: NullableFields<TimeoutConfig> | null;
   backup?: NullableFields<BackupConfig> | null;
   gateRetry?: NullableFields<GateRetryConfig> | null;
+  harness?: NullableFields<HarnessConfig> | null;
   coalesceAgentMessages?: boolean | null;
   operatorEnabled?: boolean | null;
   schedulerEnabled?: boolean | null;
@@ -1236,6 +1266,8 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     enabled: false, bindHost: "127.0.0.1",
     rateLimit: { perIpPerMin: 120, perTokenPerMin: 120, authFailLockout: { maxAttempts: 5, windowMs: 600000, lockoutMs: 900000 } },
   },
+  // Default vendor CLI (card 66b1b40d): claude, workers-only — today's behavior. See HarnessConfig.
+  harness: { default: "claude", scope: "workers" },
   docLint: true, // Pillar D vault-lint hook on by default
   // NOTE: no `codescape` key here (card 3bd8ef17) — deliberately kept off `PLATFORM_DEFAULTS`/
   // `ResolvedConfig`, which `packages/web` pulls into the browser bundle via `resolveConfig()`. The
@@ -1578,6 +1610,35 @@ function resolveRemoteAccess(po: PlatformConfigOverride | undefined): RemoteAcce
  * is the daemon-GLOBAL tuning override (the daemon's SQLite singleton blob); absent → platform defaults
  * + LOOM_* env = today's behavior, so every existing single-arg caller is byte-identical.
  */
+/**
+ * Resolve the default-harness config: project override ?? platform override ?? built-in default, per
+ * field (card 66b1b40d). Pure and exported so the daemon's `resolveAgentSpawn` — whose `config` argument
+ * was resolved WITHOUT a platform layer by every caller — can read BOTH layers directly instead of
+ * relying on `ResolvedConfig.harness`.
+ */
+export function resolveHarnessConfig(
+  projectOverride: ProjectConfigOverride | undefined,
+  platformOverride: PlatformConfigOverride | undefined,
+): HarnessConfig {
+  const d = PLATFORM_DEFAULTS.harness;
+  return {
+    default: projectOverride?.harness?.default ?? platformOverride?.harness?.default ?? d.default,
+    scope: projectOverride?.harness?.scope ?? platformOverride?.harness?.scope ?? d.scope,
+  };
+}
+
+/**
+ * The harness a role's spawn takes from the DEFAULT layer (i.e. when its Profile sets none), or
+ * `undefined` for "claude / engine default" — so a resolved claude writes a NULL session column and every
+ * existing spawn stays byte-identical. Card 66b1b40d applies the default to `worker` ONLY, regardless of
+ * `scope`: `"fleet"` is rejected by both write validators and, if it ever reached storage some other way,
+ * is deliberately NOT honored here until card 4c4eb9af (codex non-worker readiness) relaxes this.
+ */
+export function harnessDefaultForRole(cfg: HarnessConfig, role: SessionRole | undefined): NonNullable<Profile["harness"]> | undefined {
+  if (role !== "worker") return undefined;
+  return cfg.default === PLATFORM_DEFAULTS.harness.default ? undefined : cfg.default;
+}
+
 export function resolveConfig(
   override: ProjectConfigOverride | undefined,
   platformOverride?: PlatformConfigOverride,
@@ -1637,6 +1698,7 @@ export function resolveConfig(
     // (2nd arg) + LOOM_* watcher env layer beneath, so `resolveConfig(undefined, po)` honors them.
     base.platform = resolvePlatform(platformOverride);
     base.remoteAccess = resolveRemoteAccess(platformOverride);
+    base.harness = resolveHarnessConfig(undefined, platformOverride);
     return base;
   }
   // Resolve the obsidian field (autoStart + optional path override), then derive its session-env so the
@@ -1766,6 +1828,8 @@ export function resolveConfig(
     platform: resolvePlatform(platformOverride),
     // Daemon-global (no per-project layer): global override (2nd arg) ?? default. See RemoteAccessConfig.
     remoteAccess: resolveRemoteAccess(platformOverride),
+    // Project override ?? platform override (2nd arg) ?? default — see resolveHarnessConfig.
+    harness: resolveHarnessConfig(override, platformOverride),
     docLint: override.docLint ?? d.docLint,
     // NOTE: no `codescape` key here (card 3bd8ef17) — this return value IS `ResolvedConfig`, which
     // `packages/web` gets back from `resolveConfig()` too. See `resolveCodescapeConfig`.

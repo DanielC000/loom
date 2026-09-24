@@ -45,6 +45,7 @@ try {
     "timeouts",
     "backup",
     "gateRetry",
+    "harness", // card 66b1b40d — default vendor CLI + scope: plain operational tuning, no secret/host-path shape; passes through unredacted
     "connections",
     "integrations", // REDACTED — dropped entirely (codescape path; see codescape-is-private-no-user-visible-surface)
     "coalesceAgentMessages",

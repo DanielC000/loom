@@ -5264,8 +5264,9 @@ export class OrchestrationMcpRouter {
           "profile — same resolution profile_get/profile_list use; false when profile-less or the profile " +
           "leaves a flag unset), harness ('claude' | 'codex' | null — the EFFECTIVE vendor CLI this agent " +
           "would spawn as, resolved the same way as the flags above; null means unset — either the agent is " +
-          "profile-less or its bound profile never set harness — and unset spawns the engine default " +
-          "('claude'), so null is NOT the same as an explicit 'claude')}, ordered by position.",
+          "profile-less or its bound profile never set harness — and an unset WORKER spawns the human-set " +
+          "default-harness config (project ?? platform ?? 'claude'), so null is NOT the same as an explicit " +
+          "'claude', and this field is the PROFILE's value only, not that default)}, ordered by position.",
         inputSchema: strictShape({}),
       },
       async () => {
@@ -5304,8 +5305,9 @@ export class OrchestrationMcpRouter {
           "summary deliberately drops it — some prompts are large), " +
           "PLUS its resolved browserTesting/documentConversion/restrictedTools capability flags AND harness " +
           "('claude' | 'codex' | null — the EFFECTIVE vendor CLI this agent would spawn as; null means " +
-          "unset, either profile-less or its profile never set harness, and unset spawns the engine default " +
-          "'claude', so null is NOT the same as an explicit 'claude') (all resolved from its " +
+          "unset, either profile-less or its profile never set harness, and an unset WORKER spawns the human-set " +
+          "default-harness config (project ?? platform ?? 'claude'), so null is NOT the same as an explicit " +
+          "'claude' and this is the PROFILE's value only) (all resolved from its " +
           "assigned/default profile — same resolution profile_get/profile_list use; false/null when profile-less " +
           "or the profile leaves a flag unset). Use this before a safe read-modify-write via agent_update " +
           "(its appendToStartupPrompt mode lets you add to what you read here without retyping the whole " +
