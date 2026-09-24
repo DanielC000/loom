@@ -29,6 +29,10 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const { GATE_TIMEOUT_BREAKER_THRESHOLD } = await import("../dist/orchestration/gate-runner.js");
 
+// Asserts merge/gate behavior, never the pre-removal process reap. The real reap runs a win32 powershell
+// Get-CimInstance enumeration (pty/host.ts enumerateProcessesWin32, ~1-2s under load) per worktree removal —
+// pure fixed cost here since no worker-rooted process exists — so inject the SessionService seam.
+const noReap = async () => ({ killedPids: [] });
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const GIT_ID = "-c user.email=gtb@loom -c user.name=gtb";
@@ -67,7 +71,7 @@ try {
     // gateOpRetainMs:0 (card 50c1e0d0): this test issues several BACK-TO-BACK runWorkerGate calls, each
     // expecting to trigger its OWN fresh gate invocation to exercise the streak counter — disables the
     // settle-grace retention window so a tight-loop re-call doesn't get served a cached prior result.
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: countingTimeoutGate, gateOpRetainMs: 0 });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: countingTimeoutGate, gateOpRetainMs: 0 });
 
     for (let i = 0; i < GATE_TIMEOUT_BREAKER_THRESHOLD; i++) {
       const r = await sessions.runWorkerGate(workerId);
@@ -110,7 +114,7 @@ try {
 
     let calls = 0;
     const countingTimeoutGate = async () => { calls++; return timeoutGate(); };
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: countingTimeoutGate });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: countingTimeoutGate });
 
     for (let i = 0; i < GATE_TIMEOUT_BREAKER_THRESHOLD; i++) {
       const r = await sessions.confirmWorkerMerge(mgrId, workerId);
@@ -147,7 +151,7 @@ try {
 
     let calls = 0;
     const countingTimeoutGate = async () => { calls++; return timeoutGate(); };
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: countingTimeoutGate });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: countingTimeoutGate });
 
     for (let i = 0; i < GATE_TIMEOUT_BREAKER_THRESHOLD; i++) await sessions.confirmWorkerMerge(mgrId, workerId);
     const tripped = await sessions.confirmWorkerMerge(mgrId, workerId);
@@ -196,7 +200,7 @@ try {
     };
     // gateOpRetainMs:0 (card 50c1e0d0): see (A)'s comment above — this test's whole point is that EVERY
     // scripted step invokes the gate runner, so back-to-back calls must never hit the retention cache.
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: scripted, gateOpRetainMs: 0 });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: scripted, gateOpRetainMs: 0 });
 
     for (let i = 0; i < sequence.length; i++) {
       const r = await sessions.runWorkerGate(workerId);
@@ -233,7 +237,7 @@ try {
 
     let calls = 0;
     const countingTimeoutGate = async () => { calls++; return timeoutGate(); };
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: countingTimeoutGate });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: countingTimeoutGate });
 
     for (let i = 0; i < GATE_TIMEOUT_BREAKER_THRESHOLD; i++) {
       // Advance MAIN (never the worker's own branch) between every confirm attempt — this is what the
@@ -288,7 +292,7 @@ try {
     let calls = 0;
     const countingTimeoutGate = async () => { calls++; return timeoutGate(); };
     // gateOpRetainMs:0 (card 50c1e0d0): see (A)'s comment above.
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: countingTimeoutGate, gateOpRetainMs: 0 });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: countingTimeoutGate, gateOpRetainMs: 0 });
 
     for (let i = 0; i < GATE_TIMEOUT_BREAKER_THRESHOLD; i++) await sessions.runWorkerGate(workerId);
     const tripped = await sessions.runWorkerGate(workerId);
@@ -341,7 +345,7 @@ try {
     let calls = 0;
     const countingTimeoutGate = async () => { calls++; return timeoutGate(); };
     // gateOpRetainMs:0 (card 50c1e0d0): see (A)'s comment above.
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: countingTimeoutGate, gateOpRetainMs: 0 });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: countingTimeoutGate, gateOpRetainMs: 0 });
 
     // Trip the breaker (abandoning the branch immediately after, without ever pushing a fix).
     for (let i = 0; i < GATE_TIMEOUT_BREAKER_THRESHOLD; i++) await sessions.runWorkerGate(workerId);
