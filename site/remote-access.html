@@ -160,6 +160,21 @@
               <code>http://127.0.0.1:4317/?token=&lt;credential&gt;</code>
             </p>
             <p>
+              To have Loom print that URL, run this <strong>on the host</strong>
+              (<code>loom start</code> and <code>loom status</code> deliberately
+              never print it):
+            </p>
+            <p>
+              <code>loom open --print-url --port 4317</code>
+            </p>
+            <p>
+              <code>--port</code> (and optional <code>--host</code>) are the address
+              you'll browse at on the far device — your tunnel's local end. The URL
+              goes to stdout and a live-credential warning to stderr; it's read from
+              the same key file, so it adds no network surface. Don't paste it into
+              chat or tickets.
+            </p>
+            <p>
               Either way the browser keeps it and strips it from the address bar.
               It's stored per browser <em>origin</em>, so each URL you reach the
               cockpit by needs it once of its own. Treat it like a password:

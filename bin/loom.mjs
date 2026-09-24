@@ -9,6 +9,8 @@
 //   loom status           report running/stopped + version + URL + PID (exit non-zero if not running)
 //   loom restart          stop, then start (honors --detach/--port/--no-open)
 //   loom open             open the browser to a running daemon
+//   loom open --print-url [--host H] [--port P]
+//                         PRINT a tokenized cockpit URL (a live credential) for a tunnelled device
 //   loom update [--channel stable|beta]
 //                         upgrade in place (npm i -g loomctl@<dist-tag>) + restart the daemon
 //
@@ -20,6 +22,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { CHANNELS, isValidChannel, installSpecFor, readChannel, writeChannel } from "./update-config.mjs";
 
@@ -61,6 +64,10 @@ Commands:
   status           Show whether the daemon is running, plus version, URL and PID.
   restart          Stop, then start (honors --detach/--port/--no-open).
   open             Open your browser to a running daemon.
+                   With --print-url, print a tokenized cockpit URL instead (see
+                   below) for a browser on another device, e.g. behind an SSH
+                   port-forward. The URL is a LIVE CREDENTIAL — it goes to
+                   stdout only when you explicitly ask; treat it like a password.
   service <action> Register Loom to autostart in the background on login.
                    Actions: install | uninstall | status. Uses the OS service
                    manager (systemd --user / launchd / Task Scheduler).
@@ -74,6 +81,10 @@ Options:
   -p, --port <n>   Port to listen on (default ${DEFAULT_PORT}; or env LOOM_PORT)
   -d, --detach     (start/restart) Run the daemon in the background and return
       --no-open    Do not open the browser automatically
+      --print-url  (open) Print the cockpit URL with the access token embedded
+                   and do NOT open a browser. -p/--port is then the tunnel's
+                   LOCAL port on the device you will browse from.
+      --host <h>   (open --print-url) Host in the printed URL (default 127.0.0.1)
       --channel <c> (update) Release channel: stable | beta. Switches and
                    persists the channel; a bare 'loom update' reuses the last.
   -v, --version    Print the loom version and exit
@@ -88,7 +99,7 @@ State (PID file + update-config.json) lives under LOOM_HOME (default ~/.loom).
 // the backward-compatible bare invocation. port is undefined when not supplied (resolved at use-site);
 // channel is null when --channel was not supplied (the `update` handler then reuses the persisted one).
 export function parseArgs(argv) {
-  const out = { command: null, serviceAction: null, port: undefined, open: true, detach: false, channel: null, help: false, version: false, error: null, exitCode: 0 };
+  const out = { command: null, serviceAction: null, port: undefined, open: true, detach: false, channel: null, printUrl: false, host: undefined, help: false, version: false, error: null, exitCode: 0 };
   let i = 0;
   // A leading non-flag token is the subcommand; an unknown one is an error (mirrors the old unknown-arg
   // behavior). A leading flag (e.g. `loom --version`) keeps command = null (bare).
@@ -113,6 +124,9 @@ export function parseArgs(argv) {
     else if (a === "--detach" || a === "-d") out.detach = true;
     else if (a === "--port" || a === "-p") out.port = Number(argv[++i]);
     else if (a.startsWith("--port=")) out.port = Number(a.slice("--port=".length));
+    else if (a === "--print-url") out.printUrl = true;
+    else if (a === "--host") out.host = argv[++i] ?? "";
+    else if (a.startsWith("--host=")) out.host = a.slice("--host=".length);
     else if (a === "--channel") out.channel = argv[++i];
     else if (a.startsWith("--channel=")) out.channel = a.slice("--channel=".length);
     else { out.error = `unknown argument '${a}' (try 'loom --help')`; out.exitCode = 2; return out; }
@@ -120,11 +134,33 @@ export function parseArgs(argv) {
   if (out.port !== undefined && !isValidPort(out.port)) {
     out.error = `invalid port '${out.port}' (expected 1-65535)`; out.exitCode = 2; return out;
   }
+  if ((out.printUrl || out.host !== undefined) && out.command !== "open") {
+    out.error = "--print-url and --host apply only to 'loom open'"; out.exitCode = 2; return out;
+  }
+  if (out.host !== undefined && !out.printUrl) {
+    out.error = "--host requires --print-url"; out.exitCode = 2; return out;
+  }
+  if (out.host !== undefined && normalizeUrlHost(out.host) === null) {
+    out.error = `invalid host '${out.host}' (expected a hostname, IPv4 or IPv6 address — no scheme, port, path or userinfo)`; out.exitCode = 2; return out;
+  }
   // A supplied --channel must be a known channel (a bare 'loom update' leaves it null → use persisted).
   if (out.channel !== null && !isValidChannel(out.channel)) {
     out.error = `invalid channel '${out.channel ?? ""}' (expected ${CHANNELS.join(" | ")})`; out.exitCode = 2; return out;
   }
   return out;
+}
+
+// Strict allowlist for the host that gets interpolated into a printed credential URL: an IP literal or
+// an RFC-1123 hostname, nothing else (no scheme, port, path, query, userinfo, whitespace). Returns the
+// URL-ready form (IPv6 bracketed) or null. Optional surrounding [] on an IPv6 literal is accepted.
+const HOSTNAME_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+export function normalizeUrlHost(h) {
+  if (typeof h !== "string" || !h) return null;
+  const bare = h.startsWith("[") && h.endsWith("]") ? h.slice(1, -1) : h;
+  if (net.isIPv6(bare)) return `[${bare}]`;
+  if (bare !== h) return null;
+  if (net.isIPv4(h) || HOSTNAME_RE.test(h)) return h;
+  return null;
 }
 
 function isValidPort(p) { return Number.isInteger(p) && p >= 1 && p <= 65535; }
@@ -506,7 +542,8 @@ async function status({ port }) {
 }
 
 // --- open: open the browser to a running daemon ----------------------------------------------------
-async function openCmd({ port }) {
+async function openCmd({ port, printUrl, host }) {
+  if (printUrl) return printUrlCmd({ port, host });
   const rec = readPidFile();
   const probePort = port ?? rec?.port ?? (process.env.LOOM_PORT ? Number(process.env.LOOM_PORT) : DEFAULT_PORT);
   const url = urlFor(probePort);
@@ -516,6 +553,25 @@ async function openCmd({ port }) {
   }
   console.log(`loom: opening ${url} …`);
   openBrowser(urlWithToken(url));
+  return 0;
+}
+
+// `loom open --print-url`: the EXPLICIT, opt-in way to hand a tunnelled browser (which can't run `loom
+// open`) the loopback credential in a URL. The secret still comes only from the host filesystem — no
+// network surface. It prints to stdout ONLY on this explicit request (never from start/status — see the
+// urlWithToken note above) and warns on stderr that the URL is a live credential. `port` here is the
+// address the URL will be opened at (the tunnel's local port), so no daemon probe is made.
+function printUrlCmd({ port, host }) {
+  const secret = readLoopbackSecret();
+  if (!secret) {
+    console.error(`loom: no access credential found at ${loopbackSecretPath()} — start the daemon once (it creates the file), then retry.`);
+    return 1;
+  }
+  const rec = readPidFile();
+  const p = port ?? rec?.port ?? resolvePort(undefined);
+  const h = host === undefined ? "127.0.0.1" : normalizeUrlHost(host);
+  console.error("loom: WARNING — this URL embeds the loopback access credential. Anyone holding it can drive the full local API. Treat it like a password: don't paste it into chat, tickets or logs.");
+  console.log(`http://${h}:${p}/?token=${encodeURIComponent(secret)}`);
   return 0;
 }
 
@@ -599,7 +655,7 @@ async function run(argv = process.argv.slice(2)) {
   switch (parsed.command) {
     case "stop": process.exit(await stop());
     case "status": process.exit(await status({ port: parsed.port }));
-    case "open": process.exit(await openCmd({ port: parsed.port }));
+    case "open": process.exit(await openCmd({ port: parsed.port, printUrl: parsed.printUrl, host: parsed.host }));
     case "update": process.exit(await update({ channel: parsed.channel, port: parsed.port }));
     case "service": {
       // status cross-checks a running daemon; install bakes a concrete port into the unit/plist/task.

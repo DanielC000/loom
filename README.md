@@ -163,6 +163,15 @@ The credential is the contents of `gateway-loopback.key` under `LOOM_HOME` (`~/.
 http://127.0.0.1:4317/?token=<credential>
 ```
 
+To print that URL for you, run this **on the host** (never from `loom start` or `loom status`, which deliberately don't print it):
+
+```sh
+loom open --print-url --port 4317                 # http://127.0.0.1:4317/?token=…
+loom open --print-url --host 127.0.0.1 --port 4317
+```
+
+`--port` (and `--host`) are the address you'll browse at on the far device — your tunnel's local end — so use the local port you gave `ssh -L`. The URL goes to stdout; a warning that it is a live credential goes to stderr. It's read straight from `gateway-loopback.key`, so it adds no network surface, but don't paste it into chat or tickets.
+
 Either way the browser keeps it and strips it from the address bar. It's stored per browser origin, so each URL you reach the cockpit by needs it once of its own — and anything holding it can drive the full loopback API, so treat it like a password.
 
 > **⚠ Tailscale `serve` does not work today, and neither does any other reverse proxy.** `tailscale serve --bg 4317` looks like the same shape as the SSH forward and was recommended here previously. It is refused *earlier* than the credential step above, so the writes-locked banner never gets a chance to help. Two guards, both keyed to loopback and both ahead of everything else: the CSRF guard rejects a request whose `Origin` isn't loopback with `403 cross-origin request refused`, and the DNS-rebinding guard rejects one whose `Host` isn't with `403 host header not allowed`. A browser on `https://your-host.<tailnet>.ts.net` sends that hostname in both, so writes and WebSocket upgrades are refused outright, and a proxy that forwards the original `Host` — the usual behaviour — is refused on plain reads too, before the page renders. This is a gap in Loom, not in Tailscale; it's tracked, and until it's fixed use the SSH forward above. (A `.ts.net` address as the `bindHost` of a *direct* bind, below, is a different configuration and is unaffected.)
