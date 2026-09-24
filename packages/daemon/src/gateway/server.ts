@@ -344,6 +344,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     app.addHook("preClose", async () => { await ref.close?.(); });
   }
 
+  // @decision 4a22aab8 — never register a guard onRequest hook above this websocket register: a guard that
+  // replies 401/403/429 first strands the rejected upgrade's socket and app.close() never settles.
+
+  // handleProtocols closes the gateway-token leak (card 42abca6a): absent this option, ws@8 echoes the
+  // FIRST client-offered Sec-WebSocket-Protocol entry verbatim into the 101 response — and that entry used
+  // to BE the token. selectWsSubprotocol always negotiates the fixed generic marker (or nothing, if the
+  // client didn't offer it), never the token-carrying `loom.bearer.*` entry — see gateway/trust-tier.ts.
+  await app.register(websocket, { options: { handleProtocols: selectWsSubprotocol } });
+
   // --- CSRF / DNS-rebind backstop (one onRequest hook, registered FIRST so it is inherited by EVERY plugin
   //     + route — the websocket and static plugins below included — i.e. UNIFORM coverage with no per-route
   //     N-1 gap; Fastify only inherits a parent hook into children registered AFTER it). The daemon binds
@@ -597,12 +606,6 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       }
     });
   }
-
-  // handleProtocols closes the gateway-token leak (card 42abca6a): absent this option, ws@8 echoes the
-  // FIRST client-offered Sec-WebSocket-Protocol entry verbatim into the 101 response — and that entry used
-  // to BE the token. selectWsSubprotocol always negotiates the fixed generic marker (or nothing, if the
-  // client didn't offer it), never the token-carrying `loom.bearer.*` entry — see gateway/trust-tier.ts.
-  await app.register(websocket, { options: { handleProtocols: selectWsSubprotocol } });
 
   // C2 of the WS delta-push umbrella (1efde4ba) — see GatewayDeps.fleetHub's doc above for why this is
   // test-injectable rather than always-fresh.

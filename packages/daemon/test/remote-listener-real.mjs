@@ -181,12 +181,11 @@ else {
     check("(A) the app's clientError handler is still reused on the remote server (>=1 listener, same count)",
       ap.listenerCount("clientError") >= 1 && sv.listenerCount("clientError") === ap.listenerCount("clientError"));
 
-    // Teardown of the REMOTE listener itself. (Not `app.close()` here: a rejected-401 WS upgrade on the LOOPBACK server
-    // leaves its server-side socket open even after the client destroyed it, and Fastify's server.close then never
-    // settles — reproduced with the main checkout's pre-change dist too, so it predates this card; scenario (T) below
-    // covers `app.close()` on an app that never saw one.)
-    await A.remote.close();
-    check("(A) remote.close() stops the remote listener (connection refused after, endpoint ref cleared)", (await req("https", "127.0.0.2", rp, "GET", "/api/version")).status === 0 && A.ref.current === null);
+    // Teardown via the REAL app.close() (its preClose hook closes the remote listener first). This used to be
+    // `A.remote.close()` because a 401-rejected WS upgrade above stranded its socket and app.close() never settled —
+    // card 4a22aab8: fixed by registering @fastify/websocket before the guard hooks; ws-rejected-upgrade-close.mjs pins it.
+    await A.app.close();
+    check("(A) app.close() settles after the rejected 401 upgrade and stops the remote listener (connection refused after, endpoint ref cleared)", (await req("https", "127.0.0.2", rp, "GET", "/api/version")).status === 0 && A.ref.current === null);
   } finally { A.db.close(); }
 }
 
