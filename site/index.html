@@ -347,10 +347,11 @@
               <p class="card-body">
                 Everything Loom keeps is local: a loopback-bound daemon, an SQLite
                 store, your git checkouts, transcripts, and vault. Loom adds no
-                cloud service of its own, so your code and history stay on your
-                machine. Every write route needs a local access credential, so
-                another process on the box can't drive the API just by reaching
-                the socket.
+                cloud service of its own — no account, no Loom server, nothing
+                phoning home; every outbound path is one you turn on yourself.
+                Every write route needs a local access credential, so another
+                process on the box can't drive the API just by reaching the
+                socket.
               </p>
             </li>
 
@@ -363,12 +364,14 @@
                   <path d="M8 33c3-2.5 7-3.8 12-3.8S29 30.5 32 33" />
                 </svg>
               </span>
-              <h3 class="card-title">Reach it from your phone</h3>
+              <h3 class="card-title">Reach it from another device</h3>
               <p class="card-body">
-                Put a Tailscale or SSH tunnel in front of the loopback daemon, or
-                turn on Loom's own authenticated bind: a gateway token per client,
-                TLS required off a tailnet, and a fail-closed route allowlist that
-                keeps every human-only writer loopback-only. Off by default.
+                Forward a port over SSH and the loopback daemon is on your laptop
+                or phone, with one token step per device and nothing new listening.
+                Loom can also bind an interface itself — a gateway token per
+                client, TLS required off a tailnet, a fail-closed route allowlist
+                — but read that as an authenticated API, not a second cockpit.
+                Off by default.
               </p>
             </li>
 
@@ -491,10 +494,11 @@
               <h3 class="card-title">Guided setup + a Platform operator</h3>
               <p class="card-body">
                 A built-in <strong>Platform</strong> operator greets you on first
-                run and stays one click away. It helps you create, configure, and
-                archive projects, agents, and profiles, and can set them up on
-                your behalf, confirming the big moves first, on a deliberately
-                narrow, safe tool surface.
+                run and stays one click away. It helps you create and configure
+                projects, agents, and profiles, and can set them up on your
+                behalf, confirming the big moves first, on a deliberately narrow,
+                safe tool surface — one lifecycle move on it, archiving a project,
+                and nothing that deletes.
               </p>
             </li>
 
@@ -530,7 +534,7 @@
                 Run a manager, or the Workspace Auditor, on a cron cadence; each
                 fire boots a real interactive session against the agent you pick,
                 behind concurrency and usage-limit gates. Off by default; enable it
-                in Settings.
+                in Settings and restart the daemon to arm the ticker.
               </p>
             </li>
 
@@ -646,8 +650,9 @@
             <p class="section-label">Quickstart</p>
             <h2 class="section-title" id="qs-h">Two commands to a live fleet.</h2>
             <p class="prose prose-tight">
-              Install the management CLI from npm and start the local daemon. The
-              cockpit runs on your own machine, bound to loopback. Prefer the
+              Install the management CLI from npm and start the local daemon —
+              <code>loom start</code> runs in the foreground and opens the cockpit
+              for you. It runs on your own machine, bound to loopback. Prefer the
               source? Clone the repo and run it with pnpm.
             </p>
             <ul class="quickstart-meta" aria-label="Distribution facts">
@@ -668,18 +673,15 @@
                 <code class="term-cmd" data-copy="npm i -g loomctl"><span class="term-prompt">$</span> npm i -g loomctl</code>
                 <button class="copy" type="button" aria-label="Copy: npm i -g loomctl">Copy</button>
               </div>
+              <p class="term-comment term-comment-sp"># start the daemon and open the cockpit</p>
               <div class="term-line">
                 <code class="term-cmd" data-copy="loom start"><span class="term-prompt">$</span> loom start</code>
                 <button class="copy" type="button" aria-label="Copy: loom start">Copy</button>
               </div>
+              <p class="term-comment term-comment-sp"># or run from source (build first — the daemon imports the built shared contract)</p>
               <div class="term-line">
-                <code class="term-cmd" data-copy="loom open"><span class="term-prompt">$</span> loom open</code>
-                <button class="copy" type="button" aria-label="Copy: loom open">Copy</button>
-              </div>
-              <p class="term-comment term-comment-sp"># or run from source</p>
-              <div class="term-line">
-                <code class="term-cmd" data-copy="pnpm install &amp;&amp; pnpm daemon"><span class="term-prompt">$</span> pnpm install &amp;&amp; pnpm daemon</code>
-                <button class="copy" type="button" aria-label="Copy: pnpm install and pnpm daemon">Copy</button>
+                <code class="term-cmd" data-copy="pnpm install &amp;&amp; pnpm build &amp;&amp; pnpm daemon"><span class="term-prompt">$</span> pnpm install &amp;&amp; pnpm build &amp;&amp; pnpm daemon</code>
+                <button class="copy" type="button" aria-label="Copy: pnpm install, pnpm build and pnpm daemon">Copy</button>
               </div>
             </div>
           </div>

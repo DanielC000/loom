@@ -6,7 +6,7 @@
     <title>Remote access · Loom</title>
     <meta
       name="description"
-      content="Reach your Loom daemon from another device. The recommended path keeps the daemon loopback-only behind Tailscale Serve or SSH; a co-equal alternative is a direct authenticated bind with a gateway token and mandatory TLS off the tailnet."
+      content="Reach your Loom daemon from another device. The recommended path keeps the daemon loopback-only behind an SSH port-forward; a narrower alternative is a direct authenticated bind with a gateway token and mandatory TLS off the tailnet, which serves the API rather than the cockpit."
     />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <meta name="color-scheme" content="dark" />
@@ -15,7 +15,7 @@
     <meta property="og:title" content="Remote access · Loom" />
     <meta
       property="og:description"
-      content="Reach your Loom daemon from another device: Tailscale Serve / SSH (recommended, zero new listening surface) or a direct authenticated bind with a gateway token and TLS."
+      content="Reach your Loom daemon from another device: an SSH port-forward (recommended, zero new listening surface) or a direct authenticated bind with a gateway token and TLS."
     />
     <meta property="og:type" content="article" />
 
@@ -66,18 +66,18 @@
             By default the Loom daemon binds <strong>loopback only</strong>
             (<code>127.0.0.1:4317</code>): nothing outside your machine can reach
             it. That's the right default, but sometimes you want to open the
-            cockpit from a laptop, a phone, or another box. There are two supported
-            ways to do that, and they trade off differently.
+            cockpit from a laptop, a phone, or another box. There are two ways to
+            do that, and only one of them gives you the cockpit.
           </p>
           <div class="opt-grid reveal">
             <div class="opt">
               <span class="pill pill-phosphor">Recommended</span>
-              <h3 class="opt-h">Tailscale Serve / SSH</h3>
+              <h3 class="opt-h">SSH port-forward</h3>
               <p class="opt-b">
-                The daemon stays loopback-only. Tailscale (or an SSH tunnel)
-                authenticates and encrypts the transport, so Loom opens
-                <strong>no new listening surface</strong> of its own — nothing to
-                mint, nothing to expose.
+                The daemon stays loopback-only. SSH authenticates and encrypts the
+                transport, so Loom opens <strong>no new listening surface</strong>
+                of its own — nothing to mint, nothing to expose. One token step per
+                device and you have the full cockpit.
               </p>
             </div>
             <div class="opt">
@@ -86,70 +86,29 @@
               <p class="opt-b">
                 Loom itself binds a non-loopback interface, gated by a
                 <strong>gateway token</strong> and — off a tailnet —
-                <strong>mandatory TLS</strong>. Reach for this when you can't run
-                Tailscale or SSH on both ends.
+                <strong>mandatory TLS</strong>. It serves an
+                <strong>authenticated API, not the cockpit</strong>: the web app's
+                own routes stay loopback-only.
               </p>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- ── Recommended: Tailscale Serve / SSH ───────────────────────────── -->
-      <section class="section" id="tailscale">
+      <!-- ── Recommended: SSH port-forward ─────────────────────────────────── -->
+      <section class="section" id="tunnel">
         <div class="wrap doc-col">
           <p class="section-label reveal">Recommended</p>
-          <h2 class="section-title reveal">Tailscale Serve, or an SSH tunnel.</h2>
+          <h2 class="section-title reveal">An SSH port-forward.</h2>
           <div class="doc-flow reveal">
             <p class="prose">
-              This is the path we recommend for almost everyone. You leave
-              Loom's <code>remoteAccess</code> config untouched (still disabled,
-              still loopback), and put the authentication in front of it. Because
-              the proxy connects to the daemon over <code>127.0.0.1</code>, the
-              request arrives on the loopback interface Loom already trusts — you
-              add reach without adding an exposed port.
-            </p>
-
-            <h3 class="doc-sub">Tailscale Serve</h3>
-            <p class="prose">
-              If your machines are on a <a href="https://tailscale.com/">Tailscale</a>
-              tailnet, <code>tailscale serve</code> publishes an HTTPS endpoint on
-              your node — with a certificate Tailscale provisions for you — and
-              proxies it to the daemon on loopback. Only devices on your tailnet
-              can reach it.
-            </p>
-          </div>
-
-          <div class="term reveal">
-            <div class="term-bar">
-              <span class="instrument-dot"></span>
-              <span class="term-title">tailscale · serve</span>
-            </div>
-            <div class="term-body">
-              <p class="term-comment"># proxy an HTTPS tailnet endpoint to the loopback daemon</p>
-              <div class="term-line">
-                <code class="term-cmd" data-copy="tailscale serve --bg 4317"><span class="term-prompt">$</span> tailscale serve --bg 4317</code>
-                <button class="copy" type="button" aria-label="Copy: tailscale serve --bg 4317">Copy</button>
-              </div>
-              <p class="term-comment term-comment-sp"># then open the cockpit from any device on your tailnet</p>
-              <div class="term-line">
-                <code class="term-cmd" data-copy="https://your-machine.your-tailnet.ts.net/"><span class="term-prompt">›</span> https://your-machine.your-tailnet.ts.net/</code>
-                <button class="copy" type="button" aria-label="Copy the tailnet URL">Copy</button>
-              </div>
-              <p class="term-comment term-comment-sp"># stop serving when you're done</p>
-              <div class="term-line">
-                <code class="term-cmd" data-copy="tailscale serve --bg 4317 off"><span class="term-prompt">$</span> tailscale serve --bg 4317 off</code>
-                <button class="copy" type="button" aria-label="Copy: tailscale serve --bg 4317 off">Copy</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="doc-flow reveal">
-            <h3 class="doc-sub">SSH tunnel</h3>
-            <p class="prose">
-              No tailnet? Any SSH connection to the daemon's host works just as
-              well. Forward a local port over SSH and browse it as if it were
-              local — SSH authenticates and encrypts the whole hop, and the daemon
-              still only ever sees a loopback connection.
+              This is the path we recommend, and today it's the one that works end
+              to end. You leave Loom's <code>remoteAccess</code> config untouched
+              (still disabled, still loopback), and put the authentication in front
+              of it. Forward a local port over SSH and browse it as if it were
+              local — SSH authenticates and encrypts the whole hop, the request
+              arrives on the loopback interface Loom already trusts, and you add
+              reach without adding an exposed port.
             </p>
           </div>
 
@@ -173,36 +132,65 @@
           </div>
 
           <div class="callout reveal">
-            <p class="callout-title"><span class="dot dot-amber"></span> One extra step on each new device</p>
+            <p class="callout-title"><span class="dot dot-amber"></span> One extra step on each new device — do it first</p>
             <p>
               Loom's loopback API requires a <strong>local access credential</strong>
-              on every write, even over a tunnel. On the host, <code>loom open</code>
-              appends it for you; a tunnelled browser has never seen it, so the
-              cockpit loads and reads fine but every write fails with a 401. Fix it
-              once per device by opening the URL with the token appended — the
-              browser stores it and strips it from the address bar:
+              on every write and on the terminal socket, even over a tunnel. On the
+              host, <code>loom open</code> appends it for you; a tunnelled browser
+              has never seen it. <strong>Skip this step and the cockpit looks
+              broken rather than locked:</strong> the page loads and reads fine,
+              but every action fails with
+              <em>"unauthorized — see <code>loom open</code> for how to obtain the
+              local access credential"</em>, and every terminal pane stays blank —
+              and <code>loom open</code>, the one thing that message tells you to
+              run, is a command on the <em>host</em>, not on the device you're
+              holding. Fix it once per device by opening the URL with the token
+              appended; the browser stores it and strips it from the address bar:
             </p>
             <p>
-              <code>https://your-machine.your-tailnet.ts.net/?token=&lt;credential&gt;</code>
+              <code>http://127.0.0.1:4317/?token=&lt;credential&gt;</code>
             </p>
             <p>
               The credential is the contents of
               <code>~/.loom/gateway-loopback.key</code> (under
               <code>LOOM_HOME</code>) on the host running Loom. It's stored per
-              browser origin, so the tailnet URL and
-              <code>http://127.0.0.1:4317</code> each need it once. Treat it like a
-              password: anything holding it can drive the full loopback API.
+              browser <em>origin</em>, so each URL you reach the cockpit by needs it
+              once of its own. Treat it like a password: anything holding it can
+              drive the full loopback API.
             </p>
           </div>
 
           <div class="callout reveal">
             <p class="callout-title"><span class="dot dot-phosphor"></span> Why this is the default recommendation</p>
             <p>
-              With Serve or SSH, the daemon's listening surface never changes — it
+              With an SSH forward, the daemon's listening surface never changes — it
               stays bound to <code>127.0.0.1</code>. There's no gateway token to
               mint, no TLS material to manage inside Loom, and no interface exposed
-              for anyone to probe. The transport's own identity layer (your
-              tailnet, or your SSH keys) does the authenticating.
+              for anyone to probe. The transport's own identity layer (your SSH
+              keys) does the authenticating.
+            </p>
+          </div>
+
+          <div class="callout reveal">
+            <p class="callout-title"><span class="dot dot-amber"></span> Tailscale Serve doesn't work today</p>
+            <p>
+              <code>tailscale serve --bg 4317</code> is the same shape as the SSH
+              forward and was recommended on this page previously. It does not
+              currently work, and the reason is on Loom's side, not Tailscale's.
+              The daemon's CSRF guard refuses any request whose <code>Origin</code>
+              isn't loopback, before it looks at anything else — and a browser on
+              <code>https://your-machine.your-tailnet.ts.net</code> sends exactly
+              that origin on every write and every WebSocket upgrade, so both come
+              back <code>403</code>. The DNS-rebinding guard applies the same rule
+              to the <code>Host</code> header on plain reads, so depending on how
+              Serve proxies it the cockpit may not load at all. Use the SSH forward
+              above until this is fixed.
+            </p>
+            <p>
+              This is about <em>Serve as a proxy in front of a loopback daemon</em>.
+              Pointing a <strong>direct bind</strong> at a <code>.ts.net</code>
+              address is a different configuration and is unaffected — see the TLS
+              section below.
             </p>
           </div>
         </div>
@@ -215,7 +203,7 @@
           <h2 class="section-title reveal">Direct authenticated bind.</h2>
           <div class="doc-flow reveal">
             <p class="prose">
-              When Tailscale and SSH aren't options — say you want the daemon to
+              When an SSH forward isn't an option — say you want the daemon to
               answer directly on a LAN interface, or on a host that's already
               reachable — Loom can bind a non-loopback interface itself. This
               opens a real listening socket, so Loom gates it hard: a
@@ -224,10 +212,35 @@
               daemon refuses to open the interface at all.
             </p>
             <p class="prose">
-              It's a co-equal, fully supported path — just one that puts the
-              authentication and the certificate in your hands instead of the
-              transport's. Prefer it over Serve/SSH only when you specifically
-              need Loom to be the thing listening.
+              Know what you're getting, though. What this serves remotely is an
+              <strong>authenticated API, not the cockpit</strong>: the route
+              allowlist covers reads and the answer/steer actions, and the web
+              app's own static routes aren't on it, so a remote browser is refused
+              the page itself. Reach for this when something on the other end
+              speaks HTTP — a script, an integration, your own client. Reach for
+              the SSH forward when you want to <em>look at</em> Loom.
+            </p>
+          </div>
+
+          <div class="callout reveal">
+            <p class="callout-title"><span class="dot dot-amber"></span> Two sharp edges before you turn it on</p>
+            <p>
+              <strong><code>bindHost: "0.0.0.0"</code> doesn't currently work.</strong>
+              The DNS-rebinding guard requires a request's <code>Host</code> to
+              match the configured <code>bindHost</code> exactly, and a real
+              client's <code>Host</code> is the address it dialled — never the
+              literal <code>0.0.0.0</code> — so every remote request is refused
+              with <code>403</code>. Bind the specific address you mean instead.
+            </p>
+            <p>
+              <strong>A non-loopback or TLS bind takes your local tooling with
+              it.</strong> The daemon opens one listener. Bind a specific address
+              and it stops answering on <code>127.0.0.1</code> at all; turn on TLS
+              and the whole listener becomes HTTPS. Either way
+              <code>loom status</code>, <code>loom stop</code>,
+              <code>loom open</code> and the <code>http://127.0.0.1:4317</code>
+              admin calls on this page — all of which speak plain HTTP to loopback
+              — stop working.
             </p>
           </div>
 
@@ -240,6 +253,16 @@
                 <code>plaintext</code> secret is returned <strong>once</strong> —
                 store it now; it's hashed at rest and never recoverable again.
               </p>
+              <p>
+                Note the <code>Authorization</code> header: this is a write, and
+                every write on the loopback API needs the
+                <strong>local access credential</strong> — the contents of
+                <code>~/.loom/gateway-loopback.key</code> under
+                <code>LOOM_HOME</code>. That's a different secret from the gateway
+                token you're minting here, and it's required on every mutating call
+                on this page. Without it you get
+                <code>401 unauthorized</code>.
+              </p>
               <div class="term">
                 <div class="term-bar">
                   <span class="instrument-dot"></span>
@@ -247,7 +270,8 @@
                 </div>
                 <div class="term-body">
                   <div class="term-line">
-                    <code class="term-cmd" data-copy="curl -X POST http://127.0.0.1:4317/api/gateway-tokens -H 'content-type: application/json' -d '{&quot;name&quot;:&quot;my-laptop&quot;}'"><span class="term-prompt">$</span> curl -X POST http://127.0.0.1:4317/api/gateway-tokens \
+                    <code class="term-cmd" data-copy="curl -X POST http://127.0.0.1:4317/api/gateway-tokens -H &quot;Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)&quot; -H 'content-type: application/json' -d '{&quot;name&quot;:&quot;my-laptop&quot;}'"><span class="term-prompt">$</span> curl -X POST http://127.0.0.1:4317/api/gateway-tokens \
+    -H "Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)" \
     -H 'content-type: application/json' -d '{"name":"my-laptop"}'</code>
                     <button class="copy" type="button" aria-label="Copy the mint-token curl command">Copy</button>
                   </div>
@@ -283,16 +307,17 @@
                 </div>
                 <div class="term-body">
                   <div class="term-line">
-                    <code class="term-cmd" data-copy="curl -X PATCH http://127.0.0.1:4317/api/platform/config -H 'content-type: application/json' -d '{&quot;config&quot;:{&quot;remoteAccess&quot;:{&quot;enabled&quot;:true,&quot;bindHost&quot;:&quot;0.0.0.0&quot;,&quot;tls&quot;:{&quot;certPath&quot;:&quot;/etc/loom/cert.pem&quot;,&quot;keyPath&quot;:&quot;/etc/loom/key.pem&quot;}}}}'"><span class="term-prompt">$</span> curl -X PATCH http://127.0.0.1:4317/api/platform/config \
+                    <code class="term-cmd" data-copy="curl -X PATCH http://127.0.0.1:4317/api/platform/config -H &quot;Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)&quot; -H 'content-type: application/json' -d '{&quot;config&quot;:{&quot;remoteAccess&quot;:{&quot;enabled&quot;:true,&quot;bindHost&quot;:&quot;192.168.1.10&quot;,&quot;tls&quot;:{&quot;certPath&quot;:&quot;/etc/loom/cert.pem&quot;,&quot;keyPath&quot;:&quot;/etc/loom/key.pem&quot;}}}}'"><span class="term-prompt">$</span> curl -X PATCH http://127.0.0.1:4317/api/platform/config \
+    -H "Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)" \
     -H 'content-type: application/json' \
     -d '{"config":{"remoteAccess":{
           "enabled": true,
-          "bindHost": "0.0.0.0",
+          "bindHost": "192.168.1.10",
           "tls": { "certPath": "/etc/loom/cert.pem", "keyPath": "/etc/loom/key.pem" }
         }}}'</code>
                     <button class="copy" type="button" aria-label="Copy the configure-remoteAccess curl command">Copy</button>
                   </div>
-                  <p class="term-comment term-comment-sp"># bindHost can be a specific address (e.g. 192.168.1.10) or 0.0.0.0 for all interfaces</p>
+                  <p class="term-comment term-comment-sp"># bindHost must be the SPECIFIC address clients will dial — 0.0.0.0 currently 403s every remote request</p>
                 </div>
               </div>
             </li>
@@ -362,14 +387,17 @@
               A remote request is deliberately limited to a read-and-steer surface:
               the read-only views, the answer/steer actions on an already-running
               session (answer a question, send input, stop, resume, end), and the
-              two read-only terminal WebSockets. Everything else — vault and git
-              writers, the internal control endpoints, the MCP mounts, and even the
-              gateway-token admin itself — stays <strong>loopback-only by
-              construction</strong>. A valid remote token can never mint, rotate,
-              or revoke tokens over the wire; only the human at the local machine
-              can. Remote requests are also rate-limited per IP and per token, with
-              an automatic lockout after repeated auth failures; loopback traffic is
-              exempt.
+              live session sockets — the terminal and companion streams plus a
+              fleet-status feed. Those sockets are <strong>read-only to a remote
+              peer</strong>: stdin only ever arrives over the governed REST input
+              route, and a host shell isn't reachable remotely at all. Everything
+              else — the web app's own routes, vault and git writers, the internal
+              control endpoints, the MCP mounts, and even the gateway-token admin
+              itself — stays <strong>loopback-only by construction</strong>. A valid
+              remote token can never mint, rotate, or revoke tokens over the wire;
+              only the human at the local machine can. Remote requests are also
+              rate-limited per IP and per token, with an automatic lockout after
+              repeated auth failures; loopback traffic is exempt.
             </p>
           </div>
         </div>
@@ -395,9 +423,12 @@
               A Tailscale <code>.ts.net</code> address is the one exception: the
               tailnet already encrypts the link end to end, so a bind whose
               <code>bindHost</code> is a <code>.ts.net</code> name skips the TLS
-              requirement. (Note this is the <em>direct-bind-to-a-tailnet-address</em>
-              case — distinct from the recommended Tailscale Serve path above, which
-              needs no bind at all.)
+              requirement. This is the <em>direct-bind-to-a-tailnet-address</em>
+              case — a real listener, on that address, matching that
+              <code>Host</code>. It is not the same thing as
+              <code>tailscale serve</code> proxying to a loopback daemon, which
+              needs no bind at all and doesn't currently work; see the note in the
+              recommended section above.
             </p>
           </div>
         </div>
@@ -411,7 +442,10 @@
           <div class="doc-flow reveal">
             <p class="prose">
               All token management is loopback-only and human-only. List shows
-              metadata only — never the secret.
+              metadata only — never the secret. Every call that changes something
+              carries the <strong>local access credential</strong> as a bearer
+              token, the same as the mint call above; the plain list read doesn't
+              need it.
             </p>
           </div>
 
@@ -428,18 +462,21 @@
               </div>
               <p class="term-comment term-comment-sp"># rotate a token's secret — old plaintext dies, new one returned once</p>
               <div class="term-line">
-                <code class="term-cmd" data-copy="curl -X POST http://127.0.0.1:4317/api/gateway-tokens/<id>/rotate"><span class="term-prompt">$</span> curl -X POST http://127.0.0.1:4317/api/gateway-tokens/&lt;id&gt;/rotate</code>
+                <code class="term-cmd" data-copy="curl -X POST http://127.0.0.1:4317/api/gateway-tokens/<id>/rotate -H &quot;Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)&quot;"><span class="term-prompt">$</span> curl -X POST http://127.0.0.1:4317/api/gateway-tokens/&lt;id&gt;/rotate \
+    -H "Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)"</code>
                 <button class="copy" type="button" aria-label="Copy: rotate a gateway token">Copy</button>
               </div>
               <p class="term-comment term-comment-sp"># pause or revoke (soft, reversible → active|paused|revoked)</p>
               <div class="term-line">
-                <code class="term-cmd" data-copy="curl -X POST http://127.0.0.1:4317/api/gateway-tokens/<id> -H 'content-type: application/json' -d '{&quot;status&quot;:&quot;revoked&quot;}'"><span class="term-prompt">$</span> curl -X POST http://127.0.0.1:4317/api/gateway-tokens/&lt;id&gt; \
+                <code class="term-cmd" data-copy="curl -X POST http://127.0.0.1:4317/api/gateway-tokens/<id> -H &quot;Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)&quot; -H 'content-type: application/json' -d '{&quot;status&quot;:&quot;revoked&quot;}'"><span class="term-prompt">$</span> curl -X POST http://127.0.0.1:4317/api/gateway-tokens/&lt;id&gt; \
+    -H "Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)" \
     -H 'content-type: application/json' -d '{"status":"revoked"}'</code>
                 <button class="copy" type="button" aria-label="Copy: revoke a gateway token">Copy</button>
               </div>
               <p class="term-comment term-comment-sp"># delete permanently</p>
               <div class="term-line">
-                <code class="term-cmd" data-copy="curl -X DELETE http://127.0.0.1:4317/api/gateway-tokens/<id>"><span class="term-prompt">$</span> curl -X DELETE http://127.0.0.1:4317/api/gateway-tokens/&lt;id&gt;</code>
+                <code class="term-cmd" data-copy="curl -X DELETE http://127.0.0.1:4317/api/gateway-tokens/<id> -H &quot;Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)&quot;"><span class="term-prompt">$</span> curl -X DELETE http://127.0.0.1:4317/api/gateway-tokens/&lt;id&gt; \
+    -H "Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)"</code>
                 <button class="copy" type="button" aria-label="Copy: delete a gateway token">Copy</button>
               </div>
             </div>
@@ -484,7 +521,7 @@
         </a>
         <p class="footer-note">
           Loom runs on your own machine, bound to loopback by default. Remote
-          access is opt-in and gated: Tailscale Serve / SSH, or a direct
+          access is opt-in and gated: an SSH port-forward, or a direct
           authenticated bind with a gateway token and TLS.
         </p>
         <a class="footer-link" href="https://github.com/DanielC000/loom"
