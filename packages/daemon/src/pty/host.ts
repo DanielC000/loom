@@ -4,6 +4,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { spawn as spawnProcess } from "node:child_process";
+import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
 import { spawn, type IPty } from "node-pty";
 import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
@@ -4861,6 +4862,9 @@ export class PtyHost {
       console.warn(`[pty] ${opts.sessionId} codescape is enabled for this project but is NOT mounted for harness "codex" — codex has no per-tool allow/disallow mechanism to pair with codescape's write-tool restriction (see createCodexPty's own doc). Use harness "claude" for codescape access.`);
       unsupportedItems.push({ id: "codescape", reason: CODEX_CODESCAPE_REASON });
     }
+    // Card b94fcb72: codex ignores restrictedTools (its only consumer is the claude createPty disallow list), so a
+    // session that arrives here with it on would run UNrestricted — report it in the SAME single report.
+    if (opts.restrictedTools === true) unsupportedItems.push({ id: "restrictedTools", reason: CODEX_RESTRICTED_TOOLS_REASON });
     const mcpServers = buildMcpServers({
       sessionId: opts.sessionId, port: PORT, role: opts.role,
       browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,

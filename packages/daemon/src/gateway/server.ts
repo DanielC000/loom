@@ -72,6 +72,7 @@ import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } fro
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile } from "../skills/store.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
+import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { cloneAgentCore } from "../agents/clone-core.js";
@@ -2217,6 +2218,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const b = (req.body ?? {}) as { restrictedTools?: unknown };
     if (typeof b.restrictedTools !== "boolean") {
       return reply.code(400).send({ error: "restrictedTools must be a boolean" });
+    }
+    // Card b94fcb72: codex ignores restrictedTools (no per-native-tool disallow lever), so a codex-pinned row
+    // flagged true would resume UNrestricted while reading as restricted. Refuse it; turning it OFF stays allowed.
+    if (b.restrictedTools === true && deps.db.getSession(sessionId)?.harness === "codex") {
+      return reply.code(409).send({ error: CODEX_RESTRICTED_TOOLS_REASON });
     }
     deps.db.setRestrictedTools(sessionId, b.restrictedTools);
     return { sessionId, restrictedTools: b.restrictedTools };

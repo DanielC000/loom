@@ -13,7 +13,7 @@ import {
 // Card 66b1b40d: its own statement (not folded into the import above) — orchestration-mcp-role-guard.mjs regex-scans
 // that import within a fixed window of `usesOrchestrationMcp`, which a longer name list would push out of range.
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
-import { codexIncompatibilities, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
+import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
@@ -3515,6 +3515,9 @@ export class SessionService {
     // write alone takes effect on the very next tool call — never assume they need the respawn below.
     const { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite } =
       this.resolveAgentSpawn(agent, config, "assistant");
+    // Card b94fcb72: the row's harness stays pinned, and codex ignores restrictedTools — re-pinning `true` onto a
+    // codex row would resume UNrestricted while reading as restricted. Refuse BEFORE any write or pty stop.
+    if (restrictedTools === true && session.harness === "codex") throw new Error(CODEX_RESTRICTED_TOOLS_REASON);
     this.db.setSessionCapabilitySurface(sessionId, { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite });
     const carried: QueuedMessage[] = [];
     const drain = (): void => { carried.push(...this.pty.flushPending(sessionId)); };
