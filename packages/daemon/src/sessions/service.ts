@@ -13572,7 +13572,9 @@ export class SessionService {
     // Card 9f6598dd: whether ANY step of whichever gate run(s) actually spawned below (the first attempt,
     // OR'd with the transient-kill retry if one fires) ever consumed its one-time auto-extend — the ONLY
     // direct signal that a run breached its `gateCommandTimeoutMs` budget (see GATE_EXTEND_IDLE_MS's doc).
-    // `anyExtended` accumulates via the wrapped `hooks.onExtend` at each `runExclusive` call site below;
+    // `anyExtended` accumulates via a wrapped `hooks.onExtend` on the only two links that can extend:
+    // attempt 1 and the resume-remaining-steps link, all inside ONE `runExclusive` (card 68155573); the
+    // transient-kill and single/multi-file retry links pass `allowExtend:false`, so they never fire it;
     // `gateExtended` is the FINAL, reportable value — `undefined` (not `false`) for a gateless project or a
     // REUSED gate, same "nothing to report" discipline `gateStepsResult` already follows, so a caller can
     // tell "never spawned" apart from "spawned and never extended". Read by confirmWorkerMergeTracked's
@@ -14601,7 +14603,10 @@ export class SessionService {
                 resumeStartedAt = startedAt;
                 // No re-union (same reason as the retry above). `allowExtend` stays at its default: every
                 // step in `remaining` is running for the FIRST time here (card 7ad12202).
-                await captureGatedTip(); const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, hooks, gateSpillFile);
+                // Card 3007bb04: this is the ONLY other link that can auto-extend (the retry links pass
+                // `allowExtend:false`), so its extend must feed `futileNow()` too, exactly like attempt 1's.
+                const resumeHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
+                await captureGatedTip(); const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, resumeHooks, gateSpillFile);
                 if (resumed.passed) holdRepoGuardOnExit();
                 return resumed;
               },

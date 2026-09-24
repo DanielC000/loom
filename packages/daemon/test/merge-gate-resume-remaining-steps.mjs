@@ -265,6 +265,98 @@ try {
       sessions.gateSemaphore.active === 0 && sessions.gateSemaphore.activeMergeRepos.size === 0 && sessions.gateSemaphore.activeWorktrees.size === 0 && sessions.gateSemaphore.squashOnlySnapshot().length === 0);
   }
 
+  // ── (U) card 3007bb04: a RESUME link that auto-extends and then times out is provably futile for the
+  //        transient-kill retry too (that retry runs `allowExtend:false`), so it must be SKIPPED — before this
+  //        card only attempt 1's hooks fed `anyExtended`, so the whole gate was re-run for a foregone failure.
+  //        Contrast (T): the same chain with a resume timeout that NEVER extended still gets its 4th link. ──
+  {
+    const U = mk("u", "feature-u.txt");
+    makeRepo(U);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async (gate, _wt, _to, _a, _env, _allowExtend, _b, hooks) => {
+      calls++;
+      if (calls === 1) {
+        return {
+          passed: false, failedStep: "node packages/daemon/test/flaky-mid.mjs", failedStatus: 1, failedSignal: null, failedTimedOut: false,
+          outputTail: "", failingTest: "FAIL  flaky-mid", failingTestCount: 1, failTierTest: "FAIL  flaky-mid", failTierTestCount: 1, failTierAll: ["FAIL  flaky-mid"],
+          steps: [{ step: "pnpm build", durationMs: 10, status: 0 }, { step: "node packages/daemon/test/flaky-mid.mjs", durationMs: 20, status: 1 }],
+        };
+      }
+      if (calls === 2) return { passed: true, steps: [{ step: "node packages/daemon/scripts/test-daemon.mjs --only=flaky-mid", durationMs: 5, status: 0 }] };
+      // calls === 3: the resume consumes its auto-extend, then still times out.
+      if (calls === 3) {
+        hooks?.onExtend?.();
+        return { passed: false, failedStep: "pnpm true-final", failedStatus: null, failedSignal: "SIGTERM", failedTimedOut: true, outputTail: "", steps: [{ step: "pnpm true-final", durationMs: 3, status: null }] };
+      }
+      // A 4th call would be the futile transient-kill retry — it would pass here, so a regression shows as merged:true.
+      return { passed: true, steps: [{ step: "pnpm build", durationMs: 1, status: 0 }, { step: "node packages/daemon/test/flaky-mid.mjs", durationMs: 1, status: 0 }, { step: "pnpm true-final", durationMs: 1, status: 0 }] };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(U.repo, U.projId, U.taskId);
+    U.worktreePath = worktreePath; U.branch = branch; worktrees.push(worktreePath);
+    plantTestFile(worktreePath, "flaky-mid");
+    fs.writeFileSync(path.join(worktreePath, U.file), "work for U\n");
+    commitAll(worktreePath, `${U.file}`, GIT_ID);
+    seed(db, U, GATE_3STEP);
+
+    const confirm = await sessions.confirmWorkerMerge(U.mgrId, U.workerId);
+    check("(U) exactly 3 gate calls — the resume extended then timed out, so NO 4th (transient-kill retry) call", calls === 3);
+    check("(U) merged:false", confirm.merged === false);
+    check("(U) the resume link's extend surfaces: confirm.gateExtended === true", confirm.gateExtended === true);
+    check("(U) NO build_gate_retry_attempt event", eventsOfKind(db, U.mgrId, "build_gate_retry_attempt").length === 0);
+    check("(U) merge_rejected carries retrySkippedFutile:true, retried:false", (() => {
+      const evs = eventsOfKind(db, U.mgrId, "merge_rejected");
+      return evs.length === 1 && evs[0].detail?.retrySkippedFutile === true && evs[0].detail?.retried === false;
+    })());
+    check("(U) nothing held after the chain",
+      sessions.gateSemaphore.active === 0 && sessions.gateSemaphore.activeMergeRepos.size === 0 && sessions.gateSemaphore.activeWorktrees.size === 0);
+  }
+
+  // ── (V) card 3007bb04 sibling of (U): the resume extends and then PASSES — merges, and the extend is
+  //        still reported (gateExtended:true on a PASSING op, the second effect of mirroring the resume's hooks). ──
+  {
+    const V = mk("v", "feature-v.txt");
+    makeRepo(V);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async (gate, _wt, _to, _a, _env, _allowExtend, _b, hooks) => {
+      calls++;
+      if (calls === 1) {
+        return {
+          passed: false, failedStep: "node packages/daemon/test/flaky-mid.mjs", failedStatus: 1, failedSignal: null, failedTimedOut: false,
+          outputTail: "", failingTest: "FAIL  flaky-mid", failingTestCount: 1, failTierTest: "FAIL  flaky-mid", failTierTestCount: 1, failTierAll: ["FAIL  flaky-mid"],
+          steps: [{ step: "pnpm build", durationMs: 10, status: 0 }, { step: "node packages/daemon/test/flaky-mid.mjs", durationMs: 20, status: 1 }],
+        };
+      }
+      if (calls === 2) return { passed: true, steps: [{ step: "node packages/daemon/scripts/test-daemon.mjs --only=flaky-mid", durationMs: 5, status: 0 }] };
+      // calls === 3: the resume consumes its auto-extend, then PASSES.
+      if (calls === 3) {
+        hooks?.onExtend?.();
+        return { passed: true, steps: [{ step: "pnpm true-final", durationMs: 3, status: 0 }] };
+      }
+      // A 4th call is not expected; if one happens it still passes, so the calls===3 check is what catches it.
+      return { passed: true, steps: [{ step: "pnpm build", durationMs: 1, status: 0 }, { step: "node packages/daemon/test/flaky-mid.mjs", durationMs: 1, status: 0 }, { step: "pnpm true-final", durationMs: 1, status: 0 }] };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(V.repo, V.projId, V.taskId);
+    V.worktreePath = worktreePath; V.branch = branch; worktrees.push(worktreePath);
+    plantTestFile(worktreePath, "flaky-mid");
+    fs.writeFileSync(path.join(worktreePath, V.file), "work for V\n");
+    commitAll(worktreePath, `${V.file}`, GIT_ID);
+    seed(db, V, GATE_3STEP);
+
+    const confirm = await sessions.confirmWorkerMerge(V.mgrId, V.workerId);
+    check("(V) exactly 3 gate calls (attempt 1, single-file retry, resume) — the passing resume ends the chain", calls === 3);
+    check("(V) merged:true", confirm.merged === true);
+    check("(V) gateExtended === true on the PASSING op (the resume link extended)", confirm.gateExtended === true);
+    check("(V) no transient retry: transientRetried is not set", confirm.transientRetried === undefined);
+    check("(V) nothing held after the chain",
+      sessions.gateSemaphore.active === 0 && sessions.gateSemaphore.activeMergeRepos.size === 0 && sessions.gateSemaphore.activeWorktrees.size === 0);
+  }
+
   // ── (R) POSITIVE CONTROL — failure on the LAST step is a byte-identical no-op (no third call) ──────────
   {
     const R = mk("r", "feature-r.txt");
