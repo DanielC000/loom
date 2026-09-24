@@ -354,7 +354,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   await app.register(websocket, { options: { handleProtocols: selectWsSubprotocol } });
 
   // --- CSRF / DNS-rebind backstop (one onRequest hook, the FIRST GUARD hook — registered right after the
-  //     websocket plugin ON PURPOSE, @decision 4a22aab8 above — so it is inherited by EVERY route and the
+  //     websocket plugin ON PURPOSE, see the guard above — so it is inherited by EVERY route and the
   //     static plugin below, all of which register after it: UNIFORM coverage with no per-route N-1 gap;
   //     Fastify only inherits a parent hook into children registered AFTER it). The daemon binds
   //     127.0.0.1 only, but a loopback bind ALONE does not stop two browser-borne attacks:
