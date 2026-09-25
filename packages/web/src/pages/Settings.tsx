@@ -244,6 +244,8 @@ function ConfigEditor({ project }: { project: Project }) {
   // this PATCH untouched (the two surfaces never fight over the same field).
   const [allowText, setAllowText] = useState(ov.permission?.allow ? ov.permission.allow.join("\n") : "");
   const [gateCommand, setGateCommand] = useState(ov.orchestration?.gateCommand ?? "");
+  // Human-only merge-gate switch (card e8df2659): checked = "off" (merges skip the gate command).
+  const [mergeGateOff, setMergeGateOff] = useState(ov.orchestration?.mergeGate === "off");
   const [maxWorkers, setMaxWorkers] = useState(numStr(ov.orchestration?.maxConcurrentWorkers));
   const [maxManagers, setMaxManagers] = useState(numStr(ov.orchestration?.maxConcurrentManagers));
   const [recycle, setRecycle] = useState(numStr(ov.orchestration?.recycleAtContextRatio));
@@ -343,6 +345,8 @@ function ConfigEditor({ project }: { project: Project }) {
     unset.push("orchestration.schedulerEnabled");
     if (gateCommand.trim()) orch.gateCommand = gateCommand.trim();
     else { delete orch.gateCommand; unset.push("orchestration.gateCommand"); }
+    if (mergeGateOff) orch.mergeGate = "off";
+    else { delete orch.mergeGate; unset.push("orchestration.mergeGate"); }
     applyMs(orch, "gateCommandTimeoutMs", gateTimeout, "s", unset);
     if (deployCommand.trim()) orch.deployCommand = deployCommand.trim();
     else { delete orch.deployCommand; unset.push("orchestration.deployCommand"); }
@@ -684,6 +688,13 @@ function ConfigEditor({ project }: { project: Project }) {
             <Input value={gateCommand} onChange={(e) => setGateCommand(e.target.value)} placeholder="e.g. pnpm build (blank = no gate)" />
             <Hint>build/test command run in a worker's worktree before merge · {effHint(resolved.orchestration.gateCommand || "none")}</Hint>
           </label>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 13, color: color.text }}>
+            <input type="checkbox" data-testid="merge-gate-off" checked={mergeGateOff} onChange={(e) => setMergeGateOff(e.target.checked)} />
+            Merge gate off
+          </label>
+          <Hint>{mergeGateOff ? "Merge gate is OFF: merges skip the gate command and land WITHOUT running it — recorded as gate-disabled, never a pass. Only the gate is skipped (conflict + dirty-tree refusals still apply)." : "Merge gate is on: merges run the gate command above."} · human-set only</Hint>
         </div>
         <div style={{ marginTop: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420 }}>

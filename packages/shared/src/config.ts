@@ -314,6 +314,15 @@ export interface OrchestrationConfig {
    */
   gateCommand: string;
   /**
+   * Per-project, HUMAN-only "merge gate" switch (card e8df2659). "on" (default) = `worker_merge_confirm` /
+   * `merge_batch` run `gateCommand` before landing. "off" = they SKIP the gate command entirely and land
+   * straight away, recording `skipReason:"gate-disabled"` (never confused with a pass). Only the gate is
+   * skipped: union-merge/conflict + dirty-tree refusals, the in-lock squash tip check and finalize still run;
+   * a worker's own `run_gate` and the deploy build are unaffected. No env/platform layer. HUMAN-set ONLY,
+   * same trust class as `gateCommand` — the agent-facing config validator REJECTS it.
+   */
+  mergeGate: "on" | "off";
+  /**
    * Per-project, HUMAN-only timeout (ms) for a `gateCommand` run — pairs with `gateCommand`. Caps how
    * long the build/DoD gate may run before it's killed. Default 600000 (raised from 120000 by card
    * bc74fcaf: the old default sat below a real quiet/warm suite's own measured runtime on more than one
@@ -1271,7 +1280,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
+  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -1805,6 +1814,7 @@ export function resolveConfig(
     sessionEnv: { ...d.sessionEnv, ...(override.sessionEnv ?? {}), ...obsidianSessionEnv(obsidian), ...pythonSessionEnv(python) },
     orchestration: {
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
+      mergeGate: override.orchestration?.mergeGate ?? d.orchestration.mergeGate,
       // Per-project timeout pairing gateCommand (no env layer). `??` so an explicit value survives.
       gateCommandTimeoutMs: override.orchestration?.gateCommandTimeoutMs ?? d.orchestration.gateCommandTimeoutMs,
       // Scoped per-project deploy (mirrors gateCommand's resolution exactly).

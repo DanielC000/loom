@@ -1936,6 +1936,10 @@ export interface GateHistoryRow {
    *  string — since this field is deliberately left unredacted cross-project unlike `reason`. Present
    *  ONLY alongside `emitCompareReduced === null`, never alongside a genuine `false` (notReducible). */
   emitCompareNotApplicableKind: string | null;
+  /** Card e8df2659: WHY a `"skipped"` row skipped the gate — `"gate-disabled"` (a human turned the project's
+   *  merge gate off) or `"inert-docs-only-diff"`; `null` for every non-skipped row and any row that predates
+   *  this field. Read `outcome:"skipped"` first; this only names the cause. */
+  skipReason: string | null;
   /** @decision 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; VACUOUS ON ONE
    *  OF TWO ARMS — never read alone, always alongside `emitCompareTestFiles` (below).
    *

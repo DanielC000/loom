@@ -166,6 +166,9 @@ const ROTATION_MARKERS_MAX_LEN = 200;
 
 const orchestrationOverride = z.object({
   gateCommand: z.string().optional(),
+  // Per-project, HUMAN-only merge-gate switch (card e8df2659): "off" makes worker_merge_confirm/merge_batch
+  // skip gateCommand. Omitted from the agent path (see agentOrchestrationOverride) so `.strict()` rejects it.
+  mergeGate: z.enum(["on", "off"]).optional(),
   // Per-project, HUMAN-only timeout (ms) capping a gateCommand run. Pairs with gateCommand and is
   // omitted from the agent path with it (see agentOrchestrationOverride). Bounds come from
   // ORCHESTRATION_TIMEOUT_MS_BOUNDS (@loom/shared) — the SAME table the Settings UI reads to state the
@@ -284,6 +287,17 @@ const harnessScope = z.enum(["workers", "fleet"]).refine((v) => v !== "fleet" ||
  * `test/project-configure-description-drift.mjs`'s "accepted vs advertised" split.
  */
 export const HUMAN_ONLY_PROJECT_CONFIG_KEYS: readonly string[] = ["harness"];
+/** Dot-path human-only keys the elevated Platform `project_configure` also refuses (card e8df2659). The
+ *  top-level list above is `Object.hasOwn`-only and cannot see a nested key. */
+export const HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = ["orchestration.mergeGate"];
+function hasNestedKey(obj: unknown, dotPath: string): boolean {
+  let cur: unknown = obj;
+  for (const seg of dotPath.split(".")) {
+    if (!cur || typeof cur !== "object" || !Object.hasOwn(cur, seg)) return false;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return true;
+}
 const harnessOverride = z.object({
   default: HARNESS_ID_SCHEMA.optional(),
   scope: harnessScope.optional(),
@@ -365,7 +379,7 @@ const projectConfigOverrideSchema = z.object({
  */
 const agentOrchestrationOverride = orchestrationOverride
   .omit({
-    gateCommand: true, gateCommandTimeoutMs: true,
+    gateCommand: true, gateCommandTimeoutMs: true, mergeGate: true,
     deployCommand: true, deployCommandTimeoutMs: true,
     alertWebhook: true, alertWebhookTimeoutMs: true,
   })
@@ -599,6 +613,14 @@ export function mergeConfigOverride(
   return guarded as ProjectConfigOverride;
 }
 
+/** The ONE path normalizer: `unsetConfigPath` deletes by these segments, and the Lead's human-only-key
+ *  refusal compares by them too, so the two can never disagree about which key a string names. */
+function configPathParts(dotPath: string): string[] {
+  return dotPath.split(".").filter(Boolean);
+}
+function normalizeConfigPath(dotPath: string): string {
+  return configPathParts(dotPath).join(".");
+}
 /**
  * Delete a dot-path key from a stored config override — the UNSET half of project_configure (the deep-merge
  * patch can SET/REPLACE a key but never REMOVE one, so a misconfigured key was previously only clearable via
@@ -613,7 +635,7 @@ export function mergeConfigOverride(
 export function unsetConfigPath(
   config: ProjectConfigOverride, dotPath: string,
 ): ProjectConfigOverride {
-  const parts = dotPath.split(".").filter(Boolean);
+  const parts = configPathParts(dotPath);
   if (!parts.length) return config;
   const out = structuredClone(config ?? {}) as Record<string, unknown>;
   // `chain` always has >= 1 entry by construction (seeded with `out`, only ever pushed to), so every
@@ -1330,6 +1352,27 @@ export class PlatformMcpRouter {
         const humanOnlyKey = config && typeof config === "object" ? HUMAN_ONLY_PROJECT_CONFIG_KEYS.find((k) => Object.hasOwn(config, k)) : undefined;
         if (humanOnlyKey) {
           return ok({ error: `invalid config: ${humanOnlyKey} may not be set via an agent MCP tool — it selects which vendor CLI spawns (human-only, via the REST config PATCH / Settings UI)`, validTopLevelKeys: CONFIG_TOP_LEVEL_KEYS.filter((k) => !HUMAN_ONLY_PROJECT_CONFIG_KEYS.includes(k)) });
+        }
+        // Card e8df2659: the NESTED human-only keys (`orchestration.mergeGate`) — the top-level check above
+        // cannot see them, and the full validator below would otherwise accept them on this elevated route.
+        const humanOnlyNested = HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS.find((p) => hasNestedKey(config, p));
+        if (humanOnlyNested) {
+          return ok({ error: `invalid config: ${humanOnlyNested} may not be set via an agent MCP tool — it switches the merge gate off (human-only, via the REST config PATCH / Settings UI)` });
+        }
+        // Human-only means BOTH directions (card e8df2659, manager ruling): the Lead may not CLEAR a stored
+        // human-only nested key either — neither by `unset` (the exact path, or a prefix such as "orchestration"
+        // that would drop it) nor by a `replace:true` whole-object write that omits it.
+        for (const k of HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS) {
+          const stored = hasNestedKey(project.config, k);
+          // Normalized EXACTLY like `unsetConfigPath` does (split on ".", drop empty segments), so
+          // "orchestration.mergeGate.", ".orchestration.mergeGate", "orchestration..mergeGate", "orchestration."
+          // and ".orchestration" cannot slip past a raw-string compare and still delete the key.
+          const unsetHits = (unset ?? []).some((u) => {
+            const nu = normalizeConfigPath(u);
+            return nu !== "" && (nu === k || (stored && k.startsWith(`${nu}.`)));
+          });
+          if (unsetHits) return ok({ error: `invalid config: ${k} may not be cleared via an agent MCP tool (unset) — it is human-only, via the REST config PATCH / Settings UI` });
+          if (replace && stored) return ok({ error: `invalid config: replace:true would drop the stored human-only ${k} — it may not be cleared via an agent MCP tool (human-only, via the REST config PATCH / Settings UI); use a merge write instead` });
         }
         const v = validateProjectConfigOverride(config ?? {});
         // List the valid top-level keys on rejection so a fat-fingered key (e.g. "columns" instead of

@@ -644,6 +644,10 @@ what you checked. Found none? Treat it as live.
    silently later (atomicity, races, environment pollution, hidden coupling, an upstream bug). Then
    `worker_merge` → review → `worker_merge_confirm`. If it's not ready, request changes via
    `worker_message`. Never merge unreviewed work.
+   - **The owner can switch a project's merge gate off** (a human-only setting). Then a confirmed merge
+     lands WITHOUT running the gate command and its result says so (`skipReason:"gate-disabled"` plus a
+     warning) — that is NOT a pass, so say "merged without a gate" in your reports, and expect later
+     problems to be caught after the fact and fixed by a follow-up task.
    - **2+ workers ready to merge on the SAME repo? Reach for `merge_batch` instead of sequential
      `worker_merge_confirm` calls** — it gates the whole group in one run instead of one gate per
      branch. Fewer than 2 eligible candidates is never wrong to pass in: it just falls through to the

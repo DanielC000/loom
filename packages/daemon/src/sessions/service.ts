@@ -583,6 +583,9 @@ type ConfirmMergeResult = {
    *  persist it as `"skipped"` (not `"pass"`) and `gate_status(opId)` stops disagreeing with `gate_history`
    *  for the identical settled op (card a228dfb5). */
   skipped?: boolean;
+  /** Card e8df2659: set (with `skipped:true`) ONLY when the human-only `orchestration.mergeGate:"off"` switch
+   *  caused the skip — never on an inert-diff skip. Absent otherwise. */
+  skipReason?: "gate-disabled";
   /** @decision a1a8c5c4 — `outputTail` covers only the two dominant paths (a plain gate-fail rejection, a
    *  plain successful merge); check `gateExtended`, never this field's absence, to tell "no gate ran"
    *  apart from "one ran on a rarer path this never wired up". */
@@ -808,6 +811,21 @@ type WorkerGateResult = {
 
 /** @decision 4c5bf820 — the durable tombstone write derives from the SAME four shapes (error/cancelled/
  * pass/fail) the completion-nudge builder branches on, or the two can tell different stories. */
+/** Card e8df2659: the ONE wording of the gate-disabled warning — shared by the sync `warning` and the async
+ *  `[loom:merge-done]` echo so the two can never drift. */
+const GATE_DISABLED_WARNING = "merge gate is OFF for this project (orchestration.mergeGate:\"off\") — merged WITHOUT running the gate command; recorded as skipReason:\"gate-disabled\", gateRan:false, NOT a pass";
+
+/** Card e8df2659: the `|mergeGate:<value>` suffix folded into a merge op's cache identity (see
+ *  `confirmWorkerMergeTracked`). Kept in one place so the solo and batch attach keys can never disagree. */
+function mergeGateIdentitySuffix(value: "on" | "off"): string {
+  return `|mergeGate:${value}`;
+}
+/** Inverse of {@link mergeGateIdentitySuffix} — for manager-facing text that should name only the commit. */
+function stripMergeGateSuffix(identity: string): string {
+  const i = identity.indexOf("|mergeGate:");
+  return i < 0 ? identity : identity.slice(0, i);
+}
+
 function deriveWorkerGateVerdict(
   outcome: { ok: true; value: WorkerGateResult } | { ok: false; error: unknown },
 ): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined {
@@ -913,6 +931,8 @@ function deriveMergeGateVerdict(
       // alongside `emitCompareReduced` left `undefined` for a `notApplicable:true` verdict; see
       // `PendingGateOpVerdict.emitCompareNotApplicableKind`'s own doc).
       ...(v.emitCompareNotApplicableKind !== undefined ? { emitCompareNotApplicableKind: v.emitCompareNotApplicableKind } : {}),
+      // Card e8df2659: a merge that landed with the human-only merge gate OFF says so on `gate_status` too.
+      ...(v.skipReason !== undefined ? { skipReason: v.skipReason } : {}),
       // Card 7a1a76e9 DoD-2: the landed squash subject — `merged:true` only (a rejection/error never lands
       // a new commit, so `v.commitSubject` is never set there); see `PendingGateOpVerdict.commitSubject`'s
       // own doc for the ALREADY_MERGED-path caveat (that path bypasses this function's onSettle entirely).
@@ -4145,9 +4165,13 @@ export class SessionService {
      *  Populated for "merge" rows only, on the same two dominant outcomes `gateCap` above already covers. */
     emitCompareReduced?: boolean; emitCompareIdenticalCount?: number;
     emitCompareTestFiles?: string[]; emitCompareNotHermeticExcluded?: string[];
+    /** Card e8df2659: `"gate-disabled"` on a merge that landed with the human-only merge gate switched off
+     *  (`outcome:"skipped"`, `gateRan:false`) — never a pass. Absent otherwise (an inert docs-only skip
+     *  carries no `skipReason` here; `gate_history`'s row `skipReason` names both causes). */
+    skipReason?: string;
     /** @decision 9f6598dd — outcome surfaces the same pass/fail/error/cancelled classification as one
      *  literal string, purely additive
-     *  @decision a228dfb5 — "skipped" (merge rows only) means landed with no gate spawned (inert diff);
+     *  @decision a228dfb5 — "skipped" (merge rows only) means landed with no gate spawned (inert docs-only diff, OR the human-only merge gate switched off — the latter also sets `skipReason:"gate-disabled"`);
      *  never collapse it into "pass" */
     outcome?: PendingGateOpVerdictKind;
     /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
@@ -4312,6 +4336,8 @@ export class SessionService {
         // grouped with `emitCompareTestFiles`/`emitCompareNotHermeticExcluded` above (which DO carry
         // foreign paths and are "sensitive").
         emitCompareNotApplicableKind: "structural",
+        // Card e8df2659: a fixed category literal ("gate-disabled"), never a path or error text.
+        skipReason: "structural",
         retryPassed: "structural",
         transientRetried: "structural",
         passed: "structural",
@@ -4418,6 +4444,7 @@ export class SessionService {
           // Card fd0d34da: same "written to verdict_payload_json but never read back" gap e2b6f900/725dc89a
           // already closed above, one field over — the coarse WHY sibling of `emitCompareReduced`.
           ...(payload?.emitCompareNotApplicableKind !== undefined ? { emitCompareNotApplicableKind: payload.emitCompareNotApplicableKind } : {}),
+          ...(payload?.skipReason !== undefined ? { skipReason: payload.skipReason } : {}),
           // Card 7a1a76e9 DoD-2: same "written to verdict_payload_json but never read back" gap e2b6f900/
           // 725dc89a already closed for the concurrency triple / reduced-gate facts, one field over.
           ...(payload?.commitSubject !== undefined ? { commitSubject: payload.commitSubject } : {}),
@@ -13425,6 +13452,10 @@ export class SessionService {
     // candidates. Every other caller omits it, so `gateDescriptor.fallbackOfBatchOpId` below is
     // `undefined` (⇒ `null` once echoed through `GateSnapshotEntry`) for every ordinary solo merge.
     fallbackOfBatchOpId?: string,
+    // Card e8df2659: the `orchestration.mergeGate` value `confirmWorkerMergeTracked` already folded into this
+    // op's cache identity — threaded so the run honours EXACTLY the value it was keyed under (a flip between
+    // the two reads would otherwise cache a verdict under the wrong key). Omitted ⇒ resolved live below.
+    mergeGateOverride?: "on" | "off",
   ): Promise<ConfirmMergeResult> {
     // CORRELATION STAMP (card 369d8824): threaded from PendingOpRegistry.attach (the SAME opId a caller
     // routed through confirmWorkerMergeTracked was already handed in its own `{status:"pending",opId}`
@@ -13470,6 +13501,12 @@ export class SessionService {
     const repoPath = targetRepo.path;
     const gate = targetRepo.gateCommand;
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
+    // Card e8df2659: the HUMAN-only per-project `orchestration.mergeGate:"off"` switch. Routed through the
+    // inert-diff-skip machinery below (same repo-guard-only admission, `gateRan:false`, `skipped:true`) with
+    // `skipReason:"gate-disabled"`; ONLY the gate command is skipped — the union-merge/conflict refusal, the
+    // confirm-time dirty-tree refusal, the in-lock `expectedBranchTip`/`requireCanonicalHead` squash checks
+    // and finalize all still run. The pinned-gate-tip refusal is N/A when off (no gate ever pins a tip).
+    const gateDisabled = (mergeGateOverride ?? orchestration.mergeGate) === "off";
 
     // @decision 864e79fe — worktree-gone alone false-negatives "build gate failed" for an already-successful
     //  merge (best-effort removal can lag finalizeMerge); OR in the task's own terminal-lane state, but
@@ -14001,7 +14038,7 @@ export class SessionService {
       // survivor even with gate-runner.ts's own tree-kill. Checked (and possibly cleared, if a new commit
       // landed since the trip) BEFORE spawning anything, so a broken branch gets ZERO more gate processes,
       // not one more before the distinct message appears.
-      if (await this.checkGateTimeoutBreaker(branch, worktreePath)) {
+      if (!gateDisabled && await this.checkGateTimeoutBreaker(branch, worktreePath)) {
         const msg = `gate repeatedly times out on this branch (${GATE_TIMEOUT_BREAKER_THRESHOLD} consecutive timeouts at this commit) — likely a hanging test, not retrying; push a new commit to re-enable gating`;
         // Card 522cf573 DoD 4: squash phase never reached — the breaker short-circuits BEFORE spawning
         // another gate at all, let alone reaching the squash.
@@ -14080,7 +14117,9 @@ export class SessionService {
       const stampDiffers = hasLastCheck ? gateStampsDiffer(lastCheck.stamp, freshStamp) : undefined;
       // @decision e50600d2 — a green run_gate self-check is reused here at merge time; do not remove
       // run_gate to cut shared gate load, only widen/tighten reuse.
-      if (hasLastCheck && branchMatches && checkPassed && checkHeadCurrent) {
+      // Card e8df2659: never "reuse" a self-check when the gate is off — that would stamp `reused:true`
+      // (a claim a prior gate verdict backs this merge) instead of the honest `gate-disabled` skip.
+      if (!gateDisabled && hasLastCheck && branchMatches && checkPassed && checkHeadCurrent) {
         if (freshHead && !freshStamp.dirty && stampDiffers === false && freshBehindMain === 0) {
           // TOCTOU NOTE (CR follow-up): `freshBehindMain === 0` only proves main hadn't moved AS OF
           // `freshHead`'s single read — main is a process-wide shared resource, and a SIBLING merge on
@@ -14204,7 +14243,7 @@ export class SessionService {
       // day this card was investigated (the manager held the inert merge deliberately rather than firing
       // it). The DEFECT itself was never triggered — n=0 occurrences stands — but the precondition is
       // ordinary to reach in normal operation, not a contrived scenario reserved for a doctrine violation.
-      if (!reuseResult && gateBaseMainHead) {
+      if (!reuseResult && (gateBaseMainHead || gateDisabled)) {
         // `preWaitBranchHead` mirrors `gateBaseMainHead`'s "captured before the wait" discipline, but for
         // `branch`: resolved FRESH here, never read from `gateBaseBranchHead` (producer-scoped, proves a
         // narrower thing — see its own declaration). A failed resolve leaves this `undefined`, failing
@@ -14218,7 +14257,9 @@ export class SessionService {
         // @decision 776fc8c9 — never cost this call in isolation from `postWaitHead`/`postWaitBranchHead`
         // below: this path makes THREE `resolveGitRef` calls total, and a split account has gone stale before.
         const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
-        inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
+        // Card e8df2659: gate OFF ⇒ the skip is unconditional (no diff-inertness proof needed). `gateBaseMainHead`
+        // is truthy on every non-disabled entry (the block's guard), so the `!` is safe on that arm.
+        inertSkip = gateDisabled ? true : await isInertMergeDiff(repoPath, gateBaseMainHead!, branch, { timeoutMs: this.gitOpMs });
         if (inertSkip) {
           gateRan = false;
           try {
@@ -14313,10 +14354,21 @@ export class SessionService {
             // re-union (`reunionFailed`), or `isInertMergeDiff`'s own internal error paths (it fails closed
             // to `false` on its own) all converge on `stillInert === false` here — "ambiguous for any
             // reason" always routes to the real gate below, never to a stale skip.
-            const stillInert = (!reunionFailed && reclassifyBase)
-              ? await isInertMergeDiff(repoPath, reclassifyBase, branch, { timeoutMs: this.gitOpMs })
-              : false;
-            if (stillInert && reclassifyBase) {
+            // Card e8df2659: with the gate OFF there is no real gate to fall back to — a failed re-union
+            // must NOT flip this to `false` (it would run the very gate the human switched off). Keep
+            // `inertSkip` and leave `gateBaseMainHead` at its last captured value: the squash's in-lock
+            // `requireCanonicalHead` then refuses `gate_base_invalidated` if main moved (fail-closed), and a
+            // real conflict surfaces as the ordinary squash conflict refusal.
+            const stillInert = gateDisabled
+              ? true
+              : (!reunionFailed && reclassifyBase)
+                ? await isInertMergeDiff(repoPath, reclassifyBase, branch, { timeoutMs: this.gitOpMs })
+                : false;
+            if (gateDisabled) {
+              // Card e8df2659: never re-route a gate-OFF merge into the real gate. Advance the base only when
+              // the re-union actually produced a fresh one; otherwise leave the captured value (fail-closed above).
+              if (reclassifyBase && !reunionFailed) gateBaseMainHead = reclassifyBase;
+            } else if (stillInert && reclassifyBase) {
               // Diff is still fully inert against the tree main actually looks like NOW — advance
               // `gateBaseMainHead` to what we just proved, so `mergeBranch`'s own `requireCanonicalHead`
               // re-check (further below, inside its own lock) validates against a base that is still
@@ -14342,6 +14394,15 @@ export class SessionService {
               gateRan = true;
               releaseInertRepoGuard?.();
               releaseInertRepoGuard = undefined;
+            }
+          }
+          // Card e8df2659: `confirmTimeDirty` was stamped BEFORE the guard wait above, so edits made DURING
+          // that wait would be squashed out (the squash reads the branch REF) and then force-removed with the
+          // worktree. With the gate OFF, re-stamp NOW that the guard is held and refuse if dirty/unreadable.
+          if (gateDisabled && inertSkip) {
+            const heldStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+            if (heldStamp.dirty || heldStamp.head === null) {
+              return refuseWorktreeDirty("before-gate", heldStamp.dirty ? "the worktree is dirty after the guard wait" : "worktree stamp unreadable after the repo merge guard was granted");
             }
           }
         }
@@ -14396,7 +14457,9 @@ export class SessionService {
 
       // @decision 975c774b — refuse a known-dirty/unreadable tree before the queue turn, but ONLY where a gate will really spawn:
       // a reused or inert-skipped merge has no verdict to contaminate (the squash reads commits), so it behaves as before.
-      if (!reuseResult && !inertSkip && confirmTimeDirty) return refuseWorktreeDirty("before-gate", confirmTimeDirty);
+      // Card e8df2659: a gate-OFF merge keeps this refusal live (`|| gateDisabled`) — the squash reads the branch
+      // REF and finalize force-removes the worktree, so uncommitted files would be silently destroyed.
+      if (!reuseResult && (!inertSkip || gateDisabled) && confirmTimeDirty) return refuseWorktreeDirty("before-gate", confirmTimeDirty);
 
       // @decision 975c774b — EVERY link (attempt 1, transient, single-file, resumed) spawns through this wrapper, which
       // stamps the worktree at settle and compares it to the stamp `captureGatedTip` took right before that spawn.
@@ -14756,7 +14819,7 @@ export class SessionService {
           // `reused:true` (it reused nothing; there was no prior run at all) and a genuine reuse is never
           // stamped `skipped:true`. `gateOutcomeFromDetail` checks `skipped` before `passed`, so this alone
           // is what keeps a skip out of `gate_history`'s `"pass"` bucket.
-          ...(gateRan ? {} : inertSkip ? { skipped: true, skipReason: "inert-docs-only-diff" } : { reused: true, reusedOpId }),
+          ...(gateRan ? {} : inertSkip ? { skipped: true, skipReason: gateDisabled ? "gate-disabled" : "inert-docs-only-diff" } : { reused: true, reusedOpId }),
           // Absent (never an empty array) whenever reuse actually fired.
           // @decision 2e52bf99 — reuseRefusalReasons is stamped independent of the inertSkip/reused
           //  ternary above, so it reflects why REUSE specifically was refused regardless of a later
@@ -15444,7 +15507,7 @@ export class SessionService {
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
     // `merge.sha` (card 1eebc46a) is the just-created squash commit's sha, free from mergeBranch's own
     // return — persisted onto the task alongside the rest of finalize's bookkeeping.
-    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null });
+    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: "gate-disabled" as const } : {}) });
     // SKILL-LIVENESS WARNING (card 64a30c79): a merge that just landed a change under
     // `packages/daemon/assets/skills/<name>/**` reaches ZERO agents right now — `skills/inject.ts` mirrors
     // sessions from the STORE, never `assets/` (see CLAUDE.md's "Caveat" section) — so surface that here,
@@ -15513,8 +15576,12 @@ export class SessionService {
     // `noGateByDesign` suppression — that flag is about a project having no gate at all, not about one
     // individual merge skipping it) so a manager reading this merge's result can tell it apart from an
     // ordinary gated pass.
+    // Card e8df2659: gate OFF — its own wording, NEVER suppressed by `noGateByDesign` (that flag is about a
+    // project with no gate; this is a gate a human switched off) and never conflated with an inert skip.
     const inertSkipWarning = inertSkip
-      ? "merge gate skipped: every changed path is under docs/, proven inert (card db9b0130) — recorded as gateRan:false, not a pass"
+      ? (gateDisabled
+        ? GATE_DISABLED_WARNING
+        : "merge gate skipped: every changed path is under docs/, proven inert (card db9b0130) — recorded as gateRan:false, not a pass")
       : undefined;
     // EMIT-COMPARE REDUCED-GATE WARNING (card 2154b6ad): distinct from `inertSkipWarning` above — a REAL
     // gate ran here (gateRan:true), it just ran `pnpm build` + the static guards instead of the full
@@ -15575,8 +15642,8 @@ export class SessionService {
       // itself stays correctly omitted.
       : (gateRan && emitCompareNotApplicableKind !== undefined ? { emitCompareNotApplicableKind } : {});
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true, ...(gateDisabled ? { skipReason: "gate-disabled" as const } : {}) } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true, ...(gateDisabled ? { skipReason: "gate-disabled" as const } : {}) } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
   }
 
   /**
@@ -15846,13 +15913,18 @@ export class SessionService {
     // of retry logic below (this card's own PRIMARY gap) structurally untestable with the existing
     // `{ runGate: fakeGate }` test-double fixture every other gate path's tests already use.
     const runGateSeq = this.runGate ?? runGateSequential;
-    if (!gate) {
+    // Card e8df2659: the human-only `orchestration.mergeGate:"off"` switch — there is no gate to share, so the
+    // whole batch takes this same per-branch solo fallback, and each solo `confirmWorkerMerge` skips the gate
+    // itself (`skipReason:"gate-disabled"`) under its own per-repo merge-admission guard (the inert-skip
+    // `acquireRepoGuardOnly` hold), so two same-repo squashes never run concurrently.
+    const mergeGateOff = orchestration.mergeGate === "off";
+    if (!gate || mergeGateOff) {
       const fallback = await runFallback([
-        ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: "no gateCommand configured for this repo — nothing to share a gate over" })),
+        ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: mergeGateOff ? "merge gate disabled" : "no gateCommand configured for this repo — nothing to share a gate over" })),
         ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
         ...strandedFallback,
       ]);
-      return { settled: true, ok: true, value: { ok: false, landed: [], fallback, reason: "no gateCommand configured" } };
+      return { settled: true, ok: true, value: { ok: false, landed: [], fallback, reason: mergeGateOff ? "merge gate disabled" : "no gateCommand configured" } };
     }
 
     // DEDUPE/ATTACH KEY (card f944d4e4 — rejected alternatives in this method's own header doc; card
@@ -15884,7 +15956,9 @@ export class SessionService {
           if (!head) { allResolved = false; break; }
           heads.push(head);
         }
-        if (allResolved) verdictIdentity = heads.slice().sort().join(",");
+        // The suffix here is always `|mergeGate:on` — an OFF batch returned to the per-branch fallback above and
+        // never attaches; it is folded anyway so the solo and batch keys share one shape.
+        if (allResolved) verdictIdentity = heads.slice().sort().join(",") + mergeGateIdentitySuffix(orchestration.mergeGate);
       } catch { /* fail-safe: undefined identity never dedupe-hits, see doc above */ }
     }
     //
@@ -16761,13 +16835,24 @@ export class SessionService {
     const worktreeGone = !(worker?.worktreePath ?? worker?.cwd) || !fs.existsSync((worker.worktreePath ?? worker.cwd)!);
     const alreadyFinished = worktreeGone || taskAlreadyTerminal;
     let verdictIdentity: string | undefined;
+    // Card e8df2659: the resolved `orchestration.mergeGate` value read NOW (at confirm start) is folded into the
+    // cache identity, so flipping the human-only switch never replays a verdict earned under the other setting
+    // (a cached red rejection would otherwise make "off" ineffective; an off-landing refusal would skip a re-gate).
+    let mergeGateSuffix = "";
+    // Resolved ONCE per confirm: the SAME value keys the cache identity below and drives the run itself.
+    const mergeGateValue: "on" | "off" = (() => {
+      const wp = worker ? this.db.getProject(worker.projectId) : undefined;
+      return wp ? resolveConfig(wp.config, this.db.getPlatformConfig()).orchestration.mergeGate : "on";
+    })();
     if (!alreadyFinished) {
       try {
         if (worker?.branch) {
           const project = this.db.getProject(worker.projectId);
           if (project) {
             const repo = resolveRepoByKey(project, worker.repoKey);
-            verdictIdentity = (await resolveGitRef(repo.path, worker.branch, { timeoutMs: this.gitOpMs })) ?? undefined;
+            const sha = (await resolveGitRef(repo.path, worker.branch, { timeoutMs: this.gitOpMs })) ?? undefined;
+            mergeGateSuffix = mergeGateIdentitySuffix(mergeGateValue);
+            verdictIdentity = sha ? `${sha}${mergeGateSuffix}` : undefined;
           }
         }
       } catch { /* fail-safe: undefined identity never dedupe-hits, see doc above */ }
@@ -16786,7 +16871,7 @@ export class SessionService {
       // (as "unknown", not "failed" — see that doc).
       async (opId) => {
         try {
-          return await this.confirmGatedIdentity(await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt, opts?.fallbackOfBatchOpId), workerSessionId);
+          return await this.confirmGatedIdentity(await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt, opts?.fallbackOfBatchOpId, mergeGateValue), workerSessionId);
         } catch (err) {
           const worker = this.db.getSession(workerSessionId);
           const project = worker ? this.db.getProject(worker.projectId) : undefined;
@@ -16899,9 +16984,14 @@ export class SessionService {
         const subjectNote = outcome.ok && outcome.value.merged && outcome.value.commitSubject
           ? ` subject="${outcome.value.commitSubject}"`
           : "";
+        // Card e8df2659 (per @decision 65336570 — a real merge settles async, so the sync `warning` never reaches a
+        // manager): a gate-disabled landing says so on the nudge too, so it is never read as a passed gate.
+        const gateOffNote = outcome.ok && outcome.value.merged && outcome.value.skipReason === "gate-disabled"
+          ? ` ⚠ ${GATE_DISABLED_WARNING}`
+          : "";
         const msg = outcome.ok
           ? (outcome.value.merged
-            ? `[loom:merge-done] ${who(opId)} merged.${subjectNote}${stepsLine}${proximityNote}${retryNote}${transientRetryNote}${concurrencyNote}${reducedGateNote}${skillNote}`
+            ? `[loom:merge-done] ${who(opId)} merged.${subjectNote}${stepsLine}${proximityNote}${retryNote}${transientRetryNote}${concurrencyNote}${reducedGateNote}${skillNote}${gateOffNote}`
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.detailText ?? outcome.value.reason ?? "merge did not complete (no diagnostic detail was captured for this rejection — this is itself a gap; report it)"}`)
           // DoD 2 (card 522cf573): a THROWN exception can strike at literally any point inside
           // confirmWorkerMerge — including AFTER mergeBranch's own squash commit succeeded, during
@@ -16974,7 +17064,7 @@ export class SessionService {
         // Card 8b1fb28f: cache a gate-FAILED rejection under the tip captured just before the FINAL gate spawn (see
         // `gatedIdentity`), not the pre-forward `verdictIdentity` above (which can name a commit the gate never ran on).
         // Dropped (unstamped) if the branch tip has since moved; every other outcome keeps `verdictIdentity`.
-        identityFromValue: (v) => v.gatedIdentity,
+        identityFromValue: (v) => (v.gatedIdentity ? `${v.gatedIdentity}${mergeGateSuffix}` : undefined),
         // @decision 99a1cf6f — `gateBaseInvalidated` classifies distinctly from an ordinary "rejected",
         // checked before the plain merged-else-rejected fallback — a real test failure is safe to replay,
         // a stale-base one is not.
@@ -17012,10 +17102,17 @@ export class SessionService {
     // @decision 615967c5 — folds this call's own freshly-resolved identity onto a genuine fresh mint (a
     // cache hit is untouched), closing the cached-verdict legibility gap: a re-gate from a moved base used
     // to look identical to a forced re-run or a genuine cache hit.
-    if (result.freshMint) {
-      return { ...result, freshMint: { ...result.freshMint, currentIdentity: verdictIdentity } };
+    // The mergeGate suffix is a cache-key detail — the ONE place it is scrubbed before anything manager-facing
+    // sees it, for BOTH `freshMint` (prior/current identity) and `cacheHit.identity`.
+    let out = result;
+    if (out.freshMint) {
+      const fm = out.freshMint;
+      out = { ...out, freshMint: { ...fm, ...(fm.priorIdentity !== undefined ? { priorIdentity: stripMergeGateSuffix(fm.priorIdentity) } : {}), currentIdentity: verdictIdentity === undefined ? undefined : stripMergeGateSuffix(verdictIdentity) } };
     }
-    return result;
+    if (out.settled && out.cacheHit?.identity !== undefined) {
+      out = { ...out, cacheHit: { ...out.cacheHit, identity: stripMergeGateSuffix(out.cacheHit.identity) } };
+    }
+    return out;
   }
 
   /** The configured gate timeout for a worker's own merge, or `null` if the worker/project can't be
@@ -18138,6 +18235,8 @@ export class SessionService {
      * lazy backfill (`GET /api/tasks/:id`) fills it in from a real `getTaskMergedInfo` read.
      */
     mergedVerification?: "content" | "pathset" | "trailer-only" | null;
+    /** Card e8df2659: stamped onto the `merge_done` event when the human-only merge-gate switch was OFF. */
+    gateSkipReason?: "gate-disabled";
   }): Promise<{
     nestedRepoBlock?: { paths: string[]; truncated: boolean };
     /** Task 035fb673: the non-"removed"/non-"nested-repo-blocked" gcWorktreeDir outcome, when one
@@ -18259,7 +18358,7 @@ export class SessionService {
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
-      taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch },
+      taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}) },
     });
     // Card 84a2eb2d: this worker's branch just objectively finalized — drop any `[loom:worker-report]`
     // nudge still queued for it (see purgeQueuedWorkerReportNudgesOnMerge's own doc for why worker-scoped

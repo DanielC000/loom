@@ -84,6 +84,38 @@ test("editing the project gate command persists (REST read-back + reload)", asyn
   await expect(field(page, "Gate command")).toHaveValue("pnpm build");
 });
 
+test("toggling the human-only merge gate off persists (REST read-back + reload) and back on clears it", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`settings-mergegate-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  const toggle = page.getByTestId("merge-gate-off");
+  // BEFORE: default is on, so the "off" box is unchecked.
+  await expect(toggle).not.toBeChecked();
+  await toggle.check();
+  // The consequence note flips to the explicit warning.
+  await expect(page.getByText(/Merge gate is OFF: merges skip the gate command/)).toBeVisible();
+  const projectSave = page.getByRole("button", { name: "Save", exact: true }).first();
+  await expect(projectSave).toBeEnabled();
+  await projectSave.click();
+
+  const readMergeGate = async () => {
+    const res = await fetch(`${loomDaemon.baseURL}/api/projects`);
+    const projects = (await res.json()) as Array<{ id: string; config?: { orchestration?: { mergeGate?: string } } }>;
+    return projects.find((p) => p.id === project.id)?.config?.orchestration?.mergeGate ?? null;
+  };
+  await expect.poll(readMergeGate).toBe("off");
+  await page.reload();
+  await expect(page.getByTestId("merge-gate-off")).toBeChecked();
+
+  // Back on: the override key is REMOVED (inherits the default), not stored as "on".
+  await page.getByTestId("merge-gate-off").uncheck();
+  const save2 = page.getByRole("button", { name: "Save", exact: true }).first();
+  await expect(save2).toBeEnabled();
+  await save2.click();
+  await expect.poll(readMergeGate).toBe(null);
+});
+
 test("editing a daemon-global setting persists to the platform override", async ({ page, loomDaemon }) => {
   // Pin a project so the page is fully populated, though the global section is project-independent.
   const project = await loomDaemon.createProject(`settings-global-${Date.now()}`);

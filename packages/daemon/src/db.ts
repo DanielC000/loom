@@ -2246,6 +2246,10 @@ export interface PendingGateOpVerdict {
    *  no path/filename/error text (unlike `reason`) — see `gate_status`'s own cross-project redaction
    *  classification, which leaves it VISIBLE on a foreign read for exactly that reason. */
   emitCompareNotApplicableKind?: EmitCompareNotApplicableKind;
+  /** Card e8df2659: why a merge landed WITHOUT running the gate, when the cause is the human-only
+   *  `orchestration.mergeGate:"off"` switch (`"gate-disabled"`). `undefined` otherwise — an inert docs-only
+   *  skip is NOT stamped here (read `GateHistoryRow.skipReason`, which covers both causes). */
+  skipReason?: string;
   /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
    *  the `gate_status(opId)` half of the same fix DoD-1 applied to the `[loom:merge-done]` nudge text.
    *  Undefined-means-not-determinable, same discipline as `emitCompareReduced` above: `undefined` means
@@ -8800,6 +8804,9 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     transientRetried,
     emitCompareReduced,
     emitCompareNotApplicableKind,
+    // Card e8df2659: read from the `build_gate` event's own `skipReason` (both the inert docs-only skip and the
+    // human-only gate-disabled skip stamp it), so /api/gates/history can tell the two apart.
+    skipReason: typeof detail.skipReason === "string" ? detail.skipReason : null,
     emitCompareIdenticalCount,
     emitCompareTestFiles,
     batched,

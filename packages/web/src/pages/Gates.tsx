@@ -80,7 +80,9 @@ const NON_RUN_NOTE =
 // "skipped" is inert-diff by construction (card db9b0130), "cancelled" is a withdrawal before a
 // process started (card 3a6f04cc), and a "pass" that never ran is a reused worker self-check — the
 // only remaining producer. Anything else falls back to the reason-free note rather than guessing.
-function nonRunReason(outcome: GateOutcome): string {
+function nonRunReason(outcome: GateOutcome, skipReason?: string | null): string {
+  // Card e8df2659: a human-only "merge gate off" landing is NOT an inert docs-only skip — say which it was.
+  if (outcome === "skipped" && skipReason === "gate-disabled") return "The project's merge gate is switched OFF, so the merge landed without running the gate (not a pass).";
   if (outcome === "skipped") return "The merge diff was proven inert, so the gate was never attempted.";
   if (outcome === "cancelled") return "This run was withdrawn before a gate process spawned.";
   if (outcome === "pass") return "This merge reused an already-green worker self-check.";
@@ -783,7 +785,7 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
         {row.workerLabel ?? "—"}
         {row.failingTest && <span style={{ color: color.red }}> · {row.failingTest}</span>}
       </td>
-      <td style={tdStyle} title={row.gateRan ? undefined : `${nonRunReason(row.outcome)} ${NON_RUN_NOTE}`}>
+      <td style={tdStyle} title={row.gateRan ? undefined : `${nonRunReason(row.outcome, row.skipReason)} ${NON_RUN_NOTE}`}>
         {row.gateRan ? (
           <span style={{ fontVariantNumeric: "tabular-nums", color: killed ? color.red : color.text }}>
             {fmtDurationMs(row.durationMs)}
