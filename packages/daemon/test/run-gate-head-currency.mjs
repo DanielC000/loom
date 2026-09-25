@@ -205,6 +205,44 @@ try {
     check("(D) headCurrent is false on a FAILING settle too", r.value.headCurrent === false);
     check("(D) headWarning (RACY shape) is present on a FAILING settle too", /actively running/i.test(r.value.headWarning ?? ""));
   }
+
+  // ── (E) QUEUE-WAIT RELABEL + a mid-run ROUND TRIP (card d099087f): the worktree moves during the queue wait (would be (B)'s benign
+  //        "STALE LABEL … likely DOES cover" text), AND inside the gate the HEAD leaves the admitted commit and comes back (detach → commit →
+  //        checkout). Settle head === admit head, so the stamps see nothing more; only the round trip can say the run may have tested a mix. ───
+  {
+    const db = new Db();
+    dbs.push(db);
+    const { workerId: blockerId } = await seedWorkerInDb(db, "e-blocker");
+    const { workerId: subjectId, worktreePath: subjectWt } = await seedWorkerInDb(db, "e-subject");
+    const subjectBranch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: subjectWt }).toString().trim();
+    let releaseBlocker; const blockerHeld = new Promise((r) => { releaseBlocker = r; }); // released once the subject has queued AND been mutated: an event, not a timer
+    const fakeGate = async (_gate, wt) => {
+      if (wt !== subjectWt) { await blockerHeld; return { passed: true }; }
+      execSync("git checkout -q --detach", { cwd: wt, stdio: "ignore" });
+      fs.writeFileSync(path.join(wt, "mid.txt"), "mid-run work\n");
+      commitAll(wt, "mid-run detached commit", GIT_ID);
+      execSync(`git checkout -q ${subjectBranch}`, { cwd: wt, stdio: "ignore" });
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate });
+    const pBlocker = sessions.runWorkerGate(blockerId);
+    await sharedWaitUntil(
+      () => sessions.snapshotGates().gates.some((g) => g.sessionId === blockerId && g.phase === "running"),
+      { timeoutMs: 5000, intervalMs: 25, label: "(E) the blocker genuinely admitted" },
+    );
+    const pSubject = sessions.runWorkerGate(subjectId);
+    await sharedWaitUntil(
+      () => sessions.snapshotGates().gates.some((g) => g.sessionId === subjectId && g.phase === "queued"),
+      { timeoutMs: 5000, intervalMs: 25, label: "(E) the subject genuinely queued" },
+    );
+    fs.writeFileSync(path.join(subjectWt, "late.txt"), "late work\n");
+    commitAll(subjectWt, "late commit during queue wait", GIT_ID);
+    releaseBlocker();
+    const [, rSubject] = await Promise.all([pBlocker, pSubject]);
+    check("(E) settles inline and passes", rSubject.settled === true && rSubject.ok === true && rSubject.value.passed === true);
+    check("(E) headCurrent is false", rSubject.value.headCurrent === false);
+    check("(E) headWarning names the round trip (came back / not reusable), not the understating STALE LABEL text", /came back/i.test(rSubject.value.headWarning ?? "") && !/STALE LABEL/i.test(rSubject.value.headWarning ?? "") && !/likely DOES cover/i.test(rSubject.value.headWarning ?? ""));
+  }
 } finally {
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
