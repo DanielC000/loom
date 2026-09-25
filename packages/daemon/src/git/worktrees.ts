@@ -2510,13 +2510,13 @@ export function gateHeadOnBranch(head: string | null | undefined, branchTip: str
 /**
  * What a landing squash is pinned to, as a DISCRIMINATED input so a skip path that forgets its tip is a TYPE error (and a caller that cannot build one refuses, fail closed).
  * `gate`: the tip the REAL gate ran on. `skip`: the tip a NO-GATE decision covered (`reuse` = a reused self-check, `inert` = an inert-diff skip; a new skip kind gets its own
- * literal and MUST carry its decision's tip). `unpinned`: a landing with nothing to pin, each with a NAMED reason — `gate-disabled` (the gate-OFF skip; 6f13746c removes it) and
- * `no-gate-configured` (a project with no gate command has no verdict about any tip).
+ * literal and MUST carry its decision's tip). `unpinned`: a landing with nothing to pin, with a NAMED reason — only `no-gate-configured` (a project with no gate command has no verdict about any tip).
+ * The gate-OFF skip (`gate-disabled`) and the gate-INTERVAL skip (`gate-interval`, card 6f13746c) are `skip` variants carrying the tip their decision covered.
  */
 export type LandingPin =
   | { kind: "gate"; tip: string }
-  | { kind: "skip"; skip: "reuse" | "inert"; tip: string }
-  | { kind: "unpinned"; reason: "gate-disabled" | "no-gate-configured" };
+  | { kind: "skip"; skip: "reuse" | "inert" | "gate-interval" | "gate-disabled"; tip: string }
+  | { kind: "unpinned"; reason: "no-gate-configured" };
 
 /**
  * THE one place that turns a {@link LandingPin} into `mergeBranch`'s `expectedBranchTip` (checked INSIDE its lock): the pinned tip, or `undefined` only for an explicit `unpinned`.

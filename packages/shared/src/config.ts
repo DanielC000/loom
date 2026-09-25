@@ -220,6 +220,18 @@ export const MEMORY_CONFIG_MAX = {
   maxNotes: 1000,
 } as const;
 
+/** Card 6f13746c: upper bound of `orchestration.mergeGateInterval` (lower bound 1). */
+export const MERGE_GATE_INTERVAL_MAX = 1000;
+export type MergeGateCadence = "every" | "interval" | "never";
+/** Card 6f13746c: the ONE derivation of the merge-gate cadence from the resolved orchestration config —
+ *  `every` = mergeGate on, `interval` = off + a valid interval set, `never` = off + no interval. */
+export function resolveMergeGateCadence(o: { mergeGate: "on" | "off"; mergeGateInterval?: number | undefined }): { cadence: MergeGateCadence; interval: number | null } {
+  if (o.mergeGate !== "off") return { cadence: "every", interval: null };
+  const n = o.mergeGateInterval;
+  if (typeof n === "number" && Number.isInteger(n) && n >= 1) return { cadence: "interval", interval: n };
+  return { cadence: "never", interval: null };
+}
+
 /**
  * The accepted range (in canonical MS) of each per-project, human-only orchestration TIMEOUT field —
  * the SINGLE source of truth for those bounds. The daemon's human config validator
@@ -322,6 +334,15 @@ export interface OrchestrationConfig {
    * same trust class as `gateCommand` — the agent-facing config validator REJECTS it.
    */
   mergeGate: "on" | "off";
+  /**
+   * Per-project, HUMAN-only "gate interval" (card 6f13746c), meaningful only while `mergeGate` is "off": the
+   * number of branches that may land UNGATED before the next landing runs the real `gateCommand` (a genuine,
+   * fail-closed gate; a pass resets the durable per-project counter). Integer 1..{@link MERGE_GATE_INTERVAL_MAX};
+   * unset = never gate while off. Cadence: `every` = mergeGate on, `interval` = off + this set, `never` = off +
+   * unset ({@link resolveMergeGateCadence}). No env/platform layer. HUMAN-set ONLY, same trust class as
+   * `mergeGate` — the agent-facing config validator and the Lead's elevated `project_configure` REJECT it.
+   */
+  mergeGateInterval?: number;
   /**
    * Per-project, HUMAN-only timeout (ms) for a `gateCommand` run — pairs with `gateCommand`. Caps how
    * long the build/DoD gate may run before it's killed. Default 600000 (raised from 120000 by card
@@ -1817,6 +1838,7 @@ export function resolveConfig(
     orchestration: {
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
       mergeGate: override.orchestration?.mergeGate ?? d.orchestration.mergeGate,
+      ...((override.orchestration?.mergeGateInterval ?? d.orchestration.mergeGateInterval) === undefined ? {} : { mergeGateInterval: (override.orchestration?.mergeGateInterval ?? d.orchestration.mergeGateInterval) as number }),
       // Per-project timeout pairing gateCommand (no env layer). `??` so an explicit value survives.
       gateCommandTimeoutMs: override.orchestration?.gateCommandTimeoutMs ?? d.orchestration.gateCommandTimeoutMs,
       // Scoped per-project deploy (mirrors gateCommand's resolution exactly).

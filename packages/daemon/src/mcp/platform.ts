@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { TASK_STRUCTURE_SHAPE, TASK_STRUCTURE_DOC, TASK_CREATE_STRUCTURE_SHAPE, TASK_CREATE_STRUCTURE_DOC } from "../tasks/relations.js";
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds, RotationMarker } from "@loom/shared";
-import { MEMORY_CONFIG_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, harnessFleetScopeAvailable, resolveConfig } from "@loom/shared";
+import { MEMORY_CONFIG_MAX, MERGE_GATE_INTERVAL_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, harnessFleetScopeAvailable, resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
@@ -170,6 +170,9 @@ const orchestrationOverride = z.object({
   // Per-project, HUMAN-only merge-gate switch (card e8df2659): "off" makes worker_merge_confirm/merge_batch
   // skip gateCommand. Omitted from the agent path (see agentOrchestrationOverride) so `.strict()` rejects it.
   mergeGate: z.enum(["on", "off"]).optional(),
+  // Per-project, HUMAN-only gate interval (card 6f13746c): ungated landings allowed while mergeGate is "off". Omitted from the
+  // agent path with mergeGate (see agentOrchestrationOverride) so `.strict()` rejects it.
+  mergeGateInterval: z.number().int().min(1).max(MERGE_GATE_INTERVAL_MAX).optional(),
   // Per-project, HUMAN-only timeout (ms) capping a gateCommand run. Pairs with gateCommand and is
   // omitted from the agent path with it (see agentOrchestrationOverride). Bounds come from
   // ORCHESTRATION_TIMEOUT_MS_BOUNDS (@loom/shared) — the SAME table the Settings UI reads to state the
@@ -290,7 +293,7 @@ const harnessScope = z.enum(["workers", "fleet"]).refine((v) => v !== "fleet" ||
 export const HUMAN_ONLY_PROJECT_CONFIG_KEYS: readonly string[] = ["harness"];
 /** Dot-path human-only keys the elevated Platform `project_configure` also refuses (card e8df2659). The
  *  top-level list above is `Object.hasOwn`-only and cannot see a nested key. */
-export const HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = ["orchestration.mergeGate"];
+export const HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = ["orchestration.mergeGate", "orchestration.mergeGateInterval"];
 /** Nested keys the Lead may CHANGE but never BLANK or DROP (card fa777608). This blocks only the LABELLED
  *  gateless path — a blank/removed `orchestration.gateCommand` ⇒ "no gateCommand configured" (unverified).
  *  It does NOT stop the gate being neutered: the Lead can still change the command to a no-op such as
@@ -402,7 +405,7 @@ const projectConfigOverrideSchema = z.object({
  */
 const agentOrchestrationOverride = orchestrationOverride
   .omit({
-    gateCommand: true, gateCommandTimeoutMs: true, mergeGate: true,
+    gateCommand: true, gateCommandTimeoutMs: true, mergeGate: true, mergeGateInterval: true,
     deployCommand: true, deployCommandTimeoutMs: true,
     alertWebhook: true, alertWebhookTimeoutMs: true,
   })
@@ -1351,7 +1354,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The default-harness key harness (which vendor CLI a worker spawns) is human-only EVEN HERE and is REJECTED, matching profile.harness. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–3600000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). You may CHANGE gateCommand to another non-empty command but NOT blank it or drop it (empty/whitespace value, unset, or replace:true omitting it are REFUSED — a human can still clear it via Settings). Any non-empty value is accepted, INCLUDING one that verifies nothing (e.g. \"exit 0\"): every merge then records a PASS with NO \"unverified\" warning, so never set one unless the owner explicitly asks — only the owner's human-only orchestration.mergeGate switch produces a labelled skip. UNSET/REPLACE: pass unset:[\"orchestration.alertWebhook\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset. A payload that both WRITES and UNSETS the same dot-path is REJECTED (not silently resolved either way) — drop one of the two. The returned config NEVER carries sessionEnv values, masked or real — instead it carries sessionEnvKeys (names + VALUE LENGTHS only, e.g. {\"FOO\":38}), so you can confirm a length without ever seeing anything value-shaped. sessionEnvKeys is NOT a settable key — feeding this response's config straight back as a later patch/replace is REJECTED (invalid config), never a silent write.",
+        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The default-harness key harness (which vendor CLI a worker spawns) is human-only EVEN HERE and is REJECTED, matching profile.harness. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–3600000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). You may CHANGE gateCommand to another non-empty command but NOT blank it or drop it (empty/whitespace value, unset, or replace:true omitting it are REFUSED — a human can still clear it via Settings). Any non-empty value is accepted, INCLUDING one that verifies nothing (e.g. \"exit 0\"): every merge then records a PASS with NO \"unverified\" warning, so never set one unless the owner explicitly asks — only the owner's human-only orchestration.mergeGate switch (and its orchestration.mergeGateInterval) produces a labelled skip. UNSET/REPLACE: pass unset:[\"orchestration.alertWebhook\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset. A payload that both WRITES and UNSETS the same dot-path is REJECTED (not silently resolved either way) — drop one of the two. The returned config NEVER carries sessionEnv values, masked or real — instead it carries sessionEnvKeys (names + VALUE LENGTHS only, e.g. {\"FOO\":38}), so you can confirm a length without ever seeing anything value-shaped. sessionEnvKeys is NOT a settable key — feeding this response's config straight back as a later patch/replace is REJECTED (invalid config), never a silent write.",
         inputSchema: strictShape({
           projectId: z.string(),
           config: z.object({}).passthrough().optional(),
@@ -1386,7 +1389,7 @@ export class PlatformMcpRouter {
         // cannot see them, and the full validator below would otherwise accept them on this elevated route.
         const humanOnlyNested = HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS.find((p) => hasNestedKey(config, p));
         if (humanOnlyNested) {
-          return ok({ error: `invalid config: ${humanOnlyNested} may not be set via an agent MCP tool — it switches the merge gate off (human-only, via the REST config PATCH / Settings UI)` });
+          return ok({ error: `invalid config: ${humanOnlyNested} may not be set via an agent MCP tool — it changes the merge gate (human-only, via the REST config PATCH / Settings UI)` });
         }
         // Human-only means BOTH directions (card e8df2659, manager ruling): the Lead may not CLEAR a stored
         // human-only nested key either — neither by `unset` (the exact path, or a prefix such as "orchestration"

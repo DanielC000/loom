@@ -8,7 +8,7 @@ import {
   type Session, type StopMode, type OrchestrationEvent, type Task, type Project,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
-  type GatesActive, type GateRun, type GateType, type CompanionRoute, type ProjectMemoryEntry,
+  type GatesActive, type GateRun, type GateType, type MergeGateAgentView, type MergeGateStatus, type CompanionRoute, type ProjectMemoryEntry,
 } from "@loom/shared";
 // Card 66b1b40d: its own statement (not folded into the import above) — orchestration-mcp-role-guard.mjs regex-scans
 // that import within a fixed window of `usesOrchestrationMcp`, which a longer name list would push out of range.
@@ -70,6 +70,7 @@ import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
 import { gateSpillPath, pruneGateSpills, listGateSpillOpIds, GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, GATE_SPILL_PROTECTED_RETAIN_COUNT } from "../orchestration/gate-spill.js";
+import { decideMergeGate, applyUngatedLanding, applyGatePass, applyGateFail, applyGateNext, applyCadenceCleared, agentViewOf, statusOf, counterNote, type MergeGateDecision } from "../orchestration/merge-gate-interval.js";
 import { GateSemaphore, GateCancelledError, type GateContinuation, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
@@ -600,7 +601,10 @@ type ConfirmMergeResult = {
   skipped?: boolean;
   /** Card e8df2659: set (with `skipped:true`) ONLY when the human-only `orchestration.mergeGate:"off"` switch
    *  caused the skip — never on an inert-diff skip. Absent otherwise. */
-  skipReason?: "gate-disabled";
+  skipReason?: "gate-disabled" | "gate-interval";
+  /** Card 6f13746c: the merge-gate interval counter line ("ungated 3/5 since the last passing gate" / "this was the
+   *  periodic gated landing …") — present only when the project's cadence is not `every`. Manager-facing text only. */
+  mergeGateNote?: string;
   /** @decision a1a8c5c4 — `outputTail` covers only the two dominant paths (a plain gate-fail rejection, a
    *  plain successful merge); check `gateExtended`, never this field's absence, to tell "no gate ran"
    *  apart from "one ran on a rarer path this never wired up". */
@@ -666,6 +670,9 @@ type ConfirmMergeResult = {
   /** @decision 99a1cf6f — `gateBaseInvalidated` is a real, resolved verdict about canonical main, never
    *  an ordinary rejection against the branch; `NEVER_CACHED_OUTCOMES` must never serve it from cache. */
   gateBaseInvalidated?: boolean;
+  /** Card 6f13746c: an UNGATED (gate-off / gate-interval) landing was refused in-lock because a gate became owed after its decision — nothing squashed,
+   *  never cached (classified `"gate-owed"`). Deliberately NOT `gateBaseInvalidated`: that is a verdict about canonical main. */
+  gateOwedRefusal?: boolean;
   /** Card 344ce950 (bounded multi-file since card 67030bb9): the bare name(s) of the test file(s) this
    *  merge's gate retried together in isolation before reaching this verdict (see gate-runner.ts's
    *  `identifyRetriableTestFiles`) — `undefined` when no such retry fired (the overwhelming majority of
@@ -838,6 +845,11 @@ type WorkerGateResult = {
 /** Card e8df2659: the ONE wording of the gate-disabled warning — shared by the sync `warning` and the async
  *  `[loom:merge-done]` echo so the two can never drift. */
 const GATE_DISABLED_WARNING = "merge gate is OFF for this project (orchestration.mergeGate:\"off\") — merged WITHOUT running the gate command; recorded as skipReason:\"gate-disabled\", gateRan:false, NOT a pass";
+/** Card 6f13746c: the interval's own wording — a landing the gate INTERVAL let through ungated (never a pass). */
+const GATE_INTERVAL_WARNING = "merge gate is in INTERVAL mode for this project (orchestration.mergeGateInterval) and this was not the gated landing's turn — merged WITHOUT running the gate command; recorded as skipReason:\"gate-interval\", gateRan:false, NOT a pass";
+function gateSkipWarning(reason: "gate-disabled" | "gate-interval" | undefined): string {
+  return reason === "gate-interval" ? GATE_INTERVAL_WARNING : GATE_DISABLED_WARNING;
+}
 
 /** Card e8df2659: the `|mergeGate:<value>` suffix folded into a merge op's cache identity (see
  *  `confirmWorkerMergeTracked`). Kept in one place so the solo and batch attach keys can never disagree. */
@@ -13077,6 +13089,8 @@ export class SessionService {
     behindMain?: number; rawTitle?: string; commitSubject?: string; coerced?: boolean; tasklessSubjectPreview?: string;
     ownTipSubject?: string; ownTipSubjectConventional?: boolean;
     ownNonTipCommitSubjects?: string[]; ownNonTipCommitSubjectsConventional?: boolean; ownNonTipCommitSubjectsTruncated?: boolean;
+    /** Card 6f13746c: the project's merge-gate cadence + ungated counter (READ-only; agents never set any of it). */
+    mergeGate?: MergeGateAgentView;
   }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
@@ -13086,6 +13100,7 @@ export class SessionService {
     // Multi-repo epic (49136451) phase 2: resolved here (moved up from its original spot below, which
     // still uses this same value) so the taskless subject preview below has it in scope too.
     const repoPath = resolveRepoByKey(project, worker.repoKey).path;
+    const mergeGateView = this.mergeGateAgentView(project.id, worker.repoKey ?? "primary"); // card 6f13746c (the repo being merged)
     // Prospective commit subject (card b88704bb) — same derivation mergeBranch uses (task title's first
     // line, trimmed); absent entirely for a taskless worker rather than fabricated from the branch name.
     // FAIL SAFE (card cf60a32a): a missing/unreadable task must never break this review, so getTask's
@@ -13254,6 +13269,7 @@ export class SessionService {
         ownNonTipCommitSubjectsConventional,
         ...(ownNonTipCommitSubjects.truncated ? { ownNonTipCommitSubjectsTruncated: true } : {}),
       } : {}),
+      ...(mergeGateView ? { mergeGate: mergeGateView } : {}),
     };
   }
 
@@ -13500,7 +13516,11 @@ export class SessionService {
     // Card e8df2659: the `orchestration.mergeGate` value `confirmWorkerMergeTracked` already folded into this
     // op's cache identity — threaded so the run honours EXACTLY the value it was keyed under (a flip between
     // the two reads would otherwise cache a verdict under the wrong key). Omitted ⇒ resolved live below.
-    mergeGateOverride?: "on" | "off",
+    // Card 6f13746c: now the whole DECISION (gate this landing? + why) — `confirmWorkerMergeTracked` (or, for a
+    // batch fallback, `mergeBatchTracked`) evaluates it ONCE per landing and threads it here.
+    mergeGateDecisionIn?: MergeGateDecision,
+    // Card 6f13746c: called once the landing has been RECORDED (at the squash), so its reservation is consumed then rather than at settle (idempotent).
+    onMergeGateRecorded?: () => void,
   ): Promise<ConfirmMergeResult> {
     // CORRELATION STAMP (card 369d8824): threaded from PendingOpRegistry.attach (the SAME opId a caller
     // routed through confirmWorkerMergeTracked was already handed in its own `{status:"pending",opId}`
@@ -13551,7 +13571,9 @@ export class SessionService {
     // `skipReason:"gate-disabled"`; ONLY the gate command is skipped — the union-merge/conflict refusal, the
     // confirm-time dirty-tree refusal, the in-lock `expectedBranchTip`/`requireCanonicalHead` squash checks
     // and finalize all still run. The pinned-gate-tip refusal is N/A when off (no gate ever pins a tip).
-    const gateDisabled = (mergeGateOverride ?? orchestration.mergeGate) === "off";
+    const mergeGateDecision = mergeGateDecisionIn ?? this.decideMergeGateFor(project.id, 1, orchestration, worker.repoKey ?? "primary");
+    const gateDisabled = !mergeGateDecision.gate;
+    const mergeSkipReason = mergeGateDecision.skipReason ?? "gate-disabled";
 
     // @decision 864e79fe — worktree-gone alone false-negatives "build gate failed" for an already-successful
     //  merge (best-effort removal can lag finalizeMerge); OR in the task's own terminal-lane state, but
@@ -13753,7 +13775,7 @@ export class SessionService {
     // Read ONLY through `expectedTipForLanding`.
     let skipCoveredTip: string | undefined;
     // @decision 35cfcbe0 — WHICH no-gate decision set `skipCoveredTip` (the refusal names the actual skip from this, never by elimination).
-    let skipKind: "reuse" | "inert" | undefined;
+    let skipKind: "reuse" | "inert" | "gate-interval" | "gate-disabled" | undefined;
     // @decision 975c774b — set at the reuse decision when the tree is dirty/unreadable; refused only if a gate will actually spawn.
     let confirmTimeDirty: string | undefined;
     // @decision 975c774b — the distinct, never-cached refusal for a verdict that describes no commit (see `gateWorktreeDirty`);
@@ -13771,7 +13793,7 @@ export class SessionService {
     // @decision 975c774b — a PASS is a fact about the tip the gate spawned on; a branch that moved since would squash a commit
     // the gate never ran. Refused (never cached, a re-call re-gates the new tip) rather than squashing the gated tip, which
     // would land without the later commit and then lose it when finalizeMerge deletes the branch.
-    const refuseGateTipMoved = async (phase: "pre-squash" | "in-lock", gated: string | undefined, live: string | null | undefined, movedAndBack = false, extra?: { headOff?: string; leftAt?: string; unverifiedWhy?: "reflog" | "branch-read"; skip?: { kind: "reuse"; reusedOpId: string } | { kind: "inert-skip" } }): Promise<ConfirmMergeResult> => {
+    const refuseGateTipMoved = async (phase: "pre-squash" | "in-lock", gated: string | undefined, live: string | null | undefined, movedAndBack = false, extra?: { headOff?: string; leftAt?: string; unverifiedWhy?: "reflog" | "branch-read"; skip?: { kind: "reuse"; reusedOpId: string } | { kind: "inert-skip" } | { kind: "gate-skip"; skip: "gate-interval" | "gate-disabled" } }): Promise<ConfirmMergeResult> => {
       // @decision 01777ceb — `live` always stays the BRANCH's live tip; a detached worktree HEAD travels in its own `worktreeHead`.
       const why = extra?.headOff
         ? `the worktree HEAD (${extra.headOff.slice(0, 8)}) and the branch tip (${gated?.slice(0, 8) ?? "?"}) differed when a gate run spawned (detached, or a commit landed between the two reads), so this PASS covers content the branch would not squash`
@@ -13787,6 +13809,8 @@ export class SessionService {
         ? `the branch tip moved after the reused self-check was proven current (covered ${gated.slice(0, 8)}, now ${live.slice(0, 8)}), so that later commit was never gated and this merge does not cover it`
         : gated && live && extra?.skip?.kind === "inert-skip"
         ? `the branch tip moved after the inert-diff skip was decided (covered ${gated.slice(0, 8)}, now ${live.slice(0, 8)}), so that later commit was never checked for inertness and this merge does not cover it`
+        : gated && live && extra?.skip?.kind === "gate-skip"
+        ? `the branch tip moved after the ungated landing was decided (${extra.skip.skip}; covered ${gated.slice(0, 8)}, now ${live.slice(0, 8)}), so that later commit was never gated and this merge does not cover it`
         : gated && live
         ? `the branch tip moved after the gate spawned (gated ${gated.slice(0, 8)}, now ${live.slice(0, 8)}), so this PASS does not cover the commit that would be squashed`
         : `the gated branch tip could not be verified (gated ${gated?.slice(0, 8) ?? "unreadable"}, now ${live?.slice(0, 8) ?? "unreadable"}), so this ${extra?.skip ? "merge" : "PASS"} is refused rather than squashed unchecked`;
@@ -14032,7 +14056,7 @@ export class SessionService {
     let merge: Awaited<ReturnType<typeof mergeBranch>>;
     // @decision 35cfcbe0 — assigned just before the squash (inside the try below), read by the post-squash in-lock refusal outside it.
     let landingPin: LandingPin | undefined;
-    let skipRefusalKind: { kind: "reuse"; reusedOpId: string } | { kind: "inert-skip" } | undefined;
+    let skipRefusalKind: { kind: "reuse"; reusedOpId: string } | { kind: "inert-skip" } | { kind: "gate-skip"; skip: "gate-interval" | "gate-disabled" } | undefined;
     // Card b9e07a4a: the inert-diff skip's OWN repo-guard release, set only when `acquireRepoGuardOnly`
     // below actually acquired one — mirrors `merge`'s own "declared outside the try, so it's still in
     // scope for what runs after" reasoning. Released unconditionally in the `finally` (a no-op when still
@@ -14502,7 +14526,7 @@ export class SessionService {
             }
           } else if (!gateDisabled) {
             // @decision 35cfcbe0 — no movement: the skip covers exactly the tip re-read after the guard was granted; pin the squash to it (in-lock `expectedBranchTip`), so a
-            // commit landing after this read is refused rather than squashed ungated. Gate OFF stays unpinned on purpose (nothing was verified about any tip).
+            // commit landing after this read is refused rather than squashed ungated. The gate-off / gate-interval skip is pinned too (its own held-stamp block below).
             skipCoveredTip = postWaitBranchHead;
             skipKind = "inert";
           }
@@ -14514,6 +14538,15 @@ export class SessionService {
             if (heldStamp.dirty || heldStamp.head === null) {
               return refuseWorktreeDirty("before-gate", heldStamp.dirty ? "the worktree is dirty after the guard wait" : "worktree stamp unreadable after the repo merge guard was granted");
             }
+            // Card 6f13746c: the gate-OFF / gate-INTERVAL skip is pinned like every other no-gate landing — to the tip its decision covered (the worktree
+            // stamp taken once the repo guard is held), so a commit landing after it is refused in-lock rather than squashed ungated.
+            // Pinned to the BRANCH REF read now, under the guard (like the inert path's `postWaitBranchHead`), not the worktree HEAD; the two must agree.
+            const skipBranchTip = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs });
+            if (!skipBranchTip || skipBranchTip !== heldStamp.head) {
+              return refuseWorktreeDirty("before-gate", !skipBranchTip ? "the branch tip could not be read after the repo merge guard was granted, so the ungated landing cannot be pinned" : `the worktree HEAD (${heldStamp.head.slice(0, 8)}) is not the branch tip (${skipBranchTip.slice(0, 8)}), so the ungated landing cannot be pinned to a tip`);
+            }
+            skipCoveredTip = skipBranchTip;
+            skipKind = mergeSkipReason;
           }
         }
       }
@@ -14938,7 +14971,7 @@ export class SessionService {
           // `reused:true` (it reused nothing; there was no prior run at all) and a genuine reuse is never
           // stamped `skipped:true`. `gateOutcomeFromDetail` checks `skipped` before `passed`, so this alone
           // is what keeps a skip out of `gate_history`'s `"pass"` bucket.
-          ...(gateRan ? {} : inertSkip ? { skipped: true, skipReason: gateDisabled ? "gate-disabled" : "inert-docs-only-diff" } : { reused: true, reusedOpId }),
+          ...(gateRan ? {} : inertSkip ? { skipped: true, skipReason: gateDisabled ? mergeSkipReason : "inert-docs-only-diff" } : { reused: true, reusedOpId }),
           // Absent (never an empty array) whenever reuse actually fired.
           // @decision 2e52bf99 — reuseRefusalReasons is stamped independent of the inertSkip/reused
           //  ternary above, so it reflects why REUSE specifically was refused regardless of a later
@@ -15338,6 +15371,8 @@ export class SessionService {
         // @decision 01777ceb — a pure round trip (settle head back on the pre-spawn head, readable reflogs) is never cached (94c28d2a). Any OTHER FAIL whose FINAL
         // link left the gated commit, or whose reflog could not be read, is cached under a VOID identity: it can never equal a future tip (so the re-call re-gates,
         // and still announces identity-mismatch), instead of falling back to the pre-forward sha a later reset to T1 would match.
+        // Card 6f13746c: a genuine gate FAILURE feeds the merge-gate interval state (owed after a periodic/owed red).
+        if (gate) await this.recordMergeGateFailure(project.id, { repoPath, repoKey: worker.repoKey ?? "primary", opId: thisOpId, periodic: mergeGateDecision.cadence !== "every", branchTip: pinnedGateTip ?? ((await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? null), branch });
         const gateRoundTrip = gateHeadLeftDuringRun && gateHeadReturned && !gateHeadLeftAt && !gateReflogUnverified;
         const finalLink = gateLinkCleanliness();
         const gateIdentityVoid = !gateRoundTrip && (finalLink.unclean || finalLink.unverified);
@@ -15505,15 +15540,31 @@ export class SessionService {
       ? (skipCoveredTip ? { kind: "skip", skip: skipKind, tip: skipCoveredTip } : undefined)
       : !gate
       ? { kind: "unpinned", reason: "no-gate-configured" }
-      : gateDisabled
-      ? { kind: "unpinned", reason: "gate-disabled" }
       : undefined;
-    skipRefusalKind = skipKind === "reuse" && reusedOpId ? { kind: "reuse" as const, reusedOpId } : skipKind === "inert" ? { kind: "inert-skip" as const } : undefined;
+    skipRefusalKind = skipKind === "reuse" && reusedOpId ? { kind: "reuse" as const, reusedOpId } : skipKind === "inert" ? { kind: "inert-skip" as const } : (skipKind === "gate-interval" || skipKind === "gate-disabled") ? { kind: "gate-skip" as const, skip: skipKind } : undefined;
     if (!landingPin) {
       return { ...(await refuseGateTipMoved("pre-squash", skipCoveredTip ?? pinnedGateTip, null, false, { unverifiedWhy: "branch-read", ...(skipRefusalKind ? { skip: skipRefusalKind } : {}) })), ...gatePassRefusalExtras() };
     }
     if (gateRan) this.gateSemaphore.beginSquash(repoPath, thisOpId);
+    // Card 6f13746c: a skip decision must not outlive a newly OWED gate. Checked HERE, at the squash point INSIDE the repo guard (the
+    // `finally` below releases it), so a red or a human gate-next recorded after this op decided "ungated" refuses it in-lock: nothing is
+    // squashed, the reservation is released by the caller, and the class is never cached (the re-call decides GATED).
+    if (gate && gateDisabled && inertSkip && this.db.getMergeGateState(project.id, worker.repoKey ?? "primary").gateOwed) {
+      const why = "a gate is now owed for this project's merge-gate interval (a periodic gate failed, or a human asked for one) after this landing was decided ungated — nothing was squashed; re-run worker_merge_confirm and it will run the gate";
+      const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. This refusal is never cached.`;
+      const { suppressed, sha } = await rejectNotify("gate_owed", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "gate_owed", sha, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: false, gateOwedRefusal: true };
+    }
     merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, expectedTipForLanding(landingPin));
+    // Card 6f13746c: record the landing HERE — at the squash, still INSIDE the repo guard (`endSquash` / `releaseInertRepoGuard` run in the
+    // `finally` below) — so the counter's order equals main's order: a later pass resets only what precedes it on main, and an ungated landing
+    // that squashed after a pass is never erased by it. (Recording in `finalizeMerge`, after the guard, raced exactly that.) An inert docs-only
+    // skip and a gateless repo are not counted.
+    if (gate && merge.ok && !merge.noop && (gateDisabled ? inertSkip : !inertSkip)) {
+      try { this.recordMergeGateOutcome(project.id, gateDisabled ? { kind: "ungated", landed: 1 } : { kind: "pass", sha: merge.sha ?? null, opId: reusedOpId ?? thisOpId, periodic: mergeGateDecision.cadence !== "every" }, worker.repoKey ?? "primary"); } catch (err) { console.warn(`[merge-gate] failed to record a landing (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+      onMergeGateRecorded?.();
+    }
     } finally {
       // Mirrors the `beginSquash` guard above exactly — `gateRan` is the same precise proxy for "this op
       // actually holds (or could hold) repoPath via `runExclusive`/`admit`", so a reuse/gateless op never
@@ -15659,7 +15710,9 @@ export class SessionService {
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
     // `merge.sha` (card 1eebc46a) is the just-created squash commit's sha, free from mergeBranch's own
     // return — persisted onto the task alongside the rest of finalize's bookkeeping.
-    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, releaseHold: true, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: "gate-disabled" as const } : {}) });
+    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, releaseHold: true, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: mergeSkipReason } : {}) });
+    // Card 6f13746c: the counter line for the merge result / [loom:merge-done] (read AFTER the landing was recorded, at the squash above).
+    const mergeGateNote = this.mergeGateNoteFor(project.id, { gatedLanding: !gateDisabled, periodic: mergeGateDecision.cadence !== "every" }, worker.repoKey ?? "primary");
     // SKILL-LIVENESS WARNING (card 64a30c79): a merge that just landed a change under
     // `packages/daemon/assets/skills/<name>/**` reaches ZERO agents right now — `skills/inject.ts` mirrors
     // sessions from the STORE, never `assets/` (see CLAUDE.md's "Caveat" section) — so surface that here,
@@ -15732,7 +15785,7 @@ export class SessionService {
     // project with no gate; this is a gate a human switched off) and never conflated with an inert skip.
     const inertSkipWarning = inertSkip
       ? (gateDisabled
-        ? GATE_DISABLED_WARNING
+        ? gateSkipWarning(mergeSkipReason)
         : "merge gate skipped: every changed path is under docs/, proven inert (card db9b0130) — recorded as gateRan:false, not a pass")
       : undefined;
     // EMIT-COMPARE REDUCED-GATE WARNING (card 2154b6ad): distinct from `inertSkipWarning` above — a REAL
@@ -15794,8 +15847,8 @@ export class SessionService {
       // itself stays correctly omitted.
       : (gateRan && emitCompareNotApplicableKind !== undefined ? { emitCompareNotApplicableKind } : {});
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true, ...(gateDisabled ? { skipReason: "gate-disabled" as const } : {}) } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true, ...(gateDisabled ? { skipReason: "gate-disabled" as const } : {}) } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true, ...(gateDisabled ? { skipReason: mergeSkipReason } : {}) } : {}), ...(mergeGateNote ? { mergeGateNote } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true, ...(gateDisabled ? { skipReason: mergeSkipReason } : {}) } : {}), ...(mergeGateNote ? { mergeGateNote } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
   }
 
   /**
@@ -16074,7 +16127,7 @@ export class SessionService {
     //  (~25 min), so the owner may have recycled meanwhile; resolve each candidate's CURRENT owner (strictly:
     //  the original manager or a `recycled_from` descendant of it) instead of passing the captured id to the
     //  ownership-checked confirm, and report a candidate that could not be started as `started:false`.
-    const runFallback = async (list: { workerSessionId: string; reason: string }[], batchOpId?: string): Promise<{ workerSessionId: string; reason: string; started?: boolean }[]> => {
+    const runFallback = async (list: { workerSessionId: string; reason: string; decision?: MergeGateDecision }[], batchOpId?: string, reservations?: Map<string, { release: (n?: number) => void }>): Promise<{ workerSessionId: string; reason: string; started?: boolean }[]> => {
       const out: { workerSessionId: string; reason: string; started?: boolean }[] = [];
       const heldReason = (h: { branch: string; assembledTip: string | null; liveTip: string | null; phase: BranchAdvancedDuringGate["phase"]; gitUnverified: boolean }) =>
         h.gitUnverified
@@ -16084,31 +16137,42 @@ export class SessionService {
           // FINALIZED: the worker is done and its worktree is gone, so worker_merge_confirm has nothing to act on.
           ? `held, NOT re-attempted: ${describeBranchRetained(h.branch, h.assembledTip, h.liveTip, h.phase)} — the branch ref still has commits that are NOT on main and were never gated; inspect it and cherry-pick its commits onto a follow-up card's worker`
           : `held, NOT re-attempted: ${describeBranchRetained(h.branch, h.assembledTip, h.liveTip, h.phase)} — its unreviewed commit(s) were never gated; review with worker_merge, then land with worker_merge_confirm (any further commit stays held too)`;
+      const handed = new Set<string>(); // candidates whose unit now belongs to a started confirm (that confirm releases it)
+      try {
       for (const f of list) {
+        const unit = reservations?.get(f.workerSessionId); // card 6f13746c: this candidate's reserved ungated landing (idempotent handle)
         const held = retainedOutstanding.get(f.workerSessionId);
-        if (held) { out.push({ workerSessionId: f.workerSessionId, reason: heldReason(held), started: false }); continue; }
+        if (held) { out.push({ workerSessionId: f.workerSessionId, reason: heldReason(held), started: false }); unit?.release(); continue; }
         const owner = this.resolveLineageOwnerForWorker(managerSessionId, f.workerSessionId);
         if (!owner) {
           const why = `fallback NOT started: worker is not a child of this manager or its recycle lineage`;
           console.warn(`[merge-batch] ${why} (worker ${f.workerSessionId}; batch reason: ${f.reason})`);
           out.push({ workerSessionId: f.workerSessionId, reason: `${f.reason} — ${why}`, started: false });
+          unit?.release();
           continue;
         }
+        handed.add(f.workerSessionId);
         try {
-          const r = await this.confirmWorkerMergeTracked(owner, f.workerSessionId, undefined, batchOpId ? { fallbackOfBatchOpId: batchOpId } : undefined);
+          const r = await this.confirmWorkerMergeTracked(owner, f.workerSessionId, undefined, batchOpId || f.decision ? { ...(batchOpId ? { fallbackOfBatchOpId: batchOpId } : {}), ...(f.decision ? { mergeGateDecision: f.decision } : {}), ...(unit ? { mergeGateReservation: unit } : {}) } : undefined);
           if (r.settled && !r.ok) {
             const msg = r.error instanceof Error ? r.error.message : String(r.error);
             console.warn(`[merge-batch] fallback confirm for worker ${f.workerSessionId} errored before/while running: ${msg}`);
             out.push({ workerSessionId: f.workerSessionId, reason: `${f.reason} — fallback NOT started: ${msg}`, started: false });
+            unit?.release();
             continue;
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           console.warn(`[merge-batch] fallback confirm for worker ${f.workerSessionId} threw: ${msg}`);
           out.push({ workerSessionId: f.workerSessionId, reason: `${f.reason} — fallback NOT started: ${msg}`, started: false });
+          unit?.release();
           continue;
         }
         out.push({ workerSessionId: f.workerSessionId, reason: f.reason, started: true });
+      }
+      } finally {
+        // Card 6f13746c: whatever the loop left behind (a throw before a confirm was started, e.g. in the lineage lookup) is released here.
+        if (reservations) for (const [id, unit] of reservations) if (!handed.has(id)) unit.release();
       }
       // Every return path of this method funnels through here, so a held candidate is always REPORTED, even when it was in
       // no list (it is never assembled — see `retainedOutstanding`).
@@ -16153,14 +16217,24 @@ export class SessionService {
     // whole batch takes this same per-branch solo fallback, and each solo `confirmWorkerMerge` skips the gate
     // itself (`skipReason:"gate-disabled"`) under its own per-repo merge-admission guard (the inert-skip
     // `acquireRepoGuardOnly` hold), so two same-repo squashes never run concurrently.
-    const mergeGateOff = orchestration.mergeGate === "off";
+    // Card 6f13746c: the ONE batch decision (K = the candidates this batch lands, counted once). A "not this
+    // landing's turn" answer takes the same per-branch fallback, each solo confirm HONOURING this decision
+    // (threaded via `mergeGateDecision`) rather than re-deciding with K=1.
+    const batchRepoKey = liveChosen[0]!.repoKey ?? "primary";
+    const batchDecision = this.decideMergeGateFor(finalProjectId, liveChosen.length, orchestration, batchRepoKey);
+    const mergeGateOff = !batchDecision.gate;
+    // A "not this landing's turn" decision RESERVES one unit per chosen candidate until that candidate's solo confirm settles (released by
+    // `confirmWorkerMergeTracked`, or by `runFallback` when no confirm was started), so an overlapping confirm cannot land past N meanwhile.
+    // The overflow/stranded members decide for THEMSELVES (K=1, these reservations counted): handing them this K=chosen decision would let
+    // them land ungated past N.
+    const batchReservations = mergeGateOff ? new Map(liveChosen.map((c) => [c.workerSessionId, this.reserveMergeGate(finalProjectId, batchRepoKey, 1)] as const)) : undefined;
     if (!gate || mergeGateOff) {
       const fallback = await runFallback([
-        ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: mergeGateOff ? "merge gate disabled" : "no gateCommand configured for this repo — nothing to share a gate over" })),
+        ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, decision: batchDecision, reason: mergeGateOff ? (batchDecision.skipReason === "gate-interval" ? "merge gate interval: not this landing's turn" : "merge gate disabled") : "no gateCommand configured for this repo — nothing to share a gate over" })),
         ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
         ...strandedFallback,
-      ]);
-      return { settled: true, ok: true, value: { ok: false, landed: [], fallback, reason: mergeGateOff ? "merge gate disabled" : "no gateCommand configured" } };
+      ], undefined, batchReservations);
+      return { settled: true, ok: true, value: { ok: false, landed: [], fallback, reason: mergeGateOff ? (batchDecision.skipReason === "gate-interval" ? "merge gate interval: not this landing's turn" : "merge gate disabled") : "no gateCommand configured" } };
     }
 
     // DEDUPE/ATTACH KEY (card f944d4e4 — rejected alternatives in this method's own header doc; card
@@ -16188,7 +16262,7 @@ export class SessionService {
         }
         // The suffix here is always `|mergeGate:on` — an OFF batch returned to the per-branch fallback above and
         // never attaches; it is folded anyway so the solo and batch keys share one shape.
-        if (allResolved) verdictIdentity = heads.slice().sort().join(",") + mergeGateIdentitySuffix(orchestration.mergeGate);
+        if (allResolved) verdictIdentity = heads.slice().sort().join(",") + mergeGateIdentitySuffix(batchDecision.identityValue);
       } catch { /* fail-safe: undefined identity never dedupe-hits, see doc above */ }
     }
     //
@@ -16522,6 +16596,11 @@ export class SessionService {
 
           const batchCandidates: BatchCandidate[] = liveChosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle }));
           const result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
+          // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (`endSquash` just below) — ONCE, with
+          // the batch's final landed tip, so the counter's order equals main's order (see the solo record after `mergeBranch`).
+          if (result.ok && result.landed.length > 0) {
+            try { this.recordMergeGateOutcome(finalProjectId, { kind: "pass", sha: result.batchHeadSha ?? null, opId, periodic: batchDecision.cadence !== "every", candidates: result.landed.length }, batchRepoKey); } catch (err) { console.warn(`[merge-gate] failed to record a batch pass (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+          }
 
           // Release the repo-admission guard extension the gate callback above took on a pass — the guard
           // must not outlive this call regardless of what the fast-forward/finalize below does with it.
@@ -16576,6 +16655,8 @@ export class SessionService {
             } catch { /* audit-only — never fail the batch over a failed event write */ }
           }
           const ownDropReason = new Map(result.dropped.map((d) => [d.workerSessionId, d.reason]));
+          // Card 6f13746c: a genuine batch gate FAILURE feeds the interval state ONCE (no branch tip — `candidates: K`).
+          if (result.gateFailed) await this.recordMergeGateFailure(finalProjectId, { repoPath: finalRepoPath, repoKey: batchRepoKey, opId, periodic: batchDecision.cadence !== "every", candidates: liveChosen.length });
 
           if (result.forfeited) {
             // currentMainSha is `string | undefined` on RunBatchedMergeResult (batch-merge.ts) — passed
@@ -16936,6 +17017,99 @@ export class SessionService {
     );
   }
 
+  // ── Merge-gate interval (card 6f13746c) ─────────────────────────────────────────────────────────────
+  // State is keyed (project, repo): the primary repo is "primary"; a pass in repo B never resets repo A's count.
+  /** In-process RESERVATIONS: ungated landings DECIDED but not yet settled, per (project, repo). A decision counts them like landed
+   *  ones so overlapping confirms (a batch's fallbacks, two overlapping solos) cannot overshoot N; a restart drops them (nothing was
+   *  recorded, so nothing is lost). ONE reserve/release pair — every path uses it, so they cannot drift. */
+  private readonly mergeGateReservations = new Map<string, number>();
+  private static mergeGateKey(projectId: string, repoKey: string): string { return `${projectId}\u0000${repoKey}`; }
+  private mergeGatePending(projectId: string, repoKey: string): number { return this.mergeGateReservations.get(SessionService.mergeGateKey(projectId, repoKey)) ?? 0; }
+  /** Reserve K ungated landings; the handle's `release(n?)` frees n (default: all that remain) and is idempotent. */
+  reserveMergeGate(projectId: string, repoKey: string, K: number): { release: (n?: number) => void } {
+    const key = SessionService.mergeGateKey(projectId, repoKey);
+    let remaining = Math.max(0, Math.floor(K));
+    this.mergeGateReservations.set(key, (this.mergeGateReservations.get(key) ?? 0) + remaining);
+    return {
+      release: (n?: number) => {
+        const give = Math.min(remaining, n === undefined ? remaining : Math.max(0, Math.floor(n)));
+        if (give <= 0) return;
+        remaining -= give;
+        const left = (this.mergeGateReservations.get(key) ?? 0) - give;
+        if (left > 0) this.mergeGateReservations.set(key, left); else this.mergeGateReservations.delete(key);
+      },
+    };
+  }
+  /** The project's resolved orchestration config (the `mergeGate`/`mergeGateInterval` pair the decision reads). */
+  private mergeGateOrch(projectId: string, given?: { mergeGate: "on" | "off"; mergeGateInterval?: number | undefined }): { mergeGate: "on" | "off"; mergeGateInterval?: number | undefined } | undefined {
+    if (given) return given;
+    const p = this.db.getProject(projectId);
+    return p ? resolveConfig(p.config, this.db.getPlatformConfig()).orchestration : undefined;
+  }
+  /** Runs a merge factory and releases its reservation when it settles (whichever way). */
+  private async runWithMergeGateRelease<T>(onStart: () => void, res: { release: () => void } | undefined, fn: () => Promise<T>): Promise<T> {
+    onStart();
+    try { return await fn(); } finally { res?.release(); }
+  }
+  /** THE decision helper: "gate this landing of K branches?" — evaluated ONCE per landing (a batch counts K). Counts this
+   *  (project, repo)'s in-process reservations as already-landed. Pure (no side effect): the caller reserves on a skip decision. */
+  decideMergeGateFor(projectId: string, K: number, orch?: { mergeGate: "on" | "off"; mergeGateInterval?: number | undefined }, repoKey = "primary"): MergeGateDecision {
+    const o = this.mergeGateOrch(projectId, orch) ?? { mergeGate: "on" as const };
+    return decideMergeGate(this.db.getMergeGateState(projectId, repoKey), o, K, this.mergeGatePending(projectId, repoKey));
+  }
+  /** THE outcome recorder (ungated landing / passing gate). A solo landing records right after its squash (inside the repo guard); a passing batch records ONCE, right after its fast-forward. */
+  recordMergeGateOutcome(projectId: string, ev: { kind: "ungated"; landed: number } | { kind: "pass"; sha: string | null; opId: string | null; periodic: boolean; candidates?: number }, repoKey = "primary"): void {
+    const st = this.db.getMergeGateState(projectId, repoKey);
+    this.db.putMergeGateState(projectId, ev.kind === "ungated"
+      ? applyUngatedLanding(st, ev.landed)
+      : applyGatePass(st, { at: new Date().toISOString(), sha: ev.sha, opId: ev.opId, periodic: ev.periodic, ...(ev.candidates ? { candidates: ev.candidates } : {}) }), repoKey);
+  }
+  /** A genuine gate FAILURE: records the range lastPassSha..main HEAD (the unverified suspects) and, when the gate was
+   *  periodic/owed, owes the next landing a gate. Best-effort — never lets bookkeeping change the merge verdict. An identity-void
+   *  red (01777ceb) still owes: the conservative reading. */
+  private async recordMergeGateFailure(projectId: string, f: { repoPath: string; repoKey: string; opId: string | null; periodic: boolean; branchTip?: string | null; branch?: string | null; candidates?: number }): Promise<void> {
+    try {
+      const toSha = (await resolveGitRef(f.repoPath, "HEAD", { timeoutMs: this.gitOpMs })) ?? null;
+      this.db.putMergeGateState(projectId, applyGateFail(this.db.getMergeGateState(projectId, f.repoKey), { at: new Date().toISOString(), opId: f.opId, toSha, periodic: f.periodic, ...(f.branchTip !== undefined ? { branchTip: f.branchTip } : {}), ...(f.branch !== undefined ? { branch: f.branch } : {}), ...(f.candidates ? { candidates: f.candidates } : {}) }), f.repoKey);
+    } catch (err) { console.warn(`[merge-gate] failed to record a gate failure (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+  }
+  private mergeGateNoteFor(projectId: string, opts: { gatedLanding: boolean; periodic: boolean }, repoKey = "primary"): string | undefined {
+    const o = this.mergeGateOrch(projectId);
+    return o ? counterNote(this.db.getMergeGateState(projectId, repoKey), o, opts) : undefined;
+  }
+  /** Whether `repoKey` names a repo of the project ("primary" always does). */
+  private mergeGateRepoKnown(projectId: string, repoKey: string): boolean {
+    const p = this.db.getProject(projectId);
+    return !!p && (repoKey === "primary" || p.repos.some((r) => r.key === repoKey));
+  }
+  /** Human REST read (`GET /api/projects/:id/merge-gate/status?repoKey=`). undefined ⇒ unknown project or repo. */
+  mergeGateStatus(projectId: string, repoKey = "primary"): MergeGateStatus | undefined {
+    const o = this.mergeGateOrch(projectId);
+    return o && this.mergeGateRepoKnown(projectId, repoKey) ? statusOf(this.db.getMergeGateState(projectId, repoKey), o, repoKey, this.mergeGatePending(projectId, repoKey)) : undefined;
+  }
+  /** Agent-visible READ-only view (`my_context` = primary, `worker_merge` = the repo being merged). */
+  mergeGateAgentView(projectId: string, repoKey = "primary"): MergeGateAgentView | undefined {
+    const o = this.mergeGateOrch(projectId);
+    return o ? agentViewOf(this.db.getMergeGateState(projectId, repoKey), o, repoKey, this.mergeGatePending(projectId, repoKey)) : undefined;
+  }
+  /** Human REST write (`POST /api/projects/:id/merge-gate/gate-next?repoKey=`): owe the next landing a gate under ANY cadence. */
+  mergeGateGateNext(projectId: string, repoKey = "primary"): MergeGateStatus | undefined {
+    if (!this.mergeGateRepoKnown(projectId, repoKey)) return undefined;
+    this.db.putMergeGateState(projectId, applyGateNext(this.db.getMergeGateState(projectId, repoKey)), repoKey);
+    return this.mergeGateStatus(projectId, repoKey);
+  }
+  /** A HUMAN cadence change (`mergeGate` / `mergeGateInterval`, via the REST config PATCH) clears `gateOwed` on every repo of the
+   *  project and writes a `cleared` ring row (only where something was owed); the ungated counter is NOT reset. Returns the repoKeys cleared. */
+  clearMergeGateOwedOnCadenceChange(projectId: string): string[] {
+    const cleared: string[] = [];
+    const at = new Date().toISOString();
+    for (const { repoKey, state } of this.db.listMergeGateStates(projectId)) {
+      const next = applyCadenceCleared(state, at);
+      if (next !== state) { this.db.putMergeGateState(projectId, next, repoKey); cleared.push(repoKey); }
+    }
+    return cleared;
+  }
+
   /** Card 8b1fb28f: validates {@link ConfirmMergeResult.gatedIdentity} (captured pre-spawn inside `confirmWorkerMerge`)
    *  against the branch tip NOW: a live worker may have committed while the gate ran, in which case the verdict
    *  describes a commit that is no longer the branch tip AND the new tip was never gated — so the stamp is
@@ -16970,6 +17144,11 @@ export class SessionService {
        *  so this confirm's gate descriptor — and therefore its `gate_queue` row — carries it. Every other
        *  caller (the MCP tool, `confirmWorkerMergeUntilSettled`) omits this. */
       fallbackOfBatchOpId?: string;
+      /** Card 6f13746c: set ONLY by `mergeBatchTracked`'s fallback for a candidate the BATCH's own decision
+       *  already covered (K counted once) — the solo confirm then honours it instead of re-deciding. */
+      mergeGateDecision?: MergeGateDecision;
+      /** Card 6f13746c: this candidate's unit of the batch's reservation, released here when the confirm settles (or never starts). */
+      mergeGateReservation?: { release: (n?: number) => void };
     },
   ): Promise<AttachResult<ConfirmMergeResult>> {
     // LINEAGE-RESOLVED KEY (card `3a2dac9c`, DoD-2 — "resolve at the read, never rewrite at the write"
@@ -17101,11 +17280,25 @@ export class SessionService {
     // cache identity, so flipping the human-only switch never replays a verdict earned under the other setting
     // (a cached red rejection would otherwise make "off" ineffective; an off-landing refusal would skip a re-gate).
     let mergeGateSuffix = "";
-    // Resolved ONCE per confirm: the SAME value keys the cache identity below and drives the run itself.
-    const mergeGateValue: "on" | "off" = (() => {
+    // Resolved ONCE per confirm: the SAME decision keys the cache identity below and drives the run itself.
+    // Card 6f13746c: it is now the whole merge-gate DECISION (every / owed / interval-due ⇒ gate; else skip), or
+    // — for a `mergeBatchTracked` fallback — the batch's own decision, threaded in so it is never re-decided.
+    const mgRepoKey = worker?.repoKey ?? "primary";
+    const mergeGateDecision: MergeGateDecision | undefined = opts?.mergeGateDecision ?? (() => {
       const wp = worker ? this.db.getProject(worker.projectId) : undefined;
-      return wp ? resolveConfig(wp.config, this.db.getPlatformConfig()).orchestration.mergeGate : "on";
+      return wp ? this.decideMergeGateFor(wp.id, 1, undefined, mgRepoKey) : undefined;
     })();
+    // RESERVATION (see reserveMergeGate): a skip decision holds one ungated landing until this confirm settles, so overlapping confirms
+    // cannot land past N. Taken in the SAME synchronous step as the decision. A batch fallback instead carries its own unit.
+    let mgStarted = false;
+    let mgRes: { release: () => void } | undefined;
+    if (opts?.mergeGateDecision) {
+      const shared = opts.mergeGateReservation;
+      if (shared) { let done = false; mgRes = { release: () => { if (!done) { done = true; shared.release(); } } }; }
+    } else if (mergeGateDecision && !mergeGateDecision.gate && worker) {
+      mgRes = this.reserveMergeGate(worker.projectId, mgRepoKey, 1);
+    }
+    const mergeGateValue: "on" | "off" = mergeGateDecision?.identityValue ?? "on";
     if (!alreadyFinished) {
       try {
         if (worker?.branch) {
@@ -17131,9 +17324,9 @@ export class SessionService {
       // already landed. NEVER swallows a genuine failure — if the branch never landed, this falls
       // through and rethrows the original error unchanged, so the classification below still reports it
       // (as "unknown", not "failed" — see that doc).
-      async (opId) => {
+      async (opId) => this.runWithMergeGateRelease(() => { mgStarted = true; }, mgRes, async () => {
         try {
-          return await this.confirmGatedIdentity(await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt, opts?.fallbackOfBatchOpId, mergeGateValue), workerSessionId);
+          return await this.confirmGatedIdentity(await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt, opts?.fallbackOfBatchOpId, mergeGateDecision, () => mgRes?.release()), workerSessionId);
         } catch (err) {
           const worker = this.db.getSession(workerSessionId);
           const project = worker ? this.db.getProject(worker.projectId) : undefined;
@@ -17150,7 +17343,7 @@ export class SessionService {
           }
           throw err;
         }
-      },
+      }),
       (outcome, opId) => {
         // TOMBSTONE ALREADY MARKED (card e3e40167): the `onSettle` opt below (fires unconditionally, for
         // EVERY settle — not just a surfaced-pending one, unlike this callback) has already flipped the
@@ -17248,9 +17441,9 @@ export class SessionService {
           : "";
         // Card e8df2659 (per @decision 65336570 — a real merge settles async, so the sync `warning` never reaches a
         // manager): a gate-disabled landing says so on the nudge too, so it is never read as a passed gate.
-        const gateOffNote = outcome.ok && outcome.value.merged && outcome.value.skipReason === "gate-disabled"
-          ? ` ⚠ ${GATE_DISABLED_WARNING}`
-          : "";
+        const gateOffNote = (outcome.ok && outcome.value.merged && (outcome.value.skipReason === "gate-disabled" || outcome.value.skipReason === "gate-interval")
+          ? ` ⚠ ${gateSkipWarning(outcome.value.skipReason)}`
+          : "") + (outcome.ok && outcome.value.merged && outcome.value.mergeGateNote ? ` [merge-gate ${outcome.value.mergeGateNote}]` : "");
         const msg = outcome.ok
           ? (outcome.value.merged
             ? `[loom:merge-done] ${who(opId)} merged.${subjectNote}${stepsLine}${proximityNote}${retryNote}${transientRetryNote}${concurrencyNote}${reducedGateNote}${skillNote}${gateOffNote}`
@@ -17334,7 +17527,7 @@ export class SessionService {
         //
         // Card 6325bc74 — a `NotYourWorkerError` throw classifies as "not-your-worker", not "unknown": it
         // is a fact about the CALLING MANAGER, a dimension `NEVER_CACHED_OUTCOMES` excludes from caching.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.
@@ -17361,7 +17554,7 @@ export class SessionService {
           pruneGateSpillsClassified(this.db);
         },
       },
-    );
+    ).finally(() => { if (!mgStarted) mgRes?.release(); }); // a reject before run(), or a dedupe/cache hit: the factory never ran, so nothing will settle this reservation
     // @decision 615967c5 — folds this call's own freshly-resolved identity onto a genuine fresh mint (a
     // cache hit is untouched), closing the cached-verdict legibility gap: a re-gate from a moved base used
     // to look identical to a forced re-run or a genuine cache hit.
@@ -18503,8 +18696,9 @@ export class SessionService {
      * lazy backfill (`GET /api/tasks/:id`) fills it in from a real `getTaskMergedInfo` read.
      */
     mergedVerification?: "content" | "pathset" | "trailer-only" | null;
-    /** Card e8df2659: stamped onto the `merge_done` event when the human-only merge-gate switch was OFF. */
-    gateSkipReason?: "gate-disabled";
+    /** Card e8df2659: stamped onto the `merge_done` event when the human-only merge-gate switch was OFF
+     *  (card 6f13746c: or the gate interval let this landing through ungated — `"gate-interval"`). */
+    gateSkipReason?: "gate-disabled" | "gate-interval";
     /**
      * Card 42daa283 — the branch tip the caller's landing was built from (a batch landing states `assembledTip`;
      * every other caller omits it, byte-identical to before). When present, finalize re-reads the live tip (the

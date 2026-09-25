@@ -84,6 +84,8 @@ import type {
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { edgesAfterPatch, type EdgeBits, type EdgePatch } from "./tasks/edge-state.js";
+import type { MergeGateOutcomeEntry } from "@loom/shared";
+import { emptyMergeGateState, type MergeGateState } from "./orchestration/merge-gate-interval.js";
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
@@ -818,6 +820,23 @@ CREATE TABLE IF NOT EXISTS app_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+-- Card 6f13746c: the per-project MERGE-GATE INTERVAL state (see orchestration/merge-gate-interval.ts) — the durable
+-- ungated-landing counter, the "gate owed" flag, the last passing gate and a ring of the last 6 periodic/owed gate
+-- outcomes. Brand-new table ⇒ this CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER, no index,
+-- nothing referencing a migrate*()-added column). One row per (project, repo) — a pass in repo B must never reset repo A's count —
+-- lazily created, the primary repo keyed "primary"; deleteProject cascades them. (Unreleased table: its shape was changed in place.)
+CREATE TABLE IF NOT EXISTS project_merge_gate_state (
+  project_id TEXT NOT NULL,
+  repo_key TEXT NOT NULL DEFAULT 'primary',
+  ungated_since_last_pass INTEGER NOT NULL DEFAULT 0,
+  gate_owed INTEGER NOT NULL DEFAULT 0,
+  last_pass_at TEXT,
+  last_pass_sha TEXT,
+  recent_json TEXT NOT NULL DEFAULT '[]',
+  last_failure_json TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, repo_key)
 );
 -- Preset Prompts: the GLOBAL "terminal action-buttons" store (label + the prompt text to send). ONE
 -- daemon-wide list — no project/session scoping (deliberately no project_id). Plain human/UI data,
@@ -3201,6 +3220,7 @@ export class Db {
       // pending_gate_ops is now a PERMANENT tombstone table (card e3e40167) — cascade explicitly, or a
       // deleted project's rows become an unbounded orphan class (see the schema doc).
       this.db.prepare("DELETE FROM pending_gate_ops WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM project_merge_gate_state WHERE project_id = ?").run(id); // card 6f13746c
       // Card af08f7e8: delivered_credentials.project_id is a NOT NULL FK (enforced) with no session/agent
       // tie — deleteSession/deleteAgent never touch it (that's the point), but deleteProject genuinely
       // removes the project itself, so this must be cascaded explicitly or the transaction aborts.
@@ -8207,6 +8227,25 @@ export class Db {
     ).get(id) as Row | undefined;
     return r ? toQuestionInboxItem(r) : undefined;
   }
+  /** Card 6f13746c: a (project, repo)'s durable merge-gate interval state (an all-zero state when it has no row yet). */
+  getMergeGateState(projectId: string, repoKey = "primary"): MergeGateState {
+    const r = this.db.prepare("SELECT * FROM project_merge_gate_state WHERE project_id = ? AND repo_key = ?").get(projectId, repoKey) as Row | undefined;
+    return r ? toMergeGateState(r) : emptyMergeGateState();
+  }
+  /** Every stored (repo → state) row of a project (a human cadence change clears `gateOwed` on ALL of them). */
+  listMergeGateStates(projectId: string): { repoKey: string; state: MergeGateState }[] {
+    return (this.db.prepare("SELECT * FROM project_merge_gate_state WHERE project_id = ?").all(projectId) as Row[]).map((r) => ({ repoKey: r.repo_key as string, state: toMergeGateState(r) }));
+  }
+  /** Card 6f13746c: upsert the whole state (synchronous ⇒ the read-modify-write in SessionService is atomic in-process). */
+  putMergeGateState(projectId: string, st: MergeGateState, repoKey = "primary"): void {
+    this.db.prepare(
+      `INSERT INTO project_merge_gate_state (project_id, repo_key, ungated_since_last_pass, gate_owed, last_pass_at, last_pass_sha, recent_json, last_failure_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(project_id, repo_key) DO UPDATE SET ungated_since_last_pass = excluded.ungated_since_last_pass, gate_owed = excluded.gate_owed,
+         last_pass_at = excluded.last_pass_at, last_pass_sha = excluded.last_pass_sha, recent_json = excluded.recent_json,
+         last_failure_json = excluded.last_failure_json, updated_at = excluded.updated_at`,
+    ).run(projectId, repoKey, st.ungatedSinceLastPass, st.gateOwed ? 1 : 0, st.lastPassAt, st.lastPassSha, JSON.stringify(st.recent), st.lastFailure ? JSON.stringify(st.lastFailure) : null, new Date().toISOString());
+  }
   /**
    * Every PENDING profile→connection grant (credential auto-provisioning v1 binding UX, card 12dc7fc9) —
    * the answered credential questions whose `provision_binding_state` is 'pending'. READ-ONLY display
@@ -9540,5 +9579,18 @@ function toCompanionReminder(r0: unknown): CompanionReminder {
     prompt: r.prompt as string, label: (r.label as string | null) ?? null,
     route: routeJson ? (JSON.parse(routeJson) as CompanionReminder["route"]) : null,
     enabled: (r.enabled as number) === 1, createdAt: r.created_at as string,
+  };
+}
+
+/** Card 6f13746c: a `project_merge_gate_state` row → the pure {@link MergeGateState} (tolerates a corrupt JSON cell). */
+function toMergeGateState(r: Row): MergeGateState {
+  const parse = <T>(raw: unknown, fallback: T): T => { try { return typeof raw === "string" ? (JSON.parse(raw) as T) : fallback; } catch { return fallback; } };
+  return {
+    ungatedSinceLastPass: Number(r.ungated_since_last_pass) || 0,
+    gateOwed: !!r.gate_owed,
+    lastPassAt: (r.last_pass_at as string | null) ?? null,
+    lastPassSha: (r.last_pass_sha as string | null) ?? null,
+    recent: parse<MergeGateOutcomeEntry[]>(r.recent_json, []),
+    lastFailure: parse<MergeGateState["lastFailure"]>(r.last_failure_json, null),
   };
 }

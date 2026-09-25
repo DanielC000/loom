@@ -1943,7 +1943,7 @@ export interface GateHistoryRow {
    *  ONLY alongside `emitCompareReduced === null`, never alongside a genuine `false` (notReducible). */
   emitCompareNotApplicableKind: string | null;
   /** Card e8df2659: WHY a `"skipped"` row skipped the gate — `"gate-disabled"` (a human turned the project's
-   *  merge gate off) or `"inert-docs-only-diff"`; `null` for every non-skipped row and any row that predates
+   *  merge gate off), `"gate-interval"` (card 6f13746c: gate off + an interval set, and it was not this landing's turn) or `"inert-docs-only-diff"`; `null` for every non-skipped row and any row that predates
    *  this field. Read `outcome:"skipped"` first; this only names the cause. */
   skipReason: string | null;
   /** @decision 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; VACUOUS ON ONE
@@ -3478,4 +3478,41 @@ export function contextWindowForModel(model?: string | null): number {
 export function contextPercentFor(tokens?: number | null, model?: string | null): number | null {
   if (tokens == null) return null;
   return Math.round((tokens / contextWindowForModel(model)) * 100);
+}
+
+// ── Merge-gate interval (card 6f13746c) ──────────────────────────────────────────────────────────────
+/** One periodic/owed (or, under cadence `every`, failing) gate outcome in a project's merge-gate ring. */
+export interface MergeGateOutcomeEntry {
+  at: string;
+  /** `cleared` = a HUMAN cadence change cleared `gateOwed` (no gate ran; `reason:"cadence-changed"`). */
+  result: "pass" | "fail" | "cleared";
+  opId: string | null;
+  /** The unverified range on main at the time: `lastPassSha` (null = never passed / "since tracking began")… */
+  fromSha: string | null;
+  /** …to main's HEAD at the outcome (for a pass: the landed tip). */
+  toSha: string | null;
+  /** A FAILING solo candidate's branch tip (the rejected work itself); null/absent for a batch. */
+  branchTip?: string | null;
+  /** The rejected solo candidate's branch NAME (e.g. loom/4e762baf…), alongside `branchTip`; absent for a batch. */
+  branch?: string | null;
+  /** A batch's candidate count K (absent for a solo landing). */
+  candidates?: number;
+  /** Why a `cleared` entry was written (today only `"cadence-changed"`). */
+  reason?: string;
+}
+/** What an AGENT may read (my_context / worker_merge review): the cadence + counter, never the ring. */
+export interface MergeGateAgentView {
+  /** The repo this state is for — the state is keyed (project, repo); the primary repo is `"primary"`. */
+  repoKey: string;
+  cadence: "every" | "interval" | "never";
+  interval: number | null;
+  ungatedSinceLastPass: number;
+  nextLandingGated: boolean;
+  gateOwed: boolean;
+}
+/** `GET /api/projects/:id/merge-gate/status` (human-only loopback REST). */
+export interface MergeGateStatus extends MergeGateAgentView {
+  lastPassAt: string | null;
+  lastFailure: (MergeGateOutcomeEntry & { result: "fail" }) | null;
+  recent: MergeGateOutcomeEntry[];
 }

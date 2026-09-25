@@ -4,7 +4,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        ungated; the re-call re-evaluates (the diff is no longer inert, so a real gate runs) and merges.
 //   (RD) re-derivation: the branch moves during the guard wait; a later non-docs commit is still refused, and the covered tip is the re-classified one.
 //   (FC) isInertMergeDiff fails closed on an unreadable tip and evaluates the SHA it is given; the helper's discriminated input.
-//   (GO) audit control: with the gate OFF (`skipReason:"gate-disabled"`) the squash is CURRENTLY unpinned — the late commit lands. A follow-up (6f13746c) routes that skip through skipCoveredTip and flips this control.
+//   (GO) with the gate OFF (`skipReason:"gate-disabled"`) the squash is pinned too (card 6f13746c routed that skip through a `skip:"gate-disabled"` LandingPin): a late commit is refused in-lock, and the re-call lands it.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-confirm-inert-skip-pin.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -128,10 +128,11 @@ const svc = (db, runGate, extra = {}) => new SessionService(db, ptyStub, new Orc
   check("(FC) by NAME the moved branch is no longer inert, but the classified SHA still is (the tip that was classified is the tip that gets pinned)", (await isInertMergeDiff(repo, base, branch)) === false && (await isInertMergeDiff(repo, base, docsSha)) === true);
   check("(FC) expectedTipForLanding: gate/skip variants return their tip, only an explicit `unpinned` returns undefined",
     expectedTipForLanding({ kind: "gate", tip: "g" }) === "g" && expectedTipForLanding({ kind: "skip", skip: "inert", tip: "i" }) === "i" && expectedTipForLanding({ kind: "skip", skip: "reuse", tip: "r" }) === "r"
-    && expectedTipForLanding({ kind: "unpinned", reason: "gate-disabled" }) === undefined && expectedTipForLanding({ kind: "unpinned", reason: "no-gate-configured" }) === undefined);
+    && expectedTipForLanding({ kind: "skip", skip: "gate-disabled", tip: "d" }) === "d" && expectedTipForLanding({ kind: "skip", skip: "gate-interval", tip: "n" }) === "n"
+    && expectedTipForLanding({ kind: "unpinned", reason: "no-gate-configured" }) === undefined);
 }
 {
-  // (GO) gate OFF: currently unpinned (see the header).
+  // (GO) gate OFF: pinned (see the header).
   const { db, mgrId, workerId, repo, worktreePath } = await setup(sfxOf("go"), { docs: true, mergeGate: "off" });
   const sessions = svc(db, async () => { throw new Error("no gate may run with the gate off"); });
   let release;
@@ -141,7 +142,9 @@ const svc = (db, runGate, extra = {}) => new SessionService(db, ptyStub, new Orc
   fs.writeFileSync(path.join(worktreePath, "late.txt"), "late"); commitAll(worktreePath, "late worker commit", GIT_ID);
   release(); await held;
   const r1 = await confirming;
-  check("(GO) with the gate off the late commit currently lands (this skip does not set skipCoveredTip yet)", r1.settled === true && r1.ok && r1.value.merged === true && fs.existsSync(path.join(repo, "late.txt")));
+  check("(GO) with the gate off the late commit is REFUSED in-lock (gateTipMoved, gateRan:false) and NOT squashed", r1.settled === true && r1.ok && r1.value.merged === false && r1.value.gateTipMoved?.phase === "in-lock" && r1.value.gateRan === false && !fs.existsSync(path.join(repo, "late.txt")));
+  const r2 = await confirm(sessions, mgrId, workerId);
+  check("(GO) never cached: the re-call re-decides and lands the new tip (gate still off, no gate run)", r2.ok && r2.value.merged === true && r2.value.skipReason === "gate-disabled" && fs.existsSync(path.join(repo, "late.txt")));
 }
 for (const db of openDbs) { try { db.close(); } catch { /* already closed */ } }
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);

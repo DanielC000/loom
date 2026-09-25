@@ -26,7 +26,7 @@ export type PendingOpOutcome = string;
  *  @decision 975c774b — a verdict produced while the worktree changed under the gate ("worktree-dirty")
  *  describes files matching no commit, so a ref-keyed identity can't vouch for it: never cache or replay it.
  *  @decision 975c774b — likewise "gate-tip-moved": a PASS refused because the branch moved after the gate spawned, or (card 94c28d2a, `gateRoundTripFail`) a FAIL earned on a run whose tip left the gated commit and came back. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved"]);
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

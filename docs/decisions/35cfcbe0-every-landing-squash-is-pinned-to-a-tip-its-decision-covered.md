@@ -5,7 +5,7 @@ Extends 975c774b (gate-ran pin) and 01777ceb (reuse pin). A no-gate decision (a 
 ## What was decided
 
 - `mergeBranch`'s `expectedBranchTip` (checked INSIDE its lock) comes from ONE place, `expectedTipForLanding(pin: LandingPin)` in `git/worktrees.ts`. `LandingPin` is `gate` (tip the real gate ran on) | `skip` (`reuse`|`inert`, each carrying the tip its decision covered) | `unpinned` (an explicit, named reason).
-- `unpinned` has exactly two reasons: `no-gate-configured` (a project with no gate command has no verdict about any tip, so nothing to pin) and `gate-disabled` (the human-only `mergeGate:"off"` skip; it verifies nothing about any tip today). **`gate-disabled` is slated for removal by 6f13746c**, which routes that skip through `skipCoveredTip` too, at which point one rule has no exceptions.
+- `unpinned` has exactly ONE reason: `no-gate-configured` (a project with no gate command has no verdict about any tip, so nothing to pin). The human-only `mergeGate:"off"` skip (`gate-disabled`) and the gate-interval skip (`gate-interval`, card 6f13746c) are `skip` variants carrying the tip their decision covered (the worktree stamp taken once the repo guard is held), so every no-gate landing that has a decision is pinned — one rule, no exceptions.
 - The call site builds the pin from state (`gateRan`, `skipKind`, `skipCoveredTip`); a decision that reaches the squash WITHOUT its tip refuses fail closed (`gateTipMoved`, "could not be verified"), never lands unpinned. The in-lock refusal takes its skip kind from `skipKind`, not by elimination.
 - Inertness is classified on the branch SHA that is then pinned (`preWaitBranchHead`, `reclassifyTip`), never on the branch NAME: the name can move between classification and pin (a T1→T2→T1 ABA), so the tip that was classified would not be the tip that was pinned. `isInertMergeDiff` takes `ref: string | undefined` and fails closed to not-inert on `undefined`.
 
@@ -15,4 +15,4 @@ Extends 975c774b (gate-ran pin) and 01777ceb (reuse pin). A no-gate decision (a 
 - Do not pass a branch NAME to `isInertMergeDiff` (or classify on one thing and pin another): classify the SHA you pin.
 - Do not make `unpinned` a fall-through or a default. Every unpinned landing names its reason; a state that matches no pin refuses.
 - Do not resolve the branch tip AFTER the inertness diff it covers (db413510's ordering): capture first, then classify that sha.
-- Do not read `gate-disabled`'s unpinned status as intentional design: it is a known gap 6f13746c closes.
+- Do not reintroduce an `unpinned` reason for a skip that made a decision: `gate-disabled` used to be one (a known gap), and 6f13746c closed it.

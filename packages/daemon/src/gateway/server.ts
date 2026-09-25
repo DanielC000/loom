@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
-import { resolveConfig, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
+import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -1061,6 +1061,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // an agent MCP tool). ACTIVE = the live semaphore registry snapshot; HISTORY = the settled gate-run
   // events, paginated. ---
   app.get("/api/gates/active", async () => deps.sessions.snapshotGates());
+  // --- MERGE-GATE INTERVAL (card 6f13746c): the per-project "ungated landings since the last passing gate" state the
+  // Overview strip + Settings read. HUMAN-only loopback REST, same posture as the other config writers — NEVER an agent
+  // MCP tool (agents get a read-only summary on `my_context` / the `worker_merge` review). Cadence + interval are set
+  // through the existing `PATCH /api/projects/:id/config` (`orchestration.mergeGate` / `.mergeGateInterval`). There is
+  // no project-scoped ws event channel to push on, so the UI polls this GET.
+  // State is keyed (project, repo): `?repoKey=` selects the repo (default "primary"); an unknown repoKey is a 404.
+  app.get("/api/projects/:id/merge-gate/status", async (req, reply) => {
+    const repoKey = (req.query as { repoKey?: string }).repoKey || "primary";
+    const status = deps.sessions.mergeGateStatus((req.params as { id: string }).id, repoKey);
+    return status ?? reply.code(404).send({ error: "project or repo not found" });
+  });
+  // "Gate the next merge": owes the NEXT landing a gate under ANY cadence (cleared by a passing gate).
+  app.post("/api/projects/:id/merge-gate/gate-next", async (req, reply) => {
+    const repoKey = (req.query as { repoKey?: string }).repoKey || "primary";
+    const status = deps.sessions.mergeGateGateNext((req.params as { id: string }).id, repoKey);
+    return status ?? reply.code(404).send({ error: "project or repo not found" });
+  });
   app.get("/api/gates/history", async (req) => {
     const q = req.query as { projectId?: string; limit?: string; offset?: string };
     const limit = q.limit ? Number(q.limit) : 100;
@@ -4406,6 +4423,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // project_update tools below, each threading its OWN actor).
     const wrote = setProjectConfigSafe(deps.db, id, merged, "human");
     if (!wrote.ok) return reply.code(400).send({ error: wrote.error });
+    // Card 6f13746c: a HUMAN cadence change (mergeGate / mergeGateInterval) clears `gateOwed` (the owner's escape when the gate itself is
+    // broken) and writes a `cleared` ring row; the ungated counter is NOT reset. Compared on the RESOLVED values, so a no-op PATCH doesn't clear.
+    {
+      // Compared on the EFFECTIVE cadence ({cadence, interval}), not the raw fields: editing N while the gate is on changes nothing.
+      const before = resolveMergeGateCadence(resolveConfig(existing.config).orchestration);
+      const after = resolveMergeGateCadence(resolveConfig(merged).orchestration);
+      if (before.cadence !== after.cadence || before.interval !== after.interval) deps.sessions.clearMergeGateOwedOnCadenceChange(id);
+    }
     // Codescape v1 has no runtime registration (see codescape/supervisor.ts's CWD CONTRACT doc): serve
     // only ever sees the projects boot-ingested it. Flipping codescape.enabled ON here won't ingest this
     // project until the next daemon restart — log it so the gap isn't silent.
