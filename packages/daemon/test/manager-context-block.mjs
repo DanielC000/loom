@@ -101,17 +101,21 @@ const optsFor = (sid) => host.capture.find((o) => o.sessionId === sid);
 
 let workerWorktree = null;
 try {
+  // Card a2ddf424: every non-staleness compose call below passes this fixed NOT-APPLICABLE result through the
+  // stalenessOverride seam. Without it each call ran the real computeDeployStaleness() (git, 1000ms timeout) and
+  // an occasional ETIMEDOUT grew a [loom:deploy-staleness-unknown] block on ONE side of a byte-identity pair.
+  const NO_STALENESS = { available: false, reason: "not a Loom source checkout", reasonKind: "not-applicable", distBuiltAt: null, processStartedAt: null, runningCodeBuiltAt: null, distAheadOfProcess: false, mainlineHeadSha: null, mainlineHeadDate: null, commitsBehind: 0, stale: false };
   // ===================== (3) pure composeManagerStartupPrompt =====================
-  const composed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
+  const composed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, NO_STALENESS);
   check("(3) pure: block carries the absolute repoPath", composed.includes("/abs/repo"));
   check("(3) pure: block carries the absolute vaultPath", composed.includes("/abs/vault"));
   check("(3) pure: block header present", composed.includes("## Where things live"));
   check("(3) pure: block carries the fully-resolved Resume doc line (vaultPath is ALREADY the project's vault dir — NOT doubled with Projects/<name>)", composed.includes("**Resume doc:**") && composed.includes(path.join("/abs/vault", "Orchestrator Log.md")) && !composed.includes(path.join("/abs/vault", "Projects", "Demo")));
   check("(3) pure: the agent's OWN prompt is preserved AFTER the block", composed.includes("DOCTRINE_BODY") && composed.indexOf("Where things live") < composed.indexOf("DOCTRINE_BODY"));
   check("(3) pure: instructs never to Glob", /never Glob/i.test(composed));
-  const blockOnly = composeManagerStartupPrompt(undefined, { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
+  const blockOnly = composeManagerStartupPrompt(undefined, { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, NO_STALENESS);
   check("(3) pure: undefined own-prompt → block-only (no crash, no trailing prompt)", blockOnly.includes("## Where things live") && blockOnly.includes("/abs/vault"));
-  const blankCase = composeManagerStartupPrompt("   ", { repoPath: "/r", vaultPath: "/v", name: "Demo" });
+  const blankCase = composeManagerStartupPrompt("   ", { repoPath: "/r", vaultPath: "/v", name: "Demo" }, NO_STALENESS);
   check("(3) pure: blank/whitespace own-prompt → block-only (trimmed away)", blankCase.includes("## Where things live") && blankCase.trimEnd().endsWith("reconstruct it."));
 
   // ===================== (3j) card 5e30c4bd: deploy-staleness surfaced in the "Where things live" block.
@@ -187,10 +191,10 @@ try {
   // daemon-global-only field instead of the owner's actual override (2), disagreeing with `gate_queue`'s
   // live `cap`. Fix: stop printing a number that can drift, and point at the live instrument instead —
   // same pattern this block already used for worker capacity below.
-  const noOrch = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
+  const noOrch = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, NO_STALENESS);
   check("(3k) orchestration OMITTED ⇒ no 'Orchestration config' block at all", !noOrch.includes("Orchestration config"));
   check("(3k) orchestration OMITTED ⇒ byte-identical to the pre-548a0c7e composition", noOrch === composed);
-  const withOrch = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", orchestration: { maxConcurrentWorkers: 4, gateCommandTimeoutMs: 900000 } });
+  const withOrch = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", orchestration: { maxConcurrentWorkers: 4, gateCommandTimeoutMs: 900000 } }, NO_STALENESS);
   check("(3k) orchestration PASSED ⇒ the 'Orchestration config' block renders", withOrch.includes("## Orchestration config"));
   check("(3k) THE BUG THIS CARD FIXES, RED-PROVEN: names the OVERRIDE value (4), not the platform's documented default (3)", withOrch.includes("`4`") && /Max concurrent workers.*`4`/.test(withOrch));
   check("(3k) also names the gate command timeout", withOrch.includes("`900000`"));
@@ -199,12 +203,12 @@ try {
   check("(3k) still carries the 'Where things live' header + the agent's own doctrine", withOrch.includes("## Where things live") && withOrch.includes("DOCTRINE_BODY"));
 
   // ===================== (3c) reference-repos epic Phase 3: referenceRepos block =====================
-  const noRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
-  const emptyRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", referenceRepos: [] });
+  const noRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, NO_STALENESS);
+  const emptyRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", referenceRepos: [] }, NO_STALENESS);
   check("(3c) pure: no referenceRepos ⇒ byte-identical to the pre-Phase-3 composition", noRefs === composed);
   check("(3c) pure: empty referenceRepos ⇒ byte-identical to omitted", emptyRefs === composed);
   check("(3c) pure: no referenceRepos ⇒ no 'Also referenced' block", !composed.includes("Also referenced"));
-  const withRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", referenceRepos: ["/abs/refA", "/abs/refB"] });
+  const withRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", referenceRepos: ["/abs/refA", "/abs/refB"] }, NO_STALENESS);
   check("(3c) pure: non-empty referenceRepos ⇒ 'Also referenced' block present", withRefs.includes("Also referenced"));
   check("(3c) pure: both reference repo paths listed", withRefs.includes("/abs/refA") && withRefs.includes("/abs/refB"));
   check("(3c) pure: read-only framing present (never commit there)", /never commit there/i.test(withRefs));
@@ -222,7 +226,7 @@ try {
   const realResumeDoc = path.join(spaceVaultDir, "Orchestrator Log.md");
   fs.mkdirSync(spaceVaultDir, { recursive: true });
   fs.writeFileSync(realResumeDoc, "# Orchestrator Log\n");
-  const spaceComposed = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: spaceVaultDir, name: spaceProjectName });
+  const spaceComposed = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: spaceVaultDir, name: spaceProjectName }, NO_STALENESS);
   check("(3b) space-in-vault: emitted resume-doc path is the EXACT real on-disk path", spaceComposed.includes(realResumeDoc));
   check("(3b) space-in-vault: that emitted path actually exists on disk (it's the real file)", fs.existsSync(realResumeDoc) && spaceComposed.includes(realResumeDoc));
   check("(3b) space-in-vault: the space in the vault folder is PRESERVED (not collapsed/escaped)", spaceComposed.includes("Obsidian Vault"));
@@ -235,18 +239,18 @@ try {
   const sizeResumeDoc = path.join(sizeVault, "Orchestrator Log.md");
 
   // No doc on disk yet (a fresh project) ⇒ no note, no crash.
-  const noteNone = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: sizeVault, name: "SizeDemo" });
+  const noteNone = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: sizeVault, name: "SizeDemo" }, NO_STALENESS);
   check("(3e) no resume doc on disk ⇒ no size-warning note", !noteNone.includes("[loom:resume-doc-size]"));
 
   // A small, healthy doc, well under the warn threshold ⇒ still no note.
   fs.writeFileSync(sizeResumeDoc, "# Orchestrator Log\n\nSTATE: nothing notable.\n");
-  const noteSmall = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: sizeVault, name: "SizeDemo" });
+  const noteSmall = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: sizeVault, name: "SizeDemo" }, NO_STALENESS);
   check("(3e) a small resume doc ⇒ no size-warning note", !noteSmall.includes("[loom:resume-doc-size]"));
 
   // A doc at/over RESUME_DOC_WARN_BYTES ⇒ the note fires, names the doc's own path, and PRECEDES the
   // "Where things live" pointer block (mirrors the Platform Lead's ordering — warn before pointing).
   fs.writeFileSync(sizeResumeDoc, "x".repeat(RESUME_DOC_WARN_BYTES + 1024));
-  const noteOversized = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: sizeVault, name: "SizeDemo" });
+  const noteOversized = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: sizeVault, name: "SizeDemo" }, NO_STALENESS);
   check("(3e) an oversized resume doc ⇒ the size-warning note fires", noteOversized.includes("[loom:resume-doc-size]"));
   check("(3e) the size-warning note names the doc's own absolute path", noteOversized.includes(sizeResumeDoc));
   check("(3e) the size-warning note precedes the 'Where things live' pointer block", noteOversized.indexOf("[loom:resume-doc-size]") < noteOversized.indexOf("Where things live"));
@@ -275,10 +279,10 @@ try {
   // ===================== (3f) card c1f2f095: composeManagerStartupPrompt honors a per-project
   // resumeDocFilename override instead of always hardcoding "Orchestrator Log.md" =====================
   const customName = "Selbstläufer — Orchestrator Resume.md"; // the real-world drifted filename from the incident
-  const customComposed = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", resumeDocFilename: customName });
+  const customComposed = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", resumeDocFilename: customName }, NO_STALENESS);
   check("(3f) pure: a resumeDocFilename override changes the emitted Resume doc path", customComposed.includes(path.join("/abs/vault", customName)));
   check("(3f) pure: the default filename is NOT emitted when an override is set", !customComposed.includes(path.join("/abs/vault", "Orchestrator Log.md")));
-  const omittedComposed = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
+  const omittedComposed = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, NO_STALENESS);
   check("(3f) pure: an OMITTED resumeDocFilename still falls back to the default (byte-identical to before this card)", omittedComposed.includes(path.join("/abs/vault", "Orchestrator Log.md")));
 
   // ===================== (3g) card c1f2f095: resolveResumeDocPath defense-in-depth — even a
@@ -294,7 +298,7 @@ try {
   // ===================== (3h) card cdc3792d: a project with NO vault bound (`vaultPath === ""`) must
   // NOT throw when composing a manager's startup prompt or resolving its resume-doc path — the vault
   // dir + resume-doc lines are omitted entirely instead of resolving "" against the daemon's own cwd. =====
-  const noVaultComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "", name: "NoVaultDemo" });
+  const noVaultComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "", name: "NoVaultDemo" }, NO_STALENESS);
   check("(3h) no-vault: does not throw and still carries the repoPath", noVaultComposed.includes("/abs/repo"));
   check("(3h) no-vault: omits the 'Project vault dir' line", !noVaultComposed.includes("Project vault dir"));
   check("(3h) no-vault: omits the 'Resume doc' line", !noVaultComposed.includes("Resume doc"));
@@ -308,7 +312,7 @@ try {
   // daemon's own cwd). It must instead surface a [loom:vault-path-invalid] note and OMIT the vault-dir/
   // resume-doc lines, rather than print a path (right or wrong) for the agent to trust and Read from. =====
   const relVaultPath = "Projects/Seismo"; // the exact shape observed in the origin finding
-  const invalidComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: relVaultPath, name: "InvalidVaultDemo" });
+  const invalidComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: relVaultPath, name: "InvalidVaultDemo" }, NO_STALENESS);
   check("(3i) relative vaultPath: fires the [loom:vault-path-invalid] note", invalidComposed.includes("[loom:vault-path-invalid]"));
   check("(3i) relative vaultPath: the note names the offending value", invalidComposed.includes(relVaultPath));
   check("(3i) relative vaultPath: omits the 'Project vault dir' line — no fabricated path is ever shown as trustworthy", !invalidComposed.includes("Project vault dir"));
@@ -317,7 +321,7 @@ try {
   check("(3i) relative vaultPath: still carries the agent's own doctrine", invalidComposed.includes("DOCTRINE_BODY"));
   check("(3i) relative vaultPath: still carries the repoPath", invalidComposed.includes("/abs/repo"));
   // Control: a genuinely ABSOLUTE vaultPath (the common case) never fires the invalid note.
-  const validComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "ValidVaultDemo" });
+  const validComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "ValidVaultDemo" }, NO_STALENESS);
   check("(3i control) an absolute vaultPath never fires [loom:vault-path-invalid]", !validComposed.includes("[loom:vault-path-invalid]"));
 
   // ===================== (1e) card c1f2f095: an end-to-end manager spawn for a project whose config
