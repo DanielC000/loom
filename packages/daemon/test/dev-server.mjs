@@ -47,7 +47,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
-import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { mkdtempManaged, finishAndExit, cleanupPathSync } from "./_tmp-fixture.mjs";
 import { observeOnce, assertNeverWithControl } from "./_timing-guard.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
@@ -79,6 +79,13 @@ const trackServerDir = (absDir) => trackedServerDirs.add(absDir);
 process.on("exit", () => {
   for (const d of trackedServerDirs) {
     try { spawnSync(process.execPath, [HELPER, "stop", d], { stdio: "ignore", timeout: 10_000 }); } catch { /* best-effort backstop */ }
+  }
+  // Card cff95b7f: the helper's `start` writes `<tmpdir>/loom-dev-server-<pathHash>.{json,log}` per dir — files
+  // OUTSIDE any mkdtemp'd dir, so nothing else swept them (~10 leaked per run). Removed only AFTER the `stop`
+  // sweep above, which needs the tracking file to find and kill the supervised tree.
+  for (const d of trackedServerDirs) {
+    const h = crypto.createHash("sha256").update(d).digest("hex").slice(0, 16);
+    for (const ext of ["json", "log"]) cleanupPathSync(path.join(os.tmpdir(), `loom-dev-server-${h}.${ext}`));
   }
 });
 
@@ -1031,6 +1038,7 @@ const crashWorkDir = mkdtempManaged("loom-dev-server-crashpath-");
 trackServerDir(path.resolve(crashWorkDir)); // belt-and-suspenders: this file's own backstop covers the crash-fixture's target too
 const crashHeartbeatOut = path.join(crashWorkDir, "hb.txt");
 const crashControlWorkDir = mkdtempManaged("loom-dev-server-crashcontrol-");
+trackServerDir(path.resolve(crashControlWorkDir));
 const crashControlOut = path.join(crashControlWorkDir, "control.txt");
 let crashControlChild = null;
 
