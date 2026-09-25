@@ -4,7 +4,7 @@
 // This module exposes them to TS / React inline-styles as var() references, so there is
 // a single source of truth and no drifting hex literals. Spec: packages/web/design/DESIGN.md.
 
-import type { ColumnRole, SessionRole } from "@loom/shared";
+import type { ColumnRole, KanbanColumn, SessionRole } from "@loom/shared";
 
 export const color = {
   // Surfaces — depth comes from hairline borders, not shadows.
@@ -62,6 +62,14 @@ export const roleTone: Record<ColumnRole, Tone> = {
   terminal: "phosphor", // done
   mergeLanding: "amber", // where a merged card lands, pre-terminal
 };
+
+// A board lane's signal tone, resolved from its lifecycle ROLE — the ONE resolver, so every surface that
+// tints a lane agrees (the board's accent bar / header label / card left-border, the drawer's lane badge,
+// and the task-link lane chips in components/taskLinks). A role-less lane has no signal tone (it may
+// still carry an explicit accentColor; that's a separate, cosmetic source resolved at the call site).
+export function columnTone(col: Pick<KanbanColumn, "role">): Tone | null {
+  return col.role ? roleTone[col.role] : null;
+}
 
 // Session-ROLE → badge tone. The ONE place a session/profile's orchestration role maps to a signal
 // tone, so every surface that tints a session by its role agrees (Archive / Overview / Profiles /

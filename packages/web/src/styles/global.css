@@ -234,10 +234,25 @@ body {
   color: var(--loom-text);
 }
 
+/* Task link (card drawer's links block — parent / children / relations): reads as metadata at rest,
+   underlines and brightens on hover so it's discoverably clickable without cyan-underlining a whole
+   block of rows by default. */
+.loom-task-link {
+  transition:
+    color 80ms linear,
+    background 80ms linear;
+}
+.loom-task-link:hover {
+  color: var(--loom-phosphor);
+  background: var(--loom-phosphor-dim);
+  text-decoration: underline;
+}
+
 /* Keyboard focus ring — shown only for keyboard nav (:focus-visible), so mouse clicks stay clean
    while Tab users get a clear phosphor ring on every interactive control. */
 .loom-toggle:focus-visible,
 .loom-btn:focus-visible,
+.loom-task-link:focus-visible,
 .loom-field:focus-visible {
   outline: 2px solid var(--loom-phosphor);
   outline-offset: 2px;
@@ -921,6 +936,7 @@ body {
   .loom-btn,
   .loom-navtab,
   .loom-toggle,
+  .loom-task-link,
   .loom-rolecard,
   .loom-fade,
   .loom-tree-row,

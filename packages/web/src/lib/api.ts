@@ -342,10 +342,20 @@ async function patchProject(url: string, body: unknown): Promise<ProjectPatchRes
 // trusting `current`.
 export interface TaskUpdateConflictError extends Error { conflict?: true; current?: Task; }
 
+/**
+ * The POST /api/tasks/:id request body. `parentId` (card 1ae4f88c) is declared HERE rather than read off
+ * `Task`, because the field is added to the shared type by the daemon-side card (3df86c87) on its own
+ * branch — the write path compiles either way, and a caller that doesn't touch parentage sends a body
+ * byte-identical to before. null CLEARS the parent.
+ */
+export type TaskUpdatePatch =
+  Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">>
+  & { parentId?: string | null; baseVersion?: number };
+
 // POST /api/tasks/:id — see api.updateTask's own doc for the `baseVersion` contract. Mirrors postErr's
 // verbatim-`{error}`-surfacing convention, PLUS lifts `conflict`/`current` onto the thrown Error (same
 // pattern as patchProject's `liveSessions` above) so a 409 carries the fresh task, not just a message.
-async function updateTaskReq(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">> & { baseVersion?: number }): Promise<{ ok: boolean }> {
+async function updateTaskReq(id: string, patch: TaskUpdatePatch): Promise<{ ok: boolean }> {
   const r = await guardedFetch(`/api/tasks/${id}`, { method: "POST", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(patch) });
   if (!r.ok) {
     let msg = `/api/tasks/${id} -> ${r.status}`;
@@ -658,8 +668,7 @@ export const api = {
   // gate a title/body write against a concurrent edit (most likely an agent's). Omit it to write blind,
   // same as before this card — the drawer's "overwrite anyway" escape hatch after a conflict. A stale
   // baseVersion 409s with a structured conflict the drawer surfaces (see updateTaskReq below).
-  updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">> & { baseVersion?: number }) =>
-    updateTaskReq(id, patch),
+  updateTask: (id: string, patch: TaskUpdatePatch) => updateTaskReq(id, patch),
   // PERMANENTLY delete a task card (drawer Delete button). HUMAN/loopback REST only — no MCP path. Uses
   // delErr so the server's live-session guard 400 ({ error }) surfaces verbatim to the user.
   deleteTask: (id: string) => delErr<{ ok: boolean }>(`/api/tasks/${id}`),

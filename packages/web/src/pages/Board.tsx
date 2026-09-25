@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
@@ -9,7 +9,11 @@ import { Button, Input, Select, SectionLabel, StatusPill, Chip, Badge, Dot } fro
 import { useOpenRequest, RequestTypeTag, RequestProvenance } from "../components/requests";
 import { DecisionStateChip } from "../components/decisions";
 import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
-import { color, font, radius, tone, roleTone, type Tone } from "../theme";
+import { color, columnTone, font, radius, tone, type Tone } from "../theme";
+// Board-hierarchy read model + presentation (card 1ae4f88c). The lib reads the daemon's hierarchy fields
+// structurally and defaults every one of them, so a response without them renders exactly as before.
+import { boardHierarchy, hasBoardHierarchy, hasTaskLinks, resolveParentInput, taskLinks, type TaskLinks } from "../lib/taskHierarchy";
+import { BoardCardHierarchy, TaskLinksBlock } from "../components/taskLinks";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang } from "../lib/useVoiceLang";
 import { isDoneColumn } from "../lib/columnSort";
@@ -19,6 +23,14 @@ import { PRIORITY_META, PriorityChip, prio } from "../components/priority";
 import { errorText } from "../lib/loopbackCredential";
 
 const PRIORITIES: TaskPriority[] = ["p0", "p1", "p2", "p3"];
+// Everything the detail drawer can write, in ONE place — the drawer's `onSave` prop, the mutation that
+// receives it and api.updateTask all read the same shape, so a new editable field can't be added to the
+// form and quietly dropped on the way to the request. `parentId` (card 1ae4f88c) is `string | null`:
+// null CLEARS the parent, and the key is omitted entirely when the field wasn't touched.
+type TaskEditPatch = {
+  title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean;
+  repoKey?: string | null; parentId?: string | null; baseVersion?: number;
+};
 // Sort a column's cards high→low priority (p0 first), then by position — strings p0<p1<p2<p3 sort right.
 const byPriorityThenPosition = (a: BoardTask, b: BoardTask) =>
   prio(a) === prio(b) ? a.position - b.position : (prio(a) < prio(b) ? -1 : 1);
@@ -82,7 +94,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
     // must dismiss before they can act on it. A version conflict is ALSO inline for the same reason —
     // it's a decision to make right next to the fields it affects, not a blocking modal.
     meta: { inlineError: true },
-    mutationFn: ({ id, patch }: { id: string; patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean; repoKey?: string | null; baseVersion?: number } }) => api.updateTask(id, patch),
+    mutationFn: ({ id, patch }: { id: string; patch: TaskEditPatch }) => api.updateTask(id, patch),
     // Invalidate BOTH the board list and this card's own lazy-fetched detail (a done card's body query,
     // below) — a save must never leave the detail cache holding the pre-edit body on next open.
     onSuccess: (_r, { id }) => {
@@ -118,15 +130,27 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   // The open card's resolved lane, for the modal header's state/lane chip (dossier header).
   const openColumn = openTask ? board.data?.columns.find((c) => c.key === openTask.columnKey) ?? null : null;
   // The board list omits a DONE card's body (card 4fa2c146) — `openTask.body` is only ever undefined for
-  // one of those, since a LIVE card's body rides along on the board response already. Lazy-fetch the full
-  // row ONLY in that case; a live card's drawer opens with zero extra round trip.
+  // one of those, since a LIVE card's body rides along on the board response already. That distinction
+  // still governs whether the drawer can open INSTANTLY (`drawerTask` below), but the fetch itself is now
+  // unconditional: parent/children/relations (card 1ae4f88c) live ONLY on the single-task read — the board
+  // list deliberately carries counts, not relation arrays — so a live card needs this round trip too. It
+  // costs one request per drawer open and does NOT delay the open; the links block fills in when it lands.
+  // Polled at the board's own interval so a relation written by an agent while the drawer sits open shows up.
   const needsBodyFetch = !!openTask && openTask.body === undefined;
   const taskDetail = useQuery({
     queryKey: ["task", openTask?.id],
     queryFn: () => api.getTask(openTask!.id),
-    enabled: needsBodyFetch,
+    enabled: !!openTask,
+    refetchInterval: 4000,
+    // NO keepPreviousData here, unlike the board query above: this key changes when a links-block click
+    // opens a DIFFERENT card, and carrying the previous card's row across that change would render the
+    // OLD card's relations (and, for a done card, its whole body) under the NEW card's header for a beat.
+    // A same-key refetch already keeps its data while re-fetching, so nothing flickers on the 4s poll.
   });
-  const drawerTask: Task | null = !openTask ? null : needsBodyFetch ? (taskDetail.data ?? null) : (openTask as Task);
+  // Belt-and-braces on the same hazard: only trust the detail row when it IS this card's. A cache hand-off
+  // mid-transition can otherwise surface the wrong row for one render.
+  const detail = taskDetail.data && openTask && taskDetail.data.id === openTask.id ? taskDetail.data : null;
+  const drawerTask: Task | null = !openTask ? null : needsBodyFetch ? detail : (openTask as Task);
 
   // ── Client-side view filter (no server round-trip) ───────────────────────────
   // Search matches id+title+body (case-insensitive substring — a full card id or any prefix finds the
@@ -142,6 +166,20 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   const q = search.trim().toLowerCase();
   const filterActive = q !== "" || priFilter.size > 0 || colFilter.size > 0;
   const allTasks = board.data?.tasks ?? [];
+  // Hierarchy lookups (card 1ae4f88c), both built off the UNFILTERED list on purpose:
+  //  · titleById resolves a card's `parentId` to a title for its board-card chip. The board response
+  //    carries every task in the project, so the parent is normally right here — no extra request, and
+  //    no need for the board row to ship a parent title. Resolving against the FILTERED list instead
+  //    would blank the parent chip the moment a search hid the parent card, which is exactly when the
+  //    context matters most.
+  //  · the same map tells the drawer's links block which targets it can actually OPEN (a relation can
+  //    point at an archived card, and a link that silently does nothing is worse than a plain-text one)
+  //    and backs the Parent field's id/prefix resolution.
+  const titleById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const t of allTasks) m.set(t.id, t.title);
+    return m;
+  }, [allTasks]);
   const shownTasks = allTasks.filter((t) =>
     taskMatchesSearch(t, q) &&
     (priFilter.size === 0 || priFilter.has(prio(t))) &&
@@ -178,6 +216,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
                       .sort(isDoneColumn(col) ? byRecentlyDone : byPriorityThenPosition)}
                     filterActive={filterActive} workers={workerByTask} onOpen={setOpenTaskId}
                     multiRepo={multiRepo} repos={repos} primaryRepoPath={project?.repoPath ?? ""}
+                    titleById={titleById}
                     cardCount={allTasks.filter((t) => t.columnKey === col.key).length} />
                 ))}
               </div>
@@ -195,6 +234,8 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
       {openTask && drawerTask && (
         <TaskDrawer key={drawerTask.id} task={drawerTask} column={openColumn} onClose={() => setOpenTaskId(null)}
           repos={repos} primaryRepoPath={project?.repoPath ?? ""}
+          links={taskLinks(detail)}
+          columns={board.data?.columns ?? []} titleById={titleById} onOpenTask={setOpenTaskId}
           onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending}
           saveError={edit.error as TaskUpdateConflictError | null}
           onDismissConflict={() => edit.reset()}
@@ -206,14 +247,9 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
 }
 
 // ── One source of truth for a board lane's color ──────────────────────────────────
-// A lane is tinted by its lifecycle ROLE (via the shared `roleTone` map), so the board agrees with
-// Settings' role coloring. The ONE resolved color drives the accent bar, the header label, AND each
-// card's left border — they can no longer diverge the way the old key-substring heuristic let them
-// (Blocked = red bar but grey label/cards). A role-less lane has no signal tone (it may still carry an
-// explicit accentColor — e.g. a future per-column accent set without a role).
-function columnTone(col: KanbanColumn): Tone | null {
-  return col.role ? roleTone[col.role] : null;
-}
+// A lane's ROLE tint is resolved by `columnTone` (theme.ts — shared with the drawer's lane badge and the
+// task-link lane chips, so every surface that tints a lane agrees).
+//
 // The resolved accent COLOR for a lane: an explicit per-column accentColor WINS, then the role tone,
 // then null. accentColor-first is what makes the Settings accent picker take effect on the board even
 // for role-bearing lanes (f033daeb added the picker; before this it silently lost to the role tone on
@@ -253,9 +289,9 @@ function labelColorFor(accent: string | null): string {
   return accent;
 }
 
-function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, primaryRepoPath, cardCount }:
+function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, primaryRepoPath, titleById, cardCount }:
   { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void; multiRepo: boolean;
-    repos: RepoRegistryEntry[]; primaryRepoPath: string; cardCount: number }) {
+    repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; cardCount: number }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
   // ONE resolved color for the lane (role → tone, else accentColor, else null). Drives the accent bar,
   // the header label, and each card's left border so all three agree. null = un-accented: transparent
@@ -302,7 +338,7 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
         )}
       </SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
-        {tasks.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} isDoneLane={isDoneColumn(col)} onOpen={() => onOpen(task.id)} />)}
+        {tasks.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={isDoneColumn(col)} onOpen={() => onOpen(task.id)} />)}
         {/* Filtered-empty state: the filter hid every card in this column. Reads as deliberate, not broken. */}
         {tasks.length === 0 && filterActive && (
           <div style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11, padding: "8px 2px" }}>no matches</div>
@@ -513,12 +549,15 @@ function MergeTrack({ merge }: { merge: MergeDisplay }) {
   );
 }
 
-function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, isDoneLane, onOpen }:
-  { task: BoardTask; accent: string; worker?: SessionListItem; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; isDoneLane: boolean; onOpen: () => void }) {
+function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, titleById, isDoneLane, onOpen }:
+  { task: BoardTask; accent: string; worker?: SessionListItem; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; isDoneLane: boolean; onOpen: () => void }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id });
   const st = worker ? workerStatus(worker) : null;
   const merge = worker ? mergeDisplay(worker.pendingMerge) : null;
   const hasBody = task.hasBody;
+  // Hierarchy (card 1ae4f88c) — every field defaults to empty, so on an older daemon `hier` is all-zero,
+  // `hasBoardHierarchy` is false, and this card renders exactly as it did before the card existed.
+  const hier = boardHierarchy(task);
   return (
     <div ref={setNodeRef}
       className="loom-board-card"
@@ -572,8 +611,15 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, isDoneL
                 ⑂ {task.repoKey}
               </span>
             )}
+            {/* The deferred badge NAMES what it's waiting on when the board row knows (card 1ae4f88c):
+                `deferredUntilTaskId` is now an alias over a gates_deferral blocks edge, so a deferred
+                card's blocker surfaces as `blockedByFirst`. The badge keeps its one-word label — the
+                lane is 240px and this is the owner's densest surface — and the blocker's title rides in
+                the tooltip, while the ⊘ marker on the meta row below shows it without a hover. */}
             {task.deferred && (
-              <span title="Deferred — a manager's own sequencing marker, won't nag (not the owner's brake)"
+              <span title={hier.blockedByFirst
+                ? `Deferred until "${hier.blockedByFirst.title}"${hier.blockedByOpen > 1 ? ` (and ${hier.blockedByOpen - 1} more)` : ""} — a manager's own sequencing marker, won't nag (not the owner's brake)`
+                : "Deferred — a manager's own sequencing marker, won't nag (not the owner's brake)"}
                 style={{ flexShrink: 0, fontFamily: font.head, fontSize: 9, fontWeight: 700, letterSpacing: "0.08em",
                   textTransform: "uppercase", color: color.bg, background: color.cyan, borderRadius: 3, padding: "1px 4px" }}>
                 deferred
@@ -582,7 +628,11 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, isDoneL
             {/* `break-word` (not `anywhere`): normal titles wrap at WORD boundaries, and only a genuinely
                 long unbroken token breaks mid-word. `anywhere` makes the title's min-content width one
                 character, so at a crushed lane width the flex row collapses it to one letter per row. */}
-            <span style={{ flex: "1 1 120px", minWidth: 0, overflowWrap: "break-word" }}>{task.title}</span>
+            {/* `data-testid` is load-bearing for e2e locators since card 1ae4f88c: the parent chip on the
+                meta row below renders the PARENT's title as card text, so a card's title is no longer
+                unique text on the board and `getByText(title)` resolves the card PLUS every child of it.
+                This gives specs the card's OWN title to filter on. */}
+            <span data-testid="card-title" style={{ flex: "1 1 120px", minWidth: 0, overflowWrap: "break-word" }}>{task.title}</span>
             {hasBody && <span title="has a description" style={{ color: color.textMuted, flexShrink: 0 }}>≣</span>}
             {/* Ship-state (card 1eebc46a) — a compact "landed" marker naming the sha; the REPO it landed on
                 (which may differ from the target-repo badge above, though it normally agrees) is in the
@@ -597,6 +647,15 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, isDoneL
               </span>
             )}
           </div>
+          {/* Hierarchy meta row (card 1ae4f88c) — ONE extra 10px line, and ONLY for a card that genuinely
+              has a parent, children or an open blocker. This is the Overview-embedded board too (the
+              owner's primary surface), so a plain card must stay exactly as tall as it was: the gate below
+              is what guarantees that, since most cards carry none of the three. Deliberately kept OFF the
+              badge row above — that row already competes for a 240px lane between the priority chip, held,
+              repo, deferred, the title and the ship marker. */}
+          {hasBoardHierarchy(hier) && (
+            <BoardCardHierarchy h={hier} parentTitle={hier.parentId ? titleById.get(hier.parentId) ?? null : null} />
+          )}
           {worker && st && (
             <div style={{ marginTop: 5, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
               {/* While a merge gate is in flight the pill speaks the MERGE state (merging/merged/failed)
@@ -674,8 +733,10 @@ function shipVerificationStyle(verification: Task["mergedVerification"]): { colo
 // Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
 // then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
 // reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
-function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError }:
-  { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean; repoKey?: string | null; baseVersion?: number }) => void; saving: boolean; saveError: TaskUpdateConflictError | null; onDismissConflict: () => void;
+function TaskDrawer({ task, column, repos, primaryRepoPath, links, columns, titleById, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError }:
+  { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string;
+    links: TaskLinks; columns: KanbanColumn[]; titleById: Map<string, string>; onOpenTask: (id: string) => void;
+    onClose: () => void; onSave: (patch: TaskEditPatch) => void; saving: boolean; saveError: TaskUpdateConflictError | null; onDismissConflict: () => void;
     onDelete: () => void; deleting: boolean; deleteError: string | null }) {
   const [title, setTitle] = useState(task.title);
   const [body, setBody] = useState(task.body ?? "");
@@ -685,6 +746,38 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, sav
   // Which registered repo this card targets. "" = primary. Only editable when the project HAS a
   // registry — see the Repo field below.
   const [repoKey, setRepoKey] = useState<string>(task.repoKey ?? "");
+  // Parent (card 1ae4f88c) — the ONE hierarchy write this drawer offers, keyed by the 8-char prefix the
+  // rest of Loom names cards by. Relation editing is deliberately absent (owner's "no overkill").
+  //
+  // NOT seeded into state at mount: `links.parentId` rides on the single-task read, which resolves AFTER
+  // this component mounts, so a mount-time initializer captures `null` and never catches up — the field
+  // would read "no parent" for a card that has one, and compare as a pending CLEAR. The displayed value
+  // falls through to the live server value until the user types; Reset drops back to that fall-through.
+  //
+  // Collapsed at rest: the open field + resolution line cost ~56px on EVERY drawer for something most
+  // cards never set. One line here, editor on demand.
+  const [parentDraft, setParentDraft] = useState<string | null>(null);
+  const [parentEditing, setParentEditing] = useState(false);
+  const parentServer = links.parentId ? links.parentId.slice(0, 8) : "";
+  const parentInput = parentDraft ?? parentServer;
+  const parentRes = resolveParentInput(parentInput, task.id, titleById);
+  // Collapse back to the summary once a save actually SUCCEEDS — staying in the editor after a committed
+  // write leaves the drawer looking like it still has pending work. Dropping the draft at the same time
+  // hands the field back to the server value, which the edit mutation has just invalidated and refetched.
+  // Keyed on the saving true→false EDGE with no error, so a FAILED save keeps the editor (and the user's
+  // entry) open rather than swallowing it.
+  const wasSaving = useRef(false);
+  useEffect(() => {
+    if (wasSaving.current && !saving && !saveError) { setParentDraft(null); setParentEditing(false); }
+    wasSaving.current = saving;
+  }, [saving, saveError]);
+  // What a Save would actually persist — null clears the parent. `undefined` means "don't touch it": an
+  // unresolvable entry must NEVER be read as a clear, which is what sending null on a typo would do. Save
+  // is disabled in that state instead (see the button's own `disabled`).
+  const parentPatch: string | null | undefined =
+    parentRes.state === "empty" ? null : parentRes.state === "ok" ? parentRes.id : undefined;
+  const parentChanged = parentPatch !== undefined && parentPatch !== links.parentId;
+  const parentBlocked = parentPatch === undefined;
   // This card names a repo the registry no longer has (the entry was removed after the card was written —
   // supported, since removal is only blocked while a live worktree session holds the card). The picker and
   // the path line both have to say so rather than silently reading as primary.
@@ -693,7 +786,10 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, sav
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const dirty = title !== task.title || body !== (task.body ?? "") || priority !== prio(task)
     || held !== (task.held ?? false) || deferred !== (task.deferred ?? false)
-    || (repoKey || null) !== (task.repoKey ?? null);
+    || (repoKey || null) !== (task.repoKey ?? null)
+    // An unresolvable parent entry counts as dirty too — it's an edit in progress, so the close guard must
+    // still fire rather than letting a typed-but-unsaveable value vanish on Esc.
+    || parentChanged || (parentBlocked && parentDraft !== null);
   // Card 0b36702e: the version this drawer instance actually LOADED — captured ONCE (this initializer
   // runs only at mount, since `key={task.id}` on the caller never remounts this component for the same
   // card), never re-derived from a later prop refresh. This is deliberate: `task` is a prop, so if we
@@ -712,13 +808,16 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, sav
   }, [task.version, dirty]);
   // The fresh task the server returned alongside a 409 — null unless the last save attempt conflicted.
   const saveConflict = saveError?.conflict ? (saveError.current ?? null) : null;
-  // Guard the three close paths (backdrop / Esc / ✕) against silently discarding unsaved edits. When dirty,
-  // a close request arms an in-drawer "Discard unsaved changes?" confirm (mirroring the delete two-step)
-  // instead of closing; when clean it closes immediately, zero extra friction.
-  const [confirmingClose, setConfirmingClose] = useState(false);
-  const requestClose = () => { if (dirty) setConfirmingClose(true); else onClose(); };
+  // Guard every path OUT of this card against silently discarding unsaved edits. When dirty, the request
+  // arms an in-drawer confirm (mirroring the delete two-step) instead of leaving; when clean it leaves
+  // immediately, zero extra friction. Two kinds of exit share one pending-nav state so the guard can't be
+  // bypassed by the newer one: closing (backdrop / Esc / ✕ → `to: null`) and following a links-block
+  // link to ANOTHER card (card 1ae4f88c → `to: <id>`), which unmounts this drawer just as thoroughly.
+  const [pendingNav, setPendingNav] = useState<{ to: string | null } | null>(null);
+  const requestClose = () => { if (dirty) setPendingNav({ to: null }); else onClose(); };
+  const requestOpen = (id: string) => { if (dirty) setPendingNav({ to: id }); else onOpenTask(id); };
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { if (dirty) setConfirmingClose(true); else onClose(); } };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { if (dirty) setPendingNav({ to: null }); else onClose(); } };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [dirty, onClose]);
@@ -820,14 +919,32 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, sav
           <span style={{ flex: 1 }} />
           <Button onClick={requestClose} title="Close (Esc)">✕</Button>
         </div>
-        {/* Unsaved-edit guard: a close request while dirty arms this confirm instead of discarding. */}
-        {confirmingClose && (
+        {/* Unsaved-edit guard: an exit request while dirty arms this confirm instead of discarding. The
+            wording names WHICH exit is pending, so "Discard" never looks like it might keep the card open. */}
+        {pendingNav && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px", borderRadius: 4,
             background: color.panel2, border: `1px solid ${color.amber}` }}>
-            <span style={{ flex: 1, color: color.amber, fontSize: 12, fontFamily: font.mono }}>Discard unsaved changes?</span>
-            <Button variant="danger" onClick={onClose}>Discard</Button>
-            <Button onClick={() => setConfirmingClose(false)}>Cancel</Button>
+            <span style={{ flex: 1, color: color.amber, fontSize: 12, fontFamily: font.mono }}>
+              {pendingNav.to ? "Discard unsaved changes and open that card?" : "Discard unsaved changes?"}
+            </span>
+            <Button variant="danger" onClick={() => { const to = pendingNav.to; if (to) onOpenTask(to); else onClose(); }}>
+              {pendingNav.to ? "Discard and open" : "Discard"}
+            </Button>
+            <Button onClick={() => setPendingNav(null)}>Cancel</Button>
           </div>
+        )}
+        {/* Card CONTEXT — parent / children / relations (card 1ae4f88c). Sits here, directly under the
+            dossier header and ABOVE the two-column edit body, because it answers "what is this card
+            connected to" in the same register as the header's id/priority/lane chips — it is not another
+            editable field. Renders nothing at all when the card has no links, which is the common case, so
+            an ordinary card's drawer is unchanged.
+
+            No loading placeholder on purpose: the detail read is a loopback request, and reserving space
+            for a block that MOST cards will never fill would flash an empty panel on every single drawer
+            open — worse than the block simply appearing once it lands. (A done card waits on that same
+            read anyway, via TaskDrawerLoading, so its links are already there when the drawer draws.) */}
+        {hasTaskLinks(links) && (
+          <TaskLinksBlock links={links} columns={columns} titleById={titleById} onOpenTask={requestOpen} />
         )}
         {/* Dossier body: LEFT = task editing, RIGHT = connected-requests rail. When the rail is collapsed
             the left column expands to full width (single-column); flexWrap lets the two stack on a narrow
@@ -857,6 +974,63 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, sav
             );
           })}
         </div>
+        {/* Parent — a card id or any unambiguous PREFIX, empty to clear. A plain field rather than a
+            picker: this board runs to thousands of cards, so a <select>/datalist of every one is a DOM
+            cost paid on every drawer open for a field most cards never set, and an 8-char prefix is
+            already how the owner and every agent name a card. The resolution line is the whole safety
+            story — it names the card you actually landed on BEFORE you save, and every failure mode reads
+            differently, so "type more characters" is distinguishable from "wrong id". */}
+        {parentEditing ? (
+          <>
+            <span style={labelStyle}>Parent</span>
+            <Input value={parentInput} onChange={(e) => setParentDraft(e.target.value)} spellCheck={false}
+              autoFocus aria-label="Parent card id" placeholder="card id or 8-char prefix — empty for no parent"
+              style={{ width: "100%", boxSizing: "border-box" }} />
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: -4, minWidth: 0 }}>
+              <span data-testid="parent-resolution" style={{ flex: 1, fontFamily: font.mono, fontSize: 11, minWidth: 0,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                color: parentRes.state === "ok" ? color.cyan : parentRes.state === "empty" ? color.textMuted : color.amber }}
+                title={parentRes.state === "ok" ? parentRes.title : undefined}>
+                {parentRes.state === "ok" ? `→ ${parentRes.title}`
+                  : parentRes.state === "empty" ? "no parent"
+                  : parentRes.state === "self" ? "that's this card — a card can't be its own parent"
+                  : parentRes.state === "ambiguous" ? `${parentRes.matches} cards start with that — type more characters`
+                  : "no card on this board starts with that"}
+              </span>
+              {/* Cancel, not Reset: this abandons the parent edit alone and re-collapses, leaving any
+                  title/priority/description edits in the same drawer untouched. Reset still drops them all. */}
+              <Button variant="ghost" style={{ flexShrink: 0, fontSize: 11 }}
+                onClick={() => { setParentDraft(null); setParentEditing(false); }}>cancel</Button>
+            </div>
+          </>
+        ) : (
+          /* At rest: ONE line. Either the resolved parent with edit/clear, or a bare "Set parent…" — so a
+             card that will never have a parent costs a single ghost link instead of a labelled field. */
+          <div data-testid="parent-summary" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+            {links.parentId ? (
+              <>
+                <span style={{ ...labelStyle, flexShrink: 0 }}>Parent</span>
+                <span style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: 12, color: color.textDim,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  title={links.parent?.title ?? `card ${links.parentId.slice(0, 8)}`}>
+                  ↳ {links.parent?.title ?? links.parentId.slice(0, 8)}
+                </span>
+                <Button variant="ghost" style={{ flexShrink: 0, fontSize: 11 }} aria-label="Change parent"
+                  onClick={() => setParentEditing(true)}>edit</Button>
+                {/* Clear STAGES the change (empties the field and opens the editor) rather than saving on
+                    the spot — every other field in this drawer persists on Save, and a one-click write
+                    hiding among staged ones is exactly the inconsistency that makes Save untrustworthy. */}
+                <Button variant="ghost" style={{ flexShrink: 0, fontSize: 11 }} aria-label="Clear parent"
+                  onClick={() => { setParentDraft(""); setParentEditing(true); }}>clear</Button>
+              </>
+            ) : (
+              // Negative margin cancels the button's own left padding so the label text sits on the SAME
+              // vertical rule as TITLE/PRIORITY/HOLD, while the padding still gives the hover fill room.
+              <Button variant="ghost" style={{ fontSize: 11, padding: "2px 6px", marginLeft: -6 }}
+                onClick={() => { setParentDraft(""); setParentEditing(true); }}>Set parent…</Button>
+            )}
+          </div>
+        )}
         {/* Target repo (multi-repo epic 49136451, phase 3). Rendered ONLY when the project has a
             registry — a single-repo project's drawer is byte-identical to before. Shows the RESOLVED
             absolute path of whatever is currently selected, which is the thing a human actually needs to
@@ -967,15 +1141,24 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, sav
               removal is supported whenever no live worktree session holds the card, so that state is
               reachable, not hypothetical. Omitting an unchanged key matches the exemption the server
               already models, and leaves retargeting (the only case that SHOULD be validated) untouched. */}
-          <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave({
+          {/* `parentBlocked` blocks the save outright rather than dropping the field: the alternative is
+              saving the OTHER fields while silently discarding a parent the user clearly meant to set,
+              which reads as "Save didn't work" with no explanation. The resolution line above already says
+              what's wrong with it. */}
+          <Button variant="primary" disabled={!dirty || saving || parentBlocked} onClick={() => onSave({
             title, body, priority, held, deferred,
             ...(repoKey !== (task.repoKey ?? "") ? { repoKey: repoKey || null } : {}),
+            // `parentId` rides along ONLY when it actually changed — same rule as repoKey above, and the
+            // same reason generalized: an unchanged field that the daemon may not know about yet must not
+            // be sent at all, so this drawer keeps saving cleanly against a daemon without the hierarchy
+            // write route (card 3df86c87) as long as nobody touches the Parent field.
+            ...(parentChanged ? { parentId: parentPatch } : {}),
             // baseVersion (card 0b36702e): the version THIS drawer loaded, never re-fetched at save time —
             // see loadedVersion's own doc above for why that distinction is the entire fix.
             baseVersion: loadedVersion,
           })}>{saving ? "Saving…" : "Save"}</Button>
           {dirty
-            ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); setRepoKey(task.repoKey ?? ""); }}>Reset</Button>
+            ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); setRepoKey(task.repoKey ?? ""); setParentDraft(null); setParentEditing(false); }}>Reset</Button>
             : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
           {saveError && !saveConflict && (
             <span role="alert" style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.4, flex: "1 1 100%" }}>{saveError.message}</span>
@@ -995,12 +1178,14 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, sav
                 setTitle(saveConflict.title); setBody(saveConflict.body ?? "");
                 setPriority(prio(saveConflict)); setHeld(saveConflict.held ?? false);
                 setDeferred(saveConflict.deferred ?? false); setRepoKey(saveConflict.repoKey ?? "");
+                setParentDraft(null); setParentEditing(false);
                 setLoadedVersion(saveConflict.version);
                 onDismissConflict();
               }}>Reload</Button>
-              <Button variant="danger" onClick={() => onSave({
+              <Button variant="danger" disabled={parentBlocked} onClick={() => onSave({
                 title, body, priority, held, deferred,
                 ...(repoKey !== (task.repoKey ?? "") ? { repoKey: repoKey || null } : {}),
+                ...(parentChanged ? { parentId: parentPatch } : {}),
               })}>Overwrite anyway</Button>
             </div>
           )}
