@@ -219,6 +219,11 @@ Three things to know before you turn it on:
 
 Step-by-step instructions live on the landing site's **Remote access** page ([`site/remote-access.html`](site/remote-access.html)).
 
+## Network
+
+Loom has no cloud service of its own; everything it keeps stays on your machine. Off-machine calls, by default: the agents' own conversations with Anthropic (they carry your code, as any coding agent's do); a plan-usage poll of `api.anthropic.com/api/oauth/usage` every 60s with your Claude OAuth token (`LOOM_SUPPRESS_USAGE_POLLER=1` stops it); an npm-installed daemon's `registry.npmjs.org` check for `loomctl` updates every 6h (a from-source daemon makes none; it can't be switched off, `LOOM_NPM_REGISTRY` only redirects it); and the package-manager install a new worker worktree runs against your project's registry.
+Opt-in, off until you configure them, and able to carry session content: the Telegram companion, outbound alert webhooks, and any Connection you bind.
+
 ## How it works
 
 A single local **daemon** owns everything durable — the sessions, the PTY host that drives `claude`, the Fastify HTTP/WS gateway, an SQLite store, git, and the vault auto-committer. An ordinary project agent gets **no git write on its tool surface**: checkout, commit and push live behind a human-only REST route, or behind one of the deliberate, opt-in grants above (the Elevated Operator, the companion's git lever). Read that as the tool-surface boundary it is rather than a sandbox — a worker still has an ordinary shell inside its own worktree, which is how it commits its work in the first place; what the boundary buys you is that no *agent tool* can push, and no Loom tool or route can reach a repo the session wasn't given. The **web viewport** is stateless: it attaches to a session over a WebSocket and detaches freely, while the session keeps running on the daemon whether or not anyone is watching.
