@@ -19,7 +19,7 @@ Because every agent is a genuine `claude` session rather than an API-key agent l
 ## Features
 
 - **🖥️ Durable real sessions.** Real `claude` sessions that survive a closed tab or a reboot without losing the thread.
-- **⛓️ Review-gated orchestration.** A lead agent delegates to workers on isolated git branches, reviews each diff, and merges only through a build gate.
+- **⛓️ Review-gated orchestration.** A lead agent delegates to workers on isolated git branches, reviews each diff, and merges through a build gate (docs-only diffs skip it).
 - **🚦 Gates page.** A read-only view of every merge, deploy and self-check gate: what's running, what's queued, and past results.
 - **🗂️ Multi-repo projects.** One project can span several repos, with each board card routed to the right one.
 - **✦ A versioned knowledge layer.** An Obsidian vault of notes and decisions kept versioned with the code, plus a Memory view of what the fleet remembers across sessions.
@@ -28,15 +28,15 @@ Because every agent is a genuine `claude` session rather than an API-key agent l
 - **💳 Runs on your subscription.** Uses your Claude Pro/Max plan instead of per-token API billing, within its usage and rate limits.
 - **❯ The terminal cockpit.** A web UI that attaches to live sessions and detaches freely, alongside your board, Memory and repository views.
 - **💬 A personal companion.** A long-lived agent you chat with over Telegram or in the app, with durable memory and reminders.
-- **🧪 An experimental second harness.** Off by default: a profile can run the Codex CLI instead of `claude`, with narrower support.
+- **🧪 An experimental second harness.** Off by default: a profile can run the Codex CLI instead of `claude`, with narrower support: only worker sessions get Loom's doctrine, there is no context or usage telemetry, and `allowDelta` and pinned skills are ignored.
 - **🌐 Per-worker browser testing.** Opt-in: give a worker profile its own headless browser to test a running app.
 - **🚀 A Platform operator.** A built-in assistant that helps you set up projects, agents, and profiles, confirming big moves first.
-- **🔐 An Elevated Operator.** Off by default: a session limited to one project's branch, commit, push and vault tools, not a sandbox.
+- **🔐 An Elevated Operator.** Off by default: a session whose Loom tools are limited to one project's branch, commit, push and vault — a tool boundary, not a sandbox.
 - **🔎 A suggest-only Workspace Auditor.** A read-only reviewer that files suggestions for your prompts and skills as cards on your board.
-- **🧩 Editable skills.** Bundled skills injected into every session, editable in the app, with shipped updates merged into your edits.
+- **🧩 Editable skills.** Bundled skills injected into every session, editable in the app, with an adopt step that three-way-merges shipped updates into skills you've edited.
 - **🛰️ Agents as API endpoints.** Expose an agent through scoped, capped API keys, with a Runs page for results.
 - **🔑 Connections.** Encrypted credentials that agents use through Loom without ever seeing the secret.
-- **⏱️ A built-in cron scheduler.** Off by default: run a manager or the Workspace Auditor on a cron schedule.
+- **⏱️ A built-in cron scheduler.** Off by default: run a manager or the Workspace Auditor on a cron schedule (restart the daemon after enabling it).
 - **📄 Document conversion.** Opt-in: worker profiles can convert PDFs, Office files, images and HTML to Markdown.
 
 ## Quick start
