@@ -2507,6 +2507,26 @@ export function gateHeadOnBranch(head: string | null | undefined, branchTip: str
   return { onBranch: h === null || b === null ? "unverified" : h === b, head: h, branchTip: b };
 }
 
+/**
+ * What a landing squash is pinned to, as a DISCRIMINATED input so a skip path that forgets its tip is a TYPE error (and a caller that cannot build one refuses, fail closed).
+ * `gate`: the tip the REAL gate ran on. `skip`: the tip a NO-GATE decision covered (`reuse` = a reused self-check, `inert` = an inert-diff skip; a new skip kind gets its own
+ * literal and MUST carry its decision's tip). `unpinned`: a landing with nothing to pin, each with a NAMED reason — `gate-disabled` (the gate-OFF skip; 6f13746c removes it) and
+ * `no-gate-configured` (a project with no gate command has no verdict about any tip).
+ */
+export type LandingPin =
+  | { kind: "gate"; tip: string }
+  | { kind: "skip"; skip: "reuse" | "inert"; tip: string }
+  | { kind: "unpinned"; reason: "gate-disabled" | "no-gate-configured" };
+
+/**
+ * THE one place that turns a {@link LandingPin} into `mergeBranch`'s `expectedBranchTip` (checked INSIDE its lock): the pinned tip, or `undefined` only for an explicit `unpinned`.
+ *
+ * @decision 35cfcbe0 — every no-gate landing is pinned to the tip its decision covered; one helper + a discriminated input so a new skip path cannot forget it.
+ */
+export function expectedTipForLanding(pin: LandingPin): string | undefined {
+  return pin.kind === "unpinned" ? undefined : pin.tip;
+}
+
 /** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
 /** One row of a diffstat — a changed file with its insertion/deletion counts (0/0 for binary). */
 export interface DiffstatFile {
@@ -3012,8 +3032,11 @@ function isInertMergePath(p: string): boolean {
  *  FAILS CLOSED to `false` on every uncertain case: a git error, zero paths, an unrecognized path, or a
  *  per-repo re-scan that can't confirm absence. */
 export async function isInertMergeDiff(
-  repoPath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
+  repoPath: string, baseSha: string, ref: string | undefined, deps: BoundedGitDeps = {},
 ): Promise<boolean> {
+  // @decision 35cfcbe0 — `ref` is the branch SHA the caller pins its squash to (never the branch NAME, which can move between classification and pin: a T1→T2→T1 ABA).
+  // An unreadable tip (undefined) fails closed to "not provably inert" — the real gate.
+  if (!ref) return false;
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   let paths: string[];
   try {

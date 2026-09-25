@@ -43,7 +43,8 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 //   const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
 //   inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
 const PRE_WAIT_RE = /const\s+preWaitBranchHead\s*=\s*await\s+resolveGitRef\(/;
-const INERT_CALL_RE = /inertSkip\s*=\s*await\s+isInertMergeDiff\(/;
+// Card e8df2659 rewrote the call to `inertSkip = gateDisabled ? true : await isInertMergeDiff(`; the optional group matches both the old and the current form.
+const INERT_CALL_RE = /inertSkip\s*=\s*(?:gateDisabled\s*\?\s*true\s*:\s*)?await\s+isInertMergeDiff\(/;
 
 /**
  * Scan `text` line-by-line for exactly one `preWaitBranchHead` capture and exactly one `inertSkip =
@@ -107,6 +108,10 @@ function checkOrdering(text) {
   ].join("\n");
   check("(A-control) NEGATIVE: comment-only duplicate mentions no longer trip the ambiguous-match fail-closed leg",
     checkOrdering(stripComments(commentDuplicate)).ok);
+  const capture = "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;";
+  const currentCall = "inertSkip = gateDisabled ? true : await isInertMergeDiff(repoPath, gateBaseMainHead!, branch, { timeoutMs: this.gitOpMs });";
+  check("(A-control) the CURRENT gate-off-aware call form is matched: capture-then-call passes, call-then-capture FAILS (card e8df2659's rewrite)",
+    checkOrdering([capture, currentCall].join("\n")).ok && !checkOrdering([currentCall, capture].join("\n")).ok);
   const realDuplicate = [
     "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",

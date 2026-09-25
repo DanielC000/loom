@@ -22,7 +22,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, type GateHeadOnBranch, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -13749,7 +13749,11 @@ export class SessionService {
     let reuseRefusalReasons: string[] | undefined;
     // @decision 01777ceb — on a REUSED green the squash is pinned to the tip the reuse proof saw (the real-gate path's 975c774b pin), so a commit / ref move between the
     // proof and mergeBranch's lock is refused in-lock rather than landed as an unverified `reused:true`.
-    let reuseExpectedTip: string | undefined;
+    // @decision 35cfcbe0 — the INERT-DIFF skip sets it too (the tip its decision covered). Every skip path sets it from its own decision's tip (the gate-OFF `gate-disabled` skip does not yet).
+    // Read ONLY through `expectedTipForLanding`.
+    let skipCoveredTip: string | undefined;
+    // @decision 35cfcbe0 — WHICH no-gate decision set `skipCoveredTip` (the refusal names the actual skip from this, never by elimination).
+    let skipKind: "reuse" | "inert" | undefined;
     // @decision 975c774b — set at the reuse decision when the tree is dirty/unreadable; refused only if a gate will actually spawn.
     let confirmTimeDirty: string | undefined;
     // @decision 975c774b — the distinct, never-cached refusal for a verdict that describes no commit (see `gateWorktreeDirty`);
@@ -13767,7 +13771,7 @@ export class SessionService {
     // @decision 975c774b — a PASS is a fact about the tip the gate spawned on; a branch that moved since would squash a commit
     // the gate never ran. Refused (never cached, a re-call re-gates the new tip) rather than squashing the gated tip, which
     // would land without the later commit and then lose it when finalizeMerge deletes the branch.
-    const refuseGateTipMoved = async (phase: "pre-squash" | "in-lock", gated: string | undefined, live: string | null | undefined, movedAndBack = false, extra?: { headOff?: string; leftAt?: string; unverifiedWhy?: "reflog" | "branch-read" }): Promise<ConfirmMergeResult> => {
+    const refuseGateTipMoved = async (phase: "pre-squash" | "in-lock", gated: string | undefined, live: string | null | undefined, movedAndBack = false, extra?: { headOff?: string; leftAt?: string; unverifiedWhy?: "reflog" | "branch-read"; skip?: { kind: "reuse"; reusedOpId: string } | { kind: "inert-skip" } }): Promise<ConfirmMergeResult> => {
       // @decision 01777ceb — `live` always stays the BRANCH's live tip; a detached worktree HEAD travels in its own `worktreeHead`.
       const why = extra?.headOff
         ? `the worktree HEAD (${extra.headOff.slice(0, 8)}) and the branch tip (${gated?.slice(0, 8) ?? "?"}) differed when a gate run spawned (detached, or a commit landed between the two reads), so this PASS covers content the branch would not squash`
@@ -13779,15 +13783,19 @@ export class SessionService {
         ? `a gate run left the worktree HEAD on ${extra.leftAt.slice(0, 8)} while the branch tip is ${live?.slice(0, 8) ?? gated?.slice(0, 8) ?? "?"}, so this PASS ran on content the branch would not squash`
         : movedAndBack
         ? `the branch tip moved off the gated commit ${gated?.slice(0, 8) ?? "?"} during the gate and came back, so this PASS may have run on mixed content and does not vouch for the commit that would be squashed`
+        : gated && live && extra?.skip?.kind === "reuse"
+        ? `the branch tip moved after the reused self-check was proven current (covered ${gated.slice(0, 8)}, now ${live.slice(0, 8)}), so that later commit was never gated and this merge does not cover it`
+        : gated && live && extra?.skip?.kind === "inert-skip"
+        ? `the branch tip moved after the inert-diff skip was decided (covered ${gated.slice(0, 8)}, now ${live.slice(0, 8)}), so that later commit was never checked for inertness and this merge does not cover it`
         : gated && live
         ? `the branch tip moved after the gate spawned (gated ${gated.slice(0, 8)}, now ${live.slice(0, 8)}), so this PASS does not cover the commit that would be squashed`
-        : `the gated branch tip could not be verified (gated ${gated?.slice(0, 8) ?? "unreadable"}, now ${live?.slice(0, 8) ?? "unreadable"}), so this PASS is refused rather than squashed unchecked`;
+        : `the gated branch tip could not be verified (gated ${gated?.slice(0, 8) ?? "unreadable"}, now ${live?.slice(0, 8) ?? "unreadable"}), so this ${extra?.skip ? "merge" : "PASS"} is refused rather than squashed unchecked`;
       // @decision 01777ceb — `live` is ALWAYS the branch's live tip; a worktree HEAD that is off it travels in its own `worktreeHead` (+ `headOffBranch`).
       const worktreeHeadOff = extra?.headOff ?? extra?.leftAt;
-      const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. Re-run worker_merge_confirm to gate the new tip — this refusal is never cached.`;
+      const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. Re-run worker_merge_confirm to ${extra?.skip ? "re-evaluate" : "gate"} the new tip — this refusal is never cached.`;
       const { suppressed, sha } = await rejectNotify("gate_tip_moved", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-      evt("merge_rejected", { reason: "gate_tip_moved", sha, phase, ...(movedAndBack ? { movedAndBack: true } : {}), ...(worktreeHeadOff ? { headOffBranch: true, worktreeHead: worktreeHeadOff } : {}), ...(extra?.unverifiedWhy ? { unverifiedWhy: extra.unverifiedWhy } : {}), gatedTip: gated ?? null, liveTip: live ?? null, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: true, gateTipMoved: { phase, gated: gated ?? null, live: live ?? null, ...(movedAndBack ? { movedAndBack: true } : {}), ...(worktreeHeadOff ? { headOffBranch: true as const, worktreeHead: worktreeHeadOff } : {}), ...(extra?.unverifiedWhy ? { unverifiedWhy: extra.unverifiedWhy } : {}) } };
+      evt("merge_rejected", { reason: "gate_tip_moved", sha, phase, ...(movedAndBack ? { movedAndBack: true } : {}), ...(worktreeHeadOff ? { headOffBranch: true, worktreeHead: worktreeHeadOff } : {}), ...(extra?.unverifiedWhy ? { unverifiedWhy: extra.unverifiedWhy } : {}), ...(extra?.skip?.kind === "reuse" ? { reused: true, reusedOpId: extra.skip.reusedOpId } : extra?.skip ? { skipped: true, skipReason: "inert-docs-only-diff" } : {}), gatedTip: gated ?? null, liveTip: live ?? null, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: !extra?.skip, ...(extra?.skip?.kind === "reuse" ? { reusedOpId: extra.skip.reusedOpId } : {}), gateTipMoved: { phase, gated: gated ?? null, live: live ?? null, ...(movedAndBack ? { movedAndBack: true } : {}), ...(worktreeHeadOff ? { headOffBranch: true as const, worktreeHead: worktreeHeadOff } : {}), ...(extra?.unverifiedWhy ? { unverifiedWhy: extra.unverifiedWhy } : {}) } };
     };
     // unionMergeMovedHead: whether the union-merge below actually MOVED HEAD, i.e.
     // `mergeMainIntoWorktree`'s own `merged:true`. Defaults `false`: the preLanded branch and the
@@ -14022,6 +14030,9 @@ export class SessionService {
     // any one throwing, uncaught, would leak the guard for the process's lifetime. `merge` is declared here
     // (not inside the try) so it's still in scope for the `if (!merge.ok)` handling after the `finally`.
     let merge: Awaited<ReturnType<typeof mergeBranch>>;
+    // @decision 35cfcbe0 — assigned just before the squash (inside the try below), read by the post-squash in-lock refusal outside it.
+    let landingPin: LandingPin | undefined;
+    let skipRefusalKind: { kind: "reuse"; reusedOpId: string } | { kind: "inert-skip" } | undefined;
     // Card b9e07a4a: the inert-diff skip's OWN repo-guard release, set only when `acquireRepoGuardOnly`
     // below actually acquired one — mirrors `merge`'s own "declared outside the try, so it's still in
     // scope for what runs after" reasoning. Released unconditionally in the `finally` (a no-op when still
@@ -14229,7 +14240,8 @@ export class SessionService {
           // Card a2873f7e: `steps:[]` — this result never actually spawned a step (it's a reuse of an
           // already-settled self-check), so there is nothing to report a per-step duration for.
           reuseResult = { passed: true, steps: [] };
-          reuseExpectedTip = freshOnBranch.branchTip ?? undefined;
+          skipCoveredTip = freshOnBranch.branchTip ?? undefined;
+          skipKind = "reuse";
           reusedOpId = lastCheck.opId;
         }
       }
@@ -14347,7 +14359,7 @@ export class SessionService {
         const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
         // Card e8df2659: gate OFF ⇒ the skip is unconditional (no diff-inertness proof needed). `gateBaseMainHead`
         // is truthy on every non-disabled entry (the block's guard), so the `!` is safe on that arm.
-        inertSkip = gateDisabled ? true : await isInertMergeDiff(repoPath, gateBaseMainHead!, branch, { timeoutMs: this.gitOpMs });
+        inertSkip = gateDisabled ? true : await isInertMergeDiff(repoPath, gateBaseMainHead!, preWaitBranchHead, { timeoutMs: this.gitOpMs });
         if (inertSkip) {
           gateRan = false;
           try {
@@ -14447,10 +14459,13 @@ export class SessionService {
             // `inertSkip` and leave `gateBaseMainHead` at its last captured value: the squash's in-lock
             // `requireCanonicalHead` then refuses `gate_base_invalidated` if main moved (fail-closed), and a
             // real conflict surfaces as the ordinary squash conflict refusal.
+            // @decision 35cfcbe0 — capture the branch tip BEFORE the diff that classifies it (the db413510 ordering): the tip this re-classification covers, which the squash is
+            // then pinned to. An unreadable tip fails closed to the real gate below (`stillInert` false).
+            const reclassifyTip = gateDisabled ? undefined : await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
             const stillInert = gateDisabled
               ? true
-              : (!reunionFailed && reclassifyBase)
-                ? await isInertMergeDiff(repoPath, reclassifyBase, branch, { timeoutMs: this.gitOpMs })
+              : (!reunionFailed && reclassifyBase && reclassifyTip)
+                ? await isInertMergeDiff(repoPath, reclassifyBase, reclassifyTip, { timeoutMs: this.gitOpMs })
                 : false;
             if (gateDisabled) {
               // Card e8df2659: never re-route a gate-OFF merge into the real gate. Advance the base only when
@@ -14462,6 +14477,8 @@ export class SessionService {
               // re-check (further below, inside its own lock) validates against a base that is still
               // current at the moment we're about to squash, not the one captured before the wait.
               gateBaseMainHead = reclassifyBase;
+              skipCoveredTip = reclassifyTip;
+              skipKind = "inert";
             } else {
               // No longer provably inert (or the re-derivation itself was ambiguous) — this MUST take the
               // real gate, never a stale skip: converting `inertSkip` back to `false` here is what routes
@@ -14483,6 +14500,11 @@ export class SessionService {
               releaseInertRepoGuard?.();
               releaseInertRepoGuard = undefined;
             }
+          } else if (!gateDisabled) {
+            // @decision 35cfcbe0 — no movement: the skip covers exactly the tip re-read after the guard was granted; pin the squash to it (in-lock `expectedBranchTip`), so a
+            // commit landing after this read is refused rather than squashed ungated. Gate OFF stays unpinned on purpose (nothing was verified about any tip).
+            skipCoveredTip = postWaitBranchHead;
+            skipKind = "inert";
           }
           // Card e8df2659: `confirmTimeDirty` was stamped BEFORE the guard wait above, so edits made DURING
           // that wait would be squashed out (the squash reads the branch REF) and then force-removed with the
@@ -15475,8 +15497,23 @@ export class SessionService {
     // (`reunionAtAdmission`) reads. Bounded: `mergeBranch` itself is timeout-bounded (`this.gitOpMs`), so
     // this hold can never outlive a single bounded git operation plus the (synchronous, or near-instant)
     // bookkeeping above it in this same try.
+    // @decision 35cfcbe0 — build the landing pin from the state that decided this merge; a decision that reached the squash WITHOUT its tip refuses fail closed (mirrors the
+    // `!pinnedGateTip` refusal above) instead of landing unpinned.
+    landingPin = gateRan
+      ? (pinnedGateTip ? { kind: "gate", tip: pinnedGateTip } : undefined)
+      : skipKind
+      ? (skipCoveredTip ? { kind: "skip", skip: skipKind, tip: skipCoveredTip } : undefined)
+      : !gate
+      ? { kind: "unpinned", reason: "no-gate-configured" }
+      : gateDisabled
+      ? { kind: "unpinned", reason: "gate-disabled" }
+      : undefined;
+    skipRefusalKind = skipKind === "reuse" && reusedOpId ? { kind: "reuse" as const, reusedOpId } : skipKind === "inert" ? { kind: "inert-skip" as const } : undefined;
+    if (!landingPin) {
+      return { ...(await refuseGateTipMoved("pre-squash", skipCoveredTip ?? pinnedGateTip, null, false, { unverifiedWhy: "branch-read", ...(skipRefusalKind ? { skip: skipRefusalKind } : {}) })), ...gatePassRefusalExtras() };
+    }
     if (gateRan) this.gateSemaphore.beginSquash(repoPath, thisOpId);
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, gateRan ? pinnedGateTip : reuseExpectedTip);
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, expectedTipForLanding(landingPin));
     } finally {
       // Mirrors the `beginSquash` guard above exactly — `gateRan` is the same precise proxy for "this op
       // actually holds (or could hold) repoPath via `runExclusive`/`admit`", so a reuse/gateless op never
@@ -15496,7 +15533,7 @@ export class SessionService {
     }
     if (!merge.ok) {
       if (merge.branchTipMoved) {
-        return { ...(await refuseGateTipMoved("in-lock", gateRan ? pinnedGateTip : reuseExpectedTip, merge.branchTipMoved.live ?? null)), ...(gateRan ? {} : { gateRan: false, ...(reusedOpId ? { reusedOpId } : {}) }), ...gatePassRefusalExtras() };
+        return { ...(await refuseGateTipMoved("in-lock", landingPin && landingPin.kind !== "unpinned" ? landingPin.tip : undefined, merge.branchTipMoved.live ?? null, false, gateRan || !skipRefusalKind ? undefined : { skip: skipRefusalKind })), ...gatePassRefusalExtras() };
       }
       if (merge.gateBaseInvalidated) {
         // BENIGN RACE, NOT A REAL MERGE FAILURE: canonical main advanced since this merge's gate-validated

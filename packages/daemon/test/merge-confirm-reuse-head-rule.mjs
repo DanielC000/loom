@@ -100,6 +100,9 @@ const svc = (db, runGate, extra = {}) => new SessionService(db, ptyStub, new Orc
   const r1 = await confirming;
   check("(RP) the reused merge was REFUSED in-lock as gateTipMoved (not squashed)", r1.settled === true && r1.ok && r1.value.merged === false && r1.value.gateTipMoved?.phase === "in-lock" && !fs.existsSync(path.join(repo, "feature.txt")) && !fs.existsSync(path.join(repo, "late.txt")));
   check("(RP) it reports gateRan:false + the reused opId (nothing ran) and no gate call was made", r1.ok && r1.value.gateRan === false && !!r1.value.reusedOpId && calls === 1);
+  check("(RP) the refusal wording names the reused self-check, not a gate spawn (card 35cfcbe0 nit)", r1.ok && /reused self-check/.test(r1.value.reason ?? "") && !/gate spawned/.test(r1.value.reason ?? ""));
+  const rpRej = db.listEvents(mgrId).find((e) => e.kind === "merge_rejected" && e.detail?.reason === "gate_tip_moved");
+  check("(RP) the merge_rejected event carries reused + reusedOpId (card 35cfcbe0 nit)", rpRej?.detail?.reused === true && typeof rpRej.detail.reusedOpId === "string" && rpRej.detail.reusedOpId === r1.value.reusedOpId);
   const r2 = await confirm(sessions, mgrId, workerId);
   check("(RP) never cached: the re-call re-gates the new tip for real and merges it", r2.ok && calls === 2 && r2.cacheHit === undefined && r2.value.merged === true && fs.existsSync(path.join(repo, "late.txt")));
 }
