@@ -210,7 +210,7 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
   check("(B) control: no mid-gate commit merges normally", r1.ok && r1.value.merged === true && fs.existsSync(path.join(repo, "feature.txt")));
 }
 {
-  // (E) ABA (card d099087f): the tip moves T1→T2 and BACK to T1 inside the gate. The settle head equals the pre-spawn head and the live tip
+  // (H) ABA (card d099087f): the tip moves T1→T2 and BACK to T1 inside the gate. The settle head equals the pre-spawn head and the live tip
   // equals the pinned one, so neither a head compare nor c59165b8's pinned-tip check can see it; the PASS ran on mixed T1/T2 content.
   const { db, mgrId, workerId, repo, worktreePath, branch } = await setupWorkerProject(sfxOf("aba"));
   const t1 = execSync("git rev-parse HEAD", { cwd: worktreePath, encoding: "utf8" }).trim();
@@ -224,19 +224,19 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
       return { ...PASS, outputTail: "aba-marker" };
     },
   });
-  check("(E) precondition: the worktree ref is on T1 before the gate", execSync(`git rev-parse ${branch}`, { cwd: repo, encoding: "utf8" }).trim() === t1);
+  check("(H) precondition: the worktree ref is on T1 before the gate", execSync(`git rev-parse ${branch}`, { cwd: repo, encoding: "utf8" }).trim() === t1);
   const r1 = await confirm(sessions, mgrId, workerId);
-  check("(E) op settled, the PASS is refused (nothing squashed)", r1.settled === true && r1.ok && r1.value.merged === false && !fs.existsSync(path.join(repo, "feature.txt")));
-  check("(E) the tip really is back on T1 (live == pinned: the ABA shape, not a plain move)", execSync(`git rev-parse ${branch}`, { cwd: repo, encoding: "utf8" }).trim() === t1);
-  check("(E) refused as gateTipMoved flagged movedAndBack, gated == live", r1.ok && r1.value.gateTipMoved?.movedAndBack === true && r1.value.gateTipMoved.gated === r1.value.gateTipMoved.live && r1.value.gateTipMoved.gated === t1);
-  check("(E) the refusal carries the gate's own record and no gateDetail", r1.ok && /aba-marker/.test(r1.value.outputTail ?? "") && r1.value.gateDetail === undefined);
-  check("(E) a merge_rejected gate_tip_moved event names movedAndBack", db.listEvents(mgrId).some((e) => e.kind === "merge_rejected" && e.detail?.reason === "gate_tip_moved" && e.detail?.movedAndBack === true));
+  check("(H) op settled, the PASS is refused (nothing squashed)", r1.settled === true && r1.ok && r1.value.merged === false && !fs.existsSync(path.join(repo, "feature.txt")));
+  check("(H) the tip really is back on T1 (live == pinned: the ABA shape, not a plain move)", execSync(`git rev-parse ${branch}`, { cwd: repo, encoding: "utf8" }).trim() === t1);
+  check("(H) refused as gateTipMoved flagged movedAndBack, gated == live", r1.ok && r1.value.gateTipMoved?.movedAndBack === true && r1.value.gateTipMoved.gated === r1.value.gateTipMoved.live && r1.value.gateTipMoved.gated === t1);
+  check("(H) the refusal carries the gate's own record and no gateDetail", r1.ok && /aba-marker/.test(r1.value.outputTail ?? "") && r1.value.gateDetail === undefined);
+  check("(H) a merge_rejected gate_tip_moved event names movedAndBack", db.listEvents(mgrId).some((e) => e.kind === "merge_rejected" && e.detail?.reason === "gate_tip_moved" && e.detail?.movedAndBack === true));
   mode = "none"; gateCalls = 0;
   const r2 = await confirm(sessions, mgrId, workerId);
-  check("(E) never cached: a re-call re-gates for real and merges T1", r2.ok && gateCalls === 1 && r2.cacheHit === undefined && r2.value.merged === true && fs.existsSync(path.join(repo, "feature.txt")) && !fs.existsSync(path.join(repo, "t2.txt")));
+  check("(H) never cached: a re-call re-gates for real and merges T1", r2.ok && gateCalls === 1 && r2.cacheHit === undefined && r2.value.merged === true && fs.existsSync(path.join(repo, "feature.txt")) && !fs.existsSync(path.join(repo, "t2.txt")));
 }
 {
-  // (F) control: a reflog-only event that never moves the tip (`git reset --hard HEAD`) must NOT trip the ABA refusal.
+  // (I) control: a reflog-only event that never moves the tip (`git reset --hard HEAD`) must NOT trip the ABA refusal.
   const { db, mgrId, workerId, repo, worktreePath } = await setupWorkerProject(sfxOf("noop"));
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
     syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
@@ -244,7 +244,7 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
   });
   void worktreePath;
   const r1 = await confirm(sessions, mgrId, workerId);
-  check("(F) control: a no-op reset inside the gate does not refuse the pass", r1.ok && r1.value.merged === true && fs.existsSync(path.join(repo, "feature.txt")));
+  check("(I) control: a no-op reset inside the gate does not refuse the pass", r1.ok && r1.value.merged === true && fs.existsSync(path.join(repo, "feature.txt")));
 }
 for (const db of openDbs) { try { db.close(); } catch { /* already closed */ } }
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);
