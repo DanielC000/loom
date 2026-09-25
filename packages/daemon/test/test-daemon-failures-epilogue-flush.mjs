@@ -98,8 +98,34 @@ function expectedLines(marker, lineCount) {
   const missing = lines.filter((l) => !r.stdout.includes(l));
   check(`[chunk-size robustness] LOOM_TEST_FORCE_WRITE_CHUNK_BYTES=7: all ${lineCount} lines survive, ${missing.length} missing`, missing.length === 0);
   // [negative control] same as above, for the chunk=7 configuration — this is the exact configuration that
-  // fails on Linux CI (card e61deaab), so on THIS host (where it passes) the diagnostic must stay silent.
+  // reddened on Linux CI (card e61deaab) — NOT because writeFullySync lost lines (its TRUNCATED diagnostic
+  // stayed silent there) but because the fixture's own console.log output was cut before the harness ever
+  // captured it (card acf17673; see the [fixture direct] case below) — so the diagnostic must stay silent.
   check("[negative control] LOOM_TEST_FORCE_WRITE_CHUNK_BYTES=7: no spurious writeFullySync TRUNCATED diagnostic", !r.stderr.includes("[writeFullySync] TRUNCATED"));
+}
+
+// Card acf17673: the FIXTURE ITSELF must emit every line — the loss that reddened Linux CI here was in the
+// fixture (console.log + process.exit(1) drops the tail of an async POSIX pipe write), upstream of both the
+// harness capture and writeFullySync, which the cases above cannot see. Deterministic: no harness in the
+// path, the reader is paused so the pipe (64KiB) fills, and 20000 lines (~500KB) cannot fit in it — a
+// console.log fixture loses the tail on Linux every time, with no CPU load needed. (On win32 pipe writes are
+// synchronous, so this case is only RED on POSIX; it is GREEN wherever the fixture writes synchronously.)
+{
+  const marker = "SLOWREADER";
+  const lineCount = 20000;
+  const r = await new Promise((resolve) => {
+    let stdout = "";
+    const child = spawn(process.execPath, [path.join(__dirname, "epilogue-flush-fixture.mjs")], {
+      env: { ...process.env, LOOM_TEST_EPILOGUE_FLUSH_MARKER: marker, LOOM_TEST_EPILOGUE_FLUSH_LINE_COUNT: String(lineCount) },
+    });
+    child.stdout.on("data", (d) => { stdout += d; });
+    child.stdout.pause();
+    setTimeout(() => child.stdout.resume(), 500); // lets the child fill the pipe first; only affects whether RED bites, never GREEN
+    child.on("close", (status) => resolve({ status, stdout }));
+  });
+  const have = new Set(r.stdout.match(new RegExp(marker + "-STDOUT-LINE-\\d+", "g")) ?? []).size;
+  check("[fixture direct] exits 1", r.status === 1);
+  check(`[fixture direct] slow reader: all ${lineCount} lines survive the fixture's own exit — ${lineCount - have} missing`, have === lineCount);
 }
 
 // [negative control] the marker-matching itself must be able to fail: a marker that was never sent must be

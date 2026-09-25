@@ -6,14 +6,32 @@
 // synchronous-flush fix — through the REAL entry point (`node scripts/test-daemon.mjs --only=<name>`),
 // never by importing test-daemon.mjs's internals directly.
 
+import fs from "node:fs";
+
 const marker = process.env.LOOM_TEST_EPILOGUE_FLUSH_MARKER;
 
 if (marker) {
   // Deliberately large + line-numbered so a truncated echo (missing a prefix or a suffix of these lines)
   // is unambiguously detectable by the caller.
   const lineCount = Number(process.env.LOOM_TEST_EPILOGUE_FLUSH_LINE_COUNT ?? "200");
-  for (let i = 0; i < lineCount; i++) console.log(`${marker}-STDOUT-LINE-${i}`);
-  console.error(`${marker}-STDERR-TAIL`);
+  // Card acf17673: written with fs.writeSync on fds 1/2, NEVER console.log/console.error + process.exit(1).
+  // On POSIX a piped process.stdout write is async, so process.exit(1) right after 300 console.log calls
+  // dropped a load-dependent tail of THIS fixture's own output before test-daemon.mjs ever captured it
+  // (reproduced on Linux under CPU load with the fixture run directly, no harness in the path) — which
+  // read as writeFullySync losing the epilogue. Touching process.stdout also flips the shared pipe fd to
+  // O_NONBLOCK; fs.writeSync alone leaves it blocking, and the loop below covers a partial write anyway.
+  const writeAll = (fd, text) => {
+    const buf = Buffer.from(text, "utf-8");
+    let off = 0;
+    const deadline = Date.now() + 10_000;
+    while (off < buf.length && Date.now() < deadline) {
+      try { off += fs.writeSync(fd, buf, off, buf.length - off); } catch (e) { if (e.code !== "EAGAIN") throw e; }
+    }
+  };
+  let body = "";
+  for (let i = 0; i < lineCount; i++) body += `${marker}-STDOUT-LINE-${i}\n`;
+  writeAll(1, body);
+  writeAll(2, `${marker}-STDERR-TAIL\n`);
   process.exit(1);
 }
 
