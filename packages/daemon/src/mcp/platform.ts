@@ -290,6 +290,28 @@ export const HUMAN_ONLY_PROJECT_CONFIG_KEYS: readonly string[] = ["harness"];
 /** Dot-path human-only keys the elevated Platform `project_configure` also refuses (card e8df2659). The
  *  top-level list above is `Object.hasOwn`-only and cannot see a nested key. */
 export const HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = ["orchestration.mergeGate"];
+/** Nested keys the Lead may CHANGE but never BLANK or DROP (card fa777608). This blocks only the LABELLED
+ *  gateless path — a blank/removed `orchestration.gateCommand` ⇒ "no gateCommand configured" (unverified).
+ *  It does NOT stop the gate being neutered: the Lead can still change the command to a no-op such as
+ *  `exit 0`, which records a PASS. A human can still clear it (REST PATCH / Settings UI). */
+export const NON_CLEARABLE_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = ["orchestration.gateCommand"];
+function nestedValue(obj: unknown, dotPath: string): unknown {
+  let cur: unknown = obj;
+  for (const seg of dotPath.split(".")) {
+    if (!cur || typeof cur !== "object" || !Object.hasOwn(cur, seg)) return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
+}
+const isNonBlankString = (v: unknown): boolean => typeof v === "string" && v.trim() !== "";
+/** ONE check for both nested-key guards above: does this `unset` list (normalized EXACTLY like
+ *  `unsetConfigPath`) hit `k` itself, or a prefix of it while `k` is stored? */
+function unsetDropsNestedKey(k: string, stored: boolean, unset: readonly string[] | undefined): boolean {
+  return (unset ?? []).some((u) => {
+    const nu = normalizeConfigPath(u);
+    return nu !== "" && (nu === k || (stored && k.startsWith(`${nu}.`)));
+  });
+}
 function hasNestedKey(obj: unknown, dotPath: string): boolean {
   let cur: unknown = obj;
   for (const seg of dotPath.split(".")) {
@@ -1322,7 +1344,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The default-harness key harness (which vendor CLI a worker spawns) is human-only EVEN HERE and is REJECTED, matching profile.harness. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–3600000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset. A payload that both WRITES and UNSETS the same dot-path is REJECTED (not silently resolved either way) — drop one of the two. The returned config NEVER carries sessionEnv values, masked or real — instead it carries sessionEnvKeys (names + VALUE LENGTHS only, e.g. {\"FOO\":38}), so you can confirm a length without ever seeing anything value-shaped. sessionEnvKeys is NOT a settable key — feeding this response's config straight back as a later patch/replace is REJECTED (invalid config), never a silent write.",
+        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The default-harness key harness (which vendor CLI a worker spawns) is human-only EVEN HERE and is REJECTED, matching profile.harness. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–3600000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). You may CHANGE gateCommand to another non-empty command but NOT blank it or drop it (empty/whitespace value, unset, or replace:true omitting it are REFUSED — a human can still clear it via Settings). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset. A payload that both WRITES and UNSETS the same dot-path is REJECTED (not silently resolved either way) — drop one of the two. The returned config NEVER carries sessionEnv values, masked or real — instead it carries sessionEnvKeys (names + VALUE LENGTHS only, e.g. {\"FOO\":38}), so you can confirm a length without ever seeing anything value-shaped. sessionEnvKeys is NOT a settable key — feeding this response's config straight back as a later patch/replace is REJECTED (invalid config), never a silent write.",
         inputSchema: strictShape({
           projectId: z.string(),
           config: z.object({}).passthrough().optional(),
@@ -1367,12 +1389,26 @@ export class PlatformMcpRouter {
           // Normalized EXACTLY like `unsetConfigPath` does (split on ".", drop empty segments), so
           // "orchestration.mergeGate.", ".orchestration.mergeGate", "orchestration..mergeGate", "orchestration."
           // and ".orchestration" cannot slip past a raw-string compare and still delete the key.
-          const unsetHits = (unset ?? []).some((u) => {
-            const nu = normalizeConfigPath(u);
-            return nu !== "" && (nu === k || (stored && k.startsWith(`${nu}.`)));
-          });
-          if (unsetHits) return ok({ error: `invalid config: ${k} may not be cleared via an agent MCP tool (unset) — it is human-only, via the REST config PATCH / Settings UI` });
+          if (unsetDropsNestedKey(k, stored, unset)) return ok({ error: `invalid config: ${k} may not be cleared via an agent MCP tool (unset) — it is human-only, via the REST config PATCH / Settings UI` });
           if (replace && stored) return ok({ error: `invalid config: replace:true would drop the stored human-only ${k} — it may not be cleared via an agent MCP tool (human-only, via the REST config PATCH / Settings UI); use a merge write instead` });
+        }
+        // Card fa777608: the Lead may CHANGE `orchestration.gateCommand` but never blank or drop it (same
+        // helper as above). A human can still clear it via the REST PATCH / Settings UI.
+        for (const k of NON_CLEARABLE_NESTED_PROJECT_CONFIG_KEYS) {
+          const human = "a human can still clear it via the REST config PATCH / Settings UI";
+          const written = nestedValue(config, k);
+          // A non-string value (0, null, {}) is the validator's to reject as a type error, not ours.
+          if (written !== undefined && typeof written !== "string") continue;
+          if (typeof written === "string" && !isNonBlankString(written)) {
+            return ok({ error: `invalid config: ${k} may not be set to an empty/blank value via an agent MCP tool — that gives the unverified "no gateCommand" merge path; set another non-empty command (${human})` });
+          }
+          const stored = isNonBlankString(nestedValue(project.config, k));
+          if (stored && unsetDropsNestedKey(k, stored, unset)) {
+            return ok({ error: `invalid config: ${k} may not be removed via an agent MCP tool (unset) — set another non-empty command instead (${human})` });
+          }
+          if (stored && replace && !isNonBlankString(written)) {
+            return ok({ error: `invalid config: replace:true would drop the stored ${k} — include a non-empty ${k} in the replacement, or use a merge write (${human})` });
+          }
         }
         const v = validateProjectConfigOverride(config ?? {});
         // List the valid top-level keys on rejection so a fat-fingered key (e.g. "columns" instead of
