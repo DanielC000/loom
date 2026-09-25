@@ -13549,7 +13549,9 @@ export class SessionService {
     // the gate never ran. Refused (never cached, a re-call re-gates the new tip) rather than squashing the gated tip, which
     // would land without the later commit and then lose it when finalizeMerge deletes the branch.
     const refuseGateTipMoved = async (phase: "pre-squash" | "in-lock", gated: string | undefined, live: string | null | undefined): Promise<ConfirmMergeResult> => {
-      const why = `the branch tip moved after the gate spawned (gated ${gated?.slice(0, 8) ?? "unknown"}, now ${live?.slice(0, 8) ?? "unreadable"}), so this PASS does not cover the commit that would be squashed`;
+      const why = gated && live
+        ? `the branch tip moved after the gate spawned (gated ${gated.slice(0, 8)}, now ${live.slice(0, 8)}), so this PASS does not cover the commit that would be squashed`
+        : `the gated branch tip could not be verified (gated ${gated?.slice(0, 8) ?? "unreadable"}, now ${live?.slice(0, 8) ?? "unreadable"}), so this PASS is refused rather than squashed unchecked`;
       const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. Re-run worker_merge_confirm to gate the new tip — this refusal is never cached.`;
       const { suppressed, sha } = await rejectNotify("gate_tip_moved", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: "gate_tip_moved", sha, phase, gatedTip: gated ?? null, liveTip: live ?? null, ...(suppressed ? { suppressed: true } : {}) });
@@ -13667,6 +13669,10 @@ export class SessionService {
     // Card 8b1fb28f: the branch tip captured immediately BEFORE each gate spawn (see `captureGatedTip`) — i.e.
     // the tip the FINAL gate attempt actually ran on. `undefined` until a gate spawns, and again after any failed read.
     let gatedTip: string | undefined;
+    // @decision 975c774b — the tip the WHOLE gate (attempt 1 / transient re-run) spawned on, pinned; single-file and resumed links
+    // never overwrite it, so a commit landed mid-attempt-1 can't be laundered by a later link's fresh capture (it stays undefined
+    // if that read failed, which the checks treat as "could not be verified").
+    let pinnedGateTip: string | undefined;
     // @decision 975c774b — set by `runGateSeq`'s settle-time stamp compare (below) when the worktree changed across a gate
     // run; `gatePreStamp` is the stamp `captureGatedTip` took right before that spawn.
     let gateWorktreeChanged: string | undefined;
@@ -13692,6 +13698,15 @@ export class SessionService {
     let gateCapForRecord: number | undefined;
     let concurrentGatesForRecord: number | undefined;
     let concurrentGatesMaxForRecord: number | undefined;
+    // One spread for every refusal of a PASS the gate really ran (dirty tree, moved tip pre-squash / in-lock), so none drops the gate's record.
+    const gatePassRefusalExtras = () => ({
+      gateExtended, gateProximity, outputTail: gateOutputTailForRecord,
+      ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}),
+      ...(gateCapForRecord !== undefined ? { gateCap: gateCapForRecord } : {}),
+      ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
+      ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
+      ...(retriedFile ? { retriedFile, retryPassed } : {}),
+    });
     // Card 344ce950: the single-file retry's own outcome (see the `if (gate)` block below for where these
     // are actually set) — declared at THIS outer scope for the SAME reason as the fields just above: the
     // plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block. `undefined` for
@@ -14258,8 +14273,9 @@ export class SessionService {
       // time, when a live worker may have committed since. Any read failure ⇒ undefined ⇒ unstamped (fail-safe).
       // @decision 975c774b — also takes the pre-spawn worktree stamp, and REFUSES up front (GateWorktreeDirtyError, caught
       // at the runExclusive catch) a tree already dirty then: the same `computeWorktreeGateStamp` dirt `run_gate` uses.
-      const captureGatedTip = async (): Promise<void> => {
+      const captureGatedTip = async (pin = false): Promise<void> => {
         try { gatedTip = (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined; } catch { gatedTip = undefined; }
+        if (pin) pinnedGateTip = gatedTip;
         gatePreStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         if (gatePreStamp.dirty) throw new GateWorktreeDirtyError("the worktree carries uncommitted changes before the gate spawns");
         if (gatePreStamp.head === null) throw new GateWorktreeDirtyError("the worktree stamp is unreadable before the gate spawns");
@@ -14649,7 +14665,7 @@ export class SessionService {
             // @decision 975c774b — this link re-runs the WHOLE gate, so dirt attempt 1 saw at settle no longer taints its verdict:
             // reset here only (single-file/resumed links stay sticky); a still-dirty tree re-sets it via captureGatedTip's throw.
             gateWorktreeChanged = undefined;
-            await captureGatedTip(); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
+            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
             transientGateSpawned = true;
             if (r.passed) holdRepoGuardOnExit();
             return r;
@@ -14768,7 +14784,7 @@ export class SessionService {
             // Card 9f6598dd: mirror the semaphore's own onExtend into `anyExtended` too — an ADDITIONAL
             // observer of the SAME event, never a replacement for the live registry's `entry.extended`.
             const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-            await captureGatedTip(); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, mirroredHooks, gateSpillFile);
+            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, mirroredHooks, gateSpillFile);
             // CARD c24dd48a: a passing gate hands off to this method's own squash phase — keep the per-repo
             // guard held (`beginSquash`/`endSquash` extend then release it). A failing gate never squashes.
             if (r.passed) holdRepoGuardOnExit();
@@ -15044,27 +15060,13 @@ export class SessionService {
       // @decision 975c774b — a PASS whose worktree changed under the gate proves nothing about the commit that would be
       // squashed: refuse before beginSquash (the outer finally frees the repo hold), never cached.
       if (gateRan && gateWorktreeChanged) {
-        return {
-          ...(await refuseWorktreeDirty("during-gate", gateWorktreeChanged)),
-          gateExtended, gateProximity, outputTail: gateOutputTailForRecord,
-          ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}),
-          ...(gateCapForRecord !== undefined ? { gateCap: gateCapForRecord } : {}),
-          ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
-          ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
-        };
+        return { ...(await refuseWorktreeDirty("during-gate", gateWorktreeChanged)), ...gatePassRefusalExtras() };
       }
       // @decision 975c774b — friendly pre-check; mergeBranch's in-lock `expectedBranchTip` is the structural half.
       if (gateRan) {
         const liveTip = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }).catch(() => null) ?? null;
-        if (!gatedTip || liveTip !== gatedTip) {
-          return {
-            ...(await refuseGateTipMoved("pre-squash", gatedTip, liveTip)),
-            gateExtended, gateProximity, outputTail: gateOutputTailForRecord,
-            ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}),
-            ...(gateCapForRecord !== undefined ? { gateCap: gateCapForRecord } : {}),
-            ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
-            ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
-          };
+        if (!pinnedGateTip || liveTip !== pinnedGateTip) {
+          return { ...(await refuseGateTipMoved("pre-squash", pinnedGateTip, liveTip)), ...gatePassRefusalExtras() };
         }
       }
     }
@@ -15138,7 +15140,7 @@ export class SessionService {
     // this hold can never outlive a single bounded git operation plus the (synchronous, or near-instant)
     // bookkeeping above it in this same try.
     if (gateRan) this.gateSemaphore.beginSquash(repoPath, thisOpId);
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, gateRan ? gatedTip : undefined);
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, gateRan ? pinnedGateTip : undefined);
     } finally {
       // Mirrors the `beginSquash` guard above exactly — `gateRan` is the same precise proxy for "this op
       // actually holds (or could hold) repoPath via `runExclusive`/`admit`", so a reuse/gateless op never
@@ -15158,7 +15160,7 @@ export class SessionService {
     }
     if (!merge.ok) {
       if (merge.branchTipMoved) {
-        return { ...(await refuseGateTipMoved("in-lock", gatedTip, merge.branchTipMoved.live ?? null)), gateExtended, gateProximity };
+        return { ...(await refuseGateTipMoved("in-lock", pinnedGateTip, merge.branchTipMoved.live ?? null)), ...gatePassRefusalExtras() };
       }
       if (merge.gateBaseInvalidated) {
         // BENIGN RACE, NOT A REAL MERGE FAILURE: canonical main advanced since this merge's gate-validated

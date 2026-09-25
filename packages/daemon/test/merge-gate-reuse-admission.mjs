@@ -160,7 +160,9 @@ try {
     check("(M) gateRan:true", confirm.gateRan === true);
     check("(M) confirmWorkerMerge REFUSES rather than silently squashing the new commit onto an advanced main", confirm.merged === false);
     // Card c59165b8: the branch itself moved mid-gate here, so the gated-tip refusal (not requireCanonicalHead's) now fires first; both are
-    // benign, uncached, zero-side-effect retries. (N) below (branch stable, main moved) is the pair that still isolates requireCanonicalHead.
+    // benign, uncached, zero-side-effect retries. requireCanonicalHead's ENFORCING branch is kept covered by (M2) below (a direct mergeBranch
+    // call), and (N) (branch stable, main moved) is the pair that proves it is not over-eager.
+    check("(M) the refusal is the gated-tip refusal (gateTipMoved, not gateBaseInvalidated)", !!confirm.gateTipMoved && !confirm.gateBaseInvalidated);
     check("(M) the refusal reads as a benign, retryable race, not a real merge/gate failure", /benign race|advanced|tip moved/i.test(confirm.reason ?? "") && /re-run worker_merge_confirm/i.test(confirm.detailText ?? ""));
     const commitsAheadOfBaseline = execSync(`git rev-list --count ${mainHeadBeforeConfirm}..HEAD`, { cwd: M.repo }).toString().trim();
     check("(M) canonical repo gained ONLY the mid-gate advance commit — no squash landed on top of it (zero side effects)", commitsAheadOfBaseline === "1");
@@ -182,6 +184,28 @@ try {
     } else {
       check("(M) retry skipped — the first confirm did not refuse as expected, so there is no clean retry to prove", false);
     }
+  }
+  // ── (M2) requireCanonicalHead's ENFORCING branch, called directly on mergeBranch — card c59165b8 moved (M)'s branch-moved case onto the
+  //         gated-tip refusal, so this keeps b0ab78d6's enforcement pinned: the branch tip is what the gate saw (expectedBranchTip = live) but
+  //         gateBaseBranchHead != live (no stability proof), and canonical main advanced since gateBaseMainHead ⇒ gateBaseInvalidated, zero side effects.
+  {
+    const M2 = mk("m2", "feature-m2.txt");
+    makeRepo(M2);
+    const { mergeBranch } = await import("../dist/git/worktrees.js");
+    const { worktreePath, branch } = await createWorktree(M2.repo, M2.projId, M2.taskId);
+    worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, M2.file), "work for M2\n");
+    commitAll(worktreePath, M2.file, GIT_ID);
+    const liveTip = execSync(`git rev-parse ${branch}`, { cwd: M2.repo }).toString().trim();
+    const staleMain = execSync("git rev-parse HEAD", { cwd: M2.repo }).toString().trim();
+    fs.writeFileSync(path.join(M2.repo, "main-advance-m2.txt"), "main moved\n");
+    commitAll(M2.repo, "main advance m2", GIT_ID);
+    const r = await mergeBranch(M2.repo, branch, "MGRU-M2", {}, staleMain, "0".repeat(40), undefined, liveTip);
+    check("(M2) stale requireCanonicalHead with an unproven branch stability is still refused as gateBaseInvalidated", r.ok === false && r.gateBaseInvalidated === true && !r.branchTipMoved);
+    check("(M2) zero side effects: nothing landed, index clean", !fs.existsSync(path.join(M2.repo, M2.file)) && execSync("git status --porcelain --untracked-files=no", { cwd: M2.repo }).toString().trim() === "");
+    const freshMain = execSync("git rev-parse HEAD", { cwd: M2.repo }).toString().trim();
+    const r2 = await mergeBranch(M2.repo, branch, "MGRU-M2", {}, freshMain, "0".repeat(40), undefined, liveTip);
+    check("(M2) control: the same call with CURRENT main merges (the refusal above was requireCanonicalHead, not a broken fixture)", r2.ok === true && fs.existsSync(path.join(M2.repo, M2.file)));
   }
   // ── (N) ALREADY-LANDED (preLanded) PURE RE-CONFIRM STAYS IDEMPOTENT WHEN ONLY MAIN MOVES — card
   //        b0ab78d6, regression found and closed before merge. (M) above and this scenario are a
@@ -410,6 +434,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the preLanded path now refuses when a branch gains new content during the gate (M) while staying idempotent when only main moves (N); an admission-time re-union conflict is a defined rejection, never a silent vanish or a silent proceed (O); and the fail-closed guard still fires for a main advance the once-only admission-time re-derivation can't see (P). See merge-gate-reuse.mjs for the core reuse-decision and race-window scenarios, and merge-gate-reuse-robustness.mjs for concurrent same-repo confirms, the admission guard's leak-proofing/confinement, and the combined-conditions capstone."
+  ? "\n✅ ALL PASS — the preLanded path now refuses when a branch gains new content during the gate (M: via the gated-tip refusal, c59165b8) while requireCanonicalHead's enforcing branch stays pinned by a direct mergeBranch case (M2) and the path stays idempotent when only main moves (N); an admission-time re-union conflict is a defined rejection, never a silent vanish or a silent proceed (O); and the fail-closed guard still fires for a main advance the once-only admission-time re-derivation can't see (P). See merge-gate-reuse.mjs for the core reuse-decision and race-window scenarios, and merge-gate-reuse-robustness.mjs for concurrent same-repo confirms, the admission guard's leak-proofing/confinement, and the combined-conditions capstone."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

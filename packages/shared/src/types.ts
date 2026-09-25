@@ -624,10 +624,11 @@ export interface PendingMerge {
    *  about the CALLING MANAGER rather than the branch, and (like "stale-base") must never be served from
    *  cache to a later re-confirm (card 6325bc74); "worktree-dirty" — the gate ran against a worktree that was
    *  dirty or changed under it (card 975c774b), so the verdict describes no commit; never cached, renders like
-   *  "rejected". The Board's `mergeDisplay` renders none of these with
+   *  "rejected"; "gate-tip-moved" — a PASS refused because the branch tip moved after the gate spawned (card c59165b8);
+   *  never cached, renders like "rejected". The Board's `mergeDisplay` renders none of these with
    *  their own visual state: "unknown" and "not-your-worker" piggyback on the sibling `state:"failed"`
    *  treatment; "stale-base" renders like "rejected". */
-  outcome?: "merged" | "cancelled" | "rejected" | "unknown" | "stale-base" | "not-your-worker" | "worktree-dirty";
+  outcome?: "merged" | "cancelled" | "rejected" | "unknown" | "stale-base" | "not-your-worker" | "worktree-dirty" | "gate-tip-moved";
   /** Disambiguates `state:"running"` into WAITING vs EXECUTING (card 53ad9ed3, closing the divergence
    *  008f33f1 left deliberately open on this REST/WS path — worker_list/worker_status's MCP `pendingMerge`
    *  already carried this). `state:"running"` alone is PendingOpRegistry's own coarse in-flight bit, set

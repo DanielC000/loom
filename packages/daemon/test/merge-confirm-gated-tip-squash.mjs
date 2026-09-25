@@ -7,6 +7,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // 975c774b's dirt stamp does not fire), then passes.
 //   (A) gate passes while a new commit lands mid-gate: the ungated commit must NOT be on main.
 //       Also: the refusal is flagged gateTipMoved, and a re-call RE-GATES the new tip (never served from cache) and merges it.
+//   (D) RETRY-LINK LAUNDERING: attempt 1 (the whole gate) runs on T1 and fails genuinely, the worker commits T2 mid-attempt, the
+//       single-file retry re-captures T2, runs ONE file and passes. The pass covers only that file on T2, so T2 must NOT land: the gated tip
+//       is PINNED at the whole-gate link, and single-file/resumed links never overwrite it.
 //   (B) control: the same flow with no mid-gate commit merges normally (a green control, so (A) is not vacuous).
 //   (C) the IN-LOCK half, called directly on mergeBranch (the window between service.ts's pre-check and the lock cannot be hit
 //       deterministically through the service): a stale expectedBranchTip refuses with zero side effects; the current tip and an
@@ -24,8 +27,6 @@ process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mcgt-home-${Date.now()}-${p
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 registerForCleanup(process.env.LOOM_HOME);
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-mcgt-nonexistent-codex");
-// Long enough that a test can observe attempt 1 settle and then clean the tree inside the retry settle wait (E2/E4).
-process.env.LOOM_GATE_RETRY_SETTLE_MS = "1500";
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -87,14 +88,14 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
 
 
 {
-  const { db, mgrId, workerId, repo, worktreePath } = await setupWorkerProject(sfxOf("moved"));
+  const { db, mgrId, workerId, repo, makeWorker } = await setupWorkerProject(sfxOf("moved"));
   let gateCalls = 0, lateOnce = true;
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
     syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
     runGate: async (_cmd, cwd) => {
       gateCalls++;
       if (lateOnce) { fs.writeFileSync(path.join(cwd, "late.txt"), "landed mid-gate\n"); commitAll(cwd, "late commit", GIT_ID); } // clean tree afterwards: only the branch tip moved
-      return PASS;
+      return { ...PASS, outputTail: "tip-moved-marker" };
     },
   });
   const r1 = await confirm(sessions, mgrId, workerId);
@@ -103,7 +104,13 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
   check("(A) the outcome is not a silent merged:true of a tip the gate never saw", r1.ok && r1.value.merged === false);
   check("(A) the refusal is the distinct gateTipMoved shape naming both tips (pre-squash)", r1.ok && r1.value.gateTipMoved?.phase === "pre-squash" && !!r1.value.gateTipMoved.gated && !!r1.value.gateTipMoved.live && r1.value.gateTipMoved.gated !== r1.value.gateTipMoved.live);
   check("(A) the refusal is not a generic gate failure (no gateDetail)", r1.ok && r1.value.gateDetail === undefined);
-  gateCalls = 0; lateOnce = false;
+  check("(A) the refusal carries the gate's own record (outputTail), like the dirty refusal", r1.ok && /tip-moved-marker/.test(r1.value.outputTail ?? ""));
+  // The refusal must have released the repo guard: a same-repo sibling's merge gate is admitted and merges right after it.
+  const sib = await makeWorker("sib", "sib.txt");
+  lateOnce = false;
+  const rs = await confirm(sessions, mgrId, sib.workerId);
+  check("(A) guard released: a same-repo sibling confirm right after the refusal is admitted and merges", rs.settled === true && rs.ok && rs.value.merged === true && fs.existsSync(path.join(repo, "sib.txt")));
+  gateCalls = 0;
   const r2 = await confirm(sessions, mgrId, workerId);
   check("(A) re-call re-gates the new tip (not served from cache) and merges it", r2.ok && gateCalls === 1 && r2.cacheHit === undefined && r2.value.merged === true && fs.existsSync(path.join(repo, "late.txt")));
 }
@@ -123,6 +130,23 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
   void db, void mgrId, void workerId;
   const r1 = await mergeBranch(repo, branch, "T");
   check("(C) omitted expectedBranchTip behaves as before (merges)", r1.ok === true && fs.existsSync(path.join(repo, "feature.txt")));
+}
+{
+  const { db, mgrId, workerId, repo } = await setupWorkerProject(sfxOf("retry"), { plant: "flaky-one" });
+  const genuineFail = { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-one", failingTestCount: 1, failTierTest: "FAIL  flaky-one", failTierTestCount: 1, failTierAll: ["FAIL  flaky-one"] };
+  let gateCalls = 0;
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
+    runGate: async (_cmd, cwd) => {
+      gateCalls++;
+      if (gateCalls === 1) { fs.writeFileSync(path.join(cwd, "t2.txt"), "T2 landed mid-attempt-1\n"); commitAll(cwd, "t2 commit", GIT_ID); return genuineFail; }
+      return PASS; // the single-file retry: passes on the moved tip
+    },
+  });
+  const r1 = await confirm(sessions, mgrId, workerId);
+  check("(D) the single-file retry ran (2 gate calls) and its pass was refused", gateCalls === 2 && r1.settled === true && r1.ok && r1.value.merged === false && r1.value.retriedFile !== undefined);
+  check("(D) refused as gateTipMoved (gated tip pinned at attempt 1, not the retry's re-capture)", r1.ok && r1.value.gateTipMoved?.gated !== r1.value.gateTipMoved?.live && !!r1.value.gateTipMoved);
+  check("(D) T2 did NOT land on main", !fs.existsSync(path.join(repo, "t2.txt")) && !fs.existsSync(path.join(repo, "feature.txt")));
 }
 {
   const { db, mgrId, workerId, repo } = await setupWorkerProject(sfxOf("stable"));

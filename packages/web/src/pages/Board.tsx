@@ -453,7 +453,9 @@ function mergeDisplay(pm: PendingMerge | null | undefined): MergeDisplay | null 
   // the board has no reason to teach a viewer the internal cache-eviction taxonomy. Without this, an
   // unrecognized outcome string fell through to the final `merged`/phosphor return below and rendered a
   // REJECTED branch as a successful green merge.
-  if (pm.outcome === "rejected" || pm.outcome === "stale-base" || pm.outcome === "worktree-dirty") return { state: "rejected", tone: "amber", label: "rejected", startedAt: pm.startedAt };
+  // Card c59165b8: ONLY a "merged" (or absent, legacy/synthetic "done") outcome may render green; any other string, including one this
+  // build does not know yet ("gate-tip-moved", "worktree-dirty", a future outcome), renders as rejected — never as a successful merge.
+  if (pm.outcome !== undefined && pm.outcome !== "merged") return { state: "rejected", tone: "amber", label: "rejected", startedAt: pm.startedAt };
   return { state: "merged", tone: "phosphor", label: "merged", startedAt: pm.startedAt }; // "merged", or a legacy/synthetic "done" with no outcome
 }
 
