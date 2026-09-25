@@ -385,9 +385,9 @@ try {
     // not be folded into or come after it — see server.ts's own comment for why), so verify the ordering
     // directly rather than mere presence, which proves nothing about precedence.
     const emptyAddrCheckIdx = codeSlice.search(/ip\s*===\s*["']["']/);
-    const loopbackMembershipIdx = codeSlice.indexOf("LOOPBACK.has(ip)");
+    const loopbackMembershipIdx = codeSlice.indexOf('classOf(req).kind !== "loopback"'); // card 4cbbc343: the membership test is the predicate's class
     check("(G) GAP 1: the guard checks for an empty/undeterminable peer address (ip === \"\")", emptyAddrCheckIdx !== -1);
-    check("(G) GAP 1: the empty-address check runs BEFORE the LOOPBACK.has(ip) membership check (ordering, not just presence)",
+    check("(G) GAP 1: the empty-address check runs BEFORE the loopback-class membership check (ordering, not just presence)",
       loopbackMembershipIdx !== -1 && emptyAddrCheckIdx !== -1 && emptyAddrCheckIdx < loopbackMembershipIdx);
   }
 } finally {

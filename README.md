@@ -174,7 +174,36 @@ loom open --print-url --host localhost --port 4317
 
 Either way the browser keeps it and strips it from the address bar. It's stored per browser origin, so each URL you reach the cockpit by needs it once of its own — and anything holding it can drive the full loopback API, so treat it like a password.
 
-> **⚠ Tailscale `serve` does not work today, and neither does any other reverse proxy.** `tailscale serve --bg 4317` looks like the same shape as the SSH forward and was recommended here previously. It is refused *earlier* than the credential step above, so the writes-locked banner never gets a chance to help. Two guards, both keyed to loopback and both ahead of everything else: the CSRF guard rejects a request whose `Origin` isn't loopback with `403 cross-origin request refused`, and the DNS-rebinding guard rejects one whose `Host` isn't with `403 host header not allowed`. A browser on `https://your-host.<tailnet>.ts.net` sends that hostname in both, so writes and WebSocket upgrades are refused outright, and a proxy that forwards the original `Host` — the usual behaviour — is refused on plain reads too, before the page renders. This is a gap in Loom, not in Tailscale; it's tracked, and until it's fixed use the SSH forward above. (A `.ts.net` address as the `bindHost` of a *direct* bind, below, is a different configuration and is unaffected.)
+### Behind a reverse proxy (Tailscale Serve) — unverified on a live Tailscale node
+
+`tailscale serve` — or another same-host reverse proxy — in front of a loopback daemon works through a **trusted-proxy listener**: a third, `127.0.0.1`-only port that the proxy forwards to. It is **off by default**, it gives a read-and-steer cockpit rather than the full local one, and it has **not been run against a live Tailscale node** (see the note at the end of this section). What it does:
+
+- **Every request on that port is remote-class, whatever its `Host`.** It needs a gateway token (below), reaches the same Tier-1 surface as any remote caller (reads, answering and steering, view-only terminals) and can never *change* configuration, reach a human-only writer, `/internal/*`, or the local access credential. (Tier 1 does include reads such as profiles and the companion's configuration.) On this listener the class follows the *listener*, never a header a proxy might rewrite, so a proxy that rewrites `Host` to `127.0.0.1` still fails closed there.
+- **Never point a proxy at the daemon's own port (`4317` by default).** On that port the class still follows the peer address: with proxy mode on, a request carrying `X-Forwarded-*`, `Forwarded`, `Via`, `X-Real-IP` or `Tailscale-*` headers is treated as remote, but a proxy that rewrites `Host` to `127.0.0.1:4317` and adds none of them (nginx's default `proxy_pass` does exactly this) is indistinguishable from a local client and is served as **loopback** — the full local read surface, with no token. Point the proxy at `proxyPort` only.
+- **The proxy must preserve the original `Host`** (nginx: `proxy_set_header Host $host;`) and, for the live panes, pass WebSocket upgrades (`proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`). Otherwise the `Host` no longer matches a trusted origin and every request is refused 403.
+- **The cockpit's static files are served without a token** (a browser has to load the app before it can present one); everything else needs the token. The browser keeps the token per origin and sends it on every request and WebSocket.
+- **`Host` must be one of `trustedProxyOrigins`, and any `Origin` must be that same entry** — exact scheme, host and port; no wildcards; `https` unless it is a `.ts.net` name; a loopback address is refused. A `Tailscale-Funnel-Request` header is refused on every route of the proxy listener, so **do not use Funnel**.
+
+Set it up (all human-only, over the loopback API; a config change needs `loom restart`; the daemon still boots without a gateway token but does not open the proxy port — it logs a warning instead — so mint the first token BEFORE the restart in step 3):
+
+```sh
+# 1. a gateway token (shown once) — see "A direct authenticated bind" below for the same call
+curl -X POST http://127.0.0.1:4317/api/gateway-tokens   -H "Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)"   -H 'content-type: application/json' -d '{"name":"my-phone"}'
+
+# 2. turn proxy mode on: the port Serve will target, and the exact origin your browser will use.
+#    ⚠ This PATCH REPLACES the whole `remoteAccess` block: if you already have a direct bind, include
+#    its fields (bindHost, port, allowedHosts, tls, rateLimit) here too, or they are dropped. Also: a trusted
+#    origin's host must NOT be a direct-bind bindHost/allowedHosts entry, or the proxy listener is refused.
+curl -X PATCH http://127.0.0.1:4317/api/platform/config   -H "Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)"   -H 'content-type: application/json'   -d '{"remoteAccess":{"enabled":true,"proxyPort":4319,"trustedProxyOrigins":["https://your-machine.your-tailnet.ts.net:8443"]}}'
+
+# 3. restart the daemon, then point Serve at the proxy port — a DEDICATED Serve port, never one shared with other content
+loom restart
+tailscale serve --bg --https=8443 http://127.0.0.1:4319
+```
+
+Then open `https://your-machine.your-tailnet.ts.net:8443/?gwtoken=<token>` once; the browser checks it with the daemon, stores it only if it is accepted (a refused link never overwrites a token you already hold) and strips it from the address bar (or paste it into the banner). `proxyPort` has no default and must differ from `4317` and from the remote listener's port. Keep the origin to a port dedicated to Loom: any other page on the same origin can read the stored token.
+
+> **Unverified on a live Tailscale node.** This was built from Tailscale's source (`serve.go` preserves `Host`, leaves `Origin` alone, adds `X-Forwarded-*` and `Tailscale-*` headers) and tested against a minimal in-test Node reverse proxy in this repo's own tests — plain HTTP only; https through a proxy, nginx and Caddy were not tested — not against a live tailnet. Whether Serve relays WebSocket upgrades unchanged on your version is the one thing to check first (the live panes stay empty if not); the `tailscale serve` flags above also vary by version, so check `tailscale serve --help`. None of it weakens the boundary — the trust decision never depends on what Serve does with `Host`.
 
 ### A direct authenticated bind (an API surface, not a cockpit)
 
@@ -192,7 +221,7 @@ Loom can also bind a non-loopback interface itself. It is **off by default**, an
 - **TLS is mandatory** for any non-loopback bind that isn't a Tailscale `.ts.net` address (a tailnet link
   is already encrypted). Point `remoteAccess.tls` at a cert and key; without readable material the daemon **refuses to open the remote listener and stays loopback-only** rather than serving plaintext.
 - **Routes are allowlisted, fail-closed.** Only an explicitly listed set — reads, plus the surfaces you
-  need to actually answer and steer (the Requests inbox, session input/stop/resume/end), plus the live session sockets: the terminal stream (view-only to a remote peer; steering goes through the governed REST input route, and host shells are never reachable remotely), the companion chat stream, and a fleet-status feed. Everything else, including all configuration, every human-only writer, and the SPA's own static routes, is loopback-only by construction: a new route is unreachable from the remote bind until someone deliberately allowlists it.
+  need to actually answer and steer (the Requests inbox, session input/stop/resume/end), plus the live session sockets: the terminal stream (view-only to a remote peer; steering goes through the governed REST input route, and host shells are never reachable remotely), the companion chat stream, and a fleet-status feed. Everything else, including every change to configuration, every human-only writer, and the SPA's own static routes, is loopback-only by construction: a new route is unreachable from the remote bind until someone deliberately allowlists it.
 - **Remote requests are rate-limited** per caller IP and per token, with a lockout on repeated auth
   failures. The loopback path is exempt.
 
@@ -202,7 +231,7 @@ Three things to know before you turn it on:
 - **A wildcard bind needs `remoteAccess.allowedHosts`.** `bindHost: "0.0.0.0"` (or `::`) listens on every interface, but a real client's `Host` is the address or name it dialled — never the literal `0.0.0.0` — and the DNS-rebind guard matches `Host` exactly. So list every hostname or IP your clients will use in `allowedHosts`; a wildcard bind with an empty list **does not open at all**. `allowedHosts` also works alongside a specific `bindHost` (a tailnet client may reach both the MagicDNS name and the `100.x` address). Matching is exact and case-insensitive — no wildcards or suffixes — and `0.0.0.0`, `::` and loopback addresses are rejected as entries.
 - **A remote browser's `Origin` must be the full remote origin** (`<scheme>://<allowed host>:<remote port>`, the same scheme and port the client dialled), and only requests that actually arrive from a non-loopback address may present one. A loopback caller keeps the loopback-only rule, so a web page served from some other local port can't borrow an allowed hostname to reach the daemon.
 
-`port` and `allowedHosts` are set exactly like the rest of `remoteAccess` — over the loopback API, human-only; no agent tool can change them. The remote listener is API-only: the cockpit itself is not served on it.
+`port` and `allowedHosts` are set exactly like the rest of `remoteAccess` — over the loopback API, human-only; no agent tool can change them. The direct remote listener is API-only: the cockpit itself is not served on it (the trusted-proxy listener above is the one that serves it).
 
 Step-by-step instructions live on the landing site's **Remote access** page ([`site/remote-access.html`](site/remote-access.html)).
 

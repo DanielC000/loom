@@ -16,7 +16,7 @@ import { resolveAlias, strictShape } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
 import { expandTilde, PORT } from "../paths.js";
-import { isForbiddenAllowedHost, canonicalHost } from "../gateway/trust-tier.js";
+import { isForbiddenAllowedHost, canonicalHost, canonicalTrustedProxyOrigin } from "../gateway/trust-tier.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
 import { validateVaultPath } from "../projects/vault-path.js";
@@ -748,6 +748,16 @@ const remoteAccessOverride = z.object({
       .refine(isValidBindHostShape, { message: "allowedHosts entries must be a valid IPv4/IPv6 address or hostname" })
       .refine((h) => !isForbiddenAllowedHost(h), { message: "allowedHosts must not contain a wildcard (0.0.0.0/::), a loopback address (any spelling), or an ambiguous numeric-looking name" }),
   ).max(32).optional(),
+  // Card 4cbbc343 — trusted-reverse-proxy mode (`tailscale serve` et al.). HUMAN-only like the rest of this block.
+  // `proxyPort` is a THIRD, 127.0.0.1-only listener (no default: nothing listens until set); `trustedProxyOrigins`
+  // are the exact origins the proxy fronts, stored CANONICAL (the transform) — exact origin only, no wildcard/path/
+  // loopback, https unless .ts.net. Both need `enabled` + a gateway token to take effect (see resolveRemoteTrust).
+  proxyPort: z.number().int().min(1).max(65535).refine((p) => p !== PORT, { message: "remoteAccess.proxyPort must differ from the daemon's own listening port" }).optional(),
+  trustedProxyOrigins: z.array(
+    z.string().min(1).max(300)
+      .refine((o) => canonicalTrustedProxyOrigin(o) !== null, { message: "trustedProxyOrigins entries must be an exact origin (scheme://host[:port]) — https unless a .ts.net name — with no wildcard, path, userinfo, trailing dot, or loopback/ambiguous host" })
+      .transform((o) => canonicalTrustedProxyOrigin(o) as string),
+  ).max(16).optional(),
   tls: z.object({ certPath: z.string().min(1), keyPath: z.string().min(1) }).strict().optional(),
   // rateLimit upper bounds (77ade04c): a human-settable cap large enough to be harmless, small enough
   // that a fat-fingered "0" or a stray extra zero can't silently defeat the limiter (e.g. a billion
@@ -1540,7 +1550,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "platform_config_get",
       {
-        description: "Read the daemon-GLOBAL platform config: the stored override blob PLUS the resolved platform group (same underlying data as the human REST GET /api/platform/config) — closes the gap where 'what is maxConcurrentGates/coalesceAgentMessages/etc actually set to right now' had no tool short of a raw sqlite read of the platform_config table. No args. REDACTED for the agent surface (audited every field — see the daemon source's sanitizePlatformConfigForAgent doc): `integrations` (incl. any codescape path) is DROPPED entirely (codescape has no user/agent-visible surface anywhere Loom ships), and `remoteAccess.tls.{certPath,keyPath}` (host paths to TLS private-key material) collapses to `{configured:true/false}`. Every other field — rate-limit numbers, watcher cadences, timeouts, backup/gateRetry tuning, the P2 authenticated-request rate/size bounds, coalesceAgentMessages/companionVoiceEnabled/operatorEnabled/schedulerEnabled, the concurrency caps, usage-sample cadence/retention, updateCheckIntervalMs, remoteAccess.enabled/bindHost/port/allowedHosts/rateLimit (network posture of the same class as bindHost — a port number and hostnames, no credential and no host path) — is plain operational tuning with no credential shape, returned as-is. Read-only: no platform_config WRITE tool exists on any agent surface (human REST PATCH only).",
+        description: "Read the daemon-GLOBAL platform config: the stored override blob PLUS the resolved platform group (same underlying data as the human REST GET /api/platform/config) — closes the gap where 'what is maxConcurrentGates/coalesceAgentMessages/etc actually set to right now' had no tool short of a raw sqlite read of the platform_config table. No args. REDACTED for the agent surface (audited every field — see the daemon source's sanitizePlatformConfigForAgent doc): `integrations` (incl. any codescape path) is DROPPED entirely (codescape has no user/agent-visible surface anywhere Loom ships), and `remoteAccess.tls.{certPath,keyPath}` (host paths to TLS private-key material) collapses to `{configured:true/false}`. Every other field — rate-limit numbers, watcher cadences, timeouts, backup/gateRetry tuning, the P2 authenticated-request rate/size bounds, coalesceAgentMessages/companionVoiceEnabled/operatorEnabled/schedulerEnabled, the concurrency caps, usage-sample cadence/retention, updateCheckIntervalMs, remoteAccess.enabled/bindHost/port/allowedHosts/proxyPort/trustedProxyOrigins/rateLimit (network posture of the same class as bindHost — port numbers, hostnames and browser origins, no credential and no host path) — is plain operational tuning with no credential shape, returned as-is. Read-only: no platform_config WRITE tool exists on any agent surface (human REST PATCH only).",
         inputSchema: strictShape({}),
       },
       async () => {

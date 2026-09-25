@@ -3,6 +3,7 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
 import { getLoopbackToken } from "../lib/api";
+import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { credentialLock, isCredentialSocketFailure, noteCredentialLock, subscribeCredentialLock } from "../lib/loopbackCredential";
 import { useIsCompanionSession } from "../lib/companionGuard";
 import { Dot } from "./ui";
@@ -216,8 +217,11 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     // mechanism. No token captured yet (guard inert, or the user hasn't visited a tokenized URL) → the
     // bare URL, unchanged from before — the server-side guard is itself optional-dep-gated the same way.
     const loopbackToken = getLoopbackToken();
-    const wsUrl = `${proto}//${location.host}/ws/term/${sessionId}${loopbackToken ? `?token=${encodeURIComponent(loopbackToken)}` : ""}`;
-    const ws = new WebSocket(wsUrl);
+    // Card 4cbbc343: behind a trusted reverse proxy the credential is the GATEWAY token, carried in the
+    // double-subprotocol (never the URL); on loopback this is byte-identical (`?token=` + no protocols).
+    const auth = socketAuth("term", loopbackToken);
+    const wsUrl = `${proto}//${location.host}/ws/term/${sessionId}${auth.query}`;
+    const ws = auth.protocols ? new WebSocket(wsUrl, auth.protocols) : new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
 
     /**
@@ -237,7 +241,10 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     ws.onopen = () => { everOpened = true; if (resizable) fitAndReport(); };
     ws.onclose = () => {
       if (everOpened) { term.write("\r\n\x1b[2m[connection closed]\x1b[0m\r\n"); return; }
-      if (isCredentialSocketFailure(everOpened, getLoopbackToken())) {
+      if (noteRemoteSocketRefusal(everOpened)) {
+        term.write("\r\n\x1b[31m[no gateway token — live terminals are disabled]\x1b[0m\r\n"
+          + "\x1b[2m[see the banner at the top of the page]\x1b[0m\r\n");
+      } else if (isCredentialSocketFailure(everOpened, getLoopbackToken())) {
         noteCredentialLock("socket");
         term.write("\r\n\x1b[31m[no local access credential — live terminals are disabled]\x1b[0m\r\n"
           + "\x1b[2m[see the banner at the top of the page]\x1b[0m\r\n");

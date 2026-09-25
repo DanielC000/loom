@@ -4,7 +4,7 @@ import https from "node:https";
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { RemoteAccessConfig } from "@loom/shared";
-import { canOpenRemoteListener, isAllInterfacesBindHost, isLoopbackBindHost, isTrustTierHookActive, remoteListenerRefusalReasons } from "./trust-tier.js";
+import { canOpenRemoteListener, isAllInterfacesBindHost, isLoopbackBindHost, isTrustTierHookActive, markProxyListenerRequest, markRemoteListenerRequest, proxyListenerRefusalReasons, remoteListenerRefusalReasons, resolveRemoteTrust } from "./trust-tier.js";
 
 // @decision 23496950 — the remote listener is a SEPARATE server; loopback (`app.server`) stays plain HTTP on
 // PORT. Do not fold TLS back into `Fastify({ https })`, bypass `app.routing`, or drop the `upgrade` forwarder.
@@ -19,6 +19,9 @@ export interface RemoteEndpoint { scheme: "http" | "https"; port: number }
 export interface RemoteEndpointRef {
   current: RemoteEndpoint | null;
   close?: () => Promise<void>;
+  /** The trusted-proxy listener's port once it is really listening (card 4cbbc343), else null/absent. */
+  proxyPort?: number | null;
+  closeProxy?: () => Promise<void>;
 }
 
 export type RemoteListenerResult =
@@ -83,7 +86,8 @@ export async function openRemoteListener(app: FastifyInstance, cfg: RemoteAccess
     }
   }
   const to: RemoteServerTimeouts = { ...REMOTE_SERVER_TIMEOUTS, ...opts.timeouts };
-  const handler = (req: http.IncomingMessage, res: http.ServerResponse): void => { app.routing(req, res); };
+  // Card d0f3c8ea: EVERY request on this listener is classed remote, even from a loopback peer — mark it before routing.
+  const handler = (req: http.IncomingMessage, res: http.ServerResponse): void => { markRemoteListenerRequest(req); app.routing(req, res); };
   let server: http.Server | https.Server | undefined;
   let httpsActive = false;
   if (tlsOptions) {
@@ -120,6 +124,7 @@ export async function openRemoteListener(app: FastifyInstance, cfg: RemoteAccess
   for (const l of src.listeners("clientError")) listening.on("clientError", l as (...a: unknown[]) => void);
 
   const forwardUpgrade = (req: http.IncomingMessage, socket: import("node:stream").Duplex, head: Buffer): void => {
+    markRemoteListenerRequest(req);
     app.server.emit("upgrade", req, socket, head);
   };
   listening.on("upgrade", forwardUpgrade);
@@ -157,6 +162,62 @@ export async function openRemoteListener(app: FastifyInstance, cfg: RemoteAccess
   return { opened: true, endpoint, server: listening, forwardUpgrade, httpsActive, close };
 }
 
+export type ProxyListenerResult =
+  | { opened: true; port: number; server: http.Server; forwardUpgrade: (req: http.IncomingMessage, socket: import("node:stream").Duplex, head: Buffer) => void; close: () => Promise<void> }
+  | { opened: false; reasons: string[] };
+
+/**
+ * Open the trusted-proxy listener (card 4cbbc343): plain HTTP on 127.0.0.1:`remoteAccess.proxyPort` ONLY (never
+ * `bindHost`), the port a same-host reverse proxy such as `tailscale serve` forwards to. Every request/upgrade on
+ * it is MARKED as the proxy class before routing, so its trust follows this listener rather than any Host/Origin
+ * header. It carries the same explicit slow-loris limits as the remote listener (it is reachable by whatever the
+ * proxy exposes). NEVER throws: every refusal comes back as `{opened:false, reasons}`.
+ */
+export async function openProxyListener(app: FastifyInstance, cfg: RemoteAccessConfig, opts: { loopbackPort: number; remotePort: number | null; tokenExists: boolean; ref: RemoteEndpointRef; timeouts?: Partial<RemoteServerTimeouts> }): Promise<ProxyListenerResult> {
+  const reasons = proxyListenerRefusalReasons(cfg, opts.tokenExists, { loopbackPort: opts.loopbackPort, remotePort: opts.remotePort });
+  if (reasons.length > 0 || cfg.proxyPort === undefined) return { opened: false, reasons };
+  const to: RemoteServerTimeouts = { ...REMOTE_SERVER_TIMEOUTS, ...opts.timeouts };
+  const server = http.createServer({ connectionsCheckingInterval: to.connectionsCheckingInterval }, (req, res) => { markProxyListenerRequest(req); app.routing(req, res); });
+  server.headersTimeout = to.headersTimeout;
+  server.requestTimeout = to.requestTimeout;
+  server.keepAliveTimeout = to.keepAliveTimeout;
+  server.timeout = to.timeout;
+  server.maxRequestsPerSocket = app.server.maxRequestsPerSocket;
+  for (const l of app.server.listeners("clientError")) server.on("clientError", l as (...a: unknown[]) => void);
+  const forwardUpgrade = (req: http.IncomingMessage, socket: import("node:stream").Duplex, head: Buffer): void => {
+    markProxyListenerRequest(req);
+    app.server.emit("upgrade", req, socket, head);
+  };
+  server.on("upgrade", forwardUpgrade);
+  const sockets = new Set<import("node:net").Socket>();
+  server.on("connection", (sock) => { sockets.add(sock); sock.once("close", () => sockets.delete(sock)); });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (e: Error): void => reject(e);
+      server.once("error", onError);
+      server.listen({ port: cfg.proxyPort, host: "127.0.0.1" }, () => { server.off("error", onError); resolve(); });
+    });
+  } catch (err) {
+    server.removeListener("upgrade", forwardUpgrade);
+    return { opened: false, reasons: [`could not listen on 127.0.0.1:${cfg.proxyPort} (${(err as Error).message})`] };
+  }
+  const port = (server.address() as AddressInfo).port;
+  let closed: Promise<void> | undefined;
+  const close = (): Promise<void> => {
+    closed ??= new Promise<void>((resolve) => {
+      opts.ref.proxyPort = null;
+      server.removeListener("upgrade", forwardUpgrade);
+      server.close(() => resolve());
+      server.closeAllConnections();
+      for (const sock of sockets) sock.destroy();
+    });
+    return closed;
+  };
+  opts.ref.proxyPort = port;
+  opts.ref.closeProxy = close;
+  return { opened: true, port, server, forwardUpgrade, close };
+}
+
 export interface GatewayListenersOpts {
   /** Loopback listener port (0 = OS-assigned, used by tests). */
   port: number;
@@ -176,14 +237,23 @@ export interface GatewayListenersOpts {
  * opens first and a failure to bind it throws (fatal, as always); the REMOTE listener opens second and any
  * refusal or bind failure only warns, leaving the daemon loopback-only with an honest log line.
  */
-export async function startGatewayListeners(app: FastifyInstance, opts: GatewayListenersOpts): Promise<{ boundAddress: string; loopbackPort: number; remote: RemoteListenerResult | null }> {
+export async function startGatewayListeners(app: FastifyInstance, opts: GatewayListenersOpts): Promise<{ boundAddress: string; loopbackPort: number; remote: RemoteListenerResult | null; proxy: ProxyListenerResult | null }> {
   const log = opts.log ?? { info: (m: string) => console.log(m), warn: (m: string) => console.warn(m) };
   const boundAddress = await app.listen({ port: opts.port, host: "127.0.0.1" });
   const loopbackPort = (app.server.address() as AddressInfo).port;
   opts.onLoopbackListening?.(boundAddress);
   const cfg = opts.remoteAccess;
-  if (!isTrustTierHookActive(cfg)) return { boundAddress, loopbackPort, remote: null };
-  const remote = await openRemoteListener(app, cfg, { loopbackPort, tokenExists: opts.tokenExists(), ref: opts.ref, timeouts: opts.timeouts });
+  const trust = resolveRemoteTrust(cfg);
+  let remote: RemoteListenerResult | null = null;
+  if (isTrustTierHookActive(cfg)) remote = await openRemoteListener(app, cfg, { loopbackPort, tokenExists: opts.tokenExists(), ref: opts.ref, timeouts: opts.timeouts });
+  let proxy: ProxyListenerResult | null = null;
+  if (trust.proxyMode) {
+    const remotePort = remote?.opened ? remote.endpoint.port : (isTrustTierHookActive(cfg) ? resolveRemotePort(cfg, loopbackPort) : null);
+    proxy = await openProxyListener(app, cfg, { loopbackPort, remotePort, tokenExists: opts.tokenExists(), ref: opts.ref, timeouts: opts.timeouts });
+    if (proxy.opened) log.info(`[gateway] trusted-proxy listener: http://127.0.0.1:${proxy.port} (every request on it is remote-class: token-gated, Tier-1 only; trusted origins: ${trust.trustedOrigins.join(", ")}).`);
+    else log.warn(`[gateway] remoteAccess trusted-proxy mode is configured but ${proxy.reasons.join("; ")} — NOT opening the proxy listener.`);
+  }
+  if (remote === null) return { boundAddress, loopbackPort, remote: null, proxy };
   if (remote.opened) {
     log.info(`[gateway] remote listener: ${remote.endpoint.scheme}://${cfg.bindHost}:${remote.endpoint.port} (loopback stays plain HTTP on 127.0.0.1:${loopbackPort}).`);
     // P5b hardening follow-up (card 80e2093f, item 2): 0.0.0.0/:: is an explicit, owner-decided supported
@@ -195,5 +265,5 @@ export async function startGatewayListeners(app: FastifyInstance, opts: GatewayL
   } else {
     log.warn(`[gateway] remoteAccess.enabled with bindHost=${cfg.bindHost} but ${remote.reasons.join("; ")} — NOT opening a remote listener. The daemon is loopback-only: plain HTTP on 127.0.0.1:${loopbackPort}.`);
   }
-  return { boundAddress, loopbackPort, remote };
+  return { boundAddress, loopbackPort, remote, proxy };
 }

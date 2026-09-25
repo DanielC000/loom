@@ -5,9 +5,10 @@ import "./_guard.mjs";
 // TLS on the remote one only, and the mirrored slow-loris settings.
 //
 //   (A) specific bind on 127.0.0.2: a REAL client at 127.0.0.1 is a LOOPBACK PEER reaching the REMOTE port.
-//       Intended behaviour: it is treated EXACTLY as a loopback peer (wall-exempt reads, loopback-secret guard on
-//       writes, loopback-only Origin). It is safe because peer identity is the real socket address, so nothing
-//       reachable from off-host can present as loopback, and 127.x can already do all of this on the loopback port.
+//       Card d0f3c8ea (built with 4cbbc343): the class follows the LISTENER, so EVERY request on the remote port is
+//       remote-class — gateway token required, Tier-1 only, remote-endpoint Origin — even from a loopback peer.
+//       (Before, this peer was wall-exempt: peer-address-only trust let a same-host dial of the internet-facing port
+//       borrow loopback trust.) The loopback port is unchanged.
 //   (B) bind on a real LAN interface address: a REAL non-loopback peer (this host's own LAN address). If this host
 //       has no non-internal IPv4 address the scenario falls back to an injected remoteAddress (app.inject seam) and
 //       SAYS SO in the output — it is then NOT a real-socket check.
@@ -138,8 +139,8 @@ else {
     check("(A) LOOPBACK listener is plain HTTP (a plain http GET works, 200) — TLS is off the app entirely", lb.status === 200);
     const lbTls = await req("https", "127.0.0.1", A.loopbackPort, "GET", "/api/version");
     check("(A) ...and a TLS client to the loopback port FAILS (it is not TLS)", lbTls.status === 0);
-    const rm = await req("https", "127.0.0.2", rp, "GET", "/api/version");
-    check("(A) REMOTE listener speaks TLS (https GET works)", rm.status === 200);
+    const rm = await req("https", "127.0.0.2", rp, "GET", "/api/version", { authorization: `Bearer ${TOKEN}` });
+    check("(A) REMOTE listener speaks TLS (https GET with the gateway token works)", rm.status === 200);
     const rmPlain = await req("http", "127.0.0.2", rp, "GET", "/api/version");
     check("(A) ...and a plain-HTTP client to the remote port does NOT get an app response", rmPlain.status !== 200);
 
@@ -158,15 +159,15 @@ else {
     A.remote.server.on("upgrade", A.remote.forwardUpgrade);
     check("(A) ...and with the forwarder restored it opens again (the control could pass)", await wsProbe(`wss://127.0.0.2:${rp}/ws/fleet`, bearer(TOKEN)) === "open");
 
-    // A LOOPBACK PEER on the REMOTE port: treated exactly as a loopback peer.
+    // A LOOPBACK PEER on the REMOTE port (card d0f3c8ea): remote-class — the listener, not the peer address, decides.
     const noTok = await req("https", "127.0.0.2", rp, "GET", "/api/version");
-    check("(A) loopback peer on the remote port: no token needed for a Tier-1 read (wall-exempt, as on the loopback port)", noTok.status === 200);
-    const write = await req("https", "127.0.0.2", rp, "POST", "/api/orchestration/pause", { "content-type": "application/json" });
-    check("(A) loopback peer on the remote port: a write WITHOUT the loopback secret is 401 (the loopback guard still applies)", write.status === 401);
-    const remoteOrigin = await req("https", "127.0.0.2", rp, "GET", "/api/version", { origin: `https://127.0.0.2:${rp}` });
-    check("(A) loopback peer presenting the REMOTE origin → 403 (Origin is peer-scoped)", remoteOrigin.status === 403);
-    const loopOrigin = await req("https", "127.0.0.2", rp, "GET", "/api/version", { origin: "http://127.0.0.1:5317" });
-    check("(A) loopback peer presenting a loopback Origin → 200", loopOrigin.status === 200);
+    check("(A) loopback peer on the remote port: NO token ⇒ 401 (was 200 wall-exempt before d0f3c8ea)", noTok.status === 401);
+    const write = await req("https", "127.0.0.2", rp, "POST", "/api/orchestration/pause", { "content-type": "application/json", authorization: `Bearer ${SECRET}` });
+    check("(A) loopback peer on the remote port: a write is Tier-0 ⇒ 403 even carrying the loopback secret (never a loopback-secret route here)", write.status === 403);
+    const remoteOrigin = await req("https", "127.0.0.2", rp, "GET", "/api/version", { origin: `https://127.0.0.2:${rp}`, authorization: `Bearer ${TOKEN}` });
+    check("(A) loopback peer presenting the REMOTE origin + token → 200 (the remote listener's own full origin)", remoteOrigin.status === 200);
+    const loopOrigin = await req("https", "127.0.0.2", rp, "GET", "/api/version", { origin: "http://127.0.0.1:5317", authorization: `Bearer ${TOKEN}` });
+    check("(A) loopback peer presenting a loopback Origin on the remote port → 403 (remote-class Origin rule)", loopOrigin.status === 403);
 
     // Slow-loris limits on the pre-auth remote server: EXPLICIT, non-zero, and no weaker than plain Node (Fastify's own
     // requestTimeout 0 / keepAliveTimeout 72s were what the first cut copied — see REMOTE_SERVER_TIMEOUTS).
@@ -252,7 +253,7 @@ if (canBind127_2) {
   const T = await boot({ enabled: true, bindHost: "127.0.0.2", port: 0, tls: { certPath, keyPath } });
   try {
     const rp = T.remote.endpoint.port;
-    check("(T) precondition: the remote listener answers before close", (await req("https", "127.0.0.2", rp, "GET", "/api/version")).status === 200);
+    check("(T) precondition: the remote listener answers before close", (await req("https", "127.0.0.2", rp, "GET", "/api/version", { authorization: `Bearer ${TOKEN}` })).status === 200);
     check("(T) a live remote WS is open when close is requested", await wsProbe(`wss://127.0.0.2:${rp}/ws/fleet`, bearer(TOKEN)) === "open");
     await T.app.close();
     check("(T) app.close() (preClose hook) closes the remote listener: connection refused, endpoint ref cleared", (await req("https", "127.0.0.2", rp, "GET", "/api/version")).status === 0 && T.ref.current === null);

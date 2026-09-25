@@ -66,7 +66,20 @@ export interface RemoteRateLimiter {
   recordAuthFailure(ip: string, nowMs: number): void;
   /** Clear this ip's failure counter — call on a successful token verification. */
   clearAuthFailures(ip: string): void;
+  /** Trusted-proxy class (card 4cbbc343) — every caller shares one local socket address, so nothing here is keyed by
+   *  ip and nothing ever hard-locks. Per VALID token request cap (the same `perTokenPerMin`); call only AFTER the
+   *  token verified. */
+  allowProxyToken(token: string, nowMs: number): boolean;
+  /** A generous shared cap over every UNAUTHENTICATED (absent/invalid token) proxy-class request (`perIpPerMin`). */
+  allowProxyPreAuth(nowMs: number): boolean;
+  /** Throttle (429) — never lock — presented-but-invalid tokens on the proxy class: `PROXY_FAILED_AUTH_PER_MIN` a minute. */
+  allowProxyFailedAuth(nowMs: number): boolean;
 }
+
+/** Failed token verifications per minute the trusted-proxy class tolerates before the FAILURE path answers 429. A
+ *  browser holding a wrong token fires several parallel requests, so this is deliberately not tiny; a valid token is
+ *  never subject to it (verify-first). */
+export const PROXY_FAILED_AUTH_PER_MIN = 30;
 
 /**
  * One rate limiter instance per live trust-tier hook registration (constructed once inside buildServer,
@@ -76,7 +89,12 @@ export interface RemoteRateLimiter {
 export function createRemoteRateLimiter(db: Db, policy: RemoteRateLimitPolicy): RemoteRateLimiter {
   const ipWindow = new SlidingWindowCounter();
   const tokenWindow = new SlidingWindowCounter();
+  const proxyPreAuthWindow = new SlidingWindowCounter();
+  const proxyFailWindow = new SlidingWindowCounter();
   return {
+    allowProxyToken(token, nowMs) { return tokenWindow.allow(`token:${token}`, policy.perTokenPerMin, nowMs); },
+    allowProxyPreAuth(nowMs) { return proxyPreAuthWindow.allow("proxy", policy.perIpPerMin, nowMs); },
+    allowProxyFailedAuth(nowMs) { return proxyFailWindow.allow("proxy", PROXY_FAILED_AUTH_PER_MIN, nowMs); },
     allowRequest(ip, token, nowMs) {
       if (!ipWindow.allow(`ip:${ip}`, policy.perIpPerMin, nowMs)) return false;
       if (token && !tokenWindow.allow(`token:${token}`, policy.perTokenPerMin, nowMs)) return false;

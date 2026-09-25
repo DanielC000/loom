@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { ServerFleetMessage, SessionListItem } from "@loom/shared";
 import { api, orchStatusQuery } from "../lib/api";
 import { applyFleetDelta } from "../lib/fleetSocket";
+import { socketAuth } from "../lib/gatewayCredential";
 
 /**
  * C4 of the WS delta-push umbrella (1efde4ba) — the payoff card. Owns ONE app-wide `/ws/fleet` socket
@@ -175,7 +176,9 @@ export function FleetSocketProvider() {
     const connect = () => {
       if (disposed) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(`${proto}//${location.host}/ws/fleet`);
+      // Card 4cbbc343: behind a trusted reverse proxy /ws/fleet needs the gateway token (double-subprotocol); loopback unchanged.
+      const auth = socketAuth("fleet", null);
+      const socket = auth.protocols ? new WebSocket(`${proto}//${location.host}/ws/fleet`, auth.protocols) : new WebSocket(`${proto}//${location.host}/ws/fleet`);
       ws = socket;
 
       socket.onopen = () => {

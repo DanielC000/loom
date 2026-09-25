@@ -240,9 +240,13 @@ try {
     routeTier("GET", "/api/webhook-endpoints") === 0 && routeTier("POST", "/api/webhook-endpoints") === 0
     && routeTier("DELETE", "/api/webhook-endpoints/:id") === 0 && routeTier("POST", "/api/webhook-endpoints/:id/enabled") === 0);
 
-  // --- (2) remoteAccess DISABLED (default): the hook never registers; a "remote" request to a writer still runs ---
+  // --- (2) remoteAccess DISABLED (default): the hook never registers. Card 4cbbc343 (M1): a request classed REMOTE with NO
+  //     wall registered is now REFUSED (403 {error:'forbidden'}) rather than passed through — it can only be a wiring
+  //     inconsistency (a non-loopback peer cannot reach a loopback-only daemon at all, so real traffic is unchanged). ---
   const r = await appOff.inject({ method: "POST", url: "/api/orchestration/kill", remoteAddress: "203.0.113.5" });
-  check("(2) remoteAccess disabled: a 'remote' POST /api/orchestration/kill still runs (200, byte-identical)", r.statusCode === 200 && killCallsOff === 1);
+  check("(2) remoteAccess disabled: a 'remote' POST /api/orchestration/kill is REFUSED 403 forbidden (fail-closed: remote class with no wall) and never runs", r.statusCode === 403 && JSON.parse(r.body).error === "forbidden" && killCallsOff === 0);
+  const rLoop = await appOff.inject({ method: "POST", url: "/api/orchestration/kill" });
+  check("(2) ...while the ordinary loopback request still runs (200) — the default daemon is unchanged", rLoop.statusCode === 200 && killCallsOff === 1);
 
   // (2a2) card a5ecb6fd: GET /api/projects masks config.sessionEnv values. That fix's own regression
   // coverage is a Playwright e2e spec, which runs in a SEPARATE CI job, never inside this project's own

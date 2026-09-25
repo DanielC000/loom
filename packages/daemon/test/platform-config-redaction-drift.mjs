@@ -85,6 +85,8 @@ try {
     "bindHost",
     "port", // EXPOSED — a port number, same class as bindHost
     "allowedHosts", // EXPOSED — hostnames/IPs clients dial, same class as bindHost
+    "proxyPort", // EXPOSED — a 127.0.0.1 port number (card 4cbbc343), same class as port
+    "trustedProxyOrigins", // EXPOSED — origins (scheme+hostname+port) the reverse proxy fronts (card 4cbbc343): no credential, no host path
     "tls", // REDACTED — {certPath,keyPath} collapses to {configured:true}
     "rateLimit",
   ];

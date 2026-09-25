@@ -3246,6 +3246,11 @@ export const STATIC_GUARD_REPO_PATHS = [
   // see the guard's own header for the comment/code classification and why it exists (the seam this card just
   // extracted has no structural way to stop a FUTURE file from reintroducing the same scattered coupling).
   "packages/daemon/test/harness-adapter-claude-literal-guard.mjs",
+  // Card 4cbbc343: a corpus-wide, comment-stripped scan of packages/daemon/src/**/*.ts asserting no trust decision
+  // reads a peer address or compares to a loopback literal outside the single predicate (`requestClass`,
+  // gateway/trust-tier.ts) — a trust-boundary invariant, seated here on the same ground as the harness-literal
+  // guard above (owner-directed: it must run on every reduced gate regardless of diff shape).
+  "packages/daemon/test/remote-trust-single-predicate-guard.mjs",
   // Card 4f2c493a (comment corrected by card a9728787): reads working-tree BYTES ON DISK to catch a
   // Write-tool (or equivalent) wholesale rewrite silently flipping a tracked text file's line endings.
   // `git diff HEAD`, `git diff --numstat`, and `git show HEAD:<file>` are blind to that flip in every

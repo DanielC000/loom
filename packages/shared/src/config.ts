@@ -853,6 +853,22 @@ export interface RemoteAccessConfig {
    */
   allowedHosts?: string[];
   /**
+   * Trusted-reverse-proxy mode (card 4cbbc343): the TCP port of a THIRD listener, bound to 127.0.0.1 ONLY
+   * (never `bindHost`), that a same-host reverse proxy (`tailscale serve`, nginx, Caddy) forwards to. EVERY
+   * request on it is classed remote — token-gated, Tier-1 only — whatever its Host, peer address or headers;
+   * the class follows the LISTENER, never a Host header a proxy may rewrite or a client may choose. No default:
+   * nothing extra listens until a human sets it. Needs `enabled`, `trustedProxyOrigins`, a gateway token, and
+   * must differ from the daemon's own PORT and from `port`. HUMAN-only.
+   */
+  proxyPort?: number;
+  /**
+   * The exact browser origins (scheme + host + port) the reverse proxy fronts, e.g. `https://box.tail1234.ts.net:8443`
+   * (card 4cbbc343). A request on the proxy listener must carry one of these as its Host, and any Origin it
+   * sends must be THAT SAME entry. No wildcards, no paths, no loopback, https only unless `.ts.net`; stored
+   * canonicalised. HUMAN-only — never agent-writable.
+   */
+  trustedProxyOrigins?: string[];
+  /**
    * TLS material for the remote listener (Phase C). MANDATORY whenever `bindHost` is non-loopback AND
    * not a `.ts.net` tailnet address (a tailnet link is already encrypted; anything else is wss-only over
    * untrusted transport) — absent/unreadable in that case boot-refuses the remote bind and falls back to
@@ -1619,6 +1635,10 @@ function resolveRemoteAccess(po: PlatformConfigOverride | undefined): RemoteAcce
   if (port !== undefined) resolved.port = port;
   const allowedHosts = po?.remoteAccess?.allowedHosts ?? d.allowedHosts;
   if (allowedHosts !== undefined) resolved.allowedHosts = allowedHosts;
+  const proxyPort = po?.remoteAccess?.proxyPort ?? d.proxyPort;
+  if (proxyPort !== undefined) resolved.proxyPort = proxyPort;
+  const trustedProxyOrigins = po?.remoteAccess?.trustedProxyOrigins ?? d.trustedProxyOrigins;
+  if (trustedProxyOrigins !== undefined) resolved.trustedProxyOrigins = trustedProxyOrigins;
   const tls = po?.remoteAccess?.tls ?? d.tls;
   if (tls !== undefined) resolved.tls = tls;
   const rateLimit = po?.remoteAccess?.rateLimit ?? d.rateLimit;

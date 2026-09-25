@@ -10,6 +10,7 @@ import { Sidebar } from "./components/Sidebar";
 import { CommandPalette } from "./components/CommandPalette";
 import { SetupWizard } from "./components/SetupWizard";
 import { CredentialBanner } from "./components/CredentialBanner";
+import { GatewayTokenBanner } from "./components/GatewayTokenBanner";
 import { RequestModalProvider } from "./components/requests";
 import { api } from "./lib/api";
 import { useAttention, useNewAttention, attentionOpenTarget, type AttentionItem } from "./lib/attention";
@@ -284,6 +285,7 @@ export default function App() {
         <Sidebar />
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
           <CredentialBanner />
+          <GatewayTokenBanner />
           <UpdateBanner />
           <main style={page}>
             <Routes>

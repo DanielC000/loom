@@ -1,10 +1,11 @@
 import { isIP as netIsIP } from "node:net";
+import type { IncomingMessage } from "node:http";
 import type { RemoteAccessConfig } from "@loom/shared";
 
 /**
  * Access-story Phase A (card 766f8b50) — the per-route trust-tier wall. Loom's security today equates
  * loopback = trusted: there is no per-route auth, only the CSRF/DNS-rebind onRequest hook (gateway/
- * server.ts) and the `/internal/*` loopback (`req.ip`) gate. A future remote bind would silently expose
+ * server.ts) and the `/internal/*` loopback (peer) gate. A future remote bind would silently expose
  * every human-only writer unless the trust tier is made EXPLICIT per route first. This module is that
  * wall: `routeTier` classifies a route FAIL-CLOSED (default Tier 0), and `canOpenRemoteListener` is the
  * boot-time guard a later phase's `.listen()` consults before ever binding non-loopback.
@@ -163,6 +164,19 @@ export function routeTier(method: string, routePattern: string): TrustTier {
   return 0;
 }
 
+/**
+ * The SPA shell (card 4cbbc343, owner flag F1): the ONE route pattern `@fastify/static` registers for the built web app
+ * (`GET|HEAD /*`, registered without a prefix in gateway/server.ts) — it matches only what no daemon route matched, and
+ * its handler can only serve a file under the web dist, the SPA fallback, or (for a reserved path) the JSON 404. Keyed on
+ * the MATCHED pattern, never on the request path text (the tier wall's own invariant). The trusted-proxy class alone is
+ * exempted from the gateway-token requirement for it — a browser must load the app before it can present a token; the
+ * remote listener stays API-only and every non-shell route still needs the token.
+ */
+export function isStaticShellRoute(method: string, routePattern: string | undefined): boolean {
+  const m = method.toUpperCase();
+  return routePattern === "/*" && (m === "GET" || m === "HEAD");
+}
+
 /** Loopback hostnames a human may reasonably set `remoteAccess.bindHost` to (meaning: not actually remote). */
 export function isLoopbackBindHost(host: string): boolean {
   return host === "127.0.0.1" || host === "::1" || host === "localhost";
@@ -181,8 +195,9 @@ export function isAllInterfacesBindHost(host: string): boolean {
 }
 
 /** A Tailscale (`.ts.net`) tailnet address — already end-to-end encrypted by the tailnet itself, so the
- *  Phase C TLS mandate (see `tlsRequirementSatisfied`) does not apply to it. v1 is direct-bind + Tailscale
- *  only (no reverse-proxy), so a suffix match is sufficient — never treated as loopback. */
+ *  Phase C TLS mandate (see `tlsRequirementSatisfied`) does not apply to it. This is about a DIRECT bind to a
+ *  tailnet address; a same-host reverse proxy (`tailscale serve`) goes through the separate trusted-proxy listener
+ *  (`resolveRemoteTrust`), never through this check. A suffix match is sufficient — never treated as loopback. */
 export function isTailnetHost(host: string): boolean {
   return host.toLowerCase().endsWith(".ts.net");
 }
@@ -260,6 +275,162 @@ export function remoteHostAllowlist(remoteAccess: RemoteAccessConfig): string[] 
     if (c !== null) out.add(c);
   }
   return [...out];
+}
+
+// @decision 4cbbc343 — `requestClass` is the ONLY place a request's trust class is decided: no other file reads a
+// peer address or compares to a loopback literal, and the class follows the LISTENER, never a Host/Origin header.
+
+/**
+ * The ONE 401 body a remote-class request without a valid gateway token gets — the remote listener (card b855c37d) and the
+ * trusted-proxy listener (card 4cbbc343) share it. `error` stays byte-identical; `code` + `hint` are additive. Absent and
+ * wrong tokens get the identical body (no oracle), and the hint names no path, secret, or `loom open` pointer (that pointer is
+ * the LOOPBACK guard's own credential, which must never arm on this 401 — decision 093981dd).
+ */
+export const GATEWAY_TOKEN_REQUIRED_BODY: Readonly<{ error: string; code: string; hint: string }> = Object.freeze({
+  error: "unauthorized",
+  code: "gateway-token-required",
+  hint: "This remote request needs a gateway token: send it as `Authorization: Bearer <token>`.",
+});
+
+const LOOPBACK_PEERS: ReadonlySet<string> = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+/** How a request came to be trusted as loopback, or which door made it remote.
+ *  - `peer`: a non-loopback (or undeterminable) TCP peer.
+ *  - `remote-listener`: arrived on the remote listener, even from a loopback peer (card d0f3c8ea).
+ *  - `proxy`: arrived on the trusted-proxy listener (card 4cbbc343) — the peer is the local reverse proxy.
+ *  - `forwarded`: a loopback peer on the daemon's own port carrying proxy-shaped headers, while proxy mode is
+ *    configured — a mis-pointed proxy, or a forgery; only ever LOWERS trust. */
+export type RemoteVia = "peer" | "remote-listener" | "proxy" | "forwarded";
+export type RequestClass = { kind: "loopback" } | { kind: "remote"; via: RemoteVia };
+
+const LOOPBACK_CLASS: RequestClass = { kind: "loopback" };
+const REMOTE_CLASSES: Readonly<Record<RemoteVia, RequestClass>> = {
+  peer: { kind: "remote", via: "peer" }, "remote-listener": { kind: "remote", via: "remote-listener" },
+  proxy: { kind: "remote", via: "proxy" }, forwarded: { kind: "remote", via: "forwarded" },
+};
+
+const remoteListenerRequests = new WeakSet<object>();
+const proxyListenerRequests = new WeakSet<object>();
+/** Called by the remote listener for every request/upgrade it receives (before `app.routing`/the forwarder). */
+export function markRemoteListenerRequest(req: IncomingMessage): void { remoteListenerRequests.add(req); }
+/** Called by the trusted-proxy listener for every request/upgrade it receives. */
+export function markProxyListenerRequest(req: IncomingMessage): void { proxyListenerRequests.add(req); }
+
+/** A header a reverse proxy adds (`X-Forwarded-*`, `Forwarded`, `Via`, `X-Real-IP`, `Tailscale-*`). */
+function hasProxyShapedHeader(headers: IncomingMessage["headers"]): boolean {
+  for (const name of Object.keys(headers)) {
+    if (name === "forwarded" || name === "via" || name === "x-real-ip" || name.startsWith("x-forwarded-") || name.startsWith("tailscale-")) return true;
+  }
+  return false;
+}
+
+/**
+ * Classify a request. FAIL-CLOSED: an empty/undeterminable peer address is remote. Pure apart from reading the
+ * two listener marks. `proxyMode` = trusted-proxy mode is configured (see `resolveRemoteTrust`).
+ */
+export function requestClass(req: IncomingMessage, opts: { proxyMode: boolean }): RequestClass {
+  if (proxyListenerRequests.has(req)) return REMOTE_CLASSES.proxy;
+  if (remoteListenerRequests.has(req)) return REMOTE_CLASSES["remote-listener"];
+  if (!LOOPBACK_PEERS.has(req.socket?.remoteAddress ?? "")) return REMOTE_CLASSES.peer;
+  if (opts.proxyMode && hasProxyShapedHeader(req.headers)) return REMOTE_CLASSES.forwarded;
+  return LOOPBACK_CLASS;
+}
+
+/** The TCP peer address, ONLY for keying rate limits / lockouts — never for a trust decision (that is
+ *  `requestClass`). Empty string when undeterminable. */
+export function peerAddressOf(req: IncomingMessage): string { return req.socket?.remoteAddress ?? ""; }
+
+const TRUSTED_ORIGIN_HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
+
+/**
+ * Canonical form of a `remoteAccess.trustedProxyOrigins` entry, or `null` when it is not acceptable: exactly
+ * `scheme://host[:port]` (no path — not even `/` — query, fragment, userinfo, wildcard or trailing dot), https
+ * unless the host is a `.ts.net` name, and a host that is not loopback/wildcard/ambiguous
+ * (`isForbiddenAllowedHost`). The result is `new URL().origin` (lower-case, default port stripped).
+ */
+export function canonicalTrustedProxyOrigin(raw: string): string | null {
+  if (typeof raw !== "string" || raw !== raw.trim() || raw.includes("*")) return null;
+  const m = /^(https?):\/\/([^/?#@\s]+)$/i.exec(raw);
+  if (!m) return null;
+  let url: URL;
+  try { url = new URL(raw); } catch { return null; }
+  const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
+  if (host === "" || host.endsWith(".")) return null;
+  if (netIsIP(host) === 0 && !TRUSTED_ORIGIN_HOST_RE.test(host)) return null;
+  if (isForbiddenAllowedHost(host)) return null;
+  if (url.protocol === "http:" && !isTailnetHost(host)) return null;
+  return url.origin;
+}
+
+/** The canonical, de-duplicated `trustedProxyOrigins` (entries that fail canonicalisation are dropped — fail-closed). */
+export function trustedProxyOriginList(remoteAccess: RemoteAccessConfig): string[] {
+  const out = new Set<string>();
+  for (const raw of remoteAccess.trustedProxyOrigins ?? []) {
+    const c = canonicalTrustedProxyOrigin(raw);
+    if (c !== null) out.add(c);
+  }
+  return [...out];
+}
+
+/** Characters a Host header value may contain for the trusted-proxy match — anything else (userinfo `@`, a
+ *  path, whitespace) is refused outright rather than parsed. */
+const PROXY_HOST_HEADER_RE = /^[A-Za-z0-9.:[\]-]+$/;
+
+/**
+ * The trusted-proxy Host rule: the Host header must equal the host[:port] of one entry (default port of the
+ * ENTRY's scheme applied — `x.ts.net` equals `x.ts.net:443` for an https entry; a trailing-dot host never matches).
+ * Returns the matching canonical origin, or `null`.
+ */
+export function trustedProxyEntryForHost(hostHeader: string | undefined, origins: readonly string[]): string | null {
+  if (typeof hostHeader !== "string" || hostHeader === "" || !PROXY_HOST_HEADER_RE.test(hostHeader)) return null;
+  for (const origin of origins) {
+    let want: URL, got: URL;
+    try { want = new URL(origin); got = new URL(`${want.protocol}//${hostHeader}`); } catch { continue; }
+    if (got.hostname.endsWith(".")) continue;
+    if (got.host === want.host) return origin;
+  }
+  return null;
+}
+
+/** The trusted-proxy Origin rule: absent is allowed (a non-browser client); anything PRESENT — including the empty
+ *  string and `null` — must canonicalise to EXACTLY the entry the Host matched. */
+export function proxyOriginAllowed(originHeader: string | string[] | undefined, entry: string): boolean {
+  if (originHeader === undefined) return true;
+  if (typeof originHeader !== "string" || originHeader === "") return false;
+  try { return new URL(originHeader).origin.toLowerCase() === entry; } catch { return false; }
+}
+
+/** The ONE source of truth for whether remote trust is live, computed once from config (card 4cbbc343 M1). */
+export interface RemoteTrust {
+  /** The trust-tier wall is registered (a remote listener OR proxy mode is configured). */
+  tierWall: boolean;
+  /** Proxy mode is configured: `enabled` + a `proxyPort` + at least one valid trusted origin. */
+  proxyMode: boolean;
+  /** Canonical trusted origins (empty unless `proxyMode`). */
+  trustedOrigins: string[];
+}
+export function resolveRemoteTrust(remoteAccess: RemoteAccessConfig): RemoteTrust {
+  const origins = remoteAccess.enabled && remoteAccess.proxyPort !== undefined ? trustedProxyOriginList(remoteAccess) : [];
+  const proxyMode = origins.length > 0;
+  return { tierWall: isTrustTierHookActive(remoteAccess) || proxyMode, proxyMode, trustedOrigins: origins };
+}
+
+/** Why the trusted-proxy listener may not open — empty when it may (mirrors `remoteListenerRefusalReasons`). */
+export function proxyListenerRefusalReasons(remoteAccess: RemoteAccessConfig, tokenExists: boolean, ports: { loopbackPort: number; remotePort: number | null }): string[] {
+  const reasons: string[] = [];
+  if (!remoteAccess.enabled) reasons.push("remoteAccess.enabled is false");
+  if (remoteAccess.proxyPort === undefined) reasons.push("remoteAccess.proxyPort is not set");
+  const origins = trustedProxyOriginList(remoteAccess);
+  if (origins.length === 0) reasons.push("remoteAccess.trustedProxyOrigins has no valid entry");
+  if (!tokenExists) reasons.push("no gateway token exists yet");
+  if (remoteAccess.proxyPort !== undefined && remoteAccess.proxyPort === ports.loopbackPort) reasons.push(`remoteAccess.proxyPort (${remoteAccess.proxyPort}) equals the loopback listener's port`);
+  if (remoteAccess.proxyPort !== undefined && ports.remotePort !== null && remoteAccess.proxyPort === ports.remotePort) reasons.push(`remoteAccess.proxyPort (${remoteAccess.proxyPort}) equals the remote listener's port`);
+  const hosts = new Set(remoteHostAllowlist(remoteAccess));
+  for (const o of origins) {
+    const h = new URL(o).hostname.replace(/^\[(.*)\]$/, "$1");
+    if (hosts.has(h)) reasons.push(`trustedProxyOrigins host ${h} is also a remote allowedHosts/bindHost entry — the two classes must stay disjoint`);
+  }
+  return reasons;
 }
 
 /**

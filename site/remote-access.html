@@ -66,8 +66,8 @@
             By default the Loom daemon binds <strong>loopback only</strong>
             (<code>127.0.0.1:4317</code>): nothing outside your machine can reach
             it. That's the right default, but sometimes you want to open the
-            cockpit from a laptop, a phone, or another box. There are two ways to
-            do that, and only one of them gives you the cockpit.
+            cockpit from a laptop, a phone, or another box. There are three ways to
+            do that, and only the first gives you the full cockpit.
           </p>
           <div class="opt-grid reveal">
             <div class="opt">
@@ -89,6 +89,16 @@
                 <strong>mandatory TLS</strong>. It serves an
                 <strong>authenticated API, not the cockpit</strong>: the web app's
                 own routes stay loopback-only.
+              </p>
+            </div>
+            <div class="opt">
+              <span class="pill pill-muted">Alternative · unverified</span>
+              <h3 class="opt-h">Reverse proxy (Tailscale Serve)</h3>
+              <p class="opt-b">
+                A proxy on the same host forwards to a third, loopback-only
+                listener. A <strong>read-and-steer cockpit</strong> behind a
+                gateway token — off by default, and not yet tried against a live
+                Tailscale node.
               </p>
             </div>
           </div>
@@ -197,33 +207,116 @@
             </p>
           </div>
 
+        </div>
+      </section>
+
+      <!-- ── Alternative: behind a reverse proxy (Tailscale Serve) ─────────── -->
+      <section class="section" id="reverse-proxy">
+        <div class="wrap doc-col">
+          <p class="section-label reveal">Alternative · unverified on a live Tailscale node</p>
+          <h2 class="section-title reveal">Behind a reverse proxy (Tailscale Serve).</h2>
+          <div class="doc-flow reveal">
+            <p class="prose">
+              <code>tailscale serve</code> — or another same-host reverse proxy —
+              in front of the loopback daemon works through a
+              <strong>trusted-proxy listener</strong>: a third port, bound to
+              <code>127.0.0.1</code> only, that the proxy forwards to. It is
+              <strong>off by default</strong>, it gives a
+              <strong>read-and-steer cockpit</strong> rather than the full local
+              one, and it has <strong>not been run against a live Tailscale
+              node</strong> (see the last paragraph). <strong>Every request on
+              that port is remote-class, whatever its <code>Host</code></strong>:
+              it needs a gateway token, reaches only the Tier-1 surface (reads,
+              answering and steering, view-only terminals) and can never
+              <em>change</em> configuration, reach a human-only writer,
+              <code>/internal/*</code> or the local access credential. (Tier 1
+              does include reads such as profiles and the companion's
+              configuration.) The cockpit's static files are served without a
+              token — a browser must load the app before it can present one —
+              and everything else needs it.
+            </p>
+            <p class="prose">
+              <code>Host</code> must be one of <code>trustedProxyOrigins</code>,
+              and any <code>Origin</code> must be that same entry — exact scheme,
+              host and port, no wildcards, <code>https</code> unless it is a
+              <code>.ts.net</code> name. The proxy must <strong>preserve the
+              original <code>Host</code></strong> (nginx:
+              <code>proxy_set_header Host $host;</code>) and, for the live panes,
+              pass WebSocket upgrades; otherwise the <code>Host</code> no longer
+              matches and every request is refused 403.
+            </p>
+          </div>
+
           <div class="callout reveal">
-            <p class="callout-title"><span class="dot dot-amber"></span> Tailscale Serve doesn't work today</p>
+            <p class="callout-title"><span class="dot dot-amber"></span> Two things never to do</p>
             <p>
-              <code>tailscale serve --bg 4317</code> is the same shape as the SSH
-              forward and was recommended on this page previously. It does not
-              currently work, and the reason is on Loom's side, not Tailscale's —
-              nor is it the credential step above, which is refused
-              <em>later</em> than this, so the writes-locked banner never gets a
-              chance to help. Two guards sit ahead of everything else, both keyed
-              to loopback: the CSRF guard rejects a request whose
-              <code>Origin</code> isn't loopback with
-              <code>403 cross-origin request refused</code>, and the DNS-rebinding
-              guard rejects one whose <code>Host</code> isn't with
-              <code>403 host header not allowed</code>. A browser on
-              <code>https://your-machine.your-tailnet.ts.net</code> sends that
-              hostname in both, so every write and every WebSocket upgrade is
-              refused outright — and a proxy that forwards the original
-              <code>Host</code>, which is the usual behaviour, is refused on plain
-              reads too, before the page renders. The same applies to any other
-              reverse proxy in front of the daemon. Use the SSH forward above until
-              this is fixed.
+              <strong>Never point a proxy at the daemon's own port (4317 by
+              default).</strong> On that port the class still follows the peer
+              address: with proxy mode on, a request carrying
+              <code>X-Forwarded-*</code>, <code>Forwarded</code>, <code>Via</code>,
+              <code>X-Real-IP</code> or <code>Tailscale-*</code> headers is treated as remote, but a proxy
+              that rewrites <code>Host</code> to <code>127.0.0.1:4317</code> and
+              adds none of them (nginx's default <code>proxy_pass</code> does
+              exactly this) is indistinguishable from a local client and is
+              served as <strong>loopback</strong> — the full local read surface,
+              with no token. Point the proxy at <code>proxyPort</code> only.
             </p>
             <p>
-              This is about <em>Serve as a proxy in front of a loopback daemon</em>.
-              Pointing a <strong>direct bind</strong> at a <code>.ts.net</code>
-              address is a different configuration and is unaffected — see the TLS
-              section below.
+              <strong>Never use Tailscale Funnel.</strong> A request carrying
+              <code>Tailscale-Funnel-Request</code> is refused on every route of
+              the proxy listener, but a Funnel would still put this listener on
+              the public internet.
+            </p>
+          </div>
+
+          <div class="doc-flow reveal">
+            <div class="term">
+              <div class="term-bar">
+                <span class="term-title">trusted proxy · setup</span>
+              </div>
+              <div class="term-body">
+                <p class="term-comment"># 1. a gateway token (shown once) — the same call as the direct bind below</p>
+                <div class="term-line">
+                  <code class="term-cmd" data-copy="curl -X POST http://127.0.0.1:4317/api/gateway-tokens -H &quot;Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)&quot; -H 'content-type: application/json' -d '{&quot;name&quot;:&quot;my-phone&quot;}'"><span class="term-prompt">$</span> curl -X POST http://127.0.0.1:4317/api/gateway-tokens … -d '{"name":"my-phone"}'</code>
+                  <button class="copy" type="button" aria-label="Copy the mint-a-token command">Copy</button>
+                </div>
+                <p class="term-comment term-comment-sp"># 2. proxy mode: the port Serve targets + the exact origin your browser uses</p>
+                <p class="term-comment"># ⚠ this PATCH REPLACES the whole remoteAccess block — if you already have a direct bind,</p>
+                <p class="term-comment"># include its fields (bindHost, port, allowedHosts, tls, rateLimit) too, or they are dropped.</p>
+                <p class="term-comment"># Also: a trusted origin's host must NOT be a direct-bind bindHost/allowedHosts entry, or the proxy listener is refused.</p>
+                <div class="term-line">
+                  <code class="term-cmd" data-copy="curl -X PATCH http://127.0.0.1:4317/api/platform/config -H &quot;Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)&quot; -H 'content-type: application/json' -d '{&quot;remoteAccess&quot;:{&quot;enabled&quot;:true,&quot;proxyPort&quot;:4319,&quot;trustedProxyOrigins&quot;:[&quot;https://your-machine.your-tailnet.ts.net:8443&quot;]}}'"><span class="term-prompt">$</span> curl -X PATCH http://127.0.0.1:4317/api/platform/config … -d '{"remoteAccess":{"enabled":true,"proxyPort":4319,"trustedProxyOrigins":["https://your-machine.your-tailnet.ts.net:8443"]}}'</code>
+                  <button class="copy" type="button" aria-label="Copy the proxy-mode config command">Copy</button>
+                </div>
+                <p class="term-comment term-comment-sp"># 3. restart (config is read at boot), then point Serve at the proxy port</p>
+                <div class="term-line">
+                  <code class="term-cmd" data-copy="loom restart &amp;&amp; tailscale serve --bg --https=8443 http://127.0.0.1:4319"><span class="term-prompt">$</span> loom restart &amp;&amp; tailscale serve --bg --https=8443 http://127.0.0.1:4319</code>
+                  <button class="copy" type="button" aria-label="Copy the restart and serve command">Copy</button>
+                </div>
+              </div>
+            </div>
+            <p class="prose">
+              Open <code>https://your-machine.your-tailnet.ts.net:8443/?gwtoken=&lt;token&gt;</code>
+              once: the browser checks the token with the daemon, stores it for that
+              origin only if it is accepted (a refused link never overwrites a
+              token you already hold), and strips it from the address bar (or paste
+              it into the banner). The daemon still boots without a gateway
+              token but does not open the proxy port (it logs a warning), so mint the
+              first token before the restart. <code>proxyPort</code> has no default. Use a port dedicated to Loom:
+              any other page on the same origin can read the stored token.
+            </p>
+            <p class="prose">
+              <strong>Unverified on a live Tailscale node.</strong> This was built
+              from Tailscale's source (<code>serve.go</code> preserves
+              <code>Host</code>, leaves <code>Origin</code> alone, and adds
+              <code>X-Forwarded-*</code> and <code>Tailscale-*</code> headers) and
+              tested against a minimal in-test Node reverse proxy over plain HTTP
+              — https through a proxy, nginx and Caddy were not tested — not a live
+              tailnet. Whether Serve relays WebSocket upgrades unchanged on your
+              version is the first thing to check (live panes stay empty if not),
+              and the <code>tailscale serve</code> flags vary by version. On the
+              proxy listener the trust decision never depends on what Serve does
+              with <code>Host</code>.
             </p>
           </div>
         </div>
@@ -514,8 +607,7 @@
               case — a real listener, on that address, matching that
               <code>Host</code>. It is not the same thing as
               <code>tailscale serve</code> proxying to a loopback daemon, which
-              needs no bind at all and doesn't currently work; see the note in the
-              recommended section above.
+              needs no bind at all and goes through the trusted-proxy listener; see the reverse-proxy section above.
             </p>
           </div>
         </div>

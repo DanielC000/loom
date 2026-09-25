@@ -9,6 +9,7 @@ import {
 } from "../lib/companionChat";
 import { channelBadgeLabel } from "../lib/companion";
 import { api, getLoopbackToken } from "../lib/api";
+import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCredential";
 import { Button, Dot, SectionLabel, StatusPill } from "./ui";
 import { color, font, radius } from "../theme";
@@ -166,8 +167,10 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
       // No token captured yet (guard inert, or a pre-tokenized-URL page) → the param is simply omitted,
       // matching Terminal.tsx's fallback exactly.
       const loopbackToken = getLoopbackToken();
-      const wsUrl = `${proto}//${location.host}/ws/companion/${sessionId}${loopbackToken ? `?token=${encodeURIComponent(loopbackToken)}` : ""}`;
-      const ws = new WebSocket(wsUrl);
+      // Card 4cbbc343: the gateway token (double-subprotocol) on a proxied origin; byte-identical on loopback.
+      const auth = socketAuth("companion", loopbackToken);
+      const wsUrl = `${proto}//${location.host}/ws/companion/${sessionId}${auth.query}`;
+      const ws = auth.protocols ? new WebSocket(wsUrl, auth.protocols) : new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -252,7 +255,8 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
         wsRef.current = null;
         // A handshake that never opened on a token-less browser is the credential lock, not a flaky link.
         // Still reconnect: if the user pastes a credential into the banner, the next attempt carries it.
-        if (isCredentialSocketFailure(everOpened, getLoopbackToken())) noteCredentialLock("socket");
+        if (noteRemoteSocketRefusal(everOpened)) { /* the gateway banner owns it */ }
+        else if (isCredentialSocketFailure(everOpened, getLoopbackToken())) noteCredentialLock("socket");
         setConn("reconnecting");
         reconnectTimer = setTimeout(connect, backoff);
         backoff = Math.min(backoff * 2, RECONNECT_MAX_MS); // exponential backoff, capped

@@ -85,7 +85,8 @@ import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from 
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
 import { listCompanionMemories, readCompanionMemory, removeCompanionMemory, authorCompanionMemory } from "../skills/companion-memory-store.js";
-import { routeTier, isTrustTierHookActive, selectWsSubprotocol, resolveWsSubprotocolToken, remoteHostAllowlist } from "./trust-tier.js";
+import { routeTier, isStaticShellRoute, isTrustTierHookActive, selectWsSubprotocol, resolveWsSubprotocolToken, remoteHostAllowlist, requestClass, peerAddressOf, resolveRemoteTrust, trustedProxyEntryForHost, proxyOriginAllowed, GATEWAY_TOKEN_REQUIRED_BODY } from "./trust-tier.js";
+import type { RequestClass } from "./trust-tier.js";
 import type { RemoteEndpointRef } from "./remote-listener.js";
 import { verifyLoopbackSecret } from "./loopback-secret.js";
 import { createRemoteRateLimiter } from "./remote-rate-limit.js";
@@ -93,7 +94,6 @@ import { registerWebhookIngress } from "../webhooks/ingress.js";
 import { listWebhookEndpoints, createWebhookEndpoint, deleteWebhookEndpoint, setWebhookEndpointEnabled } from "../webhooks/store.js";
 import { detectIntegrations } from "../integrations/detect.js";
 
-const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 /** Min gap between honoured `repaint` frames from one REMOTE /ws/term socket (card 5b4ddca5). */
 const REMOTE_REPAINT_MIN_INTERVAL_MS = 1000;
 
@@ -324,17 +324,18 @@ export function redactSessionEnvHistoryEntry(entry: ProjectConfigHistoryEntry): 
 }
 
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
-  // trustProxy is DELIBERATELY left at its default (false) — LOAD-BEARING for every `req.ip` loopback
-  // gate in this file (the /internal/* checks below, and the trust-tier onRequest hook's own peer check).
-  // With trustProxy enabled, Fastify derives `req.ip` from an X-Forwarded-For header, which is
-  // attacker-controlled on any request that actually reaches this process — a remote caller could set
-  // `X-Forwarded-For: 127.0.0.1` and spoof past every one of those loopback checks. If a real reverse-proxy
-  // deployment ever needs trustProxy:true, every `LOOPBACK.has(req.ip)` site in this file must be re-audited
-  // (the trust-tier hook below instead reads `req.socket.remoteAddress` directly, so it stays correct
-  // regardless of this setting — see gateway/trust-tier.ts).
+  // trustProxy is DELIBERATELY left at its default (false): Fastify would otherwise derive `req.ip` from an
+  // attacker-controlled X-Forwarded-For. Every trust decision here goes through `classOf` (gateway/trust-tier.ts
+  // `requestClass`), which reads the socket peer and the listener a request arrived on — never `req.ip`, never a
+  // forwarded header as a credential — so the class stays correct regardless of this setting.
   // Card 23496950: Fastify is ALWAYS plain HTTP — the loopback listener every in-host consumer dials.
   // TLS belongs to the separately created REMOTE listener (gateway/remote-listener.ts), never to this app.
   const remoteAccessConfig = resolveConfig(undefined, deps.db.getPlatformConfig()).remoteAccess;
+  // Card 4cbbc343 (M1): ONE source of truth for whether remote trust is live — the tier wall's registration, the
+  // Host allowlist, the Origin rule, the fail-closed check below and the listener composition all read it.
+  const remoteTrust = resolveRemoteTrust(remoteAccessConfig);
+  // The request's trust class, decided ONLY by requestClass (gateway/trust-tier.ts). Pure, so handlers call it directly.
+  const classOf = (req: { raw: Parameters<typeof requestClass>[0] }): RequestClass => requestClass(req.raw, { proxyMode: remoteTrust.proxyMode });
   // `logger: false`: see GATEWAY_LOG_SERIALIZERS's doc above for the redaction seam to plug in FIRST if
   // this is ever flipped to a real logger.
   const app: FastifyInstance = Fastify({ logger: false });
@@ -342,7 +343,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const ref = deps.remoteEndpoint;
     // preClose (not onClose): runs BEFORE Fastify starts closing its own server, so the remote listener is
     // torn down first instead of queueing behind the loopback server's connection drain.
-    app.addHook("preClose", async () => { await ref.close?.(); });
+    app.addHook("preClose", async () => { await ref.closeProxy?.(); await ref.close?.(); });
   }
 
   // @decision 4a22aab8 — never register a guard onRequest hook above this websocket register: a guard that
@@ -377,7 +378,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   //     bound-port-only Host pin would 403 it; (3) the port adds no security here — both threats are external
   //     hostnames, and a loopback-port origin already implies local code execution. The bound-port loopback
   //     origin/host (paths.ts PORT = LOOM_PORT||4317, the same constant index.ts listens on) is of course a
-  //     subset of "loopback hostname" and stays allowed. ADDITIVE: the /internal/* loopback (req.ip) gate
+  //     subset of "loopback hostname" and stays allowed. ADDITIVE: the /internal/* class gate
   //     below is untouched — defence in depth.
   const isLoopbackHostname = (h: string | null): boolean => h === "127.0.0.1" || h === "localhost";
   // Card 23496950 — remote Host/Origin reconciliation. A real remote client's Host is whatever hostname/IP
@@ -399,10 +400,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // port). A loopback peer keeps the loopback-only rule: otherwise another local web service at
   // `http://<allowedHost>:8080`, open in a browser on the daemon host, could read loopback-exempt GETs and
   // `/ws/fleet`. A non-loopback peer may ONLY present an origin equal to one of the remote listener's own.
-  const isAllowedOrigin = (originRaw: string, peerIsLoopback: boolean): boolean => {
+  const isAllowedOrigin = (originRaw: string, cls: RequestClass): boolean => {
     const h = hostnameOf(originRaw, true);
     // No remote bind configured ⇒ no remote peer can exist: byte-identical to the pre-remote loopback rule.
-    if (peerIsLoopback || remoteHosts.size === 0) return isLoopbackHostname(h);
+    if (cls.kind === "loopback" || remoteHosts.size === 0) return isLoopbackHostname(h);
     const ep = deps.remoteEndpoint?.current;
     if (!ep || h === null || remoteHosts.size === 0) return false;
     let origin: string;
@@ -419,6 +420,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     try { return new URL(withScheme ? raw : `http://${raw}`).hostname; } catch { return null; }
   };
   app.addHook("onRequest", async (req, reply) => {
+    const cls = classOf(req);
+    // Fail-closed invariant (card 4cbbc343 M1): a request classed remote while NO trust-tier wall is registered can
+    // only be a config/wiring inconsistency — refuse it rather than let a remote class fall through to loopback-era
+    // guards that assume "remote ⇒ the wall is on".
+    // An UNDETERMINABLE peer address (no socket — only a test seam such as `injectWS`) keeps its pre-existing behaviour.
+    if (cls.kind === "remote" && !remoteTrust.tierWall && (cls.via !== "peer" || peerAddressOf(req.raw) !== "")) return reply.code(403).send({ error: "forbidden" });
+    if (cls.kind === "remote" && cls.via === "proxy") {
+      // The trusted-proxy listener: trust follows the LISTENER, so this only decides whether the request's own
+      // Host/Origin are consistent with a configured entry. Funnel-fronted requests are refused on every route.
+      if (typeof req.headers["tailscale-funnel-request"] === "string") return reply.code(403).send({ error: "funnel requests refused" });
+      const entry = trustedProxyEntryForHost(req.headers.host, remoteTrust.trustedOrigins);
+      if (entry === null) return reply.code(403).send({ error: "host header not allowed" });
+      if (!proxyOriginAllowed(req.headers.origin, entry)) return reply.code(403).send({ error: "cross-origin request refused" });
+      return;
+    }
     const origin = req.headers.origin;
     // OAuth2 loopback callback (agent-tooling P5a): the ONE deliberate exemption from the Origin check.
     // The user's browser reaches this route via a TOP-LEVEL navigation the OAuth PROVIDER redirects —
@@ -434,8 +450,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // (CLI / Run-API-key / server-to-server). A present-but-malformed Origin — including the literal
     // "null" origin (a sandboxed-iframe CSRF sends `Origin: null`), which fails to parse → not allowed →
     // 403 — is REJECTED (the safer behavior).
-    const peerIsLoopback = LOOPBACK.has(req.socket?.remoteAddress ?? "");
-    if (!isOAuthCallback && typeof origin === "string" && origin.length > 0 && !isAllowedOrigin(origin, peerIsLoopback)) {
+    if (!isOAuthCallback && typeof origin === "string" && origin.length > 0 && !isAllowedOrigin(origin, cls)) {
       return reply.code(403).send({ error: "cross-origin request refused" });
     }
     // Host must be present and allowed (DNS-rebind defence). Real HTTP clients always send Host; a
@@ -452,7 +467,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // was already resolved ONCE at the top of this function, daemon-global like gitWriteTimeouts below — a config change needs a daemon
   // restart — and the hook is only ever REGISTERED when a non-loopback bind is actually configured — off
   // by default, so today's daemon never even allocates it (byte-identical, not just a no-op check).
-  if (isTrustTierHookActive(remoteAccessConfig)) {
+  if (remoteTrust.tierWall) {
     const verifyGatewayToken = deps.verifyGatewayToken ?? (() => false);
     // Phase C rate limiter (card 6bc02f50): ONE instance for this hook's lifetime — sliding-window
     // request caps (in-memory) + the db-backed per-ip auth-failure lockout (gateway/remote-rate-limit.ts).
@@ -464,18 +479,28 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     };
     const rateLimiter = createRemoteRateLimiter(deps.db, rateLimitPolicy);
     app.addHook("onRequest", async (req, reply) => {
-      // Read the TCP peer directly rather than `req.ip` — see the trustProxy comment at the Fastify()
-      // construction site above. This keeps the wall correct even if trustProxy is ever flipped on.
-      const ip = req.socket?.remoteAddress ?? "";
-      if (LOOPBACK.has(ip)) return; // arrived via the loopback interface — pass through unchanged, EXEMPT from the rate limiter too
+      const cls = classOf(req);
+      const ip = peerAddressOf(req.raw); // rate-limit KEY only — the trust decision is `cls`
+      if (cls.kind === "loopback") return; // arrived via the loopback interface — pass through unchanged, EXEMPT from the rate limiter too
+      // Card 4cbbc343: every peer behind the trusted-proxy listener (or a proxy-shaped header on the daemon's own
+      // port) is the SAME local socket address, so per-ip keys and lockouts are meaningless there — see below.
+      const sharedPeer = cls.via === "proxy" || cls.via === "forwarded";
       // `req.routeOptions.url` is the matched route's registered PATTERN (find-my-way resolves it before
       // onRequest hooks run). It is undefined only when no route matched at all (a 404) — treat that
       // EXPLICITLY as Tier 0 rather than falling back to `req.url` (the attacker-controlled resolved path),
       // so an unmatched path's own text can never influence tier classification.
       const routePattern = req.routeOptions.url;
       const tier = routePattern === undefined ? 0 : routeTier(req.method, routePattern);
+      // Card 4cbbc343 (F1): the SPA shell is public to the trusted-proxy class ONLY (see isStaticShellRoute) — a browser
+      // must load the app before it can present a token. Keyed on the matched pattern. Deliberately NOT rate-limited:
+      // it is public static bytes, and every proxied request arrives from 127.0.0.1, so any shared bucket would let one
+      // tailnet peer 429 the owner's own app load (the API paths below keep their throttles).
+      if (cls.via === "proxy" && isStaticShellRoute(req.method, routePattern)) return;
       if (tier === 0) return reply.code(403).send({ error: "forbidden" });
       if (tier === 2) {
+        // The webhook ingress is not reachable through the trusted-proxy listener (card 4cbbc343): a browser front
+        // has no business relaying it, and it would be the one public route on that listener.
+        if (sharedPeer) return reply.code(403).send({ error: "forbidden" });
         // Tier 2 (card 8fbedcac): PUBLIC webhook ingress, signature-gated — NEVER reads Authorization at
         // all, so a Tier-1 gateway token has no code path here (it cannot grant Tier-2 access) and this
         // request can never grant Tier-1 access either — isolation by construction, not a denylist check.
@@ -512,6 +537,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           token = resolved.outcome === "token" ? resolved.token : (typeof q?.token === "string" ? q.token : undefined);
         }
       }
+      if (sharedPeer) {
+        // Card 4cbbc343 M3 — THROTTLE-ONLY, VERIFY FIRST. Every caller behind the proxy listener shares one local
+        // socket address, so a per-ip lockout would let one guesser lock the owner out; tokens are 256-bit, so a
+        // lockout adds nothing anyway. A VALID token is never gated by anything but its own per-token cap; only the
+        // failure path is throttled (429), and never hard-locked.
+        const at = Date.now();
+        if (!wsProtocolRejected && verifyGatewayToken(token)) {
+          if (!rateLimiter.allowProxyToken(token as string, at)) return reply.code(429).send({ error: "rate limit exceeded" });
+          return;
+        }
+        if (!rateLimiter.allowProxyPreAuth(at)) return reply.code(429).send({ error: "rate limit exceeded" });
+        if ((wsProtocolRejected || token) && !rateLimiter.allowProxyFailedAuth(at)) return reply.code(429).send({ error: "too many failed attempts — try again shortly" });
+        return reply.code(401).send(GATEWAY_TOKEN_REQUIRED_BODY);
+      }
       const now = Date.now();
       // Auth-failure lockout gate — reject BEFORE re-verifying while this ip is locked out (mirrors the
       // companion pairing coordinator's own lockout-gate-before-load ordering).
@@ -528,11 +567,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // keeps working. Absent and wrong tokens get the identical body (no oracle), and the hint states only
         // what any 401 already implies; it names no path, secret, or `loom open` pointer (that pointer is the
         // LOOPBACK guard's own credential, which must never arm on this 401 — decision 093981dd).
-        return reply.code(401).send({
-          error: "unauthorized",
-          code: "gateway-token-required",
-          hint: "This remote request needs a gateway token: send it as `Authorization: Bearer <token>`.",
-        });
+        return reply.code(401).send(GATEWAY_TOKEN_REQUIRED_BODY);
       }
       rateLimiter.clearAuthFailures(ip);
     });
@@ -553,7 +588,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   //     `Sec-WebSocket-Protocol: loom.v1, loom.bearer.<secret>` mechanism (or a `?token=` fallback) —
   //     reused verbatim, not reinvented. Optional dep — ABSENT ⇒ no-op (partial-stub tests stay
   //     byte-identical); `index.ts` (the only real boot path) always supplies it.
-  //   - TEST NOTE: `req.socket.remoteAddress` is what this hook (and the trust-tier wall above) key
+  //   - TEST NOTE: the socket peer address (via `requestClass`) is what this hook (and the trust-tier wall above) key
   //     loopback-vs-remote off — Fastify's `injectWS` helper does NOT default it the way `.inject()`
   //     does; card 214caa53 GAP 1 (same record above) covers the mechanics this forces on tests.
   if (deps.loopbackSecret !== undefined) {
@@ -577,17 +612,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // This check is what scopes the hook to loopback, not a defensive no-op: a non-loopback caller
       // reaching here either already passed/failed the trust-tier wall above, or has no non-loopback bind
       // to reach at all.
-      // @decision 214caa53 — an empty/undeterminable `remoteAddress` on a guarded route is REJECTED
+      // @decision 214caa53 — an empty/undeterminable peer address on a guarded route is REJECTED
       // (401), never treated as "confirmed non-loopback" — fail CLOSED, unconditionally; no bearer
       // credential rescues it, since we can't confirm this is the loopback caller it's scoped to trust.
-      const ip = req.socket?.remoteAddress ?? "";
+      const ip = peerAddressOf(req.raw);
       if (ip === "") {
         // Distinct body from the credential-rejection cases below (Code Review nitpick, card 214caa53):
         // this reject is unconditional on the address — no credential can rescue it — so telling the
         // caller to go fetch one via `loom open` would point at the one thing that will NOT help here.
         return reply.code(401).send({ error: "unauthorized — peer address undeterminable" });
       }
-      if (!LOOPBACK.has(ip)) return;
+      if (classOf(req).kind !== "loopback") return;
       let presented: string | undefined;
       if (isTermSocket || isCompanionSocket) {
         const proto = req.headers["sec-websocket-protocol"];
@@ -647,7 +682,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // API-only deployment). Resolver (LOOM_WEB_DIST override → bundled → monorepo) lives in paths.ts.
   const webDist = resolveWebDistDir();
   if (fs.existsSync(path.join(webDist, "index.html"))) {
-    await app.register(fastifyStatic, { root: webDist, index: ["index.html"] });
+    // `dotfiles: "ignore"` (card 4cbbc343): the shell is public to the trusted-proxy class, so a dotfile in the web dist must never be
+    // servable (it 404s into the SPA fallback instead).
+    await app.register(fastifyStatic, { root: webDist, index: ["index.html"], dotfiles: "ignore" });
     // SPA fallback: an unmatched GET that is NOT a reserved daemon path serves index.html, so the client
     // router owns deep links (e.g. /board). @fastify/static's wildcard serves any real asset first and
     // only routes a genuine miss here. The reserved-path guard is what keeps this from swallowing the
@@ -2727,7 +2764,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // deliberately reads the TARGET session's own settings.json can still extract the token; that ceiling is
   // inherited from 93249b52, not closed by this fix.
   app.post("/internal/hook", async (req, reply) => {
-    if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
+    if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
     const body = req.body as { sessionId?: string; hook?: Record<string, unknown>; token?: string };
     if (body?.sessionId && body.hook) {
       if (!deps.pty.verifyHookToken(body.sessionId, body.token)) {
@@ -2748,7 +2785,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // secret bearer guard above (`isGuardedInternalWrite`) — stopping the daemon is too large a capability
   // for a co-resident agent to reach unauthenticated.
   app.post("/internal/shutdown", async (req, reply) => {
-    if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
+    if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
     setTimeout(() => deps.requestShutdown(), 50);
     return reply.code(202).send({ ok: true, stopping: true });
   });
@@ -2758,7 +2795,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // /internal/shutdown): this route FETCHES AND INSTALLS CODE on a packaged install, a strictly larger
   // blast radius than any /api/* write. PACKAGED-ONLY: a from-source daemon REFUSES with 409.
   app.post("/internal/update", async (req, reply) => {
-    if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
+    if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
     if (!isPackagedInstall()) {
       return reply.code(409).send({ error: "update is only available for a packaged (npm-installed) Loom; this is a from-source daemon — update it with git." });
     }
@@ -2771,7 +2808,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // structurally unreachable on a real daemon; never route a new kind through startRun/PTY or reconcile().
   if (inTestMode()) {
     app.post("/internal/test/seed", async (req, reply) => {
-      if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
+      if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
       const b = (req.body ?? {}) as {
         usageSamples?: Partial<UsageSample>[];
         runs?: Partial<AgentRun>[];
@@ -3275,7 +3312,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // trust posture as `/internal/test/seed` immediately above: gated on BOTH `inTestMode()` (so it's
     // absent from a real end-user daemon's route table entirely) AND loopback.
     app.post("/internal/test/sweep-dead-sessions", async (req, reply) => {
-      if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
+      if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
       return reply.send({ ok: true, marked: sweepDeadSessions(deps.db) });
     });
 
@@ -3284,7 +3321,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // never redacted — same trust posture as `/internal/test/seed`/`sweep-dead-sessions` above: gated on
     // BOTH `inTestMode()` AND loopback, structurally absent from a real end-user daemon.
     app.get("/internal/test/projects/:id/raw-config", async (req, reply) => {
-      if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
+      if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
       const id = (req.params as { id: string }).id;
       const project = deps.db.getProject(id);
       if (!project) return reply.code(404).send({ error: "project not found" });
@@ -5697,7 +5734,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // @decision 710a34fa — a non-loopback peer (a Tier-1 gateway token holder) gets a view of an
     // agent session with no input except a repaint (Ctrl-L), and NO access at all to a host shell: never accept raw stdin from it, never attach it to
     // a shell pty. An empty/undeterminable peer address counts as non-loopback (fail closed).
-    const remotePeer = !LOOPBACK.has(req.socket?.remoteAddress ?? "");
+    const remotePeer = classOf(req).kind === "remote";
     if (remotePeer && deps.pty.listShells().some((t) => t.id === sessionId)) {
       socket.close(1008, "host shell terminals are loopback-only");
       return;

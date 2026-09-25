@@ -6,6 +6,7 @@ import type { HarnessDrainStatus } from "./harnessFields";
 // Card 093981dd — the loopback credential's storage + the "writes are locked" signal (JSX-free, so it
 // stays unit-testable without a DOM renderer).
 import { captureTokenFromUrl, getLoopbackToken, isCredentialGuardFailure, noteCredentialLock } from "./loopbackCredential";
+import { captureGatewayTokenFromUrl, gatewayAuthHeaders, isGatewayTokenRequired, isRemoteOrigin, noteGatewayLock, withGatewayAuth } from "./gatewayCredential";
 
 // A one-time DM-pairing enrollment code, returned ONCE by the mint endpoint (the store keeps only a
 // salted hash). The human relays `code` to the person being enrolled; it is never recoverable after.
@@ -170,10 +171,14 @@ export interface TemplateApplyResult { agents: Agent[]; tasks: Task[]; }
 // Storage + the `?token=` capture moved to lib/loopbackCredential.ts (card 093981dd) so ONE module owns
 // them; `getLoopbackToken` is re-exported below because Terminal.tsx/CompanionChat.tsx import it here.
 captureTokenFromUrl();
+// Card 4cbbc343: the gateway token a browser needs behind a trusted reverse proxy — a SEPARATE param and storage key.
+void captureGatewayTokenFromUrl(); // verifies before storing (async); a bad link never overwrites a working token
 
 export { getLoopbackToken, setLoopbackToken } from "./loopbackCredential";
 
 function authHeaders(): Record<string, string> {
+  // Card 4cbbc343: on a proxied (non-loopback) origin the credential is the gateway token, never the loopback secret.
+  if (isRemoteOrigin()) return gatewayAuthHeaders();
   const token = getLoopbackToken();
   return token ? { authorization: `Bearer ${token}` } : {};
 }
@@ -188,11 +193,13 @@ function authHeaders(): Record<string, string> {
  * 401s leave the user with the daemon's unrunnable "see `loom open`" advice and no way to act on it.
  */
 async function guardedFetch(url: string, init?: RequestInit): Promise<Response> {
-  const r = await fetch(url, init);
+  // Card 4cbbc343: on a proxied origin EVERY request (reads too) carries the gateway token; loopback is untouched.
+  const r = await fetch(url, withGatewayAuth(init));
   if (r.status === 401) {
     void r.clone().json()
-      .then((j: { error?: string }) => {
+      .then((j: { error?: string; code?: string }) => {
         if (isCredentialGuardFailure(401, j?.error ?? "")) noteCredentialLock("write");
+        else if (isGatewayTokenRequired(401, j)) noteGatewayLock(); // its OWN banner, never the loopback one
       })
       .catch(() => { /* non-JSON 401 body — not the guard's shape, so not our signal */ });
   }
