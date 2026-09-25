@@ -143,17 +143,19 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
 {
   // (L) HEAD-only move that does NOT return: the worktree is left detached at T2, the branch ref still T1. Refused, but NOT labelled movedAndBack.
   const { db, mgrId, workerId, repo } = await setupWorkerProject(sfxOf("headleft"));
+  let t2Sha = null;
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
     syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
     runGate: async (_cmd, cwd) => {
       execSync("git checkout -q --detach", { cwd, stdio: "ignore" });
       fs.writeFileSync(path.join(cwd, "t2.txt"), "T2\n"); commitAll(cwd, "t2 detached commit", GIT_ID);
+      t2Sha = execSync("git rev-parse HEAD", { cwd }).toString().trim();
       return PASS;
     },
   });
   const r1 = await confirm(sessions, mgrId, workerId);
   check("(L) a HEAD-only move that never returns is refused as gateTipMoved", r1.settled === true && r1.ok && r1.value.merged === false && !!r1.value.gateTipMoved && !fs.existsSync(path.join(repo, "feature.txt")));
-  check("(L) it is NOT labelled movedAndBack and names the worktree HEAD it was left on", r1.ok && r1.value.gateTipMoved?.movedAndBack === undefined && r1.value.gateTipMoved?.gated !== r1.value.gateTipMoved?.live && !!r1.value.gateTipMoved?.live);
+  check("(L) it is NOT labelled movedAndBack and names the worktree HEAD it was left on", r1.ok && r1.value.gateTipMoved?.movedAndBack === undefined && r1.value.gateTipMoved?.gated !== r1.value.gateTipMoved?.live && !!t2Sha && r1.value.gateTipMoved?.live === t2Sha);
 }
 {
   // (K) REUSE PATH: a `run_gate` self-check whose own gate saw a tip round trip must NOT be reusable. Head stamps at start/admit/settle all

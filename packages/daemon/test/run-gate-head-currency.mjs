@@ -243,6 +243,35 @@ try {
     check("(E) headCurrent is false", rSubject.value.headCurrent === false);
     check("(E) headWarning names the round trip (came back / not reusable), not the understating STALE LABEL text", /came back/i.test(rSubject.value.headWarning ?? "") && !/STALE LABEL/i.test(rSubject.value.headWarning ?? "") && !/likely DOES cover/i.test(rSubject.value.headWarning ?? ""));
   }
+  // ── (F) DIRECT unit cases on describeGateHeadCurrency (card 92dcd9f1): the admit-vs-settle RACY check must run BEFORE the
+  //        start==settle CLEAN shortcut. A tree that moves during the QUEUE WAIT and moves back during the RUN has start == settle
+  //        ≠ admit — the run executed against the ADMIT tree, so it must NOT read headCurrent:true (a reusable self-check).
+  //        The DIRTY variant (an uncommitted edit made during the queue wait, reverted mid-run) writes no reflog entry, so
+  //        d099087f's roundTrip cannot see it; only the stamp order can. ─────────────────────────────────────────────────────
+  {
+    const { SessionService: SS } = await import("../dist/sessions/service.js");
+    const describe = (s, a, t, rt) => SS.prototype.describeGateHeadCurrency.call({}, s, a, t, rt);
+    const T1 = "1".repeat(40), T2 = "2".repeat(40);
+    const clean = (head) => ({ head, dirty: false, dirtyHash: null });
+    const dirty = (head, h) => ({ head, dirty: true, dirtyHash: h });
+    const racy = (r) => r.headCurrent === false && /actively running/i.test(r.headWarning ?? "") && /UNVERIFIED/i.test(r.headWarning ?? "");
+
+    const commitShape = describe(clean(T1), clean(T2), clean(T1), false);
+    check("(F1) S=T1 A=T2 T=T1 (commit moved in the queue wait, moved back mid-run) is RACY, not headCurrent:true", racy(commitShape));
+    const dirtyShape = describe(clean(T1), dirty(T1, "h"), clean(T1), false);
+    check("(F2) S=T1 clean, A=T1 dirty, T=T1 clean (uncommitted edit reverted mid-run) is RACY, not headCurrent:true", racy(dirtyShape));
+    const commitShapeRt = describe(clean(T1), clean(T2), clean(T1), true);
+    check("(F3) S=T1 A=T2 T=T1 WITH roundTrip keeps the RACY wording (roundTrip decides only where settle === admit)", racy(commitShapeRt) && !/came back/i.test(commitShapeRt.headWarning ?? ""));
+    check("(F4) S=T1 A=T1 T=T1 clean, no round trip: headCurrent:true, no warning", (() => { const r = describe(clean(T1), clean(T1), clean(T1), false); return r.headCurrent === true && r.headWarning === undefined; })());
+    const rt = describe(clean(T1), clean(T1), clean(T1), true);
+    check("(F5) S=A=T clean WITH roundTrip: headCurrent:false, round-trip wording", rt.headCurrent === false && /came back/i.test(rt.headWarning ?? ""));
+    const relabel = describe(clean(T1), clean(T2), clean(T2), false);
+    check("(F6) S=T1 A=T2=T2 (queue-wait move, stable after admission) stays the benign RELABELED shape", relabel.headCurrent === false && /STALE LABEL/i.test(relabel.headWarning ?? ""));
+    const relabelRt = describe(clean(T1), clean(T2), clean(T2), true);
+    check("(F7) RELABELED + roundTrip reads as the round-trip wording, not STALE LABEL", relabelRt.headCurrent === false && /came back/i.test(relabelRt.headWarning ?? "") && !/STALE LABEL/i.test(relabelRt.headWarning ?? ""));
+    const unknown = describe(clean(T1), clean(null), clean(T1), false);
+    check("(F8) a null stamp is still UNKNOWN", unknown.headCurrent === false && /UNKNOWN/i.test(unknown.headWarning ?? ""));
+  }
 } finally {
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

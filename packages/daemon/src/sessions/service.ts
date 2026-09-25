@@ -13346,10 +13346,11 @@ export class SessionService {
         headWarning: "could not confirm the worktree's HEAD at one or more checkpoints (a git read failed) — treat this result's currency as UNKNOWN, not as confirmed-current.",
       };
     }
-    // @decision d099087f — `roundTrip` decides ONLY where the stamps cannot see a move (settle head === admit head): the null-stamp UNKNOWN and
+    // @decision d099087f — `roundTrip` decides ONLY where the stamps cannot see a move (settle === admit): the null-stamp UNKNOWN and
     // the RACY shape stay first, so a plain mid-run commit that never returns keeps 39196378's RACY wording.
+    // @decision 92dcd9f1 — admit-vs-settle is tested BEFORE start-vs-settle: start === settle ≠ admit (moved in the queue wait, back mid-run)
+    // ran against the ADMIT tree, so it must be RACY, never the CLEAN shortcut (its dirty variant leaves no reflog entry for roundTrip).
     const roundTripResult = { headCurrent: false, headWarning: "the branch/worktree HEAD moved off the admitted commit while this gate was running and came back (an ABA round trip the head stamps cannot see) — what it tested may be a mix of commits. Treat this result as UNVERIFIED and NOT reusable; re-run." };
-    if (!gateStampsDiffer(startStamp, settleStamp)) return roundTrip ? roundTripResult : { headCurrent: true };
     const nowHead = settleStamp.head.slice(0, 8);
     if (gateStampsDiffer(admitStamp, settleStamp)) {
       return {
@@ -13357,7 +13358,8 @@ export class SessionService {
         headWarning: `the worktree changed WHILE this gate was actively running (branch HEAD is now ${nowHead}) — this run's own execution window did not see a single stable tree, so what it tested may be an inconsistent mix of old and new files. Treat this result as UNVERIFIED for your current code.`,
       };
     }
-    if (roundTrip) return roundTripResult; // queue-wait relabel AND a mid-run round trip: the "likely DOES cover your current code" text below would understate it
+    if (roundTrip) return roundTripResult; // settle === admit here, so a round trip is the only thing left to see (covers the queue-wait relabel too: the "likely DOES cover" text below would understate it)
+    if (!gateStampsDiffer(startStamp, settleStamp)) return { headCurrent: true };
     const validated = startStamp.head.slice(0, 8);
     return {
       headCurrent: false,
