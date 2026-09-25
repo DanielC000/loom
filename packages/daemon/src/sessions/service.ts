@@ -13683,8 +13683,8 @@ export class SessionService {
     // run; `gatePreStamp` is the stamp `captureGatedTip` took right before that spawn.
     let gateWorktreeChanged: string | undefined;
     let gatePreStamp: WorktreeGateStamp | undefined;
-    // @decision d099087f — branch-reflog snapshot taken with `gatePreStamp`; `gateHeadLeftDuringRun` is STICKY (never reset by a
-    // later link) once any link's gate saw the tip leave its pre-spawn head, even if it came back (T1→T2→T1).
+    // @decision d099087f — branch-reflog snapshot taken with `gatePreStamp`; `gateHeadLeftDuringRun` is STICKY across the
+    // single-file/resumed links (reset only at the transient whole-gate re-run's re-pin) once a link's gate saw the tip leave its pre-spawn head, even if it came back (T1→T2→T1).
     let gatePreReflog: GateReflogSnapshot | null = null;
     let gateHeadLeftDuringRun = false;
     // Whether the move that set it came BACK (settle worktree HEAD === the pre-spawn head), else where the worktree HEAD was left instead
@@ -14686,6 +14686,9 @@ export class SessionService {
             // @decision 975c774b — this link re-runs the WHOLE gate, so dirt attempt 1 saw at settle no longer taints its verdict:
             // reset here only (single-file/resumed links stay sticky); a still-dirty tree re-sets it via captureGatedTip's throw.
             gateWorktreeChanged = undefined;
+            // @decision d099087f — same for the round-trip state: a whole-gate re-run on the re-pinned tip is complete evidence for THAT tip
+            // (c59165b8's contract); captureGatedTip below re-takes the reflog snapshots at the re-pin. Single-file/resumed links stay sticky.
+            gateHeadLeftDuringRun = false; gateHeadReturned = false; gateHeadLeftAt = undefined;
             await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
             transientGateSpawned = true;
             if (r.passed) holdRepoGuardOnExit();
