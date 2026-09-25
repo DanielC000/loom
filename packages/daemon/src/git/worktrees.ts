@@ -2399,13 +2399,41 @@ export async function branchReflogShas(repoPath: string, branch: string, deps: B
   }
 }
 
+/** The worktree's OWN HEAD reflog (per-worktree in a linked worktree), NEWEST FIRST, or `null` when unreadable. A HEAD-only round trip
+ *  (detach → commit → checkout back, another branch and back, an aborted rebase) writes NO `refs/heads/<branch>` entry, so the branch reflog alone misses it. */
+export async function worktreeHeadReflogShas(worktreePath: string, deps: BoundedGitDeps = {}): Promise<string[] | null> {
+  try {
+    const { git, timeoutMs } = boundedGit(worktreePath, deps);
+    const out = await withTimeout(git.raw(["reflog", "show", "--format=%H", "HEAD", "--"]), timeoutMs, "worktree HEAD reflog");
+    return out.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  } catch {
+    return null;
+  }
+}
+
+/** Both reflogs a gate's ABA check reads, snapshotted together (each `null` when unreadable). */
+export interface GateReflogSnapshot { branch: string[] | null; head: string[] | null }
+
+export async function snapshotGateReflogs(repoPath: string, branch: string, worktreePath: string, deps: BoundedGitDeps = {}): Promise<GateReflogSnapshot> {
+  const [b, h] = await Promise.all([branchReflogShas(repoPath, branch, deps), worktreeHeadReflogShas(worktreePath, deps)]);
+  return { branch: b, head: h };
+}
+
 /**
- * Did the branch tip leave `preHead` at any point between two {@link branchReflogShas} snapshots — even if it came back? Fail-closed:
- * an unreadable snapshot, or a reflog that shrank, reads as "moved". Pure.
+ * Did one reflog gain an entry that is not `preHead` between two snapshots (newest first)? The delta is anchored on the before-snapshot's
+ * newest entry by POSITION and sha (`after[after.length - before.length] === before[0]`), never on length alone: an expiry/rewrite during the
+ * gate breaks the anchor and reads as "moved". Fail-closed on unreadable or shrunken input. Pure.
  */
-export function branchLeftHeadBetween(preHead: string, before: string[] | null, after: string[] | null): boolean {
+function reflogGainedForeignEntry(preHead: string, before: string[] | null, after: string[] | null): boolean {
   if (before === null || after === null || after.length < before.length) return true;
-  return after.slice(0, after.length - before.length).some((sha) => sha !== preHead);
+  const anchor = after.length - before.length;
+  if (before.length > 0 && after[anchor] !== before[0]) return true;
+  return after.slice(0, anchor).some((sha) => sha !== preHead);
+}
+
+/** Did the branch tip / the worktree HEAD leave `preHead` at any point between two {@link GateReflogSnapshot}s — even if it came back? */
+export function gateReflogLeftHead(preHead: string, before: GateReflogSnapshot, after: GateReflogSnapshot): boolean {
+  return reflogGainedForeignEntry(preHead, before.branch, after.branch) || reflogGainedForeignEntry(preHead, before.head, after.head);
 }
 
 /** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */

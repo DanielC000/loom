@@ -22,7 +22,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, branchReflogShas, branchLeftHeadBetween, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -13181,8 +13181,14 @@ export class SessionService {
    *  (moved mid-run, unverified) into one warning; a start-vs-settle-only check cannot tell them
    *  apart and cries wolf on the benign case. */
   private describeGateHeadCurrency(
-    startStamp: WorktreeGateStamp, admitStamp: WorktreeGateStamp, settleStamp: WorktreeGateStamp,
+    startStamp: WorktreeGateStamp, admitStamp: WorktreeGateStamp, settleStamp: WorktreeGateStamp, roundTrip = false,
   ): { headCurrent: boolean; headWarning?: string } {
+    if (roundTrip) {
+      return {
+        headCurrent: false,
+        headWarning: "the branch/worktree HEAD moved off the admitted commit while this gate was running and came back (an ABA round trip the head stamps cannot see) — what it tested may be a mix of commits. Treat this result as UNVERIFIED and NOT reusable; re-run.",
+      };
+    }
     if (startStamp.head === null || admitStamp.head === null || settleStamp.head === null) {
       return {
         headCurrent: false,
@@ -13681,7 +13687,7 @@ export class SessionService {
     let gatePreStamp: WorktreeGateStamp | undefined;
     // @decision d099087f — branch-reflog snapshot taken with `gatePreStamp`; `gateHeadLeftDuringRun` is STICKY (never reset by a
     // later link) once any link's gate saw the tip leave its pre-spawn head, even if it came back (T1→T2→T1).
-    let gatePreReflog: string[] | null = null;
+    let gatePreReflog: GateReflogSnapshot | null = null;
     let gateHeadLeftDuringRun = false;
     // @decision 975c774b — true once ANY link's gate has actually returned in this op: a later link's dirty pre-check is then a
     // `during-gate` outcome that keeps the gate's own verdict, never a `before-gate` refusal that erases it.
@@ -14268,7 +14274,7 @@ export class SessionService {
         gateHasRun = true;
         const post = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         // @decision d099087f — head-equality below is blind to T1→T2→T1; the reflog delta is not.
-        if (gatePreStamp?.head && branchLeftHeadBetween(gatePreStamp.head, gatePreReflog, await branchReflogShas(repoPath, branch, { timeoutMs: this.gitOpMs }))) gateHeadLeftDuringRun = true;
+        if (gatePreStamp?.head && (!gatePreReflog || gateReflogLeftHead(gatePreStamp.head, gatePreReflog, await snapshotGateReflogs(repoPath, branch, worktreePath, { timeoutMs: this.gitOpMs })))) gateHeadLeftDuringRun = true;
         // The pre stamp is clean by construction (a dirty one threw in `captureGatedTip`), so "changed" is: dirt at settle, or
         // an unreadable stamp (fail closed). A CLEAN head move (a commit landed mid-gate) is deliberately NOT flagged here —
         // 8b1fb28f's `confirmGatedIdentity` already owns that shape (re-call re-gates, announced as identity-mismatch).
@@ -14282,10 +14288,11 @@ export class SessionService {
       // @decision 975c774b — also takes the pre-spawn worktree stamp, and REFUSES up front (GateWorktreeDirtyError, caught
       // at the runExclusive catch) a tree already dirty then: the same `computeWorktreeGateStamp` dirt `run_gate` uses.
       const captureGatedTip = async (pin = false): Promise<void> => {
+        // @decision d099087f — reflog snapshot FIRST: anything that moves the tip after it is inside the delta, never before it.
+        gatePreReflog = await snapshotGateReflogs(repoPath, branch, worktreePath, { timeoutMs: this.gitOpMs });
         try { gatedTip = (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined; } catch { gatedTip = undefined; }
         if (pin) pinnedGateTip = gatedTip;
         gatePreStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
-        gatePreReflog = await branchReflogShas(repoPath, branch, { timeoutMs: this.gitOpMs });
         if (gatePreStamp.dirty) throw new GateWorktreeDirtyError("the worktree carries uncommitted changes before the gate spawns");
         if (gatePreStamp.head === null) throw new GateWorktreeDirtyError("the worktree stamp is unreadable before the gate spawns");
       };
@@ -17094,6 +17101,8 @@ export class SessionService {
         // and the finally needs to read this to clean up {@link gateAdmitStamps} the same way it already
         // cleans up `gateStartStamps`.
         let admitStamp: WorktreeGateStamp | undefined;
+        // @decision d099087f — reflog snapshot taken just before `admitStamp`, compared at settle: head-equality cannot see a T1→T2→T1 round trip.
+        let admitReflog: GateReflogSnapshot | undefined;
         try {
           // OP-ID STAMPED ONTO EVERY EVENT (card 7d492f8b) — see confirmWorkerMerge's identical `evt`
           // closure for the full rationale (findGateOpEventsByOpId's join key / recoverGateOpVerdict).
@@ -17154,6 +17163,7 @@ export class SessionService {
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 getConcurrentGatesMax = getMaxConcurrentGates;
                 cancelSignalRef = cancelSignal;
+                if (worker.branch) admitReflog = await snapshotGateReflogs(targetRepo.path, worker.branch, worktreePath, { timeoutMs: this.gitOpMs });
                 admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
                 // Card a0d912f5 Code Review: recorded the instant it's known — deliberately NOT at the
                 // same site as `gateStartStamps` (that one is set at FIRE time, well before this callback
@@ -17260,7 +17270,9 @@ export class SessionService {
           // reason about into something the result states outright. See describeGateHeadCurrency's own
           // doc for why three checkpoints, and the resulting wording split.
           const settleStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
-          const headCurrency = this.describeGateHeadCurrency(startStamp, admitStamp!, settleStamp);
+          // @decision d099087f — a tip that left the admitted head and came back is invisible to the stamps; it makes the result non-reusable.
+          const roundTrip = !!(worker.branch && admitReflog && admitStamp!.head !== null && gateReflogLeftHead(admitStamp!.head, admitReflog, await snapshotGateReflogs(targetRepo.path, worker.branch, worktreePath, { timeoutMs: this.gitOpMs })));
+          const headCurrency = this.describeGateHeadCurrency(startStamp, admitStamp!, settleStamp, roundTrip);
           // REUSE-A-GREEN-SELF-CHECK RECORD (card e50600d2): record THIS settle — pass or fail — as the
           // worker's latest self-check outcome, so confirmWorkerMerge can later prove (or refuse to
           // assume) that a merge's input is byte-identical to what this run validated. Overwrites
