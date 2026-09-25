@@ -361,6 +361,28 @@ try {
   await upd(oTarget.id, { columnKey: "done" });
   check("(O) closing the BLOCKED card does not resolve an open blocker's outgoing edge", view(oOpen.id).relations.blocks.find((r) => r.id === oTarget.id)?.resolved === false);
 
+  // ---------------- (S) cross-project cycles (card 5e05a4c6): the cycle walk is NOT project-scoped ----------------
+  db.insertProject({ id: "pS1", name: "S1", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertProject({ id: "pS2", name: "S2", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  const sq1 = createProjectTask(db, "pS1", { title: "S4 Q1" }); const sq2 = createProjectTask(db, "pS1", { title: "S4 Q2" }); const sp3 = createProjectTask(db, "pS1", { title: "S4 P3" });
+  await updateProjectTask(db, "pS1", sp3.id, { deferred: true, deferredUntilTaskId: sq1.id });
+  await updateProjectTask(db, "pS1", sq2.id, { deferred: true, deferredUntilTaskId: sp3.id });
+  relocateProjectTask(db, sq2.id, "pS2");
+  relocateProjectTask(db, sq1.id, "pS2");
+  const s4 = await updateProjectTask(db, "pS2", sq1.id, { blockedBy: [sq2.id] });
+  check("(S) reviewer repro S4: after relocating Q2 then Q1 away from P3, 'Q1 blockedBy [Q2]' is REFUSED as a cycle (Q2->Q1->P3->Q2 spans two projects)", isErr(s4) && /cycle/.test(s4.error));
+  check("(S) ...and nothing was written (no Q2->Q1 edge)", !db.listRelations("pS2").some((e) => e.fromTaskId === sq2.id && e.toTaskId === sq1.id));
+  // the same loop via blocks: on the card that stayed behind
+  const s4b = await updateProjectTask(db, "pS2", sq2.id, { blocks: [sq1.id] });
+  check("(S) the same loop proposed as blocks:[Q1] on Q2 is refused too", isErr(s4b) && /cycle/.test(s4b.error));
+  // CREATE with blockedBy + blocks whose closing path is an EXISTING chain (used to be missed: create graphs started empty)
+  const cx = mk("create-cycle chain X"); const cy = mk("create-cycle chain Y");
+  await upd(cx.id, { blocks: [cy.id] }); // X -> Y
+  const cc = createProjectTaskChecked(db, "pRepo", { title: "created closing a chain", blockedBy: [cy.id], blocks: [cx.id] });
+  check("(S) a CREATE with blockedBy:[Y] + blocks:[X] over an existing X->Y chain is refused as a cycle (new->X->Y->new)", isErr(cc) && /cycle/.test(cc.error));
+  check("(S) ...no card left behind", db.listTasks("pRepo").every((t) => t.title !== "created closing a chain"));
+  check("(S) a non-cyclic cross-project write is still accepted (Q1 blockedBy a fresh card)", ok(await updateProjectTask(db, "pS2", sq1.id, { blockedBy: [createProjectTask(db, "pS2", { title: "S fresh" }).id] })));
+
   // ---------------- (V) views + caps ----------------
   const bigEpic = mk("wide epic");
   for (let i = 0; i < 105; i++) { const k = mk(`wide child ${i}`); db.setTaskParent(k.id, bigEpic.id); if (i < 5) db.updateTask(k.id, { columnKey: "done" }); }

@@ -305,9 +305,12 @@ export function planTaskStructure(
   // gets written. Any new cycle must pass through this card.
   if (input.blockedBy !== undefined || input.blocks !== undefined || deferral !== undefined) {
     const T = taskId ?? NEW_NODE;
-    const rows: EdgeBits[] = taskId
-      ? db.listRelations(projectId).filter((e) => e.type === "blocks").map((e) => ({ from: e.fromTaskId, to: e.toTaskId, declared: e.declared, gates: e.gatesDeferral, released: e.released }))
-      : [];
+    // NOT project-scoped (card 5e05a4c6): every blocks row reachable from this card (or, on create, from the
+    // proposed out-neighbours), whatever its project_id — flagged deferral edges keep the DEPENDENT's project,
+    // so a relocated chain can span projects. Still fed through the same edgesAfterPatch below.
+    const rows: EdgeBits[] = db
+      .listBlocksReachableFrom([...(taskId ? [taskId] : []), ...bl.tasks.map((t) => t.id)], taskId)
+      .map((e) => ({ from: e.fromTaskId, to: e.toTaskId, declared: e.declared, gates: e.gatesDeferral, released: e.released }));
     const after = edgesAfterPatch(rows, {
       taskId: T,
       ...(input.blockedBy !== undefined ? { blockedBy: bb.tasks.map((t) => t.id) } : {}),

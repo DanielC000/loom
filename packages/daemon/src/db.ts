@@ -6766,6 +6766,26 @@ export class Db {
     return (this.db.prepare("SELECT id, project_id, from_task_id, to_task_id, type, declared, gates_deferral, released, created_at FROM task_relations WHERE project_id = ? ORDER BY created_at, rowid")
       .all(projectId) as Row[]).map(toRelationRow);
   }
+  /**
+   * Every `blocks` row the cycle planner needs, REGARDLESS of project_id (card 5e05a4c6): all rows reachable
+   * FORWARD (blocker → blocked) from `seeds`, plus every row touching `taskId` (so the patch can replace the
+   * bits it owns). A flagged deferral edge keeps the DEPENDENT's project_id, so after cross-project relocations
+   * a chain can span projects; a project-scoped read (listRelations) would hide half of it. A cycle through a
+   * card must pass through one of its out-neighbours, so forward reachability from the seeds is sufficient.
+   */
+  listBlocksReachableFrom(seeds: string[], taskId?: string): TaskRelationRow[] {
+    return (this.db.prepare(
+      `WITH RECURSIVE r(id) AS (
+         SELECT value FROM json_each(?)
+         UNION
+         SELECT e.to_task_id FROM task_relations e JOIN r ON e.from_task_id = r.id WHERE e.type = 'blocks'
+       )
+       SELECT id, project_id, from_task_id, to_task_id, type, declared, gates_deferral, released, created_at
+       FROM task_relations
+       WHERE type = 'blocks' AND (from_task_id IN (SELECT id FROM r) OR to_task_id = ? OR from_task_id = ?)
+       ORDER BY created_at, rowid`,
+    ).all(JSON.stringify(seeds), taskId ?? "", taskId ?? "") as Row[]).map(toRelationRow);
+  }
   /** Idempotent insert of a NON-blocks edge (related / discovered-from); blocks edges are written only through
    *  {@link applyBlocksPatch}. Returns whether a row was inserted. */
   insertRelation(projectId: string, fromTaskId: string, toTaskId: string, type: Exclude<TaskRelationType, "blocks">): boolean {
