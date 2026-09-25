@@ -24,8 +24,9 @@ export type PendingOpOutcome = string;
  *  dimension this cache doesn't key on at all: never cache or replay it, or a refusal correct for one
  *  manager gets served forever to a different (or since-corrected) one.
  *  @decision 975c774b — a verdict produced while the worktree changed under the gate ("worktree-dirty")
- *  describes files matching no commit, so a ref-keyed identity can't vouch for it: never cache or replay it. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty"]);
+ *  describes files matching no commit, so a ref-keyed identity can't vouch for it: never cache or replay it.
+ *  @decision 975c774b — likewise "gate-tip-moved": a PASS refused because the branch moved after the gate spawned. */
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

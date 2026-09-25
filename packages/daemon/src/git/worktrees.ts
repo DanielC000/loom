@@ -5227,14 +5227,14 @@ export async function mergeMainIntoWorktree(
 
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
-  gateBaseBranchHead?: string, opId?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean }> {
+  gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null } }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
   // GitWriter.commit/checkout/createBranch against the same repo, can never interleave with this one. See
   // the lock's own doc (git/repo-lock.ts) for the exact corruption this closes.
-  return withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId));
+  return withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip));
 }
 
 // `opId` (board card 5a7692a4): purely for attribution on the in-memory danger-window tracker (see
@@ -5242,8 +5242,8 @@ export async function mergeBranch(
 // unattributed window entry (repo/branch only), never a functional difference in what this function does.
 async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
-  gateBaseBranchHead?: string, opId?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean }> {
+  gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null } }> {
   // BOUNDED + NON-INTERACTIVE (board card 44c28799): this is the repo's highest-consequence git write
   // (see boundedMergeGit's own doc), so it gets the same block-timeout + withTimeout race as every other
   // bounded op in this file, plus nonInteractiveEnv() to match git/reader.ts + git/writer.ts. Before this
@@ -5266,6 +5266,14 @@ async function mergeBranchLocked(
     )).trim();
   } catch { /* fall through: squashTarget below stays the branch name, unchanged from before this fix */ }
   const squashTarget = resolvedBranchHead ?? branch;
+  // @decision 975c774b — a gated PASS covers only the tip the gate spawned on; refuse (zero side effects) if the branch moved
+  // since, or its tip can't be read. Optional: callers that pass no expected tip keep today's behavior.
+  if (expectedBranchTip !== undefined && resolvedBranchHead !== expectedBranchTip) {
+    return {
+      ok: false, branchTipMoved: { live: resolvedBranchHead ?? null },
+      reason: "the branch tip moved after this merge's gate spawned — canonical repo and worktree are untouched; re-confirm to gate the new tip",
+    };
+  }
   let branchStableSinceGateBase = false;
   if (gateBaseBranchHead && resolvedBranchHead) {
     branchStableSinceGateBase = resolvedBranchHead === gateBaseBranchHead;

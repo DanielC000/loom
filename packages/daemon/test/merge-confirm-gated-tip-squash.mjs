@@ -6,7 +6,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // The gate stub simulates the worker committing extra work to the branch while the gate runs (worktree left CLEAN, so
 // 975c774b's dirt stamp does not fire), then passes.
 //   (A) gate passes while a new commit lands mid-gate: the ungated commit must NOT be on main.
+//       Also: the refusal is flagged gateTipMoved, and a re-call RE-GATES the new tip (never served from cache) and merges it.
 //   (B) control: the same flow with no mid-gate commit merges normally (a green control, so (A) is not vacuous).
+//   (C) the IN-LOCK half, called directly on mergeBranch (the window between service.ts's pre-check and the lock cannot be hit
+//       deterministically through the service): a stale expectedBranchTip refuses with zero side effects; the current tip and an
+//       omitted param both merge exactly as before.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-confirm-gated-tip-squash.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -26,7 +30,7 @@ process.env.LOOM_GATE_RETRY_SETTLE_MS = "1500";
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree } = await import("../dist/git/worktrees.js");
+const { createWorktree, mergeBranch } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -84,11 +88,12 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
 
 {
   const { db, mgrId, workerId, repo, worktreePath } = await setupWorkerProject(sfxOf("moved"));
+  let gateCalls = 0, lateOnce = true;
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
     syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
     runGate: async (_cmd, cwd) => {
-      fs.writeFileSync(path.join(cwd, "late.txt"), "landed mid-gate\n");
-      commitAll(cwd, "late commit", GIT_ID); // clean tree afterwards: only the branch tip moved
+      gateCalls++;
+      if (lateOnce) { fs.writeFileSync(path.join(cwd, "late.txt"), "landed mid-gate\n"); commitAll(cwd, "late commit", GIT_ID); } // clean tree afterwards: only the branch tip moved
       return PASS;
     },
   });
@@ -96,6 +101,28 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
   check("(A) op settled", r1.settled === true && r1.ok === true);
   check("(A) the ungated mid-gate commit is NOT on main", !fs.existsSync(path.join(repo, "late.txt")));
   check("(A) the outcome is not a silent merged:true of a tip the gate never saw", r1.ok && r1.value.merged === false);
+  check("(A) the refusal is the distinct gateTipMoved shape naming both tips (pre-squash)", r1.ok && r1.value.gateTipMoved?.phase === "pre-squash" && !!r1.value.gateTipMoved.gated && !!r1.value.gateTipMoved.live && r1.value.gateTipMoved.gated !== r1.value.gateTipMoved.live);
+  check("(A) the refusal is not a generic gate failure (no gateDetail)", r1.ok && r1.value.gateDetail === undefined);
+  gateCalls = 0; lateOnce = false;
+  const r2 = await confirm(sessions, mgrId, workerId);
+  check("(A) re-call re-gates the new tip (not served from cache) and merges it", r2.ok && gateCalls === 1 && r2.cacheHit === undefined && r2.value.merged === true && fs.existsSync(path.join(repo, "late.txt")));
+}
+{
+  const { db, mgrId, workerId, repo, worktreePath, branch } = await setupWorkerProject(sfxOf("ctl"));
+  void db, void mgrId, void workerId, void worktreePath;
+  const git = (a) => execSync("git " + a, { cwd: repo, encoding: "utf8" }).trim();
+  const oldTip = git("rev-parse " + branch);
+  const r0 = await mergeBranch(repo, branch, "T", {}, undefined, undefined, undefined, "0".repeat(40));
+  check("(C) stale expectedBranchTip refuses with branchTipMoved carrying the live tip", r0.ok === false && r0.branchTipMoved?.live === oldTip);
+  check("(C) zero side effects: nothing landed, index clean", !fs.existsSync(path.join(repo, "feature.txt")) && git("status --porcelain --untracked-files=no") === "");
+  const r1 = await mergeBranch(repo, branch, "T", {}, undefined, undefined, undefined, oldTip);
+  check("(C) matching expectedBranchTip merges", r1.ok === true && fs.existsSync(path.join(repo, "feature.txt")));
+}
+{
+  const { db, mgrId, workerId, repo, branch } = await setupWorkerProject(sfxOf("omit"));
+  void db, void mgrId, void workerId;
+  const r1 = await mergeBranch(repo, branch, "T");
+  check("(C) omitted expectedBranchTip behaves as before (merges)", r1.ok === true && fs.existsSync(path.join(repo, "feature.txt")));
 }
 {
   const { db, mgrId, workerId, repo } = await setupWorkerProject(sfxOf("stable"));

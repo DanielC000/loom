@@ -610,6 +610,9 @@ type ConfirmMergeResult = {
   /** @decision 975c774b — the worktree was dirty before a gate spawn or changed across it: the verdict matches no
    *  commit. A PASS is refused (`gate_worktree_dirty`); a FAIL keeps its rejection, unstamped. Never cached. */
   gateWorktreeDirty?: { phase: "before-gate" | "during-gate"; detail: string };
+  /** @decision 975c774b — a gate PASS was refused because the branch tip is no longer the one the gate spawned on
+   *  (`live` null = unreadable, fail closed). Never cached; a re-call re-gates the new tip. */
+  gateTipMoved?: { phase: "pre-squash" | "in-lock"; gated: string | null; live: string | null };
   /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs`, for whichever gate run(s)
    *  actually spawned for THIS merge — see {@link GateProximity}'s own doc. Same "nothing to report"
    *  discipline as `gateExtended`: `undefined` when no gate actually spawned (gateless project, or a
@@ -13542,6 +13545,16 @@ export class SessionService {
       evt("merge_rejected", { reason: "gate_worktree_dirty", sha, phase, detail, ...(reuseRefusalReasons && reuseRefusalReasons.length > 0 ? { reuseRefusalReasons } : {}), ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateWorktreeDirty: { phase, detail } };
     };
+    // @decision 975c774b — a PASS is a fact about the tip the gate spawned on; a branch that moved since would squash a commit
+    // the gate never ran. Refused (never cached, a re-call re-gates the new tip) rather than squashing the gated tip, which
+    // would land without the later commit and then lose it when finalizeMerge deletes the branch.
+    const refuseGateTipMoved = async (phase: "pre-squash" | "in-lock", gated: string | undefined, live: string | null | undefined): Promise<ConfirmMergeResult> => {
+      const why = `the branch tip moved after the gate spawned (gated ${gated?.slice(0, 8) ?? "unknown"}, now ${live?.slice(0, 8) ?? "unreadable"}), so this PASS does not cover the commit that would be squashed`;
+      const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. Re-run worker_merge_confirm to gate the new tip — this refusal is never cached.`;
+      const { suppressed, sha } = await rejectNotify("gate_tip_moved", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "gate_tip_moved", sha, phase, gatedTip: gated ?? null, liveTip: live ?? null, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: true, gateTipMoved: { phase, gated: gated ?? null, live: live ?? null } };
+    };
     // unionMergeMovedHead: whether the union-merge below actually MOVED HEAD, i.e.
     // `mergeMainIntoWorktree`'s own `merged:true`. Defaults `false`: the preLanded branch and the
     // nothing-to-fold-in short-circuit both leave it unset. Read-only, additive: never influences
@@ -15040,6 +15053,20 @@ export class SessionService {
           ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
         };
       }
+      // @decision 975c774b — friendly pre-check; mergeBranch's in-lock `expectedBranchTip` is the structural half.
+      if (gateRan) {
+        const liveTip = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }).catch(() => null) ?? null;
+        if (!gatedTip || liveTip !== gatedTip) {
+          return {
+            ...(await refuseGateTipMoved("pre-squash", gatedTip, liveTip)),
+            gateExtended, gateProximity, outputTail: gateOutputTailForRecord,
+            ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}),
+            ...(gateCapForRecord !== undefined ? { gateCap: gateCapForRecord } : {}),
+            ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
+            ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
+          };
+        }
+      }
     }
 
     // Squash-merge as ONE clean commit. The subject comes from the task title (mergeBranch falls back to
@@ -15111,7 +15138,7 @@ export class SessionService {
     // this hold can never outlive a single bounded git operation plus the (synchronous, or near-instant)
     // bookkeeping above it in this same try.
     if (gateRan) this.gateSemaphore.beginSquash(repoPath, thisOpId);
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId);
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, gateRan ? gatedTip : undefined);
     } finally {
       // Mirrors the `beginSquash` guard above exactly — `gateRan` is the same precise proxy for "this op
       // actually holds (or could hold) repoPath via `runExclusive`/`admit`", so a reuse/gateless op never
@@ -15130,6 +15157,9 @@ export class SessionService {
       releaseInertRepoGuard?.();
     }
     if (!merge.ok) {
+      if (merge.branchTipMoved) {
+        return { ...(await refuseGateTipMoved("in-lock", gatedTip, merge.branchTipMoved.live ?? null)), gateExtended, gateProximity };
+      }
       if (merge.gateBaseInvalidated) {
         // BENIGN RACE, NOT A REAL MERGE FAILURE: canonical main advanced since this merge's gate-validated
         // tree was fixed (reused or freshly unioned) and mergeBranch's own lock — caught with ZERO side
@@ -16791,7 +16821,7 @@ export class SessionService {
         //
         // Card 6325bc74 — a `NotYourWorkerError` throw classifies as "not-your-worker", not "unknown": it
         // is a fact about the CALLING MANAGER, a dimension `NEVER_CACHED_OUTCOMES` excludes from caching.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved ? "gate-tip-moved" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

@@ -159,7 +159,9 @@ try {
     check("(M) the gate ran for real (a real gate on the preLanded path, not the reuse path)", calls === 1);
     check("(M) gateRan:true", confirm.gateRan === true);
     check("(M) confirmWorkerMerge REFUSES rather than silently squashing the new commit onto an advanced main", confirm.merged === false);
-    check("(M) the refusal reads as a benign, retryable race, not a real merge/gate failure", /benign race|advanced/i.test(confirm.reason ?? ""));
+    // Card c59165b8: the branch itself moved mid-gate here, so the gated-tip refusal (not requireCanonicalHead's) now fires first; both are
+    // benign, uncached, zero-side-effect retries. (N) below (branch stable, main moved) is the pair that still isolates requireCanonicalHead.
+    check("(M) the refusal reads as a benign, retryable race, not a real merge/gate failure", /benign race|advanced|tip moved/i.test(confirm.reason ?? "") && /re-run worker_merge_confirm/i.test(confirm.detailText ?? ""));
     const commitsAheadOfBaseline = execSync(`git rev-list --count ${mainHeadBeforeConfirm}..HEAD`, { cwd: M.repo }).toString().trim();
     check("(M) canonical repo gained ONLY the mid-gate advance commit — no squash landed on top of it (zero side effects)", commitsAheadOfBaseline === "1");
     const stagedAfterRefusal = execSync("git diff --cached --name-only", { cwd: M.repo }).toString().trim();
