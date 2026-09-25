@@ -47,7 +47,7 @@ commitAll(repo, "init", "-c user.email=wrv@loom -c user.name=wrv");
 
 const now = new Date().toISOString();
 const db = new Db();
-db.insertProject({ id: "pP", name: "P", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+db.insertProject({ id: "pP", name: "P", repoPath: repo, vaultPath: repo, config: { orchestration: { maxConcurrentWorkers: 50 } }, createdAt: now, archivedAt: null });
 db.insertProject({ id: "pCap", name: "Cap", repoPath: repo, vaultPath: repo, config: { orchestration: { maxConcurrentWorkers: 1 } }, createdAt: now, archivedAt: null });
 db.insertProfile({ id: "profDev", name: "Dev", role: "worker", description: "dev rig", allowDelta: [], skills: null, model: "claude-test-model", icon: null });
 db.insertAgent({ id: "agentPlain", projectId: "pP", name: "Plain", startupPrompt: "PLAIN_PROMPT", position: 0, profileId: null });
@@ -90,6 +90,9 @@ mergeDone("src", T_ORIG);
 class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; this.alive = new Set(); }
   createPty(opts) { this.capture.push(opts); return super.createPty(opts); }
+  // A codex-harness spawn goes through createCodexPty (NOT createPty): fake it too so a wrongly re-resolved
+  // codex revive is CAPTURED (and fails the harness-pin asserts) instead of launching a real codex.
+  createCodexPty(opts) { this.capture.push(opts); return super.createPty(opts); }
   isAlive(id) { return this.alive.has(id); }
 }
 const events = {
@@ -196,6 +199,50 @@ try {
   db.insertSession(workerRow("srcCap", { projectId: "pCap", agentId: "agentDevCap", parentSessionId: "mgrCap", taskId: T_ORIG })); mergeDone("srcCap", T_ORIG);
   db.insertSession(workerRow("capHolder", { projectId: "pCap", agentId: "agentDevCap", parentSessionId: "mgrCap", processState: "live", taskId: null, engineSessionId: null }));
   await refuse("concurrency cap reached (counts against the cap, never queued)", () => svc.reviveWorker("mgrCap", { workerSessionId: "srcCap", taskId: T_CAP_FIX }), /cap reached.*not queued/);
+
+  // ============ (5) HARNESS PIN: a revive never re-resolves its harness from the profile / default-harness config ============
+  const T_H1 = uuid(8), T_H2 = uuid(9), T_H3 = uuid(1) .replace(/1/g, "a");
+  task(T_H1, "fix(x): harness pin via platform default"); task(T_H2, "fix(x): harness pin via profile"); task(T_H3, "fix(x): positive control");
+  db.insertProfile({ id: "profCodex", name: "DevCodex", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, harness: "codex" });
+  db.insertAgent({ id: "agentDevCodex", projectId: "pP", name: "DevCodex", startupPrompt: "CODEX_BRIEF", position: 2, profileId: "profCodex" });
+  db.setPlatformConfig({ harness: { default: "codex", scope: "workers" } });
+  const h1src = "srcH1"; db.insertSession(workerRow(h1src)); mergeDone(h1src, T_ORIG);
+  const h1 = await svc.reviveWorker("mgr1", { workerSessionId: h1src, taskId: T_H1 });
+  worktrees.push(h1.worktreePath);
+  const oh1 = host.capture.find((c) => c.sessionId === h1.id);
+  check("(5) platform default=codex: the revive STILL forks on claude (opts.harness undefined, resumeId + fork present)", !!oh1 && oh1.harness === undefined && oh1.resumeId === ENG && oh1.fork === true);
+  check("(5) platform default=codex: the revived row is NOT stamped codex", (db.getSession(h1.id).harness ?? null) === null);
+  const h2src = "srcH2"; db.insertSession(workerRow(h2src, { agentId: "agentDevCodex" })); mergeDone(h2src, T_ORIG);
+  const h2 = await svc.reviveWorker("mgr1", { workerSessionId: h2src, taskId: T_H2 });
+  worktrees.push(h2.worktreePath);
+  const oh2 = host.capture.find((c) => c.sessionId === h2.id);
+  check("(5) the agent's profile now says codex: the revive STILL forks on claude", !!oh2 && oh2.harness === undefined && oh2.resumeId === ENG && oh2.fork === true && (db.getSession(h2.id).harness ?? null) === null);
+  // POSITIVE CONTROL: under the SAME config an ORDINARY worker spawn on that codex-profile agent really does go codex,
+  // so the two results above are the pin, not a broken codex path.
+  const ctl = await svc.spawnWorker("mgr1", { taskId: T_H3, agentId: "agentDevCodex", kickoffPrompt: "CTL" });
+  worktrees.push(ctl.worktreePath);
+  check("(5) POSITIVE CONTROL: an ordinary spawn on the codex-profile agent goes codex", host.capture.find((c) => c.sessionId === ctl.id)?.harness === "codex");
+  db.setPlatformConfig({});
+
+  // ============ (6) SHARED spawn:<taskId> pending-op key: a revive never reports a PLAIN spawn as its own ============
+  const T_C1 = uuid(7).replace(/7/g, "b"), T_C2 = uuid(7).replace(/7/g, "c");
+  task(T_C1, "fix(x): retained plain-spawn collision"); task(T_C2, "fix(x): in-flight plain-spawn collision");
+  const plainC1 = await svc.spawnWorkerTracked("mgr1", { taskId: T_C1, agentId: "agentDev", kickoffPrompt: "PLAIN" });
+  if (plainC1.settled && plainC1.ok) worktrees.push(plainC1.value.worktreePath);
+  db.setProcessState(plainC1.value.id, "live");
+  const rc1 = await svc.reviveWorkerTracked("mgr1", { workerSessionId: "src", taskId: T_C1 });
+  check("(6) a RETAINED plain-spawn result on the card is NOT reported as a revive (settled error naming the collision)", plainC1.settled && plainC1.ok && rc1.settled && rc1.ok === false && /different spawn/.test(String(rc1.error?.message)));
+  const before = host.capture.length;
+  const inflight = svc.pendingOps.attach("spawn:" + T_C2, "spawn", "mgr1", 10, () => new Promise(() => {}));
+  await inflight; // settles as {settled:false} after the 10ms sync budget; the op itself never resolves (stays running)
+  const rc2 = await svc.reviveWorkerTracked("mgr1", { workerSessionId: "src", taskId: T_C2 });
+  check("(6) an IN-FLIGHT plain spawn on the card is NOT attached to: settled error, nothing spawned", rc2.settled && rc2.ok === false && /different spawn/.test(String(rc2.error?.message)) && host.capture.length === before);
+  void inflight;
+  // POSITIVE CONTROL: a genuine tracked revive on a clean card settles OK with revivedFrom === the source.
+  const T_C3 = uuid(7).replace(/7/g, "d"); task(T_C3, "fix(x): genuine tracked revive");
+  const rc3 = await svc.reviveWorkerTracked("mgr1", { workerSessionId: "src", taskId: T_C3 });
+  if (rc3.settled && rc3.ok) worktrees.push(rc3.value.worktreePath);
+  check("(6) POSITIVE CONTROL: a genuine tracked revive settles ok with revivedFrom === the source", rc3.settled && rc3.ok === true && rc3.value.revivedFrom === "src");
 
   // ============ (4) the pure kickoff composer ============
   const k = composeReviveKickoff({ originalTaskId: "O", originalTaskTitle: "T", commitSha: null, oldWorktreePath: null, followUpTaskId: "F", followUpTitle: "FT", followUpBody: "", branch: "loom/f" });

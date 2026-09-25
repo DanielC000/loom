@@ -2274,6 +2274,8 @@ export class SessionService {
    * finally once the row is live (the liveHolder guard then owns exclusion) or on any failure.
    */
   private readonly inFlightSpawnTaskIds = new Set<string>();
+  /** Card dc13bcf1: pending-op keys whose in-flight op was minted by reviveWorkerTracked (vs a plain spawn). */
+  private readonly reviveInFlightKeys = new Set<string>();
   /**
    * Card 7234688b — PER-MANAGER in-flight spawn COUNT, used ONLY for the concurrency-cap admit
    * (`liveWorkers + inFlightForManager >= cap`, below). Kept as a SEPARATE structure from {@link
@@ -6752,7 +6754,12 @@ export class SessionService {
     const skills = workerSpawn.skills;
     const connections = workerSpawn.connections; // authenticated-egress allowlist (profile-pinned; [] ⇒ no access)
     const vaultWrite = workerSpawn.vaultWrite; // confined vault-write grant (profile-pinned; false ⇒ no access)
-    const harness = workerSpawn.harness; // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
+    // A revive PINS the harness to the SOURCE row's (card dc13bcf1), bypassing the profile/default-harness
+    // re-resolution: a re-resolved codex would boot a FRESH memory-less session (codex has no fork primitive)
+    // under a kickoff that says the conversation is remembered. Defence in depth: refuse if the pinned
+    // harness is anything but claude, BEFORE any worktree/session side effect.
+    const harness = internal?.revive ? internal.revive.sourceHarness : workerSpawn.harness; // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
+    if (internal?.revive && (harness ?? "claude") !== "claude") throw new CodexForkUnsupportedError();
 
     // Safety rails (§17a) — refuse NEW work before any side effect (worktree/pty). In-flight
     // workers are untouched. Pause is global-or-this-manager. (The concurrency cap is admitted
@@ -6902,7 +6909,8 @@ export class SessionService {
         repoKey: targetRepo.key === "primary" ? null : targetRepo.key, // stamped once — see Session.repoKey's doc
       };
       this.db.insertSession(worker);
-      this.recordHarnessDefaultSkipped(worker, managerSessionId, workerSpawn.harnessDefaultSkipped);
+      // A revive's harness is pinned, never default-derived — a "default skipped" record would be misleading.
+      this.recordHarnessDefaultSkipped(worker, managerSessionId, internal?.revive ? undefined : workerSpawn.harnessDefaultSkipped);
       // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
       this.db.setProcessState(worker.id, "live");
       // @decision 16637a9e — release the cap-count claim HERE, synchronously, the instant the row is
@@ -7129,7 +7137,7 @@ export class SessionService {
     const worker = await this.spawnWorker(
       managerSessionId,
       { taskId: followUp.id, agentId: src.agentId, kickoffPrompt: kickoff },
-      { revive: { sourceSessionId: src.id, sourceEngineSessionId: src.engineSessionId, forkEngineSessionId: randomUUID(), originalTaskId: src.taskId, commitSha } },
+      { revive: { sourceSessionId: src.id, sourceHarness: src.harness, sourceEngineSessionId: src.engineSessionId, forkEngineSessionId: randomUUID(), originalTaskId: src.taskId, commitSha } },
     );
     return { ...worker, revivedFrom: src.id, commitSha };
   }
@@ -7220,10 +7228,21 @@ export class SessionService {
     managerSessionId: string,
     opts: { workerSessionId: string; taskId: string; note?: string },
   ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity; revivedFrom: string; commitSha: string | null }>> {
+    type ReviveResult = Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity; revivedFrom: string; commitSha: string | null };
     const key = `spawn:${(opts.taskId ?? "").trim()}`;
-    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity; revivedFrom: string; commitSha: string | null }>(
+    // The key is SHARED with worker_spawn (so the pendingSpawn placeholder + same-card dedupe apply), which
+    // means an attach could land on a PLAIN spawn's op — and report that worker as a revive. Refuse both
+    // shapes: an in-flight op this call did not mint, and a settled/retained value that is not a revive of
+    // THIS source (a plain spawn's value carries no `revivedFrom`).
+    const collision = { settled: true as const, ok: false as const, error: new Error(`worker_revive: a different spawn (a plain worker_spawn or another revive) on card '${(opts.taskId ?? "").trim()}' is in flight or holds it — wait for it, or read worker_list`) };
+    const live = this.pendingOps.peek(key);
+    if (live && live.state === "running" && !this.reviveInFlightKeys.has(key)) return collision;
+    const r = await this.pendingOps.attach<ReviveResult>(
       key, "spawn", managerSessionId, this.syncAttachBudgetMs,
-      () => this.reviveWorker(managerSessionId, opts),
+      async () => {
+        this.reviveInFlightKeys.add(key);
+        try { return await this.reviveWorker(managerSessionId, opts); } finally { this.reviveInFlightKeys.delete(key); }
+      },
       undefined,
       {
         retainMs: this.spawnOpRetainMs,
@@ -7231,6 +7250,8 @@ export class SessionService {
         retainErrors: false,
       },
     );
+    if (r.settled && r.ok && r.value.revivedFrom !== opts.workerSessionId) return collision;
+    return r;
   }
 
   /** @decision 3a2dac9c — walks the recycle lineage to find a predecessor's still-running merge op

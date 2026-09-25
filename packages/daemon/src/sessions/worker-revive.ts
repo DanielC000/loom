@@ -13,10 +13,14 @@
  * `worker_revived` link as a recycle_* event (resume()'s hasSuccessor refusals must not fire on the source).
  */
 
+import type { Session } from "@loom/shared";
+
 /** Everything spawnWorker needs beyond its ordinary inputs to start a revived worker. */
 export interface ReviveSpawnSpec {
   /** The MERGED source worker's Loom session id (lineage + event only; the source row is never touched). */
   sourceSessionId: string;
+  /** The source row's pinned harness (undefined ⇒ claude). The revive is PINNED to it; never re-resolved. */
+  sourceHarness: Session["harness"];
   /** Its engine conversation id — what `--resume` is pointed at. */
   sourceEngineSessionId: string;
   /** Fresh engine id minted for the fork (`--session-id`), persisted on the new row up front. */

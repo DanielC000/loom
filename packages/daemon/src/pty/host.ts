@@ -2506,8 +2506,9 @@ interface Live {
   // every submit() (including a resume's drainPending-triggered delivery of a QUEUED message) unconditionally
   // overwrites. `markReady` reads THIS field, not `lastPrompt`, to decide what "the kickoff" is — so the
   // answer is correct by construction (it names the one thing that can never be another turn's text),
-  // not by capturing `lastPrompt` before some other write gets a chance to clobber it. A resume/fork never
-  // passes `opts.startupPrompt`, so this is null there — no kickoff to guarantee, exactly as intended.
+  // not by capturing `lastPrompt` before some other write gets a chance to clobber it. An ordinary resume/fork
+  // passes no `opts.startupPrompt`, so this is null there — no kickoff to guarantee, exactly as intended;
+  // a `worker_revive` fork (card dc13bcf1) is the exception and seeds it like a fresh spawn.
   startupPrompt: string | null;
   // Card 0f9268cc: the raw-terminal-channel counterpart of `lastPrompt`, so the paste-tripwire can see a
   // paste/long text typed or pasted directly into the terminal panel (/ws/term -> writeStdin), NOT just a
@@ -10271,7 +10272,9 @@ export class PtyHost {
    * recycled session's handoff is delivered the same way. A run session's startup prompt
    * (composeRunStartupPrompt) rides the same path and is covered the same way.
    *
-   * A no-op ONLY for resume and fork: neither ever passes `opts.startupPrompt` (a resume's continuation
+   * A no-op for an ordinary resume and fork (a `worker_revive` fork, card dc13bcf1, is the exception: it
+   * DOES pass a startupPrompt with resumeId+fork, delivered here like any fresh worker's): those pass no
+   * `opts.startupPrompt` (a resume's continuation
    * is injected via enqueueStdin post-boot, not a startup turn — and boot-reconcile's resume path is
    * covered by the SAME resume mechanics, not this one), so `startupPrompt` stays null there and
    * markReady's own capture never calls this at all in that case — genuinely byte-identical now, since
