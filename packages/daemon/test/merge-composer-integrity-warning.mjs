@@ -335,10 +335,13 @@ try {
     // The background op (real git squash/finalize work) can easily outlast the SAME tiny 20ms budget on a
     // re-attach — poll (re-attaching to the SAME in-flight op each time, never starting a new one) until
     // it actually settles, rather than assuming one re-call is enough.
+    // The budget is a HANG GUARD, not a performance claim (nothing here asserts how fast the squash is): the real
+    // git work behind the settle has been measured at 11.6s on a loaded host, so 10s was tighter than the thing
+    // it waits on. A gate that truly never settles still fails, just not at the mercy of host speed.
     const settled = await waitUntil(async () => {
       const r = await sessions.confirmWorkerMergeTracked(G.mgrId, G.workerId);
       return r.settled ? r : false;
-    }, { label: "op G settles after the held gate resolves", timeoutMs: 10_000 });
+    }, { label: "op G settles after the held gate resolves", timeoutMs: 60_000 });
     check("(G) eventually settles, merged", settled.settled === true && settled.ok === true && settled.value.merged === true);
     check("(G) settled warning names gen=6 — computed when the op actually ran, not at the original request", settled.ok && settled.value.warning?.includes("gen=6"));
   }
