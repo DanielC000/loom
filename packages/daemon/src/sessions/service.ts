@@ -617,6 +617,9 @@ type ConfirmMergeResult = {
   /** @decision 975c774b — a gate PASS was refused because the branch tip is no longer the one the gate spawned on
    *  (`live` null = unreadable, fail closed). Never cached; a re-call re-gates the new tip. */
   gateTipMoved?: { phase: "pre-squash" | "in-lock"; gated: string | null; live: string | null; movedAndBack?: true };
+  /** @decision d099087f — a gate FAIL earned on a run whose tip/HEAD left the gated commit and came back mid-run: kept as an
+   *  ordinary rejection, but unstamped and classified `"gate-tip-moved"` so it is never cached (mixed T1/T2 evidence). */
+  gateRoundTripFail?: true;
   /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs`, for whichever gate run(s)
    *  actually spawned for THIS merge — see {@link GateProximity}'s own doc. Same "nothing to report"
    *  discipline as `gateExtended`: `undefined` when no gate actually spawned (gateless project, or a
@@ -15218,6 +15221,9 @@ export class SessionService {
         // the actual gate stderr, not just the summary bits, so a settled op can be diagnosed from the
         // log alone without needing the pty transcript.
         console.log(`[gate opId=${thisOpId}] branch=${branch} task=${taskId ?? "none"} passed=false ${detailBits}${tailBlock}`);
+        // ONLY a true round trip (settle head back on the pre-spawn head) is un-cached. A plain mid-gate move, and a HEAD-only move that never returns, keep their stamp
+        // and CAN still be cached as a FAIL (8b1fb28f's identity-mismatch does not reliably cover them when main hasn't advanced) — known gap, tracked by card 01777ceb; not fixed here.
+        const gateRoundTrip = gateHeadLeftDuringRun && gateHeadReturned && !gateHeadLeftAt;
         return {
           merged: false,
           reason: headline, detailText,
@@ -15233,7 +15239,9 @@ export class SessionService {
           // Card 8b1fb28f: ONLY a genuine gate-FAILED rejection carries it (this `!gateResult.passed` return) —
           // a post-gate-pass squash refusal, a breaker/preflight rejection or a reused result never does.
           // @decision 975c774b — never stamped when the worktree changed under the gate; flagged so it is never cached either.
-          ...(gatedTip && !gateWorktreeChanged ? { gatedIdentity: gatedTip } : {}),
+          // @decision d099087f — likewise never stamped/cached when the tip left the gated commit and came back mid-run.
+          ...(gatedTip && !gateWorktreeChanged && !gateRoundTrip ? { gatedIdentity: gatedTip } : {}),
+          ...(gateRoundTrip ? { gateRoundTripFail: true as const } : {}),
           ...(gateWorktreeChanged ? { gateWorktreeDirty: { phase: "during-gate" as const, detail: gateWorktreeChanged } } : {}),
           outputTail: gateOutputTailForRecord,
           ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}),
@@ -17073,7 +17081,7 @@ export class SessionService {
         //
         // Card 6325bc74 — a `NotYourWorkerError` throw classifies as "not-your-worker", not "unknown": it
         // is a fact about the CALLING MANAGER, a dimension `NEVER_CACHED_OUTCOMES` excludes from caching.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved ? "gate-tip-moved" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

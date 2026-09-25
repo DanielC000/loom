@@ -624,7 +624,7 @@ export interface PendingMerge {
    *  about the CALLING MANAGER rather than the branch, and (like "stale-base") must never be served from
    *  cache to a later re-confirm (card 6325bc74); "worktree-dirty" — the gate ran against a worktree that was
    *  dirty or changed under it (card 975c774b), so the verdict describes no commit; never cached, renders like
-   *  "rejected"; "gate-tip-moved" — a PASS refused because the branch tip moved after the gate spawned (card c59165b8);
+   *  "rejected"; "gate-tip-moved" — a PASS refused because the branch tip moved after the gate spawned (card c59165b8), or a gate FAIL earned on a run whose tip left the gated commit and came back (card 94c28d2a, `gateRoundTripFail`);
    *  never cached, renders like "rejected". The Board's `mergeDisplay` renders none of these with
    *  their own visual state: "unknown" and "not-your-worker" piggyback on the sibling `state:"failed"`
    *  treatment; "stale-base" renders like "rejected". */

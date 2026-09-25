@@ -110,9 +110,8 @@ async function setupWorkerProject(sfx, reposDir, gateCommand = "pnpm gate") {
 //             `confirmGatedIdentity` drops the stamp (the verdict describes a tree the gate saw moving); the old pre-forward
 //             identity stands, T != it, so the re-call re-gates. This is the case that goes RED when
 //             `confirmGatedIdentity` is mutated to `return v` (without the drop the stamp T matches the reset tip → cache hit).
-//        (g2) reset INSIDE the gate stub, before it fails: settle-time tip == captured tip, so NOTHING observable at settle
-//             distinguishes it from a gate that never saw movement — the stamp survives and the re-call is a cache hit.
-//             Pinned as the known LIMIT of a tip-compare (not an endorsement).
+//        (g2) reset INSIDE the gate stub, before it fails: settle-time tip == captured tip, so a tip compare cannot see it, but the
+//             branch/HEAD reflog delta (card d099087f) can — the FAIL is unstamped and never cached (card 94c28d2a), the re-call re-gates.
 {
   for (const variant of ["g1-reset-after-settle", "g2-reset-inside-gate"]) {
     const sfx = `aba-${variant}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -142,7 +141,7 @@ async function setupWorkerProject(sfx, reposDir, gateCommand = "pnpm gate") {
     if (variant === "g1-reset-after-settle") {
       check("(g1) the re-call RE-GATES: the stamp was dropped because the tip had moved at settle (RED if confirmGatedIdentity is mutated to return v)", gateCalls === 2 && r2.cacheHit === undefined);
     } else {
-      check("(g2) PIN (known limit): a move-and-reset entirely inside the gate is invisible to a settle-time tip compare — cache hit at the captured tip", gateCalls === 1 && r2.cacheHit?.identity === capturedTip);
+      check("(g2) a move-and-reset entirely inside the gate is caught by the reflog delta: the FAIL is never cached, the re-call RE-GATES (card 94c28d2a)", gateCalls === 2 && r2.cacheHit === undefined);
     }
   }
 }

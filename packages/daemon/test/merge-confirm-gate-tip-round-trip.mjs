@@ -177,6 +177,32 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
   const cm = await confirm(sessions, mgrId, workerId);
   check("(K) the merge did NOT reuse the self-check: it re-gated (2 gate calls, no reusedOpId)", gateCalls === 2 && cm.ok && cm.value.reusedOpId === undefined && cm.value.merged === true && fs.existsSync(path.join(repo, "feature.txt")));
 }
+{
+  // (M) card 94c28d2a — a FAIL earned on a run whose tip left the gated commit and came back (T1→T2→T1) is mixed-content evidence: it must
+  // not be cached under the T1 identity, or a re-confirm at T1 replays a red instead of re-gating.
+  const { db, mgrId, workerId, repo, worktreePath, branch } = await setupWorkerProject(sfxOf("abafail"));
+  const t1 = execSync("git rev-parse HEAD", { cwd: worktreePath, encoding: "utf8" }).trim();
+  let gateCalls = 0, mode = "aba";
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
+    runGate: async (_cmd, cwd) => {
+      gateCalls++;
+      if (mode === "aba") { fs.writeFileSync(path.join(cwd, "t2.txt"), "T2\n"); commitAll(cwd, "t2 commit", GIT_ID); execSync(`git reset --hard ${t1}`, { cwd, stdio: "ignore" }); }
+      return mode === "pass" ? PASS : { ...FAIL, outputTail: "abafail-marker" };
+    },
+  });
+  const r1 = await confirm(sessions, mgrId, workerId);
+  check("(M) the ABA run's FAIL settles as a rejection (nothing squashed)", r1.settled === true && r1.ok && r1.value.merged === false && gateCalls === 1 && !fs.existsSync(path.join(repo, "feature.txt")));
+  check("(M) the tip really is back on T1 (ABA shape)", execSync(`git rev-parse ${branch}`, { cwd: repo, encoding: "utf8" }).trim() === t1);
+  check("(M) the FAIL is not stamped with a gated identity (mixed T1/T2 evidence)", r1.ok && r1.value.gatedIdentity === undefined);
+  mode = "fail";
+  const r2 = await confirm(sessions, mgrId, workerId);
+  const callsAfterR2 = gateCalls;
+  check("(M) never cached: the re-call re-runs the gate (2 gate calls, no cacheHit)", r2.ok && gateCalls === 2 && r2.cacheHit === undefined && r2.value.merged === false);
+  // Control: a clean (no-ABA) FAIL IS still cached — the fix must not disable caching for ordinary rejections.
+  const r3 = await confirm(sessions, mgrId, workerId);
+  check("(M) control: an ordinary FAIL at an unchanged tip is still a cache hit (no third gate call)", r3.ok && gateCalls === callsAfterR2 && r3.cacheHit !== undefined);
+}
 for (const db of openDbs) { try { db.close(); } catch { /* already closed */ } }
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);
