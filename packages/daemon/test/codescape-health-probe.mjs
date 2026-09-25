@@ -159,17 +159,38 @@ async function waitForStableCount(getCount, tickCounter, { settleTicks = 2, poll
 // own loop produced, never a later, still-in-progress tick's partial count leaking in early. Keeps
 // checking on every subsequent tick completion until one reaches `minAttempts` (so an earlier bailed tick,
 // or several, are transparently skipped) or genuinely stalls.
+//
+// ⚠️ The "no await between the two reads" argument above holds only for a check that runs AT the completion
+// edge — but this poll observes the edge up to `pollMs` (or a whole loaded-host stall) LATER, and the next
+// `setInterval` tick (interval 300ms vs a ~1050ms probe) is already overdue, so it can begin and bump the
+// shared cumulative counter before the poll looks (scenario (14)'s "EXACTLY 3 — observed: 4" gate failure).
+// So the exact tally is captured AT the edge instead: `instrumentProbeTicks` wraps the instance's
+// probeHealth and snapshots the cumulative attempt count in the microtask right after each tick completes
+// (no timer/macrotask, hence no other tick, can run in between). The helper returns true only when a
+// snapshot reached `minAttempts` and publishes THAT snapshot as `sup.reachedAttempts` — callers asserting an
+// exact per-tick tally must read `sup.reachedAttempts`, never the live counter.
+function instrumentProbeTicks(sup) {
+  if (sup.__probeTickSnaps) return sup.__probeTickSnaps;
+  const snaps = [];
+  sup.__probeTickSnaps = snaps;
+  const orig = sup.probeHealth.bind(sup);
+  sup.probeHealth = async function instrumentedProbeHealth() {
+    const before = sup.getCompletedProbeTickCount();
+    await orig();
+    if (sup.getCompletedProbeTickCount() > before) snaps.push(sup.getVersionProbeAttemptCount());
+  };
+  return snaps;
+}
 async function waitForTickReachingAttempts(sup, minAttempts, { pollMs = 25, stallTimeoutMs = 8000 } = {}) {
+  const snaps = instrumentProbeTicks(sup);
   let lastTicks = sup.getCompletedProbeTickCount();
   let lastProgressAt = Date.now();
   while (true) {
+    const hit = snaps.find((n) => n >= minAttempts);
+    if (hit !== undefined) { sup.reachedAttempts = hit; return true; }
     await sleep(pollMs);
     const ticks = sup.getCompletedProbeTickCount();
-    if (ticks !== lastTicks) {
-      lastTicks = ticks;
-      lastProgressAt = Date.now();
-      if (sup.getVersionProbeAttemptCount() >= minAttempts) return true;
-    }
+    if (ticks !== lastTicks) { lastTicks = ticks; lastProgressAt = Date.now(); }
     if (Date.now() - lastProgressAt > stallTimeoutMs) return false; // genuinely stalled — no probe-tick progress at all
   }
 }
@@ -1383,8 +1404,8 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   // ⭐ Observed ATTEMPT COUNT, never wall-clock — EXACTLY the configured max, not fewer (budget genuinely
   // exhausted) and not more (bounded, no runaway retry). Prints the OBSERVED count on a mismatch (card
   // 92b0f44e), never just the expectation, mirroring `19fbeede`/served-status.mjs's `reasonSuffix`.
-  check(`(14) EXACTLY the max (3) version-probe attempts were made${attemptSuffix(3, sup.getVersionProbeAttemptCount())}`,
-    sup.getVersionProbeAttemptCount() === 3);
+  check(`(14) EXACTLY the max (3) version-probe attempts were made${attemptSuffix(3, sup.reachedAttempts)}`,
+    sup.reachedAttempts === 3);
 
   const diagnosticLines = () => warnings.lines.filter((l) => l.includes("cannot read the INSTALLED build id"));
   check("(14) a persistent timeout IS reported loudly, exactly once (latched, same discipline as scenario (8))",
@@ -1406,8 +1427,8 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   const secondTickReached = await waitForTickReachingAttempts(sup, 6);
   check("(14) waitForTickReachingAttempts located a second completed tick reaching the cumulative attempt budget (6 across 2 ticks)",
     secondTickReached);
-  check(`(14) a second completed tick re-spends the full attempt budget too (cumulative: 6 across 2 ticks) — the retry budget is per-tick, never cached${attemptSuffix(6, sup.getVersionProbeAttemptCount())}`,
-    sup.getVersionProbeAttemptCount() === 6);
+  check(`(14) a second completed tick re-spends the full attempt budget too (cumulative: 6 across 2 ticks) — the retry budget is per-tick, never cached${attemptSuffix(6, sup.reachedAttempts)}`,
+    sup.reachedAttempts === 6);
   check("(14) the diagnostic still did not re-fire on the second tick (still exactly ONE, same reason)",
     diagnosticLines().length === 1);
   check("(14) still no restart after a second exhausted tick (fail-safe holds across ticks too)",
