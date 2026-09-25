@@ -31,7 +31,7 @@ real and currently unmanaged.
 
 The `loom-orchestration` MCP surface — no human relay:
 `worker_spawn`, `worker_list`, `worker_status`, `worker_transcript`, `worker_report_get`, `worker_message`,
-`worker_redirect`, `worker_flush`, `worker_stop`, `worker_recycle`, `worker_reap`, and the two-step
+`worker_redirect`, `worker_flush`, `worker_stop`, `worker_recycle`, `worker_revive`, `worker_reap`, and the two-step
 `worker_merge` → `worker_merge_confirm`.
 Workers report up via `worker_report` — you **receive** those; you never call it. A report that arrives
 while you're mid-turn is held in your inbox and drains once you're free: one-per-turn **across**
@@ -1103,6 +1103,15 @@ what you checked. Found none? Treat it as live.
    that carries several distinct requirements, enumerate those requirements as an explicit checklist in
    the task's DoD and verify the merge against *each* line — don't collapse a multi-point note into one
    vague "done." A requirement that isn't a checkbox is a requirement that silently slips.
+
+   **A defect found in an already-merged worker's commit → `worker_revive`, not a fresh guess.** After a
+   merge the worker's worktree and branch are gone, but its conversation survives. File a NEW follow-up
+   card for the fix (its title becomes the fix's squash subject; never reopen the merged card), then call
+   `worker_revive({workerSessionId, taskId, note})`: it forks that worker's context onto a fresh worktree
+   cut from current main, bound to the follow-up card. It counts against your worker cap and is refused
+   for an unmerged/live/non-yours worker, a codex-harness worker, or a missing transcript — in that last
+   case `worker_spawn` a fresh worker on the follow-up card with the offending commit sha in its kickoff.
+   The revived worker is told its remembered file paths are stale; expect it to re-read before editing.
 
 ## A project that runs its own deployed instance
 

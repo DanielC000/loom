@@ -3498,6 +3498,31 @@ export class OrchestrationMcpRouter {
     );
 
     server.registerTool(
+      "worker_revive",
+      {
+        description:
+          "Revive a MERGED worker of yours WITH ITS CONVERSATION CONTEXT to fix its own landed commit. The old worktree and branch are gone after a merge, so this FORKS the worker's engine conversation (the original transcript is left untouched) into a FRESH worktree + branch cut from the CURRENT mainline, as a NEW worker session bound to a follow-up card. " +
+          "`taskId` is REQUIRED: file the follow-up card yourself first — its title becomes the fix's squash-commit subject and its body is the worker's instruction. `note` is optional extra direction. " +
+          "The revived worker's first turn tells it that the earlier task merged (naming the landed commit), that every file path in its memory is stale, and which card/branch it now owns. It counts against your worker concurrency cap and is NOT cap-queued (a full cap refuses; retry when a slot frees). " +
+          "REFUSED (nothing is created): a session that is not YOUR worker; one that is still live (message it instead); one with no `merge_done` (unmerged — it still has its worktree); a codex-harness worker (codex has no fork primitive); a source whose conversation transcript is missing or rotated (fall back to `worker_spawn` on the follow-up card with the offending commit sha in the kickoff); a `taskId` that is the worker's own MERGED card (reopening it would overwrite its ship-state) or that already has a live worker, is held, or is terminal. " +
+          "Result: `{workerSessionId, branch, worktreePath, revivedFrom, commitSha, capacity}`. A slow spawn returns `{opId, status:\"pending\"}` exactly like `worker_spawn`. The revive is recorded as a `worker_revived` orchestration event ({fromSessionId, toSessionId, taskId, commitSha}).",
+        inputSchema: strictShape({ workerSessionId: z.string(), taskId: z.string(), note: z.string().optional() }),
+      },
+      async ({ workerSessionId, taskId, note }) => {
+        try {
+          selfHealWorkerLink(workerSessionId, "worker_revive");
+          const r = await sessions.reviveWorkerTracked(managerSessionId, { workerSessionId, taskId, note });
+          if (!r.settled) return ok({ opId: r.op.opId, status: "pending", taskId, note: "still spawning — poll worker_list (a pendingSpawn placeholder row) or re-call worker_revive with the SAME arguments to fetch the result." });
+          if (!r.ok) return ok({ error: r.error instanceof Error ? r.error.message : String(r.error) });
+          const w = r.value;
+          return ok({ workerSessionId: w.id, branch: w.branch, worktreePath: w.worktreePath, revivedFrom: w.revivedFrom, commitSha: w.commitSha, capacity: w.capacity });
+        } catch (e) {
+          return ok({ error: e instanceof Error ? e.message : String(e) });
+        }
+      },
+    );
+
+    server.registerTool(
       "worker_stop",
       {
         description: "ENDS one of your workers' sessions (graceful Ctrl-C by default, or hard kill) — this is TERMINAL, not a pause: the session is over and cannot resume mid-turn. If what you actually want is to HOLD it — pause it, make it stop what it's doing and wait for you, without ending it — use `worker_redirect` instead; this tool cannot do that. The worktree is retained. Pass EITHER workerSessionId (a real, already-spawned worker) OR opId (a `cap-queued` placeholder row from worker_list — an intent that was recorded but never actually spawned because the concurrency cap was full) — exactly one is required. opId accepts the FULL id OR an unambiguous 8-char id-prefix (the short id Loom displays everywhere else — gate_status, gate_cancel, tasks_get, worker_spawn's own taskId all accept the same form; card 7878e45a). An AMBIGUOUS prefix (matches more than one of your own queued entries) returns `{error: \"ambiguous opId prefix '...' — it matches ...\"}`, naming the candidates — never a silent pick. The opId path withdraws the queued intent instead of stopping a pty (there's no pty yet): it returns `{cancelled:true}` if a matching queued entry was found and removed, or `{cancelled:false, reason}` if not — that's a normal outcome, not an error, so check the flag rather than assuming success. `reason` is `\"already-fired\"` (already auto-fired once a slot freed), `\"reaped\"` (already TTL-reaped), or `\"not-found\"` (the opId is simply wrong, or has aged out of this registry's own bounded memory of why an entry is gone) — only the distinction the registry can actually tell apart, never a guess. A queued entry otherwise auto-fires on its own once a concurrency slot frees, for as long as THIS daemon process keeps running (no re-call needed to make that happen) — cancel it BEFORE that happens if you no longer want it. ⚠️ It does NOT survive a daemon restart of any kind (a crash, a dev-watch reload, or a deliberate `daemon_restart`) — the queue is in-memory only, so a restart discards it silently and there is nothing left here to cancel. The workerSessionId path returns `{stopped:true}` ONLY when a live pty actually existed and was told to stop — NEVER unconditionally (card dde0ce24: a worker_spawn that failed during process creation used to leave a phantom `live` row with no engine, and this tool used to report `{stopped:true}` for it without having stopped anything, a false success a manager could not route around). `{stopped:false, reason:\"no live pty for this session\"}` means there was nothing running to stop — the call still reconciles a stale `live` DB row to `exited` as a side effect, releasing the per-task one-live-worker mutex, so a re-spawn on that task is admitted right after.",

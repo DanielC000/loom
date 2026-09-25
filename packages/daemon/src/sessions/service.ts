@@ -42,6 +42,7 @@ import { composeManagerStartupPrompt, appendScheduledPrompt } from "./manager-pr
 import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
 import { lineageResolvedPendingOp, lineageRootId, liveLineageSuccessor } from "./lineage.js";
 import { composeWorkerStartupPrompt, buildWorkerRepoContext, type WorkerRepoContext, type ReviewOfInfo } from "./worker-prompt.js";
+import { composeReviveKickoff, type ReviveSpawnSpec } from "./worker-revive.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
 import { listSkills as listSkillStore } from "../skills/store.js";
@@ -6605,7 +6606,7 @@ export class SessionService {
      *  the drain already holds the original popped entry and re-queues THAT itself, preserving its opId/
      *  FIFO position instead of letting a fresh `record()` mint a new one at the back). Every OTHER caller
      *  (worker_spawn/spawnWorkerTracked) omits this — byte-identical cap-reject behavior for them. */
-    internal?: { skipCapQueueRecord?: boolean },
+    internal?: { skipCapQueueRecord?: boolean; revive?: ReviveSpawnSpec },
   ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
@@ -6815,6 +6816,9 @@ export class SessionService {
       // mint a new opId at the BACK of the queue, demoting it behind younger entries and invalidating any
       // worker_stop({opId}) already held for it (see CapQueueRejectedError's doc).
       if (internal?.skipCapQueueRecord) throw new CapQueueRejectedError(cap);
+      // A revive is never cap-QUEUED: the queue replays a plain fresh spawn, which would silently drop the
+      // fork (card dc13bcf1) — refuse plainly and let the manager retry once a slot frees.
+      if (internal?.revive) throw new Error(`worker_revive: concurrency cap reached (${cap}) — retry when a worker slot frees (a revive is not queued)`);
       // Record the rejected intent so it stays VISIBLE via worker_list instead of silently
       // disappearing — see CapQueueRegistry's class doc. Purely additive: the thrown error's
       // `.message` is byte-identical to before; only CapQueueRejectedError.capQueued is new.
@@ -6866,7 +6870,9 @@ export class SessionService {
         id: randomUUID(),
         projectId: manager.projectId,
         agentId: workerAgent.id, // the RESOLVED agent (opts.agentId may have been a name/slug — bind to the real id)
-        engineSessionId: null,
+        // A revive's fork id is PRE-ASSIGNED (--session-id) and persisted up front, exactly as forkSession does
+        // (--fork-session mints the id lazily, so SessionStart would report the SOURCE id). null for every fresh spawn.
+        engineSessionId: internal?.revive?.forkEngineSessionId ?? null,
         title: null,
         cwd: worktreePath, // worker runs IN its worktree (parallel-worker isolation)
         processState: "starting",
@@ -6946,7 +6952,8 @@ export class SessionService {
             appendMemoryRecallToStartupPrompt(
               // `targetRepo` is the repo this worktree was JUST cut from and whose key is stamped on the
               // session row above — the same resolution, so the prompt can never disagree with the worktree.
-              composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined, discardedOnRecut),
+              // A revive drops the agent base brief: the forked conversation already carries it (card dc13bcf1).
+              composeWorkerStartupPrompt(internal?.revive ? undefined : workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined, discardedOnRecut),
               codescapeStatus.text,
             ),
             workerProjectMemoryFramed,
@@ -6956,16 +6963,23 @@ export class SessionService {
           documentConversion, // inject the per-session markitdown MCP iff this worker's profile opted in
           capabilities, // inject any registry-capability MCP(s) iff this worker's profile opted in
           restrictedTools, // union the dangerous-native-tool disallow into --disallowedTools iff this worker's profile opted in
-          model: workerSpawn.model, // profile-pinned model → `--model` (undefined ⇒ no `--model`); was dropped — workers never honored a profile model pin
+          // A revive omits --model exactly like resume()/forkSession(): --fork-session inherits the source
+          // transcript's own model (card dc13bcf1).
+          model: internal?.revive ? undefined : workerSpawn.model, // profile-pinned model → `--model` (undefined ⇒ no `--model`); was dropped — workers never honored a profile model pin
           skills, // deliver only the worker profile's skill subset (null ⇒ all)
           harness, // multi-harness epic df1f94b0 P1: spawn the worker's profile-pinned vendor CLI (undefined ⇒ "claude")
+          // Card dc13bcf1 (worker_revive): fork the MERGED source's conversation into THIS fresh worktree.
+          // Spread-conditional so every ordinary spawn's SpawnOpts stays byte-identical.
+          ...(internal?.revive ? { resumeId: internal.revive.sourceEngineSessionId, fork: true, forkSessionId: internal.revive.forkEngineSessionId } : {}),
           // Card f9b47cd1: `loom-<project>-<agent>-<taskslug>` (or "-adhoc" for a taskless spawn), collision
           // suffix appended only if it matches a currently-live sibling worker under this same manager.
           //
           // @decision f9b47cd1 — EXCLUDE worker.id itself: the row is already live here, so listWorkers
           // would otherwise see this spawn as its own collision.
           //
-          sessionName: composeWorkerSessionName(project.name, workerAgent.name, taskTitle, worker.id, this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([worker.id]))),
+          // A revive passes NO sessionName, like forkSession(): `-n` alongside --resume/--fork-session is
+          // an untested engine combination (card dc13bcf1).
+          sessionName: internal?.revive ? undefined : composeWorkerSessionName(project.name, workerAgent.name, taskTitle, worker.id, this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([worker.id]))),
         });
       } catch (e) {
         // @decision 6ca4155f — anything in this try can throw SYNCHRONOUSLY before any Live entry is
@@ -6996,6 +7010,13 @@ export class SessionService {
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId, workerSessionId: worker.id, taskId, kind: "spawn_worker",
       });
+      if (internal?.revive) {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId, workerSessionId: worker.id, taskId, kind: "worker_revived",
+          detail: { fromSessionId: internal.revive.sourceSessionId, toSessionId: worker.id, taskId, commitSha: internal.revive.commitSha },
+        });
+      }
       // Card badba5a8: observability only — record whether the codescape block was injected.
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
@@ -7043,6 +7064,74 @@ export class SessionService {
       this.inFlightSpawnTaskIds.delete(claimKey);
       releaseCapSlotClaim();
     }
+  }
+
+  /**
+   * `worker_revive` (card dc13bcf1): fork a MERGED worker's engine conversation onto a FRESH worktree/branch
+   * cut from the current mainline, bound to a follow-up card the manager filed. See worker-revive.ts for the
+   * mechanism and its decision record. Every refusal below is thrown BEFORE any worktree/session side effect;
+   * cap admission, the per-task live-worker guard, terminal/held-card refusals and worktree creation all run
+   * inside {@link spawnWorker} (this is a thin wrapper around it, never a parallel spawn path).
+   *
+   * Deliberately NOT consulted: the source row's `resumability`/`archivedAt`/`processState` flags (the
+   * finalize path leaves them in whatever state it likes — `engineTranscriptExists` is the only transcript
+   * pre-check) and `hasSuccessor` (a revive is not a recycle successor).
+   */
+  async reviveWorker(
+    managerSessionId: string,
+    opts: { workerSessionId: string; taskId: string; note?: string },
+  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity; revivedFrom: string; commitSha: string | null }> {
+    const manager = this.db.getSession(managerSessionId);
+    if (!manager || manager.role !== "manager") throw new Error("not a manager session");
+    const src = this.db.getSession(opts.workerSessionId);
+    if (!src || src.projectId !== manager.projectId) throw new Error(`worker_revive workerSessionId '${opts.workerSessionId}' does not resolve to a session in this project`);
+    if (src.role !== "worker") throw new Error("worker_revive: the source is not a worker session");
+    if (src.parentSessionId !== managerSessionId) throw new Error("worker_revive: not your worker (its parent is a different manager)");
+    // @decision 961da6c6 — codex has no fork primitive: refuse, never degrade to a fresh (memory-less) spawn.
+    if (src.harness === "codex") throw new CodexForkUnsupportedError();
+    if (this.pty.isAlive(src.id)) throw new Error("worker_revive: that worker is still live — message it (worker_message) instead of reviving it");
+    if (!src.taskId) throw new Error("worker_revive: the source worker had no task, so nothing of its landed");
+    // "Merged" = a merge_done event for THIS worker (finalizeMerge appends it for every landing path,
+    // including a gate-off merge) — never the task's column or the branch's existence.
+    if (!this.db.listEventsForWorker(src.id).some((e) => e.kind === "merge_done")) {
+      throw new Error("worker_revive: that worker has no merge_done event — it has not merged (an unmerged worker still has its worktree; resume or message it instead)");
+    }
+    if (!src.engineSessionId) throw new Error("worker_revive: the source worker has no engine conversation to fork (it never started)");
+    if (!engineTranscriptExists(src.cwd, src.engineSessionId, src.harness)) {
+      throw new Error("worker_revive: the source conversation transcript is missing (rotated or deleted) — nothing to fork; worker_spawn a fresh worker on the follow-up card with the offending commit sha in its kickoff instead");
+    }
+
+    const ref = (opts.taskId ?? "").trim();
+    if (!ref || /\s/.test(ref)) throw new Error("worker_revive requires the follow-up card's taskId (file the card first — its title becomes the fix's squash subject)");
+    const exact = this.db.getTask(ref);
+    let followUp = exact && exact.projectId === manager.projectId ? exact : undefined;
+    if (!followUp) {
+      const r = resolveIdPrefix(this.db.listTasks(manager.projectId), ref);
+      if (r.kind === "ambiguous") throw new Error(`worker_revive taskId '${ref}' is an ambiguous id-prefix — it matches ${r.ids.join(", ")}; pass more characters or the full id`);
+      if (r.kind === "found") followUp = r.record;
+    }
+    if (!followUp) throw new Error(`worker_revive taskId '${ref}' does not resolve to an existing task in this project`);
+    if (followUp.id === src.taskId) throw new Error("worker_revive: taskId is the source worker's own MERGED card — file a NEW follow-up card for the fix (reopening the merged card would overwrite its ship-state)");
+    const original = this.db.getTask(src.taskId);
+    const commitSha = original?.mergedSha ?? null;
+
+    const kickoff = composeReviveKickoff({
+      originalTaskId: src.taskId,
+      originalTaskTitle: original?.title ?? "(title unavailable)",
+      commitSha,
+      oldWorktreePath: src.worktreePath ?? null,
+      followUpTaskId: followUp.id,
+      followUpTitle: followUp.title,
+      followUpBody: followUp.body ?? "",
+      branch: `loom/${taskKey(followUp.id)}`,
+      note: opts.note,
+    });
+    const worker = await this.spawnWorker(
+      managerSessionId,
+      { taskId: followUp.id, agentId: src.agentId, kickoffPrompt: kickoff },
+      { revive: { sourceSessionId: src.id, sourceEngineSessionId: src.engineSessionId, forkEngineSessionId: randomUUID(), originalTaskId: src.taskId, commitSha } },
+    );
+    return { ...worker, revivedFrom: src.id, commitSha };
   }
 
   // Card 6ca4155f: a synchronous throw between a row's live-flip and a successful pty.spawn must never
@@ -7119,6 +7208,26 @@ export class SessionService {
         // gated for an `ok:false` hit), so this is the only lever that stops an error from being cached at
         // all: skip retaining ANY failed spawn (cap-rejected or otherwise), so a same-key re-call within
         // the window with nothing usable cached always mints a genuinely fresh attempt.
+        retainErrors: false,
+      },
+    );
+  }
+
+  /** Card dc13bcf1: the tracked twin of {@link reviveWorker} — same pending-op key/retention shape as
+   *  {@link spawnWorkerTracked} (a revive IS a spawn: a slow createWorktree must never outlive the MCP call,
+   *  and worker_list's `pendingSpawn` placeholder / a same-taskId re-call dedupe apply unchanged). */
+  async reviveWorkerTracked(
+    managerSessionId: string,
+    opts: { workerSessionId: string; taskId: string; note?: string },
+  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity; revivedFrom: string; commitSha: string | null }>> {
+    const key = `spawn:${(opts.taskId ?? "").trim()}`;
+    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity; revivedFrom: string; commitSha: string | null }>(
+      key, "spawn", managerSessionId, this.syncAttachBudgetMs,
+      () => this.reviveWorker(managerSessionId, opts),
+      undefined,
+      {
+        retainMs: this.spawnOpRetainMs,
+        isRetainedResultUsable: (value) => value.taskId != null && this.db.liveSessionIdForTask(value.taskId) === value.id,
         retainErrors: false,
       },
     );
