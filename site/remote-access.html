@@ -271,6 +271,10 @@
               the daemon's own port: point a reverse proxy at <code>proxyPort</code>,
               or exclude <code>127.0.0.1</code> and <code>localhost</code> via
               <code>NO_PROXY</code> if a local HTTP proxy is relaying a local client.
+              Sessions Loom itself spawns already exclude <code>127.0.0.1</code>,
+              <code>localhost</code> and <code>::1</code> from HTTP proxies
+              automatically, so that advice applies only to your own tools and
+              browser outside Loom.
             </p>
             <p>
               <strong>Never use Tailscale Funnel.</strong> A request carrying

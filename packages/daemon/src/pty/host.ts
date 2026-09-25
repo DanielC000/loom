@@ -3743,6 +3743,41 @@ export function buildSpawnEnv(
   env.PYTHONIOENCODING = "utf-8";
   env.PYTHONUTF8 = "1";
   Object.assign(env, sessionEnv);
+  // AFTER the sessionEnv merge on purpose (unlike the vars above): this APPENDS to whatever value won
+  // (inherited or a deliberate override) rather than replacing it, so the user's own hosts survive.
+  withLoopbackNoProxy(env);
+  return env;
+}
+
+/** Loopback hosts a Loom-spawned session must never send through an HTTP proxy: the session's MCP
+ * endpoints and hook-relay all target the daemon on loopback, and a proxy relaying them adds
+ * Via/X-Forwarded-* headers that the gateway treats as a remote request. */
+export const LOOPBACK_NO_PROXY_HOSTS = ["127.0.0.1", "localhost", "::1"] as const;
+
+/** Fold {@link LOOPBACK_NO_PROXY_HOSTS} into `env` (mutating): ONE union of every case-variant of
+ * no_proxy present (`NO_PROXY`, `no_proxy`, `No_Proxy`, … in key order), deduped case-insensitively with
+ * loopback appended, written to BOTH canonical keys as the identical value and the other variants
+ * removed. Identical on every OS on purpose: Windows env names are case-INSENSITIVE, so two differing
+ * values under `NO_PROXY`/`no_proxy` would be one variable twice and a lookup could silently return the
+ * one that dropped the user's own hosts. Unconditional — harmless with no proxy configured. */
+export function withLoopbackNoProxy(env: Record<string, string>): Record<string, string> {
+  const entries: string[] = [];
+  const seen = new Set<string>();
+  const add = (raw: string) => {
+    const s = raw.trim();
+    if (s.length === 0 || seen.has(s.toLowerCase())) return;
+    seen.add(s.toLowerCase());
+    entries.push(s);
+  };
+  for (const [key, val] of Object.entries(env)) {
+    if (key.toLowerCase() !== "no_proxy") continue;
+    for (const part of val.split(",")) add(part);
+    delete env[key];
+  }
+  for (const h of LOOPBACK_NO_PROXY_HOSTS) add(h);
+  const value = entries.join(",");
+  env.NO_PROXY = value;
+  env.no_proxy = value;
   return env;
 }
 
