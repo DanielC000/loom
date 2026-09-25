@@ -26,6 +26,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { waitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mrt-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -40,6 +41,12 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Card 43f5b242: a local `waitUntil` used to be defined here but had ZERO call sites in this file —
 // dead code, removed rather than converted (nothing depended on its behavior).
+// The wrapper's ceiling (6x gateCommandTimeoutMs) starts BEFORE runGate is reached: confirmWorkerMerge does real
+// git prep (merge main, etc.) first, and on a loaded host that prep alone can outlast the ceiling, so the wrapper
+// legitimately reports NOT settled with the stubbed gate not yet invoked. "Exactly ONE invocation" is only
+// assertable once the first one has been WITNESSED; a duplicate mint would push the count past 1 on its own.
+// Generous cap: a gate that genuinely never spawns still fails the waitUntil, it just isn't judged on host speed.
+const gateSpawnedAtLeastOnce = (getCalls, label) => waitUntil(() => getCalls() >= 1, { timeoutMs: 30_000, label });
 const GIT_ID = "-c user.email=mrt@loom -c user.name=mrt";
 const now = new Date().toISOString();
 const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
@@ -156,6 +163,7 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   const pendingResult = await sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
   const elapsedMs = Date.now() - startedAt;
 
+  await gateSpawnedAtLeastOnce(() => (gateSpawned ? 1 : 0), "(ceiling) gate spawned");
   check("(ceiling) the gate genuinely spawned (setup sanity)", gateSpawned === true);
   check("(ceiling) the wrapper gave up as NOT settled once the ceiling passed", pendingResult.settled === false);
   check("(ceiling) it NEVER synthesizes a false merged:false — there is simply no `value` on a settled:false result",
@@ -223,6 +231,7 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   check("(dead-owner) it genuinely looped for roughly the full 6s ceiling (proving MANY poll iterations happened, not a one-shot)",
     elapsedMs >= 5000 && elapsedMs < 11000);
   check("(dead-owner) it gave up as NOT settled once the ceiling passed (the gate is still genuinely running)", pendingResult.settled === false);
+  await gateSpawnedAtLeastOnce(() => gateCalls, "(dead-owner) gate spawned");
   check("(dead-owner) CRITICAL — the real gate command ran EXACTLY ONCE despite ~100+ poll iterations against a dead-owner op", gateCalls === 1);
   check("(dead-owner) the dead-owner eviction check never fired mid-loop (0 'had a dead owner' warnings)", evictionWarnings === 0);
   const deadRows = db.listPendingGateOps().filter((r) => r.key === `merge:${workerId}`);
@@ -267,6 +276,7 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
 
   const pendingResult = await sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
   check("(live-owner control) it gave up as NOT settled once the ceiling passed, same as (4)", pendingResult.settled === false);
+  await gateSpawnedAtLeastOnce(() => gateCalls, "(live-owner) gate spawned");
   check("(live-owner control) POSITIVE CONTROL — the real gate command ran EXACTLY ONCE, matching (4) — the dead-owner case isn't an outlier shape", gateCalls === 1);
   const liveRows = db.listPendingGateOps().filter((r) => r.key === `merge:${workerId}`);
   check("(live-owner control) exactly ONE pending_gate_ops row, matching (4)", liveRows.length === 1);
@@ -315,6 +325,7 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
 
   const pendingResult1 = await sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
   check("(recycled-owner) FIRST call mints the op and gives up as NOT settled once the ceiling passed", pendingResult1.settled === false);
+  await gateSpawnedAtLeastOnce(() => gateCalls, "(recycled-owner) gate spawned");
   check("(recycled-owner) exactly ONE real gate invocation after the first call", gateCalls === 1);
 
   // Spy only around the SECOND call — this is the one whose own first internal attempt genuinely
