@@ -195,11 +195,11 @@ function authHeaders(): Record<string, string> {
 async function guardedFetch(url: string, init?: RequestInit): Promise<Response> {
   // Card 4cbbc343: on a proxied origin EVERY request (reads too) carries the gateway token; loopback is untouched.
   const r = await fetch(url, withGatewayAuth(init));
-  if (r.status === 401) {
+  if (r.status === 401 || r.status === 429) {
     void r.clone().json()
       .then((j: { error?: string; code?: string }) => {
-        if (isCredentialGuardFailure(401, j?.error ?? "")) noteCredentialLock("write");
-        else if (isGatewayTokenRequired(401, j)) noteGatewayLock(); // its OWN banner, never the loopback one
+        if (r.status === 401 && isCredentialGuardFailure(401, j?.error ?? "")) noteCredentialLock("write");
+        else if (isGatewayTokenRequired(r.status, j)) noteGatewayLock(); // its OWN banner, never the loopback one
       })
       .catch(() => { /* non-JSON 401 body — not the guard's shape, so not our signal */ });
   }

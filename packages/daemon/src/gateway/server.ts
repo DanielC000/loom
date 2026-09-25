@@ -537,7 +537,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           token = resolved.outcome === "token" ? resolved.token : (typeof q?.token === "string" ? q.token : undefined);
         }
       }
-      // @decision 179b6227 — VERIFY FIRST, THROTTLE ONLY THE FAILURE PATH, on BOTH listeners (extends 4cbbc343 M3, which
+      // @decision 4cbbc343 — VERIFY FIRST, THROTTLE ONLY THE FAILURE PATH, on BOTH listeners (extends 4cbbc343 M3, which
       // first did this for the trusted-proxy class). Do not restore a per-ip hard lockout, and do not gate a valid token
       // by an ip's failure count or a pre-auth cap: behind NAT/CGNAT or a shared office ip that lets one guesser lock out
       // the owner, the owner's success used to reset the guesser's count, and tokens are 256-bit so a lockout adds no
@@ -553,7 +553,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // Only a non-empty PRESENTED credential that fails to verify counts as a credential-guessing signal — an
         // entirely absent token is ordinary unauthenticated first contact. A rejected WS subprotocol offer DID
         // present a (malformed) credential, so it counts the same as a wrong one.
-        if ((wsProtocolRejected || token) && !opts.failed(at)) return reply.code(429).send({ error: opts.failedMsg });
+        // Card cf9ebab9: the failed-auth 429 carries the SAME additive `code` as the 401 below. Verify-first means this line
+        // is reached ONLY for a request whose token just FAILED verification (never a valid one), so "this browser needs a
+        // (new) gateway token" is true of it — and a stale/revoked token on a shared ip (a guesser filled the bucket) would
+        // otherwise lose the actionable banner signal, since the web client used to key on 401 alone. `error` is unchanged.
+        if ((wsProtocolRejected || token) && !opts.failed(at)) return reply.code(429).send({ error: opts.failedMsg, code: GATEWAY_TOKEN_REQUIRED_BODY.code });
         // Card b855c37d: `code` + `hint` are ADDITIVE — `error` stays byte-identical so every string-matcher
         // keeps working. Absent and wrong tokens get the identical body (no oracle), and the hint states only
         // what any 401 already implies; it names no path, secret, or `loom open` pointer (that pointer is the

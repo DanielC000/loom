@@ -143,6 +143,56 @@ const buildApp = (db, overrides = {}) => buildServer({
   check("(7) crossing the threshold again with an expired backlog SWEEPS stale entries (bounded growth, not indefinite accumulation)", counter.size === 1);
 }
 
+// ===================== (7b) card cf9ebab9 — key-count bound, sweep-frequency bound, eviction, IPv6 /64 ===========
+{
+  const { SlidingWindowCounter, rateLimitKeyForIp, createRemoteRateLimiter, DEFAULT_MAX_KEYS } = await import("../dist/gateway/remote-rate-limit.js");
+  const T0 = 2_000_000_000_000;
+  // (7b) hard key cap: a spray of distinct, all-still-in-window keys can never grow the map past maxKeys.
+  const capped = new SlidingWindowCounter(600_000, { maxKeys: 50, sweepIntervalMs: 1_000 });
+  for (let i = 0; i < 500; i++) capped.allow(`spray-${i}`, 5, T0 + i);
+  check("(7b) 500 distinct in-window keys against maxKeys:50 → the map holds exactly 50 (hard cap, not merely a stale-key sweep)", capped.size === 50);
+  const DEFAULT_SPRAY = DEFAULT_MAX_KEYS + 500;
+  const dflt = new SlidingWindowCounter(600_000);
+  for (let i = 0; i < DEFAULT_SPRAY; i++) dflt.allow(`spray-${i}`, 5, T0 + i);
+  check(`(7b) the DEFAULT cap bounds a ${DEFAULT_SPRAY}-key spray to DEFAULT_MAX_KEYS (${DEFAULT_MAX_KEYS}) with nothing stale`, dflt.size === DEFAULT_MAX_KEYS);
+  // (7c) eviction is oldest-first BY LAST TOUCH, and an evicted key fails open (fresh window), never closed.
+  const ev = new SlidingWindowCounter(600_000, { maxKeys: 3 });
+  ev.allow("a", 1, T0); ev.allow("b", 1, T0 + 1); ev.allow("c", 1, T0 + 2);
+  ev.allow("a", 1, T0 + 3); // a is refused (at limit 1) but TOUCHED: now b is the least recently touched
+  ev.allow("d", 1, T0 + 4); // over the cap of 3 → evicts b
+  check("(7c) a recently-touched key survives eviction; the least-recently-touched (b) is the one dropped (size stays at the cap)", ev.size === 3);
+  check("(7c) survivor 'a' still throttled (its hit was kept)", ev.allow("a", 1, T0 + 5) === false);
+  check("(7c) evicted 'b' FAILS OPEN — it gets a fresh window (allowed again), by design (see the class doc)", ev.allow("b", 1, T0 + 6) === true);
+  // (7d) sweep-frequency bound: with > SWEEP_THRESHOLD live keys and NOTHING stale, the old code re-walked the whole map on
+  // EVERY allow(); now it walks at most once per sweepIntervalMs of the caller's clock.
+  const sw = new SlidingWindowCounter(600_000, { maxKeys: 100_000, sweepIntervalMs: 1_000 });
+  for (let i = 0; i < 2_500; i++) sw.allow(`live-${i}`, 5, T0); // one instant: every key live, none stale
+  const afterFill = sw.sweepCount;
+  for (let i = 0; i < 1_000; i++) sw.allow(`more-${i}`, 5, T0 + 1 + (i >> 1)); // 1000 more allow()s inside the same second
+  check(`(7d) 1000 further allow()s with 3500 live keys inside one sweep interval trigger NO extra sweep (was ~1000 full walks; sweeps so far: ${afterFill} → ${sw.sweepCount})`, sw.sweepCount === afterFill && afterFill <= 1);
+  sw.allow("later", 5, T0 + 5_000);
+  check("(7d) ...but once the interval has elapsed the sweep runs again (one more, not one per call)", sw.sweepCount === afterFill + 1);
+  // (7d) CONTROL: the same sequence with the rate limit switched OFF (sweepIntervalMs:0) DOES sweep per call — so the
+  // assertion above can fail; it is not satisfied vacuously by a counter that simply never sweeps.
+  const noLimit = new SlidingWindowCounter(600_000, { maxKeys: 100_000, sweepIntervalMs: 0 });
+  for (let i = 0; i < 2_500; i++) noLimit.allow(`live-${i}`, 5, T0);
+  const ctlAfterFill = noLimit.sweepCount;
+  for (let i = 0; i < 1_000; i++) noLimit.allow(`more-${i}`, 5, T0 + 1 + (i >> 1));
+  check(`(7d) CONTROL: with the interval disabled the same 1000 allow()s cause ~1000 extra sweeps (got ${noLimit.sweepCount - ctlAfterFill}) — the bound above is what prevents that`, noLimit.sweepCount - ctlAfterFill >= 900);
+  // (7e) IPv6 keys fold to /64; IPv4-mapped folds to IPv4; IPv4/empty pass through.
+  check("(7e) two addresses in the same /64 share a key", rateLimitKeyForIp("2001:db8:1:2:aaaa:bbbb:cccc:dddd") === rateLimitKeyForIp("2001:db8:1:2::1"));
+  check("(7e) a different /64 gets a different key", rateLimitKeyForIp("2001:db8:1:3::1") !== rateLimitKeyForIp("2001:db8:1:2::1"));
+  check("(7e) '::' compression is expanded before folding (2001:db8::1 → its /64)", rateLimitKeyForIp("2001:db8::1") === rateLimitKeyForIp("2001:0db8:0000:0000:1:2:3:4"));
+  check("(7e) IPv4-mapped IPv6 folds to the bare IPv4 key", rateLimitKeyForIp("::ffff:203.0.113.9") === "203.0.113.9");
+  check("(7e) IPv4 and an empty peer pass through unchanged", rateLimitKeyForIp("203.0.113.9") === "203.0.113.9" && rateLimitKeyForIp("") === "");
+  // (7e) end-to-end through the limiter: a spray across ONE /64 shares a single failure bucket (was: unlimited fresh buckets).
+  const lim = createRemoteRateLimiter({ perIpPerMin: 1000, perTokenPerMin: 1000, authFailLockout: { maxAttempts: 2, windowMs: 600_000, lockoutMs: 900_000 } });
+  const results = [];
+  for (let i = 1; i <= 5; i++) results.push(lim.allowIpFailedAuth(`2001:db8:9:9::${i}`, T0));
+  check(`(7e) 5 failed attempts from 5 addresses in ONE /64 hit the shared maxAttempts:2 throttle (got ${results.join(",")})`, results.join(",") === "true,true,false,false,false");
+  check("(7e) ...while a different /64 is unaffected", lim.allowIpFailedAuth("2001:db8:9:a::1", T0) === true);
+}
+
 // ===================== (4) tightened validator: bindHost shape + rateLimit bounds ==========================
 {
   check("(4) bindHost '127.0.0.1' (loopback IP) accepted", validatePlatformConfigOverride({ remoteAccess: { bindHost: "127.0.0.1" } }).ok === true);
@@ -236,6 +286,8 @@ try {
   check("(2) 2nd wrong-token request (hits maxAttempts:2) → 401", fail2.statusCode === 401);
   const fail3 = await badTokenReq();
   check("(2b) 3rd WRONG-token request from the SAME ip → 429 failure throttle", fail3.statusCode === 429 && JSON.parse(fail3.body).error.includes("too many failed attempts"));
+  check("(2e) the failed-auth 429 carries the same code:\"gateway-token-required\" as the 401 (a stale token on a throttled shared ip keeps the actionable signal); `error` unchanged", JSON.parse(fail3.body).code === "gateway-token-required" && JSON.parse(fail3.body).error === "too many failed attempts — try again later");
+  check("(2e) ...and the 401 body it mirrors still has that code", JSON.parse(fail2.body).code === "gateway-token-required");
   const okAfterGuesser = await goodTokenReq();
   check("(2a) a VALID token from the SAME ip is NOT blocked by the guesser's failures (200, not 429)", okAfterGuesser.statusCode === 200);
   const fail4 = await badTokenReq();

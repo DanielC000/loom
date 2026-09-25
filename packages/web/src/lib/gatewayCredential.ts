@@ -93,9 +93,11 @@ export function withGatewayAuth(init: RequestInit | undefined, remote: boolean =
 }
 
 /** Does this failure mean "this browser needs a gateway token, and supplying one would fix it"? Keyed ONLY on the
- *  daemon's explicit `code` — never on a bare 401 (that would swallow the loopback guard's own 401s). */
+ *  daemon's explicit `code` — never on a bare 401 (that would swallow the loopback guard's own 401s). The code rides
+ *  a 401, and (card cf9ebab9) also the failed-auth 429: the daemon answers that only to a request whose token just
+ *  FAILED verification (verify-first), so a stale/revoked token on a throttled shared ip still surfaces the banner. */
 export function isGatewayTokenRequired(status: number, body: unknown): boolean {
-  return status === 401 && typeof body === "object" && body !== null && (body as { code?: unknown }).code === GATEWAY_TOKEN_REQUIRED_CODE;
+  return (status === 401 || status === 429) && typeof body === "object" && body !== null && (body as { code?: unknown }).code === GATEWAY_TOKEN_REQUIRED_CODE;
 }
 
 /** What a WebSocket needs to present the right credential for this origin. Loopback: byte-identical to before

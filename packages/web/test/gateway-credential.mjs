@@ -28,7 +28,10 @@ check("the daemon's proxy-class 401 body is the gateway discriminator; a bare 40
   assert.equal(G.isGatewayTokenRequired(401, { error: "unauthorized", code: "gateway-token-required", hint: "x" }), true);
   assert.equal(G.isGatewayTokenRequired(401, { error: "unauthorized" }), false, "a bare trust-tier 401 (no code) is not it");
   assert.equal(G.isGatewayTokenRequired(401, { error: "unauthorized — see `loom open` for how to obtain the local access credential" }), false);
-  assert.equal(G.isGatewayTokenRequired(403, { code: "gateway-token-required" }), false, "only a 401");
+  assert.equal(G.isGatewayTokenRequired(403, { code: "gateway-token-required" }), false, "only a 401 or the coded failed-auth 429");
+  assert.equal(G.isGatewayTokenRequired(429, { error: "too many failed attempts — try again later", code: "gateway-token-required" }), true, "the daemon's failed-auth 429 carries the code (card cf9ebab9)");
+  assert.equal(G.isGatewayTokenRequired(429, { error: "rate limit exceeded" }), false, "a bare 429 (no code) is not it");
+  assert.equal(G.isGatewayTokenRequired(500, { code: "gateway-token-required" }), false);
   assert.equal(G.isGatewayTokenRequired(401, null), false);
   assert.equal(G.isGatewayTokenRequired(401, "gateway-token-required"), false);
 });
