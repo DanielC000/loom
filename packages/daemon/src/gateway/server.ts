@@ -27,6 +27,7 @@ import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
 import { toBoardTasks, resolveMergedInfo } from "../mcp/tasks.js";
+import { boardRollup, buildRelationView, planTaskStructure, applyTaskPlan, resolveDeferralInput, hasStructureInput, type TaskStructureInput, type StructurePlan } from "../tasks/relations.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
 import type { AuditMcpRouter } from "../mcp/audit.js";
@@ -3758,13 +3759,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!p) return reply.code(404).send({ error: "project not found" });
     const cols = resolveConfig(p.config).kanbanColumns;
     const terminalKey = columnKeyForRole(cols, "terminal");
-    return { columns: cols, tasks: toBoardTasks(deps.db.listTasks(p.id), terminalKey) };
+    const tasks = deps.db.listTasks(p.id);
+    // Card 3df86c87: parent/children/blocker roll-up per card (counts only — the drawer's GET /api/tasks/:id
+    // carries the full relation view). The web board learns of a change through its 4s poll of this route.
+    return { columns: cols, tasks: toBoardTasks(tasks, terminalKey, boardRollup(deps.db, p.id, tasks)) };
   });
   // A single task's full row (incl. body) — the lazy per-card fetch the board drawer uses to load a
   // DONE card's body on open (the board LIST route above omits it). Same store as tasks_get/tasks_update.
   app.get("/api/tasks/:id", async (req, reply) => {
     const t = deps.db.getTask((req.params as { id: string }).id);
     if (!t) return reply.code(404).send({ error: "task not found" });
+    // Card 3df86c87: every shape this route returns carries the parent/children/relations view.
+    const withRelations = (row: Task) => ({ ...row, ...buildRelationView(deps.db, row) });
     // @decision 1eebc46a — lazy single-task ship-state backfill; use setTaskMergedInfoNoTouch (never
     // updateTask) and stamp resolved.repoKey (never t.repoKey); a failure here must fall through, not 500.
     if (!t.mergedSha || t.mergedVerification == null) {
@@ -3775,11 +3781,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
             mergedSha: resolved.merged.sha, mergedRepoKey: resolved.repoKey, mergedDate: resolved.merged.date,
             mergedVerification: resolved.merged.verification ?? null,
           });
-          return deps.db.getTask(t.id);
+          return withRelations(deps.db.getTask(t.id) ?? t);
         }
       } catch { /* best-effort cache-fill; fall through and return the row unchanged */ }
     }
-    return t;
+    return withRelations(t);
   });
   // Memory — the read-only, per-project window into project_memory. PROJECT-SCOPED (WHERE project_id =
   // ?). Calls db.listProjectMemory DIRECTLY (raw rows, no `requestAnnotations`), unlike the memory_list
@@ -4908,8 +4914,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const projectId = (req.params as { id: string }).id;
     const project = deps.db.getProject(projectId);
     if (!project) return reply.code(404).send({ error: "project not found" });
-    const b = (req.body ?? {}) as { title?: string; body?: string; columnKey?: string; priority?: string; repoKey?: string | null };
+    const b = (req.body ?? {}) as { title?: string; body?: string; columnKey?: string; priority?: string; repoKey?: string | null } & TaskStructureInput;
     if (!b.title) return reply.code(400).send({ error: "title required" });
+    // Card 3df86c87: parent/relations validated BEFORE the card is written (same validator as the MCP tools).
+    const structure: TaskStructureInput = { parentId: b.parentId, blockedBy: b.blockedBy, blocks: b.blocks, related: b.related, discoveredFrom: b.discoveredFrom };
+    let plan: StructurePlan | undefined;
+    if (hasStructureInput(structure)) {
+      const planned = planTaskStructure(deps.db, projectId, undefined, structure);
+      if ("error" in planned) return reply.code(400).send({ error: planned.error });
+      plan = planned.plan;
+    }
     if (b.priority !== undefined && !isTaskPriority(b.priority)) return reply.code(400).send({ error: "priority must be one of p0|p1|p2|p3" });
     const now = new Date().toISOString();
     // Role-resolved default landing (not the hardcoded "backlog" key) so a renamed lane still receives
@@ -4935,15 +4949,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       columnKey, position: Date.now(),
       priority: b.priority ?? "p2", repoKey, createdAt: now, updatedAt: now, version: 1,
     };
-    deps.db.insertTask(task);
-    return reply.code(201).send(task);
+    deps.db.runInTransaction(() => {
+      deps.db.insertTask(task);
+      if (plan) applyTaskPlan(deps.db, projectId, task.id, plan);
+    });
+    return reply.code(201).send(deps.db.getTask(task.id) ?? task);
   });
 
   // Update / move a task (kanban drag writes columnKey + position here — SAME store the
   // MCP task tools read/write, so UI and agent never diverge).
   app.post("/api/tasks/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey">> & { baseVersion?: number };
+    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey">> & { baseVersion?: number; deferredUntilTaskId?: string | string[] | null } & TaskStructureInput;
+    // Card 3df86c87: pull the parent/relation fields OUT of the raw body before it reaches db.updateTask —
+    // parentId in particular must only ever be written through the validator (planTaskStructure/applyTaskPlan below, planned after this route's last await).
+    const structure: TaskStructureInput = { parentId: b.parentId, blockedBy: b.blockedBy, blocks: b.blocks, related: b.related, discoveredFrom: b.discoveredFrom };
+    delete b.parentId; delete b.blockedBy; delete b.blocks; delete b.related; delete b.discoveredFrom;
+    // The raw deferredUntilTaskId is pulled out too: it reaches the db ONLY as the resolved, cycle-checked ids
+    // from the same plan (a raw value used to go straight to db.updateTask unvalidated).
+    const rawDeferral = b.deferredUntilTaskId;
+    delete b.deferredUntilTaskId;
     // heldBy is NEVER client-suppliable — that's this whole fix's central invariant (card 9b0373c0). Unlike
     // priority/held/deferred, this raw REST body is NOT schema-validated the way the MCP tools' zod input is,
     // so a bare `{heldBy:"agent"}` POST (no `held` key) would otherwise flow straight through to
@@ -5011,8 +5036,34 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // in between. Per d0978321, `version` only ever advances on a title/body write, so a field-only patch
     // (kanban drag: columnKey+position) never reaches this gate regardless of whether baseVersion was sent.
     const touchesContent = b.title !== undefined || b.body !== undefined;
-    if (touchesContent && baseVersion !== undefined) {
-      const result = deps.db.updateTaskChecked(id, b, baseVersion);
+    // Planned HERE, after the last await above (checkTaskRepoKeyRebind): the plan is validated against the
+    // graph as it is NOW and applied in the very next synchronous span — no await between plan and apply.
+    let deferral: string[] | null | undefined;
+    if (rawDeferral !== undefined) {
+      const r = resolveDeferralInput(deps.db, existingTask.projectId, existingTask.id, rawDeferral);
+      if ("error" in r) return reply.code(400).send({ error: r.error });
+      deferral = r.ids;
+    }
+    let plan: StructurePlan | undefined;
+    if (hasStructureInput(structure) || deferral !== undefined) {
+      const planned = planTaskStructure(deps.db, existingTask.projectId, existingTask.id, structure, deferral);
+      if ("error" in planned) return reply.code(400).send({ error: planned.error });
+      plan = planned.plan;
+    }
+    if (deferral !== undefined) b.deferredUntilTaskId = deferral === null ? null : deferral.length === 1 ? deferral[0] : deferral;
+    // Row write + planned structure in ONE transaction (all or nothing).
+    const outcome = deps.db.runInTransaction(() => {
+      if (touchesContent && baseVersion !== undefined) {
+        const r = deps.db.updateTaskChecked(id, b, baseVersion);
+        if (r.ok && plan) applyTaskPlan(deps.db, existingTask.projectId, existingTask.id, plan);
+        return r;
+      }
+      deps.db.updateTask(id, b);
+      if (plan) applyTaskPlan(deps.db, existingTask.projectId, existingTask.id, plan);
+      return null;
+    });
+    if (outcome) {
+      const result = outcome;
       if (!result.ok) {
         if ("notFound" in result) return reply.code(404).send({ error: "task not found" });
         return reply.code(409).send({
@@ -5021,8 +5072,6 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           current: result.current,
         });
       }
-    } else {
-      deps.db.updateTask(id, b);
     }
     // Audit trail twin of the agent-side clear event (mcp/tasks.ts `updateProjectTask`) — a human clear
     // is always allowed, but still worth a durable record alongside an agent clear.

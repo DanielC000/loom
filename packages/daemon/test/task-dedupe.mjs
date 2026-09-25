@@ -356,14 +356,16 @@ try {
   check("(m7) the SUPERSEDED (loser) card's body is back-noted with a pointer to the new card",
     db.getTask(p2First.id).body.includes(`Superseded by: ${superseded.id}`));
 
-  // relatedTo back-links too, with the distinct "Related to" wording (not "Superseded by") on both sides.
+  // Card 3df86c87: relatedTo now creates a real `related` RELATION (visible from both cards) and writes NO
+  // `Related to:` prose on either card; supersedes above keeps its prose back-note on both sides.
   const relBase = await call("tasks_create", { title: "feat(x): related-base card for m7", body: "loom/deadbeefcafe" });
   check("(m7) related-base card created normally", !relBase.error && !!relBase.id);
   const relNew = await call("tasks_create", { title: "feat(x): related-new card for m7", body: "loom/deadbeefcafe", relatedTo: relBase.id });
   check("(m7) relatedTo:<id> creates it, declaring an explicit relation", !relNew.error && !!relNew.id);
-  check("(m7) the NEW card's body records 'Related to' (not 'Supersedes')", db.getTask(relNew.id).body.includes(`Related to: ${relBase.id}`));
-  check("(m7) the RELATED (base) card's body is back-noted with 'Related to' pointing at the new card",
-    db.getTask(relBase.id).body.includes(`Related to: ${relNew.id}`));
+  check("(m7) the NEW card carries NO 'Related to:' / 'Supersedes:' prose (3df86c87)", !/Related to:|Supersedes:/.test(db.getTask(relNew.id).body));
+  check("(m7) the RELATED (base) card's body is NOT back-noted with prose either (3df86c87)", !db.getTask(relBase.id).body.includes("Related to:"));
+  const relEdges = db.listRelations(db.getTask(relNew.id).projectId).filter((e) => e.type === "related");
+  check("(m7) ...instead ONE real related relation links the two cards", relEdges.some((e) => [e.fromTaskId, e.toTaskId].sort().join() === [relNew.id, relBase.id].sort().join()));
 
   // an unresolvable supersedes/relatedTo target is rejected outright (typo protection), nothing written.
   const beforeBadTarget = db.listTasks(PROJECT_ID).length;

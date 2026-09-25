@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Task, TaskPriority, Question, QuestionType, QuestionState, BoardTask, DeferredItem, DeferredItemStatus, DeferredUntilEvent } from "@loom/shared";
+import type { Task, TaskPriority, Question, QuestionType, QuestionState, BoardTask, DeferredItem, DeferredItemStatus, DeferredUntilEvent, TaskRelationView } from "@loom/shared";
 import { DEFAULT_TASK_PRIORITY, resolveConfig, columnKeyForRole } from "@loom/shared";
 import type { Db } from "../db.js";
 import { resolveIdPrefix } from "../id-prefix.js";
@@ -11,6 +11,10 @@ import { checkTaskRepoKeyRebind } from "../projects/rebind.js";
 import { findSuspectedDuplicate, type DuplicateMatch } from "./duplicateDetection.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { checkTitleHtmlEntities, checkTitleConventionalType } from "../tasks/title-guard.js";
+import {
+  planTaskStructure, applyTaskPlan, hasStructureInput, buildRelationView, boardRollup, openBlockersByTask,
+  type TaskStructureInput, type StructurePlan,
+} from "../tasks/relations.js";
 export { checkTitleHtmlEntities, checkTitleConventionalType } from "../tasks/title-guard.js";
 
 // Task-tool business logic. EVERY function takes the projectId resolved SERVER-SIDE from the
@@ -51,7 +55,7 @@ export type TaskWithMerged = Omit<Task, "mergedVerification"> & {
  *  card), and its prior absence here meant a default `tasks_list`/`list_all_tasks` read an owner-held
  *  card as indistinguishable from a plain actionable one. `heldBy` is server-stamped provenance, safe
  *  to project on a read; never accept it on a write. */
-export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey" | "deferred" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "held" | "heldBy">;
+export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey" | "deferred" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "held" | "heldBy" | "parentId">;
 
 /**
  * {@link resolveMergedInfo}'s return: the git-derived ship state PLUS which repoKey was actually scanned
@@ -119,6 +123,10 @@ export interface ResolvedDeferredState {
   /** Whether `stuck` differs from the row's raw persisted `deferredStuck` — gates the write-through, same
    *  genuine-transition guard as `autoCleared` (fires on stuck→unstuck too, e.g. a reopened blocker). */
   stuckChanged: boolean;
+  /** Card 3df86c87 — on an `autoCleared` transition: every blocker's git-derived merged state, so the persist
+   *  step can stamp it on the blocker row (the same NoTouch cache-fill the drawer uses) and a plain `blocks`
+   *  edge / `ready` read agrees with the release that just fired. Absent on every other outcome. */
+  mergedBlockers?: Array<{ id: string; merged: MergedCommitInfo; repoKey: string | null }>;
 }
 
 /**
@@ -198,6 +206,7 @@ export async function resolveDeferredEffective(
   const terminalKey = columnKeyForRole(cols, "terminal");
   let allMerged = true;
   let anyStuck = false;
+  const mergedBlockers: NonNullable<ResolvedDeferredState["mergedBlockers"]> = [];
   for (const blockerId of ids) {
     const blocker = db.getTask(blockerId);
     if (!blocker || blocker.projectId !== projectId) {
@@ -205,14 +214,14 @@ export async function resolveDeferredEffective(
       anyStuck = true; // dangling/cross-project blocker
       continue;
     }
-    const { merged } = await resolveMergedInfo(db, projectId, blocker, true);
-    if (merged) continue; // this ONE blocker is satisfied — keep checking the rest
+    const { merged, repoKey } = await resolveMergedInfo(db, projectId, blocker, true);
+    if (merged) { mergedBlockers.push({ id: blocker.id, merged, repoKey }); continue; } // this ONE blocker is satisfied — keep checking the rest
     allMerged = false;
     if (blocker.columnKey === terminalKey) anyStuck = true; // closed with no proven merge → stuck
   }
   // All named TASK blockers merged: `deferred` auto-clears regardless of `eventStuck` — `deferredUntilEvent`
   // never gates `deferred` (see its own doc), and `stuck` is only ever meaningful while `deferred` is true.
-  if (allMerged) return { deferred: false, autoCleared: true, stuck: false, stuckChanged: rawStuck !== false };
+  if (allMerged) return { deferred: false, autoCleared: true, stuck: false, stuckChanged: rawStuck !== false, mergedBlockers };
   const stuck = anyStuck || eventStuck;
   return { deferred: true, autoCleared: false, stuck, stuckChanged: stuck !== rawStuck };
 }
@@ -264,7 +273,7 @@ function resolveDeferredEventStuck(db: Db, projectId: string, event: DeferredUnt
  * auto-cleared by anything, so this branch is unreachable for one.
  */
 function persistDeferredStateBestEffort(
-  db: Db, taskId: string, state: Pick<ResolvedDeferredState, "autoCleared" | "stuck" | "stuckChanged">,
+  db: Db, taskId: string, state: Pick<ResolvedDeferredState, "autoCleared" | "stuck" | "stuckChanged" | "mergedBlockers">,
 ): void {
   if (!state.autoCleared && !state.stuckChanged) return;
   try {
@@ -277,7 +286,7 @@ function persistDeferredStateBestEffort(
     if (!fresh) return; // deleted concurrently — nothing left to persist
     const patch: Parameters<Db["updateTask"]>[1] = state.autoCleared
       ? {
-          deferred: false, deferredUntilTaskId: null, deferredStuck: false, deferredAt: null, deferredReason: null,
+          deferred: false, deferredStuck: false, deferredAt: null, deferredReason: null,
           // Card 1d27c3cd: this auto-release IS the designed, recommended way a deferral ends — which is
           // exactly why it must not also be the thing that silently destroys the closure record
           // `deferredReason` held. Fold it into the body before it's lost, same as the manual-clear branch
@@ -296,6 +305,22 @@ function persistDeferredStateBestEffort(
     // board, which is a contract this card must not change. Every other blind writer in this file
     // (heldByPatch/deferredAtPatch in updateProjectTask) carries the identical residual risk.
     db.updateTask(fresh.id, patch);
+    // Card 3df86c87 (cf62c1ef's "no stale blocker reference" guarantee, on the edge storage): the released
+    // deferral's edges are RELEASED, not deleted (gates_deferral cleared; kept as `released` history unless the
+    // user also declared them) — the card no longer projects a deferredUntilTaskId, and the closure history stays
+    // visible as a resolved, display-only entry.
+    if (state.autoCleared) {
+      db.releaseDeferralEdges(fresh.id);
+      // Card 3df86c87: the release fired on a LIVE git merge scan; stamp each blocker's merged ship-state
+      // (setTaskMergedInfoNoTouch — the drawer's own cache-fill, never bumping updatedAt) so the released,
+      // now-released/declared edge and `ready` agree that the blocker is done. Only fills a blocker with no stamp yet.
+      for (const mb of state.mergedBlockers ?? []) {
+        const b = db.getTask(mb.id);
+        if (b && !b.mergedSha) {
+          db.setTaskMergedInfoNoTouch(mb.id, { mergedSha: mb.merged.sha, mergedRepoKey: mb.repoKey, mergedDate: mb.merged.date, mergedVerification: mb.merged.verification ?? null });
+        }
+      }
+    }
   } catch (e) {
     console.warn(`[mcp/tasks] best-effort deferred/deferredStuck write-through failed for task ${taskId} (read result is unaffected):`, e);
   }
@@ -356,6 +381,10 @@ export interface ListTasksOptions {
   idPrefix?: string;
   /** Return only tasks whose title contains this (case-insensitive) substring — the name-based sibling of `idPrefix`. */
   titleContains?: string;
+  /** Card 3df86c87 — return only the direct children of this parent (full id or an id-prefix). */
+  parentId?: string;
+  /** Card 3df86c87 — return only READY work: workReady-lane cards, not held, not deferred, no open `blocks` edge. */
+  ready?: boolean;
   /** Skip the first N rows (after filtering, before limit) — bounded-read pagination. Omit = 0. */
   offset?: number;
   /** Return at most N rows (after offset) — bounded-read pagination. Omit = no slice (caller caps). */
@@ -397,7 +426,7 @@ export const toTaskSummary = (t: TaskWithMerged): TaskSummary => ({
   id: t.id, title: t.title, columnKey: t.columnKey, position: t.position, priority: t.priority, updatedAt: t.updatedAt, merged: t.merged, repoKey: t.repoKey ?? null,
   deferred: t.deferred === true, deferredUntilTaskId: t.deferredUntilTaskId ?? null, deferredStuck: t.deferredStuck === true,
   deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null,
-  held: t.held === true, heldBy: t.heldBy ?? null,
+  held: t.held === true, heldBy: t.heldBy ?? null, parentId: t.parentId ?? null,
 });
 
 /**
@@ -410,14 +439,19 @@ export const toTaskSummary = (t: TaskWithMerged): TaskSummary => ({
  * the resolved terminal column key (`columnKeyForRole(cols, "terminal")`), or undefined on a board with
  * no terminal role assigned — nothing is ever dropped in that case, matching listProjectTasks's fallback.
  */
-export function toBoardTasks(tasks: Task[], terminalKey: string | undefined): BoardTask[] {
+export function toBoardTasks(
+  tasks: Task[], terminalKey: string | undefined,
+  /** Card 3df86c87 — per-task relation roll-up from {@link boardRollup}; omitted ⇒ zeros (callers with no db at hand). */
+  rollup?: ReturnType<typeof boardRollup>,
+): BoardTask[] {
   return tasks.map((t) => {
     const hasBody = !!t.body?.trim();
+    const r = rollup?.get(t.id) ?? { childCount: 0, childDone: 0, blockedByOpen: 0, blockedByFirst: null };
     if (terminalKey && t.columnKey === terminalKey) {
       const { body: _body, ...rest } = t;
-      return { ...rest, hasBody };
+      return { ...rest, hasBody, ...r };
     }
-    return { ...t, hasBody };
+    return { ...t, hasBody, ...r };
   });
 }
 
@@ -446,9 +480,9 @@ export function toBoardTasks(tasks: Task[], terminalKey: string | undefined): Bo
  */
 function filterProjectTasks(
   db: Db, projectId: string,
-  opts: Pick<ListTasksOptions, "columns" | "excludeDone" | "minPriority" | "idPrefix" | "titleContains">,
+  opts: Pick<ListTasksOptions, "columns" | "excludeDone" | "minPriority" | "idPrefix" | "titleContains" | "parentId">,
 ): Task[] {
-  const { columns, excludeDone = true, minPriority, idPrefix, titleContains } = opts;
+  const { columns, excludeDone = true, minPriority, idPrefix, titleContains, parentId } = opts;
   let tasks = db.listTasks(projectId);
   if (excludeDone) {
     const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
@@ -465,6 +499,7 @@ function filterProjectTasks(
     tasks = tasks.filter((t) => t.priority <= minPriority);
   }
   if (idPrefix) tasks = tasks.filter((t) => t.id.startsWith(idPrefix));
+  if (parentId) tasks = tasks.filter((t) => !!t.parentId && t.parentId.startsWith(parentId)); // card 3df86c87: full id or prefix
   if (titleContains) {
     const needle = titleContains.toLowerCase();
     tasks = tasks.filter((t) => t.title.toLowerCase().includes(needle));
@@ -472,11 +507,32 @@ function filterProjectTasks(
   return tasks;
 }
 
+/**
+ * Card 3df86c87 — the `ready` filter: cards in the project's `workReady`-role column that are not held,
+ * not (effectively) deferred, and have NO open incoming `blocks` edge. `deferred` is the READ-RESOLVED
+ * value (a deferral whose blockers all merged reads false), and a deferred card is never ready whether or
+ * not it carries gates_deferral edges. Applied BEFORE pagination.
+ */
+async function filterReadyTasks(db: Db, projectId: string, tasks: Task[]): Promise<Task[]> {
+  const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
+  const workReadyKey = columnKeyForRole(cols, "workReady");
+  if (!workReadyKey) return [];
+  const open = openBlockersByTask(db.listTasks(projectId), db.listRelations(projectId), columnKeyForRole(cols, "terminal"));
+  const out: Task[] = [];
+  for (const t of tasks) {
+    if (t.columnKey !== workReadyKey || t.held === true || (open.get(t.id)?.count ?? 0) > 0) continue;
+    const { deferred } = await resolveDeferredEffective(db, projectId, t, true);
+    if (!deferred) out.push(t);
+  }
+  return out;
+}
+
 export async function listProjectTasks(
   db: Db, projectId: string, opts: ListTasksOptions = {},
 ): Promise<TaskWithMerged[] | TaskSummary[]> {
   const { includeBody = false, offset, limit, includeMerged = true } = opts;
   let tasks = filterProjectTasks(db, projectId, opts);
+  if (opts.ready) tasks = await filterReadyTasks(db, projectId, tasks);
   if (offset !== undefined) tasks = tasks.slice(offset);
   if (limit !== undefined) tasks = tasks.slice(0, limit);
   // Merged-state enrichment (card 9983eed6): one cached, bounded git-log scan per repo backs every
@@ -487,8 +543,8 @@ export async function listProjectTasks(
   const withMerged: TaskWithMerged[] = await Promise.all(
     tasks.map(async (t) => {
       const merged = (await resolveMergedInfo(db, projectId, t, includeMerged)).merged;
-      const { deferred, autoCleared, stuck, stuckChanged } = await resolveDeferredEffective(db, projectId, t, includeMerged);
-      persistDeferredStateBestEffort(db, t.id, { autoCleared, stuck, stuckChanged });
+      const { deferred, autoCleared, stuck, stuckChanged, mergedBlockers } = await resolveDeferredEffective(db, projectId, t, includeMerged);
+      persistDeferredStateBestEffort(db, t.id, { autoCleared, stuck, stuckChanged, mergedBlockers });
       // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredStateBestEffort) —
       // mirror that in THIS response too, so the read that reports the clear never echoes a stale
       // non-null blocker id alongside deferred:false (card cf62c1ef).
@@ -503,6 +559,27 @@ export async function listProjectTasks(
     }),
   );
   return includeBody ? withMerged : withMerged.map(toTaskSummary);
+}
+
+/**
+ * {@link countProjectTasks} that ALSO honours `ready:true` (card 3df86c87): the ready predicate needs the
+ * read-resolved `deferred` state (async, git-derived), which the sync counter cannot compute, so a ready count
+ * goes through {@link filterReadyTasks} first and tallies what survives. Without `ready` this is exactly
+ * countProjectTasks (same sync path, no extra cost).
+ */
+export async function countProjectTasksAsync(
+  db: Db, projectId: string,
+  opts: Pick<ListTasksOptions, "columns" | "excludeDone" | "minPriority" | "idPrefix" | "titleContains" | "parentId" | "ready"> = {},
+): Promise<TaskCounts> {
+  if (!opts.ready) return countProjectTasks(db, projectId, opts);
+  const tasks = await filterReadyTasks(db, projectId, filterProjectTasks(db, projectId, opts));
+  const byColumn: Record<string, number> = {};
+  const byPriority: Record<string, number> = {};
+  for (const t of tasks) {
+    byColumn[t.columnKey] = (byColumn[t.columnKey] ?? 0) + 1;
+    byPriority[t.priority] = (byPriority[t.priority] ?? 0) + 1;
+  }
+  return { total: tasks.length, byColumn, byPriority };
 }
 
 /** Per-column and per-priority totals — {@link countProjectTasks}'s return shape. */
@@ -521,7 +598,7 @@ export interface TaskCounts {
  */
 export function countProjectTasks(
   db: Db, projectId: string,
-  opts: Pick<ListTasksOptions, "columns" | "excludeDone" | "minPriority" | "idPrefix" | "titleContains"> = {},
+  opts: Pick<ListTasksOptions, "columns" | "excludeDone" | "minPriority" | "idPrefix" | "titleContains" | "parentId"> = {},
 ): TaskCounts {
   const tasks = filterProjectTasks(db, projectId, opts);
   const byColumn: Record<string, number> = {};
@@ -581,7 +658,7 @@ export interface TaskRequestsSummary {
 }
 
 /** A task extended with its connected-requests summary + git-derived merged state — what getProjectTask/tasks_get returns. */
-export type TaskWithRequests = TaskWithMerged & { requests: TaskRequestsSummary; incomingDeferredItems: IncomingDeferredItemsSummary; heldRequestState: HeldRequestState | null };
+export type TaskWithRequests = TaskWithMerged & TaskRelationView & { requests: TaskRequestsSummary; incomingDeferredItems: IncomingDeferredItemsSummary; heldRequestState: HeldRequestState | null };
 
 /**
  * The live-resolved state of a task's {@link Task.heldRequestId} link (card 0ad1ca68) — `null` when the
@@ -741,8 +818,8 @@ export async function getProjectTask(
   const includeMerged = opts.includeMerged ?? true;
   const merged = (await resolveMergedInfo(db, projectId, found, includeMerged)).merged;
   // Deferred auto-clear + stuck-visibility (card 793ac76d / 93669813) — see resolveDeferredEffective's own doc.
-  const { deferred, autoCleared, stuck, stuckChanged } = await resolveDeferredEffective(db, projectId, found, includeMerged);
-  persistDeferredStateBestEffort(db, found.id, { autoCleared, stuck, stuckChanged });
+  const { deferred, autoCleared, stuck, stuckChanged, mergedBlockers } = await resolveDeferredEffective(db, projectId, found, includeMerged);
+  persistDeferredStateBestEffort(db, found.id, { autoCleared, stuck, stuckChanged, mergedBlockers });
   // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredStateBestEffort) — mirror
   // that here too, so this same read never echoes a stale non-null blocker id alongside deferred:false.
   // Card 634edd2b: same rename as listProjectTasks — see TaskWithMerged's own doc.
@@ -750,6 +827,7 @@ export async function getProjectTask(
   return {
     ...foundRest, deferred, deferredUntilTaskId: autoCleared ? null : found.deferredUntilTaskId, deferredStuck: stuck, merged,
     mergedVerificationAtMerge: mergedVerification ?? null,
+    ...buildRelationView(db, found), // card 3df86c87: parentId/parent/children/relations
     requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)),
     incomingDeferredItems: summarizeIncomingDeferredItems(db, projectId, found.id),
     heldRequestState: resolveHeldRequestState(db, found),
@@ -959,7 +1037,7 @@ export interface CreateTaskDedupeOptions {
   supersedes?: string;
   /** This new card is related to (but not a straight duplicate of) an existing one — same effect as
    *  `supersedes`, different relationship recorded on the body. */
-  relatedTo?: string;
+  relatedTo?: string | string[];
 }
 
 /**
@@ -980,13 +1058,18 @@ export interface CreateTaskDedupeOptions {
  * that is the DESTINATION project, never the Lead's own) and noted on the new card's body; an
  * unresolvable target is rejected (whole create rejected, nothing written) rather than silently ignored.
  *
- * m7: a `supersedes`/`relatedTo` relationship is recorded on BOTH cards, not just the new one — see
+ * m7: a `supersedes` relationship is recorded on BOTH cards, not just the new one — see
  * docs/decisions/0ef0270b-....md for the back-note mechanism and its race-freedom argument.
  * @decision 0ef0270b
+ *
+ * Card 3df86c87: `relatedTo` no longer writes a `Related to:` prose line on either card — it creates a real
+ * `related` relation (visible from both cards). `supersedes` is unchanged. The create's optional structure
+ * fields (`parentId`, `blockedBy`, `blocks`, `related`, `discoveredFrom`) are validated BEFORE the card is
+ * written, so a rejected structure never leaves a half-created card behind.
  */
 export function createProjectTaskChecked(
   db: Db, projectId: string,
-  input: { title: string; body?: string; columnKey?: string; priority?: TaskPriority; repoKey?: string | null },
+  input: { title: string; body?: string; columnKey?: string; priority?: TaskPriority; repoKey?: string | null } & Omit<TaskStructureInput, "related">,
   dedupe?: CreateTaskDedupeOptions,
   /** Card 267fd215 — bypasses {@link checkTitleHtmlEntities}'s rejection for a title genuinely about
    *  escaped HTML. A separate param, not folded into `dedupe`: it skips a DIFFERENT refusal (the entity
@@ -1002,45 +1085,67 @@ export function createProjectTaskChecked(
   if (titleGuard) return titleGuard;
   const typeGuard = checkTitleConventionalType(input.title, allowNonConventionalType);
   if (typeGuard) return typeGuard;
-  let body = input.body ?? "";
+  const { parentId, blockedBy, blocks, discoveredFrom, ...coreInput } = input;
+  const relatedToRaw = dedupe?.relatedTo === undefined ? [] : Array.isArray(dedupe.relatedTo) ? dedupe.relatedTo : [dedupe.relatedTo];
+  let body = coreInput.body ?? "";
   let relationNote: string | undefined;
   let backlinkTarget: Task | undefined;
-  if (dedupe?.supersedes && dedupe?.relatedTo) {
+  const relatedToIds: string[] = [];
+  if (dedupe?.supersedes && relatedToRaw.length > 0) {
     // Never silently prefer one over the other (house "never silently ignore" posture) — a caller
     // that passed both meant something distinct by each; ask them to pick one instead of guessing.
     return { error: "pass only ONE of supersedes/relatedTo, not both" };
   }
-  if (dedupe?.supersedes || dedupe?.relatedTo) {
-    const targetId = dedupe.supersedes ?? dedupe.relatedTo;
-    const resolved = resolveProjectTaskId(db, projectId, targetId as string);
+  if (dedupe?.supersedes) {
+    const resolved = resolveProjectTaskId(db, projectId, dedupe.supersedes);
     if ("error" in resolved) return resolved;
-    relationNote = dedupe.supersedes ? `Supersedes: ${resolved.id}` : `Related to: ${resolved.id}`;
+    relationNote = `Supersedes: ${resolved.id}`;
     backlinkTarget = resolved;
+  }
+  for (const raw of relatedToRaw) {
+    const resolved = resolveProjectTaskId(db, projectId, raw);
+    if ("error" in resolved) return resolved;
+    if (!relatedToIds.includes(resolved.id)) relatedToIds.push(resolved.id);
+  }
+  // Card 3df86c87: ONE plan for the whole create (parent + blocks + related), validated against the combined
+  // graph with a synthetic node for the not-yet-existing card, BEFORE anything is written.
+  const structure: TaskStructureInput = { parentId, blockedBy, blocks, discoveredFrom, ...(relatedToIds.length > 0 ? { related: relatedToIds } : {}) };
+  let plan: StructurePlan | undefined;
+  if (hasStructureInput(structure)) {
+    const planned = planTaskStructure(db, projectId, undefined, structure);
+    if ("error" in planned) return planned;
+    plan = planned.plan;
   }
   // Card d6890435: never refuses — a suspect is surfaced as an ADVISORY on the successful create below,
   // never a block. `bypassed` still skips computing it at all (an explicit relation already says
   // everything the advisory would, and `allowDuplicate` is the caller's explicit "don't bother" ack).
-  const bypassed = !!(dedupe?.allowDuplicate || dedupe?.supersedes || dedupe?.relatedTo);
+  const bypassed = !!(dedupe?.allowDuplicate || dedupe?.supersedes || relatedToRaw.length > 0);
   let related: DuplicateMatch | undefined;
   if (!bypassed) {
     // Card b6eab182: findSuspectedDuplicate requires a STRONG identifier (session/task id, branch
     // name) for every match — a weak-only match (shared code identifier/naming convention alone) can
     // no longer occur, so every advisory names a genuinely rare shared identifier, not incidental prose
     // overlap.
-    const candidateText = `${input.title}\n${body}`;
+    const candidateText = `${coreInput.title}\n${body}`;
     related = findSuspectedDuplicate(db.listTasks(projectId), candidateText) ?? undefined;
   }
   if (relationNote) body = body ? `${body}\n\n${relationNote}` : relationNote;
-  const created = createProjectTask(db, projectId, { ...input, body });
+  // The card row and its planned structure land in ONE transaction: either both or neither.
+  const created = db.runInTransaction(() => {
+    const c = createProjectTask(db, projectId, { ...coreInput, body });
+    if (!("error" in c) && plan) applyTaskPlan(db, projectId, c.id, plan);
+    return c;
+  });
   // m7 back-link (see the doc above): the loser card must be reachable FROM the new one AND reach it
   // back — a one-directional note only solves the problem for a reader who already found the winner.
   if (backlinkTarget && !("error" in created)) {
-    const backNote = dedupe?.supersedes ? `Superseded by: ${created.id}` : `Related to: ${created.id}`;
+    const backNote = `Superseded by: ${created.id}`;
     const targetBody = backlinkTarget.body ? `${backlinkTarget.body}\n\n${backNote}` : backNote;
     db.updateTask(backlinkTarget.id, { body: targetBody });
   }
   if ("error" in created) return created;
-  return related ? { ...created, related } : created;
+  const fresh = db.getTask(created.id) ?? created; // carries parentId when one was set
+  return related ? { ...fresh, related } : fresh;
 }
 
 /**
@@ -1152,7 +1257,7 @@ export interface PendingRequestWarning {
 
 export async function updateProjectTask(
   db: Db, projectId: string, taskId: string,
-  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId" | "deferredReason" | "deferredUntilEvent" | "heldRequestId">>,
+  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId" | "deferredReason" | "deferredUntilEvent" | "heldRequestId">> & TaskStructureInput,
   actor?: TaskUpdateActor,
   /**
    * Card d0978321 — the `version` the caller last read for this task (`tasks_get`/`tasks_list`/a prior
@@ -1268,6 +1373,8 @@ export async function updateProjectTask(
   // @decision 793ac76d
   //
   // @decision 022659ac
+  let resolvedDeferral: string[] | null | undefined;
+  if (patch.deferredUntilTaskId === null) resolvedDeferral = null;
   if (patch.deferredUntilTaskId !== undefined && patch.deferredUntilTaskId !== null) {
     const rawIds = Array.isArray(patch.deferredUntilTaskId) ? patch.deferredUntilTaskId : [patch.deferredUntilTaskId];
     if (rawIds.length === 0) {
@@ -1283,8 +1390,24 @@ export async function updateProjectTask(
       resolvedIds.push(blocker.id);
     }
     const dedupedIds = [...new Set(resolvedIds)];
+    resolvedDeferral = dedupedIds; // cycle-checked below, in the SAME combined graph as blockedBy/blocks
     patch = { ...patch, deferredUntilTaskId: dedupedIds.length === 1 ? dedupedIds[0] : dedupedIds };
   }
+  // Card 3df86c87 — parent/relation guard, whole-patch-reject like every guard above (nothing is written
+  // unless every part validates). The structure keys are split OUT of `patch` here so they never reach the
+  // task-row write; they are applied after the main write below, and still appear in the ack's `changed`.
+  const { parentId: sParent, blockedBy: sBlockedBy, blocks: sBlocks, related: sRelated, discoveredFrom: sDiscovered, ...patchRest } = patch;
+  const structure: TaskStructureInput = { parentId: sParent, blockedBy: sBlockedBy, blocks: sBlocks, related: sRelated, discoveredFrom: sDiscovered };
+  const structureKeys = (Object.keys(structure) as Array<keyof TaskStructureInput>).filter((k) => structure[k] !== undefined);
+  // ONE plan, validated against the combined graph (existing edges + deferral ids + blockedBy/blocks + parent);
+  // applied below in the SAME transaction as the row write, without re-validating (never a silent partial write).
+  let plan: StructurePlan | undefined;
+  if (structureKeys.length > 0 || resolvedDeferral !== undefined) {
+    const planned = planTaskStructure(db, projectId, owned.id, structure, resolvedDeferral);
+    if ("error" in planned) return planned;
+    plan = planned.plan;
+  }
+  patch = patchRest;
   // deferredUntilEvent guard (card 74716cfb) — whole-patch-reject, same convention as every guard above:
   // this field ONLY annotates which event to watch for (see Task.deferredUntilEvent's own doc — it never
   // auto-clears anything and carries no release semantics), so the sole thing worth validating at set
@@ -1496,8 +1619,20 @@ export async function updateProjectTask(
   // intent, which is what this gate is actually about.
   const touchesContent = patch.title !== undefined || patch.body !== undefined;
   let updated: Task;
+  // Row write + planned structure in ONE transaction (card 3df86c87): a rejected (conflict) row write applies
+  // no structure, and a throw rolls both back.
+  const written = db.runInTransaction(() => {
+    if (touchesContent) {
+      const r = db.updateTaskChecked(owned.id, dbPatch, baseVersion);
+      if (r.ok && plan) applyTaskPlan(db, projectId, owned.id, plan);
+      return r;
+    }
+    db.updateTask(owned.id, dbPatch);
+    if (plan) applyTaskPlan(db, projectId, owned.id, plan);
+    return null;
+  });
   if (touchesContent) {
-    const result = db.updateTaskChecked(owned.id, dbPatch, baseVersion);
+    const result = written!;
     if (!result.ok) {
       if ("notFound" in result) return { error: "task not found (deleted concurrently)" };
       // Code Review Minor A (dffd5534): an `appendBody` caller never supplies `baseVersion` — it's
@@ -1542,9 +1677,9 @@ export async function updateProjectTask(
     }
     updated = result.task;
   } else {
-    db.updateTask(owned.id, dbPatch);
     updated = { ...owned, ...dbPatch, updatedAt: new Date().toISOString() };
   }
+  if (plan) updated = { ...updated, parentId: db.getTask(owned.id)?.parentId ?? null };
   // Audit trail: a real clear just went through. Only reachable here for an AGENT-set hold — a
   // human-set hold already returned above, so this fires on the DoD's "agent-set-then-agent-clear"
   // path, never on a refused clear.
@@ -1561,7 +1696,7 @@ export async function updateProjectTask(
   if (patch.body === undefined) {
     const { id, title, columnKey, priority, position, held, deferred, heldBy, heldRequestId, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version } = updated;
     const ack: TaskUpdateAck & { pendingRequestWarning?: PendingRequestWarning[] } = {
-      id, title, columnKey, priority, position, held, deferred, heldBy, heldRequestId, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version, changed: Object.keys(patch),
+      id, title, columnKey, priority, position, held, deferred, heldBy, heldRequestId, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version, changed: [...Object.keys(patch), ...structureKeys],
     };
     if (pendingRequestWarning) ack.pendingRequestWarning = pendingRequestWarning;
     return ack;

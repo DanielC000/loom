@@ -78,11 +78,12 @@ import type {
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay, SessionUsageSession,
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
   ProjectLink, ProjectMemoryEntry,
-  DeferredItem, DeferredItemStatus,
+  DeferredItem, DeferredItemStatus, TaskRelationType,
   GateHistoryPage, GateHistoryRow, GateOutcome, GateType,
   RepoRegistryEntry, PlatformConfigHistoryEntry, ProjectConfigHistoryEntry,
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
+import { edgesAfterPatch, type EdgeBits, type EdgePatch } from "./tasks/edge-state.js";
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
@@ -1289,6 +1290,31 @@ CREATE INDEX IF NOT EXISTS idx_wakes_due ON wakes(wake_at);
 CREATE INDEX IF NOT EXISTS idx_companion_reminders_session ON companion_reminders(session_id, enabled);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id, last_activity DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, column_key, position);
+-- Card 3df86c87 — typed task-to-task relations (docs/decisions/3df86c87-*.md). A NEW table, so its indexes
+-- live here (unlike idx_tasks_parent, which indexes the migrate-added tasks.parent_id and is created in
+-- migrateTasks() after the ALTER). No FKs: deletion is application-level (deleteTask/deleteProject).
+CREATE TABLE IF NOT EXISTS task_relations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  -- blocks: from BLOCKS to. discovered-from: from was discovered while working to. related: stored once, from < to.
+  from_task_id TEXT NOT NULL,
+  to_task_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  -- Two INDEPENDENT bits on a blocks edge (tasks/edge-state.ts): declared = the user's explicit dependency
+  -- (blockedBy/blocks writes only; also 1 on related/discovered-from rows), gates_deferral = backs the
+  -- target's deferredUntilTaskId alias (alias writes + auto-release only). released = history only: the alias
+  -- auto-released this edge and nothing declared it (display-only, never a live dependency). A row exists iff
+  -- any of the three is set. NOTE: unreleased shape — a dev LOOM_HOME that booted an earlier draft keeps its
+  -- old task_relations columns (CREATE TABLE IF NOT EXISTS); recreate it (drop the table) there.
+  declared INTEGER NOT NULL DEFAULT 0,
+  gates_deferral INTEGER NOT NULL DEFAULT 0,
+  released INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  CHECK (declared = 1 OR gates_deferral = 1 OR released = 1),
+  UNIQUE (from_task_id, to_task_id, type)
+);
+CREATE INDEX IF NOT EXISTS idx_task_relations_to ON task_relations(to_task_id, type);
+CREATE INDEX IF NOT EXISTS idx_task_relations_project ON task_relations(project_id, type);
 CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_session_id, ts);
 -- worker_session_id, ts, kind are all ORIGINAL columns on this table (present since its very first
 -- CREATE TABLE, unlike a later ALTER-added column) — so, like idx_orch_events_mgr above, these two are
@@ -1373,6 +1399,8 @@ const ARCHIVED_AT_BACKFILL_KEY = "archived_at_backfill_done";
  * before the flag existed keep their idle-watchdog discount. Daemon-GLOBAL; set once per LOOM_HOME.
  */
 const HELD_BACKFILL_KEY = "task_held_title_backfill_done";
+/** app_meta marker for the one-shot legacy `deferred_until_task_id` column → `task_relations` backfill (card 3df86c87). */
+const DEFERRAL_EDGES_BACKFILL_MARKER = "task_deferral_edges_backfill_done";
 
 /**
  * app_meta key PREFIX for a companion's home channel (the proactive/outbound "where to reach the owner"
@@ -1882,6 +1910,10 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // hold's explanation survives the request moving through pending → answered → consumed, or even being
   // deleted (a dangling reference degrades to a fail-visible "not-found" state, never silently drops).
   held_request_id: "TEXT",
+  // Card 3df86c87 — parent link (epic → task → subtask, depth-capped, same project). Nullable, no DEFAULT:
+  // every legacy row backfills to NULL ("top-level card"). Its index is created in migrateTasks() AFTER
+  // this ALTER, never in the base SCHEMA (no base-schema index may reference a migrate-added column).
+  parent_id: "TEXT",
 };
 
 /** Columns added to `project_memory` after its card-2fd9abf9 launch; applied to existing DBs by
@@ -2516,6 +2548,46 @@ export class Db {
         if (name === "held_by") this.db.exec("UPDATE tasks SET held_by = 'human' WHERE held = 1");
       }
     }
+    // Card 3df86c87: index the migrate-added parent_id only after the ALTER above has run.
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id)");
+    this.backfillDeferralEdgesOnce();
+  }
+
+  /**
+   * Card 3df86c87 — one-shot copy of the legacy `tasks.deferred_until_task_id` column (bare id string or JSON
+   * array) into `task_relations` `blocks` edges flagged `gates_deferral=1`; the column is FROZEN afterwards
+   * (never read or written again). Stamped in `app_meta` (checked FIRST, stamped LAST, all in one
+   * transaction) so a re-boot never duplicates edges or re-reads a column that later drifted. An id that
+   * does not resolve to a task in the same project is still copied as a DANGLING edge (a deferred card whose
+   * blocker was deleted must keep reading `deferredStuck`, docs/decisions/793ac76d); a value that is not a
+   * usable id is skipped. Returns the counts for the boot log and the migration test.
+   */
+  backfillDeferralEdgesOnce(): { rows: number; edges: number; skipped: number } | undefined {
+    if (this.getMeta(DEFERRAL_EDGES_BACKFILL_MARKER)) return undefined;
+    const counts = { rows: 0, edges: 0, skipped: 0 };
+    this.db.transaction(() => {
+      const rows = this.db.prepare(
+        "SELECT id, project_id, deferred_until_task_id, created_at FROM tasks WHERE deferred_until_task_id IS NOT NULL AND deferred_until_task_id != ''",
+      ).all() as Row[];
+      const ins = this.db.prepare(
+        "INSERT OR IGNORE INTO task_relations (id, project_id, from_task_id, to_task_id, type, declared, gates_deferral, released, created_at) VALUES (?, ?, ?, ?, 'blocks', 0, 1, 0, ?)",
+      );
+      for (const r of rows) {
+        counts.rows++;
+        const parsed = parseDeferredUntilTaskId(r.deferred_until_task_id as string);
+        const ids = (Array.isArray(parsed) ? parsed : parsed ? [parsed] : []);
+        for (const blocker of ids) {
+          if (typeof blocker !== "string" || blocker.length === 0 || blocker === r.id) { counts.skipped++; continue; }
+          if (ins.run(randomUUID(), r.project_id, blocker, r.id, r.created_at).changes > 0) counts.edges++;
+          else counts.skipped++;
+        }
+      }
+      this.setMeta(DEFERRAL_EDGES_BACKFILL_MARKER, new Date().toISOString());
+    })();
+    if (counts.rows > 0) {
+      console.log(`[db] deferral-edge backfill: ${counts.rows} card(s) with deferred_until_task_id -> ${counts.edges} blocks edge(s), ${counts.skipped} skipped`);
+    }
+    return counts;
   }
 
   /**
@@ -3125,6 +3197,7 @@ export class Db {
       this.db.prepare("DELETE FROM runs WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM api_keys WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM tasks WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM task_relations WHERE project_id = ?").run(id); // card 3df86c87
       // pending_gate_ops is now a PERMANENT tombstone table (card e3e40167) — cascade explicitly, or a
       // deleted project's rows become an unbounded orphan class (see the schema doc).
       this.db.prepare("DELETE FROM pending_gate_ops WHERE project_id = ?").run(id);
@@ -6410,8 +6483,9 @@ export class Db {
 
   // --- tasks ---
   listTasks(projectId: string): Task[] {
+    const ids = this.loadDeferralIds(projectId);
     return this.db.prepare("SELECT * FROM tasks WHERE project_id = ? ORDER BY column_key, position")
-      .all(projectId).map(toTask);
+      .all(projectId).map((r) => toTask(r, ids.get((r as Row).id as string)));
   }
   /** Card c8f855e1: one COUNT for the spawn-time stale-prompt banner — never a full board read. */
   countTasks(projectId: string): number {
@@ -6419,7 +6493,7 @@ export class Db {
   }
   getTask(id: string): Task | undefined {
     const r = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
-    return r ? toTask(r) : undefined;
+    return r ? toTask(r, this.deferralBlockerIds(id)) : undefined;
   }
   /**
    * Batched branch → task-title mapping for the Git tab's worker-branch enrichment (card e03b7ee4):
@@ -6442,9 +6516,12 @@ export class Db {
   }
   insertTask(t: Task): void {
     this.db.prepare(
-      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key,deferred_until_task_id,deferred_stuck,deferred_at,deferred_reason,deferred_items,deferred_until_event)
-       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey,@deferredUntilTaskId,@deferredStuck,@deferredAt,@deferredReason,@deferredItems,@deferredUntilEvent)`,
-    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, deferredUntilTaskId: serializeDeferredUntilTaskId(t.deferredUntilTaskId), deferredStuck: t.deferredStuck ? 1 : 0, deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null, deferredItems: JSON.stringify(t.deferredItems ?? []), deferredUntilEvent: serializeDeferredUntilEvent(t.deferredUntilEvent) }); // defaults when an (untyped) caller omits them
+      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key,parent_id,deferred_stuck,deferred_at,deferred_reason,deferred_items,deferred_until_event)
+       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey,@parentId,@deferredStuck,@deferredAt,@deferredReason,@deferredItems,@deferredUntilEvent)`,
+    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, parentId: t.parentId ?? null, deferredStuck: t.deferredStuck ? 1 : 0, deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null, deferredItems: JSON.stringify(t.deferredItems ?? []), deferredUntilEvent: serializeDeferredUntilEvent(t.deferredUntilEvent) }); // defaults when an (untyped) caller omits them
+    // Card 3df86c87: the deferredUntilTaskId alias is stored as flagged blocks edges, not the frozen column.
+    const created = t.deferredUntilTaskId == null ? [] : Array.isArray(t.deferredUntilTaskId) ? t.deferredUntilTaskId : [t.deferredUntilTaskId];
+    if (created.length > 0) this.setDeferralEdges(t.id, t.projectId, created);
   }
   // `heldBy` is a plain persist here, same as every other field — no set-vs-clear POLICY belongs in the DB
   // layer. That lives in the ONE agent-facing choke point both agent MCP surfaces share
@@ -6458,7 +6535,7 @@ export class Db {
   // NOT go through this method — see {@link backfillTaskMergedInfo} below, which writes the same three
   // columns WITHOUT touching `updatedAt`, so opening an old done card's drawer can never reorder the
   // owner's `byRecentlyDone`-sorted done lane (Code Review finding, card 1eebc46a).
-  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "heldRequestId" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "deferredUntilEvent">>): void {
+  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "heldRequestId" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "deferredUntilEvent" | "parentId">>): void {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
@@ -6474,18 +6551,19 @@ export class Db {
     const touchesContent = patch.title !== undefined || patch.body !== undefined;
     const next = { ...t, ...patch, updatedAt: new Date().toISOString(), version: touchesContent ? t.version + 1 : t.version };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, held_request_id=@heldRequestId, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, deferred_until_task_id=@deferredUntilTaskId, deferred_stuck=@deferredStuck, deferred_at=@deferredAt, deferred_reason=@deferredReason, deferred_until_event=@deferredUntilEvent, version=@version WHERE id=@id",
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, held_request_id=@heldRequestId, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, parent_id=@parentId, deferred_stuck=@deferredStuck, deferred_at=@deferredAt, deferred_reason=@deferredReason, deferred_until_event=@deferredUntilEvent, version=@version WHERE id=@id",
     ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, heldRequestId: next.heldRequestId ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null,
-      // Card 022659ac: `next.deferredUntilTaskId` may carry the CURRENT already-parsed (possibly
-      // array-shaped) value forward from `t = toTask(cur)` even when THIS patch never mentions the field
-      // at all — better-sqlite3 cannot bind a raw array, so this must re-serialize unconditionally, not
-      // only when `patch.deferredUntilTaskId !== undefined`. Without this, a field-only write (e.g. the
-      // deferredStuck-only write-through in mcp/tasks.ts) on any multi-blocker row would throw.
-      deferredUntilTaskId: serializeDeferredUntilTaskId(next.deferredUntilTaskId), deferredStuck: next.deferredStuck ? 1 : 0, deferredAt: next.deferredAt ?? null, deferredReason: next.deferredReason ?? null,
+      // Card 3df86c87: `deferredUntilTaskId` is no longer a column write — see setDeferralEdges below (it
+      // must only run when THIS patch names the field, since `next` merely carries `t`'s value forward).
+      parentId: next.parentId ?? null, deferredStuck: next.deferredStuck ? 1 : 0, deferredAt: next.deferredAt ?? null, deferredReason: next.deferredReason ?? null,
       // Card 74716cfb: same unconditional-re-serialize reasoning as deferredUntilTaskId just above —
       // `next.deferredUntilEvent` carries the CURRENT value forward on any field-only patch that never
       // mentions this field at all, and better-sqlite3 cannot bind a raw JS object as a parameter.
       deferredUntilEvent: serializeDeferredUntilEvent(next.deferredUntilEvent) });
+    if (patch.deferredUntilTaskId !== undefined) {
+      const ids = patch.deferredUntilTaskId == null ? [] : Array.isArray(patch.deferredUntilTaskId) ? patch.deferredUntilTaskId : [patch.deferredUntilTaskId];
+      this.setDeferralEdges(id, t.projectId, ids);
+    }
   }
   /** Optimistic-concurrency-guarded wrapper around {@link updateTask} — `version` bumps only on
    *  title/body writes, and only THIS wrapper gates on it, never a field-only move.
@@ -6493,7 +6571,7 @@ export class Db {
    *  @decision d0978321 */
   updateTaskChecked(
     id: string,
-    patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "heldRequestId" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "deferredUntilEvent">>,
+    patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "heldRequestId" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "deferredUntilEvent" | "parentId">>,
     baseVersion: number | undefined,
   ): { ok: true; task: Task } | { ok: false; current: Task } | { ok: false; notFound: true } {
     const run = this.db.transaction((): { ok: true; task: Task } | { ok: false; current: Task } | { ok: false; notFound: true } => {
@@ -6579,8 +6657,18 @@ export class Db {
   relocateTask(id: string, patch: { projectId: string; columnKey: string; position: number }): void {
     this.db.transaction(() => {
       this.db.prepare(
-        "UPDATE tasks SET project_id=@projectId, column_key=@columnKey, position=@position, updated_at=@updatedAt, repo_key=NULL WHERE id=@id",
+        "UPDATE tasks SET project_id=@projectId, column_key=@columnKey, position=@position, updated_at=@updatedAt, repo_key=NULL, parent_id=NULL WHERE id=@id",
       ).run({ id, projectId: patch.projectId, columnKey: patch.columnKey, position: patch.position, updatedAt: new Date().toISOString() });
+      // Card 3df86c87: relations are same-project only — the moved card's children and every non-alias
+      // edge are detached; gates_deferral (alias) edges stay (a cross-project blocker reads deferredStuck, as before).
+      this.db.prepare("UPDATE tasks SET parent_id = NULL WHERE parent_id = ?").run(id);
+      this.db.prepare("UPDATE task_relations SET declared = 0 WHERE (from_task_id = ? OR to_task_id = ?) AND gates_deferral = 1").run(id, id); // a cross-project edge can only be an alias edge
+      this.db.prepare("DELETE FROM task_relations WHERE (from_task_id = ? OR to_task_id = ?) AND gates_deferral = 0").run(id, id);
+      // A flagged edge's project_id is ALWAYS its TARGET card's project (the deferred card's board — that is
+      // what listTasks(project) reads, and what deleteProject(project) deletes). So the moved card's own
+      // deferral edges (to = id) follow it; edges where it is only the BLOCKER (from = id) stay with the
+      // dependent's project, and read deferredStuck there (cross-project blocker), exactly as before.
+      this.db.prepare("UPDATE task_relations SET project_id = ? WHERE to_task_id = ? AND type = 'blocks' AND gates_deferral = 1").run(patch.projectId, id);
       this.db.prepare(
         "UPDATE questions SET project_id=? WHERE task_id = ? OR (length(task_id) = 8 AND ? LIKE task_id || '-%')",
       ).run(patch.projectId, id, id);
@@ -6589,7 +6677,114 @@ export class Db {
   /** PERMANENTLY delete a task card. Idempotent on a missing id (DELETE … WHERE matches nothing). HUMAN-only
    * (no MCP path) — an agent can only move a card to done; the REST route enforces the live-session guard. */
   deleteTask(id: string): void {
-    this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+    // Card 3df86c87: children become top-level, the card's relation edges go with it — EXCEPT a
+    // gates_deferral edge whose BLOCKER is this card, kept dangling so the deferred card still reads
+    // deferredStuck (docs/decisions/793ac76d: a deleted blocker degrades to "stays deferred", visibly).
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE tasks SET parent_id = NULL WHERE parent_id = ?").run(id);
+      this.db.prepare("UPDATE task_relations SET declared = 0 WHERE from_task_id = ? AND gates_deferral = 1").run(id);
+      this.db.prepare("DELETE FROM task_relations WHERE to_task_id = ? OR (from_task_id = ? AND gates_deferral = 0)").run(id, id);
+      this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+    })();
+  }
+  // --- task relations (card 3df86c87; docs/decisions/3df86c87-*.md) ---
+  /** taskId → ordered blocker ids of its gates_deferral edges, for one project (one query, no N+1). */
+  private loadDeferralIds(projectId: string): Map<string, string[]> {
+    const out = new Map<string, string[]>();
+    const rows = this.db.prepare(
+      "SELECT from_task_id, to_task_id FROM task_relations WHERE project_id = ? AND type = 'blocks' AND gates_deferral = 1 ORDER BY created_at, rowid",
+    ).all(projectId) as Row[];
+    for (const r of rows) {
+      const k = r.to_task_id as string;
+      const list = out.get(k);
+      if (list) list.push(r.from_task_id as string); else out.set(k, [r.from_task_id as string]);
+    }
+    return out;
+  }
+  private deferralBlockerIds(taskId: string): string[] {
+    return (this.db.prepare(
+      "SELECT from_task_id FROM task_relations WHERE to_task_id = ? AND type = 'blocks' AND gates_deferral = 1 ORDER BY created_at, rowid",
+    ).all(taskId) as Row[]).map((r) => r.from_task_id as string);
+  }
+  /** REPLACE the `gates_deferral` bit of every blocks edge into `taskId` (the deferredUntilTaskId alias). Only
+   *  that bit is touched: an edge the user also DECLARED keeps existing when the alias drops it, and an edge
+   *  nothing declared is deleted with the alias (explicit clear — no history). */
+  private setDeferralEdges(taskId: string, projectId: string, blockerIds: string[]): void {
+    const want = [...new Set(blockerIds.filter((x) => typeof x === "string" && x.length > 0 && x !== taskId))];
+    this.applyBlocksPatch(projectId, { taskId, deferral: want });
+  }
+  /**
+   * The writer of blocks-edge bits for every USER-level write (card 3df86c87 review 8d5f73bd): reads every blocks edge touching
+   * `patch.taskId`, computes the post-patch state with the SAME pure function the planner's cycle check uses
+   * (tasks/edge-state.ts `edgesAfterPatch`), and writes exactly that diff. `projectId` is the TARGET card's
+   * project (a new edge's project_id).
+   *
+   * NOT the only code that touches task_relations bits: five raw-SQL sites act on a whole edge SET rather than
+   * a patch, and each is a bulk lifecycle operation that keeps the table's CHECK (declared OR gates OR released)
+   * true by construction: (1) the boot backfill INSERT (declared=0, gates=1), (2) releaseDeferralEdges (gates→0,
+   * released iff nothing declared), (3) relocateTask (clears declared on alias edges, deletes the rest, re-homes
+   * project_id), (4) deleteTask (same shape for the deleted blocker/target), (5) deleteProject (deletes by project).
+   */
+  applyBlocksPatch(projectId: string, patch: EdgePatch): void {
+    this.db.transaction(() => {
+      const rows = this.db.prepare(
+        "SELECT from_task_id, to_task_id, declared, gates_deferral, released FROM task_relations WHERE type = 'blocks' AND (from_task_id = ? OR to_task_id = ?)",
+      ).all(patch.taskId, patch.taskId) as Row[];
+      const before: EdgeBits[] = rows.map((r) => ({
+        from: r.from_task_id as string, to: r.to_task_id as string,
+        declared: (r.declared as number) === 1, gates: (r.gates_deferral as number) === 1, released: (r.released as number) === 1,
+      }));
+      const after = edgesAfterPatch(before, patch);
+      const keyOf = (e: { from: string; to: string }) => `${e.from}\u0000${e.to}`;
+      const afterKeys = new Set(after.map(keyOf));
+      const beforeKeys = new Set(before.map(keyOf));
+      for (const gone of before.filter((e) => !afterKeys.has(keyOf(e)))) {
+        this.db.prepare("DELETE FROM task_relations WHERE from_task_id = ? AND to_task_id = ? AND type = 'blocks'").run(gone.from, gone.to);
+      }
+      const now = new Date().toISOString();
+      for (const e of after) {
+        if (beforeKeys.has(keyOf(e))) {
+          this.db.prepare("UPDATE task_relations SET declared = ?, gates_deferral = ?, released = ? WHERE from_task_id = ? AND to_task_id = ? AND type = 'blocks'")
+            .run(e.declared ? 1 : 0, e.gates ? 1 : 0, e.released ? 1 : 0, e.from, e.to);
+        } else {
+          this.db.prepare("INSERT INTO task_relations (id, project_id, from_task_id, to_task_id, type, declared, gates_deferral, released, created_at) VALUES (?, ?, ?, ?, 'blocks', ?, ?, ?, ?)")
+            .run(randomUUID(), projectId, e.from, e.to, e.declared ? 1 : 0, e.gates ? 1 : 0, e.released ? 1 : 0, now);
+        }
+      }
+    })();
+  }
+  /** Auto-release: clear the `gates_deferral` bit of every alias edge into `taskId`. An edge the user ALSO
+   *  declared stays a live declared dependency; one nothing declared is KEPT as `released` history (display-only,
+   *  never counted as a live dependency by ready/the roll-up/the cycle graph). */
+  releaseDeferralEdges(taskId: string): void {
+    this.db.prepare(
+      "UPDATE task_relations SET released = CASE WHEN declared = 0 THEN 1 ELSE 0 END, gates_deferral = 0 WHERE to_task_id = ? AND type = 'blocks' AND gates_deferral = 1",
+    ).run(taskId);
+  }
+  /** Every relation edge in a project (one query) — the read side of tasks/relations.ts. */
+  listRelations(projectId: string): TaskRelationRow[] {
+    return (this.db.prepare("SELECT id, project_id, from_task_id, to_task_id, type, declared, gates_deferral, released, created_at FROM task_relations WHERE project_id = ? ORDER BY created_at, rowid")
+      .all(projectId) as Row[]).map(toRelationRow);
+  }
+  /** Idempotent insert of a NON-blocks edge (related / discovered-from); blocks edges are written only through
+   *  {@link applyBlocksPatch}. Returns whether a row was inserted. */
+  insertRelation(projectId: string, fromTaskId: string, toTaskId: string, type: Exclude<TaskRelationType, "blocks">): boolean {
+    return this.db.prepare("INSERT OR IGNORE INTO task_relations (id, project_id, from_task_id, to_task_id, type, declared, gates_deferral, released, created_at) VALUES (?, ?, ?, ?, ?, 1, 0, 0, ?)")
+      .run(randomUUID(), projectId, fromTaskId, toTaskId, type, new Date().toISOString()).changes > 0;
+  }
+  /** Delete ONE non-blocks edge. */
+  deleteRelation(fromTaskId: string, toTaskId: string, type: Exclude<TaskRelationType, "blocks">): boolean {
+    return this.db.prepare("DELETE FROM task_relations WHERE from_task_id = ? AND to_task_id = ? AND type = ?")
+      .run(fromTaskId, toTaskId, type).changes > 0;
+  }
+  /** Run `fn` in ONE transaction (structure writes touch tasks + task_relations together). */
+  runInTransaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+  /** Set a card's parent (null clears). Validation lives in tasks/relations.ts; this is a plain persist that
+   *  deliberately does NOT bump updatedAt/version (a structure edit is not a title/body edit). */
+  setTaskParent(taskId: string, parentId: string | null): void {
+    this.db.prepare("UPDATE tasks SET parent_id = ? WHERE id = ?").run(parentId, taskId);
   }
   /** Count of sessions still in processState 'live' bound to a task — the task-delete guard ("don't delete a
    * card out from under a running worker"), mirroring countLiveSessionsForAgent/InProject. */
@@ -8871,28 +9066,7 @@ function toEventForensicsRow(r: GateEventJoinRow): EventForensicsRow {
 }
 
 /**
- * Card 022659ac — write-side counterpart to {@link parseDeferredUntilTaskId}: collapse whatever shape a
- * caller/patch carries (a bare id, an array of ids, null/undefined) into the single TEXT value the
- * `deferred_until_task_id` column actually stores. A single id is passed through UNCHANGED (never
- * JSON-wrapped) — this is what keeps a single-blocker row byte-identical to every row written before
- * this card, and is exactly why the read side can tell a legacy/single-id row apart from a multi-id one
- * by a leading "[" alone. An array collapses to its one element when it has exactly one (mirrors
- * updateProjectTask's own set-time dedupe, but re-applied here defensively — this function has no way to
- * know whether ITS caller already collapsed) and to `null` when empty. better-sqlite3 cannot bind a raw
- * JS array as a parameter, so EVERY write through insertTask/updateTask must route through this — not
- * only a write that explicitly touches the field, since `updateTask`'s `next` also carries the CURRENT
- * (already-parsed, possibly array-shaped) value forward on a field-only patch that never mentions it.
- */
-function serializeDeferredUntilTaskId(v: string | string[] | null | undefined): string | null {
-  if (v == null) return null;
-  if (!Array.isArray(v)) return v;
-  const ids = v.filter((x) => typeof x === "string" && x.length > 0);
-  if (ids.length === 0) return null;
-  return ids.length === 1 ? ids[0]! : JSON.stringify(ids);
-}
-
-/**
- * Card 022659ac — read-side counterpart to {@link serializeDeferredUntilTaskId}. A `null` column reads
+ * Card 022659ac — parser for the legacy `deferred_until_task_id` column (read only by the one-shot edge backfill, card 3df86c87). A `null` column reads
  * null. Text starting with "[" is treated as the new multi-blocker JSON-array format and parsed; a
  * 1-element array normalizes to a bare string (mirrors the write side's own collapse, so an array never
  * survives a round-trip at length 1), a genuine 2+-element array of strings returns as-is, and anything
@@ -8952,7 +9126,19 @@ function parseDeferredUntilEvent(raw: string | null | undefined): Task["deferred
   return null;
 }
 
-function toTask(r0: unknown): Task {
+/** Card 3df86c87 — one `task_relations` row. */
+export interface TaskRelationRow {
+  id: string; projectId: string; fromTaskId: string; toTaskId: string; type: TaskRelationType; declared: boolean; gatesDeferral: boolean; released: boolean; createdAt: string;
+}
+function toRelationRow(r0: unknown): TaskRelationRow {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, projectId: r.project_id as string, fromTaskId: r.from_task_id as string, toTaskId: r.to_task_id as string,
+    type: r.type as TaskRelationType, declared: (r.declared as number) === 1, gatesDeferral: (r.gates_deferral as number) === 1,
+    released: (r.released as number) === 1, createdAt: r.created_at as string,
+  };
+}
+function toTask(r0: unknown, deferralIds?: string[]): Task {
   const r = r0 as Row;
   return {
     id: r.id as string, projectId: r.project_id as string, title: r.title as string,
@@ -8960,7 +9146,10 @@ function toTask(r0: unknown): Task {
     priority: (r.priority as Task["priority"]) ?? "p2",
     held: (r.held as number) === 1,
     deferred: (r.deferred as number) === 1,
-    deferredUntilTaskId: parseDeferredUntilTaskId(r.deferred_until_task_id as string | null),
+    // Card 3df86c87: the frozen legacy column is NEVER read here — the alias is projected from the
+    // gates_deferral edges (see Db.loadDeferralIds), a bare string for one blocker, an array for several.
+    deferredUntilTaskId: deferralIds && deferralIds.length > 0 ? (deferralIds.length === 1 ? deferralIds[0]! : deferralIds) : null,
+    parentId: (r.parent_id as string | null) ?? null,
     deferredStuck: (r.deferred_stuck as number | null) === 1,
     deferredAt: (r.deferred_at as string | null) ?? null,
     deferredReason: (r.deferred_reason as string | null) ?? null,

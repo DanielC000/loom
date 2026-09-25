@@ -4,6 +4,7 @@ import { isIP as netIsIP } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { TASK_STRUCTURE_SHAPE, TASK_STRUCTURE_DOC, TASK_CREATE_STRUCTURE_SHAPE, TASK_CREATE_STRUCTURE_DOC } from "../tasks/relations.js";
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds, RotationMarker } from "@loom/shared";
 import { MEMORY_CONFIG_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, harnessFleetScopeAvailable, resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
@@ -2576,10 +2577,10 @@ export class PlatformMcpRouter {
           "board, the create still SUCCEEDS and the result carries a `related: {taskId, title, " +
           "sharedIdentifiers}` field naming the suspected counterpart — never a block, never a silent " +
           "drop or auto-merge. Pass allowDuplicate:true to skip computing the advisory (\"I know, don't " +
-          "tell me\"), or supersedes/relatedTo:\"<taskId>\" (full id or unambiguous prefix, resolved on " +
-          "the DESTINATION board) to instead declare an explicit relationship, noted on the new card's " +
-          "body — the superseded/related card's OWN body is back-noted too " +
-          "(\"Superseded by: <newId>\" / \"Related to: <newId>\"), so either card is discoverable from the other. " +
+          "tell me\"), or supersedes:\"<taskId>\" (full id or unambiguous prefix, resolved on " +
+          "the DESTINATION board) to declare that this card replaces one — noted on the new card's " +
+          "body, and the superseded card's OWN body is back-noted too (\"Superseded by: <newId>\") — or " +
+          "relatedTo:\"<taskId>\" (or an array of ids) to create real `related` relations (no prose on either card). " + TASK_CREATE_STRUCTURE_DOC + " " +
           "projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Error if the " +
           "id is unknown or an ambiguous prefix (the error names the candidate ids). Returns the created Task row.\n" +
           "`resolvesEscalation` (card ba04d607): when this new card IS the fix for a `platform_escalate` " +
@@ -2596,6 +2597,7 @@ export class PlatformMcpRouter {
           "later realized it resolves an escalation? `project_task_update` takes the SAME `resolvesEscalation` " +
           "param (card de90f22a) — the link isn't create-only.",
         inputSchema: strictShape({
+          ...TASK_CREATE_STRUCTURE_SHAPE,
           projectId: z.string(),
           title: z.string(),
           body: z.string().optional(),
@@ -2604,11 +2606,11 @@ export class PlatformMcpRouter {
           repoKey: z.string().nullable().optional(),
           allowDuplicate: z.boolean().optional(),
           supersedes: z.string().optional(),
-          relatedTo: z.string().optional(),
+          relatedTo: z.union([z.string(), z.array(z.string())]).optional(),
           resolvesEscalation: z.string().optional(),
         }),
       },
-      async ({ projectId, title, body, priority, columnKey, repoKey, allowDuplicate, supersedes, relatedTo, resolvesEscalation }) => {
+      async ({ projectId, title, body, priority, columnKey, repoKey, allowDuplicate, supersedes, relatedTo, resolvesEscalation, parentId, blockedBy, blocks, discoveredFrom }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
         // Resolve + validate the escalation link BEFORE creating anything — a rejected link must fail the
@@ -2617,7 +2619,7 @@ export class PlatformMcpRouter {
         if ("error" in escalationResolution) return ok(escalationResolution);
         const escalationTaskId = escalationResolution.escalationTaskId;
         const created = createProjectTaskChecked(
-          db, project.id, { title, body, priority, columnKey, repoKey }, { allowDuplicate, supersedes, relatedTo },
+          db, project.id, { title, body, priority, columnKey, repoKey, parentId, blockedBy, blocks, discoveredFrom }, { allowDuplicate, supersedes, relatedTo },
         );
         if (escalationTaskId && "id" in created) {
           db.appendEvent({
@@ -2832,8 +2834,10 @@ export class PlatformMcpRouter {
           "worse than no link at all). The response carries `escalationLinked:true` ONLY when the link was " +
           "actually written — never on a patch that also failed for some other reason (a stale baseVersion, " +
           "an unknown column) or on the `taskIds` batch path, which REJECTS `resolvesEscalation` outright " +
-          "(linking one escalation to many destination cards at once is never a legitimate ask).",
+          "(linking one escalation to many destination cards at once is never a legitimate ask)." + TASK_STRUCTURE_DOC +
+          " parentId/blockedBy/blocks/related/discoveredFrom are single-`taskId` only: the `taskIds` batch path REJECTS them (whole call, nothing written).",
         inputSchema: strictShape({
+          ...TASK_STRUCTURE_SHAPE,
           projectId: z.string(),
           taskId: z.string().optional(),
           taskIds: z.array(z.string()).min(1).max(200).optional(),
@@ -2884,6 +2888,9 @@ export class PlatformMcpRouter {
         const spillable = (res: Awaited<ReturnType<typeof updateProjectTask>>) =>
           callerSessionId ? spillableTaskUpdateResult(callerSessionId, "project-task-update-spills", res) : res;
         if (taskIds) {
+          if (patch.parentId !== undefined || patch.blockedBy !== undefined || patch.blocks !== undefined || patch.related !== undefined || patch.discoveredFrom !== undefined) {
+            return ok({ error: "taskIds batch move does not support parentId/blockedBy/blocks/related/discoveredFrom — set a card's parent and relations one card at a time via taskId" });
+          }
           if (patch.title !== undefined || patch.body !== undefined || appendBody !== undefined) {
             return ok({ error: "taskIds batch move does not support title/body/appendBody — apply those one card at a time via taskId" });
           }

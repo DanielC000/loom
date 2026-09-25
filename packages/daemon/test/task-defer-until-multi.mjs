@@ -160,6 +160,10 @@ try {
     // in deferred_until_task_id — never JSON-encoded, since this format predates this card entirely and
     // this card's own design deliberately keeps a single blocker stored this same bare way going forward.
     raw.prepare("UPDATE tasks SET deferred = 1, deferred_until_task_id = ? WHERE id = ?").run(blockerLegacy.id, dependentLegacy.id);
+    // Card 3df86c87: the column is FROZEN after the one-shot boot backfill into gates_deferral edges, so the
+    // row only becomes visible to the app by re-arming that backfill — exactly what upgrading a real pre-edge
+    // DB does. Dropping the marker makes the reopen below run it again over this raw legacy row.
+    raw.prepare("DELETE FROM app_meta WHERE key = ?").run("task_deferral_edges_backfill_done");
     raw.close();
   }
   const db2 = new Db(file);

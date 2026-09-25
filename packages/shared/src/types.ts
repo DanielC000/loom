@@ -2254,6 +2254,12 @@ export interface Task {
    * (including absent) as the plain confident tick.
    */
   mergedVerification?: "content" | "pathset" | "trailer-only" | null;
+  /**
+   * Card 3df86c87 — this card's PARENT (same project only), or `null`/absent for a top-level card. Max 2
+   * levels below a top card (epic → task → subtask); no type field ("epic" = "has children"). Validated at
+   * write time (daemon `tasks/relations.ts`); deleting the parent makes its children top-level.
+   */
+  parentId?: string | null;
   createdAt: string;
   updatedAt: string;
   /**
@@ -2275,7 +2281,51 @@ export interface Task {
  * via `GET /api/tasks/:id`. `hasBody` is always accurate (derived server-side), so a card's "has a
  * description" indicator never depends on whether `body` happens to be present on this row.
  */
-export type BoardTask = Omit<Task, "body"> & { body?: string; hasBody: boolean };
+export type BoardTask = Omit<Task, "body"> & {
+  body?: string;
+  hasBody: boolean;
+  /** Card 3df86c87 — light relation roll-up for the board list (no relation arrays; the drawer's
+   *  `GET /api/tasks/:id` carries the full {@link TaskRelationView}). */
+  childCount: number;
+  childDone: number;
+  blockedByOpen: number;
+  /** The first OPEN blocker, for a "deferred: waits on X" badge; `null` when nothing open blocks this card. */
+  blockedByFirst: { id: string; title: string } | null;
+};
+
+/** Card 3df86c87 — the three task relation types (docs/decisions/3df86c87-*.md). Only `blocks` drives scheduling. */
+export type TaskRelationType = "blocks" | "related" | "discovered-from";
+
+/** A card as shown from the other side of a relation/parent link. `resolved` is present on `blocks` edges
+ *  only and is derived at read time (blocker in the terminal column, or merged) — never stored. */
+export interface TaskRelationRef {
+  id: string;
+  title: string;
+  columnKey: string;
+  resolved?: boolean;
+  /** `true` ONLY on a blockedBy/blocks item that is auto-released deferral HISTORY (card 3df86c87): it is not a
+   *  declared dependency and is not live — do NOT send it back in a blockedBy/blocks write. Distinct from a
+   *  declared edge that is merely `resolved` because its blocker is done. Absent otherwise. */
+  released?: true;
+}
+
+/** Card 3df86c87 — a task's full parent/children/relations view (`GET /api/tasks/:id`, `tasks_get`). */
+export interface TaskRelationView {
+  parentId: string | null;
+  parent: { id: string; title: string; columnKey: string } | null;
+  /** `done`/`total` are always exact; `items` is capped (TASK_CHILDREN_ITEMS_CAP) on a very wide epic. */
+  children: { done: number; total: number; items: Array<{ id: string; title: string; columnKey: string; priority: TaskPriority }> };
+  relations: {
+    blockedBy: TaskRelationRef[];
+    blocks: TaskRelationRef[];
+    related: TaskRelationRef[];
+    discoveredFrom: TaskRelationRef[];
+    discoveries: TaskRelationRef[];
+  };
+}
+
+/** Cap on `TaskRelationView.children.items` (card 3df86c87); the roll-up counts are never capped. */
+export const TASK_CHILDREN_ITEMS_CAP = 100;
 
 /**
  * A project-scoped SHARED memory note (card 2fd9abf9) — durable, fleet-shared project knowledge any
