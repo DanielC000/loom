@@ -4444,7 +4444,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     //
     // @decision ba9ccd75 — DEEP_MERGE_GROUPS get a
     // FIELD-BY-FIELD merge instead — a shallow replace here silently wipes sibling fields in that group.
-    const DEEP_MERGE_GROUPS = new Set(["rateLimit", "watchers", "timeouts", "backup", "gateRetry", "harness"]);
+    const DEEP_MERGE_GROUPS = new Set(["rateLimit", "watchers", "timeouts", "backup", "gateRetry", "harness", "remoteAccess"]);
     const before = deps.db.getPlatformConfig();
     const merged: Record<string, unknown> = { ...before };
     for (const [key, val] of Object.entries(v.value)) {

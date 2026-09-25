@@ -376,6 +376,54 @@ const dbFile = path.join(TMP, "loom.db");
   }
 }
 
+// ============================ (12b) PATCH deep-merges remoteAccess (card 074e16fd) ============================
+// Regression guard: `remoteAccess` was NOT a DEEP_MERGE_GROUPS member, so PATCHing one sub-key (the documented
+// Tailscale Serve `{remoteAccess:{proxyPort,trustedProxyOrigins}}`) REPLACED the whole block and silently wiped an
+// existing direct-bind's bindHost/port/allowedHosts/tls/rateLimit. Now field-by-field, per-field `null` clears one
+// sub-key (whole-block `null` stays rejected); the nested `tls`/`rateLimit` objects and the arrays are replaced
+// ATOMICALLY (each is only valid as a whole), matching how a sibling group's leaf values are replaced.
+{
+  const db = new Db(path.join(TMP, "remote-access-merge.db"));
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  const patch = (payload) => app.inject({ method: "PATCH", url: "/api/platform/config", payload });
+  try {
+    const rl = { perIpPerMin: 100, perTokenPerMin: 200, authFailLockout: { maxAttempts: 5, windowMs: 60000, lockoutMs: 120000 } };
+    db.setPlatformConfig({
+      coalesceAgentMessages: true,
+      remoteAccess: { enabled: true, bindHost: "192.168.1.10", port: 45999, allowedHosts: ["box.lan"], tls: { certPath: "/c.pem", keyPath: "/k.pem" }, rateLimit: rl },
+    });
+
+    const p1 = await patch({ remoteAccess: { proxyPort: 45998, trustedProxyOrigins: ["https://box.tail1234.ts.net"] } });
+    check("(12b) single-sub-key PATCH → 200", p1.statusCode === 200);
+    const a1 = db.getPlatformConfig().remoteAccess;
+    check("(12b) new sub-keys took", a1?.proxyPort === 45998 && a1?.trustedProxyOrigins?.[0] === "https://box.tail1234.ts.net");
+    check("(12b) existing direct-bind sub-keys SURVIVE",
+      a1?.enabled === true && a1?.bindHost === "192.168.1.10" && a1?.port === 45999 && a1?.allowedHosts?.[0] === "box.lan" &&
+      a1?.tls?.certPath === "/c.pem" && a1?.rateLimit?.perIpPerMin === 100);
+    check("(12b) unrelated top-level sibling survives", db.getPlatformConfig().coalesceAgentMessages === true);
+
+    const p2 = await patch({ remoteAccess: { allowedHosts: ["other.lan"], tls: { certPath: "/c2.pem", keyPath: "/k2.pem" } } });
+    const a2 = db.getPlatformConfig().remoteAccess;
+    check("(12b) arrays + tls are replaced whole (not element/field-merged)",
+      p2.statusCode === 200 && a2.allowedHosts.length === 1 && a2.allowedHosts[0] === "other.lan" && a2.tls.certPath === "/c2.pem" && a2.tls.keyPath === "/k2.pem");
+    check("(12b) a tls with a missing half is still rejected (400), store untouched",
+      (await patch({ remoteAccess: { tls: { certPath: "/only.pem" } } })).statusCode === 400 && db.getPlatformConfig().remoteAccess.tls.certPath === "/c2.pem");
+
+    const p3 = await patch({ remoteAccess: { proxyPort: null, tls: null } });
+    const a3 = db.getPlatformConfig().remoteAccess;
+    check("(12b) per-field null removes just that sub-key", p3.statusCode === 200 && !("proxyPort" in a3) && !("tls" in a3) && a3.bindHost === "192.168.1.10" && a3.rateLimit?.perIpPerMin === 100);
+
+    check("(12b) an unknown sub-key is still rejected (400)", (await patch({ remoteAccess: { bogus: 1 } })).statusCode === 400);
+    check("(12b) an invalid value is still rejected (400) and does not clobber", (await patch({ remoteAccess: { bindHost: "0x7f.0.0.1" } })).statusCode === 400 && db.getPlatformConfig().remoteAccess.bindHost === "192.168.1.10");
+
+    check("(12b) whole-block null stays rejected (unchanged validator surface)", (await patch({ remoteAccess: null })).statusCode === 400 && !!db.getPlatformConfig().remoteAccess);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 // ============================ (13) schedulerEnabled moved to daemon-global platform config ============================
 // Card 1debd457: the owner-facing scheduler toggle used to be a per-project orchestration.schedulerEnabled
 // field the boot gate never read (index.ts:676-677 only ever consulted resolved.orchestration.

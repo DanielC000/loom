@@ -948,6 +948,11 @@ const gateRetryPatchOverride = z.object(nullableShape(gateRetryOverride.shape)).
 // Card 66b1b40d: `harness` is a 6th deep-partial group (see server.ts's DEEP_MERGE_GROUPS) — per-field null
 // clears just `default` or `scope`; `scope:"fleet"` stays rejected because the shape derives from harnessOverride.
 const harnessPatchOverride = z.object(nullableShape(harnessOverride.shape)).strict();
+// Card 074e16fd: `remoteAccess` is a 7th deep-partial group (see server.ts's DEEP_MERGE_GROUPS) — per-field null
+// clears one sub-key (whole-block `null` stays rejected, unchanged). Merge depth is ONE level, like every sibling: `tls`/`rateLimit` (objects only valid as a
+// whole) and the two arrays are replaced atomically, never merged inside. Derived from remoteAccessOverride's
+// shape, so every sub-key's validation (bindHost/port/origin canonicalisation) stays defined in exactly one place.
+const remoteAccessPatchOverride = z.object(nullableShape(remoteAccessOverride.shape)).strict();
 
 /**
  * Clear-to-inherit sentinel schema for the PATCH body (card fd55ac8a, widened by card ba9ccd75, sweep
@@ -966,7 +971,7 @@ const harnessPatchOverride = z.object(nullableShape(harnessOverride.shape)).stri
  * handler in server.ts is what turns a `null` (whole-group or per-field) into an actual delete via a
  * DEEP merge onto the persisted config, then re-validates the merged result against the non-nullable
  * `platformConfigOverrideSchema` above, so a `null` can never itself reach `db.setPlatformConfig`. Every
- * other key (`connections`/`integrations`/`remoteAccess`/`companionVoiceEnabled`) has no client-facing
+ * other key (`connections`/`integrations`/`companionVoiceEnabled`) has no client-facing
  * blank-to-inherit control today, so it keeps its plain optional shape here too — add the nullable
  * treatment here first if that ever changes.
  */
@@ -982,7 +987,7 @@ const platformConfigPatchSchema = z.object({
   coalesceAgentMessages: z.boolean().nullable().optional(),
   companionVoiceEnabled: z.boolean().optional(),
   operatorEnabled: z.boolean().nullable().optional(),
-  remoteAccess: remoteAccessOverride.optional(),
+  remoteAccess: remoteAccessPatchOverride.optional(),
   schedulerEnabled: z.boolean().nullable().optional(),
   maxConcurrentGates: z.number().int().min(1).max(50).nullable().optional(),
   maxConcurrentManagers: z.number().int().min(1).max(100).nullable().optional(),

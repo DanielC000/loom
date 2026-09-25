@@ -172,8 +172,7 @@ Set it up (all human-only, over the loopback API; a config change needs `loom re
 curl -X POST http://127.0.0.1:4317/api/gateway-tokens   -H "Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)"   -H 'content-type: application/json' -d '{"name":"my-phone"}'
 
 # 2. turn proxy mode on: the port Serve will target, and the exact origin your browser will use.
-#    ⚠ This PATCH REPLACES the whole `remoteAccess` block: if you already have a direct bind, include
-#    its fields (bindHost, port, allowedHosts, tls, rateLimit) here too, or they are dropped. Also: a trusted
+#    The PATCH merges into any existing `remoteAccess` block, so a direct bind's fields are kept. Note: a trusted
 #    origin's host must NOT be a direct-bind bindHost/allowedHosts entry, or the proxy listener is refused.
 curl -X PATCH http://127.0.0.1:4317/api/platform/config   -H "Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)"   -H 'content-type: application/json'   -d '{"remoteAccess":{"enabled":true,"proxyPort":4319,"trustedProxyOrigins":["https://your-machine.your-tailnet.ts.net:8443"]}}'
 

@@ -281,9 +281,8 @@
                   <button class="copy" type="button" aria-label="Copy the mint-a-token command">Copy</button>
                 </div>
                 <p class="term-comment term-comment-sp"># 2. proxy mode: the port Serve targets + the exact origin your browser uses</p>
-                <p class="term-comment"># ⚠ this PATCH REPLACES the whole remoteAccess block — if you already have a direct bind,</p>
-                <p class="term-comment"># include its fields (bindHost, port, allowedHosts, tls, rateLimit) too, or they are dropped.</p>
-                <p class="term-comment"># Also: a trusted origin's host must NOT be a direct-bind bindHost/allowedHosts entry, or the proxy listener is refused.</p>
+                <p class="term-comment"># this PATCH merges into any existing remoteAccess block, so a direct bind's fields are kept.</p>
+                <p class="term-comment"># Note: a trusted origin's host must NOT be a direct-bind bindHost/allowedHosts entry, or the proxy listener is refused.</p>
                 <div class="term-line">
                   <code class="term-cmd" data-copy="curl -X PATCH http://127.0.0.1:4317/api/platform/config -H &quot;Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)&quot; -H 'content-type: application/json' -d '{&quot;remoteAccess&quot;:{&quot;enabled&quot;:true,&quot;proxyPort&quot;:4319,&quot;trustedProxyOrigins&quot;:[&quot;https://your-machine.your-tailnet.ts.net:8443&quot;]}}'"><span class="term-prompt">$</span> curl -X PATCH http://127.0.0.1:4317/api/platform/config … -d '{"remoteAccess":{"enabled":true,"proxyPort":4319,"trustedProxyOrigins":["https://your-machine.your-tailnet.ts.net:8443"]}}'</code>
                   <button class="copy" type="button" aria-label="Copy the proxy-mode config command">Copy</button>
