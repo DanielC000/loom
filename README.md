@@ -221,8 +221,10 @@ Step-by-step instructions live on the landing site's **Remote access** page ([`s
 
 ## Network
 
-Loom has no cloud service of its own; everything it keeps stays on your machine. Off-machine calls, by default: the agents' own conversations with Anthropic (they carry your code, as any coding agent's do); a plan-usage poll of `api.anthropic.com/api/oauth/usage` every 60s with your Claude OAuth token (`LOOM_SUPPRESS_USAGE_POLLER=1` stops it); an npm-installed daemon's `registry.npmjs.org` check for `loomctl` updates every 6h (a from-source daemon makes none; it can't be switched off, `LOOM_NPM_REGISTRY` only redirects it); and the package-manager install a new worker worktree runs against your project's registry.
-Opt-in, off until you configure them, and able to carry session content: the Telegram companion, outbound alert webhooks, and any Connection you bind.
+- Your agents' own conversations with Anthropic. They carry your code, as any coding agent's do.
+- A plan-usage poll of `api.anthropic.com/api/oauth/usage` every 60s, only when Claude OAuth credentials exist (`LOOM_SUPPRESS_USAGE_POLLER=1` stops it).
+- npm-installed daemons check `registry.npmjs.org` for `loomctl` updates every 6h (none from source; not switchable off, `LOOM_NPM_REGISTRY` only redirects). New worker worktrees run your package manager's install.
+- Opt-in and able to carry session content: the Telegram companion, outbound alert webhooks, and any Connection you bind.
 
 ## How it works
 
