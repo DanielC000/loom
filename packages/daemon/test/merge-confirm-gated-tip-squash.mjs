@@ -10,6 +10,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (D) RETRY-LINK LAUNDERING: attempt 1 (the whole gate) runs on T1 and fails genuinely, the worker commits T2 mid-attempt, the
 //       single-file retry re-captures T2, runs ONE file and passes. The pass covers only that file on T2, so T2 must NOT land: the gated tip
 //       is PINNED at the whole-gate link, and single-file/resumed links never overwrite it.
+//   (E) RESUMED-LINK LAUNDERING (card b32b6718): as (D) but the gate is a chain whose FIRST step fails, so after the single-file retry
+//       passes the remaining steps RESUME as their own link, which also re-captures T2. The pin must survive that link too.
+//   (F) TRANSIENT RE-RUN: a kill-class failure + a mid-attempt-1 commit, then a whole-gate transient pass. That link re-runs the WHOLE
+//       gate on T2 and RE-PINS (captureGatedTip(true)), so T2 must MERGE; never refused as moved.
+//   (G) UNVERIFIABLE PIN: resolveGitRef fails at the attempt-1 capture (the worker row names a branch that resolves to no commit), so
+//       nothing is pinned and the PASS is refused with the "could not be verified" wording rather than squashed unchecked.
 //   (B) control: the same flow with no mid-gate commit merges normally (a green control, so (A) is not vacuous).
 //   (C) the IN-LOCK half, called directly on mergeBranch (the window between service.ts's pre-check and the lock cannot be hit
 //       deterministically through the service): a stale expectedBranchTip refuses with zero side effects; the current tip and an
@@ -26,6 +32,7 @@ import { settleTracked } from "./_settle-tracked.mjs";
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mcgt-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 registerForCleanup(process.env.LOOM_HOME);
+process.env.LOOM_GATE_RETRY_SETTLE_MS = "1"; // transient auto-retry settle wait: not what this file tests
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-mcgt-nonexistent-codex");
 
 const { Db } = await import("../dist/db.js");
@@ -46,14 +53,14 @@ function makeRepo(repo) {
   commitAll(repo, "init", GIT_ID);
 }
 
-async function setupWorkerProject(sfx, { plant } = {}) {
+async function setupWorkerProject(sfx, { plant, gateCommand = "pnpm gate", rowBranch } = {}) {
   const reposDir = path.join(os.tmpdir(), `loom-mcgt-${sfx}`);
   registerForCleanup(reposDir);
   const db = new Db(); openDbs.push(db);
   const mgrId = `mcgt-mgr-${sfx}`, projId = `mcgt-p-${sfx}`, taskId = `mcgt-t-${sfx}`, workerId = `mcgt-w-${sfx}`;
   const repo = path.join(reposDir, "repo");
   makeRepo(repo);
-  db.insertProject({ id: projId, name: "MCGT", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertProject({ id: projId, name: "MCGT", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: `agent-mcgt-m-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
   db.insertSession({ id: mgrId, projectId: projId, agentId: `agent-mcgt-m-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
   db.insertAgent({ id: `agent-mcgt-w-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
@@ -71,7 +78,7 @@ async function setupWorkerProject(sfx, { plant } = {}) {
       fs.writeFileSync(path.join(wt.worktreePath, "packages", "daemon", "test", `${plant}.mjs`), "// stub\n");
     }
     commitAll(wt.worktreePath, file, GIT_ID);
-    db.insertSession({ id: wId, projectId: projId, agentId: `agent-mcgt-w-${sfx}`, engineSessionId: null, title: null, cwd: wt.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: tId, worktreePath: wt.worktreePath, branch: wt.branch });
+    db.insertSession({ id: wId, projectId: projId, agentId: `agent-mcgt-w-${sfx}`, engineSessionId: null, title: null, cwd: wt.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: tId, worktreePath: wt.worktreePath, branch: rowBranch ?? wt.branch });
     return { workerId: wId, worktreePath: wt.worktreePath, branch: wt.branch };
   };
   const { workerId: _w0, worktreePath, branch } = await makeWorker("main", "feature.txt");
@@ -147,6 +154,54 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
   check("(D) the single-file retry ran (2 gate calls) and its pass was refused", gateCalls === 2 && r1.settled === true && r1.ok && r1.value.merged === false && r1.value.retriedFile !== undefined);
   check("(D) refused as gateTipMoved (gated tip pinned at attempt 1, not the retry's re-capture)", r1.ok && r1.value.gateTipMoved?.gated !== r1.value.gateTipMoved?.live && !!r1.value.gateTipMoved);
   check("(D) T2 did NOT land on main", !fs.existsSync(path.join(repo, "t2.txt")) && !fs.existsSync(path.join(repo, "feature.txt")));
+}
+{
+  // (E) resumed-remaining-steps link: chain "step1 && step2"; step1 fails genuinely on T1 (T2 committed mid-attempt-1), the single-file
+  // retry passes, then step2 resumes and passes. Each link but attempt 1 re-captures T2 UNPINNED, so only the pin keeps T2 off main.
+  const { db, mgrId, workerId, repo } = await setupWorkerProject(sfxOf("resume"), { plant: "flaky-one", gateCommand: "pnpm stepone && pnpm steptwo" });
+  const genuineFail = { passed: false, failedStep: "pnpm stepone", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-one", failingTestCount: 1, failTierTest: "FAIL  flaky-one", failTierTestCount: 1, failTierAll: ["FAIL  flaky-one"], steps: [{ command: "pnpm stepone", passed: false }] };
+  const cmds = [];
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
+    runGate: async (cmd, cwd) => {
+      cmds.push(cmd);
+      if (cmds.length === 1) { fs.writeFileSync(path.join(cwd, "t2.txt"), "T2 landed mid-attempt-1\n"); commitAll(cwd, "t2 commit", GIT_ID); return genuineFail; }
+      return { passed: true, steps: [{ command: cmd, passed: true }] };
+    },
+  });
+  const r1 = await confirm(sessions, mgrId, workerId);
+  check("(E) all three links ran (attempt 1, single-file retry, resumed steps)", cmds.length === 3 && /steptwo/.test(cmds[2]) && !/stepone/.test(cmds[2]));
+  check("(E) the resumed pass was refused (merged:false)", r1.settled === true && r1.ok && r1.value.merged === false);
+  check("(E) refused as gateTipMoved, gated tip still pinned at attempt 1", r1.ok && !!r1.value.gateTipMoved && !!r1.value.gateTipMoved.gated && r1.value.gateTipMoved.gated !== r1.value.gateTipMoved.live);
+  check("(E) T2 did NOT land on main", !fs.existsSync(path.join(repo, "t2.txt")) && !fs.existsSync(path.join(repo, "feature.txt")));
+}
+{
+  // (F) transient re-run: the kill-class failure is followed by a WHOLE-gate re-run on T2, which re-pins, so T2 merges.
+  const { db, mgrId, workerId, repo } = await setupWorkerProject(sfxOf("transient"));
+  const killed = { passed: false, failedStep: "pnpm gate", failedStatus: null, failedSignal: "SIGKILL", failedTimedOut: false, outputTail: "", steps: [] };
+  let gateCalls = 0;
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
+    runGate: async (_cmd, cwd) => {
+      gateCalls++;
+      if (gateCalls === 1) { fs.writeFileSync(path.join(cwd, "t2.txt"), "T2 landed mid-attempt-1\n"); commitAll(cwd, "t2 commit", GIT_ID); return killed; }
+      return PASS;
+    },
+  });
+  const r1 = await confirm(sessions, mgrId, workerId);
+  check("(F) the transient whole-gate re-run happened (2 gate calls)", gateCalls === 2);
+  check("(F) the re-run's pass MERGES the new tip (re-pinned at the transient link)", r1.settled === true && r1.ok && r1.value.merged === true && r1.value.gateTipMoved === undefined);
+  check("(F) T2 (the mid-attempt-1 commit) landed on main, along with the original work", fs.existsSync(path.join(repo, "t2.txt")) && fs.existsSync(path.join(repo, "feature.txt")));
+}
+{
+  // (G) the row's branch resolves to no commit, so `resolveGitRef` returns null at the attempt-1 capture: nothing pinned.
+  const { db, mgrId, workerId, repo } = await setupWorkerProject(sfxOf("unpinned"), { rowBranch: "loom/does-not-exist" });
+  let gateCalls = 0;
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap, runGate: async () => { gateCalls++; return PASS; } });
+  const r1 = await confirm(sessions, mgrId, workerId);
+  check("(G) the gate ran (so the refusal is the post-gate tip check, not an earlier one)", gateCalls === 1 && r1.ok && r1.value.gateRan === true);
+  check("(G) refused, nothing landed", r1.settled === true && r1.ok && r1.value.merged === false && !fs.existsSync(path.join(repo, "feature.txt")));
+  check('(G) refusal carries the "could not be verified" wording and an unreadable gated tip', r1.ok && /could not be verified/.test(r1.value.reason ?? "") && r1.value.gateTipMoved?.gated === null);
 }
 {
   const { db, mgrId, workerId, repo } = await setupWorkerProject(sfxOf("stable"));
