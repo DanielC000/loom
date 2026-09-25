@@ -67,7 +67,7 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
 2. **Stay in scope.** Do exactly the assigned task and its definition of done — one logical change.
    Don't sprawl scope mid-task. If you discover something bigger (a real bug, a wrong assumption, a
    missing piece), surface it **up** via `worker_report` and let your manager decide — don't quietly
-   expand or leave the task half-done. (`tasks_create`/`tasks_update` are on your surface, but the board is your manager's: don't move your own card or file follow-ups unless the kickoff says to.) The minimal-change boundary: a pure-function extraction of the
+   expand or leave the task half-done. (`tasks_create`/`tasks_update` are on your surface, but the board is your manager's: don't move your own card or file follow-ups unless the kickoff says to; when you do file one, set `discoveredFrom` to the card you're working so it keeps its lineage.) The minimal-change boundary: a pure-function extraction of the
    EXACT branch under change (to make it testable) is IN-SCOPE; structural reorganization of the
    surrounding code is NOT — escalate that.
 3. **Escalate up, never sideways.** On a decision, ambiguity, or blocker beyond the task's clear scope,

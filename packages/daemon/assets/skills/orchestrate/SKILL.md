@@ -134,6 +134,15 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   `worker_spawn` outright — setting it yourself to sequence your own queue silences the nag at the cost
   of blocking your own dispatch onto that card. Clear `deferred` (`deferred:false`) when you pick the
   card back up.
+- **Record structure as board data, not title tags or prose.** Group an epic/umbrella's children with
+  `parentId` (a card with children *is* the epic — no `[epic …]` title tags, no "child A" prose). Record a
+  real dependency with `blockedBy`/`blocks`: it stops blocking by itself once the blocker is done or merged
+  and never parks the card, so use `deferredUntilTaskId` only for "park this card and auto-release it when
+  that card merges". Link cards with `relatedTo`/`related` (not a "Related to:" line) and a follow-up with
+  `discoveredFrom`. Pick work with `tasks_list({ready:true})` — unblocked, unheld, undeferred cards in the
+  work-ready lane (add `parentId` to scope it to one epic). When you read a card's relations and write them
+  back, leave out items marked `released:true`: that is history, not a dependency. The tool descriptions own
+  the mechanics.
 - **Work you discover is work you own — a card you file is the backlog refilling, not a finish line.**
   Bugs you found, tickets you filed, follow-ups you identified: as long as an actionable, non-gated
   card sits on the board, you keep working it — spawn the fix → review → merge → repeat. Never file
