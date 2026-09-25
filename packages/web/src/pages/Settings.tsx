@@ -38,6 +38,8 @@ import {
   rolesAffected, switchesToCodex, type DefaultValue, type ScopeValue,
 } from "../components/DefaultHarness";
 import { HARNESS_TITLE, type Harness } from "../lib/harnessFields";
+import { MergeGateCadencePanel, cadenceDraftFrom, type CadenceDraft } from "../components/mergeGate";
+import { cadenceConfigWrite, intervalError } from "../lib/mergeGate";
 import { color, font, tone, type Tone } from "../theme";
 import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 import { errorText } from "../lib/loopbackCredential";
@@ -244,8 +246,11 @@ function ConfigEditor({ project }: { project: Project }) {
   // this PATCH untouched (the two surfaces never fight over the same field).
   const [allowText, setAllowText] = useState(ov.permission?.allow ? ov.permission.allow.join("\n") : "");
   const [gateCommand, setGateCommand] = useState(ov.orchestration?.gateCommand ?? "");
-  // Human-only merge-gate switch (card e8df2659): checked = "off" (merges skip the gate command).
-  const [mergeGateOff, setMergeGateOff] = useState(ov.orchestration?.mergeGate === "off");
+  // Human-only merge-gate CADENCE (card e8df2659's on/off, widened to three values by card 00664e74).
+  // The STORED shape stays `mergeGate: "on" | "off"` + an optional `mergeGateInterval`; the CONTROL is
+  // three-valued, because "off with an interval 5" runs the gate regularly and calling that "off" would be
+  // false about the project's behaviour. cadenceDraftFrom/cadenceConfigWrite own both directions.
+  const [cadence, setCadence] = useState<CadenceDraft>(() => cadenceDraftFrom(ov.orchestration));
   const [maxWorkers, setMaxWorkers] = useState(numStr(ov.orchestration?.maxConcurrentWorkers));
   const [maxManagers, setMaxManagers] = useState(numStr(ov.orchestration?.maxConcurrentManagers));
   const [recycle, setRecycle] = useState(numStr(ov.orchestration?.recycleAtContextRatio));
@@ -345,8 +350,13 @@ function ConfigEditor({ project }: { project: Project }) {
     unset.push("orchestration.schedulerEnabled");
     if (gateCommand.trim()) orch.gateCommand = gateCommand.trim();
     else { delete orch.gateCommand; unset.push("orchestration.gateCommand"); }
-    if (mergeGateOff) orch.mergeGate = "off";
-    else { delete orch.mergeGate; unset.push("orchestration.mergeGate"); }
+    // Cadence → the two stored keys. `every` CLEARS both (inheriting the default) rather than writing
+    // mergeGate:"on", matching how the old checkbox behaved; `never` clears only the interval.
+    delete orch.mergeGate;
+    delete orch.mergeGateInterval;
+    const cadenceWrite = cadenceConfigWrite(cadence.cadence, cadence.intervalRaw);
+    Object.assign(orch, cadenceWrite.set);
+    unset.push(...cadenceWrite.unset);
     applyMs(orch, "gateCommandTimeoutMs", gateTimeout, "s", unset);
     if (deployCommand.trim()) orch.deployCommand = deployCommand.trim();
     else { delete orch.deployCommand; unset.push("orchestration.deployCommand"); }
@@ -609,9 +619,14 @@ function ConfigEditor({ project }: { project: Project }) {
     .map(([label, value, b]) => { const e = msRangeError(value, "s", b); return e ? `${label} ${e}` : null; })
     .filter((e): e is string => e !== null);
 
+  // An out-of-range merge-gate interval blocks Save the same way an out-of-range timeout does (card
+  // 00664e74 / mockup state S4). Only at the `every Nth` cadence — the field is inert at the other two, and
+  // a BLANK field there is legal, not an error: it means the `never` cadence.
+  const cadenceIntervalError = cadence.cadence === "interval" ? intervalError(cadence.intervalRaw) : null;
+
   // Everything that BLOCKS Save, in one list — it both disables the button and takes the error slot, so
   // a blocked Save can never be silent about which entry is blocking it.
-  const blockingErrors = [...timeoutRangeErrors, ...sessionEnvErrors];
+  const blockingErrors = [...timeoutRangeErrors, ...sessionEnvErrors, ...(cadenceIntervalError ? [cadenceIntervalError] : [])];
 
   // The switch-to-codex gate. Compared on EFFECTIVE values so blanking a codex override back onto a codex
   // platform default is correctly not a "switch", and a save that leaves codex alone never re-asks.
@@ -690,11 +705,8 @@ function ConfigEditor({ project }: { project: Project }) {
           </label>
         </div>
         <div style={{ marginTop: 12 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 13, color: color.text }}>
-            <input type="checkbox" data-testid="merge-gate-off" checked={mergeGateOff} onChange={(e) => setMergeGateOff(e.target.checked)} />
-            Merge gate off
-          </label>
-          <Hint>{mergeGateOff ? "Merge gate is OFF: merges skip the gate command and land WITHOUT running it — recorded as gate-disabled, never a pass. Only the gate is skipped (conflict + dirty-tree refusals still apply)." : "Merge gate is on: merges run the gate command above."} · human-set only</Hint>
+          <SectionLabel style={{ margin: "0 0 8px" }}>Merge gate</SectionLabel>
+          <MergeGateCadencePanel projectId={project.id} draft={cadence} onChange={setCadence} />
         </div>
         <div style={{ marginTop: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420 }}>

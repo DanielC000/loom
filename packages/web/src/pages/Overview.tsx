@@ -2,6 +2,7 @@ import { useState, useMemo, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole } from "@loom/shared";
+import { resolveConfig } from "@loom/shared";
 import { api, workerDiffQuery } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention, attentionOpenTarget, dismissAttention, type AttentionItem } from "../lib/attention";
@@ -21,6 +22,7 @@ import {
   Stat, FleetCard, FleetRow, AttentionRow, EventRow, fleetRollup, worstContext,
 } from "../components/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
+import { MergeGateStrip, MergeGateAttention, mergeGateAttentionCount, useMergeGateStatus } from "../components/mergeGate";
 import { HarnessMixProvider } from "../components/HarnessPicker";
 import { color, font, tone } from "../theme";
 import { RoleBadge } from "../lib/roleDisplay";
@@ -88,6 +90,15 @@ export default function Overview() {
   // Everything else keeps the compact AttentionRow treatment.
   const reviewWorkerIds = projAttention.filter((i) => i.kind === "MERGE REQUEST" && i.workerSessionId).map((i) => i.workerSessionId!);
   const otherAttention = projAttention.filter((i) => i.kind !== "MERGE REQUEST");
+
+  // Merge-gate cadence (card 00664e74). The strip pins under the header; a FAILED periodic gate ALSO
+  // raises an ordinary Attention row (direction B's borrowing) so the failure survives you not looking at
+  // this page. Read here rather than inside the Attention section so the heading's count includes it —
+  // react-query dedups the poll with the strip's own identical query key.
+  const mergeGate = useMergeGateStatus(projectId);
+  const gateAttention = mergeGateAttentionCount(mergeGate.data);
+  const orchOverride = project?.config?.orchestration;
+  const resolvedGateCommand = resolveConfig(project?.config).orchestration.gateCommand;
 
   // Fleet: collapsed → the compact per-project FleetCard summary; expanded (default) → the full
   // managers→workers FleetRow hierarchy. Persisted per project, mirroring Mission Control's expand set.
@@ -173,6 +184,13 @@ export default function Overview() {
         </div>
       </div>
 
+      {/* --- Merge gate cadence (card 00664e74, owner direction A) — the one-row instrument strip, pinned
+             directly under the header and above every other section. Renders NOTHING on a daemon whose
+             merge-gate routes 404 (an older daemon simply lacks the feature). It is additive above the
+             sections below: the Board embed keeps its size, its position and its full width. --- */}
+      <MergeGateStrip projectId={projectId} override={orchOverride} gateCommand={resolvedGateCommand}
+        multiRepo={(project?.repos?.length ?? 0) > 0} />
+
       {/* --- Agents spawn (every non-worker project agent — spawn from profile or override the role) --- */}
       <section>
         <SectionLabel>Agents</SectionLabel>
@@ -193,8 +211,11 @@ export default function Overview() {
              review cards Mission Control uses (ReviewQueue, label suppressed so they nest under this
              heading); every other alert keeps the compact AttentionRow. --- */}
       <section>
-        <SectionLabel>Attention ({projAttention.length})</SectionLabel>
-        {projAttention.length === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing in this project needs you right now.</span></Panel>}
+        <SectionLabel>Attention ({projAttention.length + gateAttention})</SectionLabel>
+        {projAttention.length + gateAttention === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing in this project needs you right now.</span></Panel>}
+        {/* A failed periodic merge gate escalates here as well as onto the strip above — first, because it
+            is the only item in this list that says the default branch itself is unverified. */}
+        <MergeGateAttention status={mergeGate.data} />
         {reviewWorkerIds.length > 0 && (
           <div style={{ marginBottom: otherAttention.length > 0 ? 12 : 0 }}>
             <ReviewQueue workerIds={reviewWorkerIds} showLabel={false} />

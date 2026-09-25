@@ -3,6 +3,9 @@ import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, Session
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
 import type { HarnessDrainStatus } from "./harnessFields";
+// Type-only — the merge-gate cadence wire contract (card 6f13746c), mirrored in the JSX-free lib module
+// that also owns this feature's state vocabulary and validation copy.
+import type { MergeGateStatus } from "./mergeGate";
 // Card 093981dd — the loopback credential's storage + the "writes are locked" signal (JSX-free, so it
 // stays unit-testable without a DOM renderer).
 import { captureTokenFromUrl, getLoopbackToken, isCredentialGuardFailure, noteCredentialLock } from "./loopbackCredential";
@@ -492,6 +495,18 @@ export const api = {
   // cannot: an omitted key now means "leave it alone", not "clear it". See Settings.tsx's buildOverride.
   updateProjectConfig: (id: string, config: ProjectConfigOverride, unset?: string[]) =>
     patch<Project>(`/api/projects/${id}/config`, unset?.length ? { config, unset } : { config }),
+  // --- Merge-gate CADENCE state (card 00664e74; daemon side 6f13746c). The live counter behind the
+  // Overview gate strip + the Settings cadence panel. `getOrNull` deliberately: a daemon older than
+  // 6f13746c has no such route, and a 404 there means "this daemon does not have the feature", which the
+  // UI degrades by hiding the strip — NOT an error to surface. Cadence and interval themselves are WRITTEN
+  // through updateProjectConfig above (the existing human-only config PATCH), never through these. ---
+  // `repoKey` selects one entry of the project's repo REGISTRY; omitted = the project's PRIMARY repo.
+  mergeGateStatus: (projectId: string, repoKey?: string | null) =>
+    getOrNull<MergeGateStatus>(`/api/projects/${projectId}/merge-gate/status${repoKey ? `?repoKey=${encodeURIComponent(repoKey)}` : ""}`),
+  // "Gate the next merge" — sets gateOwed, so the next landing runs the real gate whatever the cadence.
+  // Human-only loopback REST (no agent MCP path), same trust posture as the config writers above.
+  gateNextMerge: (projectId: string, repoKey?: string | null) =>
+    postErr<{ ok: boolean }>(`/api/projects/${projectId}/merge-gate/gate-next${repoKey ? `?repoKey=${encodeURIComponent(repoKey)}` : ""}`),
   // --- Daemon-global platform tuning (HUMAN-only; NOT project-scoped — one shared daemon). GET returns
   // the stored override + the RESOLVED effective platform group (for the "effective:" hints); update
   // PATCHes the replacement override under `{ config }`. The validator is strict zod with §bounds — an
