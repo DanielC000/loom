@@ -2205,6 +2205,7 @@ export class SessionService {
    *  settle-lineage) no longer has to block on a real ~12-16s wall-clock sleep to cross it — it sets this
    *  small and sleeps just past IT instead, at the same logical outcome. */
   private readonly syncAttachBudgetMs: number;
+  private readonly finalizeWorkerDeathPolls: number;
   /** Test-only override for {@link SPAWN_OP_RETAIN_MS} (mirrors `gateOpRetainMs` above) — defaults to the
    *  real production constant. A hermetic test proving a re-call AFTER the window still falls through to
    *  the real one-live-worker guard sets this small and sleeps just past it, rather than waiting out the
@@ -2480,6 +2481,8 @@ export class SessionService {
       gateOpRetainMs?: number;
       gateCancelVerifyMs?: number;
       syncAttachBudgetMs?: number;
+      /** TEST SEAM (card 7cd2cb11): polls (x100ms each) of the merge finalize "is the worker's pty dead yet" wait. Default 50 (~5s), unchanged in production. */
+      finalizeWorkerDeathPolls?: number;
       spawnOpRetainMs?: number;
       /** TEST SEAM (card 42daa283): git factory for the hold's release check (`isBranchHeld`'s landed-trailer read) only. */
       heldProbeGitFactory?: BoundedGitDeps["gitFactory"];
@@ -2495,6 +2498,7 @@ export class SessionService {
     this.gateOpRetainMs = opts?.gateOpRetainMs ?? GATE_OP_RETAIN_MS;
     this.gateCancelVerifyMs = opts?.gateCancelVerifyMs ?? SessionService.DEFAULT_GATE_CANCEL_VERIFY_MS;
     this.syncAttachBudgetMs = opts?.syncAttachBudgetMs ?? SYNC_ATTACH_BUDGET_MS;
+    this.finalizeWorkerDeathPolls = opts?.finalizeWorkerDeathPolls ?? 50;
     this.spawnOpRetainMs = opts?.spawnOpRetainMs ?? SPAWN_OP_RETAIN_MS;
     this.heldProbeGitFactory = opts?.heldProbeGitFactory;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
@@ -15702,7 +15706,7 @@ export class SessionService {
     // removing the worktree (recycleWorker does the same before reusing one). A no-pty worker row
     // (e.g. merge-gate's seed) is already !isAlive, so this is a no-op there.
     this.pty.stop(workerSessionId, "hard");
-    for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
+    for (let i = 0; i < this.finalizeWorkerDeathPolls && this.pty.isAlive(workerSessionId); i++) {
       await new Promise((r) => setTimeout(r, 100));
     }
     // Retire the worktree, delete the now-merged branch (so a later worker on this task — or any
@@ -15945,7 +15949,7 @@ export class SessionService {
     // drains stale, describing a merge this call is about to settle synchronously.
     try { this.pty.purgeQueuedWorkerIdleNudges(args.managerSessionId, args.workerSessionId); } catch { /* manager not live */ }
     this.pty.stop(args.workerSessionId, "hard");
-    for (let i = 0; i < 50 && this.pty.isAlive(args.workerSessionId); i++) {
+    for (let i = 0; i < this.finalizeWorkerDeathPolls && this.pty.isAlive(args.workerSessionId); i++) {
       await new Promise((r) => setTimeout(r, 100));
     }
     const finalizeResult = await this.finalizeMerge(args);

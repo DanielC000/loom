@@ -872,6 +872,7 @@ const TEST_TIMEOUT_MS = 120_000;
 // splits did not stop the kills); the no-blanket-raise principle above stands. The nine 300s entries below
 // carrying "card a9119abf" are sized off in-suite max pass + tail, NOT off a solo-times-N factor.
 const TEST_TIMEOUT_OVERRIDES = {
+  "merge-gate-interval": 900_000, // card 7cd2cb11: ~300-390s standalone on a busy host (n=4 bare runs, 2026-09-25; killed at the 120s blanket ceiling on clean main too, at (E)) — 15 sections of real createWorktree/merge/batch-gate work; ~2.3x the slowest bare run
   "merge-repo-mutex": 300_000, // 15 trials x 2 concurrent real merges + a full content-integrity sweep
   "merge-stranded-backstop": 300_000, // 2x createWorktree + reviewWorkerMerge/confirmWorkerMerge, all real git
   "gate-timeout-circuit-breaker": 300_000, // measured ~50-52s standalone (3 runs); ~6x headroom for 8 blocks x real union-merges/createWorktree/commits under concurrent gate contention

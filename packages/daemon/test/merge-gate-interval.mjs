@@ -63,9 +63,12 @@ const GIT_ID = "-c user.email=mgint@loom -c user.name=mgint";
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const mkdirp = (p) => fs.mkdirSync(p, { recursive: true });
-// `slowAlive` lets a test make a worker look alive for a while, slowing a batch's post-guard finalize (finishAlreadyMerged waits for the pty to die).
-const slowAlive = new Map();
-const ptyStub = { stop() {}, isAlive(id) { return (slowAlive.get(id) ?? 0) > Date.now(); }, enqueueStdin() {} };
+// `holdAlive` lets a test make a worker look alive until it releases it, stalling a batch's post-guard finalize (finishAlreadyMerged waits for the pty to die).
+// `holdAlive` is the deterministic form: a worker stays alive until the TEST releases it (no wall-clock), and `alivePolls` counts how many
+// times finalize polled it (its wait loop is bounded at 50 polls, so a count < 50 proves the hold was never expired by that bound).
+const holdAlive = new Set();
+const alivePolls = new Map();
+const ptyStub = { stop() {}, isAlive(id) { if (!holdAlive.has(id)) return false; alivePolls.set(id, (alivePolls.get(id) ?? 0) + 1); return true; }, enqueueStdin() {} };
 const head = (repo) => execSync("git rev-parse HEAD", { cwd: repo }).toString().trim();
 const tip = (repo, branch) => execSync(`git rev-parse ${branch}`, { cwd: repo }).toString().trim();
 
@@ -147,6 +150,7 @@ function mkService(db) {
   const gate = { calls: 0, pass: true, hold: null, failNext: false };
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
     syncAttachBudgetMs: 60_000,
+    finalizeWorkerDeathPolls: 600, // (Q)'s hold must outlive the solo's landing on a loaded host: ~60s instead of the default ~5s
     runGate: async () => {
       gate.calls++;
       if (gate.hold) await gate.hold;
@@ -379,17 +383,20 @@ try {
     await waitUntil(() => ctx.gate.calls === 1, { timeoutMs: 60000, intervalMs: 20, label: "merge-gate-interval (Q): the batch gate is running (holding the repo guard)" });
     const soloP = confirm(ctx.sessions, P.mgrId, sw.workerId); // 4+pending0+1 > 5 is false ⇒ SKIP-decided; then it waits on the repo guard
     await waitUntil(() => ctx.spy.decide >= 2, { timeoutMs: 60000, intervalMs: 20, label: "merge-gate-interval (Q): the solo has taken its skip decision" });
-    // slow the BATCH's post-guard finalize (its workers look alive ~3s) while the solo's finalize is instant: in the buggy order the solo
-    // records 5 first and the batch's later pass then resets it to 0.
-    slowAlive.set(b1.workerId, Date.now() + 3000); slowAlive.set(b2.workerId, Date.now() + 3000);
+    // hold the BATCH's post-guard finalize (its workers look alive) until the SOLO has fully landed — an event, not a time window: in the buggy
+    // order (record in finalize) the solo records 5 first and the batch's later pass then resets it to 0.
+    holdAlive.add(b1.workerId); holdAlive.add(b2.workerId);
     releaseGate();
-    const rb = await batchP;
     const vs = await soloP;
+    const pollsWhenSoloSettled = Math.max(alivePolls.get(b1.workerId) ?? 0, alivePolls.get(b2.workerId) ?? 0);
+    holdAlive.clear();
+    const rb = await batchP;
     const vb = rb.settled && rb.ok ? rb.value : undefined;
     check("(Q) the gated batch landed both and the overlapping solo landed UNGATED (gate-interval) after it", vb?.ok === true && vb.landed.length === 2 && vs.merged === true && vs.skipReason === "gate-interval" && ctx.gate.calls === 1);
+    check("(Q) the hold was still in force when the solo settled (finalize's death-poll wait, 600 polls here, not exhausted), so the batch's finalize could not have run first", pollsWhenSoloSettled < 600);
+    check("(Q) records landed in main's order: the batch's pass, THEN the solo's ungated landing", JSON.stringify(ctx.spy.recorded) === JSON.stringify(["pass", "ungated"]));
     check("(Q) the ungated solo squashed AFTER the batch on main, so the counter ends at 1 — the pass's reset did NOT erase it (0 would be the bug)", db.getMergeGateState(P.projId).ungatedSinceLastPass === 1);
   }
-
   // ── (O2) a skip decision does not outlive a newly OWED gate ─────────────────────────────────────────
   {
     const P = mk("o2"); makeRepo(P.repo);
