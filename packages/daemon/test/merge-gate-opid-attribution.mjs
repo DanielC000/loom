@@ -207,7 +207,9 @@ try {
       capturedEnv = envOverride;
       return { passed: true, steps: [{ step: gate, durationMs: 10, status: 0 }], outputTail: "ok" };
     };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    // GENEROUS syncAttachBudgetMs (card c188412a): (D precondition) asserts an inline settle of a REAL git merge —
+    // the outcome, not wall-clock, so pin the per-instance DI budget high rather than lean on the 12s default.
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: 600_000 });
     const wt = await createWorktree(E.repo, E.projId, E.taskId);
     E.worktreePath = wt.worktreePath; E.branch = wt.branch; worktrees.push(wt.worktreePath);
     seed(db, E, "pnpm gate");

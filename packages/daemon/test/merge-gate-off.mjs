@@ -25,6 +25,10 @@ import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
 const noReap = async () => ({ killedPids: [] });
+// GENEROUS syncAttachBudgetMs (card c188412a): every confirm here is a REAL git merge, and the `settled === true` checks
+// assert the OUTCOME, not wall-clock — under host load a confirm outlives the default 12s and degrades to pending.
+// Same DI-seam idiom as merge-confirm-dead-owner-recovery.mjs / gate-idle-liveness.mjs (never the production constant).
+const GENEROUS_SYNC_BUDGET_MS = 600_000;
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgoff-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -86,7 +90,7 @@ try {
     const P = mk("a"); makeRepo(P.repo);
     const db = new Db(); dbs.push(db);
     let calls = 0;
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return { passed: true }; }, reapWorktreeProcesses: noReap });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return { passed: true }; }, reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     await seedProject(db, P, { mergeGate: "off" });
     const w = await addWorker(db, P, "a", { "src/feature.ts": "export const feature = 1;\n" });
 
@@ -112,7 +116,7 @@ try {
     const P = mk("b"); makeRepo(P.repo);
     const db = new Db(); dbs.push(db);
     let calls = 0;
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return { passed: true }; }, reapWorktreeProcesses: noReap });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return { passed: true }; }, reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     await seedProject(db, P, {});
     const w = await addWorker(db, P, "b", { "src/feature.ts": "export const feature = 1;\n" });
     const confirm = await sessions.confirmWorkerMerge(P.mgrId, w.workerId);
@@ -127,7 +131,7 @@ try {
   {
     const P = mk("c"); makeRepo(P.repo);
     const db = new Db(); dbs.push(db);
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => ({ passed: true }), reapWorktreeProcesses: noReap });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => ({ passed: true }), reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     await seedProject(db, P, { mergeGate: "off", noGateByDesign: true });
     const w = await addWorker(db, P, "c", { "src/feature.ts": "export const feature = 1;\n" });
     const confirm = await sessions.confirmWorkerMerge(P.mgrId, w.workerId);
@@ -140,7 +144,7 @@ try {
     const P = mk("d"); makeRepo(P.repo);
     const db = new Db(); dbs.push(db);
     let calls = 0;
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return { passed: true }; }, reapWorktreeProcesses: noReap });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return { passed: true }; }, reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     await seedProject(db, P, { mergeGate: "off" });
     const w = await addWorker(db, P, "d", { "src/feature.ts": "export const feature = 1;\n" });
     fs.writeFileSync(path.join(w.worktreePath, "uncommitted-scratch.txt"), "never committed\n");
@@ -156,7 +160,7 @@ try {
     const P = mk("f"); makeRepo(P.repo);
     const db = new Db(); dbs.push(db);
     let calls = 0;
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return { passed: true }; }, reapWorktreeProcesses: noReap });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return { passed: true }; }, reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     await seedProject(db, P, { mergeGate: "off" });
     const w1 = await addWorker(db, P, "f1", { "src/one.ts": "export const one = 1;\n" });
     const w2 = await addWorker(db, P, "f2", { "src/two.ts": "export const two = 2;\n" });
@@ -178,7 +182,7 @@ try {
     const db = new Db(); dbs.push(db);
     let calls = 0;
     const red = { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "boom" };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return red; }, reapWorktreeProcesses: noReap });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return red; }, reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     await seedProject(db, P, {});
     const w = await addWorker(db, P, "g", { "src/feature.ts": "export const feature = 1;\n" });
     const r1 = await sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId);
@@ -202,7 +206,7 @@ try {
     const P = mk("h"); makeRepo(P.repo);
     const db = new Db(); dbs.push(db);
     let calls = 0;
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return { passed: true }; }, reapWorktreeProcesses: noReap });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { calls++; return { passed: true }; }, reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     await seedProject(db, P, { mergeGate: "off" });
     const w = await addWorker(db, P, "h", { "src/clash.ts": "export const v = 'branch';\n" });
     fs.writeFileSync(path.join(P.repo, "src", "clash.ts"), "export const v = 'main';\n");
@@ -223,7 +227,7 @@ try {
     const db = new Db(); dbs.push(db);
     let releaseSibling; const siblingHeld = new Promise((r) => { releaseSibling = r; });
     let siblingCalls = 0;
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { siblingCalls++; await siblingHeld; return { passed: true }; }, reapWorktreeProcesses: noReap });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { siblingCalls++; await siblingHeld; return { passed: true }; }, reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     await seedProject(db, P, { mergeGate: "off" });
     // A SECOND project on the SAME repo path, gate ON: its real gate holds the per-repo merge guard.
     const S = { projId: `mgoff-i2-proj-${sfx}`, agentId: `mgoff-i2-agent-${sfx}`, mgrId: `mgoff-i2-mgr-${sfx}`, repo: P.repo };
@@ -250,7 +254,7 @@ try {
   {
     const P = mk("j"); makeRepo(P.repo);
     const db = new Db(); dbs.push(db);
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => ({ passed: true }), reapWorktreeProcesses: noReap });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => ({ passed: true }), reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     await seedProject(db, P, { mergeGate: "off" });
     db.setProjectConfig(P.projId, { orchestration: { mergeGate: "off" } }); // no gateCommand at all
     const w = await addWorker(db, P, "j", { "src/feature.ts": "export const feature = 1;\n" });
@@ -263,7 +267,7 @@ try {
   {
     const P = mk("k"); makeRepo(P.repo);
     const db = new Db(); dbs.push(db);
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => ({ passed: true }), reapWorktreeProcesses: noReap });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => ({ passed: true }), reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     await seedProject(db, P, { mergeGate: "off" });
     const w = await addWorker(db, P, "k", { "src/feature.ts": "export const feature = 1;\n" });
     const r = await sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId);
