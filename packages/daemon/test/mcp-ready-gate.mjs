@@ -144,13 +144,18 @@ try {
   const D = "sess-mcp-D";
   host.spawn(spawnOpts(D));
   const fd = fakes[fakes.length - 1];
-  const t1 = Date.now();
-  const pD = host.waitForMcpSeen(D);
+  // The wait is given a 60s timeout, far past anything a loaded host could stall for, so resolving at all inside
+  // the 10s hang-guard below can ONLY be the death path (the timer would need 60s). An absolute elapsed bound
+  // (was `< 200` against the 300ms default timeout) measured host event-loop stalls, not the death wiring —
+  // the death resolve is synchronous inside fd.exit(), so it cannot be late by construction.
+  const HANG_GUARD = Symbol("hang-guard");
+  const pD = host.waitForMcpSeen(D, 60_000);
   fd.exit(1); // simulate the pty dying while something is awaiting waitForMcpSeen
-  const seenD = await pD;
-  const elapsedD = Date.now() - t1;
+  let guardTimer;
+  const seenD = await Promise.race([pD, new Promise((r) => { guardTimer = setTimeout(() => r(HANG_GUARD), 10_000); })]);
+  clearTimeout(guardTimer);
   check("4: a session dying mid-wait resolves FALSE", seenD === false);
-  check("4: resolves promptly on death, well under the full timeout (not waiting it out)", elapsedD < 200);
+  check("4: resolves on death, not by waiting out the (60s) timeout", seenD !== HANG_GUARD);
 
   // ============ 5) markMcpSeen on an unknown/dead session is a safe no-op (never throws) ============
   let threw5 = null;
