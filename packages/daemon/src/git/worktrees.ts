@@ -2382,6 +2382,32 @@ export function gateStampsDiffer(a: WorktreeGateStamp, b: WorktreeGateStamp): bo
   return false;
 }
 
+/**
+ * The branch's ref-reflog shas, NEWEST FIRST, or `null` when unreadable. The gate wrapper snapshots it before each gate spawn and at
+ * settle: `computeWorktreeGateStamp`'s head compare is blind to a tip that moved T1→T2 and BACK to T1 (the settle head equals the
+ * pre-spawn head), but that round trip appends reflog entries.
+ *
+ * @decision d099087f — a head compare cannot see an ABA round trip; the reflog delta can.
+ */
+export async function branchReflogShas(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<string[] | null> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const out = await withTimeout(git.raw(["reflog", "show", "--format=%H", `refs/heads/${branch}`, "--"]), timeoutMs, "branch reflog");
+    return out.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Did the branch tip leave `preHead` at any point between two {@link branchReflogShas} snapshots — even if it came back? Fail-closed:
+ * an unreadable snapshot, or a reflog that shrank, reads as "moved". Pure.
+ */
+export function branchLeftHeadBetween(preHead: string, before: string[] | null, after: string[] | null): boolean {
+  if (before === null || after === null || after.length < before.length) return true;
+  return after.slice(0, after.length - before.length).some((sha) => sha !== preHead);
+}
+
 /** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
 /** One row of a diffstat — a changed file with its insertion/deletion counts (0/0 for binary). */
 export interface DiffstatFile {

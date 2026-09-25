@@ -245,7 +245,7 @@ interface UntilSupersededVerdict {
  * TTL'd `retained` window closes — `opts.retainVerdictUntilSuperseded` opts a `key` into a SEPARATE,
  * never-expiring cache instead; an unrequested second run can launder a rejected branch into a merge.
  *
- * ⚠️ THE FOUR HARDCODED EXCEPTIONS (`NEVER_CACHED_OUTCOMES`, see its own top-level doc): `attach()` checks
+ * ⚠️ THE FIVE HARDCODED EXCEPTIONS (`NEVER_CACHED_OUTCOMES`, see its own top-level doc): `attach()` checks
  * the classified outcome string directly, both at this write and at the TTL'd `retained` read a few lines
  * below, rather than adding a new per-call opt for either.
  * @decision 171297dc — `"cancelled"` is not a verdict (no gate ever ran): never cache or replay it — a
@@ -406,8 +406,8 @@ export class PendingOpRegistry {
    * `retainMs`) just stamps `outcome` on the terminal `AttachResult` value this call itself returns/awaits
    * — harmless but pointless without retention, since nothing else would ever observe it once evicted.
    * `outcome` is ordinarily just caller-chosen display vocabulary this registry never reasons about — see
-   * `PendingOpOutcome`'s own doc — with FOUR hardcoded exceptions (`NEVER_CACHED_OUTCOMES`, this file's own
-   * top-level doc for the shared reason): a classified outcome of exactly `"cancelled"` (card 171297dc), `"not-your-worker"` (card 6325bc74), `"worktree-dirty"` (card 975c774b) or
+   * `PendingOpOutcome`'s own doc — with FIVE hardcoded exceptions (`NEVER_CACHED_OUTCOMES`, this file's own
+   * top-level doc for the shared reason): a classified outcome of exactly `"cancelled"` (card 171297dc), `"not-your-worker"` (card 6325bc74), `"worktree-dirty"` (card 975c774b), `"gate-tip-moved"` (cards 975c774b, c59165b8, d099087f) or
    * `"stale-base"` (card 99a1cf6f) also gates BOTH `retainVerdictUntilSuperseded`'s write and the TTL'd
    * `retained` map's dedupe-serve (see the class doc's "UNTIL-SUPERSEDED VERDICT CACHE" section) — neither
    * is a verdict worth replaying to a later re-call, for its own distinct reason (see `NEVER_CACHED_OUTCOMES`).

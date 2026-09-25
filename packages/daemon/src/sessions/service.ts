@@ -22,7 +22,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, branchReflogShas, branchLeftHeadBetween, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -612,7 +612,7 @@ type ConfirmMergeResult = {
   gateWorktreeDirty?: { phase: "before-gate" | "during-gate"; detail: string };
   /** @decision 975c774b — a gate PASS was refused because the branch tip is no longer the one the gate spawned on
    *  (`live` null = unreadable, fail closed). Never cached; a re-call re-gates the new tip. */
-  gateTipMoved?: { phase: "pre-squash" | "in-lock"; gated: string | null; live: string | null };
+  gateTipMoved?: { phase: "pre-squash" | "in-lock"; gated: string | null; live: string | null; movedAndBack?: true };
   /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs`, for whichever gate run(s)
    *  actually spawned for THIS merge — see {@link GateProximity}'s own doc. Same "nothing to report"
    *  discipline as `gateExtended`: `undefined` when no gate actually spawned (gateless project, or a
@@ -13548,14 +13548,16 @@ export class SessionService {
     // @decision 975c774b — a PASS is a fact about the tip the gate spawned on; a branch that moved since would squash a commit
     // the gate never ran. Refused (never cached, a re-call re-gates the new tip) rather than squashing the gated tip, which
     // would land without the later commit and then lose it when finalizeMerge deletes the branch.
-    const refuseGateTipMoved = async (phase: "pre-squash" | "in-lock", gated: string | undefined, live: string | null | undefined): Promise<ConfirmMergeResult> => {
-      const why = gated && live
+    const refuseGateTipMoved = async (phase: "pre-squash" | "in-lock", gated: string | undefined, live: string | null | undefined, movedAndBack = false): Promise<ConfirmMergeResult> => {
+      const why = movedAndBack
+        ? `the branch tip moved off the gated commit ${gated?.slice(0, 8) ?? "?"} during the gate and came back, so this PASS may have run on mixed content and does not vouch for the commit that would be squashed`
+        : gated && live
         ? `the branch tip moved after the gate spawned (gated ${gated.slice(0, 8)}, now ${live.slice(0, 8)}), so this PASS does not cover the commit that would be squashed`
         : `the gated branch tip could not be verified (gated ${gated?.slice(0, 8) ?? "unreadable"}, now ${live?.slice(0, 8) ?? "unreadable"}), so this PASS is refused rather than squashed unchecked`;
       const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. Re-run worker_merge_confirm to gate the new tip — this refusal is never cached.`;
       const { suppressed, sha } = await rejectNotify("gate_tip_moved", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-      evt("merge_rejected", { reason: "gate_tip_moved", sha, phase, gatedTip: gated ?? null, liveTip: live ?? null, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: true, gateTipMoved: { phase, gated: gated ?? null, live: live ?? null } };
+      evt("merge_rejected", { reason: "gate_tip_moved", sha, phase, ...(movedAndBack ? { movedAndBack: true } : {}), gatedTip: gated ?? null, liveTip: live ?? null, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: true, gateTipMoved: { phase, gated: gated ?? null, live: live ?? null, ...(movedAndBack ? { movedAndBack: true } : {}) } };
     };
     // unionMergeMovedHead: whether the union-merge below actually MOVED HEAD, i.e.
     // `mergeMainIntoWorktree`'s own `merged:true`. Defaults `false`: the preLanded branch and the
@@ -13677,6 +13679,10 @@ export class SessionService {
     // run; `gatePreStamp` is the stamp `captureGatedTip` took right before that spawn.
     let gateWorktreeChanged: string | undefined;
     let gatePreStamp: WorktreeGateStamp | undefined;
+    // @decision d099087f — branch-reflog snapshot taken with `gatePreStamp`; `gateHeadLeftDuringRun` is STICKY (never reset by a
+    // later link) once any link's gate saw the tip leave its pre-spawn head, even if it came back (T1→T2→T1).
+    let gatePreReflog: string[] | null = null;
+    let gateHeadLeftDuringRun = false;
     // @decision 975c774b — true once ANY link's gate has actually returned in this op: a later link's dirty pre-check is then a
     // `during-gate` outcome that keeps the gate's own verdict, never a `before-gate` refusal that erases it.
     let gateHasRun = false;
@@ -14261,6 +14267,8 @@ export class SessionService {
         const r = await runGateSeqRaw(...args);
         gateHasRun = true;
         const post = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+        // @decision d099087f — head-equality below is blind to T1→T2→T1; the reflog delta is not.
+        if (gatePreStamp?.head && branchLeftHeadBetween(gatePreStamp.head, gatePreReflog, await branchReflogShas(repoPath, branch, { timeoutMs: this.gitOpMs }))) gateHeadLeftDuringRun = true;
         // The pre stamp is clean by construction (a dirty one threw in `captureGatedTip`), so "changed" is: dirt at settle, or
         // an unreadable stamp (fail closed). A CLEAN head move (a commit landed mid-gate) is deliberately NOT flagged here —
         // 8b1fb28f's `confirmGatedIdentity` already owns that shape (re-call re-gates, announced as identity-mismatch).
@@ -14277,6 +14285,7 @@ export class SessionService {
         try { gatedTip = (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined; } catch { gatedTip = undefined; }
         if (pin) pinnedGateTip = gatedTip;
         gatePreStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+        gatePreReflog = await branchReflogShas(repoPath, branch, { timeoutMs: this.gitOpMs });
         if (gatePreStamp.dirty) throw new GateWorktreeDirtyError("the worktree carries uncommitted changes before the gate spawns");
         if (gatePreStamp.head === null) throw new GateWorktreeDirtyError("the worktree stamp is unreadable before the gate spawns");
       };
@@ -15067,6 +15076,10 @@ export class SessionService {
         const liveTip = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }).catch(() => null) ?? null;
         if (!pinnedGateTip || liveTip !== pinnedGateTip) {
           return { ...(await refuseGateTipMoved("pre-squash", pinnedGateTip, liveTip)), ...gatePassRefusalExtras() };
+        }
+        // @decision d099087f — the tip equals the pinned one, but it LEFT it and came back mid-gate (T1→T2→T1): the PASS ran on mixed content.
+        if (gateHeadLeftDuringRun) {
+          return { ...(await refuseGateTipMoved("pre-squash", pinnedGateTip, liveTip, true)), ...gatePassRefusalExtras() };
         }
       }
     }
