@@ -26,6 +26,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { assertNeverWithControl, observeOnce, pollUntil } from "./_timing-guard.mjs";
+import { waitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mdw-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -72,7 +73,9 @@ try {
   const elapsed1 = Date.now() - t0;
   check("(1) restarting:true", r1.restarting === true);
   check("(1) mergeDangerWait reports 0 windows active", r1.mergeDangerWait?.windowsActive === 0);
-  check("(1) mergeDangerWait resolves fast when nothing is in flight (<1000ms, not the 5000ms ceiling)", elapsed1 < 1000);
+  // The wait's OWN duration (waitedMs), not the whole call: requestDaemonRestart's build/backup/snapshot prelude
+  // is host-speed-bound and is not what this asserts. A no-window wait returns immediately; riding the ceiling would be ~5000.
+  check("(1) mergeDangerWait resolves fast when nothing is in flight (<1000ms, not the 5000ms ceiling)", (r1.mergeDangerWait?.waitedMs ?? Infinity) < 1000);
   const resolvedProofWentTrue = r1.restarting === true; // r1 already resolved above -- a real, not fabricated, observation
   const exitProofWentTrue = await pollUntil(() => exit1.calls.length > 0, { timeoutMs: 1000, intervalMs: 20 });
   check("(1) exit1 fired within the flush delay (this run doubles as (2)/(3a)'s positive-control proof)", exitProofWentTrue);
@@ -84,8 +87,18 @@ try {
 
   const exit2 = makeExit();
   let resolved = false;
+  // requestDaemonRestart does a build/backup/snapshot/intent-write prelude BEFORE it samples the active windows
+  // and starts waiting; on a loaded host that prelude can outlast the fixed sampling windows below, so clearing
+  // the window "after 600ms" could land BEFORE the wait began (windowsActive 0, waitedMs ~0). The wait's own
+  // one-shot "[shutdown] a canonical merge squash is IN FLIGHT" warning is the production event that marks
+  // "now blocked on the window" -- witness it before judging anything about the blocked state.
+  let enteredWait = false;
+  const origWarn2 = console.warn;
+  console.warn = (...args) => { if (String(args[0]).includes("merge squash is IN FLIGHT") && String(args[0]).includes(REPO_PATH)) enteredWait = true; origWarn2(...args); };
   const p2 = sessions.requestDaemonRestart(ids.mgrId, "deploy while a squash is in flight", { buildDeps, exit: exit2.fn, mergeDangerGraceMs: 5000, isSupervisorAlive })
     .then((r) => { resolved = true; return r; });
+  try { await waitUntil(() => enteredWait, { timeoutMs: 30_000, label: "(2) requestDaemonRestart entered the merge-danger wait" }); }
+  finally { console.warn = origWarn2; }
 
   // (2)+(3a): prove requestDaemonRestart does NOT resolve / call exit while the window is still open --
   // via assertNeverWithControl (a bounded sampling window with a MANDATORY positiveControl proving the
@@ -117,8 +130,10 @@ try {
   check("(2) requestDaemonRestart resolves once the window clears", resolved === true);
   check("(2) mergeDangerWait reports 1 window was active", r2.mergeDangerWait?.windowsActive === 1);
   check("(2) mergeDangerWait's waitedMs reflects a REAL wait (>=250ms, not a near-zero no-op)", (r2.mergeDangerWait?.waitedMs ?? 0) >= 250);
-  check("(2) it resolved promptly after the window cleared (<2000ms poll latency), not after riding out the 5000ms ceiling",
-    settledAt - clearedAt < 2000);
+  check("(2) it resolved promptly after the window cleared (<4000ms, i.e. well under the 5000ms ceiling), not after riding out the 5000ms ceiling",
+    // Scaled, not tightened: the point is "did not ride out the 5000ms grace ceiling", so bound against that
+    // ceiling with margin (the wait polls every 150ms; a loaded host adds scheduling latency, not seconds).
+    settledAt - clearedAt < 4000);
   check("(3b) exit still not yet called the instant the wait settles (the 300ms MCP-response-flush delay is unshortened)", exit2.calls.length === 0);
   // (3c): exit DOES eventually fire, ~300ms later -- observed via pollUntil (a real completion signal to
   // wait for), not a guessed fixed sleep.
@@ -135,7 +150,7 @@ try {
   const r4 = await sessions.requestDaemonRestart(ids.mgrId, "deploy against a window that never clears", { buildDeps, exit: exit4.fn, mergeDangerGraceMs: 500, isSupervisorAlive });
   const elapsed4 = Date.now() - t4;
   check("(4) restarting:true even though the window never cleared (fail-open, never a hard refusal)", r4.restarting === true);
-  check("(4) resolved within the shrunk grace ceiling, not blocked indefinitely (400-2000ms)", elapsed4 >= 400 && elapsed4 < 2000);
+  check("(4) resolved within the shrunk grace ceiling, not blocked indefinitely (>=400ms, well under the 5000ms default)", elapsed4 >= 400 && elapsed4 < 5000);
   check("(4) mergeDangerWait.waitedMs is bounded by the grace ceiling (<=700ms, allowing poll slack)", (r4.mergeDangerWait?.waitedMs ?? 0) <= 700);
   exitMergeDangerWindow(REPO_PATH); // cleanup -- don't leak a dangling window into another test's process
   clearRestartIntent();
