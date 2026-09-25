@@ -155,7 +155,7 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
   });
   const r1 = await confirm(sessions, mgrId, workerId);
   check("(L) a HEAD-only move that never returns is refused as gateTipMoved", r1.settled === true && r1.ok && r1.value.merged === false && !!r1.value.gateTipMoved && !fs.existsSync(path.join(repo, "feature.txt")));
-  check("(L) it is NOT labelled movedAndBack and names the worktree HEAD it was left on", r1.ok && r1.value.gateTipMoved?.movedAndBack === undefined && r1.value.gateTipMoved?.gated !== r1.value.gateTipMoved?.live && !!t2Sha && r1.value.gateTipMoved?.live === t2Sha);
+  check("(L) it is NOT labelled movedAndBack and names the worktree HEAD it was left on", r1.ok && r1.value.gateTipMoved?.movedAndBack === undefined && r1.value.gateTipMoved?.headOffBranch === true && !!t2Sha && r1.value.gateTipMoved?.worktreeHead === t2Sha && r1.value.gateTipMoved?.live === r1.value.gateTipMoved?.gated && r1.value.gateTipMoved?.live !== t2Sha);
 }
 {
   // (K) REUSE PATH: a `run_gate` self-check whose own gate saw a tip round trip must NOT be reusable. Head stamps at start/admit/settle all

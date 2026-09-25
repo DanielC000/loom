@@ -22,7 +22,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, type GateHeadOnBranch, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -630,11 +630,17 @@ type ConfirmMergeResult = {
    *  commit. A PASS is refused (`gate_worktree_dirty`); a FAIL keeps its rejection, unstamped. Never cached. */
   gateWorktreeDirty?: { phase: "before-gate" | "during-gate"; detail: string };
   /** @decision 975c774b — a gate PASS was refused because the branch tip is no longer the one the gate spawned on
-   *  (`live` null = unreadable, fail closed). Never cached; a re-call re-gates the new tip. */
-  gateTipMoved?: { phase: "pre-squash" | "in-lock"; gated: string | null; live: string | null; movedAndBack?: true };
+   *  (`live` is ALWAYS the branch's live tip, null only when that read itself failed, fail closed; a worktree HEAD that is off the branch travels in `worktreeHead` + `headOffBranch`; `unverifiedWhy` names WHY a could-not-verify refusal could not verify). Never cached; a re-call re-gates the new tip. */
+  gateTipMoved?: { phase: "pre-squash" | "in-lock"; gated: string | null; live: string | null; movedAndBack?: true; headOffBranch?: true; worktreeHead?: string; unverifiedWhy?: "reflog" | "branch-read" };
   /** @decision d099087f — a gate FAIL earned on a run whose tip/HEAD left the gated commit and came back mid-run: kept as an
    *  ordinary rejection, but unstamped and classified `"gate-tip-moved"` so it is never cached (mixed T1/T2 evidence). */
   gateRoundTripFail?: true;
+  /** @decision 01777ceb — a gate FAIL whose FINAL link's own run left the gated commit and did not come back (a plain branch move, or a HEAD-only
+   *  move), or whose reflog snapshot could not be read: cached under an identity no future tip can equal (`identityFromValue`), so a re-call re-gates
+   *  and announces identity-mismatch instead of replaying the red at the fallback pre-forward sha. */
+  gateIdentityVoid?: true;
+  /** @decision 01777ceb — a reflog snapshot needed to tell whether the tip moved could not be read (git timeout/error): "could not verify", never "moved". */
+  gateTipUnverified?: true;
   /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs`, for whichever gate run(s)
    *  actually spawned for THIS merge — see {@link GateProximity}'s own doc. Same "nothing to report"
    *  discipline as `gateExtended`: `undefined` when no gate actually spawned (gateless project, or a
@@ -2216,6 +2222,7 @@ export class SessionService {
    * needing a real cross-platform OOM/SIGKILL (signal delivery on `close` is not reliably fakeable via a
    * real spawn on every OS this daemon runs on).
    */
+  private readonly snapshotReflogs: typeof snapshotGateReflogs;
   private readonly runGate:
     | ((gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal, hooks?: GateLivenessHooks, spillFile?: string) => Promise<GateSequentialResult>)
     | undefined;
@@ -2453,6 +2460,8 @@ export class SessionService {
       reapWorktreeProcesses?: (worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>;
       findNestedGitRepos?: (worktreePath: string) => Promise<{ repos: string[]; truncated: boolean }>;
       runGate?: (gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv) => Promise<GateSequentialResult>;
+      /** Test seam for the merge gate's reflog snapshots (card 01777ceb): lets a hermetic test return an unreadable (null) snapshot. */
+      snapshotGateReflogs?: typeof snapshotGateReflogs;
       wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
       mergeReconcileEscalateAttempts?: number; mergeReconcileEscalateMs?: number;
       codescape?: CodescapeSupervisor;
@@ -2470,6 +2479,7 @@ export class SessionService {
     this.reapWorktreeProcesses = opts?.reapWorktreeProcesses;
     this.findNestedGitReposOverride = opts?.findNestedGitRepos;
     this.runGate = opts?.runGate;
+    this.snapshotReflogs = opts?.snapshotGateReflogs ?? snapshotGateReflogs;
     this.gateOpRetainMs = opts?.gateOpRetainMs ?? GATE_OP_RETAIN_MS;
     this.gateCancelVerifyMs = opts?.gateCancelVerifyMs ?? SessionService.DEFAULT_GATE_CANCEL_VERIFY_MS;
     this.syncAttachBudgetMs = opts?.syncAttachBudgetMs ?? SYNC_ATTACH_BUDGET_MS;
@@ -13360,7 +13370,7 @@ export class SessionService {
    *  (moved mid-run, unverified) into one warning; a start-vs-settle-only check cannot tell them
    *  apart and cries wolf on the benign case. */
   private describeGateHeadCurrency(
-    startStamp: WorktreeGateStamp, admitStamp: WorktreeGateStamp, settleStamp: WorktreeGateStamp, roundTrip = false,
+    startStamp: WorktreeGateStamp, admitStamp: WorktreeGateStamp, settleStamp: WorktreeGateStamp, roundTrip = false, onBranch?: GateHeadOnBranch, reflogUnverified = false,
   ): { headCurrent: boolean; headWarning?: string } {
     if (startStamp.head === null || admitStamp.head === null || settleStamp.head === null) {
       return {
@@ -13380,6 +13390,17 @@ export class SessionService {
         headWarning: `the worktree changed WHILE this gate was actively running (branch HEAD is now ${nowHead}) — this run's own execution window did not see a single stable tree, so what it tested may be an inconsistent mix of old and new files. Treat this result as UNVERIFIED for your current code.`,
       };
     }
+    // @decision 01777ceb — a worktree HEAD that is not the BRANCH tip (detached, or on another branch) means the gate ran on content the branch does not name: never current, never reusable.
+    if (onBranch && onBranch.onBranch !== true) {
+      return {
+        headCurrent: false,
+        headWarning: onBranch.onBranch === false
+          ? `the worktree HEAD (${onBranch.head?.slice(0, 8)}) and the branch tip (${onBranch.branchTip?.slice(0, 8)}) differed at read time (detached, or a commit landed between the two reads), so this gate may have run on content the branch does not name. Treat this result as UNVERIFIED and NOT reusable; re-attach the branch and re-run.`
+          : "could not read the worktree HEAD or the branch tip to confirm they match (a git read failed) — treat this result's currency as UNKNOWN, not as confirmed-current.",
+      };
+    }
+    // @decision 01777ceb (card c3e1bfc3) — the reflog needed to see a round trip could not be read: UNKNOWN, not "moved and came back".
+    if (reflogUnverified) return { headCurrent: false, headWarning: "could not read the branch/worktree reflog to confirm the tip did not move and come back during this gate (a git read failed) — treat this result's currency as UNKNOWN, not as confirmed-current." };
     if (roundTrip) return roundTripResult; // settle === admit here, so a round trip is the only thing left to see (covers the queue-wait relabel too: the "likely DOES cover" text below would understate it)
     if (!gateStampsDiffer(startStamp, settleStamp)) return { headCurrent: true };
     const validated = startStamp.head.slice(0, 8);
@@ -13726,6 +13747,9 @@ export class SessionService {
     //  the first hit, or a refusal-cause distribution built from it is biased toward whichever check
     //  happens to run earliest.
     let reuseRefusalReasons: string[] | undefined;
+    // @decision 01777ceb — on a REUSED green the squash is pinned to the tip the reuse proof saw (the real-gate path's 975c774b pin), so a commit / ref move between the
+    // proof and mergeBranch's lock is refused in-lock rather than landed as an unverified `reused:true`.
+    let reuseExpectedTip: string | undefined;
     // @decision 975c774b — set at the reuse decision when the tree is dirty/unreadable; refused only if a gate will actually spawn.
     let confirmTimeDirty: string | undefined;
     // @decision 975c774b — the distinct, never-cached refusal for a verdict that describes no commit (see `gateWorktreeDirty`);
@@ -13743,16 +13767,27 @@ export class SessionService {
     // @decision 975c774b — a PASS is a fact about the tip the gate spawned on; a branch that moved since would squash a commit
     // the gate never ran. Refused (never cached, a re-call re-gates the new tip) rather than squashing the gated tip, which
     // would land without the later commit and then lose it when finalizeMerge deletes the branch.
-    const refuseGateTipMoved = async (phase: "pre-squash" | "in-lock", gated: string | undefined, live: string | null | undefined, movedAndBack = false): Promise<ConfirmMergeResult> => {
-      const why = movedAndBack
+    const refuseGateTipMoved = async (phase: "pre-squash" | "in-lock", gated: string | undefined, live: string | null | undefined, movedAndBack = false, extra?: { headOff?: string; leftAt?: string; unverifiedWhy?: "reflog" | "branch-read" }): Promise<ConfirmMergeResult> => {
+      // @decision 01777ceb — `live` always stays the BRANCH's live tip; a detached worktree HEAD travels in its own `worktreeHead`.
+      const why = extra?.headOff
+        ? `the worktree HEAD (${extra.headOff.slice(0, 8)}) and the branch tip (${gated?.slice(0, 8) ?? "?"}) differed when a gate run spawned (detached, or a commit landed between the two reads), so this PASS covers content the branch would not squash`
+        : extra?.unverifiedWhy === "reflog"
+        ? "whether the branch tip / worktree HEAD moved during the gate could not be verified (the reflog could not be read), so this PASS is refused rather than squashed unchecked"
+        : extra?.unverifiedWhy === "branch-read"
+        ? "the branch tip could not be read before a gate run spawned, so what that run covers could not be verified, and this PASS is refused rather than squashed unchecked"
+        : extra?.leftAt
+        ? `a gate run left the worktree HEAD on ${extra.leftAt.slice(0, 8)} while the branch tip is ${live?.slice(0, 8) ?? gated?.slice(0, 8) ?? "?"}, so this PASS ran on content the branch would not squash`
+        : movedAndBack
         ? `the branch tip moved off the gated commit ${gated?.slice(0, 8) ?? "?"} during the gate and came back, so this PASS may have run on mixed content and does not vouch for the commit that would be squashed`
         : gated && live
         ? `the branch tip moved after the gate spawned (gated ${gated.slice(0, 8)}, now ${live.slice(0, 8)}), so this PASS does not cover the commit that would be squashed`
         : `the gated branch tip could not be verified (gated ${gated?.slice(0, 8) ?? "unreadable"}, now ${live?.slice(0, 8) ?? "unreadable"}), so this PASS is refused rather than squashed unchecked`;
+      // @decision 01777ceb — `live` is ALWAYS the branch's live tip; a worktree HEAD that is off it travels in its own `worktreeHead` (+ `headOffBranch`).
+      const worktreeHeadOff = extra?.headOff ?? extra?.leftAt;
       const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. Re-run worker_merge_confirm to gate the new tip — this refusal is never cached.`;
       const { suppressed, sha } = await rejectNotify("gate_tip_moved", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-      evt("merge_rejected", { reason: "gate_tip_moved", sha, phase, ...(movedAndBack ? { movedAndBack: true } : {}), gatedTip: gated ?? null, liveTip: live ?? null, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: true, gateTipMoved: { phase, gated: gated ?? null, live: live ?? null, ...(movedAndBack ? { movedAndBack: true } : {}) } };
+      evt("merge_rejected", { reason: "gate_tip_moved", sha, phase, ...(movedAndBack ? { movedAndBack: true } : {}), ...(worktreeHeadOff ? { headOffBranch: true, worktreeHead: worktreeHeadOff } : {}), ...(extra?.unverifiedWhy ? { unverifiedWhy: extra.unverifiedWhy } : {}), gatedTip: gated ?? null, liveTip: live ?? null, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: true, gateTipMoved: { phase, gated: gated ?? null, live: live ?? null, ...(movedAndBack ? { movedAndBack: true } : {}), ...(worktreeHeadOff ? { headOffBranch: true as const, worktreeHead: worktreeHeadOff } : {}), ...(extra?.unverifiedWhy ? { unverifiedWhy: extra.unverifiedWhy } : {}) } };
     };
     // unionMergeMovedHead: whether the union-merge below actually MOVED HEAD, i.e.
     // `mergeMainIntoWorktree`'s own `merged:true`. Defaults `false`: the preLanded branch and the
@@ -13878,6 +13913,30 @@ export class SessionService {
     // single-file/resumed links (reset only at the transient whole-gate re-run's re-pin) once a link's gate saw the tip leave its pre-spawn head, even if it came back (T1→T2→T1).
     let gatePreReflog: GateReflogSnapshot | null = null;
     let gateHeadLeftDuringRun = false;
+    // @decision 01777ceb — STICKY like gateHeadLeftDuringRun (same reset point): a snapshot was unreadable, so "left" above may be a could-not-verify.
+    let gateReflogUnverified = false;
+    // @decision 01777ceb — PER-LINK (reset by every captureGatedTip): did THIS link's own gate run leave the gated commit? An earlier link's move must not void
+    // a later clean link's cache identity (merge-confirm-verdict-cache-retry-links.mjs pins that), but the FINAL link's own move must.
+    let gateLinkLeft = false;
+    // @decision 01777ceb — PER-LINK: the worktree HEAD at this link's spawn when it was NOT the gatedTip read from the branch ref (a worktree left detached
+    // off the branch, so the gate ran on content the branch ref does not name), and whether gatedTip itself could not be read. Reset by `captureGatedTip`.
+    let gateLinkPreHeadOff: string | undefined;
+    let gateLinkPreUnverified = false;
+    // @decision 01777ceb — THE one predicate for "a link ran on the commit it claims" (a link is clean only if its pre-spawn worktree head equals its gatedTip,
+    // via the shared `gateHeadOnBranch`, AND it did not leave during its run). The FAIL side voids the cache identity on the FINAL link's state and the PASS side
+    // refuses on it, so the two cannot drift. A composed PASS (single-file retry / resumed steps) carries steps that passed on EARLIER links, so the PASS side needs
+    // EVERY contributing link clean: `anyLinkPreHeadOff`/`anyLinkPreUnverified` are STICKY (reset only at the whole-gate re-run's re-pin, like gateHeadLeftDuringRun),
+    // and the PASS side's "any link left during its run" input is the sticky `gateHeadLeftDuringRun` itself (checked just before this in the PASS block).
+    let anyLinkPreHeadOff: string | undefined;
+    let anyLinkPreUnverified = false;
+    const gateLinkCleanliness = () => ({
+      preHeadOff: gateLinkPreHeadOff,
+      anyLinkPreHeadOff,
+      unclean: gateLinkLeft || gateLinkPreHeadOff !== undefined,
+      unverified: gateReflogUnverified || gateLinkPreUnverified,
+      anyLinkUnverified: gateReflogUnverified || anyLinkPreUnverified,
+      anyLinkUnverifiedWhy: gateReflogUnverified ? ("reflog" as const) : anyLinkPreUnverified ? ("branch-read" as const) : undefined,
+    });
     // Whether the move that set it came BACK (settle worktree HEAD === the pre-spawn head), else where the worktree HEAD was left instead
     // (a HEAD-only move that never returns, e.g. detached at T2 with the branch ref still T1): only the former is `movedAndBack`.
     let gateHeadReturned = false;
@@ -14088,8 +14147,9 @@ export class SessionService {
       //   2. `!freshStamp.dirty` — the worktree carries NO uncommitted changes right now (a clean tree),
       //      and `!gateStampsDiffer(lastCheck.stamp, freshStamp)` — that clean tree's HEAD (and, had it
       //      been dirty, its content hash) is BYTE-IDENTICAL to what the self-check validated: no commits,
-      //      no edits, landed since. This directly proves the self-check's validated sha IS the branch tip
-      //      being merged, and that nothing changed post-gate.
+      //      no edits, landed since. This proves the worktree HEAD is unchanged since the self-check — NOT, on its
+      //      own, that it is the branch tip being merged: a detached worktree keeps its HEAD while the branch ref
+      //      names another commit. @decision 01777ceb — `freshOnBranch` (the shared `gateHeadOnBranch`) closes that.
       //   3. `freshBehindMain === 0` — re-derived FRESH here (never assumed from anything computed
       //      earlier in this method, and never skipped just because a union-merge already ran above) —
       //      main's current HEAD is already an ancestor of the branch. This is the hard constraint: a main
@@ -14139,12 +14199,14 @@ export class SessionService {
       // nothing to compare against, so the reasons list below can tell "genuinely unchanged" apart from
       // "no prior stamp to compare".
       const stampDiffers = hasLastCheck ? gateStampsDiffer(lastCheck.stamp, freshStamp) : undefined;
+      // @decision 01777ceb — belt and braces for a self-check recorded before headCurrent knew about a detached worktree: the FRESH worktree HEAD must be the branch tip.
+      const freshOnBranch = gateHeadOnBranch(freshStamp.head, await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }).catch(() => null));
       // @decision e50600d2 — a green run_gate self-check is reused here at merge time; do not remove
       // run_gate to cut shared gate load, only widen/tighten reuse.
       // Card e8df2659: never "reuse" a self-check when the gate is off — that would stamp `reused:true`
       // (a claim a prior gate verdict backs this merge) instead of the honest `gate-disabled` skip.
       if (!gateDisabled && hasLastCheck && branchMatches && checkPassed && checkHeadCurrent) {
-        if (freshHead && !freshStamp.dirty && stampDiffers === false && freshBehindMain === 0) {
+        if (freshHead && !freshStamp.dirty && stampDiffers === false && freshBehindMain === 0 && freshOnBranch.onBranch === true) {
           // TOCTOU NOTE (CR follow-up): `freshBehindMain === 0` only proves main hadn't moved AS OF
           // `freshHead`'s single read — main is a process-wide shared resource, and a SIBLING merge on
           // this same repo can still land before this merge's own squash actually runs (this reuse
@@ -14167,6 +14229,7 @@ export class SessionService {
           // Card a2873f7e: `steps:[]` — this result never actually spawned a step (it's a reuse of an
           // already-settled self-check), so there is nothing to report a per-step duration for.
           reuseResult = { passed: true, steps: [] };
+          reuseExpectedTip = freshOnBranch.branchTip ?? undefined;
           reusedOpId = lastCheck.opId;
         }
       }
@@ -14187,6 +14250,7 @@ export class SessionService {
           reasons.push("worktree-dirty-unknown", "stamp-unknown");
         } else {
           if (freshStamp.dirty) reasons.push("worktree-dirty");
+          if (freshOnBranch.onBranch === false) reasons.push("head-off-branch"); else if (freshOnBranch.onBranch === "unverified") reasons.push("head-off-branch-unknown");
           // @decision 2e52bf99 — a stamp change is attributed to the union-merge folding main in
           //  (structural) when unionMergeMovedHead is true, never collapsed into the same bucket as a
           //  worker's own new commit or edit landing after the self-check.
@@ -14493,8 +14557,11 @@ export class SessionService {
         gateHasRun = true;
         const post = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         // @decision d099087f — head-equality below is blind to T1→T2→T1; the reflog delta is not.
-        if (gatePreStamp?.head && (!gatePreReflog || gateReflogLeftHead(gatePreStamp.head, gatePreReflog, await snapshotGateReflogs(repoPath, branch, worktreePath, { timeoutMs: this.gitOpMs })))) {
+        const reflogAtSettle = gatePreReflog ? await this.snapshotReflogs(repoPath, branch, worktreePath, { timeoutMs: this.gitOpMs }) : undefined;
+        if (gatePreStamp?.head && (!gatePreReflog || !reflogAtSettle || gateReflogLeftHead(gatePreStamp.head, gatePreReflog, reflogAtSettle))) {
           gateHeadLeftDuringRun = true;
+          gateLinkLeft = true;
+          if (!gatePreReflog || !reflogAtSettle || gateReflogUnreadable(gatePreReflog, reflogAtSettle)) gateReflogUnverified = true;
           if (post.head === gatePreStamp.head) gateHeadReturned = true; else gateHeadLeftAt = post.head ?? undefined;
         }
         // The pre stamp is clean by construction (a dirty one threw in `captureGatedTip`), so "changed" is: dirt at settle, or
@@ -14511,12 +14578,18 @@ export class SessionService {
       // at the runExclusive catch) a tree already dirty then: the same `computeWorktreeGateStamp` dirt `run_gate` uses.
       const captureGatedTip = async (pin = false): Promise<void> => {
         // @decision d099087f — reflog snapshot FIRST: anything that moves the tip after it is inside the delta, never before it.
-        gatePreReflog = await snapshotGateReflogs(repoPath, branch, worktreePath, { timeoutMs: this.gitOpMs });
+        gateLinkLeft = false; gateLinkPreHeadOff = undefined; gateLinkPreUnverified = false;
+        gatePreReflog = await this.snapshotReflogs(repoPath, branch, worktreePath, { timeoutMs: this.gitOpMs });
         try { gatedTip = (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined; } catch { gatedTip = undefined; }
         if (pin) pinnedGateTip = gatedTip;
         gatePreStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         if (gatePreStamp.dirty) throw new GateWorktreeDirtyError("the worktree carries uncommitted changes before the gate spawns");
         if (gatePreStamp.head === null) throw new GateWorktreeDirtyError("the worktree stamp is unreadable before the gate spawns");
+        // @decision 01777ceb — the gate reads the WORKTREE's HEAD while the verdict is keyed on the BRANCH ref: they must name the same commit.
+        const preOnBranch = gateHeadOnBranch(gatePreStamp.head, gatedTip);
+        if (preOnBranch.onBranch === "unverified") gateLinkPreUnverified = true; else if (preOnBranch.onBranch === false) gateLinkPreHeadOff = preOnBranch.head ?? undefined;
+        if (gateLinkPreUnverified) anyLinkPreUnverified = true;
+        if (gateLinkPreHeadOff !== undefined) anyLinkPreHeadOff ??= gateLinkPreHeadOff;
       };
       // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
       // rather than running alongside it unbounded. See GateSemaphore's class doc. Held only across the
@@ -14905,7 +14978,7 @@ export class SessionService {
             gateWorktreeChanged = undefined;
             // @decision d099087f — same for the round-trip state: a whole-gate re-run on the re-pinned tip is complete evidence for THAT tip
             // (c59165b8's contract); captureGatedTip below re-takes the reflog snapshots at the re-pin. Single-file/resumed links stay sticky.
-            gateHeadLeftDuringRun = false; gateHeadReturned = false; gateHeadLeftAt = undefined;
+            gateHeadLeftDuringRun = false; gateHeadReturned = false; gateHeadLeftAt = undefined; gateReflogUnverified = false; anyLinkPreHeadOff = undefined; anyLinkPreUnverified = false;
             await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
             transientGateSpawned = true;
             if (r.passed) holdRepoGuardOnExit();
@@ -15240,9 +15313,12 @@ export class SessionService {
         // the actual gate stderr, not just the summary bits, so a settled op can be diagnosed from the
         // log alone without needing the pty transcript.
         console.log(`[gate opId=${thisOpId}] branch=${branch} task=${taskId ?? "none"} passed=false ${detailBits}${tailBlock}`);
-        // ONLY a true round trip (settle head back on the pre-spawn head) is un-cached. A plain mid-gate move, and a HEAD-only move that never returns, keep their stamp
-        // and CAN still be cached as a FAIL (8b1fb28f's identity-mismatch does not reliably cover them when main hasn't advanced) — known gap, tracked by card 01777ceb; not fixed here.
-        const gateRoundTrip = gateHeadLeftDuringRun && gateHeadReturned && !gateHeadLeftAt;
+        // @decision 01777ceb — a pure round trip (settle head back on the pre-spawn head, readable reflogs) is never cached (94c28d2a). Any OTHER FAIL whose FINAL
+        // link left the gated commit, or whose reflog could not be read, is cached under a VOID identity: it can never equal a future tip (so the re-call re-gates,
+        // and still announces identity-mismatch), instead of falling back to the pre-forward sha a later reset to T1 would match.
+        const gateRoundTrip = gateHeadLeftDuringRun && gateHeadReturned && !gateHeadLeftAt && !gateReflogUnverified;
+        const finalLink = gateLinkCleanliness();
+        const gateIdentityVoid = !gateRoundTrip && (finalLink.unclean || finalLink.unverified);
         return {
           merged: false,
           reason: headline, detailText,
@@ -15259,8 +15335,10 @@ export class SessionService {
           // a post-gate-pass squash refusal, a breaker/preflight rejection or a reused result never does.
           // @decision 975c774b — never stamped when the worktree changed under the gate; flagged so it is never cached either.
           // @decision d099087f — likewise never stamped/cached when the tip left the gated commit and came back mid-run.
-          ...(gatedTip && !gateWorktreeChanged && !gateRoundTrip ? { gatedIdentity: gatedTip } : {}),
+          ...(gatedTip && !gateWorktreeChanged && !gateRoundTrip && !gateIdentityVoid ? { gatedIdentity: gatedTip } : {}),
           ...(gateRoundTrip ? { gateRoundTripFail: true as const } : {}),
+          ...(gateIdentityVoid ? { gateIdentityVoid: true as const } : {}),
+          ...(finalLink.unverified ? { gateTipUnverified: true as const } : {}),
           ...(gateWorktreeChanged ? { gateWorktreeDirty: { phase: "during-gate" as const, detail: gateWorktreeChanged } } : {}),
           outputTail: gateOutputTailForRecord,
           ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}),
@@ -15315,8 +15393,16 @@ export class SessionService {
           return { ...(await refuseGateTipMoved("pre-squash", pinnedGateTip, liveTip)), ...gatePassRefusalExtras() };
         }
         // @decision d099087f — the tip equals the pinned one, but it LEFT it and came back mid-gate (T1→T2→T1): the PASS ran on mixed content.
+        // @decision 01777ceb — an unreadable reflog is "could not be verified", never movedAndBack.
         if (gateHeadLeftDuringRun) {
-          return { ...(await refuseGateTipMoved("pre-squash", pinnedGateTip, gateHeadLeftAt ?? liveTip, gateHeadReturned && !gateHeadLeftAt)), ...gatePassRefusalExtras() };
+          return { ...(await refuseGateTipMoved("pre-squash", pinnedGateTip, liveTip, gateHeadReturned && !gateHeadLeftAt && !gateReflogUnverified, gateReflogUnverified || gateHeadLeftAt ? { ...(gateReflogUnverified ? { unverifiedWhy: "reflog" as const } : {}), ...(gateHeadLeftAt ? { leftAt: gateHeadLeftAt } : {}) } : undefined)), ...gatePassRefusalExtras() };
+        }
+        // @decision 01777ceb — the same predicate the FAIL side voids on: a final link whose pre-spawn worktree HEAD was not its gatedTip (detached before the gate)
+        // ran on content the branch ref does not name; squashing the ref would land never-gated commits. Refused, never cached.
+        const finalLinkPass = gateLinkCleanliness();
+        // PASS: EVERY contributing link (a composed verdict's earlier-link steps are not re-run by the final link); FAIL: the final link only.
+        if (finalLinkPass.anyLinkPreHeadOff !== undefined || finalLinkPass.anyLinkUnverified) {
+          return { ...(await refuseGateTipMoved("pre-squash", pinnedGateTip, liveTip, false, finalLinkPass.anyLinkUnverified ? { unverifiedWhy: finalLinkPass.anyLinkUnverifiedWhy } : { headOff: finalLinkPass.anyLinkPreHeadOff })), ...gatePassRefusalExtras() };
         }
       }
     }
@@ -15390,7 +15476,7 @@ export class SessionService {
     // this hold can never outlive a single bounded git operation plus the (synchronous, or near-instant)
     // bookkeeping above it in this same try.
     if (gateRan) this.gateSemaphore.beginSquash(repoPath, thisOpId);
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, gateRan ? pinnedGateTip : undefined);
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, gateRan ? pinnedGateTip : reuseExpectedTip);
     } finally {
       // Mirrors the `beginSquash` guard above exactly — `gateRan` is the same precise proxy for "this op
       // actually holds (or could hold) repoPath via `runExclusive`/`admit`", so a reuse/gateless op never
@@ -15410,7 +15496,7 @@ export class SessionService {
     }
     if (!merge.ok) {
       if (merge.branchTipMoved) {
-        return { ...(await refuseGateTipMoved("in-lock", pinnedGateTip, merge.branchTipMoved.live ?? null)), ...gatePassRefusalExtras() };
+        return { ...(await refuseGateTipMoved("in-lock", gateRan ? pinnedGateTip : reuseExpectedTip, merge.branchTipMoved.live ?? null)), ...(gateRan ? {} : { gateRan: false, ...(reusedOpId ? { reusedOpId } : {}) }), ...gatePassRefusalExtras() };
       }
       if (merge.gateBaseInvalidated) {
         // BENIGN RACE, NOT A REAL MERGE FAILURE: canonical main advanced since this merge's gate-validated
@@ -17203,7 +17289,8 @@ export class SessionService {
         // Card 8b1fb28f: cache a gate-FAILED rejection under the tip captured just before the FINAL gate spawn (see
         // `gatedIdentity`), not the pre-forward `verdictIdentity` above (which can name a commit the gate never ran on).
         // Dropped (unstamped) if the branch tip has since moved; every other outcome keeps `verdictIdentity`.
-        identityFromValue: (v) => (v.gatedIdentity ? `${v.gatedIdentity}${mergeGateSuffix}` : undefined),
+        // @decision 01777ceb — a void-identity FAIL is stored under `void:<opId>`, which no `<sha>|mergeGate:…` verdictIdentity can equal.
+        identityFromValue: (v) => (v.gateIdentityVoid ? `void:${v.opId}` : v.gatedIdentity ? `${v.gatedIdentity}${mergeGateSuffix}` : undefined),
         // @decision 99a1cf6f — `gateBaseInvalidated` classifies distinctly from an ordinary "rejected",
         // checked before the plain merged-else-rejected fallback — a real test failure is safe to replay,
         // a stale-base one is not.
@@ -17537,7 +17624,7 @@ export class SessionService {
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 getConcurrentGatesMax = getMaxConcurrentGates;
                 cancelSignalRef = cancelSignal;
-                if (worker.branch) admitReflog = await snapshotGateReflogs(targetRepo.path, worker.branch, worktreePath, { timeoutMs: this.gitOpMs });
+                if (worker.branch) admitReflog = await this.snapshotReflogs(targetRepo.path, worker.branch, worktreePath, { timeoutMs: this.gitOpMs });
                 admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
                 // Card a0d912f5 Code Review: recorded the instant it's known — deliberately NOT at the
                 // same site as `gateStartStamps` (that one is set at FIRE time, well before this callback
@@ -17645,8 +17732,13 @@ export class SessionService {
           // doc for why three checkpoints, and the resulting wording split.
           const settleStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
           // @decision d099087f — a tip that left the admitted head and came back is invisible to the stamps; it makes the result non-reusable.
-          const roundTrip = !!(worker.branch && admitReflog && admitStamp!.head !== null && gateReflogLeftHead(admitStamp!.head, admitReflog, await snapshotGateReflogs(targetRepo.path, worker.branch, worktreePath, { timeoutMs: this.gitOpMs })));
-          const headCurrency = this.describeGateHeadCurrency(startStamp, admitStamp!, settleStamp, roundTrip);
+          // @decision 01777ceb (card c3e1bfc3) — an UNREADABLE reflog is "could not verify", never "moved and came back": mirror of the merge gate's gateReflogUnverified.
+          const settleReflog = worker.branch && admitReflog && admitStamp!.head !== null ? await this.snapshotReflogs(targetRepo.path, worker.branch, worktreePath, { timeoutMs: this.gitOpMs }) : undefined;
+          const reflogUnverified = !!(admitReflog && settleReflog && gateReflogUnreadable(admitReflog, settleReflog));
+          const roundTrip = !reflogUnverified && !!(admitReflog && settleReflog && gateReflogLeftHead(admitStamp!.head!, admitReflog, settleReflog));
+          // @decision 01777ceb — the shared head-vs-branch-ref rule; a worker row with no branch has nothing to compare against.
+          const settleOnBranch = worker.branch ? gateHeadOnBranch(settleStamp.head, await resolveGitRef(targetRepo.path, worker.branch, { timeoutMs: this.gitOpMs }).catch(() => null)) : undefined;
+          const headCurrency = this.describeGateHeadCurrency(startStamp, admitStamp!, settleStamp, roundTrip, settleOnBranch, reflogUnverified);
           // REUSE-A-GREEN-SELF-CHECK RECORD (card e50600d2): record THIS settle — pass or fail — as the
           // worker's latest self-check outcome, so confirmWorkerMerge can later prove (or refuse to
           // assume) that a merge's input is byte-identical to what this run validated. Overwrites

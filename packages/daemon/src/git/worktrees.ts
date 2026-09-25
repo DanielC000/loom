@@ -2485,6 +2485,28 @@ export function gateReflogLeftHead(preHead: string, before: GateReflogSnapshot, 
   return reflogGainedForeignEntry(preHead, before.branch, after.branch) || reflogGainedForeignEntry(preHead, before.head, after.head);
 }
 
+/** Could either {@link GateReflogSnapshot} of a before/after pair not be READ (a git timeout/error => `null`)? {@link gateReflogLeftHead} fails
+ *  closed on that and reads "left"; this lets a caller tell "could not verify" apart from a real move. Pure. */
+export function gateReflogUnreadable(before: GateReflogSnapshot, after: GateReflogSnapshot): boolean {
+  return before.branch === null || before.head === null || after.branch === null || after.head === null;
+}
+
+/** Where a gate's WORKTREE HEAD sits relative to the BRANCH ref the verdict is keyed on. `onBranch:"unverified"` when either side could not be read. */
+export interface GateHeadOnBranch { onBranch: true | false | "unverified"; head: string | null; branchTip: string | null }
+
+/**
+ * THE shared "did the gate run on the commit its verdict names?" rule (card 01777ceb): a gate reads the WORKTREE's HEAD, every verdict/merge is keyed on the
+ * BRANCH ref, and a worktree left detached (or on another branch) makes them differ — the gate ran on content the branch does not name. Pure: each gate path
+ * (the merge gate's `captureGatedTip`, `run_gate`'s settle stamp, the reuse proof at confirm time) feeds it the two reads it already has.
+ *
+ * @decision 01777ceb — one helper for the merge gate, the run_gate self-check and the reuse proof; never a third local head-vs-ref check.
+ */
+export function gateHeadOnBranch(head: string | null | undefined, branchTip: string | null | undefined): GateHeadOnBranch {
+  const h = head ?? null;
+  const b = branchTip ?? null;
+  return { onBranch: h === null || b === null ? "unverified" : h === b, head: h, branchTip: b };
+}
+
 /** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
 /** One row of a diffstat — a changed file with its insertion/deletion counts (0/0 for binary). */
 export interface DiffstatFile {
