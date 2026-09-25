@@ -1573,6 +1573,12 @@ export type OrchestrationEventKind =
   // filed per drop, even when the batch never reaches its gate. `detail` carries { opId, branch, reason,
   // conflict, branches }; the drop reason is otherwise only in the (bounded) nudge. Card bc2240d7.
   | "batch_merge_dropped"
+  // A candidate a merge_batch LANDED but did NOT finalize, because its branch tip moved after the batch assembled it
+  // (a commit added mid-gate) — branch, worktree and worker are retained. `detail` carries { opId, branch, assembledTip,
+  // liveTip, phase } (liveTip null = unreadable; phase pre-stop | at-finalize | ref-kept-after-finalize). Its LATEST event HOLDS the candidate: no
+  // merge_batch re-fire assembles or fallback-confirms it until a REAL (not detail.reconciled) merge_done newer than the event exists.
+  // Card 42daa283.
+  | "batch_merge_branch_retained"
   // Card 932f13d4: a genuine engine-session-id ROTATION — the Claude Code CLI fired a SECOND
   // `SessionStart` reporting a DIFFERENT `session_id` for the SAME live pty (no new Loom spawn/resume/
   // fork — see `pty/host.ts`'s SessionStart handler doc / card 7c1fc117). `db.setEngineSessionId`
@@ -1645,7 +1651,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true,
-  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_dropped: true, engine_session_rotated: true,
+  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_dropped: true, batch_merge_branch_retained: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true,
   codex_auto_commit: true,

@@ -22,7 +22,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -520,12 +520,27 @@ type GateRejectionDetail = {
  *  dedupe/attach rationale this type now sits behind). Unchanged in shape from the pre-card `mergeBatch`'s
  *  own return type — only the OUTER wrapper (`AttachResult<MergeBatchResult>`, mirroring
  *  `confirmWorkerMergeTracked`'s `AttachResult<ConfirmMergeResult>`) is new. */
+/** Card 42daa283 — where a batch candidate's branch tip moved relative to what the batch assembled.
+ *  - "pre-stop": caught before the worker was touched — nothing finalized, worker kept (live).
+ *  - "at-finalize": caught after the worker's hard stop — nothing finalized, worker kept (stopped).
+ *  - "ref-kept-after-finalize": the CAS ref delete refused after finalize had already run — FINALIZED, only the ref kept. */
+type BranchAdvancedDuringGate = { assembledTip: string | null; liveTip: string | null; phase: "pre-stop" | "at-finalize" | "ref-kept-after-finalize" };
+/** One line naming what happened to a batch candidate whose tip moved. An UNREADABLE live tip is a different fact from a
+ *  moved one (nothing was proven about a commit), so it is worded as a failed verification. */
+function describeBranchRetained(branch: string, assembledTip: string | null, liveTip: string | null, phase: BranchAdvancedDuringGate["phase"]): string {
+  const what = liveTip && assembledTip
+    ? `${branch} advanced after the batch assembled it (assembled ${assembledTip.slice(0, 8)}, now ${liveTip.slice(0, 8)})`
+    : `${branch}: could not verify the branch tip (assembled ${assembledTip?.slice(0, 8) ?? "unknown"}, now ${liveTip?.slice(0, 8) ?? "unreadable"})`;
+  return phase === "ref-kept-after-finalize"
+    ? `${what} — FINALIZED; only the branch ref was kept because it moved`
+    : `${what} — NOT finalized; branch and worktree kept, worker kept (${phase === "pre-stop" ? "live" : "stopped"})`;
+}
 type MergeBatchResult = {
   ok: boolean;
   /** @decision c85f842d — keep `opId` OPTIONAL, unlike the solo path's — this method has real early
    *  bail-outs (ownership/repo-mismatch, too-few-candidates, no gateCommand) with no op minted yet. */
   opId?: string;
-  landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number }[];
+  landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate }[];
   /** @decision 553ea58c — use `landedCount`, the real git-verified total, never `landed.length` — that
    *  array under-reports if a worker session row was hard-deleted between selection and finalize. */
   landedCount?: number;
@@ -2177,6 +2192,7 @@ export class SessionService {
    *  the real one-live-worker guard sets this small and sleeps just past it, rather than waiting out the
    *  real production window. */
   private readonly spawnOpRetainMs: number;
+  private readonly heldProbeGitFactory?: BoundedGitDeps["gitFactory"];
   /** Public read of {@link spawnOpRetainMs} in whole minutes — lets `worker_spawn`'s own pending-note/
    *  description text (mcp/orchestration.ts) state the REAL configured window instead of a hardcoded
    *  copy that could drift from {@link SPAWN_OP_RETAIN_MS} on a future change to either. Rounds to the
@@ -2444,6 +2460,8 @@ export class SessionService {
       gateCancelVerifyMs?: number;
       syncAttachBudgetMs?: number;
       spawnOpRetainMs?: number;
+      /** TEST SEAM (card 42daa283): git factory for the hold's release check (`isBranchHeld`'s landed-trailer read) only. */
+      heldProbeGitFactory?: BoundedGitDeps["gitFactory"];
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
@@ -2456,6 +2474,7 @@ export class SessionService {
     this.gateCancelVerifyMs = opts?.gateCancelVerifyMs ?? SessionService.DEFAULT_GATE_CANCEL_VERIFY_MS;
     this.syncAttachBudgetMs = opts?.syncAttachBudgetMs ?? SYNC_ATTACH_BUDGET_MS;
     this.spawnOpRetainMs = opts?.spawnOpRetainMs ?? SPAWN_OP_RETAIN_MS;
+    this.heldProbeGitFactory = opts?.heldProbeGitFactory;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
     this.wedgeGiveUpMs = opts?.wedgeGiveUpMs ?? SessionService.DEFAULT_WEDGE_GIVE_UP_MS;
@@ -15517,7 +15536,7 @@ export class SessionService {
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
     // `merge.sha` (card 1eebc46a) is the just-created squash commit's sha, free from mergeBranch's own
     // return — persisted onto the task alongside the rest of finalize's bookkeeping.
-    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: "gate-disabled" as const } : {}) });
+    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, releaseHold: true, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: "gate-disabled" as const } : {}) });
     // SKILL-LIVENESS WARNING (card 64a30c79): a merge that just landed a change under
     // `packages/daemon/assets/skills/<name>/**` reaches ZERO agents right now — `skills/inject.ts` mirrors
     // sessions from the STORE, never `assets/` (see CLAUDE.md's "Caveat" section) — so surface that here,
@@ -15674,6 +15693,26 @@ export class SessionService {
    *  `suppressNotify` and sends ONE aggregate notice for the whole batch instead — a new, explicit opt-out,
    *  not a widening of the stale-retry guard above.
    */
+  /**
+   * @decision 42daa283 — THE one definition of "this branch is HELD" (a `merge_batch` retained it: commits landed on it after the batch
+   * assembled it, never gated). Keyed on the BRANCH, read from the durable event log; released only by a real non-reconciled `merge_done`
+   * newer than the latest retain event OR by the git fact (main carries a later `Loom-Worker-Branch` commit after the retain's `landedSha`);
+   * a git read that errors keeps it held (`gitUnverified`). Every finalize/delete site calls this — never a site-local variant. The rules,
+   * the rejected alternatives and the Do-nots are in docs/decisions/42daa283-*.md. BOUND: "only the merge code writes a `Loom-Worker-Branch` commit"
+   * is a claim about PRODUCERS, not a proof — a HUMAN commit carrying the trailer (e.g. re-cherry-picking the batch commit) would falsely release. That
+   * is accepted because every destructive site stays independently content-guarded (Pass A's branchContentLandedInCommit, the `--merged`-only ref
+   * sweep, finishAlreadyMerged only after an empty squash) and a batch landing is itself gated.
+   */
+  private async isBranchHeld(branch: string, repoPath: string): Promise<{ retain: OrchestrationEvent; gitUnverified: boolean } | undefined> {
+    const retain = this.db.listEventsForBranch(branch, "batch_merge_branch_retained").reduce<OrchestrationEvent | undefined>((best, e) => (!best || e.ts >= best.ts ? e : best), undefined);
+    if (!retain) return undefined;
+    if (this.db.listEventsForBranch(branch, "merge_done").some((e) => e.ts > retain.ts && e.detail?.reconciled !== true)) return undefined;
+    const landedSha = typeof retain.detail?.landedSha === "string" ? retain.detail.landedSha : undefined;
+    if (!landedSha) return { retain, gitUnverified: false };
+    const later = await findLaterBranchSquash(repoPath, branch, landedSha, { timeoutMs: this.gitOpMs, gitFactory: this.heldProbeGitFactory });
+    if (later === "found") return undefined;
+    return { retain, gitUnverified: later === "error" };
+  }
   private async finishAlreadyMerged(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
     worktreePath: string; branch: string; repoPath: string; projectId: string; opId: string;
@@ -15685,7 +15724,19 @@ export class SessionService {
     mergedVerification?: "content" | "pathset" | "trailer-only" | null;
     /** See the `@decision c35b60c4` anchor in this method's doc above. */
     suppressNotify?: boolean;
+    /** Forwarded verbatim into {@link finalizeMerge} (card 42daa283) — see its own doc. */
+    expectedBranchTip?: string; onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize") => void;
   }): Promise<ConfirmMergeResult> {
+    // Card 42daa283: an ALREADY_MERGED-style finish must never delete a HELD branch (its late commit was never landed) — refuse up front,
+    // BEFORE the worker is hard-stopped or anything is announced. The held branch is released only by a real new squash (Green path) or its
+    // durable trace (a later Loom-Worker-Branch commit on main / a newer merge_done) — see `isBranchHeld`.
+    const heldAtFinish = await this.isBranchHeld(args.branch, args.repoPath);
+    if (heldAtFinish) {
+      const reason = heldAtFinish.gitUnverified
+        ? `branch ${args.branch} is HELD by a merge_batch retain and its release could not be VERIFIED: reading main for a later Loom-Worker-Branch commit (which would mean it was already landed) failed. Nothing was finalized or deleted. This is usually transient — retry worker_merge_confirm (or restart the daemon) to re-check.`
+        : `branch ${args.branch} is HELD: a merge_batch retained it because commit(s) landed on it after the batch assembled it, and main carries no later Loom-Worker-Branch commit for it, so those were never gated or landed. Nothing was finalized or deleted. Review it with worker_merge, then land it with worker_merge_confirm (a real squash of the live tip releases the hold). If that squash would be EMPTY — e.g. the late commit only reverts part of the branch's own change, so the branch nets to nothing against main — confirm cannot land it (this refusal is what you get instead): cherry-pick the late commit(s) (the assembled..live range on the batch_merge_branch_retained event) onto a follow-up card's worker. The branch stays held until a real merge_done or a later Loom-Worker-Branch squash on main.`;
+      return { merged: false, reason, notified: false, opId: args.opId };
+    }
     if (!args.suppressNotify) {
       const alreadyFinalized = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
       if (!alreadyFinalized) {
@@ -15845,12 +15896,32 @@ export class SessionService {
     const project = this.db.getProject(finalProjectId)!;
     const orchestration = resolveConfig(project.config, this.db.getPlatformConfig()).orchestration;
 
+    // @decision 42daa283 — a candidate a prior merge_batch RETAINED (commits landed on its branch after assembly, never gated) is HELD:
+    //  never assembled, never stranded-checked, never fallback-confirmed (runFallback reports it `started:false`), and it counts toward
+    //  neither K nor the `< 2` check. `isBranchHeld` is the one definition (keyed on the BRANCH, read from the durable event log, released by
+    //  a real non-reconciled merge_done OR the landed-squash git fact, and FAIL-CLOSED: a git read that errors keeps it held, flagged
+    //  `gitUnverified`); the rules and Do-nots are in docs/decisions/42daa283-*.md, not restated here. A manager's own worker_merge_confirm
+    //  on a held candidate stays allowed.
+    const retainedOutstanding = new Map<string, { branch: string; assembledTip: string | null; liveTip: string | null; phase: BranchAdvancedDuringGate["phase"]; gitUnverified: boolean }>();
+    for (const cand of resolved) {
+      const heldC = await this.isBranchHeld(cand.branch, finalRepoPath); // BRANCH-keyed (a recycle successor shares the branch)
+      if (!heldC) continue;
+      const ev = heldC.retain;
+      retainedOutstanding.set(cand.workerSessionId, {
+        branch: cand.branch, assembledTip: typeof ev.detail?.assembledTip === "string" ? ev.detail.assembledTip : null,
+        liveTip: typeof ev.detail?.liveTip === "string" ? ev.detail.liveTip : null,
+        phase: (ev.detail?.phase as BranchAdvancedDuringGate["phase"] | undefined) ?? "pre-stop",
+        gitUnverified: heldC.gitUnverified,
+      });
+    }
+
     // STRANDED-WORK BACKSTOP (mirrors confirmWorkerMerge's own pre-gate check): a worker whose real commits
     // sit on some OTHER self-created branch would squash NOTHING into the batch — pull it out to the
     // fallback path up front rather than silently wasting a batch slot on an empty diff.
     const candidates: Candidate[] = [];
     const strandedFallback: { workerSessionId: string; reason: string }[] = [];
     for (const r of resolved) {
+      if (retainedOutstanding.has(r.workerSessionId)) { candidates.push(r); continue; } // held: no stranded check, no fallback
       const worker = this.db.getSession(r.workerSessionId)!;
       const worktreePath = worker.worktreePath ?? worker.cwd;
       const stranded = await detectStrandedWork(finalRepoPath, worktreePath, r.branch, { timeoutMs: this.gitOpMs });
@@ -15858,10 +15929,15 @@ export class SessionService {
       candidates.push(r);
     }
 
-    const K = computeBatchSize(candidates.length, Math.max(1, orchestration.maxConcurrentWorkers));
-    const chosen = candidates.slice(0, K);
-    const overflow = candidates.slice(K);
-
+    const batchable = candidates.filter((c) => !retainedOutstanding.has(c.workerSessionId));
+    // Held candidates are excluded from `batchable`, so they count toward neither K nor the `liveChosen.length < 2` check below (a
+    // [held, X] pair must not cut a batch worktree for one real candidate) — but they STAY in `chosen`, so the dedupe key over the
+    // original set, and with it the cached retained verdict a degraded caller's same-ids re-call recovers, is unchanged. They are
+    // never assembled: `liveChosen` (chosen minus held) is what every batch member list below is built from.
+    const K = computeBatchSize(batchable.length, Math.max(1, orchestration.maxConcurrentWorkers));
+    const liveChosen = batchable.slice(0, K);
+    const chosen = candidates.filter((c) => retainedOutstanding.has(c.workerSessionId) || liveChosen.includes(c));
+    const overflow = batchable.slice(K);
     // Card 19256231: `batchOpId`, when given, is threaded onto every fallback confirm this call spawns
     // (via confirmWorkerMergeTracked's own `opts.fallbackOfBatchOpId`) so each one's gate_queue row is
     // traceable back to THIS batch op — see GateDescriptor.fallbackOfBatchOpId's own doc for why that
@@ -15877,7 +15953,17 @@ export class SessionService {
     //  ownership-checked confirm, and report a candidate that could not be started as `started:false`.
     const runFallback = async (list: { workerSessionId: string; reason: string }[], batchOpId?: string): Promise<{ workerSessionId: string; reason: string; started?: boolean }[]> => {
       const out: { workerSessionId: string; reason: string; started?: boolean }[] = [];
+      const heldReason = (h: { branch: string; assembledTip: string | null; liveTip: string | null; phase: BranchAdvancedDuringGate["phase"]; gitUnverified: boolean }) =>
+        h.gitUnverified
+          // The hold could not be RE-CHECKED (a git read of main failed), so this is NOT a confirmed genuine hold — say so.
+          ? `held, NOT re-attempted: ${describeBranchRetained(h.branch, h.assembledTip, h.liveTip, h.phase)} — its release could not be VERIFIED (reading main for a later Loom-Worker-Branch commit failed); this is usually transient, re-run merge_batch or restart the daemon to re-check`
+        : h.phase === "ref-kept-after-finalize"
+          // FINALIZED: the worker is done and its worktree is gone, so worker_merge_confirm has nothing to act on.
+          ? `held, NOT re-attempted: ${describeBranchRetained(h.branch, h.assembledTip, h.liveTip, h.phase)} — the branch ref still has commits that are NOT on main and were never gated; inspect it and cherry-pick its commits onto a follow-up card's worker`
+          : `held, NOT re-attempted: ${describeBranchRetained(h.branch, h.assembledTip, h.liveTip, h.phase)} — its unreviewed commit(s) were never gated; review with worker_merge, then land with worker_merge_confirm (any further commit stays held too)`;
       for (const f of list) {
+        const held = retainedOutstanding.get(f.workerSessionId);
+        if (held) { out.push({ workerSessionId: f.workerSessionId, reason: heldReason(held), started: false }); continue; }
         const owner = this.resolveLineageOwnerForWorker(managerSessionId, f.workerSessionId);
         if (!owner) {
           const why = `fallback NOT started: worker is not a child of this manager or its recycle lineage`;
@@ -15901,10 +15987,27 @@ export class SessionService {
         }
         out.push({ workerSessionId: f.workerSessionId, reason: f.reason, started: true });
       }
+      // Every return path of this method funnels through here, so a held candidate is always REPORTED, even when it was in
+      // no list (it is never assembled — see `retainedOutstanding`).
+      for (const [id, held] of retainedOutstanding) {
+        if (!out.some((o) => o.workerSessionId === id)) out.push({ workerSessionId: id, reason: heldReason(held), started: false });
+      }
       return out;
     };
 
-    if (chosen.length < 2) {
+    // A candidate whose work is already done (worktree gone or task terminal). Hoisted from `batchAlreadyFinished` below so the
+    // `< 2` early return can tell "one real candidate" from "everything else is finished and only a cached verdict remains".
+    const candidateFinished = (c: Candidate): boolean => {
+      const worker = this.db.getSession(c.workerSessionId);
+      const worktreeGone = !(worker?.worktreePath ?? worker?.cwd) || !fs.existsSync((worker.worktreePath ?? worker.cwd)!);
+      const taskAlreadyTerminal = c.taskId != null && (() => {
+        const task = this.db.getTask(c.taskId!);
+        const terminalKey = task ? this.columnKeyForProjectRole(task.projectId, "terminal") : undefined;
+        return !!task && !!terminalKey && task.columnKey === terminalKey;
+      })();
+      return worktreeGone || taskAlreadyTerminal;
+    };
+    if (liveChosen.length < 2 && !(retainedOutstanding.size > 0 && liveChosen.length >= 1 && liveChosen.every(candidateFinished))) {
       // Nothing to batch (0 or 1 eligible candidate) — a solo confirm buys nothing over the ordinary path.
       const fallback = await runFallback([
         ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: "fewer than 2 eligible candidates — batching buys nothing over a solo confirm" })),
@@ -15946,16 +16049,10 @@ export class SessionService {
     //  required to avoid an immortal cached rejection; `batchAlreadyFinished` short-circuits only when
     //  EVERY candidate is finished, never a mixed batch.
     //
-    const batchAlreadyFinished = chosen.every((c) => {
-      const worker = this.db.getSession(c.workerSessionId);
-      const worktreeGone = !(worker?.worktreePath ?? worker?.cwd) || !fs.existsSync((worker.worktreePath ?? worker.cwd)!);
-      const taskAlreadyTerminal = c.taskId != null && (() => {
-        const task = this.db.getTask(c.taskId!);
-        const terminalKey = task ? this.columnKeyForProjectRole(task.projectId, "terminal") : undefined;
-        return !!task && !!terminalKey && task.columnKey === terminalKey;
-      })();
-      return worktreeGone || taskAlreadyTerminal;
-    });
+    // @decision 42daa283 — a HELD (retained) candidate counts as finished for this purpose: its branch tip is expected to differ
+    //  from the identity a cached verdict was minted under, and without this a same-ids re-fire would identity-mismatch into a
+    //  fresh op instead of returning the cached retained verdict. It is never assembled or confirmed either way (see above).
+    const batchAlreadyFinished = chosen.every((c) => candidateFinished(c) || retainedOutstanding.has(c.workerSessionId));
     let verdictIdentity: string | undefined;
     if (!batchAlreadyFinished) {
       try {
@@ -15980,7 +16077,8 @@ export class SessionService {
     return this.pendingOps.attach<MergeBatchResult>(
       batchKey, "merge", managerSessionId, this.syncAttachBudgetMs,
       async (opId) => {
-        const branchIdentities = chosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch }));
+        // The LIVE set only — a held candidate is not a member of this batch (Minor 4: it used to be named here).
+        const branchIdentities = liveChosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch }));
         const evtBatch = (kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>) => this.db.appendEvent({
           id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind,
           detail: { ...detail, opId, branches: branchIdentities },
@@ -16299,7 +16397,7 @@ export class SessionService {
             };
           };
 
-          const batchCandidates: BatchCandidate[] = chosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle }));
+          const batchCandidates: BatchCandidate[] = liveChosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle }));
           const result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
 
           // Release the repo-admission guard extension the gate callback above took on a pass — the guard
@@ -16406,7 +16504,7 @@ export class SessionService {
             };
           }
 
-          const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number }[] = [];
+          const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate }[] = [];
           for (const lb of result.landed) {
             const worker = this.db.getSession(lb.workerSessionId);
             if (!worker) continue;
@@ -16424,6 +16522,34 @@ export class SessionService {
             // (unknown) rather than guessing at a tier nothing here actually verified.
             const mergedVerification: "pathset" | "trailer-only" | null =
               lb.noop ? null : lb.pathSetStamped === false ? "trailer-only" : "pathset";
+            // @decision 42daa283 — a commit added to this branch AFTER the batch assembled it (e.g. while the gate
+            //  ran) is not in the batch HEAD, and finalizeMerge `branch -D`s + force-removes the worktree, which
+            //  would silently destroy it under a "landed" batch. Compare the live tip to the assembled one and, if it
+            //  moved (or cannot be read — fail closed), RETAIN branch + worktree + live worker and surface it.
+            let liveTip: string | null = null;
+            try { liveTip = (await resolveGitRef(finalRepoPath, lb.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
+            // Records the retain durably (Q5: daemon-authored decisions get audited) + in the log; the landed row carries the flag.
+            const noteRetained = (phase: BranchAdvancedDuringGate["phase"], live: string | null): BranchAdvancedDuringGate => {
+              const flag: BranchAdvancedDuringGate = { assembledTip: lb.assembledTip ?? null, liveTip: live, phase };
+              // eslint-disable-next-line no-console
+              console.warn(`[mergeBatch] op ${opId} ${describeBranchRetained(lb.branch, flag.assembledTip, flag.liveTip, phase)}`);
+              try {
+                this.db.appendEvent({
+                  id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "batch_merge_branch_retained",
+                  workerSessionId: lb.workerSessionId, taskId: lb.taskId,
+                  detail: { opId, branch: lb.branch, assembledTip: flag.assembledTip, liveTip: flag.liveTip, phase, landedSha: lb.sha },
+                });
+              } catch { /* audit-only — never fail the batch over a failed event write */ }
+              return flag;
+            };
+            if (!lb.assembledTip || !liveTip || liveTip !== lb.assembledTip) {
+              const branchAdvancedDuringGate = noteRetained("pre-stop", liveTip);
+              landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, branchAdvancedDuringGate });
+              continue;
+            }
+            // m3: the tip is re-checked INSIDE finalizeMerge (after the worker's hard stop/reap, just before the worktree
+            // removal) and the ref is deleted compare-and-swap, so a commit landing in the stop window is retained too.
+            let lateRetained: BranchAdvancedDuringGate | undefined;
             await this.finishAlreadyMerged({
               // @decision 2c16447b — the worker's CURRENT lineage owner, so the post-merge purge/cap-drain
               // reach a recycled successor instead of a dead predecessor (falls back to the captured id).
@@ -16431,11 +16557,13 @@ export class SessionService {
               worktreePath: worker.worktreePath ?? worker.cwd, branch: lb.branch, repoPath: finalRepoPath,
               projectId: finalProjectId, opId: randomUUID(), mergedSha: lb.sha, repoKey: c?.repoKey ?? null,
               mergedVerification, suppressNotify: true,
+              expectedBranchTip: lb.assembledTip,
+              onBranchRetained: (live, phase) => { lateRetained = noteRetained(phase, live); },
             });
             // strippedTrailerCount (card b7f965d2): non-zero means this branch's own commit(s) carried a
             // Claude-Session trailer that got stripped before landing — surface it to the calling manager
             // rather than leaving it as a console.warn only the host log would show.
-            landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount });
+            landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, ...(lateRetained ? { branchAdvancedDuringGate: lateRetained } : {}) });
           }
           const droppedFallback = result.dropped.map((d) => ({ workerSessionId: d.workerSessionId, reason: d.reason }));
           const fallback = await runFallback([
@@ -16518,6 +16646,7 @@ export class SessionService {
           ? `[loom:merge-batch-unknown] merge_batch [op ${opId}] errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}; canonical repo state UNKNOWN — check 'git --no-pager log' in the repo for a batch fast-forward before assuming nothing landed.`
           : outcome.value.ok
           ? `[loom:merge-batch-done] merge_batch [op ${opId}] landed ${landedTotal(outcome.value)} branch(es) on main: ${landedList(outcome.value.landed)}.` +
+            (outcome.value.landed.some((l) => l.branchAdvancedDuringGate) ? ` BRANCH TIP MOVED AFTER ASSEMBLY (the extra commit is NOT on main and was never gated): ${outcome.value.landed.filter((l) => l.branchAdvancedDuringGate).map((l) => describeBranchRetained(l.branch, l.branchAdvancedDuringGate!.assembledTip, l.branchAdvancedDuringGate!.liveTip, l.branchAdvancedDuringGate!.phase)).join("; ")}. For a NOT-finalized branch: review the new commit with worker_merge, then land it with worker_merge_confirm — re-firing merge_batch will NOT land it.` : "") +
             (outcome.value.fallback.length ? ` ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}` : "") +
             // Card 67030bb9: the ONE place an async batch settle is announced (per this callback's own
             // header doc) — a retry-assisted batch landing must carry the SAME weaker-pass note the sync
@@ -18247,6 +18376,21 @@ export class SessionService {
     mergedVerification?: "content" | "pathset" | "trailer-only" | null;
     /** Card e8df2659: stamped onto the `merge_done` event when the human-only merge-gate switch was OFF. */
     gateSkipReason?: "gate-disabled";
+    /**
+     * Card 42daa283 — the branch tip the caller's landing was built from (a batch landing states `assembledTip`;
+     * every other caller omits it, byte-identical to before). When present, finalize re-reads the live tip (the
+     * caller has already hard-stopped/reaped the worker) BEFORE touching anything and, if it moved or cannot be
+     * read, RETAINS everything — no sibling sweep, no worktree removal, no task move, no merge_done — calls
+     * `onBranchRetained` and returns. The ref delete below is then a compare-and-swap on this same tip, so a commit
+     * landing in the remaining window is also kept. A late commit is never landed, so it must never be deleted.
+     */
+    expectedBranchTip?: string; onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize") => void;
+    /**
+     * Card 42daa283 — set ONLY by `confirmWorkerMerge`'s Green path: a real, just-created squash of the branch's LIVE tip is the one deliberate
+     * way a HELD branch (see {@link isBranchHeld}) is landed, so its finalize may proceed and its `merge_done` releases the hold. Every other
+     * caller (boot Pass A, ALREADY_MERGED finishes, the batch loop) is REFUSED for a held branch below: nothing finalized, nothing deleted.
+     */
+    releaseHold?: boolean;
   }): Promise<{
     nestedRepoBlock?: { paths: string[]; truncated: boolean };
     /** Task 035fb673: the non-"removed"/non-"nested-repo-blocked" gcWorktreeDir outcome, when one
@@ -18254,6 +18398,20 @@ export class SessionService {
      *  byte-identical to before this field existed. */
     worktreeGcOutcome?: "wedged" | "left-on-disk" | "needs-human-skip";
   }> {
+    if (!args.releaseHold && await this.isBranchHeld(args.branch, args.repoPath)) {
+      // eslint-disable-next-line no-console
+      console.warn(`[finalizeMerge] branch ${args.branch} is HELD by a merge_batch retain — NOT finalizing (no worktree removal, no branch delete, no task move, no merge_done)`);
+      args.onBranchRetained?.(null, "at-finalize");
+      return {};
+    }
+    if (args.expectedBranchTip) {
+      let liveTip: string | null = null;
+      try { liveTip = (await resolveGitRef(args.repoPath, args.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
+      if (!liveTip || liveTip !== args.expectedBranchTip) {
+        args.onBranchRetained?.(liveTip, "at-finalize");
+        return {};
+      }
+    }
     // SIBLING SWEEP first (incident 35fc823f): retire any OTHER live session bound to this task before the
     // worktree is removed, so no zombie is left running in the about-to-be-deleted cwd. The keep is the
     // worker being merged (already hard-stopped by the caller). Covers BOTH confirmWorkerMerge paths
@@ -18262,6 +18420,7 @@ export class SessionService {
     await this.retireSiblingSessionsForTask(args.taskId, args.workerSessionId);
     let nestedRepoBlock: { paths: string[]; truncated: boolean } | undefined;
     let worktreeGcOutcome: "wedged" | "left-on-disk" | "needs-human-skip" | undefined;
+    let worktreeRemoved = false;
     try {
       // The nested-git-repo guard (card b6d41db1) lives IN gcWorktreeDir — the single removal
       // chokepoint every caller (this, boot-reconcile Pass B's two GC sites, the wedge sweep) shares —
@@ -18272,6 +18431,7 @@ export class SessionService {
         projectId: args.projectId,
         worktreeId: codescapeWorktreeId(args.taskId),
       }, { forceRemoveWorktree: args.forceRemoveWorktree, branch: args.branch });
+      worktreeRemoved = result.outcome === "removed";
       if (result.outcome === "nested-repo-blocked") {
         nestedRepoBlock = { paths: result.nestedRepoPaths ?? [], truncated: !!result.scanTruncated };
         // eslint-disable-next-line no-console
@@ -18378,7 +18538,23 @@ export class SessionService {
     // A retained worktree (nested-repo guard above, hit OR inconclusively truncated) is still checked
     // out on `branch` — `git branch -D` would only fail ("checked out at ...") and warn for a reason we
     // already know, so skip it; the branch is deleted on a later confirm once the worktree is actually gone.
-    if (!nestedRepoBlock) await deleteBranch(args.repoPath, args.branch, { timeoutMs: this.gitOpMs });
+    if (!nestedRepoBlock && args.expectedBranchTip && !worktreeRemoved) {
+      // `git update-ref -d` (the CAS below) — unlike `branch -D` — DELETES a branch that is still checked out in a live
+      // worktree. When the worktree was not actually removed (wedged / left-on-disk / needs-human-skip) skip the delete,
+      // matching the solo path's effective refusal: the ref goes on a later confirm once the worktree is genuinely gone.
+      // eslint-disable-next-line no-console
+      console.warn(`[finalizeMerge] branch ${args.branch} NOT deleted: its worktree was not removed (${worktreeGcOutcome ?? "unknown"}), and a compare-and-swap ref delete would drop a checked-out branch`);
+    } else if (!nestedRepoBlock) {
+      // Card 42daa283: with an expected tip this is a COMPARE-AND-SWAP delete; a refusal means the tip moved in the
+      // window since the check above. By now the worktree is gone, the task moved and merge_done filed — this is
+      // FINALIZED with only the ref kept (phase "ref-kept-after-finalize"), never reported as "not finalized".
+      const deleted = await deleteBranch(args.repoPath, args.branch, { timeoutMs: this.gitOpMs, ...(args.expectedBranchTip ? { expectedTip: args.expectedBranchTip } : {}) });
+      if (!deleted) {
+        let liveTip: string | null = null;
+        try { liveTip = (await resolveGitRef(args.repoPath, args.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
+        args.onBranchRetained?.(liveTip, "ref-kept-after-finalize");
+      }
+    }
     // Codescape C3: reingest main's CURRENT working tree AFTER it's been checked out above (both the
     // Green path and the ALREADY_MERGED path converge here) — fire-and-forget, NEVER awaited inline: a
     // big-repo ingest can take up to ~2 minutes, so awaiting it here would hold the merge caller for that
@@ -18638,6 +18814,17 @@ export class SessionService {
             ? null
             : await findLandedSquashCommit(repoPath, s.branch, "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps }, () => { noPathSetTrailerNoticeCount++; });
         if (!landedSha) continue;
+        // Card 42daa283: a HELD branch (a merge_batch retained it: commit(s) landed on it after assembly, never gated or landed) is NEVER finalized
+        // here — its batch commit carries the Loom-Worker-Branch trailer, so the landed-squash lookup above happily "proves" it merged, yet the late
+        // commit would be destroyed by finalize's branch delete + worktree force-remove. Skip it whole: no finalize, no delete, no merge_done.
+        const heldA = await this.isBranchHeld(s.branch, repoPath);
+        if (heldA) {
+          handledWorktrees.add(worktreePath);
+          // eslint-disable-next-line no-console
+          console.warn(heldA.gitUnverified
+            ? `[reconcile] worker ${s.id} (branch ${s.branch}) is HELD by a merge_batch retain and its release could NOT be VERIFIED (a git read of main failed) — skipping its finalize this boot (branch/worktree kept; a later boot retries)`
+            : `[reconcile] worker ${s.id} (branch ${s.branch}) is HELD by a merge_batch retain — skipping its finalize (branch/worktree kept for review)`);          continue;
+        }
         // `landedSha` + `s.repoKey` (card 1eebc46a) are already resolved above (the squash-detection
         // lookup this pass exists to do) — free to persist, no extra git call.
         await this.finalizeMerge({
@@ -18909,7 +19096,10 @@ export class SessionService {
         // (wasted work, a spurious warn, and non-idempotent — see card 09f268a5's test, which proves this
         // exact case via the reclaim COUNT and idempotency, not branch-survival, precisely because the
         // git-level refusal already covers survival on its own).
-        const toDelete = merged.filter((branch) => !checkedOut.has(branch));
+        // Card 42daa283: a HELD branch is never reclaimed either — one shared definition (`isBranchHeld`), looked up once per RETAINED branch, not per swept one.
+        const heldBranches = new Set<string>();
+        for (const b of this.db.listRetainedBranches()) { if (await this.isBranchHeld(b, repoPath)) heldBranches.add(b); }
+        const toDelete = merged.filter((branch) => !checkedOut.has(branch) && !heldBranches.has(branch));
         if (toDelete.length > 0) {
           // Batched (card 09f268a5's measured ~14x win over one-`deleteBranch`-call-per-branch: 14.1s →
           // 0.99s at 275 branches on this host) — `deleteBranches` falls back to per-branch deletes on a

@@ -280,6 +280,29 @@ export async function resolveGitRef(repoPath: string, ref: string, deps: Bounded
 }
 
 /**
+ * Card 42daa283 — is there a commit on HEAD's history, STRICTLY AFTER `afterSha`, carrying a `Loom-Worker-Branch: <branch>` trailer? That is the
+ * durable git fact that a branch a merge_batch retained was later landed by a real squash of its live tip (only the merge code writes those
+ * trailer commits, and a held branch is never re-assembled, so a later one can only be a deliberate confirm). Three-valued and FAIL-CLOSED:
+ * "error" (a git failure/timeout, or `afterSha` not being an ancestor of HEAD so "strictly after" cannot be proven) must be read by the caller as
+ * "not released", never as "none found means released" — the next boot or confirm simply retries.
+ */
+export async function findLaterBranchSquash(repoPath: string, branch: string, afterSha: string, deps: BoundedGitDeps = {}): Promise<"found" | "none" | "error"> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    // Compare merge-base OUTPUT to afterSha (never `--is-ancestor`: simple-git resolves its exit-1 "no" as success — see batch-merge.ts).
+    const mb = (await withTimeout(git.raw(["merge-base", afterSha, "HEAD"]), timeoutMs, "git merge-base (later branch squash)")).trim();
+    if (mb !== afterSha) return "error";
+    const out = (await withTimeout(
+      git.raw(["rev-list", "-n", "1", "--fixed-strings", `--grep=Loom-Worker-Branch: ${branch}`, `${afterSha}..HEAD`]),
+      timeoutMs, "git rev-list --grep (later branch squash)",
+    )).trim();
+    return out ? "found" : "none";
+  } catch {
+    return "error";
+  }
+}
+
+/**
  * Per-creation ceiling for the at-creation dep install. Generous (a warm-store frozen install is
  * usually seconds), but BOUNDED so a wedged/slow `pnpm install` can never hold up the spawn path
  * indefinitely. Far larger than {@link GIT_OP_TIMEOUT_MS} because an install legitimately takes longer
@@ -976,18 +999,44 @@ export async function createWorktree(
  * lock) must not wedge boot. The op runs through the same block-timeout + {@link withTimeout} guard;
  * a timeout-throw is swallowed + warned exactly like any other delete failure.
  */
-export async function deleteBranch(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<void> {
+export async function deleteBranch(repoPath: string, branch: string, deps: BoundedGitDeps & {
+  /** COMPARE-AND-SWAP (card 42daa283): delete only if the branch still points at exactly this commit —
+   *  `git update-ref -d refs/heads/<b> <expectedTip>` instead of `branch -D`. A tip that moved since the caller
+   *  read it (a worker's late commit) makes git refuse, and the branch is RETAINED. Omitted ⇒ unchanged `branch -D`. */
+  expectedTip?: string;
+} = {}): Promise<boolean> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
-    await withTimeout(git.raw(["branch", "-D", branch]), timeoutMs, "git branch -D");
+    if (deps.expectedTip) {
+      await withTimeout(git.raw(["update-ref", "-d", `refs/heads/${branch}`, deps.expectedTip]), timeoutMs, "git update-ref -d (compare-and-swap)");
+    } else {
+      await withTimeout(git.raw(["branch", "-D", branch]), timeoutMs, "git branch -D");
+    }
+    return true;
   } catch (e) {
     const msg = (e as Error).message;
     // `branch '…' not found` is the DESIRED idempotent end state (the branch is already gone — e.g. a
     // re-run after a prior delete, or a never-created branch) — treat as success, no warn. Keep warning
     // on genuine failures (busy ref lock, timeout, etc.).
-    if (/not found/i.test(msg)) return;
+    if (/not found/i.test(msg)) return true;
+    if (deps.expectedTip) {
+      // The CAS refused. Distinguish "already gone" (idempotent success) from "moved" (RETAINED, returns false).
+      // `--quiet` + no match prints nothing (simple-git resolves a silent non-zero exit), so read the OUTPUT.
+      try {
+        const cur = (await withTimeout(git.raw(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]), timeoutMs, "git rev-parse (deleteBranch CAS follow-up)")).trim();
+        if (!cur) return true;
+        // An UNMOVED tip means the CAS failed for some OTHER reason (ref lock, timeout): that is a plain delete
+        // failure — reported by the generic warning below, never a bogus "moved" retain.
+        if (cur !== deps.expectedTip) {
+          // eslint-disable-next-line no-console
+          console.warn(`[worktree] branch ${branch} RETAINED: tip is now ${cur.slice(0, 8)}, not the expected ${deps.expectedTip.slice(0, 8)} (${msg})`);
+          return false;
+        }
+      } catch { /* fall through to the generic failure warning */ }
+    }
     // eslint-disable-next-line no-console
     console.warn(`[worktree] could not delete merged branch ${branch}: ${msg}`);
+    return true;
   }
 }
 

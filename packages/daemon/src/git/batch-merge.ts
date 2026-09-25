@@ -119,6 +119,10 @@ export interface BatchLandedBranch extends BatchCandidate {
    *  from a commit that predates this trailer entirely or was never stamped for any other reason. Does NOT
    *  fail the merge itself: the commit above already landed and stays valid without the trailers. */
   pathSetStamped?: boolean;
+  /** The branch tip the batch ASSEMBLED from (card 42daa283). A commit a worker adds afterwards is not in the
+   *  batch and not in this sha, so the finalizer compares the live tip against it and RETAINS the branch +
+   *  worktree when it moved, rather than `branch -D`-ing a commit that never landed. */
+  assembledTip?: string;
 }
 
 export interface BatchDroppedBranch extends BatchCandidate {
@@ -155,6 +159,8 @@ interface LandResult {
   emptyKind?: MergeEmptyKind;
   strippedTrailerCount?: number;
   pathSetStamped?: boolean;
+  /** The branch tip this landing was assembled from (resolved once, at the top of the land). */
+  branchTip?: string;
 }
 
 /** Bound on how many merge commits one branch may carry before it is dropped unexamined (each is up to
@@ -268,8 +274,8 @@ async function landBranchCommitsIndividually(
     // batch was cut). Classify exactly like the solo path's own noop branch.
     const landedSha = await findLandedSquashCommit(batchWorktreePath, branch, "HEAD", deps);
     return landedSha
-      ? { ok: true, noop: true, emptyKind: "ALREADY_MERGED", sha: landedSha }
-      : { ok: true, noop: true, emptyKind: "STAGE_EMPTY_RETRY" };
+      ? { ok: true, noop: true, emptyKind: "ALREADY_MERGED", sha: landedSha, branchTip }
+      : { ok: true, noop: true, emptyKind: "STAGE_EMPTY_RETRY", branchTip };
   }
 
   let commitShas: string[];
@@ -463,7 +469,7 @@ async function landBranchCommitsIndividually(
   try {
     const landedSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, post-commit)")).trim();
     const landedSubject = (await withTimeout(git.raw(["log", "-1", "--format=%s"]), timeoutMs, "git log -1 subject (batch land)")).trim();
-    return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount, pathSetStamped };
+    return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount, pathSetStamped, branchTip };
   } catch (e) {
     return { ok: false, reason: `${branch}: landed but failed to read the result: ${(e as Error).message}` };
   }
@@ -584,7 +590,7 @@ export async function assembleBatchBranches(
     }
     if (r.noop) {
       if (r.emptyKind === "ALREADY_MERGED" && r.sha) {
-        landed.push({ ...c, sha: r.sha, subject: r.subject ?? (c.taskTitle ?? c.branch), noop: true });
+        landed.push({ ...c, sha: r.sha, subject: r.subject ?? (c.taskTitle ?? c.branch), noop: true, assembledTip: r.branchTip });
       } else {
         // STAGE_EMPTY_RETRY (or an ALREADY_MERGED with no resolvable sha) — genuinely nothing this batch
         // can prove either way; let the individual fallback path (today's confirmWorkerMerge, which has
@@ -597,7 +603,7 @@ export async function assembleBatchBranches(
       dropped.push({ ...c, reason: "batch land reported ok with no sha/subject" });
       continue;
     }
-    landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount, pathSetStamped: r.pathSetStamped });
+    landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount, pathSetStamped: r.pathSetStamped, assembledTip: r.branchTip });
   }
   return { landed, dropped };
 }
