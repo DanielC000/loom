@@ -347,6 +347,20 @@ try {
   try { db.db.prepare("INSERT INTO task_relations (id, project_id, from_task_id, to_task_id, type, declared, gates_deferral, released, created_at) VALUES ('x','pRepo','a','b','blocks',0,0,0,'t')").run(); } catch { checkRejected = true; }
   check("(Z) the CHECK constraint rejects an edge row with declared=gates=released=0", checkRejected);
 
+  // ---------------- (O) OUTGOING blocks items: resolved comes from the edge's BLOCKER (the displayed card), card dc1e27fe ----------------
+  const oDone = mk("outgoing: finished blocker"); const oOpen = mk("outgoing: not-done blocker"); const oTarget = mk("outgoing: blocked card", { columnKey: "todo" });
+  await upd(oDone.id, { blocks: [oTarget.id] });
+  await upd(oOpen.id, { blocks: [oTarget.id] });
+  await upd(oDone.id, { columnKey: "done" });
+  const oDoneOut = view(oDone.id).relations.blocks.find((r) => r.id === oTarget.id);
+  const oOpenOut = view(oOpen.id).relations.blocks.find((r) => r.id === oTarget.id);
+  check("(O) a TERMINAL-lane blocker's OUTGOING blocks item reads resolved:true (the blocked card is still To Do)", oDoneOut?.resolved === true);
+  check("(O) a NOT-DONE blocker's outgoing item reads resolved:false", oOpenOut?.resolved === false);
+  const oIn = view(oTarget.id).relations.blockedBy;
+  check("(O) the reverse side agrees: the blocked card's blockedBy shows the finished blocker resolved and the open one not", oIn.find((r) => r.id === oDone.id)?.resolved === true && oIn.find((r) => r.id === oOpen.id)?.resolved === false);
+  await upd(oTarget.id, { columnKey: "done" });
+  check("(O) closing the BLOCKED card does not resolve an open blocker's outgoing edge", view(oOpen.id).relations.blocks.find((r) => r.id === oTarget.id)?.resolved === false);
+
   // ---------------- (V) views + caps ----------------
   const bigEpic = mk("wide epic");
   for (let i = 0; i < 105; i++) { const k = mk(`wide child ${i}`); db.setTaskParent(k.id, bigEpic.id); if (i < 5) db.updateTask(k.id, { columnKey: "done" }); }

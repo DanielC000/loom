@@ -121,11 +121,14 @@ export function buildRelationView(db: Db, task: Task): TaskRelationView {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const terminalKey = terminalKeyFor(db, task.projectId);
   const edges = db.listRelations(task.projectId);
-  const ref = (id: string, withResolved: boolean, releasedOnly = false): TaskRelationRef | undefined => {
+  // `id` is the card SHOWN in the item; `blockerId` is the edge's BLOCKER, whose state `resolved` reports (same
+  // isOpenBlocker/isCardDone rule for blockedBy AND blocks — card dc1e27fe: an outgoing item used to evaluate
+  // the blocked card instead). For blockedBy the shown card IS the blocker; for blocks the blocker is this card.
+  const ref = (id: string, withResolved: boolean, releasedOnly = false, blockerId: string = id): TaskRelationRef | undefined => {
     const t = byId.get(id);
     if (!t) return undefined; // a dangling id has nothing to show
     return withResolved
-      ? { id: t.id, title: t.title, columnKey: t.columnKey, resolved: releasedOnly || !isOpenBlocker(t, terminalKey), ...(releasedOnly ? { released: true as const } : {}) }
+      ? { id: t.id, title: t.title, columnKey: t.columnKey, resolved: releasedOnly || !isOpenBlocker(byId.get(blockerId), terminalKey), ...(releasedOnly ? { released: true as const } : {}) }
       : { id: t.id, title: t.title, columnKey: t.columnKey };
   };
   const releasedOnly = (e: TaskRelationRow) => e.released && !isLiveEdge({ declared: e.declared, gates: e.gatesDeferral });
@@ -142,7 +145,7 @@ export function buildRelationView(db: Db, task: Task): TaskRelationView {
     },
     relations: {
       blockedBy: pick(edges.filter((e) => e.type === "blocks" && e.toTaskId === task.id).map((e) => ref(e.fromTaskId, true, releasedOnly(e)))),
-      blocks: pick(edges.filter((e) => e.type === "blocks" && e.fromTaskId === task.id).map((e) => ref(e.toTaskId, true, releasedOnly(e)))),
+      blocks: pick(edges.filter((e) => e.type === "blocks" && e.fromTaskId === task.id).map((e) => ref(e.toTaskId, true, releasedOnly(e), e.fromTaskId))),
       related: pick(edges.filter((e) => e.type === "related" && (e.fromTaskId === task.id || e.toTaskId === task.id)).map((e) => ref(e.fromTaskId === task.id ? e.toTaskId : e.fromTaskId, false))),
       discoveredFrom: pick(edges.filter((e) => e.type === "discovered-from" && e.fromTaskId === task.id).map((e) => ref(e.toTaskId, false))),
       discoveries: pick(edges.filter((e) => e.type === "discovered-from" && e.toTaskId === task.id).map((e) => ref(e.fromTaskId, false))),

@@ -142,26 +142,13 @@ test("board cards show parent, child progress and a blocked marker; the drawer l
   expect(new Set(seenBlockers.map((b) => b.id))).toEqual(new Set([blocker.id, doneChild.id]));
   expect(seenBlockers.find((b) => b.id === blocker.id)?.resolved).toBe(false);
   expect(seenBlockers.find((b) => b.id === doneChild.id)?.resolved).toBe(true);
-  // ⚠️ PINNED TO A KNOWN BUG, DELIBERATELY — card dc1e27fe. Read this before "fixing" the assertion.
-  //
-  // `buildRelationView` (packages/daemon/src/tasks/relations.ts, the `ref()` helper) computes `resolved`
-  // from the card it is DISPLAYING rather than from the edge's blocker:
-  //   blockedBy → ref(e.fromTaskId) = the blocker  → "has my blocker landed?"    ✅ correct
-  //   blocks    → ref(e.toTaskId)   = the blocked  → "is the card I block done?" ❌ the bug
-  // So doneChild is terminal, yet its OUTGOING edge reads resolved:false because openChild (To Do) isn't.
-  // The decision record is AUTHORITATIVE and correct ("resolved is on the edge's BLOCKER side for both");
-  // the code is wrong. Confirmed by the manager and carded as dc1e27fe.
-  //
-  // This expects `false` — today's buggy value — ON PURPOSE, so the bug cannot quietly persist unnoticed.
-  // WHEN dc1e27fe LANDS THIS ASSERTION WILL FAIL. That is the intended signal, not a regression: flip the
-  // expected value to `true` (and the UI assertion in the click-through below, which expects no
-  // "(resolved)" marker on this card, to expect one). Do NOT weaken it to accept either value — that would
-  // throw away the only thing here that will tell anyone the fix actually shipped.
-  // The UI needs no change either way: it renders whatever `resolved` says.
+  // `resolved` on an edge is always evaluated on the edge's BLOCKER (card dc1e27fe fixed the outgoing side, which
+  // used to evaluate the blocked card): doneChild is terminal, so its OUTGOING edge to openChild (still To Do)
+  // reads resolved:true, exactly like the blockedBy item on the other side.
   const doneChildRow = await readTask(baseURL, loopbackSecret, doneChild.id);
   const blocksOut = (doneChildRow.relations?.blocks ?? []) as { id: string; resolved: boolean }[];
   expect(blocksOut.map((b) => b.id)).toEqual([openChild.id]);
-  expect(blocksOut[0]?.resolved).toBe(false);
+  expect(blocksOut[0]?.resolved).toBe(true);
   const epicRow = await readTask(baseURL, loopbackSecret, epic.id);
   expect(epicRow.children).toMatchObject({ done: 1, total: 2 });
   expect((epicRow.relations?.discoveries ?? []).map((d: { id: string }) => d.id)).toEqual([openChild.id]);
@@ -274,18 +261,15 @@ test("board cards show parent, child progress and a blocked marker; the drawer l
   await expect(linksBlock(page).getByText("(resolved)", { exact: true })).toHaveCount(0);
   await shoot(dialog, "board-hierarchy-drawer-blocker.png");
 
-  // ── The `blocks` direction renders from the same field, whatever it says ──────────────────────────
-  // doneChild's outgoing edge reads resolved:false today because of bug dc1e27fe (see the pinned note at
-  // the seeding block above), so it renders LIVE here. The point is that the drawer's history split is
-  // driven by the served field and nothing else — which is why the UI needs no change when that bug is
-  // fixed. FLIP THIS WITH THE PIN ABOVE when dc1e27fe lands: expect the "(resolved)" marker, not its
-  // absence.
+  // ── The `blocks` direction renders from the same field ────────────────────────────────────────────────
+  // doneChild is finished, so its outgoing edge is resolved history and the drawer shows the "(resolved)" marker
+  // (the UI just renders the served field; dc1e27fe fixed what the daemon serves).
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await cardTitleText(page, doneChildTitle).click();
   await expect.poll(() => openCardId(page)).toBe(doneChild.id.slice(0, 8));
   await expect(linkTo(page, "blocks", openChild.id)).toBeVisible();
-  await expect(linksBlock(page).getByText("(resolved)", { exact: true })).toHaveCount(0);
+  await expect(linksBlock(page).getByText("(resolved)", { exact: true })).toHaveCount(1);
 });
 
 test("the drawer's Parent field resolves an id prefix, names the resolved card, and refuses a bad one", async ({ page, loomDaemon }) => {
