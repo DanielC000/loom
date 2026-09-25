@@ -4391,10 +4391,11 @@ export class Db {
     return { ok: true, token: toGatewayTokenPublic(rec) };
   }
 
-  // --- remote-gateway auth-failure lockout (access-story Phase C, card 6bc02f50) ----------------
-  // Per-ip counterpart to the companion_pairing_attempts lockout above — SAME shared primitive
-  // (security/lockout.ts), keyed on the remote caller's ip instead of (channel, sender_id). Consulted by
-  // the trust-tier onRequest hook (gateway/server.ts) via gateway/remote-rate-limit.ts.
+  // --- remote-gateway auth-failure lockout (access-story Phase C, card 6bc02f50) — LEGACY, no longer consulted ----
+  // Card 179b6227 replaced the db-backed per-ip hard lockout with an in-memory failed-auth throttle
+  // (gateway/remote-rate-limit.ts). Nothing in src reads or writes `gateway_auth_attempts` any more; the table and
+  // these three methods remain (no schema change) so a row persisted before the upgrade is inert, and a test can seed
+  // one to prove that. Safe to delete together in a later schema cleanup.
 
   /** The current lockout-state row for an ip; undefined = never failed (or already cleared). */
   getGatewayAuthAttempts(ip: string): LockoutState | undefined {

@@ -386,11 +386,11 @@ try {
   wsOkFleet.close();
 
   // --- (3e) CR follow-up on card 42abca6a: a rejected bearer-only WS offer must share the SAME per-ip
-  // rate-limit/lockout gate as any other 401 — NOT bypass it via an early return before isIpLockedOut/
-  // allowRequest run. Plain .inject() (no real upgrade) is sufficient: the trust-tier onRequest hook
-  // terminates a rejected/locked-out request before Fastify ever attempts to hijack the socket, so the
+  // rate-limit/failed-auth throttle as any other 401 — NOT bypass it via an early return before the per-ip
+  // pre-auth cap / failed-auth throttle run. Plain .inject() (no real upgrade) is sufficient: the trust-tier onRequest hook
+  // terminates a rejected/throttled request before Fastify ever attempts to hijack the socket, so the
   // status code alone proves the gate. Uses a dedicated ip so its failure count can't mix with
-  // 203.0.113.5's use elsewhere in this file. maxAttempts=5 is the default authFailLockout policy
+  // 203.0.113.5's use elsewhere in this file. maxAttempts=5 is the default authFailLockout policy (now the throttle limit)
   // (unset here, same as gateway/server.ts's own fallback).
   const spamIp = "203.0.113.77";
   const bearerOnlyRejectedHeaders = { host: "127.0.0.1", "sec-websocket-protocol": `${WS_BEARER_PREFIX}${GOOD_TOKEN}` };
@@ -401,7 +401,7 @@ try {
   }
   check("(3e) 5 rejected bearer-only WS offers from one ip each 401 (folded into the rate-limited path, each counted as an auth failure)", allFiveWere401);
   const sixthFromSameIp = await appOn.inject({ method: "GET", url: "/ws/companion/sess-spam", remoteAddress: spamIp, headers: bearerOnlyRejectedHeaders });
-  check("(3e) the 6th rejected bearer-only offer from the SAME ip is now LOCKED OUT (429) — proves the DoS-cap bypass the CR flagged is closed", sixthFromSameIp.statusCode === 429);
+  check("(3e) the 6th rejected bearer-only offer from the SAME ip is now THROTTLED (429) — proves the DoS-cap bypass the CR flagged is closed", sixthFromSameIp.statusCode === 429);
 } finally {
   await appOn.close();
   dbOn.close();

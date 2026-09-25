@@ -805,14 +805,15 @@ const remoteAccessOverride = z.object({
   tls: z.object({ certPath: z.string().min(1), keyPath: z.string().min(1) }).strict().optional(),
   // rateLimit upper bounds (77ade04c): a human-settable cap large enough to be harmless, small enough
   // that a fat-fingered "0" or a stray extra zero can't silently defeat the limiter (e.g. a billion
-  // requests/min) or leave a lockout that never expires (a 24h ceiling on lockoutMs).
+  // requests/min). `lockoutMs` is IGNORED since card 179b6227 (the failed-auth path is a throttle, never a lock); it is
+  // kept, with its old 24h ceiling, only so an already-stored override keeps validating.
   rateLimit: z.object({
     perIpPerMin: z.number().int().min(1).max(100000),
     perTokenPerMin: z.number().int().min(1).max(100000),
     authFailLockout: z.object({
       maxAttempts: z.number().int().min(1).max(1000),
       windowMs: z.number().int().min(1000).max(3600000), // 1s..1h
-      lockoutMs: z.number().int().min(1000).max(86400000), // 1s..24h
+      lockoutMs: z.number().int().min(1000).max(86400000), // 1s..24h — IGNORED, kept for compat (see above)
     }).strict(),
   }).strict().optional(),
 }).strict();

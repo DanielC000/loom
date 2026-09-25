@@ -1,9 +1,9 @@
 /**
  * A generic sliding-window failed-attempt lockout — the shared primitive behind BOTH the companion
  * DM-pairing rate-limit (companion/pairing.ts + db.ts's `companion_pairing_attempts`, keyed on
- * (channel, senderId)) and the access-story remote-gateway auth-failure lockout (Phase C, card 6bc02f50 —
- * gateway/remote-rate-limit.ts + db.ts's `gateway_auth_attempts`, keyed on ip). Pure + db/fs-free so both
- * call sites share the SAME algorithm (generalized, not forked) and it's unit-testable without SQLite.
+ * (channel, senderId)). The access-story remote-gateway lockout (card 6bc02f50, `gateway_auth_attempts`) also used
+ * it until card 179b6227 replaced that with an in-memory throttle; only the legacy db methods still reference it.
+ * Pure + db/fs-free so it is unit-testable without SQLite.
  */
 
 export interface LockoutState {

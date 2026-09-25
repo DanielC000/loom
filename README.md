@@ -205,8 +205,7 @@ Loom can also bind a non-loopback interface itself. It is **off by default**, an
   is already encrypted). Point `remoteAccess.tls` at a cert and key; without readable material the daemon **refuses to open the remote listener and stays loopback-only** rather than serving plaintext.
 - **Routes are allowlisted, fail-closed.** Only an explicitly listed set — reads, plus the surfaces you
   need to actually answer and steer (the Requests inbox, session input/stop/resume/end), plus the live session sockets: the terminal stream (view-only to a remote peer; steering goes through the governed REST input route, and host shells are never reachable remotely), the companion chat stream, and a fleet-status feed. Everything else, including every change to configuration, every human-only writer, and the SPA's own static routes, is loopback-only by construction: a new route is unreachable from the remote bind until someone deliberately allowlists it.
-- **Remote requests are rate-limited** per caller IP and per token, with a lockout on repeated auth
-  failures. The loopback path is exempt.
+- **Remote requests are rate-limited** per caller IP and per token; repeated wrong-token attempts from one IP are throttled (429), never hard-locked, so a valid token is never blocked by someone else's failures on a shared IP. The loopback path is exempt.
 
 Three things to know before you turn it on:
 

@@ -895,8 +895,10 @@ export interface RemoteAccessConfig {
     perIpPerMin: number;
     /** Sliding-window request cap per presented gateway token, per minute. */
     perTokenPerMin: number;
-    /** Auth-failure backoff/lockout, keyed on the caller's ip — reuses the SAME sliding-window-lockout
-     *  primitive (security/lockout.ts) as the companion DM-pairing coordinator's rate-limit. */
+    /** Failed-auth THROTTLE (card 179b6227), keyed on the caller's ip (one shared bucket on the trusted-proxy class):
+     *  at most `maxAttempts` presented-but-invalid tokens per `windowMs`, then 429 on the failure path only — a valid
+     *  token is never blocked. In memory. `lockoutMs` is IGNORED (there is no hard lock any more); it stays in the
+     *  shape only so an existing stored override keeps validating. */
     authFailLockout: { maxAttempts: number; windowMs: number; lockoutMs: number };
   };
 }

@@ -1,16 +1,14 @@
 /**
- * Access-story Phase C (card 6bc02f50) — the remote-interface rate limiter. Two independent controls,
- * both consulted ONLY from the trust-tier onRequest hook (gateway/server.ts) — after its loopback-peer
- * early-return, so the loopback fast path never touches this module at all:
- *   1. A per-ip AND per-token SLIDING-WINDOW request cap (in-memory; a daemon restart resets it — a
- *      request-rate cap doesn't need to survive a restart, unlike the auth-failure lockout below).
- *   2. An auth-failure LOCKOUT keyed on the caller's ip, backed by db.ts's `gateway_auth_attempts` table,
- *      which shares the SAME sliding-window-lockout primitive (security/lockout.ts) the companion
- *      DM-pairing coordinator uses — generalized, not forked.
+ * Access-story Phase C (card 6bc02f50) — the remote-interface rate limiter, all in memory (a daemon restart resets
+ * it), consulted ONLY from the trust-tier onRequest hook (gateway/server.ts) — after its loopback-peer early-return,
+ * so the loopback fast path never touches this module at all. Two kinds of control, both sliding-window:
+ *   1. Request caps: per VALID token, and per ip (or one shared bucket on the trusted-proxy class) for requests that
+ *      did not verify.
+ *   2. A failed-auth THROTTLE (card 179b6227 — replaced the old db-backed per-ip hard lockout): only the FAILURE
+ *      path is limited, and it answers 429, never a lock; a VALID token is never gated by an ip's failure count.
+ * The direct and trusted-proxy listeners share ONE verify-first sequence (server.ts `verifyThenThrottle`,
+ * `@decision 179b6227`); see docs/decisions/4cbbc343-trust-class-follows-the-listener-proxy-mode.md.
  */
-import type { Db } from "../db.js";
-import { isLockedOut } from "../security/lockout.js";
-
 export interface RemoteRateLimitPolicy {
   perIpPerMin: number;
   perTokenPerMin: number;
@@ -18,7 +16,7 @@ export interface RemoteRateLimitPolicy {
 }
 
 /**
- * In-memory per-key sliding-window counter (60s window). Not persisted — see module doc.
+ * In-memory per-key sliding-window counter (60s window unless constructed otherwise). Not persisted — see module doc.
  *
  * Eviction (CR follow-up on card 6bc02f50): a key touched once and never again (the common shape of a
  * volumetric attacker cycling through many distinct source ips/tokens, each hit once) would otherwise sit
@@ -30,11 +28,12 @@ export interface RemoteRateLimitPolicy {
 export class SlidingWindowCounter {
   private hits = new Map<string, number[]>();
   private static readonly SWEEP_THRESHOLD = 2000;
-  /** true = allowed (and recorded this hit); false = the key is already at its per-minute cap. */
-  allow(key: string, limitPerMin: number, nowMs: number): boolean {
-    const windowStart = nowMs - 60_000;
+  constructor(private readonly windowMs: number = 60_000) {}
+  /** true = allowed (and recorded this hit); false = the key is already at `limit` hits within this counter's window. */
+  allow(key: string, limit: number, nowMs: number): boolean {
+    const windowStart = nowMs - this.windowMs;
     const kept = (this.hits.get(key) ?? []).filter((t) => t > windowStart);
-    const allowed = kept.length < limitPerMin;
+    const allowed = kept.length < limit;
     if (allowed) kept.push(nowMs);
     if (kept.length > 0) this.hits.set(key, kept); else this.hits.delete(key);
     if (this.hits.size > SlidingWindowCounter.SWEEP_THRESHOLD) this.sweep(nowMs);
@@ -45,7 +44,7 @@ export class SlidingWindowCounter {
     return this.hits.size;
   }
   private sweep(nowMs: number): void {
-    const windowStart = nowMs - 60_000;
+    const windowStart = nowMs - this.windowMs;
     for (const [key, hits] of this.hits) {
       const kept = hits.filter((t) => t > windowStart);
       if (kept.length === 0) this.hits.delete(key); else this.hits.set(key, kept);
@@ -54,22 +53,23 @@ export class SlidingWindowCounter {
 }
 
 export interface RemoteRateLimiter {
-  /** Sliding-window request cap — call for EVERY remote request (after the loopback exemption), before
-   *  the token-verify step. false ⇒ the caller should reply 429 without doing any further auth work. */
-  allowRequest(ip: string, token: string | undefined, nowMs: number): boolean;
-  /** Is this ip currently locked out from repeated auth failures? Checked BEFORE re-verifying a token,
-   *  mirroring the pairing coordinator's own lockout-gate-before-load ordering. */
-  isIpLockedOut(ip: string, nowMs: number): boolean;
-  /** Record an auth failure for this ip (bumps/locks per policy.authFailLockout). Call ONLY when a
-   *  non-empty token was actually presented and failed verification — an entirely absent token is
-   *  ordinary unauthenticated first contact, not a credential-guessing signal. */
-  recordAuthFailure(ip: string, nowMs: number): void;
-  /** Clear this ip's failure counter — call on a successful token verification. */
-  clearAuthFailures(ip: string): void;
-  /** Trusted-proxy class (card 4cbbc343) — every caller shares one local socket address, so nothing here is keyed by
-   *  ip and nothing ever hard-locks. Per VALID token request cap (the same `perTokenPerMin`); call only AFTER the
-   *  token verified. */
-  allowProxyToken(token: string, nowMs: number): boolean;
+  /** Per-ip sliding-window cap (`perIpPerMin`) for the PUBLIC Tier-2 webhook ingress, the only caller — there is no
+   *  token there (Tier 2 never reads Authorization), so the old per-token branch is gone. Tier 1 goes through
+   *  allowIpPreAuth / allowToken instead. */
+  allowRequest(ip: string, nowMs: number): boolean;
+  /** Card 179b6227 — per-ip request cap for a request whose token did NOT verify (absent/invalid): `perIpPerMin`.
+   *  A VALID token never touches an ip bucket (verify-first), so a guesser sharing the owner's ip (NAT/CGNAT/office)
+   *  cannot exhaust the owner's request budget. */
+  allowIpPreAuth(ip: string, nowMs: number): boolean;
+  /** Throttle (429) — NEVER a hard lock — a PRESENTED-but-invalid credential per ip: `authFailLockout.maxAttempts`
+   *  failures per `authFailLockout.windowMs`, in memory (a restart resets it; tokens are 256-bit so nothing is
+   *  gained by persisting). Call ONLY for a non-empty token that failed verification — an absent token is ordinary
+   *  first contact. A success deliberately does NOT reset it: on a shared ip that would let the owner's success wipe
+   *  a guesser's count. A refused (throttled) call does not extend the window. */
+  allowIpFailedAuth(ip: string, nowMs: number): boolean;
+  /** Per VALID token request cap (`perTokenPerMin`), shared by the direct and trusted-proxy listeners; call only
+   *  AFTER the token verified (verify-first, `@decision 179b6227`). */
+  allowToken(token: string, nowMs: number): boolean;
   /** A generous shared cap over every UNAUTHENTICATED (absent/invalid token) proxy-class request (`perIpPerMin`). */
   allowProxyPreAuth(nowMs: number): boolean;
   /** Throttle (429) — never lock — presented-but-invalid tokens on the proxy class: `PROXY_FAILED_AUTH_PER_MIN` a minute. */
@@ -85,29 +85,20 @@ export const PROXY_FAILED_AUTH_PER_MIN = 30;
  * One rate limiter instance per live trust-tier hook registration (constructed once inside buildServer,
  * scoped to that closure) — a fresh `buildServer()` call, as every daemon test performs, starts with
  * clean in-memory counters; a real daemon carries ONE instance for its whole process lifetime.
+ * `authFailLockout.lockoutMs` is accepted for config compatibility but no longer used (no hard lock exists).
  */
-export function createRemoteRateLimiter(db: Db, policy: RemoteRateLimitPolicy): RemoteRateLimiter {
+export function createRemoteRateLimiter(policy: RemoteRateLimitPolicy): RemoteRateLimiter {
   const ipWindow = new SlidingWindowCounter();
   const tokenWindow = new SlidingWindowCounter();
   const proxyPreAuthWindow = new SlidingWindowCounter();
   const proxyFailWindow = new SlidingWindowCounter();
+  const ipFailWindow = new SlidingWindowCounter(policy.authFailLockout.windowMs);
   return {
-    allowProxyToken(token, nowMs) { return tokenWindow.allow(`token:${token}`, policy.perTokenPerMin, nowMs); },
+    allowToken(token, nowMs) { return tokenWindow.allow(`token:${token}`, policy.perTokenPerMin, nowMs); },
     allowProxyPreAuth(nowMs) { return proxyPreAuthWindow.allow("proxy", policy.perIpPerMin, nowMs); },
     allowProxyFailedAuth(nowMs) { return proxyFailWindow.allow("proxy", PROXY_FAILED_AUTH_PER_MIN, nowMs); },
-    allowRequest(ip, token, nowMs) {
-      if (!ipWindow.allow(`ip:${ip}`, policy.perIpPerMin, nowMs)) return false;
-      if (token && !tokenWindow.allow(`token:${token}`, policy.perTokenPerMin, nowMs)) return false;
-      return true;
-    },
-    isIpLockedOut(ip, nowMs) {
-      return isLockedOut(db.getGatewayAuthAttempts(ip), nowMs);
-    },
-    recordAuthFailure(ip, nowMs) {
-      db.recordGatewayAuthFailure(ip, nowMs, policy.authFailLockout);
-    },
-    clearAuthFailures(ip) {
-      db.clearGatewayAuthAttempts(ip);
-    },
+    allowRequest(ip, nowMs) { return ipWindow.allow(`ip:${ip}`, policy.perIpPerMin, nowMs); },
+    allowIpPreAuth(ip, nowMs) { return ipWindow.allow(`ip:${ip}`, policy.perIpPerMin, nowMs); },
+    allowIpFailedAuth(ip, nowMs) { return ipFailWindow.allow(`ip:${ip}`, policy.authFailLockout.maxAttempts, nowMs); },
   };
 }

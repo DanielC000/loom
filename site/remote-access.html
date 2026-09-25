@@ -576,7 +576,7 @@
               <strong>loopback-only by construction</strong>. A valid remote token
               can never mint, rotate, or revoke tokens over the wire; only the human
               at the local machine can. Remote requests are also rate-limited per IP
-              and per token, with an automatic lockout after repeated auth failures;
+              and per token; repeated wrong-token attempts from one IP are throttled, never hard-locked, so a valid token is never blocked by someone else's failures on a shared IP;
               loopback traffic is exempt.
             </p>
             <p>

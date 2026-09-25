@@ -11,8 +11,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (1) canOpenRemoteListener / tlsRequirementSatisfied / isTailnetHost: refuses a non-loopback bind
 //       without a token, refuses one without TLS (off-tailnet), tailnet bypasses the TLS mandate, and a
 //       loopback/disabled config never needs either.
-//   (2) Rate limiter: N consecutive WRONG-token 401s from an ip → 429 lockout; a per-ip sliding-window
-//       request cap; loopback is fully exempt from both.
+//   (2) Rate limiter (card 179b6227): verify-first — N WRONG-token 401s from an ip then 429 THROTTLE on the failure
+//       path only, never a hard lock (a valid token from the same ip still 200s, and its success doesn't reset the
+//       throttle); a per-ip sliding-window cap on unverified requests; loopback is fully exempt from all of it.
 //   (3) CSRF-Host reconciliation: a remote Host matching the configured bindHost is NOT 403'd by the
 //       CSRF/DNS-rebind hook; a mismatched/attacker Host still 403s.
 //   (4) The tightened validator: bindHost host/IP shape + rateLimit upper bounds.
@@ -44,6 +45,7 @@ const { buildServer, GATEWAY_LOG_SERIALIZERS } = await import("../dist/gateway/s
 const { canOpenRemoteListener, tlsRequirementSatisfied, isTailnetHost, isTrustTierHookActive, isAllInterfacesBindHost } = await import("../dist/gateway/trust-tier.js");
 const { validatePlatformConfigOverride, validateProjectConfigOverride } = await import("../dist/mcp/platform.js");
 const { openRemoteListener } = await import("../dist/gateway/remote-listener.js");
+const { isLockedOut } = await import("../dist/security/lockout.js");
 const { remoteHostAllowlist, remoteListenerRefusalReasons, isForbiddenAllowedHost, canonicalHost } = await import("../dist/gateway/trust-tier.js");
 
 let failures = 0;
@@ -184,7 +186,7 @@ const dbOn = new Db(path.join(TMP, "loom-on.db"));
 dbOn.setPlatformConfig({
   remoteAccess: {
     enabled: true, bindHost: REMOTE_BIND_HOST,
-    rateLimit: { perIpPerMin: 3, perTokenPerMin: 3, authFailLockout: { maxAttempts: 2, windowMs: 600000, lockoutMs: 900000 } },
+    rateLimit: { perIpPerMin: 10, perTokenPerMin: 50, authFailLockout: { maxAttempts: 2, windowMs: 600000, lockoutMs: 900000 } },
   },
 });
 const REMOTE_PORT = 4444; // card 23496950: a remote peer's Origin must be the FULL remote origin (scheme + host + port)
@@ -217,27 +219,46 @@ try {
   });
   check("(3) a remote request with a cross-origin Origin (not the bindHost) still 403s", remoteOriginMismatch.statusCode === 403);
 
-  // --- (2) auth-failure lockout: maxAttempts:2 — two WRONG-token 401s lock this ip out, a THIRD 429s ---
+  // --- (2) auth-failure THROTTLE (card 179b6227): maxAttempts:2 — two WRONG-token 401s, a THIRD failure 429s,
+  //     but a VALID token from the SAME ip is never gated (verify-first; shared NAT/office ip) ---
   const lockoutIp = "203.0.113.10";
   const badTokenReq = () => appOn.inject({
     method: "GET", url: "/api/version", remoteAddress: lockoutIp,
     headers: { host: REMOTE_BIND_HOST, authorization: "Bearer wrong-token-guess" },
   });
-  const fail1 = await badTokenReq();
-  check("(2) 1st wrong-token request → 401 (not yet locked)", fail1.statusCode === 401);
-  const fail2 = await badTokenReq();
-  check("(2) 2nd wrong-token request (hits maxAttempts:2) → 401", fail2.statusCode === 401);
-  const fail3 = await badTokenReq();
-  check("(2) 3rd request from the SAME ip, even with the VALID token, is now locked out → 429", fail3.statusCode === 429);
-  const fail3WithGoodToken = await appOn.inject({
+  const goodTokenReq = () => appOn.inject({
     method: "GET", url: "/api/version", remoteAddress: lockoutIp,
     headers: { host: REMOTE_BIND_HOST, authorization: `Bearer ${GOOD_TOKEN}` },
   });
-  check("(2) ...lockout blocks even a VALID token from this ip until it expires (429, not 200)", fail3WithGoodToken.statusCode === 429);
+  const fail1 = await badTokenReq();
+  check("(2) 1st wrong-token request → 401 (not yet throttled)", fail1.statusCode === 401);
+  const fail2 = await badTokenReq();
+  check("(2) 2nd wrong-token request (hits maxAttempts:2) → 401", fail2.statusCode === 401);
+  const fail3 = await badTokenReq();
+  check("(2b) 3rd WRONG-token request from the SAME ip → 429 failure throttle", fail3.statusCode === 429 && JSON.parse(fail3.body).error.includes("too many failed attempts"));
+  const okAfterGuesser = await goodTokenReq();
+  check("(2a) a VALID token from the SAME ip is NOT blocked by the guesser's failures (200, not 429)", okAfterGuesser.statusCode === 200);
+  const fail4 = await badTokenReq();
+  check("(2c) the valid-token success did NOT wipe the guesser's throttle — the next wrong token is still 429 'too many failed attempts'", fail4.statusCode === 429 && JSON.parse(fail4.body).error.includes("too many failed attempts"));
+  const okAgain = await goodTokenReq();
+  check("(2a) ...and the valid token still succeeds after the throttled failure (200)", okAgain.statusCode === 200);
+  const absentWhileThrottled = await appOn.inject({ method: "GET", url: "/api/version", remoteAddress: lockoutIp, headers: { host: REMOTE_BIND_HOST } });
+  check("(2) an ABSENT token from a throttled ip still gets the ordinary 401 (only presented-and-failed credentials are throttled)", absentWhileThrottled.statusCode === 401);
+
+  // --- (2d) upgrade: a lockout row persisted by the OLD db-backed lockout (gateway_auth_attempts, still in the
+  //     schema, no longer read) is IGNORED — a valid token from that ip succeeds, and the stale row can't throttle.
+  //     No schema change ⇒ no migration; the row is inert. Seeded through the real (retained) db writer.
+  const legacyIp = "203.0.113.13";
+  dbOn.recordGatewayAuthFailure(legacyIp, Date.now(), { maxAttempts: 1, windowMs: 600000, lockoutMs: 900000 });
+  check("(2d) precondition: the legacy row really is a live lockout", isLockedOut(dbOn.getGatewayAuthAttempts(legacyIp), Date.now()) === true);
+  const legacyOk = await appOn.inject({ method: "GET", url: "/api/version", remoteAddress: legacyIp, headers: { host: REMOTE_BIND_HOST, authorization: `Bearer ${GOOD_TOKEN}` } });
+  check("(2d) a valid token from an ip with a persisted legacy lockout row → 200 (row ignored after upgrade)", legacyOk.statusCode === 200);
+  const legacyBad = await appOn.inject({ method: "GET", url: "/api/version", remoteAddress: legacyIp, headers: { host: REMOTE_BIND_HOST, authorization: "Bearer nope" } });
+  check("(2d) ...and a wrong token from it is an ordinary 401 (the stale row counts for nothing)", legacyBad.statusCode === 401);
 
   // An entirely ABSENT token must never itself count toward the lockout (ordinary unauthenticated first
   // contact, not a credential-guessing signal) — a fresh ip can 401 repeatedly with no token and still
-  // succeed once it presents the real one. Kept under perIpPerMin:3 (2 no-token + 1 good-token) so the
+  // succeed once it presents the real one. Kept far under perIpPerMin:10 so the
   // sliding-window request cap below doesn't confound this assertion.
   const noTokenIp = "203.0.113.11";
   for (let i = 0; i < 2; i++) {
@@ -249,20 +270,23 @@ try {
   });
   check("(2) no-token 401s never lock the ip out — a subsequent VALID token still succeeds (200)", thenGood.statusCode === 200);
 
-  // --- (2) sliding-window request cap: perIpPerMin:3 on a fresh ip. Deliberately NO Authorization header
+  // --- (2) sliding-window request cap: perIpPerMin:10 on a fresh ip. Deliberately NO Authorization header
   //     here — isolates the per-ip window from the per-TOKEN window (GOOD_TOKEN's own window already has
   //     hits from earlier assertions above; a shared-token cap is correct real behavior, just not what
   //     THIS assertion is isolating). A request that clears the rate cap but has no token still 401s
   //     (auth runs AFTER the cap check) — what distinguishes cap-exceeded is the 429 on request #4.
   const capIp = "203.0.113.12";
   const capReq = () => appOn.inject({ method: "GET", url: "/api/version", remoteAddress: capIp, headers: { host: REMOTE_BIND_HOST } });
-  const c1 = await capReq(); const c2 = await capReq(); const c3 = await capReq();
-  check("(2) requests 1-3 within the perIpPerMin:3 cap all reach auth (401, not 429 — the ip cap itself isn't tripped yet)", c1.statusCode === 401 && c2.statusCode === 401 && c3.statusCode === 401);
-  const c4 = await capReq();
-  check("(2) the 4th request within the same minute → 429 (sliding-window ip cap, distinct from the auth lockout)", c4.statusCode === 429);
+  let underCap = true;
+  for (let i = 0; i < 10; i++) if ((await capReq()).statusCode !== 401) underCap = false;
+  check("(2) requests 1-10 within the perIpPerMin:10 cap all reach auth (401, not 429 — the ip cap itself isn't tripped yet)", underCap);
+  const c11 = await capReq();
+  check("(2) the 11th request within the same minute → 429 (sliding-window ip cap, distinct from the auth failure throttle)", c11.statusCode === 429 && JSON.parse(c11.body).error === "rate limit exceeded");
+  const capIpValid = await appOn.inject({ method: "GET", url: "/api/version", remoteAddress: capIp, headers: { host: REMOTE_BIND_HOST, authorization: `Bearer ${GOOD_TOKEN}` } });
+  check("(2ii) a VALID token from an ip whose pre-auth cap is exhausted is NOT gated by it (200, verify-first — the ip cap only meters unverified requests)", capIpValid.statusCode === 200);
 
-  // --- (2) loopback exemption: the SAME lockout-triggering ip pattern, but via the loopback interface,
-  //     is untouched — no rate limiting/lockout logic runs at all for a loopback peer.
+  // --- (2) loopback exemption: the SAME throttle-triggering ip pattern, but via the loopback interface,
+  //     is untouched — no rate limiting/throttle logic runs at all for a loopback peer.
   let loopbackFails = 0;
   for (let i = 0; i < 10; i++) {
     const r = await appOn.inject({ method: "GET", url: "/api/version", headers: { host: "127.0.0.1" } }); // default remoteAddress 127.0.0.1
@@ -272,6 +296,34 @@ try {
 } finally {
   await appOn.close();
   dbOn.close();
+}
+
+// ===================== (2i) per-VALID-token request cap, across different ips (card 179b6227) ===================
+// perTokenPerMin:3 on its OWN app/token so no other assertion's traffic touches this token's window. Every request
+// is a VALID token from a DIFFERENT ip, so only the per-token cap (never a per-ip bucket) can produce the 429.
+{
+  const CAP_TOKEN = "test-token-cap-token";
+  const dbCap = new Db(path.join(TMP, "loom-tokencap.db"));
+  dbCap.setPlatformConfig({
+    remoteAccess: {
+      enabled: true, bindHost: REMOTE_BIND_HOST,
+      rateLimit: { perIpPerMin: 100, perTokenPerMin: 3, authFailLockout: { maxAttempts: 5, windowMs: 600000, lockoutMs: 900000 } },
+    },
+  });
+  const appCap = await buildApp(dbCap, { verifyGatewayToken: (t) => t === CAP_TOKEN, remoteEndpoint: { current: { scheme: "https", port: REMOTE_PORT } } });
+  try {
+    const statuses = [];
+    let lastBody = "";
+    for (let i = 0; i < 4; i++) {
+      const r = await appCap.inject({ method: "GET", url: "/api/version", remoteAddress: `203.0.113.${100 + i}`, headers: { host: REMOTE_BIND_HOST, authorization: `Bearer ${CAP_TOKEN}` } });
+      statuses.push(r.statusCode); lastBody = r.body;
+    }
+    check(`(2i) perTokenPerMin+1 valid-token requests from DIFFERENT ips: the first 3 are 200 and the last is 429 "rate limit exceeded" (got ${statuses.join(",")})`,
+      statuses.slice(0, 3).every((c) => c === 200) && statuses[3] === 429 && JSON.parse(lastBody).error === "rate limit exceeded");
+  } finally {
+    await appCap.close();
+    dbCap.close();
+  }
 }
 
 // ===================== (8) CR follow-up — an IPv6-literal bindHost is reachable through the CSRF hook =====
@@ -429,6 +481,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — canOpenRemoteListener refuses a non-loopback bind without a token or (off-tailnet) without TLS while a tailnet bypasses the TLS mandate; the remote rate limiter locks out repeated wrong-token 401s and caps a sliding request window while never touching an absent-token first contact or the loopback interface; the CSRF hook accepts a remote Host/Origin matching the configured bindHost while still refusing a mismatched one; the tightened validator enforces bindHost shape + rateLimit bounds; and only the human-only platform override (never the agent-reachable project override) can set remoteAccess."
+  ? "\n✅ ALL PASS — canOpenRemoteListener refuses a non-loopback bind without a token or (off-tailnet) without TLS while a tailnet bypasses the TLS mandate; the remote rate limiter throttles (429, never hard-locks) repeated wrong-token 401s and caps a sliding request window while never touching an absent-token first contact or the loopback interface; the CSRF hook accepts a remote Host/Origin matching the configured bindHost while still refusing a mismatched one; the tightened validator enforces bindHost shape + rateLimit bounds; and only the human-only platform override (never the agent-reachable project override) can set remoteAccess."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
