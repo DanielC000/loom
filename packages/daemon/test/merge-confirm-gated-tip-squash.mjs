@@ -250,7 +250,7 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
 {
   // (J) HEAD-ONLY ABA: detach → commit → checkout the branch back. Writes NO refs/heads/<branch> reflog entry (asserted below), so only the
   // worktree's own HEAD reflog can see it. Same shape as (H) otherwise: settle head == pre-spawn head, live tip == pinned tip.
-  const { db, mgrId, workerId, repo, worktreePath, branch } = await setupWorkerProject(sfxOf("headaba"));
+  const { db, mgrId, workerId, repo, branch } = await setupWorkerProject(sfxOf("headaba"));
   const branchReflog = () => { try { return execSync(`git reflog show --format=%H refs/heads/${branch}`, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch { return null; } };
   let reflogBefore = null, reflogAfter = null;
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
@@ -268,7 +268,21 @@ const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.conf
   check("(J) instrument check: the branch reflog did NOT change (a branch-reflog-only detector is blind to this shape)", reflogBefore !== null && reflogBefore === reflogAfter);
   check("(J) the HEAD-only round trip is refused as gateTipMoved movedAndBack, nothing squashed", r1.settled === true && r1.ok && r1.value.merged === false && r1.value.gateTipMoved?.movedAndBack === true && !fs.existsSync(path.join(repo, "feature.txt")));
   check("(J) T2 (the detached commit) is not on main", !fs.existsSync(path.join(repo, "t2.txt")));
-  void worktreePath;
+}
+{
+  // (L) HEAD-only move that does NOT return: the worktree is left detached at T2, the branch ref still T1. Refused, but NOT labelled movedAndBack.
+  const { db, mgrId, workerId, repo } = await setupWorkerProject(sfxOf("headleft"));
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
+    runGate: async (_cmd, cwd) => {
+      execSync("git checkout -q --detach", { cwd, stdio: "ignore" });
+      fs.writeFileSync(path.join(cwd, "t2.txt"), "T2\n"); commitAll(cwd, "t2 detached commit", GIT_ID);
+      return PASS;
+    },
+  });
+  const r1 = await confirm(sessions, mgrId, workerId);
+  check("(L) a HEAD-only move that never returns is refused as gateTipMoved", r1.settled === true && r1.ok && r1.value.merged === false && !!r1.value.gateTipMoved && !fs.existsSync(path.join(repo, "feature.txt")));
+  check("(L) it is NOT labelled movedAndBack and names the worktree HEAD it was left on", r1.ok && r1.value.gateTipMoved?.movedAndBack === undefined && r1.value.gateTipMoved?.gated !== r1.value.gateTipMoved?.live && !!r1.value.gateTipMoved?.live);
 }
 {
   // (K) REUSE PATH: a `run_gate` self-check whose own gate saw a tip round trip must NOT be reusable. Head stamps at start/admit/settle all

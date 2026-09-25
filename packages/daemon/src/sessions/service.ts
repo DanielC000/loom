@@ -13183,19 +13183,16 @@ export class SessionService {
   private describeGateHeadCurrency(
     startStamp: WorktreeGateStamp, admitStamp: WorktreeGateStamp, settleStamp: WorktreeGateStamp, roundTrip = false,
   ): { headCurrent: boolean; headWarning?: string } {
-    if (roundTrip) {
-      return {
-        headCurrent: false,
-        headWarning: "the branch/worktree HEAD moved off the admitted commit while this gate was running and came back (an ABA round trip the head stamps cannot see) — what it tested may be a mix of commits. Treat this result as UNVERIFIED and NOT reusable; re-run.",
-      };
-    }
     if (startStamp.head === null || admitStamp.head === null || settleStamp.head === null) {
       return {
         headCurrent: false,
         headWarning: "could not confirm the worktree's HEAD at one or more checkpoints (a git read failed) — treat this result's currency as UNKNOWN, not as confirmed-current.",
       };
     }
-    if (!gateStampsDiffer(startStamp, settleStamp)) return { headCurrent: true };
+    // @decision d099087f — `roundTrip` decides ONLY where the stamps cannot see a move (settle head === admit head): the null-stamp UNKNOWN and
+    // the RACY shape stay first, so a plain mid-run commit that never returns keeps 39196378's RACY wording.
+    const roundTripResult = { headCurrent: false, headWarning: "the branch/worktree HEAD moved off the admitted commit while this gate was running and came back (an ABA round trip the head stamps cannot see) — what it tested may be a mix of commits. Treat this result as UNVERIFIED and NOT reusable; re-run." };
+    if (!gateStampsDiffer(startStamp, settleStamp)) return roundTrip ? roundTripResult : { headCurrent: true };
     const nowHead = settleStamp.head.slice(0, 8);
     if (gateStampsDiffer(admitStamp, settleStamp)) {
       return {
@@ -13203,6 +13200,7 @@ export class SessionService {
         headWarning: `the worktree changed WHILE this gate was actively running (branch HEAD is now ${nowHead}) — this run's own execution window did not see a single stable tree, so what it tested may be an inconsistent mix of old and new files. Treat this result as UNVERIFIED for your current code.`,
       };
     }
+    if (roundTrip) return roundTripResult; // queue-wait relabel AND a mid-run round trip: the "likely DOES cover your current code" text below would understate it
     const validated = startStamp.head.slice(0, 8);
     return {
       headCurrent: false,
@@ -13689,6 +13687,10 @@ export class SessionService {
     // later link) once any link's gate saw the tip leave its pre-spawn head, even if it came back (T1→T2→T1).
     let gatePreReflog: GateReflogSnapshot | null = null;
     let gateHeadLeftDuringRun = false;
+    // Whether the move that set it came BACK (settle worktree HEAD === the pre-spawn head), else where the worktree HEAD was left instead
+    // (a HEAD-only move that never returns, e.g. detached at T2 with the branch ref still T1): only the former is `movedAndBack`.
+    let gateHeadReturned = false;
+    let gateHeadLeftAt: string | undefined;
     // @decision 975c774b — true once ANY link's gate has actually returned in this op: a later link's dirty pre-check is then a
     // `during-gate` outcome that keeps the gate's own verdict, never a `before-gate` refusal that erases it.
     let gateHasRun = false;
@@ -14274,7 +14276,10 @@ export class SessionService {
         gateHasRun = true;
         const post = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         // @decision d099087f — head-equality below is blind to T1→T2→T1; the reflog delta is not.
-        if (gatePreStamp?.head && (!gatePreReflog || gateReflogLeftHead(gatePreStamp.head, gatePreReflog, await snapshotGateReflogs(repoPath, branch, worktreePath, { timeoutMs: this.gitOpMs })))) gateHeadLeftDuringRun = true;
+        if (gatePreStamp?.head && (!gatePreReflog || gateReflogLeftHead(gatePreStamp.head, gatePreReflog, await snapshotGateReflogs(repoPath, branch, worktreePath, { timeoutMs: this.gitOpMs })))) {
+          gateHeadLeftDuringRun = true;
+          if (post.head === gatePreStamp.head) gateHeadReturned = true; else gateHeadLeftAt = post.head ?? undefined;
+        }
         // The pre stamp is clean by construction (a dirty one threw in `captureGatedTip`), so "changed" is: dirt at settle, or
         // an unreadable stamp (fail closed). A CLEAN head move (a commit landed mid-gate) is deliberately NOT flagged here —
         // 8b1fb28f's `confirmGatedIdentity` already owns that shape (re-call re-gates, announced as identity-mismatch).
@@ -15086,7 +15091,7 @@ export class SessionService {
         }
         // @decision d099087f — the tip equals the pinned one, but it LEFT it and came back mid-gate (T1→T2→T1): the PASS ran on mixed content.
         if (gateHeadLeftDuringRun) {
-          return { ...(await refuseGateTipMoved("pre-squash", pinnedGateTip, liveTip, true)), ...gatePassRefusalExtras() };
+          return { ...(await refuseGateTipMoved("pre-squash", pinnedGateTip, gateHeadLeftAt ?? liveTip, gateHeadReturned && !gateHeadLeftAt)), ...gatePassRefusalExtras() };
         }
       }
     }

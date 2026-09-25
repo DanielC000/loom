@@ -11,4 +11,9 @@ Extends 975c774b / c59165b8 (pinned gated tip, outcome `gate-tip-moved`, in `NEV
 - Do not leave the `run_gate` self-check out: its stamps (start/admit/settle) all show the same head after an ABA, so a reused green would skip the merge gate. `describeGateHeadCurrency` takes a `roundTrip` flag (reflog snapshot at admission vs settle) and yields `headCurrent:false`, which makes the result non-reusable.
 - Do not add a new outcome: the refusal is `gateTipMoved` with `movedAndBack:true`, so classification stays `gate-tip-moved` and stays never-cached.
 
+- Do not let `roundTrip` run ahead of `describeGateHeadCurrency`'s other checks: it decides ONLY where the stamps cannot see a move (settle head === admit head, including the queue-wait-relabel case). The null-stamp UNKNOWN and the RACY shape stay first, so a plain mid-run commit that never returns keeps 39196378's RACY wording (`run-gate-head-currency.mjs` pins that).
+- Do not label a HEAD-only move that never returns (worktree left detached at T2, branch ref still T1) `movedAndBack`: only a move whose settle worktree HEAD is back at the pre-spawn head is; the other is refused as an ordinary `gateTipMoved` naming the worktree HEAD it was left on.
+
+Known false refusal: a reflog expiry (e.g. `gc --auto` on an old worktree) that shrinks the reflog or breaks the position anchor during a gate reads as "moved". Rare, fails closed, costs one re-gate.
+
 Known limit: a repo with `core.logAllRefUpdates=false` records no reflog, so the ABA round trip is invisible there (the snapshots compare equal).
