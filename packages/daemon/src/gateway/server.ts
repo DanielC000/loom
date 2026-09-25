@@ -85,7 +85,7 @@ import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from 
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
 import { listCompanionMemories, readCompanionMemory, removeCompanionMemory, authorCompanionMemory } from "../skills/companion-memory-store.js";
-import { routeTier, isStaticShellRoute, isTrustTierHookActive, selectWsSubprotocol, resolveWsSubprotocolToken, remoteHostAllowlist, requestClass, peerAddressOf, resolveRemoteTrust, trustedProxyEntryForHost, proxyOriginAllowed, GATEWAY_TOKEN_REQUIRED_BODY } from "./trust-tier.js";
+import { routeTier, isStaticShellRoute, isTrustTierHookActive, selectWsSubprotocol, resolveWsSubprotocolToken, remoteHostAllowlist, requestClass, peerAddressOf, resolveRemoteTrust, trustedProxyEntryForHost, proxyOriginAllowed, GATEWAY_TOKEN_REQUIRED_BODY, proxyShapedHeaderName, forwardedRefusalBody, createForwardedLogGate } from "./trust-tier.js";
 import type { RequestClass } from "./trust-tier.js";
 import type { RemoteEndpointRef } from "./remote-listener.js";
 import { verifyLoopbackSecret } from "./loopback-secret.js";
@@ -335,7 +335,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Host allowlist, the Origin rule, the fail-closed check below and the listener composition all read it.
   const remoteTrust = resolveRemoteTrust(remoteAccessConfig);
   // The request's trust class, decided ONLY by requestClass (gateway/trust-tier.ts). Pure, so handlers call it directly.
-  const classOf = (req: { raw: Parameters<typeof requestClass>[0] }): RequestClass => requestClass(req.raw, { proxyMode: remoteTrust.proxyMode });
+  const classOf = (req: { raw: Parameters<typeof requestClass>[0] }): RequestClass => requestClass(req.raw);
   // `logger: false`: see GATEWAY_LOG_SERIALIZERS's doc above for the redaction seam to plug in FIRST if
   // this is ever flipped to a real logger.
   const app: FastifyInstance = Fastify({ logger: false });
@@ -419,13 +419,27 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   const hostnameOf = (raw: string, withScheme = false): string | null => {
     try { return new URL(withScheme ? raw : `http://${raw}`).hostname; } catch { return null; }
   };
+  // Card a3d48a15: ONE diagnosable line per header family per minute when a proxy-shaped header downgrades a loopback-peer
+  // request (a mis-pointed reverse proxy, or a local HTTP proxy relaying the claude CLI's MCP calls). Header NAMES only —
+  // this log is shared across tenants, so a value (an address, a token-bearing Via) never goes in.
+  const forwardedLogGate = createForwardedLogGate();
+  const forwardedRefusal = (req: { raw: Parameters<typeof requestClass>[0] }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }) =>
+    reply.code(403).send(forwardedRefusalBody(proxyShapedHeaderName(req.raw.headers) ?? "unknown"));
   app.addHook("onRequest", async (req, reply) => {
     const cls = classOf(req);
+    if (cls.kind === "remote" && cls.via === "forwarded") {
+      const hdr = proxyShapedHeaderName(req.raw.headers);
+      if (hdr !== null && forwardedLogGate(hdr, Date.now())) {
+        console.warn(`[gateway] a request on the daemon's own port carrying the proxy-shaped header "${hdr}" (values never logged) is treated as REMOTE, not loopback. A reverse proxy must target remoteAccess.proxyPort; a local HTTP proxy relaying a local client (HTTP_PROXY/HTTPS_PROXY — Fiddler, Charles, mitmproxy, a corporate agent) needs 127.0.0.1/localhost in NO_PROXY. Logged at most once a minute per header family.`);
+      }
+    }
     // Fail-closed invariant (card 4cbbc343 M1): a request classed remote while NO trust-tier wall is registered can
     // only be a config/wiring inconsistency — refuse it rather than let a remote class fall through to loopback-era
     // guards that assume "remote ⇒ the wall is on".
     // An UNDETERMINABLE peer address (no socket — only a test seam such as `injectWS`) keeps its pre-existing behaviour.
-    if (cls.kind === "remote" && !remoteTrust.tierWall && (cls.via !== "peer" || peerAddressOf(req.raw) !== "")) return reply.code(403).send({ error: "forbidden" });
+    if (cls.kind === "remote" && !remoteTrust.tierWall && (cls.via !== "peer" || peerAddressOf(req.raw) !== "")) {
+      return cls.via === "forwarded" ? forwardedRefusal(req, reply) : reply.code(403).send({ error: "forbidden" });
+    }
     if (cls.kind === "remote" && cls.via === "proxy") {
       // The trusted-proxy listener: trust follows the LISTENER, so this only decides whether the request's own
       // Host/Origin are consistent with a configured entry. Funnel-fronted requests are refused on every route.
@@ -496,11 +510,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // it is public static bytes, and every proxied request arrives from 127.0.0.1, so any shared bucket would let one
       // tailnet peer 429 the owner's own app load (the API paths below keep their throttles).
       if (cls.via === "proxy" && isStaticShellRoute(req.method, routePattern)) return;
-      if (tier === 0) return reply.code(403).send({ error: "forbidden" });
+      if (tier === 0) return cls.via === "forwarded" ? forwardedRefusal(req, reply) : reply.code(403).send({ error: "forbidden" });
       if (tier === 2) {
         // The webhook ingress is not reachable through the trusted-proxy listener (card 4cbbc343): a browser front
         // has no business relaying it, and it would be the one public route on that listener.
-        if (sharedPeer) return reply.code(403).send({ error: "forbidden" });
+        if (sharedPeer) return cls.via === "forwarded" ? forwardedRefusal(req, reply) : reply.code(403).send({ error: "forbidden" });
         // Tier 2 (card 8fbedcac): PUBLIC webhook ingress, signature-gated — NEVER reads Authorization at
         // all, so a Tier-1 gateway token has no code path here (it cannot grant Tier-2 access) and this
         // request can never grant Tier-1 access either — isolation by construction, not a denylist check.

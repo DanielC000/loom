@@ -298,8 +298,9 @@ const LOOPBACK_PEERS: ReadonlySet<string> = new Set(["127.0.0.1", "::1", "::ffff
  *  - `peer`: a non-loopback (or undeterminable) TCP peer.
  *  - `remote-listener`: arrived on the remote listener, even from a loopback peer (card d0f3c8ea).
  *  - `proxy`: arrived on the trusted-proxy listener (card 4cbbc343) — the peer is the local reverse proxy.
- *  - `forwarded`: a loopback peer on the daemon's own port carrying proxy-shaped headers, while proxy mode is
- *    configured — a mis-pointed proxy, or a forgery; only ever LOWERS trust. */
+ *  - `forwarded`: a loopback peer on the daemon's own port carrying proxy-shaped headers — a mis-pointed reverse
+ *    proxy, a local HTTP proxy relaying a client (HTTP_PROXY), or a forgery; only ever LOWERS trust, and (card
+ *    a3d48a15) does so UNCONDITIONALLY, whether or not proxy mode is configured. */
 export type RemoteVia = "peer" | "remote-listener" | "proxy" | "forwarded";
 export type RequestClass = { kind: "loopback" } | { kind: "remote"; via: RemoteVia };
 
@@ -316,24 +317,55 @@ export function markRemoteListenerRequest(req: IncomingMessage): void { remoteLi
 /** Called by the trusted-proxy listener for every request/upgrade it receives. */
 export function markProxyListenerRequest(req: IncomingMessage): void { proxyListenerRequests.add(req); }
 
-/** A header a reverse proxy adds (`X-Forwarded-*`, `Forwarded`, `Via`, `X-Real-IP`, `Tailscale-*`). */
-function hasProxyShapedHeader(headers: IncomingMessage["headers"]): boolean {
+/** The NAME (lower-case, never the value) of the first header a reverse proxy adds (`X-Forwarded-*`, `Forwarded`,
+ *  `Via`, `X-Real-IP`, `Tailscale-*`), or `null`. Capped at 64 chars so a hostile header name can't bloat a log line. */
+export function proxyShapedHeaderName(headers: IncomingMessage["headers"]): string | null {
   for (const name of Object.keys(headers)) {
-    if (name === "forwarded" || name === "via" || name === "x-real-ip" || name.startsWith("x-forwarded-") || name.startsWith("tailscale-")) return true;
+    if (name === "forwarded" || name === "via" || name === "x-real-ip" || name.startsWith("x-forwarded-") || name.startsWith("tailscale-")) return name.slice(0, 64);
   }
-  return false;
+  return null;
 }
 
 /**
  * Classify a request. FAIL-CLOSED: an empty/undeterminable peer address is remote. Pure apart from reading the
- * two listener marks. `proxyMode` = trusted-proxy mode is configured (see `resolveRemoteTrust`).
+ * two listener marks.
+ *
+ * @decision 4cbbc343 — a proxy-shaped header on a loopback peer downgrades to remote UNCONDITIONALLY (card a3d48a15),
+ * never only when proxy mode is configured. Do not re-add a config gate: the user who never configured proxy mode and
+ * points a proxy at the daemon port is exactly the one with no other protection. Presence only ever lowers trust.
  */
-export function requestClass(req: IncomingMessage, opts: { proxyMode: boolean }): RequestClass {
+export function requestClass(req: IncomingMessage): RequestClass {
   if (proxyListenerRequests.has(req)) return REMOTE_CLASSES.proxy;
   if (remoteListenerRequests.has(req)) return REMOTE_CLASSES["remote-listener"];
   if (!LOOPBACK_PEERS.has(req.socket?.remoteAddress ?? "")) return REMOTE_CLASSES.peer;
-  if (opts.proxyMode && hasProxyShapedHeader(req.headers)) return REMOTE_CLASSES.forwarded;
+  if (proxyShapedHeaderName(req.headers) !== null) return REMOTE_CLASSES.forwarded;
   return LOOPBACK_CLASS;
+}
+
+/** The 403 a `forwarded`-class request gets where it is refused (a Tier-0 route or no wall at all): `error` stays the
+ *  generic "forbidden"; `code` + `hint` are additive so a claude CLI / MCP / WS client behind a local HTTP proxy can see WHY
+ *  instead of an opaque 403. Names the header, never its value. */
+export function forwardedRefusalBody(header: string): { error: string; code: string; header: string; hint: string } {
+  return {
+    error: "forbidden",
+    code: "proxy-shaped-header",
+    header,
+    hint: "This request reached the daemon's own port carrying a proxy-shaped header, so it is treated as remote, not local. If a reverse proxy is in front of Loom, point it at remoteAccess.proxyPort. If a local HTTP proxy (HTTP_PROXY/HTTPS_PROXY: Fiddler, Charles, mitmproxy, a corporate agent) is relaying a local client, exclude 127.0.0.1 and localhost via NO_PROXY.",
+  };
+}
+
+/** Log gate: `true` at most once per `intervalMs` per header FAMILY (`forwarded`, `via`, `x-real-ip`, `x-forwarded-*`,
+ *  `tailscale-*`), so a hostile client rotating header names cannot grow the map or flood the shared daemon log. */
+export function createForwardedLogGate(intervalMs = 60_000): (header: string, nowMs: number) => boolean {
+  const last = new Map<string, number>();
+  const familyOf = (h: string): string => (h.startsWith("x-forwarded-") ? "x-forwarded-*" : h.startsWith("tailscale-") ? "tailscale-*" : h);
+  return (header, nowMs) => {
+    const fam = familyOf(header);
+    const prev = last.get(fam);
+    if (prev !== undefined && nowMs - prev < intervalMs) return false;
+    last.set(fam, nowMs);
+    return true;
+  };
 }
 
 /** The TCP peer address, ONLY for keying rate limits / lockouts — never for a trust decision (that is

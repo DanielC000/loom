@@ -30,6 +30,9 @@ export const PATTERNS = [
   { name: "equality test against a loopback literal", re: new RegExp(String.raw`(?:===|!==|==|!=)\s*["']${LOOP}["']|["']${LOOP}["']\s*(?:===|!==|==|!=)`) },
   { name: "Set/array membership built from a loopback literal", re: new RegExp(String.raw`new Set\(\s*\[[^\]]*["']${LOOP}["']`) },
   { name: "`/^127\\./`-style loopback regex", re: /\/\^127\\\./ },
+  // Card a3d48a15 (follow-up 6): a proxy-shaped header-NAME literal is part of the trust decision too — reading one outside
+  // trust-tier.ts is a second place that can decide "this request was proxied" (or, worse, forget to). Quoted literals only.
+  { name: "proxy-shaped header-name literal", re: /(?<!via\s*(?:===|!==|==|!=|:)\s*)["'`](?:x-forwarded-[a-z-]*|forwarded|via|x-real-ip|tailscale-[a-z-]*)["'`]/i }, // the lookbehind spares the class-name compare `cls.via === "forwarded"`, which is not a header name
 ];
 
 /** Files that ARE the predicate (or its host-shape validators): allowed to name peers and loopback literals. */
@@ -37,6 +40,7 @@ const ALLOWED_FILES = new Set(["gateway/trust-tier.ts"]);
 /** Individually justified exceptions elsewhere: [file, pattern name, exact count, why it is NOT a peer-trust decision]. */
 const EXCEPTIONS = [
   ["gateway/server.ts", "equality test against a loopback literal", 1, "isLoopbackHostname — the CSRF hook's Host/Origin HOSTNAME allowlist for the loopback class (a header check, not a peer-address trust decision; the class it applies to is decided by requestClass)"],
+  ["gateway/server.ts", "proxy-shaped header-name literal", 1, "tailscale-funnel-request — a REFUSAL-only check on the proxy listener (it can only deny a request, never grant or lower trust)"],
   ["codescape/supervisor.ts", "equality test against a loopback literal", 1, "validates the hostname of the codescape serve URL Loom itself constructed — no request peer involved"],
 ];
 
@@ -73,9 +77,16 @@ function walk(dir, out = []) {
     [`if (/^127\\./.test(a)) trust();`, "`/^127\\./`-style loopback regex"],
     [`const s = new Set(["x", "::ffff:127.0.0.1"]);`, "Set/array membership built from a loopback literal"],
     [`const a = socket.remoteAddress;`, "bare `remoteAddress` identifier"],
+    [`if (req.headers["x-forwarded-for"]) trust();`, "proxy-shaped header-name literal"],
+    [`const h = 'X-Real-IP';`, "proxy-shaped header-name literal"],
+    [`if (name.startsWith("tailscale-")) x();`, "proxy-shaped header-name literal"],
+    [`if (name === "forwarded" || name === "via") x();`, "proxy-shaped header-name literal"],
+    [`x = cls.via === "peer" ? h["forwarded"] : 0;`, "proxy-shaped header-name literal"],
   ];
   for (const [ln, name] of synthetic) check(`(C) fires on ${name}: ${ln}`, scanText(ln).some((h) => h.name === name));
   check("(C) NEGATIVE control: a bogus/innocuous line returns 0 hits", scanText(`const x = compute(req.method, "GET");`).length === 0);
+  check("(C) NEGATIVE control: comparing the CLASS name `cls.via === \"forwarded\"` is not a header-name literal", scanText(`if (cls.via === "forwarded") x(); if (via !== "forwarded") y(); const k = { via: "forwarded" };`).length === 0);
+  check("(C) NEGATIVE control: the class field `via: \"peer\"` / `cls.via === \"proxy\"` is NOT a header-name literal", scanText(`const c = { kind: "remote", via: "peer" }; if (cls.via === "proxy") x();`).length === 0);
   check("(C) NEGATIVE control: a loopback literal mentioned only in a COMMENT returns 0 hits (comment-stripped)", scanText(`// LOOPBACK.has(req.ip) and req.socket.remoteAddress were the old way\nconst y = 1;`).length === 0);
   check("(C) a listen-host literal that is not a comparison is NOT flagged (\"127.0.0.1\" as a bind address)", scanText(`await app.listen({ port, host: "127.0.0.1" });`).length === 0);
 }

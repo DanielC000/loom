@@ -76,7 +76,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // ===================== (3) requestClass — the ONE predicate ================================================
 {
   const fake = (addr, headers = {}) => ({ socket: addr === undefined ? undefined : { remoteAddress: addr }, headers });
-  const cls = (req, proxyMode = false) => T.requestClass(req, { proxyMode });
+  const cls = (req) => T.requestClass(req);
   const isLoop = (c) => c.kind === "loopback";
   check("(3) 127.0.0.1 / ::1 / ::ffff:127.0.0.1 peers are loopback", ["127.0.0.1", "::1", "::ffff:127.0.0.1"].every((a) => isLoop(cls(fake(a)))));
   check("(3) a LAN / tailnet peer is remote (via peer)", cls(fake("100.64.1.2")).via === "peer" && cls(fake("203.0.113.9")).kind === "remote");
@@ -88,17 +88,19 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("(3) a request on the proxy listener is remote (via proxy) WHATEVER its Host says — even a loopback Host", cls(viaProxy).kind === "remote" && cls(viaProxy).via === "proxy");
   const both = fake("127.0.0.1"); T.markRemoteListenerRequest(both); T.markProxyListenerRequest(both);
   check("(3) ...and the proxy mark wins if a request is (impossibly) marked both", cls(both).via === "proxy");
-  check("(3) proxy-shaped headers on a loopback peer: forwarded class ONLY in proxy mode", cls(fake("127.0.0.1", { "x-forwarded-for": "1.2.3.4" }), true).via === "forwarded" && isLoop(cls(fake("127.0.0.1", { "x-forwarded-for": "1.2.3.4" }), false)));
+  // Card a3d48a15 — DELIBERATELY FLIPPED: this used to assert `forwarded` ONLY in proxy mode (and loopback otherwise). The
+  // downgrade is now UNCONDITIONAL, so the user who never configured proxy mode gets it too.
+  check("(3) proxy-shaped headers on a loopback peer ⇒ forwarded class, UNCONDITIONALLY (card a3d48a15; requestClass takes no proxyMode)", cls(fake("127.0.0.1", { "x-forwarded-for": "1.2.3.4" })).via === "forwarded" && T.requestClass.length === 1);
   for (const h of ["x-forwarded-host", "x-forwarded-proto", "forwarded", "x-real-ip", "via", "tailscale-user-login", "tailscale-funnel-request"]) {
-    check(`(3) header ${h} on a loopback peer in proxy mode ⇒ forwarded (remote)`, cls(fake("127.0.0.1", { [h]: "x" }), true).kind === "remote");
+    check(`(3) header ${h} on a loopback peer ⇒ forwarded (remote)`, cls(fake("127.0.0.1", { [h]: "x" })).kind === "remote");
   }
-  check("(3) an ordinary loopback request with normal headers stays loopback in proxy mode (the control)", isLoop(cls(fake("127.0.0.1", { host: "127.0.0.1:4317", origin: "http://127.0.0.1:5317", authorization: "Bearer x" }), true)));
+  check("(3) an ordinary loopback request with normal headers stays loopback (the control)", isLoop(cls(fake("127.0.0.1", { host: "127.0.0.1:4317", origin: "http://127.0.0.1:5317", authorization: "Bearer x" }))));
   // DOCUMENTED LIMIT (README + site/remote-access.html: "never point a proxy at the daemon's own port"): on the DAEMON'S OWN
   // port the class still follows the peer. A proxy that rewrites Host to 127.0.0.1:<port> and adds NO proxy-shaped header
   // (nginx's default proxy_pass) is indistinguishable from a local client and is loopback — this pins that so the docs'
   // warning can never silently become untrue in either direction.
-  check("(3) LIMIT: loopback Host + NO proxy-shaped header on the daemon port ⇒ loopback, even in proxy mode (why the docs say never point a proxy there)", isLoop(cls(fake("127.0.0.1", { host: "127.0.0.1:4317" }), true)));
-  check("(3) a Host naming a trusted entry does NOT make a loopback peer remote by itself (class follows the listener, not Host)", isLoop(cls(fake("127.0.0.1", { host: "box.tail1.ts.net:8443" }), true)));
+  check("(3) LIMIT: loopback Host + NO proxy-shaped header on the daemon port ⇒ loopback, (why the docs say never point a proxy there)", isLoop(cls(fake("127.0.0.1", { host: "127.0.0.1:4317" }))));
+  check("(3) a Host naming a trusted entry does NOT make a loopback peer remote by itself (class follows the listener, not Host)", isLoop(cls(fake("127.0.0.1", { host: "box.tail1.ts.net:8443" }))));
   check("(3) peerAddressOf reads the socket address (rate-limit key only)", T.peerAddressOf(fake("10.1.2.3")) === "10.1.2.3" && T.peerAddressOf(fake(undefined)) === "");
 }
 
@@ -163,8 +165,12 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
     check("(6a) control: a default loopback GET /api/version is 200 (the config is inert)", ok.statusCode === 200);
     const r = await app0.inject({ method: "GET", url: "/api/version", remoteAddress: "203.0.113.9", headers: { host: "127.0.0.1:4317" } });
     check("(6a) FAIL-CLOSED: a remote-class request with NO wall registered is 403 {error:'forbidden'} (the class body, not the Host check's)", r.statusCode === 403 && JSON.parse(r.body).error === "forbidden");
+    // Card a3d48a15 — DELIBERATELY FLIPPED (was: "with proxy mode OFF ... changes nothing (byte-identical default)", 200).
     const fwd = await app0.inject({ method: "GET", url: "/api/version", headers: { "x-forwarded-for": "198.51.100.7" } });
-    check("(6a) with proxy mode OFF, an X-Forwarded-For header on a loopback request changes nothing (byte-identical default)", fwd.statusCode === 200);
+    const fwdBody = JSON.parse(fwd.body);
+    check("(6a) with proxy mode OFF, an X-Forwarded-For header on a loopback-peer request is now REFUSED 403 (unconditional downgrade), error still 'forbidden'", fwd.statusCode === 403 && fwdBody.error === "forbidden");
+    check("(6a) ...with the additive diagnosable body: code 'proxy-shaped-header', the header NAME, and a hint naming proxyPort + NO_PROXY", fwdBody.code === "proxy-shaped-header" && fwdBody.header === "x-forwarded-for" && /proxyPort/.test(fwdBody.hint) && /NO_PROXY/.test(fwdBody.hint));
+    check("(6a) ...and the body never echoes the header VALUE", !fwd.body.includes("198.51.100.7"));
   } finally { await app0.close(); db0.close(); }
 
   // (6b) proxy mode configured: the wall is registered; a loopback peer on the daemon's own port carrying a proxy header is remote.
@@ -186,6 +192,55 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
     const internal = await app1.inject({ method: "POST", url: "/internal/shutdown", headers: { "x-forwarded-for": "198.51.100.7" }, payload: {} });
     check("(6b) /internal/shutdown from a forwarded-class request is 403 forbidden (never reaches the handler)", internal.statusCode === 403);
   } finally { await app1.close(); db1.close(); }
+
+  // (6c) card a3d48a15 — the refusal is diagnosable on EVERY door (REST, /mcp/:sessionId, a WS upgrade route), with the wall
+  // off (default config) AND on (a Tier-0 route), and logs ONE header-name-only line per header family (no values).
+  const seen = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => { seen.push(args.map(String).join(" ")); };
+  const db2 = new Db(path.join(TMP, "c.db"));
+  const app2 = await build(db2);
+  const db3 = new Db(path.join(TMP, "d.db"));
+  db3.setPlatformConfig({ remoteAccess: { enabled: true, bindHost: "127.0.0.1", proxyPort: 4500, trustedProxyOrigins: ["https://box.tail1.ts.net:8443"] } });
+  const app3 = await build(db3);
+  try {
+    const SECRET = "SECRET-VALUE-9f3a";
+    const isRefusal = (r, hdr) => { try { const b = JSON.parse(r.body); return r.statusCode === 403 && b.code === "proxy-shaped-header" && b.header === hdr && !r.body.includes(SECRET); } catch { return false; } };
+    // no wall (default config): REST, MCP, and a WS route (the hook runs before any upgrade, so a plain GET shows the body)
+    const rest = await app2.inject({ method: "GET", url: "/api/version", headers: { via: SECRET } });
+    const mcp = await app2.inject({ method: "POST", url: "/mcp/some-session", headers: { "x-forwarded-for": SECRET, "content-type": "application/json" }, payload: {} });
+    const ws = await app2.inject({ method: "GET", url: "/ws/fleet", headers: { "x-real-ip": SECRET } });
+    check("(6c) NO wall: REST gets the diagnosable 403 body naming the header", isRefusal(rest, "via"));
+    check("(6c) NO wall: /mcp/:sessionId (the claude CLI's own MCP path) gets the SAME body, not an opaque 403", isRefusal(mcp, "x-forwarded-for"));
+    check("(6c) NO wall: a WS route (/ws/fleet) gets the SAME body", isRefusal(ws, "x-real-ip"));
+    await app2.inject({ method: "GET", url: "/api/version", headers: { via: SECRET } }); // a REPEAT of the same family: must not log again
+    const nonForwardedRemote = await app2.inject({ method: "GET", url: "/api/version", remoteAddress: "203.0.113.9", headers: { host: "127.0.0.1:4317" } });
+    check("(6c) CONTROL: a plain non-loopback peer with no wall keeps the OLD generic 403 body (no code)", nonForwardedRemote.statusCode === 403 && JSON.parse(nonForwardedRemote.body).code === undefined);
+    // the log: header NAMES only, once per family per interval, never a value
+    const lines = seen.filter((l) => l.includes("proxy-shaped header"));
+    check(`(6c) LOG: 4 refusals across 3 header families (via x2, x-forwarded-for, x-real-ip) logged as exactly 3 lines, one each (the repeat is suppressed) (got ${lines.length})`, lines.length === 3 && lines.some((l) => l.includes('"via"')) && lines.some((l) => l.includes('"x-forwarded-for"')) && lines.some((l) => l.includes('"x-real-ip"')));
+    check("(6c) LOG: no line contains a header VALUE", lines.every((l) => !l.includes(SECRET)));
+    check("(6c) LOG: the line names both fixes (proxyPort for a reverse proxy, NO_PROXY for a local HTTP proxy)", lines.every((l) => /proxyPort/.test(l) && /NO_PROXY/.test(l)));
+    check("(6c) LOG: nothing was logged for the ordinary requests (control)", seen.length === lines.length);
+
+    // wall on: Tier-0 routes (MCP, internal) previously got the bare {error:'forbidden'} from the wall
+    const mcpWall = await app3.inject({ method: "POST", url: "/mcp/some-session", headers: { "x-forwarded-for": SECRET, "content-type": "application/json" }, payload: {} });
+    check("(6c) WALL on: /mcp/:sessionId from a forwarded-class request gets the diagnosable body too (the wall's Tier-0 403)", isRefusal(mcpWall, "x-forwarded-for"));
+    const hookWall = await app3.inject({ method: "POST", url: "/hooks/some-endpoint", headers: { "x-forwarded-for": SECRET, "content-type": "application/json" }, payload: {} });
+    check("(6c) WALL on: the Tier-2 webhook ingress refuses a forwarded-class request with the SAME diagnosable body (card a3d48a15 review nit; was a bare 403)", isRefusal(hookWall, "x-forwarded-for"));
+    const plainWall = await app3.inject({ method: "GET", url: "/api/version" });
+    check("(6c) CONTROL: an ordinary loopback request (no proxy header) is untouched (200) with the wall on", plainWall.statusCode === 200);
+  } finally { console.warn = origWarn; await app2.close(); await app3.close(); db2.close(); db3.close(); }
+
+  // the interval bound itself, on the injected clock (no waiting): once per FAMILY per interval; a hostile client rotating
+  // x-forwarded-* names shares ONE family so it can't grow the map or flood the log.
+  const gate = T.createForwardedLogGate(60_000);
+  const T0 = 5_000_000_000_000;
+  check("(6c) gate: the first sighting logs; a repeat inside the interval does not", gate("via", T0) === true && gate("via", T0 + 59_999) === false);
+  check("(6c) gate: it logs again once the interval has elapsed", gate("via", T0 + 60_000) === true);
+  check("(6c) gate: a different family is independent", gate("x-real-ip", T0 + 1) === true);
+  check("(6c) gate: rotating x-forwarded-* / tailscale-* NAMES share one family each (1 line, not N)", gate("x-forwarded-a", T0) === true && gate("x-forwarded-b", T0 + 1) === false && gate("x-forwarded-zzz", T0 + 2) === false && gate("tailscale-user-login", T0) === true && gate("tailscale-funnel-request", T0 + 1) === false);
+  check("(6c) header name is capped at 64 chars", T.proxyShapedHeaderName({ ["x-forwarded-" + "a".repeat(200)]: "v" }).length === 64);
 }
 
 console.log(failures === 0
