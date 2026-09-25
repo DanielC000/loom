@@ -135,8 +135,14 @@ async function setupWorkerProject(sfx, reposDir, gateCommand = "pnpm gate") {
     const tag = `(${sc.link}/${variant})`;
     const sfx = `retry-${sc.link}-${variant}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-mcvc-${sfx}`);
-    const { db, mgrId, workerId, repo, worktreePath, workerSha } = await setupWorkerProject(sfx, reposDir, sc.gate);
-    if (sc.plant) plantTestFile(worktreePath, "flaky-mid");
+    let { db, mgrId, workerId, repo, worktreePath, workerSha } = await setupWorkerProject(sfx, reposDir, sc.gate);
+    if (sc.plant) {
+      plantTestFile(worktreePath, "flaky-mid");
+      // Card 975c774b: the planted files must be COMMITTED before op 1 — a merge gate refuses an untracked/dirty worktree (its verdict
+      // would describe files matching no commit). `workerSha` is re-read so "no gate tip is the pre-forward tip" compares the REAL pre-forward tip.
+      commitAll(worktreePath, "plant flaky-mid", GIT_ID);
+      workerSha = headSha(worktreePath);
+    }
     // Main advances BEFORE op 1 in every scenario so the branch is forwarded: the pre-forward tip (`workerSha`) is then the
     // verdict's unstamped fallback identity and can never coincide with a tip a gate actually ran on.
     fs.writeFileSync(path.join(repo, "main-advance-0.txt"), "advanced\n");

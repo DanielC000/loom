@@ -888,6 +888,32 @@ try {
     check("(M) merged:true", confirm.merged === true);
     check("(M) gateRan:true — CLAUDE.md is a top-level FILE, not under docs/, so isInertMergePath never matches it", confirm.gateRan === true);
   }
+
+  // ── (DIRTY) card 975c774b: a DIRTY worktree + an INERT (docs-only) diff still skips the gate and merges its COMMITTED content ──
+  //   An inert merge spawns no gate, so there is no verdict for uncommitted files to contaminate, and the squash reads commits: the
+  //   dirty-worktree refusal must not fire here (it behaved this way before the refusal existed). Nothing uncommitted may land.
+  {
+    const D = mk("dirty");
+    makeRepo(D);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
+    D.worktreePath = worktreePath; D.branch = branch; worktrees.push(worktreePath);
+    mkdirp(path.join(worktreePath, "docs", "investigations"));
+    fs.writeFileSync(path.join(worktreePath, "docs", "investigations", "note.md"), "findings\n");
+    commitAll(worktreePath, "docs: add finding", GIT_ID);
+    seed(db, D, "pnpm gate");
+    fs.writeFileSync(path.join(worktreePath, "uncommitted-scratch.txt"), "never committed\n");
+
+    const confirm = await sessions.confirmWorkerMerge(D.mgrId, D.workerId);
+    check("(DIRTY) the gate command was NEVER called — the diff is inert even with a dirty tree", calls === 0);
+    check("(DIRTY) merged:true and gateRan:false (an inert skip, not refused as dirty)", confirm.merged === true && confirm.gateRan === false && confirm.gateWorktreeDirty === undefined);
+    check("(DIRTY) the COMMITTED docs content landed on main", fs.existsSync(path.join(D.repo, "docs", "investigations", "note.md")));
+    check("(DIRTY) nothing uncommitted landed on main", !fs.existsSync(path.join(D.repo, "uncommitted-scratch.txt")));
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);

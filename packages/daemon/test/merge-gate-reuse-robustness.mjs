@@ -392,14 +392,16 @@ try {
     fs.writeFileSync(path.join(worktreePath, "uncommitted-t.txt"), "post-gate edit\n");
 
     const confirm = await sessions.confirmWorkerMerge(T.mgrId, T.workerId);
-    check("(T) confirmWorkerMerge re-ran the gate for real (a real gate on the preLanded path, not the reuse path)", calls === 2);
+    // Card 975c774b: the dirty worktree is now refused up front (no second gate spawns), so the refusal reasons
+    // land on the `merge_rejected` (gate_worktree_dirty) event instead of a `build_gate` row.
+    check("(T) the dirty worktree was refused before any real gate spawned (calls stays 1) — not the reuse path", calls === 1 && confirm.gateWorktreeDirty?.phase === "before-gate");
     // NOT asserting confirm.gateRan here (unlike (M)/(J)/(P)) — this lands as an idempotent ALREADY_MERGED
     // no-op (no new commit on the branch beyond the earlier land), and per (N)'s own comment above, that
     // success path returns via `finishAlreadyMerged`, whose result never carries `gateRan` at all.
     // `calls === 2` is this scenario's own proof a real gate ran, exactly as (N) already establishes.
     check("(T) reusedOpId is absent", confirm.reusedOpId === undefined);
 
-    const buildGateT = eventsOfKind(db, T.mgrId, "build_gate")[0];
+    const buildGateT = eventsOfKind(db, T.mgrId, "merge_rejected").find((e) => e.detail?.reason === "gate_worktree_dirty");
     const reasonsT = buildGateT?.detail?.reuseRefusalReasons;
     check("(T) reuseRefusalReasons is an array", Array.isArray(reasonsT));
     check("(T) reuseRefusalReasons includes worktree-dirty", Array.isArray(reasonsT) && reasonsT.includes("worktree-dirty"));

@@ -607,6 +607,9 @@ type ConfirmMergeResult = {
    *  under, so a plain re-call at that same tip is a cache hit rather than a second gate. `undefined` on every
    *  other path, and after any failed read (fail-safe: the pre-forward `verdictIdentity` then stands). */
   gatedIdentity?: string;
+  /** @decision 975c774b — the worktree was dirty before a gate spawn or changed across it: the verdict matches no
+   *  commit. A PASS is refused (`gate_worktree_dirty`); a FAIL keeps its rejection, unstamped. Never cached. */
+  gateWorktreeDirty?: { phase: "before-gate" | "during-gate"; detail: string };
   /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs`, for whichever gate run(s)
    *  actually spawned for THIS merge — see {@link GateProximity}'s own doc. Same "nothing to report"
    *  discipline as `gateExtended`: `undefined` when no gate actually spawned (gateless project, or a
@@ -1969,6 +1972,13 @@ class NotYourWorkerError extends Error {
  * @decision b798e706 — always a defined, observable rejection, never a silent vanish or silent proceed
  *  on the stale base, distinct from the benign `gateBaseInvalidated` staleness race reported at squash.
  */
+class GateWorktreeDirtyError extends Error {
+  constructor(public readonly detail: string) {
+    super(`gate worktree dirty before spawn: ${detail}`);
+    this.name = "GateWorktreeDirtyError";
+  }
+}
+
 class AdmissionReunionFailedError extends Error {
   constructor(
     public readonly failReason: "union_conflict_at_admission" | "union_merge_failed_at_admission",
@@ -13518,6 +13528,20 @@ export class SessionService {
     //  the first hit, or a refusal-cause distribution built from it is biased toward whichever check
     //  happens to run earliest.
     let reuseRefusalReasons: string[] | undefined;
+    // @decision 975c774b — set at the reuse decision when the tree is dirty/unreadable; refused only if a gate will actually spawn.
+    let confirmTimeDirty: string | undefined;
+    // @decision 975c774b — the distinct, never-cached refusal for a verdict that describes no commit (see `gateWorktreeDirty`);
+    // declared here (not beside the gate) so the confirm-time check ahead of the queue can use it too.
+    const refuseWorktreeDirty = async (phase: "before-gate" | "during-gate", detail: string): Promise<ConfirmMergeResult> => {
+      const why = phase === "before-gate"
+        ? `worktree has uncommitted changes (or an unreadable state) when the gate was about to spawn (${detail})`
+        : `the worktree changed while the gate ran (${detail}), so its PASS describes files that match no commit`;
+      const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. Commit or discard the worktree's uncommitted changes, then re-run worker_merge_confirm — this refusal is never cached, a re-call re-gates for real.`;
+      const { suppressed, sha } = await rejectNotify("gate_worktree_dirty", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      // `reuseRefusalReasons` (2e52bf99) rides here too: a dirty tree never reaches a `build_gate` row, so this is its only record.
+      evt("merge_rejected", { reason: "gate_worktree_dirty", sha, phase, detail, ...(reuseRefusalReasons && reuseRefusalReasons.length > 0 ? { reuseRefusalReasons } : {}), ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateWorktreeDirty: { phase, detail } };
+    };
     // unionMergeMovedHead: whether the union-merge below actually MOVED HEAD, i.e.
     // `mergeMainIntoWorktree`'s own `merged:true`. Defaults `false`: the preLanded branch and the
     // nothing-to-fold-in short-circuit both leave it unset. Read-only, additive: never influences
@@ -13630,6 +13654,13 @@ export class SessionService {
     // Card 8b1fb28f: the branch tip captured immediately BEFORE each gate spawn (see `captureGatedTip`) — i.e.
     // the tip the FINAL gate attempt actually ran on. `undefined` until a gate spawns, and again after any failed read.
     let gatedTip: string | undefined;
+    // @decision 975c774b — set by `runGateSeq`'s settle-time stamp compare (below) when the worktree changed across a gate
+    // run; `gatePreStamp` is the stamp `captureGatedTip` took right before that spawn.
+    let gateWorktreeChanged: string | undefined;
+    let gatePreStamp: WorktreeGateStamp | undefined;
+    // @decision 975c774b — true once ANY link's gate has actually returned in this op: a later link's dirty pre-check is then a
+    // `during-gate` outcome that keeps the gate's own verdict, never a `before-gate` refusal that erases it.
+    let gateHasRun = false;
     // Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs` for whichever gate run actually
     // settles below — declared at THIS outer scope for the same reason `gateExtended` is (the plain GREEN
     // return sits OUTSIDE the `if (gate)` block). Derived from `gateStepsResult` right after it's set,
@@ -13672,6 +13703,10 @@ export class SessionService {
     // gates on `merged:true` so a still-failing retry never reports this on a rejection, where the
     // rejection's own `detailBits`/`reason` text already names the retry by other means).
     let gateRetried = false;
+    // @decision 975c774b — the transient link's gate actually spawned / its pre-check threw on a dirty tree instead: a retry that never ran
+    // must not be reported as "retried once".
+    let transientGateSpawned = false;
+    let retryNotRunDirty = false;
     // gateBaseMainHead: mergeBranch's own squash re-derives fresh against whatever canonical HEAD is at
     // squash time, entirely independent of the worktree's own unioned tree — so THIS sha, not any later
     // read, is what ties the squash back to what the gate actually tested.
@@ -13932,6 +13967,10 @@ export class SessionService {
         else if (freshBehindMain === undefined) reasons.push("behind-main-unknown");
         else if (freshBehindMain !== 0) reasons.push("behind-main");
         reuseRefusalReasons = reasons;
+        // @decision 975c774b — a tree already known dirty (or unreadable) is refused before the queue turn, but only for a merge that
+        // will actually spawn a gate (checked just before the gate section); `captureGatedTip` stays the in-lane backstop.
+        // Only RECORDED here: acted on below, once the inert-skip decision is known (an inert merge spawns no gate, so it has no verdict to contaminate).
+        if (freshStamp.dirty || !worktreeReadable) confirmTimeDirty = freshStamp.dirty ? "uncommitted changes at confirm time" : "worktree stamp unreadable at confirm time";
       }
 
       // INERT-DIFF SKIP (card db9b0130 — owner-proposed: "running the full merge gate for a merge that
@@ -14183,12 +14222,34 @@ export class SessionService {
       // pre-wait classification — see that function's own doc for the full mechanism.
       let effectiveGate = emitCompareSkip ? buildReducedGateCommand({ changedTestFiles: emitCompareTestFiles, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths, changedScriptFiles: emitCompareScriptFiles }) : gate;
 
-      const runGateSeq = this.runGate ?? runGateSequential;
+      // @decision 975c774b — refuse a known-dirty/unreadable tree before the queue turn, but ONLY where a gate will really spawn:
+      // a reused or inert-skipped merge has no verdict to contaminate (the squash reads commits), so it behaves as before.
+      if (!reuseResult && !inertSkip && confirmTimeDirty) return refuseWorktreeDirty("before-gate", confirmTimeDirty);
+
+      // @decision 975c774b — EVERY link (attempt 1, transient, single-file, resumed) spawns through this wrapper, which
+      // stamps the worktree at settle and compares it to the stamp `captureGatedTip` took right before that spawn.
+      const runGateSeqRaw = this.runGate ?? runGateSequential;
+      const runGateSeq: typeof runGateSeqRaw = async (...args) => {
+        const r = await runGateSeqRaw(...args);
+        gateHasRun = true;
+        const post = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+        // The pre stamp is clean by construction (a dirty one threw in `captureGatedTip`), so "changed" is: dirt at settle, or
+        // an unreadable stamp (fail closed). A CLEAN head move (a commit landed mid-gate) is deliberately NOT flagged here —
+        // 8b1fb28f's `confirmGatedIdentity` already owns that shape (re-call re-gates, announced as identity-mismatch).
+        if (!gatePreStamp || gatePreStamp.head === null || post.head === null) gateWorktreeChanged = "worktree stamp unreadable";
+        else if (post.dirty) gateWorktreeChanged = "uncommitted edits present when the gate settled";
+        return r;
+      };
       // Card 8b1fb28f: call right before EVERY gate spawn (attempt 1, the single-file / resumed-step retries, the
       // transient-kill retry) so `gatedTip` names the tip the last-run gate saw — never re-derived at settle
       // time, when a live worker may have committed since. Any read failure ⇒ undefined ⇒ unstamped (fail-safe).
+      // @decision 975c774b — also takes the pre-spawn worktree stamp, and REFUSES up front (GateWorktreeDirtyError, caught
+      // at the runExclusive catch) a tree already dirty then: the same `computeWorktreeGateStamp` dirt `run_gate` uses.
       const captureGatedTip = async (): Promise<void> => {
         try { gatedTip = (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined; } catch { gatedTip = undefined; }
+        gatePreStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+        if (gatePreStamp.dirty) throw new GateWorktreeDirtyError("the worktree carries uncommitted changes before the gate spawns");
+        if (gatePreStamp.head === null) throw new GateWorktreeDirtyError("the worktree stamp is unreadable before the gate spawns");
       };
       // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
       // rather than running alongside it unbounded. See GateSemaphore's class doc. Held only across the
@@ -14572,7 +14633,11 @@ export class SessionService {
             // Card b798e706: re-union onto a moved main; safe here because this retry re-runs the WHOLE gate.
             await reunionAtAdmission();
             // allowExtend:false (card 24642c3d) — attempt 1 already got its one auto-extend.
+            // @decision 975c774b — this link re-runs the WHOLE gate, so dirt attempt 1 saw at settle no longer taints its verdict:
+            // reset here only (single-file/resumed links stay sticky); a still-dirty tree re-sets it via captureGatedTip's throw.
+            gateWorktreeChanged = undefined;
             await captureGatedTip(); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
+            transientGateSpawned = true;
             if (r.passed) holdRepoGuardOnExit();
             return r;
           },
@@ -14699,6 +14764,7 @@ export class SessionService {
         }
       } catch (err) {
         if (err instanceof AdmissionReunionFailedError) return rejectAdmissionReunionFailure(err);
+        if (err instanceof GateWorktreeDirtyError && !gateHasRun) return refuseWorktreeDirty("before-gate", err.detail);
         // CANCELLED-WHILE-QUEUED (card 361520a0, Half Two — mirrors runWorkerGate's identical catch): thrown
         // by GateSemaphore.runExclusive when THIS op was withdrawn (gate_cancel, card 8d585277) before it
         // was ever admitted — no process was ever spawned, so this is never a real gate/runner exception and
@@ -14731,7 +14797,11 @@ export class SessionService {
           evt("merge_cancelled", { cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
           return { merged: false, cancelled: true, cancelKind: err.kind, reason: err.detail, opId: thisOpId };
         }
-        throw err;
+        if (!(err instanceof GateWorktreeDirtyError)) throw err;
+        // @decision 975c774b — a LATER link's pre-check found the tree dirty after a gate already ran: fall through with attempt 1's
+        // verdict/tail intact (its `build_gate` row is emitted below) and the dirt recorded, instead of a `before-gate` refusal.
+        gateWorktreeChanged = gateWorktreeChanged ?? `${err.detail} (before a retry link)`;
+        if (gateRetried && !transientGateSpawned) { gateRetried = false; retryNotRunDirty = true; }
       }
       // Card c6750500: read AFTER `runExclusive` has fully resolved — the getter closes over the entry
       // directly, so the value is already frozen-final by this point. `?? concurrentAtStart` covers reuse.
@@ -14781,7 +14851,9 @@ export class SessionService {
         // feature being turned off entirely). Names WHICH retry this is about (the internal, automatic,
         // post-timeout one) and states plainly that a manager re-fire is a different, unaffected thing — see
         // DoD-5: no wording here may be sayable as a bare "the retry is futile".
-        const retryOutcome = gateRetried
+        const retryOutcome = retryNotRunDirty
+          ? "retry not run: the worktree was dirty when it was about to start"
+          : gateRetried
           ? "retried once, still failed"
           : gateRetrySkippedFutile
             ? "the automatic internal post-timeout retry was skipped: it already consumed its one auto-extend on the first attempt, so a hard-bounded rerun could not have passed either — this is a budget-exceeded report, not a generic gate failure; re-running worker_merge_confirm starts a brand-new attempt with its own full budget and is unaffected"
@@ -14870,12 +14942,13 @@ export class SessionService {
         //  variable, not tacked onto the notify call separately, so it rides both of that variable's
         //  downstream consumers; never wire it at only one gate-outcome nudge site.
         const deferredTriggerAppendix = deferredTriggerNotice(this.db, worker.projectId, await readFailedNamesForOp(thisOpId));
-        const detailText = `${headline}${detailBits ? ` (${detailBits})` : ""}; squash phase never reached, canonical repo untouched, worktree retained.${stepsLine}${tailBlock}${deferredTriggerAppendix}`;
+        const dirtyNote = gateWorktreeChanged ? ` NOTE: the worktree changed while the gate ran (${gateWorktreeChanged}), so this verdict matches no commit and is NOT cached — a re-call re-gates for real.` : "";
+        const detailText = `${headline}${detailBits ? ` (${detailBits})` : ""}; squash phase never reached, canonical repo untouched, worktree retained.${dirtyNote}${stepsLine}${tailBlock}${deferredTriggerAppendix}`;
         const { suppressed, sha } = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", {
           reason: "gate", sha, phase, failedStep: gateResult.failedStep, failingTest, failingTestCount, failingTestReason,
           exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
-          killClass: finalClass, retried: gateRetried,
+          killClass: finalClass, retried: gateRetried, ...(retryNotRunDirty ? { retryNotRun: "worktree-dirty" } : {}),
           gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
           // Card 73a847f5: distinct from `retried:false` alone — this is SPECIFICALLY the case where the
           // internal post-timeout retry was skipped as provably futile (timeout + extension already
@@ -14911,7 +14984,9 @@ export class SessionService {
           gateProximity,
           // Card 8b1fb28f: ONLY a genuine gate-FAILED rejection carries it (this `!gateResult.passed` return) —
           // a post-gate-pass squash refusal, a breaker/preflight rejection or a reused result never does.
-          ...(gatedTip ? { gatedIdentity: gatedTip } : {}),
+          // @decision 975c774b — never stamped when the worktree changed under the gate; flagged so it is never cached either.
+          ...(gatedTip && !gateWorktreeChanged ? { gatedIdentity: gatedTip } : {}),
+          ...(gateWorktreeChanged ? { gateWorktreeDirty: { phase: "during-gate" as const, detail: gateWorktreeChanged } } : {}),
           outputTail: gateOutputTailForRecord,
           ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}),
           // Card e2b6f900: mirrors the plain-GREEN return's own `gateCap`/`concurrentGates`/
@@ -14951,6 +15026,18 @@ export class SessionService {
           // own `reason`/`detailText`/`gateDetail` above are UNCHANGED by that retry (DoD-1: "fails again ⇒
           // reject exactly as today"); this is purely additive observability alongside the unchanged verdict.
           ...(retriedFile ? { retriedFile, retryPassed } : {}),
+        };
+      }
+      // @decision 975c774b — a PASS whose worktree changed under the gate proves nothing about the commit that would be
+      // squashed: refuse before beginSquash (the outer finally frees the repo hold), never cached.
+      if (gateRan && gateWorktreeChanged) {
+        return {
+          ...(await refuseWorktreeDirty("during-gate", gateWorktreeChanged)),
+          gateExtended, gateProximity, outputTail: gateOutputTailForRecord,
+          ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}),
+          ...(gateCapForRecord !== undefined ? { gateCap: gateCapForRecord } : {}),
+          ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
+          ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
         };
       }
     }
@@ -16704,7 +16791,7 @@ export class SessionService {
         //
         // Card 6325bc74 — a `NotYourWorkerError` throw classifies as "not-your-worker", not "unknown": it
         // is a fact about the CALLING MANAGER, a dimension `NEVER_CACHED_OUTCOMES` excludes from caching.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

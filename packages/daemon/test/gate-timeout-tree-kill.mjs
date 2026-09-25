@@ -126,6 +126,9 @@ const q = (p) => `"${p}"`; // quote a path for both cmd.exe and posix sh
   const strayScript = path.join(worktreePath, "stray.js");
   fs.writeFileSync(strayScript, "setInterval(() => {}, 1000);\n");
   const stray = spawnProcess(process.execPath, [strayScript], { cwd: worktreePath, stdio: "ignore" });
+  // Card 975c774b: both process scripts are COMMITTED before the confirm (a merge gate refuses an untracked/dirty worktree, and this test
+  // needs the gate to genuinely spawn and time out). The processes stay rooted in the worktree by cwd and command line; a committed file is not dirt.
+  commitAll(worktreePath, "process scripts", GIT_ID);
 
   try {
     await sleep(400);

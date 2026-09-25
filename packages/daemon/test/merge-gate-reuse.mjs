@@ -292,8 +292,10 @@ try {
     fs.writeFileSync(path.join(worktreePath, "uncommitted.txt"), "post-gate edit\n");
 
     const confirm = await sessions.confirmWorkerMerge(E.mgrId, E.workerId);
-    check("(E) confirmWorkerMerge re-ran the gate for real (a dirty worktree is never reused)", calls === 2);
-    check("(E) gateRan:true", confirm.gateRan === true);
+    // Card 975c774b: a dirty worktree is still never reused — and is now ALSO refused up front (the gate must not
+    // spawn against a tree that matches no commit), so the invariant reads: no second gate ran, nothing merged.
+    check("(E) a dirty worktree is never reused: no second gate ran and the merge was refused up front (gateWorktreeDirty before-gate)", calls === 1 && confirm.merged === false && confirm.gateWorktreeDirty?.phase === "before-gate");
+    check("(E) not reported as a reuse (gateRan is not false)", confirm.gateRan !== false);
     check("(E) reusedOpId is absent", confirm.reusedOpId === undefined);
   }
 
