@@ -86,7 +86,8 @@ can only return an artifact that agrees with it. The same trap catches any searc
 already expect — a log sweep, a board/column filter, a grep scoped to a guess — none of them can surface
 disconfirming evidence. Then
 `node .claude/skills/orchestrate/scripts/dev-server.mjs stop <worktree-dir>` before requesting a
-merge for that worktree. A dev server left running is exactly what makes `worker_merge_confirm`'s
+merge for that worktree. `stop` refuses a recorded pid that is no longer the supervisor it launched, tree-kills the rest, and prints `Verified: port N is free.` — if it instead exits nonzero with `STILL IN USE`, something outside the tracked tree (a launcher that already exited) holds the port: read the pid from that server's own log/tooling and stop it by that pid, never by port.
+A dev server left running is exactly what makes `worker_merge_confirm`'s
 `git worktree remove` fail on Windows (the live process holds the worktree dir open) — stopping it by
 tracked handle before you request the merge avoids that. **Scope any process match to its worktree
 path and nothing else — not image name (`taskkill /IM node.exe`), not port, not a session id, not a

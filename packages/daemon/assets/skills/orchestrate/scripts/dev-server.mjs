@@ -43,10 +43,14 @@
 //     <dir>; stop the first one before starting another.
 //
 //   node dev-server.mjs stop <dir>
-//     Reads the tracking file for <dir>, kills the tracked pid (+ its process tree) BY THAT EXACT PID,
-//     and removes the tracking file. A no-op (exit 0) if no tracked server is found for <dir> — this
-//     never enumerates processes and never searches by name or port. Prints the tracked port (when
-//     known) alongside the pid, re-read fresh from the tracking file in this separate process.
+//     Reads the tracking file for <dir>. If the tracked pid is alive it first re-checks that the pid is
+//     still the supervisor `start` launched (its command line carries the record's own log path) and
+//     REFUSES (nonzero, nothing killed) otherwise — the pid-reuse guard; then it kills that pid + its
+//     process tree, confirms the pid is gone, and VERIFIES the recorded port is free ("Verified: port N
+//     is free."). Exits nonzero and keeps the tracking file if the pid survives or the port is still in
+//     use (a descendant whose launcher already exited is unreachable from the tracked pid) — it reports
+//     that and never goes looking for the listener by port. A no-op (exit 0) if no tracked server is
+//     found for <dir>. Prints the tracked port (when known) alongside the pid.
 //
 // PORT DETECTION — why this differs from serve-static.mjs even though its OWN detached child still
 // spawns with `stdio: "ignore"` (unchanged there — see that file's own start()):
@@ -94,17 +98,16 @@
 // SAFETY (the reason this helper exists): `stop` only ever acts on the pid THIS SAME HELPER recorded
 // in `start` for that exact <dir> — never a name/port/netstat search, never a bash `$!` (which on
 // Windows is the shell's pid, not the real listener). It never touches any process it didn't itself
-// spawn. ACCEPTED RISK: if the tracked pid has since exited and the OS reused that number for an
-// unrelated process, `stop` would signal that unrelated process instead — a generic pid-reuse race any
-// pid-tracking scheme has. This is judged acceptable here because the intended lifetime of a tracked
-// dev-server (an interactive eyeball session, stopped promptly after) is short relative to typical OS
-// pid-reuse windows, and the alternative (re-verifying identity via process enumeration) reintroduces
-// the exact OS-enumeration blind spot — win32 exposes no per-process cwd — this handle-tracked design
-// exists to avoid.
+// spawn. PID REUSE: if the tracked pid has since exited and the OS reused that number, `stop` does not
+// signal it — before killing it re-reads that ONE pid's command line and requires it to carry the
+// record's own log path (unique to this <dir>, handed to the supervisor at spawn); otherwise it refuses.
+// That reads a single recorded pid, never enumerates processes, so it needs no per-process cwd (which
+// win32 does not expose).
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -422,18 +425,90 @@ async function start(dir, cmdArgs) {
   }
 }
 
-function stop(dir) {
+// The command line of a live pid, or null when it is gone/unreadable. Used ONLY to re-check that a
+// recorded pid is still the supervisor `start` launched (pid reuse) — never to search for a process.
+function commandLineOf(pid) {
+  try {
+    if (process.platform === "win32") {
+      const r = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`], { encoding: "utf8", timeout: 20000 });
+      const out = (r.stdout || "").trim();
+      return out || null;
+    }
+    const r = spawnSync("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 10000 });
+    const out = (r.stdout || "").trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+// True iff `pid` is still the supervisor this helper launched for the record: its command line carries
+// the record's own log path, which is unique to that <dir> and is passed to the supervisor as JSON (so a
+// win32 backslash appears doubled on the command line — match the JSON-escaped form).
+function isRecordedSupervisor(tracked) {
+  const cmdline = commandLineOf(tracked.pid);
+  if (cmdline == null || typeof tracked.logFile !== "string") return false;
+  return cmdline.includes(JSON.stringify(tracked.logFile).slice(1, -1));
+}
+
+async function waitDead(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (isAlive(pid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+  return !isAlive(pid);
+}
+
+// True iff something accepts a connection on `port` at either loopback address. A wildcard bind
+// (0.0.0.0 / ::) also answers on loopback, so the two probes cover every bind a dev server makes. A
+// probe only ever connects and closes — it never enumerates processes and never acts on a listener.
+function portHeld(port) {
+  const probe = (host) => new Promise((resolve) => {
+    const sock = net.connect({ port, host });
+    const done = (held) => { sock.destroy(); resolve(held); };
+    sock.setTimeout(2000, () => done(false));
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+  });
+  return Promise.all([probe("127.0.0.1"), probe("::1")]).then(([a, b]) => a || b);
+}
+
+async function stop(dir) {
   const absDir = requireAbsoluteDir(dir);
   const tracked = readTracked(absDir);
   if (!tracked) {
     console.log(`stop: no tracked dev-server for ${absDir} (nothing to do)`);
     return;
   }
-  killTracked(tracked.pid);
-  removeTracked(absDir);
   const label = Array.isArray(tracked.command) ? tracked.command.join(" ") : String(tracked.command);
-  const portLabel = typeof tracked.port === "number" ? ` (port ${tracked.port})` : "";
+  const hasPort = typeof tracked.port === "number";
+  const portLabel = hasPort ? ` (port ${tracked.port})` : "";
+  let failed = false;
+  if (isAlive(tracked.pid)) {
+    // Pid reuse: only kill a pid that is still the supervisor this helper launched. Refuse otherwise,
+    // and leave the tracking file so the refusal is repeatable and nothing else is touched.
+    if (!isRecordedSupervisor(tracked)) {
+      console.error(`stop: REFUSED — pid ${tracked.pid} is alive but its command line is not the supervisor this helper launched for ${absDir} (the pid was likely reused by an unrelated process, or its command line could not be read). Nothing was killed. Remove the stale tracking file ${trackingFilePath(absDir)} once you have confirmed the server is gone.`);
+      process.exit(1);
+    }
+    killTracked(tracked.pid);
+    if (!(await waitDead(tracked.pid, 5000))) {
+      failed = true;
+      console.error(`stop: pid ${tracked.pid} is STILL ALIVE after the tree kill.`);
+    }
+  }
   console.log(`Stopped pid ${tracked.pid}${portLabel} ("${label}") tracked for ${absDir}`);
+  // The kill walks DOWN from the tracked pid only. A descendant whose parent already exited (a launcher
+  // that daemonizes its server) is no longer reachable from it, so verify the recorded port instead of
+  // assuming — and only REPORT if it is still held; never fall back to finding a listener by port.
+  if (hasPort) {
+    if (await portHeld(tracked.port)) {
+      failed = true;
+      console.error(`stop: port ${tracked.port} is STILL IN USE after stopping the tracked tree — a process outside the tracked pid's tree (e.g. one whose launcher already exited) is holding it. This helper does not search for it; stop it by the pid its own tooling reports.`);
+    } else {
+      console.log(`Verified: port ${tracked.port} is free.`);
+    }
+  }
+  if (failed) process.exit(1);
+  removeTracked(absDir);
 }
 
 const [, , mode, dirArg, ...rest] = process.argv;
@@ -444,7 +519,7 @@ if (mode === "start") {
   await start(dirArg, rest.slice(sepIdx + 1));
 } else if (mode === "stop") {
   if (!dirArg) usageAndExit();
-  stop(dirArg);
+  await stop(dirArg);
 } else {
   usageAndExit();
 }
