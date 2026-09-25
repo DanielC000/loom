@@ -288,10 +288,16 @@
                   <code class="term-cmd" data-copy="curl -X PATCH http://127.0.0.1:4317/api/platform/config -H &quot;Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)&quot; -H 'content-type: application/json' -d '{&quot;remoteAccess&quot;:{&quot;enabled&quot;:true,&quot;proxyPort&quot;:4319,&quot;trustedProxyOrigins&quot;:[&quot;https://your-machine.your-tailnet.ts.net:8443&quot;]}}'"><span class="term-prompt">$</span> curl -X PATCH http://127.0.0.1:4317/api/platform/config … -d '{"remoteAccess":{"enabled":true,"proxyPort":4319,"trustedProxyOrigins":["https://your-machine.your-tailnet.ts.net:8443"]}}'</code>
                   <button class="copy" type="button" aria-label="Copy the proxy-mode config command">Copy</button>
                 </div>
-                <p class="term-comment term-comment-sp"># 3. restart (config is read at boot), then point Serve at the proxy port</p>
+                <p class="term-comment term-comment-sp"># 3. restart (config is read at boot) — detached, so the next step can run</p>
+                <p class="term-comment"># (a `loom service` install restarts via its service manager; from source, re-run your daemon command)</p>
                 <div class="term-line">
-                  <code class="term-cmd" data-copy="loom restart &amp;&amp; tailscale serve --bg --https=8443 http://127.0.0.1:4319"><span class="term-prompt">$</span> loom restart &amp;&amp; tailscale serve --bg --https=8443 http://127.0.0.1:4319</code>
-                  <button class="copy" type="button" aria-label="Copy the restart and serve command">Copy</button>
+                  <code class="term-cmd" data-copy="loom restart --detach"><span class="term-prompt">$</span> loom restart --detach</code>
+                  <button class="copy" type="button" aria-label="Copy the restart command">Copy</button>
+                </div>
+                <p class="term-comment term-comment-sp"># 4. point Serve at the proxy port (--https needs HTTPS certificates enabled on your tailnet)</p>
+                <div class="term-line">
+                  <code class="term-cmd" data-copy="tailscale serve --bg --https=8443 http://127.0.0.1:4319"><span class="term-prompt">$</span> tailscale serve --bg --https=8443 http://127.0.0.1:4319</code>
+                  <button class="copy" type="button" aria-label="Copy the Serve command">Copy</button>
                 </div>
               </div>
             </div>
@@ -304,6 +310,8 @@
               token but does not open the proxy port (it logs a warning), so mint the
               first token before the restart. <code>proxyPort</code> has no default. Use a port dedicated to Loom:
               any other page on the same origin can read the stored token.
+              Serve's <code>--https</code> needs HTTPS certificates enabled on your
+              tailnet (<a href="https://tailscale.com/kb/1153/enabling-https">Tailscale's docs</a>).
             </p>
             <p class="prose">
               <strong>Unverified on a live Tailscale node.</strong> This was built

@@ -196,8 +196,11 @@ curl -X POST http://127.0.0.1:4317/api/gateway-tokens   -H "Authorization: Beare
 #    origin's host must NOT be a direct-bind bindHost/allowedHosts entry, or the proxy listener is refused.
 curl -X PATCH http://127.0.0.1:4317/api/platform/config   -H "Authorization: Bearer $(cat ~/.loom/gateway-loopback.key)"   -H 'content-type: application/json'   -d '{"remoteAccess":{"enabled":true,"proxyPort":4319,"trustedProxyOrigins":["https://your-machine.your-tailnet.ts.net:8443"]}}'
 
-# 3. restart the daemon, then point Serve at the proxy port — a DEDICATED Serve port, never one shared with other content
-loom restart
+# 3. restart the daemon detached, so the next step can run (a `loom service` install restarts via its service manager; from source, re-run your daemon command)
+loom restart --detach
+
+# 4. point Serve at the proxy port — a DEDICATED Serve port, never one shared with other content.
+#    --https needs HTTPS certificates enabled on your tailnet: https://tailscale.com/kb/1153/enabling-https
 tailscale serve --bg --https=8443 http://127.0.0.1:4319
 ```
 
