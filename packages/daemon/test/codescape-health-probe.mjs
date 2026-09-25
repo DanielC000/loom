@@ -1389,6 +1389,9 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     versionProbeMaxAttempts: 3,
     versionProbeRetryDelayMs: 50,
   });
+  // Instrument BEFORE start(): a tick that completed before the wrapper existed would never be snapshotted,
+  // and the first snapshot >= 3 would then be a LATER cumulative (6), not the first tick's own tally.
+  instrumentProbeTicks(sup);
   const warnings = captureWarnings();
   await sup.start(["/fake/repo/version-retry-exhausted"]);
   // Card 998cb0d3: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
