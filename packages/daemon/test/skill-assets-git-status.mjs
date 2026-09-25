@@ -74,6 +74,9 @@ requireHermeticEnv();
 
 const { skillStoreStaleness } = await import("../dist/skills/store.js");
 const { skillAssetsGitStatus, deriveSkillAssetsSyncState } = await import("../dist/skills/assets-git-status.js");
+// Production bounds `git status` at 1s (synchronous, on served_status's path); these scenarios assert what git REPORTS,
+// not how fast it answers, so they get a generous bound (a loaded host once ETIMEDOUT'd at 1s: "could not read git status").
+const GIT_TEST_TIMEOUT_MS = 30_000;
 
 const mkdirp = (p) => fs.mkdirSync(p, { recursive: true });
 const homeSkillsDir = path.join(process.env.LOOM_HOME, "skills");
@@ -103,7 +106,7 @@ try {
   {
     const store = skillStoreStaleness();
     check("(2) store: stale:false (mine == base == shipped)", store.stale === false);
-    const git2 = skillAssetsGitStatus({ repoRoot: repo });
+    const git2 = skillAssetsGitStatus({ repoRoot: repo, gitTimeoutMs: GIT_TEST_TIMEOUT_MS });
     check("(2) git: available:true, uncommitted:false" + reasonSuffix(git2), git2.available === true && git2.uncommitted === false);
     check("(2) tri-state: \"clean\"", deriveSkillAssetsSyncState(store, git2) === "clean");
   }
@@ -116,7 +119,7 @@ try {
   {
     const store = skillStoreStaleness();
     check("🔴 (3) RED CONTROL: skillStoreStaleness() STILL reports a clean bill despite the live uncommitted edit — the pre-existing bug, reproduced" + JSON.stringify(store), store.stale === false && store.pendingRestart.length === 0 && store.pendingAdopt.length === 0);
-    const git3 = skillAssetsGitStatus({ repoRoot: repo });
+    const git3 = skillAssetsGitStatus({ repoRoot: repo, gitTimeoutMs: GIT_TEST_TIMEOUT_MS });
     check("✅ (3) GREEN: skillAssetsGitStatus() catches it — available:true, uncommitted:true" + reasonSuffix(git3), git3.available === true && git3.uncommitted === true);
     check("(3) uncommittedPaths names the dirty file", git3.uncommittedPaths.some((p) => p.includes("demo/SKILL.md") || p.includes("demo\\SKILL.md")));
     check("✅ (3) tri-state distinguishes this from \"clean\": \"uncommitted\"", deriveSkillAssetsSyncState(store, git3) === "uncommitted");
@@ -127,7 +130,7 @@ try {
   git('-c user.email=t@loom -c user.name=t commit -q -m "docs(assets): land demo skill v2"', "2026-01-03T00:00:00Z");
   {
     const store = skillStoreStaleness();
-    const git4 = skillAssetsGitStatus({ repoRoot: repo });
+    const git4 = skillAssetsGitStatus({ repoRoot: repo, gitTimeoutMs: GIT_TEST_TIMEOUT_MS });
     check("(4) after committing: uncommitted:false again — proves this tracks LIVE git state, not a one-shot latch", git4.available === true && git4.uncommitted === false);
     check("(4) tri-state back to \"clean\"", deriveSkillAssetsSyncState(store, git4) === "clean");
   }
@@ -136,7 +139,7 @@ try {
   mkdirp(path.join(assetSkillsDir, "newskill"));
   fs.writeFileSync(path.join(assetSkillsDir, "newskill", "SKILL.md"), "---\nname: newskill\ndescription: Never synced anywhere.\n---\nBody.\n");
   {
-    const git5 = skillAssetsGitStatus({ repoRoot: repo });
+    const git5 = skillAssetsGitStatus({ repoRoot: repo, gitTimeoutMs: GIT_TEST_TIMEOUT_MS });
     check("(5) a new UNTRACKED asset file ⇒ uncommitted:true" + reasonSuffix(git5), git5.available === true && git5.uncommitted === true);
     // git collapses a wholly-untracked NEW DIRECTORY to the directory path itself ("newskill/"), not each
     // file inside it — real, standard porcelain behavior, not a bug in this module.
@@ -156,7 +159,7 @@ try {
   {
     const store = skillStoreStaleness();
     check("(6) store: stale:true (pristine-skill pending restart)", store.stale === true && store.pendingRestart.includes("pristine-skill"));
-    const git6 = skillAssetsGitStatus({ repoRoot: repo });
+    const git6 = skillAssetsGitStatus({ repoRoot: repo, gitTimeoutMs: GIT_TEST_TIMEOUT_MS });
     check("(6) git: uncommitted:false — the shipped update is fully committed" + reasonSuffix(git6), git6.available === true && git6.uncommitted === false);
     check("(6) tri-state: \"stale\" — distinct from both \"clean\" and \"uncommitted\"", deriveSkillAssetsSyncState(store, git6) === "stale");
   }
@@ -165,7 +168,7 @@ try {
   fs.writeFileSync(path.join(assetSkillsDir, "pristine-skill", "SKILL.md"), "v3 (shipped, edited again, NOT committed)\n");
   {
     const store = skillStoreStaleness();
-    const git7 = skillAssetsGitStatus({ repoRoot: repo });
+    const git7 = skillAssetsGitStatus({ repoRoot: repo, gitTimeoutMs: GIT_TEST_TIMEOUT_MS });
     check("(7-setup) store still stale, git now ALSO uncommitted", store.stale === true && git7.uncommitted === true);
     check("(7) precedence: tri-state reads \"stale\" (checked first), not \"uncommitted\"", deriveSkillAssetsSyncState(store, git7) === "stale");
   }

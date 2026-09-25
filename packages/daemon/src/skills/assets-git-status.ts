@@ -52,10 +52,10 @@ const GIT_TIMEOUT_MS = 1000;
  *  this module never reads it). */
 const ASSET_SKILLS_PATHSPEC = "packages/daemon/assets/skills";
 
-function runGit(repoRoot: string, args: string[]): string {
+function runGit(repoRoot: string, args: string[], timeoutMs: number): string {
   return execFileSync("git", ["-C", repoRoot, ...args], {
     encoding: "utf8",
-    timeout: GIT_TIMEOUT_MS,
+    timeout: timeoutMs,
     windowsHide: true,
     env: nonInteractiveEnv(),
   });
@@ -69,6 +69,11 @@ export interface SkillAssetsGitStatusOptions {
   /** Test seam: a fixture git repo root. Production callers omit this and get the real repo root
    *  (`loomRepoRoot()`, itself overridable via `LOOM_REPO_ROOT` — see paths.ts). */
   repoRoot?: string;
+  /** Test seam: overrides the 1s `GIT_TIMEOUT_MS` bound. The production bound is deliberate (this runs
+   *  synchronously on the `served_status` path, so it must stay short and degrade to `could-not-measure`
+   *  rather than stall the event loop); a test asserting what git REPORTS (not how fast it answers) passes a
+   *  generous value so a loaded host's slow `git status` isn't misread as a `could-not-measure` result. */
+  gitTimeoutMs?: number;
 }
 
 /** Fresh, uncached read of whether `packages/daemon/assets/skills` has uncommitted changes relative to
@@ -84,7 +89,7 @@ export function skillAssetsGitStatus(options: SkillAssetsGitStatusOptions = {}):
   }
   let out: string;
   try {
-    out = runGit(repoRoot, ["status", "--porcelain", "--", ASSET_SKILLS_PATHSPEC]);
+    out = runGit(repoRoot, ["status", "--porcelain", "--", ASSET_SKILLS_PATHSPEC], options.gitTimeoutMs ?? GIT_TIMEOUT_MS);
   } catch (err) {
     return unavailable(
       `could not read git status for ${ASSET_SKILLS_PATHSPEC}: ${err instanceof Error ? err.message : String(err)}`,
