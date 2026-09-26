@@ -24,11 +24,10 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
-import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_GATE_RETRY_SETTLE_MS = "20"; // keep the transient-retry settle wait tiny
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgrae-home-${Date.now()}-${process.pid}`);
-fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+useOwnLoomHome("loom-mgrae-home-"); // cleanup-by-construction: registered for the exit sweep (a self-assigned home would leak)
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -64,12 +63,11 @@ function makeRepo(P) {
   execSync(`git init -q && git config user.email mgrae@loom && git config user.name mgrae`, { cwd: P.repo });
   commitAll(P.repo, "init", GIT_ID);
 }
-const worktrees = [];
 async function addWorker(db, P, n, files) {
   const taskId = `mgrae-${n}-task-${sfx}`; const workerId = `mgrae-${n}-wkr-${sfx}`;
   db.insertTask({ id: taskId, projectId: P.projId, title: `feat(x): change ${n}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   const { worktreePath, branch } = await createWorktree(P.repo, P.projId, taskId);
-  worktrees.push(worktreePath);
+  registerForCleanup(worktreePath);
   for (const [rel, body] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(worktreePath, rel)), { recursive: true }); fs.writeFileSync(path.join(worktreePath, rel), body); }
   commitAll(worktreePath, `feat(x): change ${n}`, GIT_ID);
   db.insertSession({ id: workerId, projectId: P.projId, agentId: P.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: P.mgrId, taskId, worktreePath, branch });
