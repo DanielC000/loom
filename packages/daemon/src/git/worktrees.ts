@@ -1595,6 +1595,41 @@ export function uncommittedWorkFiles(porcelainZ: string): string[] {
   return paths;
 }
 
+/**
+ * @decision 6796c9ea — the ONE dirty-worktree predicate for merge finalize's worktree removal (solo + batch); `unknown` (git
+ * error/timeout on a worktree that still has its `.git` link) is retained, never removed. A missing directory or one with no `.git` link reads `clean`.
+ */
+/** The ONE dead-leftover test (a pure fs stat, never a git op): a directory with NO `.git` link is no longer a git worktree, so git holds nothing there
+ *  to lose. Shared by boot Pass B's leftover GC and {@link readWorktreeUncommittedState}. A `.git` that exists but points at a pruned gitdir is deliberately
+ *  NOT a dead leftover here (git cannot read it, so it may still hold work — callers fail closed). */
+export function worktreeHasGitLink(worktreePath: string): boolean {
+  return fs.existsSync(path.join(worktreePath, ".git"));
+}
+export type WorktreeUncommittedState = { state: "clean" } | { state: "dirty"; files: string[] } | { state: "unknown"; reason: string };
+export async function readWorktreeUncommittedState(worktreePath: string, deps: BoundedGitDeps = {}): Promise<WorktreeUncommittedState> {
+  // A missing dir, or a dead leftover with no `.git` link (the Windows busy-handle case: `git worktree remove` dropped the registration but the dir survived),
+  // has nothing git can lose — it must reach removal, or the re-finalize paths built for exactly this leftover would never clean it.
+  if (!worktreeHasGitLink(worktreePath)) return { state: "clean" };
+  const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
+  try {
+    const porcelainZ = await withTimeout(
+      makeGit(worktreePath, timeoutMs).raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]), timeoutMs, "git status --porcelain -z (finalize dirty check)",
+    );
+    // Untracked `node_modules/` is the worktree's own provisioned dependency install (createWorktree's dep-provisioning), regenerable and never a
+    // worker's product — in a repo whose .gitignore lacks it, counting it would retain EVERY worktree. A TRACKED change under node_modules still counts.
+    const files: string[] = [];
+    for (const e of filteredWorkEntries(porcelainZ)) {
+      if (e.untracked && /(^|\/)node_modules(\/|$)/.test(e.path)) continue;
+      if (e.oldPath) files.push(e.oldPath);
+      files.push(e.path);
+    }
+    return files.length > 0 ? { state: "dirty", files } : { state: "clean" };
+  } catch (e) {
+    return { state: "unknown", reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export interface DoneReportPrecheck {
   /** the working tree has REAL uncommitted changes (ignoring daemon-injected `.claude/` noise) → REFUSE the done. */
   uncommitted: boolean;

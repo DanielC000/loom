@@ -33,6 +33,10 @@ The batch now records each candidate's assembled tip; a moved or unreadable tip 
 
 A held branch whose live tip squashes to NOTHING against main (a late commit that only reverts part of the branch's own change) cannot be landed by `worker_merge_confirm`; the finish is refused with cherry-pick guidance and the branch stays held. Reviewing/landing a held branch by `assembledTip..liveTip` is carded separately.
 
+## Uncommitted work is a separate retain, and is NOT a hold
+
+The tip guard above sees only COMMITTED work. An UNCOMMITTED edit in the candidate worktree (untracked file or modified tracked file) made while the gate ran is guarded separately by card 6796c9ea (see `6796c9ea-finalize-retains-a-worktree-holding-uncommitted-work.md`): `finalizeMerge`'s worktree removal keeps a dirty (or unreadable) worktree and the landed row carries `worktreeRetainedDirty`. It is a sibling field, not a new phase of `branchAdvancedDuringGate`, and files no `batch_merge_branch_retained` event, because that event is what `isBranchHeld` reads and a dirty worktree at an unmoved tip must not hold the branch.
+
 ## The solo path
 
 The solo `worker_merge_confirm` half of this guard landed in card cc9bce38 (see `cc9bce38-solo-finalize-deletes-the-branch-only-at-the-landed-tip.md`), reusing this finalize check, the compare-and-swap delete and `isBranchHeld`. Its event kind stays `merge_branch_retained` (`source:"solo"`), distinct from the batch's `batch_merge_branch_retained`.

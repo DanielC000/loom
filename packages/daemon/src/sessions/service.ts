@@ -22,7 +22,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -557,7 +557,7 @@ type MergeBatchResult = {
   /** @decision c85f842d — keep `opId` OPTIONAL, unlike the solo path's — this method has real early
    *  bail-outs (ownership/repo-mismatch, too-few-candidates, no gateCommand) with no op minted yet. */
   opId?: string;
-  landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate }[];
+  landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained }[];
   /** @decision 553ea58c — use `landedCount`, the real git-verified total, never `landed.length` — that
    *  array under-reports if a worker session row was hard-deleted between selection and finalize. */
   landedCount?: number;
@@ -1343,10 +1343,21 @@ function gateOpIdEnvOverride(opId: string, batchSize: number, base?: NodeJS.Proc
 /** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
  *  alongside `outcome: "nested-repo-blocked"` — see that outcome's doc on gcWorktreeDir. */
 type GcOutcomeResult = {
-  outcome: "removed" | "wedged" | "left-on-disk" | "needs-human-skip" | "nested-repo-blocked";
+  outcome: "removed" | "wedged" | "left-on-disk" | "needs-human-skip" | "nested-repo-blocked" | "dirty-retained";
   nestedRepoPaths?: string[];
   scanTruncated?: boolean;
+  /** Only with `outcome: "dirty-retained"` (card 6796c9ea): the uncommitted paths, or `unverified:true` when the status read failed (fail closed). */
+  dirtyWorktree?: DirtyWorktreeRetained;
 };
+
+/** Card 6796c9ea — a merge finalize KEPT the worktree because it holds uncommitted work (or its status could not be read). The merge itself landed. */
+type DirtyWorktreeRetained = { files: string[]; truncated: boolean; unverified: boolean };
+const DIRTY_WORKTREE_FILES_CAP = 20;
+function dirtyWorktreeRetainedWarning(d: DirtyWorktreeRetained, worktreePath: string): string {
+  return d.unverified
+    ? `worktree ${worktreePath} RETAINED — its uncommitted-work status could not be read (git error/timeout), so it was NOT removed (fail closed). The merge itself landed. Inspect it; to clean up, move any work out and re-run worker_merge_confirm with forceRemoveWorktree:true (removing the directory by hand leaks the loom/* branch ref forever).`
+    : `worktree ${worktreePath} RETAINED — it holds uncommitted work made after the merge was built (${d.files.join(", ")}${d.truncated ? ", …" : ""}); that work is NOT on main. The merge itself landed. Move it out, then re-run worker_merge_confirm with forceRemoveWorktree:true to remove the worktree and branch (removing the directory by hand leaks the loom/* branch ref forever).`;
+}
 
 /** The manager-facing `warning` text for a `worker_merge_confirm` whose worktree removal was blocked by
  *  the nested-repo guard (card b6d41db1) — shared by the Green path and the ALREADY_MERGED path
@@ -15874,7 +15885,7 @@ export class SessionService {
     // WORKTREE-GC WARNING (task 035fb673): the worktree removal itself came back wedged/left-on-disk/
     // needs-human — distinct from the nested-repo BLOCK above (which retains the worktree deliberately).
     // Purely additive: `undefined` on a clean removal, so this never fires on the common path.
-    const worktreeWarning = finalizeResult.worktreeGcOutcome ? worktreeGcWarning(finalizeResult.worktreeGcOutcome, worktreePath) : undefined;
+    const worktreeWarning = [finalizeResult.dirtyWorktreeRetained ? dirtyWorktreeRetainedWarning(finalizeResult.dirtyWorktreeRetained, worktreePath) : undefined, finalizeResult.worktreeGcOutcome ? worktreeGcWarning(finalizeResult.worktreeGcOutcome, worktreePath) : undefined].filter((w): w is string => !!w).join(" ") || undefined;
     // @decision 8363e602 — with no gateCommand configured for the target repo, a merge still lands
     //  unconditionally; `gateWarning` carries that forward explicitly instead of rubber-stamping a merge
     //  that was never verified by any build/DoD check.
@@ -16132,6 +16143,8 @@ export class SessionService {
     suppressNotify?: boolean;
     /** Forwarded verbatim into {@link finalizeMerge} (card 42daa283) — see its own doc. */
     expectedBranchTip?: string; onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize") => void;
+    /** Forwarded verbatim into {@link finalizeMerge} (card 6796c9ea). */
+    onWorktreeRetainedDirty?: (info: DirtyWorktreeRetained) => void;
     /** Card cc9bce38: the solo tip guard's retained-branch text (`soloFinalizeTipGuard().warning`), read AFTER finalize — folded into the result, and it rewords the `[loom:already-merged]` push. */
     retainedNote?: () => string | undefined;
     /** Card 293d418e: this finish ran WITHOUT the merge gate because the branch was proven already landed — said in the announcement + result, and stamped on `merge_done`. */
@@ -16195,7 +16208,7 @@ export class SessionService {
     const nestedWarning = finalizeResult.nestedRepoBlock ? nestedRepoBlockWarning(finalizeResult.nestedRepoBlock) : undefined;
     // Task 035fb673: same additive worktree-GC warning as the Green path (confirmWorkerMerge) — see its
     // own comment for why this is purely additive and never a failure signal.
-    const worktreeWarning = finalizeResult.worktreeGcOutcome ? worktreeGcWarning(finalizeResult.worktreeGcOutcome, args.worktreePath) : undefined;
+    const worktreeWarning = [finalizeResult.dirtyWorktreeRetained ? dirtyWorktreeRetainedWarning(finalizeResult.dirtyWorktreeRetained, args.worktreePath) : undefined, finalizeResult.worktreeGcOutcome ? worktreeGcWarning(finalizeResult.worktreeGcOutcome, args.worktreePath) : undefined].filter((w): w is string => !!w).join(" ") || undefined;
     // Card e1ac691b — same non-blocking surfacing as the Green path (confirmWorkerMerge) — see
     // composerIntegrityWarning's own doc. An ALREADY_MERGED confirm is still a real merge-confirm ACTION
     // against this same worker, so the same signal is just as relevant here.
@@ -17005,7 +17018,7 @@ export class SessionService {
             };
           }
 
-          const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate }[] = [];
+          const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained }[] = [];
           for (const lb of result.landed) {
             const worker = this.db.getSession(lb.workerSessionId);
             if (!worker) continue;
@@ -17051,6 +17064,8 @@ export class SessionService {
             // m3: the tip is re-checked INSIDE finalizeMerge (after the worker's hard stop/reap, just before the worktree
             // removal) and the ref is deleted compare-and-swap, so a commit landing in the stop window is retained too.
             let lateRetained: BranchAdvancedDuringGate | undefined;
+            // Card 6796c9ea: uncommitted edits made in the candidate worktree while the gate ran — finalize keeps the worktree and says so here.
+            let dirtyRetained: DirtyWorktreeRetained | undefined;
             await this.finishAlreadyMerged({
               // @decision 2c16447b — the worker's CURRENT lineage owner, so the post-merge purge/cap-drain
               // reach a recycled successor instead of a dead predecessor (falls back to the captured id).
@@ -17060,11 +17075,16 @@ export class SessionService {
               mergedVerification, suppressNotify: true,
               expectedBranchTip: lb.assembledTip,
               onBranchRetained: (live, phase) => { lateRetained = noteRetained(phase, live); },
+              onWorktreeRetainedDirty: (info) => {
+                dirtyRetained = info;
+                // eslint-disable-next-line no-console
+                console.warn(`[mergeBatch] op ${opId} ${lb.branch}: ${dirtyWorktreeRetainedWarning(info, worker.worktreePath ?? worker.cwd)}`);
+              },
             });
             // strippedTrailerCount (card b7f965d2): non-zero means this branch's own commit(s) carried a
             // Claude-Session trailer that got stripped before landing — surface it to the calling manager
             // rather than leaving it as a console.warn only the host log would show.
-            landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, ...(lateRetained ? { branchAdvancedDuringGate: lateRetained } : {}) });
+            landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, ...(lateRetained ? { branchAdvancedDuringGate: lateRetained } : {}), ...(dirtyRetained ? { worktreeRetainedDirty: dirtyRetained } : {}) });
           }
           const droppedFallback = result.dropped.map((d) => ({ workerSessionId: d.workerSessionId, reason: d.reason }));
           const fallback = await runFallback([
@@ -17172,6 +17192,7 @@ export class SessionService {
           : outcome.value.ok
           ? `[loom:merge-batch-done] merge_batch [op ${opId}] landed ${landedTotal(outcome.value)} branch(es) on main: ${landedList(outcome.value.landed)}.` +
             (outcome.value.landed.some((l) => l.branchAdvancedDuringGate) ? ` BRANCH TIP MOVED AFTER ASSEMBLY (the extra commit is NOT on main and was never gated): ${outcome.value.landed.filter((l) => l.branchAdvancedDuringGate).map((l) => describeBranchRetained(l.branch, l.branchAdvancedDuringGate!.assembledTip, l.branchAdvancedDuringGate!.liveTip, l.branchAdvancedDuringGate!.phase)).join("; ")}. For a NOT-finalized branch: review the new commit with worker_merge, then land it with worker_merge_confirm — re-firing merge_batch will NOT land it.` : "") +
+            (outcome.value.landed.some((l) => l.worktreeRetainedDirty) ? ` WORKTREE RETAINED (uncommitted work, or its status could not be read; the merge itself landed): ${outcome.value.landed.filter((l) => l.worktreeRetainedDirty).map((l) => l.branch).join(", ")}.` : "") +
             (outcome.value.fallback.length ? ` ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}` : "") +
             // Card 67030bb9: the ONE place an async batch settle is announced (per this callback's own
             // header doc) — a retry-assisted batch landing must carry the SAME weaker-pass note the sync
@@ -19021,6 +19042,8 @@ export class SessionService {
        * (`WedgedWorktreeEntry` is advisory metadata only, repoPath+worktreePath) and simply omits it.
        */
       branch?: string;
+      /** Card 6796c9ea: retain (never remove) a worktree holding uncommitted work or whose status is unreadable. Set ONLY by `finalizeMerge`; the boot-Pass-B and wedge-sweep callers never set it. */
+      retainIfUncommitted?: boolean;
     },
   ): Promise<GcOutcomeResult> {
     if (this.db.getWedgedWorktree(worktreePath)?.needsHuman) return { outcome: "needs-human-skip" };
@@ -19054,6 +19077,19 @@ export class SessionService {
     } catch {
       // Best-effort by construction (reapProcessesRootedInWorktree never throws), but stay defensive:
       // an injected/broken seam must never abort the removal it's only meant to help along.
+    }
+    // @decision 6796c9ea — read the dirty state AFTER the reap, immediately before removal: a process still rooted in the worktree could write a file
+    //  between an earlier check and removeWorktree. A dir with no `.git` link reads clean (see worktreeHasGitLink), so a dead leftover still reaches removal.
+    if (opts?.retainIfUncommitted && !opts.forceRemoveWorktree) {
+      const st = await readWorktreeUncommittedState(worktreePath, { timeoutMs: this.gitOpMs });
+      if (st.state !== "clean") {
+        const dirtyWorktree: DirtyWorktreeRetained = st.state === "dirty"
+          ? { files: st.files.slice(0, DIRTY_WORKTREE_FILES_CAP), truncated: st.files.length > DIRTY_WORKTREE_FILES_CAP, unverified: false }
+          : { files: [], truncated: false, unverified: true };
+        // eslint-disable-next-line no-console
+        console.warn(`[worktree] ${worktreePath} RETAINED — ${st.state === "dirty" ? `uncommitted work: ${dirtyWorktree.files.join(", ")}` : `uncommitted-work status unreadable (${st.reason})`}`);
+        return { outcome: "dirty-retained", dirtyWorktree };
+      }
     }
     const { removed, wedged } = await removeWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, removeDir: this.removeDirOverride });
     if (removed) {
@@ -19211,8 +19247,12 @@ export class SessionService {
      * caller (boot Pass A, ALREADY_MERGED finishes, the batch loop) is REFUSED for a held branch below: nothing finalized, nothing deleted.
      */
     releaseHold?: boolean;
+    /** Card 6796c9ea: called when the worktree removal was skipped because it holds uncommitted work (or its status was unreadable). */
+    onWorktreeRetainedDirty?: (info: DirtyWorktreeRetained) => void;
   }): Promise<{
     nestedRepoBlock?: { paths: string[]; truncated: boolean };
+    /** Card 6796c9ea: the worktree was kept because it holds uncommitted work / its status was unreadable. */
+    dirtyWorktreeRetained?: DirtyWorktreeRetained;
     /** Task 035fb673: the non-"removed"/non-"nested-repo-blocked" gcWorktreeDir outcome, when one
      *  occurred — surfaced by the caller via {@link worktreeGcWarning}. `undefined` on a clean removal,
      *  byte-identical to before this field existed. */
@@ -19239,6 +19279,7 @@ export class SessionService {
     // Sessions has already marked prior-run ptys exited, so the task has no live siblings).
     await this.retireSiblingSessionsForTask(args.taskId, args.workerSessionId);
     let nestedRepoBlock: { paths: string[]; truncated: boolean } | undefined;
+    let dirtyWorktreeRetained: DirtyWorktreeRetained | undefined;
     let worktreeGcOutcome: "wedged" | "left-on-disk" | "needs-human-skip" | undefined;
     let worktreeRemoved = false;
     try {
@@ -19250,14 +19291,18 @@ export class SessionService {
       const result = await this.gcWorktreeDir(args.repoPath, args.worktreePath, {
         projectId: args.projectId,
         worktreeId: codescapeWorktreeId(args.taskId),
-      }, { forceRemoveWorktree: args.forceRemoveWorktree, branch: args.branch });
+      }, { forceRemoveWorktree: args.forceRemoveWorktree, branch: args.branch, retainIfUncommitted: true });
       worktreeRemoved = result.outcome === "removed";
+      if (result.outcome === "dirty-retained") {
+        dirtyWorktreeRetained = result.dirtyWorktree;
+        args.onWorktreeRetainedDirty?.(result.dirtyWorktree!);
+      }
       if (result.outcome === "nested-repo-blocked") {
         nestedRepoBlock = { paths: result.nestedRepoPaths ?? [], truncated: !!result.scanTruncated };
         // eslint-disable-next-line no-console
         console.warn(`[finalizeMerge] worktree ${args.worktreePath} RETAINED (nested-repo-blocked) — ` +
           `merge already landed, only the worktree cleanup is deferred.`);
-      } else if (result.outcome !== "removed") {
+      } else if (result.outcome !== "removed" && result.outcome !== "dirty-retained") {
         // Task 035fb673: this used to be console.warn-only (the daemon log), invisible to the merging
         // manager. `worktreeGcOutcome` carries it out to the caller so it can be folded into the
         // `worker_merge_confirm` return's `warning` field — a surface the manager already reads.
@@ -19361,16 +19406,16 @@ export class SessionService {
     // @decision cc9bce38 — skip the CAS delete only while git STILL has the branch checked out ANYWHERE (`update-ref -d`, unlike `branch -D`, would drop it), whether or not THIS
     // worktree was removed; a worktree that was not removed but is already de-registered (wedged / left-on-disk) no longer holds it, so the delete proceeds. Fail closed: an unreadable list skips.
     let branchStillCheckedOut = false;
-    if (!nestedRepoBlock && args.expectedBranchTip) {
+    if (!nestedRepoBlock && !dirtyWorktreeRetained && args.expectedBranchTip) {
       try { branchStillCheckedOut = (await listCheckedOutBranches(args.repoPath, { timeoutMs: this.gitOpMs })).has(args.branch); } catch { branchStillCheckedOut = true; }
     }
-    if (!nestedRepoBlock && args.expectedBranchTip && branchStillCheckedOut) {
+    if (!nestedRepoBlock && !dirtyWorktreeRetained && args.expectedBranchTip && branchStillCheckedOut) {
       // `git update-ref -d` (the CAS below) — unlike `branch -D` — DELETES a branch that is still checked out in a live
       // worktree. When the worktree was not actually removed (wedged / left-on-disk / needs-human-skip) skip the delete,
       // matching the solo path's effective refusal: the ref goes on a later confirm once the worktree is genuinely gone.
       // eslint-disable-next-line no-console
       console.warn(`[finalizeMerge] branch ${args.branch} NOT deleted: git still has it checked out in a worktree (worktree GC: ${worktreeRemoved ? "removed" : (worktreeGcOutcome ?? "unknown")}), or that could not be verified, and a compare-and-swap ref delete would drop a checked-out branch`);
-    } else if (!nestedRepoBlock) {
+    } else if (!nestedRepoBlock && !dirtyWorktreeRetained) {
       // Card 42daa283: with an expected tip this is a COMPARE-AND-SWAP delete; a refusal means the tip moved in the
       // window since the check above. By now the worktree is gone, the task moved and merge_done filed — this is
       // FINALIZED with only the ref kept (phase "ref-kept-after-finalize"), never reported as "not finalized".
@@ -19396,7 +19441,7 @@ export class SessionService {
     // redundant second drain from that later onExit is harmless (idempotent — the queue is either already
     // empty or still genuinely has room). Safe on the idempotent ALREADY_MERGED replay path too.
     void this.maybeDrainCapQueue(args.managerSessionId);
-    return { ...(nestedRepoBlock ? { nestedRepoBlock } : {}), ...(worktreeGcOutcome ? { worktreeGcOutcome } : {}) };
+    return { ...(nestedRepoBlock ? { nestedRepoBlock } : {}), ...(dirtyWorktreeRetained ? { dirtyWorktreeRetained } : {}), ...(worktreeGcOutcome ? { worktreeGcOutcome } : {}) };
   }
 
   /**
@@ -19797,7 +19842,7 @@ export class SessionService {
       // `.git` falls through to the EXACT fail-safe path below (the 2026-06-05 P0 data-loss guard for real
       // worktrees stays byte-intact). Scope: only the no-`.git` case — NOT the rarer "`.git` exists but
       // gitdir pruned" variant.
-      if (!fs.existsSync(path.join(worktreePath, ".git"))) {
+      if (!worktreeHasGitLink(worktreePath)) {
         // gcWorktreeDir's nested-repo guard applies here too (card b6d41db1 follow-up) — a partially-
         // deleted worktree (no root `.git` linkage left) can still hold a live nested clone; NO override
         // is ever passed on this automatic path, so a hit is always retained + logged, never destroyed.
