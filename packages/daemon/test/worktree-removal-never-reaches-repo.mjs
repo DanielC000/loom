@@ -41,7 +41,7 @@ const sessions = new SessionService(db, {}, new OrchestrationControl());
 
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
-  fs.writeFileSync(path.join(repo, "README.md"), "# wrr\n");
+  fs.writeFileSync(path.join(repo, "tracked.txt"), "wrr\n");
   execSync(`git init -q`, { cwd: repo });
   commitAll(repo, "init", GIT_ID);
   git(repo, "branch -M main");
@@ -80,7 +80,7 @@ await sessions.reconcileOrchestrationOnBoot(new Set());
 
 check("(A) the primary repo directory survives a real boot reconcile", fs.existsSync(repo));
 check("(A) the primary repo's .git survives", fs.existsSync(path.join(repo, ".git")));
-check("(A) the primary repo's tracked file survives", fs.existsSync(path.join(repo, "README.md")));
+check("(A) the primary repo's tracked file survives", fs.existsSync(path.join(repo, "tracked.txt")));
 check("(A) the repo is still a usable git repo at the same HEAD", fs.existsSync(repo) && git(repo, "rev-parse HEAD") === sha0);
 check("(B) a dir outside the worktrees root is refused (survives, contents intact)", fs.existsSync(path.join(outside, "keep.txt")));
 check("(C) CONTROL: a normal worktree under the root is still reclaimed", !fs.existsSync(created.worktreePath));
