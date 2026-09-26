@@ -334,6 +334,15 @@ export class GateCancelledError extends Error {
   }
 }
 
+/**
+ * @decision 13571c71 — THE one rule for "is this gate outcome a merge-gate RED": a gate that ran to a settled verdict and failed. A
+ * cancelled outcome (withdrawn while queued, so no gate ever ran) is NOT a verdict and never a red. Both the solo and the batch path
+ * decide through this, so they cannot drift; card 90db13d8 (reunion failure) extends the rule here, not at a call site.
+ */
+export function isMergeGateRed(v: { passed: boolean; cancelled?: boolean }): boolean {
+  return !v.passed && !v.cancelled;
+}
+
 /** One waiter parked in `highWaiters`/`lowWaiters` — `id` mirrors its {@link RegistryEntry.id} so
  *  {@link GateSemaphore.cancelQueued} can find and splice out ONE specific waiter (not just shift the
  *  head), and `entry` lets {@link GateSemaphore.grantNext} read its `descriptor.worktreePath` to decide

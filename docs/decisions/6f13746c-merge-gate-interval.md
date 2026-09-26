@@ -27,6 +27,10 @@ Decisions taken (owner accepted the four behaviour calls; the manager ruled the 
 - **`skipReason`:** `gate-disabled` (cadence never) vs NEW `gate-interval` (interval, not this landing's turn); neither is ever recorded as a pass. The merge result carries `mergeGateNote` ("ungated 3/5 since the last passing gate" / "this was the periodic gated landing …") and `[loom:merge-done]` echoes it.
 - **Trust posture = `mergeGate`'s.** HUMAN-only: the agent config validator rejects the key, and it is in `HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS` so the Lead's elevated `project_configure` can neither set nor clear it. REST (`GET /api/projects/:id/merge-gate/status?repoKey=`, `POST .../gate-next?repoKey=`, default primary, unknown repo ⇒ 404) is human loopback only; agents get a READ-only `{repoKey, cadence, interval, ungatedSinceLastPass, nextLandingGated, gateOwed}` (the repo being merged on `worker_merge`, primary on `my_context`) on `my_context` and `worker_merge`'s review — never the ring or shas. There is no project-scoped ws event channel, so the UI polls the GET. Both routes stay on the default (non-Tier-1) trust tier.
 
+## Cancel is not a red (card 13571c71)
+
+A merge gate cancelled while queued never ran, so it feeds no interval state — neither path records it, and a cancelled batch starts no per-candidate fallback. See `13571c71-a-cancelled-gate-is-not-a-red-and-starts-nothing.md`.
+
 ## Do not
 
 - Do not decide without counting the in-process reservations, and do not reserve anywhere but in the same synchronous step as the decision — overlapping confirms would overshoot N. Do not share one state across repos.

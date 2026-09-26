@@ -17,6 +17,7 @@ Follows 6f13746c (merge-gate state changes happen in main's order, inside the re
 - Do not move the red's recording back after `runExclusive` returns: the release admits a waiting same-repo sibling in the same tick, before that record runs.
 - Do not hand-place a second recording call on either path; extend the shared hook and keep the once-flag, or a red is recorded twice (the ring dedupes by opId, but `gateOwed` timing would still differ).
 - Do not run the hook per link: only the FINAL verdict is a red; an intermediate failing attempt that a retry then passes must not owe a gate.
+- Do not decide "is this a red" inline on either path: both call `isMergeGateRed` (card 13571c71, `13571c71-a-cancelled-gate-is-not-a-red-and-starts-nothing.md`) — a cancelled-while-queued batch is not a red. Card 90db13d8 (retry-admission reunion failure) extends the rule there, not with a third condition.
 
 ## Source
 

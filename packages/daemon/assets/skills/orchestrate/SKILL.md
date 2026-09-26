@@ -676,7 +676,7 @@ what you checked. Found none? Treat it as live.
    - **A batch reporting `settled` does NOT mean every fallback merge has finished.** `settled` means the
      batch's own work — the shared gate run, the fast-forward onto main, any already-landed finalize — is
      done, never that everything the batch touched is. A dropped/over-cap/stranded candidate on a
-     green batch, or every candidate on a rejected/forfeited one, routes through its own ordinary
+     green batch, or every candidate on a rejected/forfeited one (never a cancelled one — that starts nothing), routes through its own ordinary
      per-branch merge gate instead, spawned by the batch but gated separately — and that gate can still
      be genuinely running after the batch itself settles. Read `gate_queue`'s `fallbackOfBatchOpId` field
      (equal to the batch's own `opId` on every fallback row it spawned, absent/null on an ordinary
@@ -759,8 +759,9 @@ what you checked. Found none? Treat it as live.
      queue) and wait for the async `[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]` /
      `[loom:merge-unknown]` / `[loom:merge-cancelled]` (withdrawn before the gate ran — not a failure) /
      `[loom:merge-orphaned]` (a restart-orphaned op with no recoverable verdict — not a failure either,
-     just re-fire the confirm) nudge for a solo merge — or, for a pending `merge_batch` call, its own trio
-     `[loom:merge-batch-done]` / `[loom:merge-batch-failed]` / `[loom:merge-batch-unknown]` (see the nudge
+     just re-fire the confirm) nudge for a solo merge — or, for a pending `merge_batch` call, its own
+     `[loom:merge-batch-done]` / `[loom:merge-batch-failed]` / `[loom:merge-batch-unknown]` /
+     `[loom:merge-batch-cancelled]` (withdrawn before its gate ran — not a failure, nothing started) (see the nudge
      vocabulary below for what each one means, and the `merge_batch` bullet above for what a `done` there
      does and does NOT guarantee about its fallback merges) — that
      lands the moment the gate/merge actually finishes — it carries the same `opId` you were handed, so if
@@ -830,9 +831,10 @@ what you checked. Found none? Treat it as live.
    - **Know the `[loom:*]` nudge vocabulary Loom pushes at you.** Besides the merge trio
      (`[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]`), a **batched** merge via
      `merge_batch` gets its OWN trio, never the solo one above: `[loom:merge-batch-done]` /
-     `[loom:merge-batch-failed]` / `[loom:merge-batch-unknown]` — one per batch op, same shape as the solo
-     trio (a completed landing / a rejection with automatic per-candidate fallback / an errored op whose
-     canonical repo state is unknown until you check `git log`). See the `merge_batch` bullet above for
+     `[loom:merge-batch-failed]` / `[loom:merge-batch-unknown]` / `[loom:merge-batch-cancelled]` — one per
+     batch op, same shape as the solo set (a completed landing / a rejection with automatic per-candidate
+     fallback / an errored op whose canonical repo state is unknown until you check `git log` / a queued
+     batch you cancelled: not a failure, no verdict, and NOTHING was started — no per-candidate fallback). See the `merge_batch` bullet above for
      what a `[loom:merge-batch-done]` does and does NOT guarantee — it never means every fallback merge the
      batch spawned has itself finished. You'll also see `[loom:merge-unknown]`
      (not a confirmed failure — the confirm threw before it could tell whether the squash landed; check

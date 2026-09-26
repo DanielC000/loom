@@ -2,6 +2,7 @@ import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, describeGitFailure } from "./bounded.js";
 import { findLandedSquashCommit, changedPathSetDigest, type MergeEmptyKind } from "./worktrees.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
+import { isMergeGateRed } from "../orchestration/gate-semaphore.js";
 
 /**
  * Card dbc6f660 — batch the merge gate: gate K ready branches ONCE, land each on main. Canonical main is
@@ -680,6 +681,8 @@ export async function fastForwardCanonicalMain(
  *  real integration wires `runGate` to whatever this daemon already uses for a real gate run. */
 export interface BatchGateResult {
   passed: boolean;
+  /** @decision 13571c71 — the batch was withdrawn while queued; no gate ran, so this is never a verdict (`passed:false` alone would read as a red). */
+  cancelled?: boolean;
   /** @decision d422e279 — this field's earlier doc asserted a RETRACTED measured claim about how often a
    *  batch's union is reducible. The field itself is RECORD-ONLY: nothing reads it back — `gate_history`
    *  is populated independently, from the same local variables the caller's `runGate` closure computes. */
@@ -725,6 +728,8 @@ export interface RunBatchedMergeResult {
   batchHeadSha?: string;
   gatePassed?: boolean;
   gateFailed?: boolean;
+  /** @decision 13571c71 — mirrors `BatchGateResult.cancelled`; never also `gateFailed`. */
+  cancelled?: boolean;
   forfeited?: boolean;
   reason?: string;
   gateDetail?: BatchGateResult;
@@ -778,7 +783,7 @@ export async function runBatchedMerge(
   }
   const gate = await runGate(batchWorktreePath, baseMainSha, landed.length, assemblyMs);
   if (!gate.passed) {
-    return { ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: false, gateFailed: true, gateDetail: gate, reason: gate.reason ?? "batch gate failed" };
+    return { ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: false, gateFailed: isMergeGateRed(gate), ...(gate.cancelled ? { cancelled: true } : {}), gateDetail: gate, reason: gate.reason ?? "batch gate failed" };
   }
   const { git, timeoutMs } = boundedGit(batchWorktreePath, deps);
   let batchHeadSha: string;

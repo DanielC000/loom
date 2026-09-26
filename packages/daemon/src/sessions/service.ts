@@ -71,7 +71,7 @@ import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
 import { gateSpillPath, pruneGateSpills, listGateSpillOpIds, GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, GATE_SPILL_PROTECTED_RETAIN_COUNT } from "../orchestration/gate-spill.js";
 import { decideMergeGate, applyUngatedLanding, applyGatePass, applyGateFail, applyGateNext, applyCadenceCleared, agentViewOf, statusOf, counterNote, type MergeGateDecision } from "../orchestration/merge-gate-interval.js";
-import { GateSemaphore, GateCancelledError, type GateContinuation, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
+import { GateSemaphore, GateCancelledError, isMergeGateRed, type GateContinuation, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -566,6 +566,9 @@ type MergeBatchResult = {
    *  pre-batch early returns, where no fallback is attempted. */
   fallback: { workerSessionId: string; reason: string; started?: boolean }[];
   reason?: string;
+  /** @decision 13571c71 — the batch was cancelled while queued: no gate ran, no verdict, NOTHING was started (no per-candidate fallback,
+   *  unlike a red). `fallback` then lists each candidate as `started:false`. Absent on every other outcome. */
+  cancelled?: boolean;
   /** Card 6cc803b2 — phase instrumentation: the two phases (of the five this card measures) that are
    *  only ever known inside {@link SessionService.mergeBatchTracked}'s own `run` closure, once
    *  {@link runBatchedMerge} has resolved — the batch-worktree cut (before any gate is even considered)
@@ -15185,7 +15188,7 @@ export class SessionService {
       let solRedRecorded = false;
       const recordSoloRedOnce = async (_r?: unknown, thrown?: unknown): Promise<void> => {
         if (thrown !== undefined && !(thrown instanceof GateWorktreeDirtyError)) return;
-        if (solRedRecorded || !gate || gateResult.passed) return;
+        if (solRedRecorded || !gate || !isMergeGateRed(gateResult)) return;
         solRedRecorded = true;
         await this.recordMergeGateFailure(project.id, { repoPath, repoKey: worker.repoKey ?? "primary", opId: thisOpId, periodic: mergeGateDecision.cadence !== "every", branchTip: pinnedGateTip ?? ((await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? null), branch });
       };
@@ -16311,7 +16314,9 @@ export class SessionService {
     //  (~25 min), so the owner may have recycled meanwhile; resolve each candidate's CURRENT owner (strictly:
     //  the original manager or a `recycled_from` descendant of it) instead of passing the captured id to the
     //  ownership-checked confirm, and report a candidate that could not be started as `started:false`.
-    const runFallback = async (list: { workerSessionId: string; reason: string; decision?: MergeGateDecision }[], batchOpId?: string, reservations?: Map<string, { release: (n?: number) => void }>): Promise<{ workerSessionId: string; reason: string; started?: boolean }[]> => {
+    const runFallback = async (list: { workerSessionId: string; reason: string; decision?: MergeGateDecision }[], batchOpId?: string, reservations?: Map<string, { release: (n?: number) => void }>, noStart = false): Promise<{ workerSessionId: string; reason: string; started?: boolean }[]> => {
+      // @decision 13571c71 — `noStart` (a CANCELLED batch) reports every candidate through this same path with its OWN reason + this suffix, and starts nothing.
+      const tail = noStart ? " (batch cancelled — not started)" : "";
       const out: { workerSessionId: string; reason: string; started?: boolean }[] = [];
       const heldReason = (h: { branch: string; assembledTip: string | null; liveTip: string | null; phase: BranchAdvancedDuringGate["phase"]; gitUnverified: boolean; solo?: boolean }) =>
         h.gitUnverified
@@ -16326,10 +16331,11 @@ export class SessionService {
       for (const f of list) {
         const unit = reservations?.get(f.workerSessionId); // card 6f13746c: this candidate's reserved ungated landing (idempotent handle)
         const held = retainedOutstanding.get(f.workerSessionId);
-        if (held) { out.push({ workerSessionId: f.workerSessionId, reason: heldReason(held), started: false }); unit?.release(); continue; }
+        if (held) { out.push({ workerSessionId: f.workerSessionId, reason: heldReason(held) + tail, started: false }); unit?.release(); continue; }
         // Card bbccf470: a review-moved candidate is skipped EXACTLY like a held one — never solo-confirmed from ANY caller path (the `< 2`, gate-off and no-gate returns included).
         const movedText = reviewMoved.get(f.workerSessionId);
-        if (movedText) { out.push({ workerSessionId: f.workerSessionId, reason: movedText, started: false }); unit?.release(); continue; }
+        if (movedText) { out.push({ workerSessionId: f.workerSessionId, reason: movedText + tail, started: false }); unit?.release(); continue; }
+        if (noStart) { out.push({ workerSessionId: f.workerSessionId, reason: f.reason + tail, started: false }); unit?.release(); continue; }
         const owner = this.resolveLineageOwnerForWorker(managerSessionId, f.workerSessionId);
         if (!owner) {
           const why = `fallback NOT started: worker is not a child of this manager or its recycle lineage`;
@@ -16364,10 +16370,10 @@ export class SessionService {
       // Every return path of this method funnels through here, so a held candidate is always REPORTED, even when it was in
       // no list (it is never assembled — see `retainedOutstanding`).
       for (const [id, held] of retainedOutstanding) {
-        if (!out.some((o) => o.workerSessionId === id)) out.push({ workerSessionId: id, reason: heldReason(held), started: false });
+        if (!out.some((o) => o.workerSessionId === id)) out.push({ workerSessionId: id, reason: heldReason(held) + tail, started: false });
       }
       for (const [id, text] of reviewMoved) {
-        if (!out.some((o) => o.workerSessionId === id)) out.push({ workerSessionId: id, reason: text, started: false });
+        if (!out.some((o) => o.workerSessionId === id)) out.push({ workerSessionId: id, reason: text + tail, started: false });
       }
       return out;
     };
@@ -16665,7 +16671,7 @@ export class SessionService {
                 return gr;
               }, "high", afterAttempt1, async (_r, thrown) => {
                 // @decision 593cedc8 — same ordering point as the solo path: the batch red is recorded before the admission releases.
-                if (thrown === undefined && !r.passed && !batchRedRecorded) {
+                if (thrown === undefined && isMergeGateRed(r) && !batchRedRecorded) {
                   batchRedRecorded = true;
                   await this.recordMergeGateFailure(finalProjectId, { repoPath: finalRepoPath, repoKey: batchRepoKey, opId, periodic: batchDecision.cadence !== "every", candidates: liveChosen.length });
                 }
@@ -16683,7 +16689,7 @@ export class SessionService {
               const totalDurationMs = nowMs - opMintedAtMs;
               if (err instanceof GateCancelledError) {
                 batchGateVerdict = { kind: "cancelled", payload: { reason: `${err.kind}: ${err.detail}`, settledAt, totalDurationMs } };
-                return { passed: false, reason: `gate cancelled (${err.kind}): ${err.detail}` };
+                return { passed: false, cancelled: true, reason: `gate cancelled (${err.kind}): ${err.detail}` };
               }
               batchGateVerdict = { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt, totalDurationMs } };
               throw err;
@@ -16865,6 +16871,16 @@ export class SessionService {
             evtBatch("batch_merge_forfeited", { repoPath: finalRepoPath, baseMainSha, currentMainSha: result.currentMainSha, reason: result.reason, fastForwardMs: result.fastForwardMs });
           }
 
+          if (result.cancelled) {
+            // @decision 13571c71 — a cancel means stop, matching solo: no per-candidate fallback, no red. Every candidate is reported (its OWN reason) through
+            // `runFallback`'s no-start mode — the one reporting path — and nothing is started.
+            const notStarted = await runFallback([
+              ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? "the batch was cancelled before its gate ran" })),
+              ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+              ...strandedFallback,
+            ], opId, undefined, true);
+            return { ok: false, opId, landed: [], fallback: notStarted, cancelled: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
+          }
           if (!result.ok) {
             const fallback = await runFallback([
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "batch failed" })),
@@ -17057,6 +17073,8 @@ export class SessionService {
             // Card d422e279: same reasoning as retryWarning immediately above, for a reduced batch gate's
             // own surfacing obligation (`MergeBatchResult.reducedGateWarning`'s own doc).
             (outcome.value.reducedGateWarning ? ` ${outcome.value.reducedGateWarning}` : "")
+          : outcome.value.cancelled
+          ? `[loom:merge-batch-cancelled] merge_batch [op ${opId}] was cancelled before its gate ran (${outcome.value.reason ?? "cancelled"}). This is NOT a failure — no verdict was reached and NOTHING was started: no candidate was routed to an individual worker_merge_confirm. Re-run merge_batch if you still want it.`
           : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`;
         try {
           // Card 791def40: fresh read, mirroring the solo-merge settle nudge (confirmWorkerMergeTracked's
@@ -17115,17 +17133,9 @@ export class SessionService {
         // Card cf803152 — see `batchAlreadyFinished`'s own doc, just above this call, for why this exists
         // and what it does and does not cover (a MIXED batch still requires a real identity match).
         identityOptional: batchAlreadyFinished,
-        // CANCELLED-VETO CLASSIFICATION (Code Review, card cf803152 finding [2]): mirrors
-        // `confirmWorkerMergeTracked`'s own three-way `classifyOutcome` shape (cancelled/merged-or-
-        // equivalent/rejected), but `MergeBatchResult` carries no boolean `cancelled` field the way
-        // `ConfirmMergeResult` does — a cancellation surfaces here only as a NORMAL, resolved value
-        // (`{ok:false, reason:"gate cancelled (<kind>): <detail>"}`, never a throw — see the
-        // `GateCancelledError` catches just above and in `runBatchedMerge`'s own `!gate.passed` branch,
-        // `git/batch-merge.ts`, which passes `gate.reason` straight through unrewritten). Detected via that
-        // EXACT literal prefix, written by Loom's own code in exactly those two symmetric catch blocks
-        // (attempt 1 and the single-file retry) and nowhere else — never user/test-output-controlled
-        // content, so this is a safe, narrow classifier, not a fragile string-sniff of arbitrary text.
-        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : /^gate cancelled \(/.test(outcome.value.reason ?? "") ? "cancelled" : outcome.value.ok ? "landed" : "rejected"),
+        // CANCELLED-VETO CLASSIFICATION (card cf803152 finding [2]; card 13571c71): a cancelled batch is a normal resolved value carrying
+        // the explicit `cancelled` field (set at the `GateCancelledError` catch above) — never a sniff of `reason` text.
+        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.cancelled ? "cancelled" : outcome.value.ok ? "landed" : "rejected"),
         // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
         //  settled, never the gate's own inner resolve; an undefined batchGateVerdict here still
         //  synthesizes a minimal "error" verdict from the real thrown value when none was recorded.
