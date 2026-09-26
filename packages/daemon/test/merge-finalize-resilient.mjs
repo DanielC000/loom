@@ -45,6 +45,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, removeWorktree, killableRemoveDir } = await import("../dist/git/worktrees.js");
+const { WORKTREES_DIR } = await import("../dist/paths.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -114,7 +115,7 @@ async function setupBusyWorker(p) {
   await removeWorktree(p.repo, worktreePath); // detach the branch from its worktree (branch retained)
   // The leftover dir the busy handle "couldn't release": a plain dir that fs.rm will be forced to fail on.
   // Tagged with p.tag (not just sfx) so two busy workers in the same run get DISTINCT leftover dirs.
-  p.busyDir = path.join(os.tmpdir(), `loom-mfr-busydir-${p.tag}-${sfx}`);
+  p.busyDir = path.join(WORKTREES_DIR, p.projId, `busydir-${p.tag}-${sfx}`); // under the worktrees root, or gcWorktreeDir's e21cfd5f path guard refuses it
   fs.mkdirSync(p.busyDir, { recursive: true });
   fs.writeFileSync(path.join(p.busyDir, "leftover.txt"), "still busy\n");
   p.worktreePath = p.busyDir; p.branch = branch;

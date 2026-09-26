@@ -13,6 +13,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit, toConventionalSubject, deriveTasklessSubject, killableRemoveDir } = await import("../dist/git/worktrees.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
+const { WORKTREES_DIR } = await import("../dist/paths.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -284,7 +285,7 @@ try {
     let seenTimeout = -1;
     const neverGit = { raw: () => new Promise(() => {}) }; // a hung child: this promise never settles
     const fakeFactory = (_repo, blockMs) => { seenTimeout = blockMs; return neverGit; };
-    const ghostPath = path.join(process.env.LOOM_HOME, `ghost-${Date.now()}`); // not on disk → fs.rm no-ops
+    const ghostPath = path.join(WORKTREES_DIR, "wt-fixture-proj", `ghost-${Date.now()}`); // not on disk → fs.rm no-ops; under the worktrees root or removeWorktree's e21cfd5f path guard refuses it
     const tinyMs = 250;
     const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
     let resolved = false;
@@ -355,7 +356,7 @@ try {
     const stubFastGit = (_p, _ms) => ({ raw: async () => "" }); // git ops succeed fast → only the removal hangs
     const neverRemoveDir = () => new Promise(() => {}); // a stuck dir handle: this removal never settles
     const tinyMs = 250;
-    const stuckPath = path.join(process.env.LOOM_HOME, `stuck-${Date.now()}`); // Date.now() here = unique path, not a duration
+    const stuckPath = path.join(WORKTREES_DIR, "wt-fixture-proj", `stuck-${Date.now()}`); // Date.now() here = unique path, not a duration; under the worktrees root (e21cfd5f path guard)
     const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
     let resolved = false;
     let outcome;

@@ -30,6 +30,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { killableRemoveDir } = await import("../dist/git/worktrees.js");
+const { WORKTREES_DIR } = await import("../dist/paths.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -92,7 +93,7 @@ function initRepo(repo) {
 // REAL registered worktree would just get deleted by the git step itself, since it isn't actually busy —
 // the fs backstop would never even be reached).
 function leftoverDir(tag, sfx) {
-  const dir = path.join(os.tmpdir(), `loom-wwr-${tag}-leftover-${sfx}`);
+  const dir = path.join(WORKTREES_DIR, "wwr-fixture", `${tag}-leftover-${sfx}`); // under the worktrees root, or gcWorktreeDir's e21cfd5f path guard refuses it
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "leftover.txt"), "dead leftover\n");
   return dir;

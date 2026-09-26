@@ -26,6 +26,7 @@ process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-rm-lock-home-${Date.now(
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { removeWorktree } = await import("../dist/git/worktrees.js");
+const { WORKTREES_DIR } = await import("../dist/paths.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -46,7 +47,7 @@ try {
   // (a) LOCKED + DIRTY residue: a real worktree, made dirty (tracked-modified + untracked), then locked —
   //     modeling the killed-mid-checkout marker card 1a858805 already established real git leaves behind.
   {
-    const wtA = `${repo}-wt-a`;
+    const wtA = path.join(WORKTREES_DIR, "rmlock-fixture", `${path.basename(repo)}-wt-a`); // under the worktrees root, or removeWorktree's e21cfd5f path guard refuses it
     extraDirs.push(wtA);
     git(repo, `worktree add -q -b loom-rmlock-a "${wtA}"`);
     fs.writeFileSync(path.join(wtA, "dirty.txt"), "tracked-then-modified\n");
@@ -86,7 +87,7 @@ try {
   //     tree (the second force bit only ever gates the locked/corrupted-HEAD check), so this must behave
   //     identically to before the fix.
   {
-    const wtB = `${repo}-wt-b`;
+    const wtB = path.join(WORKTREES_DIR, "rmlock-fixture", `${path.basename(repo)}-wt-b`);
     extraDirs.push(wtB);
     git(repo, `worktree add -q -b loom-rmlock-b "${wtB}"`);
     fs.writeFileSync(path.join(wtB, "dirty.txt"), "tracked-then-modified\n");
@@ -110,7 +111,7 @@ try {
   //     succeed against something git never knew about), and must not throw past removeWorktree (the
   //     filesystem backstop still tidies up any stray directory there, same as before).
   {
-    const wtC = path.join(repo, "..", `loom-wt-rm-lock-notaworktree-${Date.now()}-${randomUUID()}`);
+    const wtC = path.join(WORKTREES_DIR, "rmlock-fixture", `loom-wt-rm-lock-notaworktree-${Date.now()}-${randomUUID()}`);
     extraDirs.push(wtC);
     fs.mkdirSync(wtC, { recursive: true });
     fs.writeFileSync(path.join(wtC, "junk.txt"), "not a worktree\n");

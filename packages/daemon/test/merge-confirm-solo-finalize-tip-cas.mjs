@@ -187,7 +187,7 @@ async function setup(sfx, { gateCommand = "pnpm gate" } = {}) {
   // (I) the branch is checked out in ANOTHER worktree: the worktree finalize is handed (a decoy) is removed, but the CAS delete must still be skipped.
   const t = await setup(sfxOf("decoy"));
   const tip = t.liveTip();
-  const decoy = path.join(path.dirname(t.repo), "decoy-worktree");
+  const decoy = path.join(path.dirname(t.wt.worktreePath), "decoy-worktree"); // sibling of the real worktree, so under the worktrees root (e21cfd5f path guard)
   fs.mkdirSync(decoy, { recursive: true });
   const sess = t.db.getSession(t.workerId);
   await t.sessions.finalizeMerge({ managerSessionId: t.mgrId, workerSessionId: t.workerId, taskId: sess.taskId, worktreePath: decoy, branch: t.wt.branch, repoPath: t.repo, projectId: sess.projectId, expectedBranchTip: tip, mergedSha: null, repoKey: null, releaseHold: true });
