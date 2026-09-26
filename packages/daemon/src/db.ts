@@ -2299,7 +2299,10 @@ export interface PendingGateOpVerdict {
   emitCompareNotApplicableKind?: EmitCompareNotApplicableKind;
   /** Card e8df2659: why a merge landed WITHOUT running the gate, when the cause is the human-only
    *  `orchestration.mergeGate:"off"` switch (`"gate-disabled"`). `undefined` otherwise — an inert docs-only
-   *  skip is NOT stamped here (read `GateHistoryRow.skipReason`, which covers both causes). */
+   *  skip is NOT stamped here (read `GateHistoryRow.skipReason`, which covers both causes).
+   *  Card 92eeb319: a `merge_batch` op whose BATCH gate never ran — every candidate was dropped at assembly and handed to its
+   *  own `worker_merge_confirm` (each a real solo op with its own opId; read that op's `gate_status` for whether it landed) —
+   *  settles `outcome:"skipped"` with `skipReason:"all-candidates-dropped"` (NOT the gate switched off). */
   skipReason?: string;
   /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
    *  the `gate_status(opId)` half of the same fix DoD-1 applied to the `[loom:merge-done]` nudge text.

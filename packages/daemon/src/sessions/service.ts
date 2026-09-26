@@ -4219,7 +4219,9 @@ export class SessionService {
     /** @decision 9f6598dd — admittedAt is the op's own mint instant, present for every tombstone-branch
      *  result
      *  @decision 720bb7ad — TRAP: admittedAt is MINT time, not admission time; totalDurationMs silently
-     *  includes queue wait */
+     *  includes queue wait
+     *  @decision 92eeb319 — a merge_batch op's mint is op CREATION (before the worktree cut), so its
+     *  admittedAt/totalDurationMs also cover the cut + assembly; a solo merge/deploy mint is unchanged */
     admittedAt?: string;
     /** @decision d5e67146 — ownerSessionAlive: the liveness signal for tombstone state:"pending",
      *  derived via liveLineageSuccessor (not a bare session-dead check); present only for the unscoped
@@ -4257,13 +4259,18 @@ export class SessionService {
     emitCompareReduced?: boolean; emitCompareIdenticalCount?: number;
     emitCompareTestFiles?: string[]; emitCompareNotHermeticExcluded?: string[];
     /** Card e8df2659: `"gate-disabled"` on a merge that landed with the human-only merge gate switched off
-     *  (`outcome:"skipped"`, `gateRan:false`) — never a pass. Absent otherwise (an inert docs-only skip
-     *  carries no `skipReason` here; `gate_history`'s row `skipReason` names both causes). */
+     *  (`outcome:"skipped"`, `gateRan:false`) — never a pass; `"gate-interval"` (card 6f13746c) when the interval let it
+     *  land ungated. Card 92eeb319: `"all-candidates-dropped"` on a merge_batch whose BATCH gate never ran (see
+     *  {@link PendingGateOpVerdict.skipReason}). Absent otherwise (an inert docs-only skip carries no `skipReason` here;
+     *  `gate_history`'s row `skipReason` names the landing causes only — a batch that never gated writes no row). */
     skipReason?: string;
     /** @decision 9f6598dd — outcome surfaces the same pass/fail/error/cancelled classification as one
      *  literal string, purely additive
      *  @decision a228dfb5 — "skipped" (merge rows only) means landed with no gate spawned (inert docs-only diff, OR the human-only merge gate switched off — the latter also sets `skipReason:"gate-disabled"`);
-     *  never collapse it into "pass" */
+     *  never collapse it into "pass".
+     *  @decision 92eeb319 — a batch whose BATCH gate never ran (every candidate dropped at assembly and handed to its own solo
+     *  worker_merge_confirm) is also "skipped", told apart by `skipReason:"all-candidates-dropped"` + `batchLanded:false`; the
+     *  candidates' own solo ops may still have landed, and `totalDurationMs` includes those fallback runs */
     outcome?: PendingGateOpVerdictKind;
     /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
      *  the documented "if you need the answer sooner" poll for a QUEUED merge, which previously could not
@@ -4770,9 +4777,11 @@ export class SessionService {
    * Two sources, unioned by opId: the live GateSemaphore snapshot (queued OR running — carries the real
    * branch count for a batch) and `pending_gate_ops` rows still `pending` (minted before admission, so
    * a batch waiting on the semaphore is covered by both; a solo merge still in worktree prep only by the
-   * row). A `pending` row whose owner session is no longer live is skipped: a batch tombstone can be left
-   * permanently `pending` by a crash (see the batch mint site's own doc) and must not warn forever.
-   * NOT covered: a batch still ASSEMBLING its worktree — nothing is minted or queued until it's assembled.
+   * row). A `pending` row whose owner session is no longer live is skipped, so a row a crash left pending
+   * (until the boot sweep, `reconcileUnsurfacedPendingGateOps`, marks it orphaned) does not warn.
+   * Card 92eeb319: a batch is minted at the START of its op, so one still cutting its worktree / ASSEMBLING IS
+   * reported (phase `pending`, `branchCount` null, `ageMs` from op creation, i.e. including cut + assembly). During an
+   * all-dropped batch's fallback window it lists BOTH the batch row and each candidate's own solo op.
    * Multi-repo project caveat: rows/entries carry no repoKey, so a match is per PROJECT (any of its repos).
    */
   pendingMergeOpsForRepoPath(repoPath: string): PendingMergeOpNotice[] {
@@ -7586,7 +7595,8 @@ export class SessionService {
 
   /**
    * @decision 7239c712 — the STATE-ONLY complement to reconcileOrphanedGateOps, covering rows minted by
-   *  a single-synchronous-span site (mergeBatch, deployOwnProject) that never flips surfaced_pending;
+   *  a site that never flips surfaced_pending (deployOwnProject's back-to-back span, and mergeBatch's whole-op span since card
+   *  92eeb319 mints at the top of the op closure);
    *  deliberately pushes no nudge, attempts no durable-history recovery, and covers all three op kinds.
    * @decision 81d795de — mergeBatch's settle is deferred to whole-batch completion, so its
    *  pending-exposure window is WIDER than deployOwnProject's back-to-back settle, not narrower.
@@ -16529,6 +16539,8 @@ export class SessionService {
     //  settles by hand from a nested closure, which is why the write had to move.
     //
     let batchGateVerdict: { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined;
+    let batchAllDropped = false; // set positively when runBatchedMerge assembled nothing and never entered runGate
+    let batchMintedAtMs: number | undefined; // set by the closure's own mint; `onSettle` derives a no-gate verdict's timing from it
     return this.pendingOps.attach<MergeBatchResult>(
       batchKey, "merge", managerSessionId, this.syncAttachBudgetMs,
       async (opId) => {
@@ -16539,6 +16551,27 @@ export class SessionService {
           detail: { ...detail, opId, branches: branchIdentities },
         });
 
+        // DURABLE TOMBSTONE (card be260976; MOVED to the top of the closure by card 92eeb319): minted once, before ANY work (worktree cut,
+        // assembly, gate), so every batch op that ran is resolvable by `gate_status(opId)` — a batch whose candidates were all dropped
+        // never reaches `runGate` and used to read `never_existed`. Every exit settles it: `onSettle` (below) fires on EVERY completion of
+        // this closure and writes the recorded verdict, or synthesizes one (the batch gate never ran / a pre-gate throw). `surfacedPending:false` is
+        // DELIBERATE and load-bearing: `reconcileOrphanedGateOps` only selects rows that are `surfaced_pending=1` AND still pending, and
+        // a surfaced "merge" row takes the merge-orphaned branch that nudges `worker_merge_confirm` — WRONG advice for a batch (no single
+        // worker/branch). Mirrors `deployOwnProject`'s `kind === "deploy"` exclusion, enforced by never setting the flag. A crash between
+        // this mint and `onSettle` does NOT leave the row pending forever: `reconcileUnsurfacedPendingGateOps` (@decision 7239c712) marks it
+        // orphaned-by-restart at the next boot; the only trade is that no nudge is pushed (do not "fix" that with `true`).
+        // TIMING (card 92eeb319): `startedAt` (= `gate_status.admittedAt`) and the verdict's `totalDurationMs` (`settledAt - admittedAt`) are
+        // op-CREATION time, so they now also cover the worktree cut + assembly (docs already say "worktree prep + queue wait + gate + squash");
+        // `gate_history.durationMs`/`steps` (the gate run) and `admissionWaitMs` (semaphore hand-off → admission) are unchanged, and
+        // `gate_queue.since` re-bases to true admission as before.
+        const opMintedAt = new Date().toISOString();
+        const opMintedAtMs = Date.parse(opMintedAt);
+        batchMintedAtMs = opMintedAtMs;
+        this.db.insertPendingGateOp({
+          opId, kind: "merge", key: `merge-batch:${managerSessionId}`, ownerSessionId: managerSessionId,
+          projectId: finalProjectId, taskId: null, branch: null, startedAt: opMintedAt,
+          state: "pending", surfacedPending: false,
+        });
         const baseMainSha = (await resolveGitRef(finalRepoPath, "HEAD", { timeoutMs: this.gitOpMs })) ?? "";
         let batchWorktreePath: string | undefined;
         const batchTaskId = `batch-${opId}`;
@@ -16620,38 +16653,11 @@ export class SessionService {
             let gateStartedAt = 0;
             let concurrentAtStart = 0;
             let getConcurrentGatesMax: (() => number) | undefined;
-            // DURABLE TOMBSTONE (card be260976 — closing DoD-4 of a Loom-lead-filed question, following the
-            // deployOwnProject precedent at this file's own `insertPendingGateOp` call in `deployOwnProject`):
-            // mint the row HERE, immediately before admission, rather than at `opId`'s own declaration above —
-            // `runBatchedMerge` (batch-merge.ts) can decide not to call `runGate` at all when nothing landed
-            // cleanly into the batch (`landed.length === 0`); minting at the earlier declaration would leave a
-            // permanently-`pending`, never-settled tombstone on that path, since nothing downstream would ever
-            // settle it. `runGate` itself is called exactly ONCE per batch (see this closure's own comment
-            // above), so this mint site is reached at most once, always followed by a RECORDED verdict below
-            // (on the pass/fail path, the cancelled-error path, or the rethrown-error path) — never left
-            // dangling the way an earlier mint could be. CARD 81d795de: the actual DB `settlePendingGateOp`
-            // WRITE for that verdict is no longer immediate — it's deferred to `onSettle` (this method's own
-            // `pendingOps.attach` opts, below), which fires only once the WHOLE batch (fast-forward and
-            // per-branch finalize included) has settled, closing a window where `gate_status(opId)` could
-            // read "settled" mid-finalize. `surfacedPending:false` is DELIBERATE and load-bearing,
-            // not merely the default: `reconcileOrphanedGateOps`' boot sweep only ever selects rows that are
-            // BOTH `surfaced_pending=1` AND still `state:'pending'` (see the schema doc), so a crash strictly
-            // between this mint and the eventual `onSettle` write leaves this row invisible to that sweep —
-            // a real, KNOWN trade (now spanning a WIDER window than before this card, since settle moved
-            // later) against the old `never_existed` (a permanently-pending row nobody reconciles),
-            // carded separately; do not "fix" it by flipping this to `true` — this row is `kind:"merge"`, and a
-            // surfaced-pending "merge" row that DOES reach that sweep takes the full merge-orphaned branch,
-            // which pushes a `[loom:merge-orphaned]` nudge telling the manager to re-run `worker_merge_confirm`
-            // — WRONG advice for a batch op, which has no single worker/branch to re-confirm. Mirrors
-            // `deployOwnProject`'s own explicit `if (row.kind === "deploy") continue;` exclusion in that same
-            // sweep, just enforced here by never setting the flag that would route this row into it at all.
-            const opMintedAt = new Date().toISOString();
-            const opMintedAtMs = Date.parse(opMintedAt);
-            this.db.insertPendingGateOp({
-              opId, kind: "merge", key: `merge-batch:${managerSessionId}`, ownerSessionId: managerSessionId,
-              projectId: finalProjectId, taskId: null, branch: null, startedAt: opMintedAt,
-              state: "pending", surfacedPending: false,
-            });
+            // @decision 92eeb319 — the tombstone is minted at the TOP of this op's closure (below), not here: `runGate` is skipped when nothing
+            //  assembles, and a row minted here left that op `never_existed`. This stamp is the ADMISSION-WAIT origin ONLY (`admissionWaitMs`
+            //  below): the instant this closure hands the assembled batch to the semaphore — after the worktree cut and assembly, which
+            //  are reported as their own phases and must never be folded into the queue wait.
+            const gateReadyAtMs = Date.now();
             // @decision 68155573 — the retry/resume links below CONTINUE this batch's ONE `runExclusive`
             //  admission (slot + repo guard + worktree held through); never re-enter `runExclusive` for a retry.
             // BOUNDED MULTI-FILE RETRY ON THE BATCH PATH (card 67030bb9): a green retry lands EVERY branch in
@@ -16811,15 +16817,15 @@ export class SessionService {
               // are handed in from outside this closure (the batch worktree cut happens before `runGate` is
               // even defined; the per-branch assembly happens inside `runBatchedMerge`, before it calls this
               // callback — see that function's own doc for why its fourth argument exists). `admissionWaitMs`
-              // is `gateStartedAt - opMintedAtMs` — the SAME two instants `insertPendingGateOp`/
-              // `deriveBatchGateVerdict` already capture for the tombstone above, just also stamped here as
+              // is `gateStartedAt - gateReadyAtMs` (the semaphore hand-off instant, above; NOT the tombstone's mint
+              // instant, which now precedes the worktree cut — card 92eeb319), stamped here as
               // its own explicit field (per the card's own DoD-1: admission wait and gate run MUST be
               // reported as separate numbers, never folded into one total) rather than left as something a
               // reader has to re-derive from `gate_status(opId)`'s `admittedAt`/`durationMs` pair by hand.
               // `fastForwardMs` (the fifth phase) is NOT here — it is only known once `runBatchedMerge`
               // resolves, strictly after this event already fired; see `mergeBatch`'s own post-`runBatchedMerge`
               // handling for where that phase is recorded instead.
-              worktreeCutMs, assemblyMs, admissionWaitMs: gateStartedAt - opMintedAtMs,
+              worktreeCutMs, assemblyMs, admissionWaitMs: gateStartedAt - gateReadyAtMs,
               // Code Review, card d422e279: `emitCompareIdenticalCount` is now stamped alongside
               // `emitCompareTestFiles` — both paired 1:1 with `emitCompareReduced:true`, matching
               // `GateHistoryRow.emitCompareIdenticalCount`'s own documented invariant (shared/types.ts:
@@ -16879,6 +16885,7 @@ export class SessionService {
           let result: Awaited<ReturnType<typeof runBatchedMerge>>;
           try {
             result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
+            if (!batchGateRan && result.landed.length === 0) batchAllDropped = true; // @decision 92eeb319 — see `onSettle`
             batchFastForwarded = result.ok;
             if (result.ok && result.landed.length > 0) await this.advanceMainlineWatermarkForBatch(finalProjectId, batchRepoKey, finalRepoPath, batchCheckedTip, baseMainSha, result.batchHeadSha); // card 59d2577a
             // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (the `finally` below) — ONCE, with
@@ -17241,28 +17248,23 @@ export class SessionService {
         // the explicit `cancelled` field (set at the `GateCancelledError` catch above) — never a sniff of `reason` text.
         classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.ok ? "landed" : "rejected"),
         // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
-        //  settled, never the gate's own inner resolve; an undefined batchGateVerdict here still
-        //  synthesizes a minimal "error" verdict from the real thrown value when none was recorded.
+        //  settled, never the gate's own inner resolve.
         //
-        // `batchGateVerdict` is `undefined` on a batch whose gate never even ran (`landed.length === 0`
-        // — see runBatchedMerge) or one that failed before `runGate` was reached at all (e.g. the batch
-        // worktree cut itself threw) — in EITHER case no tombstone row was ever minted for this opId
-        // either (mint stays scoped to `runGate`, unchanged by this card), so this call is a harmless
-        // no-op UPDATE against a non-existent row, exactly as it silently was before this card whenever
-        // `runGate` was never reached.
-        //
-        // Code Review, card 81d795de finding [5]: the verdict-recording branches a throw can land
-        // between the mint and are `classifyGateFailure`, `identifyRetriableTestFiles`'s own
-        // `fs.existsSync`, or the retry's own `evtBatch("build_gate_single_file_retry", ...)` write —
-        // none of which record a verdict themselves. This is already strictly better (the row goes
-        // terminal the instant `run()` rejects, and the real error still reaches the manager via
-        // `onSettledAfterPending`) — but `outcome` is exactly what makes that terminal row
-        // SELF-DESCRIBING instead of a bare `state:"settled"` with no verdict at all. Confirmed safe on
-        // the `landed.length === 0` / never-reached-`runGate` path too — still a harmless no-op UPDATE
-        // against a never-minted opId, since `outcome.ok` is `true` there and the `?? undefined` branch
-        // is taken.
+        // @decision 92eeb319 — the tombstone is minted at the top of the closure, so this write always has a row. `batchGateVerdict` is
+        //  undefined only when NO gate verdict was recorded: (a) `batchAllDropped` — POSITIVELY set when `runBatchedMerge` returned with
+        //  nothing assembled and `runGate` never entered — settled with the explicit verdict below, NEVER a bare row and NEVER the
+        //  `skipReason:"gate-disabled"|"gate-interval"` an ungated LANDING carries (the gate was not switched off); or (b) a throw before
+        //  the gate closure recorded anything (the worktree cut) — settled as `"error"` from the real thrown value. A cancelled batch always
+        //  recorded `"cancelled"` itself (the `GateCancelledError` catch inside `runGate`), so no cancelled verdict is synthesized here.
         onSettle: (outcome, opId) => {
-          this.db.settlePendingGateOp(opId, batchGateVerdict ?? (outcome.ok ? undefined : { kind: "error", payload: { reason: outcome.error instanceof Error ? outcome.error.message : String(outcome.error) } }));
+          let verdict = batchGateVerdict;
+          if (!verdict) {
+            const nowMs = Date.now();
+            const timing = { settledAt: new Date(nowMs).toISOString(), ...(batchMintedAtMs !== undefined ? { totalDurationMs: nowMs - batchMintedAtMs } : {}) };
+            if (!outcome.ok) verdict = { kind: "error", payload: { reason: outcome.error instanceof Error ? outcome.error.message : String(outcome.error), ...timing } };
+            else if (batchAllDropped) verdict = { kind: "skipped", payload: { reason: "the batch gate never ran: every candidate was dropped at assembly and handed to its own worker_merge_confirm (read that op's own gate_status for whether it landed); totalDurationMs includes those fallback runs", skipReason: "all-candidates-dropped", batchBranchCount: 0, batchLanded: false, ...timing } };
+          }
+          this.db.settlePendingGateOp(opId, verdict);
         },
       },
     );
