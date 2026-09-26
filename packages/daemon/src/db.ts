@@ -1567,7 +1567,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   "build_gate", "build_gate_retry_attempt", "build_gate_retry", "build_gate_single_file_retry",
   // Card 2ec00f6a: attempt 1's own verdict, written before the retry runs (it is a link of the same admission, card 68155573) — see its types.ts doc.
   "build_gate_single_file_retry_attempt",
-  "merge_request", "merge_done", "merge_rejected", "merge_cancelled", "batch_merge_forfeited", "batch_merge_dropped", "batch_merge_branch_retained", "kill_switch",
+  "merge_request", "merge_done", "merge_rejected", "merge_cancelled", "batch_merge_forfeited", "batch_merge_dropped", "batch_merge_branch_retained", "merge_branch_retained", "kill_switch",
   // Incident / forensic record
   "session_died", "session_recovery_abandoned", "worker_report_undelivered", "worker_exited_without_report",
   "manager_exited_with_live_workers", "fleet_resume_failed", "manager_crash_resume_failed",
@@ -6355,9 +6355,9 @@ export class Db {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE kind = ? AND json_extract(detail_json, '$.branch') = ? ORDER BY ts, rowid")
       .all(kind, branch) as Row[]).map(toOrchestrationEvent);
   }
-  /** Card 42daa283 — every DISTINCT branch that has ever been filed a `batch_merge_branch_retained` event (candidates for the hold). */
+  /** Card 42daa283 — every DISTINCT branch that has ever been filed a `batch_merge_branch_retained` (or, card cc9bce38, a solo `merge_branch_retained`) event (candidates for the hold). */
   listRetainedBranches(): string[] {
-    return (this.db.prepare("SELECT DISTINCT json_extract(detail_json, '$.branch') AS b FROM orchestration_events WHERE kind = 'batch_merge_branch_retained'")
+    return (this.db.prepare("SELECT DISTINCT json_extract(detail_json, '$.branch') AS b FROM orchestration_events WHERE kind IN ('batch_merge_branch_retained', 'merge_branch_retained')")
       .all() as { b: string | null }[]).map((r) => r.b).filter((b): b is string => typeof b === "string" && b.length > 0);
   }
   /** Every durable audit event stamped with a given op's `opId`, `seq ASC` — recovers a genuinely-settled

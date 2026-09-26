@@ -2885,6 +2885,29 @@ async function branchContentLandedInCommit(
   }
 }
 
+/**
+ * @decision cc9bce38 — the `Loom-Landed-Tip:` trailer a SOLO squash carries: the branch tip the squash actually ran on (`resolvedBranchHead`), so the tip that landed is recoverable
+ * from main itself with no fresh read. A recovery caller pins its finalize CAS to THIS, never to a fresh read or a content check (both bless a late whole-file revert). A squash
+ * with no trailer (pre-cc9bce38, or an unresolved head) falls back to a stable-tip read.
+ */
+const LOOM_LANDED_TIP_TRAILER = /^Loom-Landed-Tip:\s*([0-9a-f]{40,64})\s*$/m;
+
+/** Reads {@link LOOM_LANDED_TIP_TRAILER} off `sha`'s message; `null` when absent or unreadable (fail safe: the caller falls back). */
+export async function readLandedTipTrailer(repoPath: string, sha: string, deps: BoundedGitDeps = {}): Promise<string | null> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const body = await withTimeout(git.raw(["log", "-1", "--format=%B", sha]), timeoutMs, "git log -1 (landed-tip trailer)");
+    // Only the FINAL trailer block counts: the solo layout puts it right after the last `Loom-Worker-Branch:` line, so a worker-authored body that merely QUOTES the text
+    // (a batch tip commit carries its body verbatim) is never read as a trailer.
+    const lastBranch = lastTrailerMatch(body, /^Loom-Worker-Branch:.*$/m);
+    if (!lastBranch || lastBranch.index === undefined) return null;
+    const block = body.slice(lastBranch.index).split(/\r?\n\s*\r?\n/)[0] ?? "";
+    return LOOM_LANDED_TIP_TRAILER.exec(block)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** The `Loom-Worker-PathSet:` trailer {@link mergeBranchLocked} stamps — see {@link changedPathSetDigest}. */
 const LOOM_WORKER_PATHSET_TRAILER = /^Loom-Worker-PathSet:\s*(\S+)/m;
 
@@ -5426,7 +5449,7 @@ export async function verifyReviewedTipChain(
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null } }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -5441,7 +5464,7 @@ export async function mergeBranch(
 async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null } }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string }> {
   // BOUNDED + NON-INTERACTIVE (board card 44c28799): this is the repo's highest-consequence git write
   // (see boundedMergeGit's own doc), so it gets the same block-timeout + withTimeout race as every other
   // bounded op in this file, plus nonInteractiveEnv() to match git/reader.ts + git/writer.ts. Before this
@@ -5648,7 +5671,7 @@ async function mergeBranchLocked(
       // already resolved by the lookup just above; surfacing it costs no extra git call, just returning
       // data this function already computed, so the caller (finalizeMerge) can persist ship-state without
       // a redundant lookup of its own.
-      return { ok: true, noop: true, emptyKind: landed ? "ALREADY_MERGED" : "STAGE_EMPTY_RETRY", sha: landed ?? undefined };
+      return { ok: true, noop: true, emptyKind: landed ? "ALREADY_MERGED" : "STAGE_EMPTY_RETRY", sha: landed ?? undefined, landedTip: resolvedBranchHead };
     }
     // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
     // Card 7a1a76e9 DoD-3: the task title still wins unconditionally when a task exists (⛔ do not regress
@@ -5688,7 +5711,7 @@ async function mergeBranchLocked(
       console.warn(`[git] mergeBranchLocked: worker-commit-log body capture failed for ${branch}: ${(e as Error).message}`);
     }
     const bodyBlock = workerCommitLogBody ? `\n\n${workerCommitLogBody}` : "";
-    let message = `${subject}${bodyBlock}\n\nLoom-Worker-Branch: ${branch}\n`;
+    let message = `${subject}${bodyBlock}\n\nLoom-Worker-Branch: ${branch}\n${resolvedBranchHead ? `Loom-Landed-Tip: ${resolvedBranchHead}\n` : ""}`;
     // @decision c862f14c — stamps the path-set trailers from the STAGED index, never a follow-up amend
     // (caused an orphan window + doubled hooks). LOAD-BEARING ADJACENCY: no git call may land between this
     // capture and the commit below, or it breaks the tree-identity the byte-identical-digest proof rests on.
@@ -5717,7 +5740,7 @@ async function mergeBranchLocked(
     // that might no longer be what HEAD actually points at.
     try {
       const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
-      return { ok: true, sha, subject };
+      return { ok: true, sha, subject, landedTip: resolvedBranchHead };
     } catch (e) {
       return { ok: false, reason: `squash landed but failed to read the result: ${(e as Error).message}` };
     }
