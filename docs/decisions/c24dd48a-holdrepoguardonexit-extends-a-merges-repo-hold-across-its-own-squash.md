@@ -23,6 +23,14 @@ The caller is then on the hook to release the guard explicitly, later, once its 
 
 Inline comment in `packages/daemon/src/orchestration/gate-semaphore.ts` (`beginSquash`, lines 767-793; `releaseMergeRepoGuard`/`endSquash`, lines 803-838; `runExclusive`'s `holdRepoGuardOnExit` param doc, lines 924-943), commits `b9ec7a777`, `6ea080604`, `252d25bb5`, as of `beeeb7c2`. Relocated by card `772735d2` (tranche 2); no wording changed, wrapped source lines joined into flowing paragraphs and the `*` comment markers stripped.
 
+## Amended by e78756dd — the BATCH path's release is a `finally`, like the solo path's
+
+`mergeBatchTracked`'s run closure used to release its guard with an inline `if (batchGateRan) endSquash(...)` AFTER `runBatchedMerge` returned; its only `finally` removed the batch worktree. A throw between a passing gate link (which had called `holdRepoGuardOnExit`) and that line — `deriveBatchGateVerdict`/`pruneGateSpillsClassified`/the `build_gate` `evtBatch` after `runExclusive`, a throw in a passing link's `next`, or a `runBatchedMerge` throw — leaked the guard: `activeMergeRepos` kept the repo and every later same-repo merge queued (repoContended) until a daemon restart. The solo path never had this (its `endSquash` is in the `finally` closing the squash bracket). The batch now wraps `runBatchedMerge` + the pass record in a `try/finally` whose `finally` calls `endSquash` when `batchGateRan`. The release point is unchanged on the happy path (right after the fast-forward + pass record); the `finally` is scoped to the squash, NOT the outer worktree-removal `finally`, because per-branch finalize/fallback never move canonical main's HEAD and would only lengthen the hold. `endSquash` after a hold that is already gone (a retry link that itself threw released it) is `freeRepoPath`'s identity-checked no-op, so the extra call is harmless. Test: `packages/daemon/test/batch-guard-release-on-throw.mjs`.
+
+### Do not (batch)
+
+- Do not move the batch's `endSquash` back to an inline call after `runBatchedMerge`, or into the outer worktree-removal `finally` (it would hold the guard through per-branch finalize/fallback).
+
 ## Amended by 68155573
 
 A failing attempt that will be retried no longer releases the guard at all: the retry continues the same admission (only the last link's `holdRepoGuardOnExit` survives into squash). See `68155573-a-retry-continues-its-admission-never-re-queues.md`.

@@ -16804,24 +16804,23 @@ export class SessionService {
           };
 
           const batchCandidates: BatchCandidate[] = liveChosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle, ...(verifiedTip.has(c.workerSessionId) ? { tip: verifiedTip.get(c.workerSessionId)! } : {}) }));
-          const result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
-          // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (`endSquash` just below) — ONCE, with
-          // the batch's final landed tip, so the counter's order equals main's order (see the solo record after `mergeBranch`).
-          if (result.ok && result.landed.length > 0) {
-            try { this.recordMergeGateOutcome(finalProjectId, { kind: "pass", sha: result.batchHeadSha ?? null, opId, periodic: batchDecision.cadence !== "every", candidates: result.landed.length }, batchRepoKey); } catch (err) { console.warn(`[merge-gate] failed to record a batch pass (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+          // @decision c24dd48a — release the held repo guard in THIS `finally` (every exit after a passing gate), never inline after it;
+          //  scoped to end at the squash, not the outer `finally` (finalize never moves main's HEAD).
+          let result: Awaited<ReturnType<typeof runBatchedMerge>>;
+          try {
+            result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
+            // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (the `finally` below) — ONCE, with
+            // the batch's final landed tip, so the counter's order equals main's order (see the solo record after `mergeBranch`).
+            if (result.ok && result.landed.length > 0) {
+              try { this.recordMergeGateOutcome(finalProjectId, { kind: "pass", sha: result.batchHeadSha ?? null, opId, periodic: batchDecision.cadence !== "every", candidates: result.landed.length }, batchRepoKey); } catch (err) { console.warn(`[merge-gate] failed to record a batch pass (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+            }
+          } finally {
+            // CONFINED TO `batchGateRan` (card dd961cf9 — mirrors confirmWorkerMerge's own `gateRan`-gated `endSquash` in its `finally`): a
+            // `landed.length === 0` batch never calls `runGate`, so its opId was never admitted for `finalRepoPath`; an unconditional call there
+            // logged a spurious `refused-not-owner` line (a no-op by `freeRepoPath`'s identity check, but noise on the `[gate:repo-guard]` instrument).
+            // A call after the guard is already gone (e.g. a retry link that itself threw) is that same identity-checked no-op.
+            if (batchGateRan) this.gateSemaphore.endSquash(finalRepoPath, opId);
           }
-
-          // Release the repo-admission guard extension the gate callback above took on a pass — the guard
-          // must not outlive this call regardless of what the fast-forward/finalize below does with it.
-          // CONFINED TO `batchGateRan` (card dd961cf9 — mirrors confirmWorkerMerge's own `gateRan`-gated
-          // `endSquash` call, service.ts's own doc on that call site): an unconditional call here fired
-          // even on a `landed.length === 0` batch, whose opId was never admitted for `finalRepoPath` at
-          // all (`runBatchedMerge` never calls `runGate` on that path — see batch-merge.ts) — safe only
-          // because `GateSemaphore.freeRepoPath`'s identity check refused it as a no-op, but it logged a
-          // spurious, alarming-looking `refused-not-owner` line on every such batch (observed in
-          // production: op aa9b6e15 vs a genuinely-admitted sibling 0bf14248, 2026-09-04T21:02:15.775Z) —
-          // noise that degrades the very `[gate:repo-guard]` instrument this card's diagnosis depends on.
-          if (batchGateRan) this.gateSemaphore.endSquash(finalRepoPath, opId);
 
           // ANNOTATE THE TOMBSTONE VERDICT WITH THE REAL LANDING OUTCOME (card 553ea58c). `batchGateVerdict`
           // (declared above) was minted by `deriveBatchGateVerdict`, INSIDE the `runGate` closure — i.e.
