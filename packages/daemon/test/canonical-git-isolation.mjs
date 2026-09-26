@@ -29,7 +29,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, mergeMainIntoWorktree, verifyReviewedTipChain } = await import("../dist/git/worktrees.js");
 const { assembleBatchBranches } = await import("../dist/git/batch-merge.js");
-const { boundedSimpleGit, CANONICAL_GIT_CONFIG, canonicalGit, CANONICAL_GIT_CONFIG_ARGS, gitSubcommand, canRunMergeDriver, assertNoLiveMergeDrivers, describeGitFailure, CanonicalGitRefusal, canonicalRaw, scrubGitEnv } = await import("../dist/git/bounded.js");
+const { boundedSimpleGit, CANONICAL_GIT_CONFIG, canonicalGit, CANONICAL_GIT_CONFIG_ARGS, gitSubcommand, canRunMergeDriver, assertNoLiveMergeDrivers, describeGitFailure, CanonicalGitRefusal, canonicalRaw, scrubGitEnv, envKeysNamed } = await import("../dist/git/bounded.js");
 
 const GIT_ID = "-c user.email=cgi@loom -c user.name=cgi";
 const now = new Date().toISOString();
@@ -418,8 +418,12 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
   // but a `{...process.env}` copy keeps the key as spelled, so a case-sensitive `delete` missed it and the driver reads went blind again. win32-only: on POSIX
   // `Git_Config` is a DIFFERENT, inert variable (nothing to test — and the strip deliberately stays case-sensitive there).
   if (process.platform !== "win32") {
-    console.log("SKIP  (GIT_CONFIG casing) win32-only: POSIX env names are case-sensitive, so `Git_Config` is not `GIT_CONFIG` there");
+    console.log("SKIP  (GIT_CONFIG casing, win32 half) win32-only: POSIX env names are case-sensitive, so `Git_Config` is not `GIT_CONFIG` there");
+    // POSIX half — the exact-match branch. Only ever runs on non-win32 hosts (Linux CI); a Windows run prints the SKIP below instead.
+    check("(casing, POSIX) scrubGitEnv KEEPS `Git_Pager` (a different variable from GIT_PAGER here) while stripping the exact `GIT_PAGER`", (() => { const o = scrubGitEnv({ Git_Pager: "x", GIT_PAGER: "y" }); return o.Git_Pager === "x" && !("GIT_PAGER" in o); })());
+    check("(casing, POSIX) envKeysNamed({Git_Config, GIT_CONFIG}, [GIT_CONFIG]) returns only GIT_CONFIG", JSON.stringify(envKeysNamed({ Git_Config: "a", GIT_CONFIG: "b" }, ["GIT_CONFIG"])) === '["GIT_CONFIG"]');
   } else {
+    console.log("SKIP  (casing, POSIX half) non-win32-only: pins the exact-match branch, so it only runs on Linux CI, never on this Windows host");
     for (const [si, spelling] of ["Git_Config", "git_config"].entries()) {
       const stag = `s${si}`; // NOT the spelling: temp paths differ only in case on a case-insensitive FS
       const repo = mkMergeRepo(`gitconfig-${stag}`);

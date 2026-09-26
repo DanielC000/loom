@@ -6,6 +6,7 @@
 - Do not re-add a per-call `--no-replace-objects` at a call site: `canonicalGit` applies `core.useReplaceRefs=false` to every command, and a per-site copy is exactly how the sibling paths were left unprotected.
 - Do not "fix" the driver isolation with `--attr-source` or `core.attributesFile` — verified NOT to stop a worker-set driver (see below).
 - Do not read this as a sandbox. Loom does not protect itself from a deliberately adversarial worker (see "Threat model").
+- Do not check or strip `GIT_CONFIG` (or any `scrubGitEnv` key) with a case-sensitive key lookup on win32 — use `envKeysNamed`/`deleteEnvKeys` (card e93703d9).
 
 ## Threat model
 
