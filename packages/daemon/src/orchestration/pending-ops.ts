@@ -25,9 +25,10 @@ export type PendingOpOutcome = string;
  *  manager gets served forever to a different (or since-corrected) one.
  *  @decision 975c774b — a verdict produced while the worktree changed under the gate ("worktree-dirty")
  *  describes files matching no commit, so a ref-keyed identity can't vouch for it: never cache or replay it.
+ *  @decision 13571c71 — "post-gate-error": a batch step AFTER a passing gate threw, so the outcome is UNKNOWN (main may or may not have moved): never replay it, a re-call must re-mint and re-derive from real git.
  *  @decision fb525c31 — "squash-refused": a refusal about the CANONICAL CHECKOUT's state (or a post-gate squash failure), not the branch; cleaning the checkout moves no identity, so a cached replay would be stale. Never cache or replay it.
  *  @decision 975c774b — likewise "gate-tip-moved": a PASS refused because the branch moved after the gate spawned, or (card 94c28d2a, `gateRoundTripFail`) a FAIL earned on a run whose tip left the gated commit and came back. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused"]);
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

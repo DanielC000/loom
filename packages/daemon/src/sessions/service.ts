@@ -570,6 +570,9 @@ type MergeBatchResult = {
   /** @decision 13571c71 — the batch was cancelled while queued: no gate ran, no verdict, NOTHING was started (no per-candidate fallback,
    *  unlike a red). `fallback` then lists each candidate as `started:false`. Absent on every other outcome. */
   cancelled?: boolean;
+  /** @decision 13571c71 — a step AFTER a passing gate threw: the outcome is UNKNOWN (main may have moved), every candidate is reported `started:false`
+   *  through `runFallback`'s no-start mode, and `classifyOutcome` reads THIS field (`"post-gate-error"`, never cached — a re-call re-mints). Absent otherwise. */
+  postGateThrow?: boolean;
   /** Card 6cc803b2 — phase instrumentation: the two phases (of the five this card measures) that are
    *  only ever known inside {@link SessionService.mergeBatchTracked}'s own `run` closure, once
    *  {@link runBatchedMerge} has resolved — the batch-worktree cut (before any gate is even considered)
@@ -16509,6 +16512,12 @@ export class SessionService {
         // for `finalRepoPath` in the first place.
         let batchGateRan = false;
         let batchRedRecorded = false;
+        // @decision 13571c71 — true once the batch gate has PASSED; a throw after it (and only after it) is reported per candidate by the catch below.
+        let batchGatePassed = false;
+        // @decision 13571c71 — what the code path KNOWS about the fast-forward, never inferred from main's HEAD (another merge can move main): set once
+        //  the runGate closure has returned (a throw before that never reached the fast-forward) and once `runBatchedMerge` has returned (`ok` = landed).
+        let batchGateClosureDone = false;
+        let batchFastForwarded: boolean | undefined;
         try {
           // Card 6cc803b2 — phase instrumentation: wall time of cutting the dedicated batch worktree, the
           // FIRST of the five phases this card measures (batch-worktree cut · per-branch assembly · gate
@@ -16721,6 +16730,7 @@ export class SessionService {
               throw err;
             }
             const concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+            batchGatePassed = r.passed;
             // ONE captured instant for everything this closure still needs to timestamp against "now" —
             // `settledAt`/`totalDurationMs` (via deriveBatchGateVerdict below) and the evtBatch call below's
             // own settle-time reads all share it, so they can never disagree by a few host-scheduling
@@ -16814,6 +16824,7 @@ export class SessionService {
             const reducedGateWarning = batchReduced
               ? formatReducedGateWarning(batchEmitCompare!, ASSET_READING_TEST_REPO_PATHS.length, CHANGED_TS_TEXT_SCANNER_REPO_PATHS.length, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS.length, landedCount)
               : undefined;
+            batchGateClosureDone = true;
             return {
               passed: r.passed, emitCompareReduced: !!batchEmitCompare?.eligible, ...(reducedGateWarning ? { reducedGateWarning } : {}), reason: r.passed ? undefined : (r.outputTail ?? "batch gate failed"), detail: { steps: r.steps },
               // Card 67030bb9: threaded through `BatchGateResult` so `runBatchedMerge`'s caller (this batch's
@@ -16829,6 +16840,7 @@ export class SessionService {
           let result: Awaited<ReturnType<typeof runBatchedMerge>>;
           try {
             result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
+            batchFastForwarded = result.ok;
             // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (the `finally` below) — ONCE, with
             // the batch's final landed tip, so the counter's order equals main's order (see the solo record after `mergeBranch`).
             if (result.ok && result.landed.length > 0) {
@@ -17038,6 +17050,30 @@ export class SessionService {
             // why it's surfaced on the green path only.
             ...(result.gateDetail?.reducedGateWarning ? { reducedGateWarning: result.gateDetail.reducedGateWarning } : {}),
           };
+        } catch (err) {
+          if (!batchGatePassed) throw err; // gate failure/cancel/pre-gate errors keep their existing paths
+          // @decision 13571c71 — a step AFTER the passing gate threw: report EVERY candidate through `runFallback`'s no-start mode (the one
+          //  reporting path) and state whether the BATCH fast-forward landed, from what the code path KNOWS (`batchFastForwarded` — never main's HEAD,
+          //  which another merge can move); never claim a landing in `landed` (stays []). The repo guard was already released by the inner
+          //  `finally`. If this handler itself fails, the secondary error is logged and the ORIGINAL error is rethrown.
+          try {
+            // Known: `runBatchedMerge` returned ⇒ `ok`; the gate closure never returned ⇒ the fast-forward was never reached; else unknown.
+            const landedKnown: boolean | undefined = batchFastForwarded !== undefined ? batchFastForwarded : !batchGateClosureDone ? false : undefined;
+            const msg = err instanceof Error ? err.message : String(err);
+            const ff = landedKnown === true ? "the batch fast-forward DID land"
+              : landedKnown === false ? "the batch fast-forward did NOT land"
+              : "the batch fast-forward MAY have landed — verify with git log";
+            // Never overwrite a `batchLanded` the normal path already recorded (a forfeit sets false).
+            if (landedKnown !== undefined && batchGateVerdict?.kind === "pass" && batchGateVerdict.payload && batchGateVerdict.payload.batchLanded === undefined) batchGateVerdict.payload.batchLanded = landedKnown;
+            const why = `a merge_batch step threw AFTER the batch gate passed (${msg}); ${ff}; no FURTHER candidate was started by this handler — run worker_merge_confirm per remaining candidate by hand (ALREADY_MERGED finalizes one that already landed; a candidate already finalized needs nothing)`;
+            console.warn(`[merge-batch] op ${opId} ${why}`);
+            const fallback = await runFallback([
+              ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: why })),
+              ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+              ...strandedFallback,
+            ], opId, undefined, true);
+            return { ok: false, opId, landed: [], fallback, postGateThrow: true, reason: why };
+          } catch (secondary) { console.warn(`[merge-batch] op ${opId} post-gate-throw handler failed (${secondary instanceof Error ? secondary.message : String(secondary)}); rethrowing the original error`); throw err; }
         } finally {
           if (batchWorktreePath) await removeWorktree(finalRepoPath, batchWorktreePath, { timeoutMs: this.gitOpMs }).catch(() => {});
         }
@@ -17098,6 +17134,9 @@ export class SessionService {
             // Card d422e279: same reasoning as retryWarning immediately above, for a reduced batch gate's
             // own surfacing obligation (`MergeBatchResult.reducedGateWarning`'s own doc).
             (outcome.value.reducedGateWarning ? ` ${outcome.value.reducedGateWarning}` : "")
+          : outcome.value.postGateThrow
+          // @decision 13571c71 — NOT the "landed nothing" wording below: main may have moved. The reason already carries the git-read state claim.
+          ? `[loom:merge-batch-unknown] merge_batch [op ${opId}] errored AFTER its gate passed — ${outcome.value.reason ?? "see fallback"}. ${fallbackSummary(outcome.value)}`
           : outcome.value.cancelled
           ? `[loom:merge-batch-cancelled] merge_batch [op ${opId}] was cancelled before its gate ran (${outcome.value.reason ?? "cancelled"}). This is NOT a failure — no verdict was reached and NOTHING was started: no candidate was routed to an individual worker_merge_confirm. Re-run merge_batch if you still want it.`
           : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`;
@@ -17160,7 +17199,7 @@ export class SessionService {
         identityOptional: batchAlreadyFinished,
         // CANCELLED-VETO CLASSIFICATION (card cf803152 finding [2]; card 13571c71): a cancelled batch is a normal resolved value carrying
         // the explicit `cancelled` field (set at the `GateCancelledError` catch above) — never a sniff of `reason` text.
-        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.cancelled ? "cancelled" : outcome.value.ok ? "landed" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.ok ? "landed" : "rejected"),
         // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
         //  settled, never the gate's own inner resolve; an undefined batchGateVerdict here still
         //  synthesizes a minimal "error" verdict from the real thrown value when none was recorded.
