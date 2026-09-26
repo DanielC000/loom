@@ -4571,6 +4571,49 @@ export async function findLandedSquashCommit(
   }
 }
 
+/** How many older same-branch trailer commits {@link findIntroducingSquashCommit} will inspect. */
+const INTRODUCING_COMMIT_MAX_OLDER = 16;
+
+/** @decision 293d418e — ATTRIBUTION ONLY: never use for gating, verification or pinning (the section "Attribution" in that record says why); those stay on {@link findLandedSquashCommit}.
+ *
+ *  Given the sha that lookup returned (the NEWEST qualifying trailer commit), returns the oldest of the unbroken run of older same-branch trailer commits that pass the same per-commit
+ *  checks, i.e. the one that brought the branch's content in. Returns `landedSha` unchanged on any error, a gone branch, a branch with no changes of its own, or an unlisted sha. */
+export async function findIntroducingSquashCommit(
+  repoPath: string, branch: string, landedSha: string, base = "HEAD", deps: BoundedGitDeps = {},
+): Promise<string> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    if ((await withTimeout(git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list (attribution)")).trim() === "") return landedSha;
+    const out = await withTimeout(
+      git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e"]),
+      timeoutMs, "git log --grep trailer (attribution)",
+    );
+    const shas: string[] = [];
+    for (const record of out.split(MERGED_MAP_RECORD_SEP)) {
+      const sepIdx = record.indexOf("\x1f");
+      if (sepIdx === -1) continue;
+      if (parseLoomTrailerBlock(record.slice(sepIdx + 1))?.branch === branch) shas.push(record.slice(0, sepIdx).trim());
+    }
+    const at = shas.indexOf(landedSha);
+    if (at === -1) return landedSha;
+    const ownChanges = (await withTimeout(
+      git.raw(["diff", "--name-only", `${(await withTimeout(git.raw(["merge-base", landedSha, branch]), timeoutMs, "git merge-base (attribution)")).trim()}..${branch}`]),
+      timeoutMs, "git diff --name-only (attribution)",
+    )).trim();
+    if (!ownChanges) return landedSha;
+    let introducer = landedSha;
+    for (const older of shas.slice(at + 1, at + 1 + INTRODUCING_COMMIT_MAX_OLDER)) {
+      const mergeBase = (await withTimeout(git.raw(["merge-base", older, branch]), timeoutMs, "git merge-base (attribution)")).trim();
+      if (!mergeBase || mergeBase === older) break; // re-cut onto it: the branch descends from this commit
+      if (!(await branchContentLandedInCommit(repoPath, branch, older, mergeBase, deps))) break;
+      introducer = older;
+    }
+    return introducer;
+  } catch {
+    return landedSha;
+  }
+}
+
 /** @decision c6a6f405 — the orchestration-view diff for a worker, robust across its WHOLE lifecycle (live
  *  worktree / committed branch / merged+deleted branch) — fixes the "/orchestration diffs are all empty" bug.
  *

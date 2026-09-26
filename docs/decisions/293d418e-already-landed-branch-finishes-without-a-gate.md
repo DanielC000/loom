@@ -20,6 +20,14 @@ The fix: after every check that can refuse the confirm, and before any gate admi
 
 Test: `packages/daemon/test/batch-fallback-already-landed-skips-gate.mjs` (gate-call counter; A skip, B1/B2 late commits on a new / an already-changed path, C dirty worktree, D interval mode — zero gates + gateSkipped, counter untouched, E the revert-to-fork-point residual, F main-modified-path behaviour change). Measured RED before the change: 2 extra gate calls on the re-call; wiring-revert control (`if (false && preLanded)`) turns (A)/(D) RED again.
 
+## Attribution: which commit is reported (card cd92e609)
+
+`findLandedSquashCommit` returns the NEWEST `Loom-Worker-Branch` commit that passes its checks. When a later commit re-uses the branch name (a recycled or re-tasked branch) over an unrelated path, that newest commit also "holds" the branch's content, so it was published as `merge_done.landedSha` and in the `[loom:already-merged] … commit xxxxxxxx` text although it introduced none of it. The verdict was right (the finalize pin retains on doubt); only the named commit was wrong.
+
+`findIntroducingSquashCommit` (git/worktrees.ts) fixes the NAMING only: given the lookup's sha it walks OLDER same-branch trailer commits (cap 16) applying the same per-commit checks (not an ancestor of the branch; `branchContentLandedInCommit` against that commit's own merge-base) and reports the oldest of the unbroken qualifying run. It returns its input on any error, a gone branch (a PathSet digest cannot separate two commits over the same paths), a branch with no changes of its own (a vacuous content match would qualify every older commit), or an unlisted sha.
+
+Where it is used, and where deliberately NOT: `finishSoloAlreadyLanded` passes the result as `attributedSha` (only on the gate-skipped path, which is the only one that prints or stamps a sha) and `finishAlreadyMerged` / `finalizeMerge` use it for the announcement, the result warning and `merge_done.landedSha`. Everything else keeps the lookup's sha: the tip pin (`pinnedTipForLandedSquash` reads the trailer of the FOUND commit; pinning to an older commit's `Loom-Landed-Tip` could match a branch tip the newest commit's trailer would have retained — more permissive), the retain event's `landedSha`, `preLanded`'s union-skip, and the persisted `task.mergedSha` (read by `isCardDone`, `worker_revive`'s `commitSha`, the boot dangling-merge check, and overwritten by the drawer's lazy backfill from the newest-wins `getTaskMergedInfo` map). Boot-reconcile Pass A's mergedSha and `findLandedSquashCommitViaMap` are unchanged (still the newest).
+
 ## Do not
 
 - Do not widen the trigger to "the batch cherry-pick was empty" — that proves the batch tree had the content, not that main does.
@@ -27,3 +35,4 @@ Test: `packages/daemon/test/batch-fallback-already-landed-skips-gate.mjs` (gate-
 - Do not skip the dirty-worktree check or move this shortcut above the reviewed-tip / preflight refusals — finalize deletes the branch and worktree, so uncommitted or post-review work would be destroyed under `merged:true`.
 - Do not record this finish as a gate outcome (`recordMergeGateOutcome`) or as a pass — it is `gateSkipped:"already-landed"`, never counted by the merge-gate interval.
 - Do not fork a second copy of the lookup → tip-guard → `finishAlreadyMerged` sequence: call `finishSoloAlreadyLanded`.
+- Do not use `findIntroducingSquashCommit` for gating, verification, pinning or the persisted `task.mergedSha`: it is attribution only, and a pin on an older commit would be more permissive than the lookup it decorates.

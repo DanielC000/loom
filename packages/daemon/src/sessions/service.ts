@@ -22,7 +22,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -16048,6 +16048,8 @@ export class SessionService {
     return this.finishAlreadyMerged({
       managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, worktreePath: a.worktreePath, branch: a.branch, repoPath: a.repoPath, projectId: a.projectId,
       opId: a.opId, forceRemoveWorktree: a.forceRemoveWorktree, opStartedAt: a.opStartedAt, mergedSha: alreadyLanded, repoKey: a.repoKey,
+      // @decision 293d418e — attribution only: the human-facing commit + merge_done.landedSha; mergedSha (persisted ship-state) and the pin stay on the lookup's sha.
+      ...(a.gateSkipped ? { attributedSha: await findIntroducingSquashCommit(a.repoPath, a.branch, alreadyLanded, "HEAD", { timeoutMs: this.gitOpMs }) } : {}),
       ...(guard.expectedBranchTip ? { expectedBranchTip: guard.expectedBranchTip } : {}), onBranchRetained: guard.onBranchRetained, retainedNote: guard.warning,
       ...(a.gateSkipped ? { gateSkipped: a.gateSkipped } : {}),
     });
@@ -16124,6 +16126,8 @@ export class SessionService {
     retainedNote?: () => string | undefined;
     /** Card 293d418e: this finish ran WITHOUT the merge gate because the branch was proven already landed — said in the announcement + result, and stamped on `merge_done`. */
     gateSkipped?: "already-landed";
+    /** Card 293d418e: the commit that INTRODUCED the branch's content (`findIntroducingSquashCommit`) — shown in the `[loom:already-merged]`/result text and stamped as `merge_done.landedSha` ONLY; never persisted, verified or pinned. */
+    attributedSha?: string;
   }): Promise<ConfirmMergeResult> {
     // Card 42daa283: an ALREADY_MERGED-style finish must never delete a HELD branch (its late commit was never landed) — refuse up front,
     // BEFORE the worker is hard-stopped or anything is announced. The held branch is released only by a real new squash (Green path) or its
@@ -16148,7 +16152,7 @@ export class SessionService {
         const target = this.resolveSettleNudgeTarget(args.managerSessionId);
         // Card 791def40: fresh read — this success announcement may be read long after the event,
         // possibly across a restart, and carries no other staleness-derived claim.
-        const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main${args.gateSkipped ? ` (commit ${(args.mergedSha ?? "unknown").slice(0, 8)}); finished as already-landed WITHOUT running the merge gate — this is not a gate pass` : ""}; ${retainedNote ? `the branch was RETAINED, NOT cleaned up (${retainedNote})` : "finishing the worktree cleanup + task without a new commit."}` + this.settleNudgeAttribution(target, args.managerSessionId) + this.buildStampSuffix(currentDeployStaleness());
+        const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main${args.gateSkipped ? ` (commit ${(args.attributedSha ?? args.mergedSha ?? "unknown").slice(0, 8)}); finished as already-landed WITHOUT running the merge gate — this is not a gate pass` : ""}; ${retainedNote ? `the branch was RETAINED, NOT cleaned up (${retainedNote})` : "finishing the worktree cleanup + task without a new commit."}` + this.settleNudgeAttribution(target, args.managerSessionId) + this.buildStampSuffix(currentDeployStaleness());
         try {
           // Card ccb407eb: a ONE-SHOT TERMINAL success announcement (never re-sent) — durable like every
           // other settle nudge.
@@ -16186,7 +16190,7 @@ export class SessionService {
     // composerIntegrityWarning's own doc. An ALREADY_MERGED confirm is still a real merge-confirm ACTION
     // against this same worker, so the same signal is just as relevant here.
     const composerWarning = composerIntegrityWarning(this.pty, args.workerSessionId);
-    const gateSkippedText = args.gateSkipped ? `Finished as ALREADY-LANDED WITHOUT running the merge gate (the branch's content is already on main${args.mergedSha ? ` in commit ${args.mergedSha.slice(0, 8)}` : ""}) — not a gate pass.` : undefined;
+    const gateSkippedText = args.gateSkipped ? `Finished as ALREADY-LANDED WITHOUT running the merge gate (the branch's content is already on main${(args.attributedSha ?? args.mergedSha) ? ` in commit ${(args.attributedSha ?? args.mergedSha)!.slice(0, 8)}` : ""}) — not a gate pass.` : undefined;
     const warning = [gateSkippedText, nestedWarning, worktreeWarning, composerWarning, retainedText].filter((w): w is string => !!w).join(" ") || undefined;
     // `notified` reflects whether THIS call actually pushed the `[loom:already-merged]` announcement —
     // `!args.suppressNotify` on the batch path (card c35b60c4), since that caller sends its own aggregate
@@ -19131,6 +19135,8 @@ export class SessionService {
     gateSkipReason?: "gate-disabled" | "gate-interval";
     /** Card 293d418e: stamped on `merge_done` (with `landedSha` = `mergedSha`) when an ALREADY_MERGED finish ran without the gate. */
     gateSkipped?: "already-landed";
+    /** Card 293d418e: `merge_done.landedSha` reports this (the introducing commit) instead of `mergedSha` when set; see {@link finishAlreadyMerged}'s own doc. */
+    attributedSha?: string;
     /**
      * Card 42daa283 — the branch tip the caller's landing was built from (a batch landing states `assembledTip`;
      * every other caller omits it, byte-identical to before). When present, finalize re-reads the live tip (the
@@ -19283,7 +19289,7 @@ export class SessionService {
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
-      taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.mergedSha ?? null } : {}) },
+      taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}) },
     });
     // Card 84a2eb2d: this worker's branch just objectively finalized — drop any `[loom:worker-report]`
     // nudge still queued for it (see purgeQueuedWorkerReportNudgesOnMerge's own doc for why worker-scoped

@@ -184,6 +184,26 @@ try {
     const v = r.value?.ok ? r.value.value : undefined;
     check("(F) main modified a path the branch changed after it landed: finishes merged:true, gateSkipped, ZERO gates", v?.merged === true && v?.gateSkipped === "already-landed" && ctx.calls === before);
   }
+
+  // (G) ATTRIBUTION (card cd92e609): a LATER main commit re-uses the branch's trailer (recycled branch name) over an unrelated path. merge_done.landedSha and the text name the commit that
+  //  INTRODUCED the content; the persisted task.mergedSha (ship-state, verified/backfilled elsewhere) stays on findLandedSquashCommit's sha (the newest) — attribution only, never gating/pinning.
+  {
+    const { P, db, a, ctx, svc } = await landedFixture("at");
+    const grep = () => execSync(`git log --format=%H --grep="Loom-Worker-Branch: ${a.branch}" -F`, { cwd: P.repo }).toString().trim().split(/\s+/).filter(Boolean);
+    const introducer = grep()[0];
+    fs.writeFileSync(path.join(P.repo, "src", "unrelated-at.ts"), "export const unrelated = 1;\n");
+    execSync(`git add -A && git ${GIT_ID} commit -q -m "feat(x): a later task re-using the branch name" -m "Loom-Worker-Branch: ${a.branch}"`, { cwd: P.repo });
+    const newest = execSync("git rev-parse HEAD", { cwd: P.repo }).toString().trim();
+    check("(G/setup) two same-branch trailer commits on main, newest != introducer", newest !== introducer && grep().length === 2);
+    const before = ctx.calls;
+    const r = await settle(svc.confirmWorkerMergeTracked(P.mgrId, a.workerId));
+    const v = r.value?.ok ? r.value.value : undefined;
+    const d = eventsOf(db, "merge_done", a.workerId).find((e) => e.detail?.gateSkipped === "already-landed");
+    check("(G) finishes gate-skipped with ZERO gates (verdict unchanged by the attribution)", v?.merged === true && v?.gateSkipped === "already-landed" && ctx.calls === before);
+    check("(G) merge_done.landedSha is the commit that INTRODUCED the content, not the newer trailer commit", d?.detail?.landedSha === introducer);
+    check("(G) the result warning names the introducing commit", typeof v?.warning === "string" && v.warning.includes(introducer.slice(0, 8)) && !v.warning.includes(newest.slice(0, 8)));
+    check("(G) the persisted task.mergedSha is UNCHANGED (still the lookup's newest sha; not attribution)", db.getTask(a.taskId)?.mergedSha === newest.slice(0, 7));
+  }
 } finally {
   for (const d of dbs) { try { d.close(); } catch { /* ignore */ } }
 }
