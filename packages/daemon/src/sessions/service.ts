@@ -626,6 +626,9 @@ type ConfirmMergeResult = {
   /** Card e8df2659: set (with `skipped:true`) ONLY when the human-only `orchestration.mergeGate:"off"` switch
    *  caused the skip — never on an inert-diff skip. Absent otherwise. */
   skipReason?: "gate-disabled" | "gate-interval";
+  /** Card 293d418e: set ONLY when the confirm finished as ALREADY_MERGED WITHOUT running the merge gate because the branch's content was proven already on main
+   *  (`findLandedSquashCommit`, content-equivalence — never a pass, never counted by the merge-gate interval). Absent on every other path. */
+  gateSkipped?: "already-landed";
   /** Card 6f13746c: the merge-gate interval counter line ("ungated 3/5 since the last passing gate" / "this was the
    *  periodic gated landing …") — present only when the project's cadence is not `every`. Manager-facing text only. */
   mergeGateNote?: string;
@@ -13632,12 +13635,8 @@ export class SessionService {
       return !!task && !!terminalKey && task.columnKey === terminalKey;
     })();
     if (!fs.existsSync(worktreePath) || taskAlreadyTerminal) {
-      const looked = await this.tipAcrossLandedCheck(repoPath, branch, () => findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs }));
-      const alreadyLanded = looked.result;
-      if (alreadyLanded) {
-        const elGuard = this.soloFinalizeTipGuard({ opId: thisOpId, managerSessionId, workerSessionId, taskId, branch, landedTip: looked.landedTip, branchGone: looked.branchGone, landedSha: alreadyLanded });
-        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, mergedSha: alreadyLanded, repoKey: worker.repoKey ?? null, ...(elGuard.expectedBranchTip ? { expectedBranchTip: elGuard.expectedBranchTip } : {}), onBranchRetained: elGuard.onBranchRetained, retainedNote: elGuard.warning });
-      }
+      const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null });
+      if (finished) return finished;
     }
 
     // OP-ID STAMPED ONTO EVERY EVENT (card 7d492f8b): merged in here — not at each call site — so no
@@ -14215,6 +14214,16 @@ export class SessionService {
         // stability proof available" and falls through to enforcing the ordinary check — never as "assume
         // unchanged".
         gateBaseBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+      }
+
+      // @decision 293d418e — a branch whose content is PROVEN already on main (`preLanded`) finishes as ALREADY_MERGED here WITHOUT a gate: the gate exists to vet a
+      //  SQUASH this path never performs. Clean-worktree only (a dirty/unreadable stamp falls through to the ordinary path and its refusal); the helper RE-runs the landed proof.
+      if (preLanded) {
+        const landedStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+        if (landedStamp.head !== null && !landedStamp.dirty) {
+          const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, gateSkipped: "already-landed" });
+          if (finished) return finished;
+        }
       }
 
       // CIRCUIT BREAKER (card 3564fd1e): a branch that has already timed out GATE_TIMEOUT_BREAKER_THRESHOLD
@@ -16024,6 +16033,26 @@ export class SessionService {
     return { state: "moved", reviewed: recorded, live, text, why, tip: live };
   }
   /**
+   * @decision 293d418e — the ONE solo "the branch's work is already on main → finish it" path, shared by confirmWorkerMerge's worktree-gone/task-terminal early block and its
+   * clean-worktree `preLanded` shortcut so the two cannot drift: lookup (`findLandedSquashCommit`, content-equivalence proof) → `tipAcrossLandedCheck` →
+   * `soloFinalizeTipGuard` (finalize CAS-pinned to the landed tip, a late commit RETAINS the branch) → `finishAlreadyMerged`. `null` = not proven landed; the caller falls through.
+   */
+  private async finishSoloAlreadyLanded(a: {
+    managerSessionId: string; workerSessionId: string; taskId: string | null; worktreePath: string; branch: string; repoPath: string; projectId: string; opId: string;
+    forceRemoveWorktree?: boolean; opStartedAt?: string; repoKey: string | null; gateSkipped?: "already-landed";
+  }): Promise<ConfirmMergeResult | null> {
+    const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, "HEAD", { timeoutMs: this.gitOpMs }));
+    const alreadyLanded = looked.result;
+    if (!alreadyLanded) return null;
+    const guard = this.soloFinalizeTipGuard({ opId: a.opId, managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, branch: a.branch, landedTip: looked.landedTip, branchGone: looked.branchGone, landedSha: alreadyLanded });
+    return this.finishAlreadyMerged({
+      managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, worktreePath: a.worktreePath, branch: a.branch, repoPath: a.repoPath, projectId: a.projectId,
+      opId: a.opId, forceRemoveWorktree: a.forceRemoveWorktree, opStartedAt: a.opStartedAt, mergedSha: alreadyLanded, repoKey: a.repoKey,
+      ...(guard.expectedBranchTip ? { expectedBranchTip: guard.expectedBranchTip } : {}), onBranchRetained: guard.onBranchRetained, retainedNote: guard.warning,
+      ...(a.gateSkipped ? { gateSkipped: a.gateSkipped } : {}),
+    });
+  }
+  /**
    * @decision cc9bce38 — run a landed-squash lookup and resolve the tip to pin finalize to through {@link pinnedTipForLandedSquash}, with the branch tip read BEFORE and AFTER `check`
    * (trusted only when the same on both reads) as its legacy fallback.
    */
@@ -16093,6 +16122,8 @@ export class SessionService {
     expectedBranchTip?: string; onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize") => void;
     /** Card cc9bce38: the solo tip guard's retained-branch text (`soloFinalizeTipGuard().warning`), read AFTER finalize — folded into the result, and it rewords the `[loom:already-merged]` push. */
     retainedNote?: () => string | undefined;
+    /** Card 293d418e: this finish ran WITHOUT the merge gate because the branch was proven already landed — said in the announcement + result, and stamped on `merge_done`. */
+    gateSkipped?: "already-landed";
   }): Promise<ConfirmMergeResult> {
     // Card 42daa283: an ALREADY_MERGED-style finish must never delete a HELD branch (its late commit was never landed) — refuse up front,
     // BEFORE the worker is hard-stopped or anything is announced. The held branch is released only by a real new squash (Green path) or its
@@ -16117,7 +16148,7 @@ export class SessionService {
         const target = this.resolveSettleNudgeTarget(args.managerSessionId);
         // Card 791def40: fresh read — this success announcement may be read long after the event,
         // possibly across a restart, and carries no other staleness-derived claim.
-        const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main; ${retainedNote ? `the branch was RETAINED, NOT cleaned up (${retainedNote})` : "finishing the worktree cleanup + task without a new commit."}` + this.settleNudgeAttribution(target, args.managerSessionId) + this.buildStampSuffix(currentDeployStaleness());
+        const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main${args.gateSkipped ? ` (commit ${(args.mergedSha ?? "unknown").slice(0, 8)}); finished as already-landed WITHOUT running the merge gate — this is not a gate pass` : ""}; ${retainedNote ? `the branch was RETAINED, NOT cleaned up (${retainedNote})` : "finishing the worktree cleanup + task without a new commit."}` + this.settleNudgeAttribution(target, args.managerSessionId) + this.buildStampSuffix(currentDeployStaleness());
         try {
           // Card ccb407eb: a ONE-SHOT TERMINAL success announcement (never re-sent) — durable like every
           // other settle nudge.
@@ -16155,13 +16186,14 @@ export class SessionService {
     // composerIntegrityWarning's own doc. An ALREADY_MERGED confirm is still a real merge-confirm ACTION
     // against this same worker, so the same signal is just as relevant here.
     const composerWarning = composerIntegrityWarning(this.pty, args.workerSessionId);
-    const warning = [nestedWarning, worktreeWarning, composerWarning, retainedText].filter((w): w is string => !!w).join(" ") || undefined;
+    const gateSkippedText = args.gateSkipped ? `Finished as ALREADY-LANDED WITHOUT running the merge gate (the branch's content is already on main${args.mergedSha ? ` in commit ${args.mergedSha.slice(0, 8)}` : ""}) — not a gate pass.` : undefined;
+    const warning = [gateSkippedText, nestedWarning, worktreeWarning, composerWarning, retainedText].filter((w): w is string => !!w).join(" ") || undefined;
     // `notified` reflects whether THIS call actually pushed the `[loom:already-merged]` announcement —
     // `!args.suppressNotify` on the batch path (card c35b60c4), since that caller sends its own aggregate
     // notice instead; unconditionally `true` for every other caller, unchanged (see this method's own doc).
     const notified = !args.suppressNotify;
     return warning
-      ? { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified, warning, ...(retainedText ? { branchRetainedWarning: retainedText } : {}) }
+      ? { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified, warning, ...(args.gateSkipped ? { gateSkipped: args.gateSkipped } : {}), ...(retainedText ? { branchRetainedWarning: retainedText } : {}) }
       : { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified };
   }
 
@@ -19082,6 +19114,8 @@ export class SessionService {
     /** Card e8df2659: stamped onto the `merge_done` event when the human-only merge-gate switch was OFF
      *  (card 6f13746c: or the gate interval let this landing through ungated — `"gate-interval"`). */
     gateSkipReason?: "gate-disabled" | "gate-interval";
+    /** Card 293d418e: stamped on `merge_done` (with `landedSha` = `mergedSha`) when an ALREADY_MERGED finish ran without the gate. */
+    gateSkipped?: "already-landed";
     /**
      * Card 42daa283 — the branch tip the caller's landing was built from (a batch landing states `assembledTip`;
      * every other caller omits it, byte-identical to before). When present, finalize re-reads the live tip (the
@@ -19234,7 +19268,7 @@ export class SessionService {
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
-      taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}) },
+      taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.mergedSha ?? null } : {}) },
     });
     // Card 84a2eb2d: this worker's branch just objectively finalized — drop any `[loom:worker-report]`
     // nudge still queued for it (see purgeQueuedWorkerReportNudgesOnMerge's own doc for why worker-scoped
