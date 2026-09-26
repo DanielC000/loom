@@ -32,3 +32,11 @@ The batch now records each candidate's assembled tip; a moved or unreadable tip 
 ## Known limit
 
 A held branch whose live tip squashes to NOTHING against main (a late commit that only reverts part of the branch's own change) cannot be landed by `worker_merge_confirm`; the finish is refused with cherry-pick guidance and the branch stays held. Reviewing/landing a held branch by `assembledTip..liveTip` is carded separately.
+
+## The solo path
+
+The solo `worker_merge_confirm` half of this guard landed in card cc9bce38 (see `cc9bce38-solo-finalize-deletes-the-branch-only-at-the-landed-tip.md`), reusing this finalize check, the compare-and-swap delete and `isBranchHeld`. Its event kind stays `merge_branch_retained` (`source:"solo"`), distinct from the batch's `batch_merge_branch_retained`.
+
+## Test coverage of the batch finalize guard
+
+`batch-merge-branch-advanced-during-gate.mjs` drives the "tip moved to another sha" arm. `batch-merge-finalize-guard-edges.mjs` (card a498cc3c) covers the other two: an UNREADABLE live tip fails closed (retained with `liveTip:null`, at the batch's pre-stop check and at `finalizeMerge`), and a NOOP (already-in-ancestry) landing is guarded like a fresh one (unmoved finalizes, moved is retained). Each was shown red by mutating the guard (fail-open on unreadable; noop exempted) and green on restore.
