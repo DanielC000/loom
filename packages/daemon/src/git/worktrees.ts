@@ -123,8 +123,6 @@ export interface BoundedGitDeps {
    * resolves) and prove removeWorktree still returns within `timeoutMs` either way.
    */
   removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
-  /** Extra repo paths (the project's registered repos[]) {@link worktreeRemovalRefusal} must never let a removal equal or contain, beyond the `repoPath` argument itself. */
-  protectedRepoPaths?: readonly string[];
 }
 
 // @decision 0f965ab7 — catch simple-git's synchronous construct throw once, centrally, via this stub
@@ -1267,28 +1265,25 @@ export function worktreeRemovalRefusal(
  * reflexively — the lock is NOT re-entrant, and a caller that already holds it would deadlock. Judged safe
  * because git's own locked/initializing marker makes a concurrent prune skip an in-flight add.
  *
- * @decision 79b8d8a9 — bounded, best-effort git removal (`-f -f`) backed by the killable filesystem removal,
- * which already deletes dirty/untracked content unconditionally — a KILLED (wedged) attempt is never retried
- * here; only a clean reject gets short in-session retries.
+ * @decision 79b8d8a9 — the directory goes first through the killable filesystem removal (never git's own recursive delete,
+ * which follows a junction planted inside the tree — see e21cfd5f); a KILLED (wedged) attempt is never retried here, only a
+ * clean reject gets short in-session retries. Git's admin record is then unlocked and pruned.
+ *
+ * Guarded (e21cfd5f) against `worktreePath` itself being outside the worktrees root or being/containing `repoPath`; a junction
+ * planted INSIDE the tree is defused by the removal order above, not by that predicate.
  */
 export async function removeWorktree(
   repoPath: string,
   worktreePath: string,
   deps: BoundedGitDeps = {},
 ): Promise<{ removed: boolean; wedged: boolean }> {
-  const refusal = worktreeRemovalRefusal(worktreePath, [repoPath, ...(deps.protectedRepoPaths ?? [])]);
+  const refusal = worktreeRemovalRefusal(worktreePath, [repoPath]);
   if (refusal) {
     // eslint-disable-next-line no-console
     console.warn(`[worktree] REFUSED to remove ${worktreePath} — ${refusal}. Nothing was touched.`);
     return { removed: false, wedged: false };
   }
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  try {
-    await withTimeout(git.raw(["worktree", "remove", worktreePath, "-f", "-f"]), timeoutMs, "git worktree remove");
-  } catch {
-    // A hang (timeout-kill), a busy handle, or git already de-registering the worktree without
-    // deleting the dir — all fall through to the filesystem backstop.
-  }
   const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
   let removed = true;
   let wedged = false;
@@ -1307,6 +1302,13 @@ export async function removeWorktree(
   if (!removed) {
     // eslint-disable-next-line no-console
     console.warn(`[worktree] could not remove dir ${worktreePath} (${wedged ? "genuinely wedged — caller retries it slowly" : "left on disk for a later GC"})`);
+  }
+  if (removed) {
+    // The dir is gone, so `prune` alone would leave a LOCKED record (a killed-mid-checkout marker) behind: unlock first, best-effort
+    // (a not-locked worktree makes this exit non-zero, which is fine). Never `worktree remove` here — it recurses through junctions.
+    try {
+      await withTimeout(git.raw(["worktree", "unlock", worktreePath]), timeoutMs, "git worktree unlock");
+    } catch { /* not locked, or already unregistered */ }
   }
   try {
     await withTimeout(git.raw(["worktree", "prune"]), timeoutMs, "git worktree prune");
@@ -1432,11 +1434,21 @@ export async function reclaimNodeModulesDir(
   deps: {
     removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
     measureSize?: (dir: string) => Promise<{ bytes: number; truncated: boolean }>;
+    /** Every registered repo path (all projects, archived included) the removal must never equal or contain (e21cfd5f). */
+    protectedRepoPaths?: readonly string[];
   } = {},
 ): Promise<NodeModulesReclaimOutcome> {
   const nodeModulesPath = path.join(worktreePath, "node_modules");
   if (!fs.existsSync(nodeModulesPath)) {
     return { worktreePath, nodeModulesPath, outcome: "missing", bytesReclaimed: null, sizeTruncated: false };
+  }
+  // e21cfd5f: `node_modules` may itself BE a junction/symlink (a worker can plant one) — the predicate resolves it, so a link into a repo (or anywhere
+  // outside the worktrees root) is refused rather than removed. Reported as "left-on-disk" (nothing reclaimed) to keep the outcome contract unchanged.
+  const refusal = worktreeRemovalRefusal(nodeModulesPath, deps.protectedRepoPaths ?? []);
+  if (refusal) {
+    // eslint-disable-next-line no-console
+    console.warn(`[worktree] REFUSED to reclaim ${nodeModulesPath} — ${refusal}. Nothing was touched.`);
+    return { worktreePath, nodeModulesPath, outcome: "left-on-disk", bytesReclaimed: null, sizeTruncated: false };
   }
   const measureSize = deps.measureSize ?? measureDirSize;
   const { bytes, truncated } = await measureSize(nodeModulesPath);

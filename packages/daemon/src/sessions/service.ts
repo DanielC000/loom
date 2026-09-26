@@ -22,7 +22,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal,deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -19050,11 +19050,14 @@ export class SessionService {
   ): Promise<GcOutcomeResult> {
     // @decision e21cfd5f — checked FIRST, before the reap/scan/any git call, and never overridable (forceRemoveWorktree included): a
     //  worktreePath that is not strictly under the worktrees root, or that equals/contains ANY project's registered repo, is never removed.
-    const protectedRepoPaths = this.db.listProjects().flatMap((p) => [p.repoPath, ...p.repos.map((r) => r.path)]).filter((p): p is string => !!p);
-    const refusal = worktreeRemovalRefusal(worktreePath, [repoPath, ...protectedRepoPaths]);
+    const refusal = worktreeRemovalRefusal(worktreePath, [repoPath, ...this.allRegisteredRepoPaths()]);
     if (refusal) {
       // eslint-disable-next-line no-console
       console.warn(`[worktree] REFUSED to remove ${worktreePath} — ${refusal}. Nothing was touched.`);
+      // A wedge entry for a refused path can never clear (we will never remove it), so the slow-retry sweep would retry it forever and never
+      // disarm its timer: park it as needsHuman, which the sweep skips.
+      const wedge = this.db.getWedgedWorktree(worktreePath);
+      if (wedge && !wedge.needsHuman) this.db.markWorktreeNeedsHuman(worktreePath);
       return { outcome: "path-refused" };
     }
     if (this.db.getWedgedWorktree(worktreePath)?.needsHuman) return { outcome: "needs-human-skip" };
@@ -19133,6 +19136,13 @@ export class SessionService {
       return { outcome: "wedged" };
     }
     return { outcome: "left-on-disk" };
+  }
+
+  /** Every registered repo path of every project — live, reserved AND archived (`listAllProjects` alone excludes archived) — so no repo is ever unprotected from a removal (e21cfd5f). */
+  private allRegisteredRepoPaths(): string[] {
+    return [...this.db.listAllProjects(), ...this.db.listArchivedProjects()]
+      .flatMap((p) => [p.repoPath, ...p.repos.map((r) => r.path)])
+      .filter((p): p is string => !!p);
   }
 
   /** Arm the low-frequency background wedge-retry sweep if it isn't already running. Self-disarms (see
@@ -19521,7 +19531,7 @@ export class SessionService {
   // `gitDeps` (card 6ee48e4d): test-only seam for Pass A's git ops, defaulting to {} so every production
   // call site (index.ts's boot call) is unaffected — a test can inject a counting/stubbed `gitFactory` to
   // prove Pass A's early-out never spawns git for an already-finalized worker.
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesPathRefused: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
@@ -19535,6 +19545,7 @@ export class SessionService {
     let worktreesKept = 0;
     let worktreesNeedsHuman = 0;
     let worktreesStaleRepoKey = 0;
+    let worktreesPathRefused = 0;
     let worktreesLeftOnDiskSuspectedLive = 0;
     let branchesReclaimed = 0;
     let branchSweepSkippedRepos = 0;
@@ -19866,6 +19877,7 @@ export class SessionService {
         // here overstated the aggregate.
         if (outcome === "needs-human-skip") worktreesNeedsHuman++;
         else if (outcome === "removed") worktreesPruned++;
+        else if (outcome === "path-refused") worktreesPathRefused++;
         continue;
       }
       if (await worktreeHasWork(repoPath, worktreePath, s.branch ?? null, "HEAD", { timeoutMs: this.gitOpMs })) {
@@ -19893,6 +19905,7 @@ export class SessionService {
       // Only an ACTUAL removal counts as pruned — see the identical comment on the dead-leftover branch above.
       if (outcome === "needs-human-skip") worktreesNeedsHuman++;
       else if (outcome === "removed") worktreesPruned++;
+      else if (outcome === "path-refused") worktreesPathRefused++;
       else if (outcome === "left-on-disk") {
         // Finding 1 (card 40b63f1c): a failed removal here is NOT routine fs flakiness to log once and
         // silently retry next boot — the incident's own log line ("could not remove dir ... left on disk
@@ -20067,10 +20080,14 @@ export class SessionService {
       // eslint-disable-next-line no-console
       console.warn(`[reconcile] ${worktreesLeftOnDiskSuspectedLive} worktree(s) could not be fully removed and are being treated as POSSIBLY STILL LIVE rather than routine GC backlog — see the per-worktree warning(s) above for paths.`);
     }
+    if (worktreesPathRefused > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] ${worktreesPathRefused} worktree(s) NOT removed this boot — the path is outside the worktrees root or is/contains a registered repo (card e21cfd5f); see the per-path REFUSED warning(s) above. Nothing was touched.`);
+    }
     if (branchesReclaimed > 0) {
       console.log(`[reconcile] reclaimed ${branchesReclaimed} merged loom/* branch ref(s)`);
     }
-    return { mergesFinished, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero };
+    return { mergesFinished, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesPathRefused, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero };
   }
 
   /**
@@ -20191,7 +20208,7 @@ export class SessionService {
       // No timeout override passed — reclaimNodeModulesDir's own default (NODE_MODULES_RECLAIM_TIMEOUT_MS)
       // is a dedicated bulk-filesystem-delete budget, deliberately never borrowed from this.gitOpMs (a
       // git-ref-op budget — review finding [2]).
-      const outcome = await reclaimNodeModulesDir(c.worktreePath, undefined, { removeDir: this.removeDirOverride });
+      const outcome = await reclaimNodeModulesDir(c.worktreePath, undefined, { removeDir: this.removeDirOverride, protectedRepoPaths: this.allRegisteredRepoPaths() });
       switch (outcome.outcome) {
         case "removed":
           result.removed++;
