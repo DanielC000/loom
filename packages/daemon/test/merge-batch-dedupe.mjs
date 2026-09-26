@@ -126,8 +126,8 @@ try {
   };
   const [r1, r2] = await Promise.all([p1.then(settleBatch), p2.then(settleBatch)]);
 
-  check("(1) first call settles within the sync-wait budget", r1.settled === true && r1.ok === true);
-  check("(2) second call settles within the sync-wait budget too (attached to the same in-flight op)", r2.settled === true && r2.ok === true);
+  check("(1) first call ends settled ok (after re-polling past any sync-wait degrade)", r1.settled === true && r1.ok === true);
+  check("(2) second call ends settled ok too (after re-polling; attached to the same in-flight op)", r2.settled === true && r2.ok === true);
   check("(3) both calls report the batch landed", r1.settled && r1.ok && r1.value.ok === true && r2.settled && r2.ok && r2.value.ok === true);
   check("(4) both calls report the SAME two branches landed (not two independent runs each landing its own copy)",
     r1.settled && r1.ok && r2.settled && r2.ok &&

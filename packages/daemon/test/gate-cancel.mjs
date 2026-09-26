@@ -35,6 +35,10 @@ const { GateSemaphore, GateCancelledError } = await import("../dist/orchestratio
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// GENEROUS syncAttachBudgetMs (card 71a6a29e, sibling of c188412a): the `settled === true` checks assert the OUTCOME, not
+// wall-clock — under host load a confirm/self-check outliving the default 12s degrades to pending. DI-seam idiom, never
+// the production constant. Ctors that don't assert a settle (gate-cancel's registry-only / {} cases) are left on the default.
+const GENEROUS_SYNC_BUDGET_MS = 600_000;
 // Poll instead of a blind fixed sleep for "has this op reached the live registry yet" — a blind sleep is
 // exactly the wall-clock-coincidence flake this file's own DoD explicitly rejects (never assert on elapsed
 // wall-clock), and it's genuinely too fragile here: a block running right after a real squash-merge/
@@ -281,7 +285,7 @@ function makeRepo(repo) {
     return { passed: true };
   };
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
-  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedFakeGate });
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedFakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
   const pHolderRun = sessions.runWorkerGate(workerId2); // occupies the ONE cap-1 slot
 
@@ -439,7 +443,7 @@ function makeRepo(repo) {
     return { passed: true };
   };
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
-  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate });
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
   const pHolderRun = sessions.runWorkerGate(workerHolder);
   await waitUntil(() => sessions.gateQueueForManager(projHolder).activeCount === 1);
@@ -520,7 +524,7 @@ function makeRepo(repo) {
     return { passed: true };
   };
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
-  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate });
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
   const pHolderRun = sessions.runWorkerGate(workerHolder);
   await waitUntil(() => sessions.gateQueueForManager(projId).activeCount === 1);
@@ -611,7 +615,7 @@ function makeRepo(repo) {
     return { passed: true };
   };
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
-  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate });
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
   const pHolderRun = sessions.runWorkerGate(workerHolder);
   await waitUntil(() => sessions.gateQueueForManager(projHolder).activeCount === 1);
@@ -692,7 +696,7 @@ function makeRepo(repo) {
   const gateHold = new Promise((res) => { releaseGate = res; });
   let gateSpawned = false;
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
-  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { gateSpawned = true; await gateHold; return { passed: true }; } });
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { gateSpawned = true; await gateHold; return { passed: true }; }, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
   const pMergeConfirm = sessions.confirmWorkerMergeTracked(mgrId, workerId);
   // Since card b798e706: "admitted" (RUNNING in the semaphore) fires BEFORE `fn` itself starts —
@@ -1029,7 +1033,7 @@ function makeRepo(repo) {
     return { passed: true };
   };
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
-  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate });
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
   const pHolderRun = sessions.runWorkerGate(workerHolderId);
   await waitUntil(() => sessions.gateQueueForManager(projId).activeCount === 1);
@@ -1158,7 +1162,7 @@ function makeRepo(repo) {
     const wt = await createWorktree(repo, projId, taskId);
     worktrees.push(wt.worktreePath);
     db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: wt.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: wt.worktreePath, branch: wt.branch });
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: respondingGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: respondingGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
     const pRun = sessions.runWorkerGate(workerId);
     const liveEntry = await waitUntil(() => sessions.gateQueueForManager(projId).running[0]);

@@ -82,6 +82,9 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { createWorktree } = await import("../dist/git/worktrees.js");
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// GENEROUS syncAttachBudgetMs (card 71a6a29e, sibling of c188412a): the `settled === true` checks assert the OUTCOME, not wall-clock —
+// under host load a confirm/self-check outliving the default 12s degrades to pending. DI-seam idiom, never the production constant.
+const GENEROUS_SYNC_BUDGET_MS = 600_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const GIT_ID = "-c user.email=mgru@loom -c user.name=mgru";
 const now = new Date().toISOString();
@@ -135,7 +138,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
     A.worktreePath = worktreePath; A.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, A.file), "work for A\n");
@@ -170,7 +173,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     B.worktreePath = worktreePath; B.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, B.file), "work for B\n");
@@ -214,7 +217,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, C.file), "work for C\n");
@@ -253,7 +256,7 @@ try {
       }
       return { passed: true };
     };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     D.worktreePath = worktreePath; D.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, D.file), "work for D\n");
@@ -278,7 +281,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
     E.worktreePath = worktreePath; E.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, E.file), "work for E\n");
@@ -314,7 +317,7 @@ try {
     // gateOpRetainMs:0 (mirrors gate-timeout-circuit-breaker.mjs): disables run_gate's own settle-grace
     // retention window, so these two BACK-TO-BACK run_gate calls each trigger a genuinely fresh
     // invocation instead of the second being served the first's cached (green) result.
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0 });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, F.file), "work for F\n");
@@ -342,7 +345,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     const { worktreePath, branch } = await createWorktree(G.repo, G.projId, G.taskId);
     G.worktreePath = worktreePath; G.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, G.file), "work for G\n");
@@ -384,7 +387,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
     const fakeGate = async () => { calls++; return { passed: true }; };
-    const preRestart = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const preRestart = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     const { worktreePath, branch } = await createWorktree(H.repo, H.projId, H.taskId);
     H.worktreePath = worktreePath; H.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, H.file), "work for H\n");
@@ -396,7 +399,7 @@ try {
 
     // A fresh SessionService — its lastWorkerGateCheck map starts empty, exactly like a real
     // daemon_restart's new process — sharing the SAME db (the on-disk state a restart actually preserves).
-    const postRestart = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const postRestart = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     const confirm = await postRestart.confirmWorkerMerge(H.mgrId, H.workerId);
     check("(H) confirmWorkerMerge on the post-restart instance ran the gate for real (no crash, no phantom reuse)", calls === 2);
     check("(H) merged:true", confirm.merged === true);
@@ -466,7 +469,7 @@ try {
       }
       return { passed: true };
     };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     const { worktreePath, branch } = await createWorktree(J.repo, J.projId, J.taskId);
     J.worktreePath = worktreePath; J.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, J.file), "work for J\n");
@@ -540,6 +543,7 @@ try {
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
       runGate: fakeGate,
       reapWorktreeProcesses: async () => ({ killedPids: [] }),
+      syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS,
     });
     const { worktreePath, branch } = await createWorktree(K.repo, K.projId, K.taskId);
     K.worktreePath = worktreePath; K.branch = branch; worktrees.push(worktreePath);

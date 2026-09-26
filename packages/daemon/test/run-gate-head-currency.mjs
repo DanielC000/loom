@@ -58,6 +58,9 @@ const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.j
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// GENEROUS syncAttachBudgetMs (card 71a6a29e, sibling of c188412a): the `settled === true` checks assert the OUTCOME, not wall-clock —
+// under host load a confirm/self-check outliving the default 12s degrades to pending. DI-seam idiom, never the production constant.
+const GENEROUS_SYNC_BUDGET_MS = 600_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Card 7b3a585a (from the 7b634e58 audit): `runWorkerGate` reads a REAL async git subprocess
 // (`computeWorktreeGateStamp`) BEFORE the semaphore ever sees the op, so "issue op 1, then op 2" does NOT
@@ -115,7 +118,7 @@ try {
       commitAll(wt, "late commit", GIT_ID);
       return { passed: true };
     };
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
     const r = await sessions.runWorkerGate(workerId);
     check("(A) settles inline and passes", r.settled === true && r.ok === true && r.value.passed === true);
@@ -146,7 +149,7 @@ try {
       if (label === "blocker") await sleep(1200); // holds the only slot long enough to force a real queue
       return { passed: true };
     };
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
     const pBlocker = sessions.runWorkerGate(blockerId); // grabs the only slot first
     await sharedWaitUntil(
@@ -181,7 +184,7 @@ try {
   {
     const { db, workerId } = await seedWorker("c");
     const fakeGate = async () => ({ passed: true });
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
     const r = await sessions.runWorkerGate(workerId);
     check("(C) settles inline and passes", r.settled === true && r.ok === true && r.value.passed === true);
@@ -198,7 +201,7 @@ try {
       commitAll(wt, "late commit", GIT_ID);
       return { passed: false, failedStep: "pnpm test", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "FAIL x" };
     };
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
     const r = await sessions.runWorkerGate(workerId);
     check("(D) settles inline and fails", r.settled === true && r.ok === true && r.value.passed === false);
@@ -224,7 +227,7 @@ try {
       execSync(`git checkout -q ${subjectBranch}`, { cwd: wt, stdio: "ignore" });
       return { passed: true };
     };
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
     const pBlocker = sessions.runWorkerGate(blockerId);
     await sharedWaitUntil(
       () => sessions.snapshotGates().gates.some((g) => g.sessionId === blockerId && g.phase === "running"),

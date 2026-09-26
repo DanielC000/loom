@@ -44,6 +44,9 @@ const { createWorktree } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// GENEROUS syncAttachBudgetMs (card 71a6a29e, sibling of c188412a): the `settled === true` checks assert the OUTCOME, not wall-clock —
+// under host load a confirm/self-check outliving the default 12s degrades to pending. DI-seam idiom, never the production constant.
+const GENEROUS_SYNC_BUDGET_MS = 600_000;
 const GIT_ID = "-c user.email=concstamp@loom -c user.name=concstamp";
 const now = new Date().toISOString();
 
@@ -170,7 +173,7 @@ try {
       }
       return { passed: true, steps: [{ step: gate, durationMs: 10, status: 0 }], outputTail: "ok" };
     };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
     const wtP = await createWorktree(P.repo, P.projId, P.taskId);
     P.worktreePath = wtP.worktreePath; P.branch = wtP.branch; worktrees.push(wtP.worktreePath);
