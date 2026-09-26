@@ -3047,8 +3047,37 @@ export class Db {
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
+    const before = patch.repoPath !== undefined || patch.repos !== undefined ? this.getProject(id) : undefined;
     const set = names.map((c) => `${c} = ?`).join(", ");
     this.db.prepare(`UPDATE projects SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+    if (before) this.resetMainlineBaselinesForRepoChange(id, before, patch);
+  }
+  /**
+   * @decision 4fa36502 — a repo REBIND/REPATH resets that (project, repoKey)'s mainline watermark + boot-alert marker through THIS one helper (the chokepoint `updateProject` reaches from every `repoPath`/`repos` writer: platform `project_update`, REST PATCH incl. registry repaths). Only a real path change resets (a no-op rebind keeps W, or a raw move could be laundered); it files a `mainline_moved_outside_loom` event (`source:"rebind"`) naming from → to so a wiped baseline is auditable: low, or HIGH carrying the marker when it drops an UNDELIVERED boot alert.
+   */
+  private resetMainlineBaselinesForRepoChange(id: string, before: Project, patch: { repoPath?: string; repos?: RepoRegistryEntry[] }): void {
+    const norm = (p: string): string => { const r = path.resolve(p).replace(/[\\/]+$/, ""); return process.platform === "win32" ? r.toLowerCase() : r; };
+    const oldPaths = new Map<string, string>([["primary", before.repoPath], ...before.repos.map((r): [string, string] => [r.key, r.path])]);
+    const newPaths = new Map<string, string>([["primary", patch.repoPath ?? before.repoPath], ...(patch.repos ?? before.repos).map((r): [string, string] => [r.key, r.path])]);
+    for (const [repoKey, from] of oldPaths) {
+      const to = newPaths.get(repoKey);
+      if (to !== undefined && (!from || !to ? from === to : norm(from) === norm(to))) continue;
+      const wKey = `mainline-watermark:${id}:${repoKey}`;
+      const aKey = `mainline-boot-alerted:${id}:${repoKey}`;
+      const rawMarker = this.getMeta(aKey);
+      if (this.getMeta(wKey) === undefined && rawMarker === undefined) continue;
+      // An UNDELIVERED boot alert (nudgedAt unset) is an alert nobody has read: the rebind must not erase it silently, so the event carries it at HIGH severity.
+      let unread: Record<string, unknown> | null = null;
+      try { const m = rawMarker ? JSON.parse(rawMarker) as Record<string, unknown> : null; if (m && typeof m.nudgedAt !== "string") unread = m; } catch { /* unparseable marker: nothing to carry */ }
+      this.deleteMeta(wKey);
+      this.deleteMeta(aKey);
+      const what = to === undefined ? "repo registry entry removed: mainline baseline reset" : "repo rebound: mainline baseline reset";
+      this.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "mainline_moved_outside_loom", detail: {
+        projectId: id, repoKey, source: "rebind", severity: unread ? "high" : "low", reset: true, fromPath: from, toPath: to ?? null,
+        reason: unread ? `${what}; an unread mainline alert for the old repo was discarded by the rebind` : what,
+        ...(unread ? { discardedAlert: { branch: unread.branch, from: unread.from, to: unread.to, evidence: unread.evidence, suspectShas: unread.suspectShas } } : {}),
+      } });
+    }
   }
   /** Replace a project's config override (Pillar C project_configure / PATCH config). */
   setProjectConfig(id: string, config: ProjectConfigOverride): void {
