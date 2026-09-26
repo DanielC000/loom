@@ -22,7 +22,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal,deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -1343,7 +1343,7 @@ function gateOpIdEnvOverride(opId: string, batchSize: number, base?: NodeJS.Proc
 /** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
  *  alongside `outcome: "nested-repo-blocked"` — see that outcome's doc on gcWorktreeDir. */
 type GcOutcomeResult = {
-  outcome: "removed" | "wedged" | "left-on-disk" | "needs-human-skip" | "nested-repo-blocked" | "dirty-retained";
+  outcome: "removed" | "wedged" | "left-on-disk" | "needs-human-skip" | "nested-repo-blocked" | "dirty-retained" | "path-refused";
   nestedRepoPaths?: string[];
   scanTruncated?: boolean;
   /** Only with `outcome: "dirty-retained"` (card 6796c9ea): the uncommitted paths, or `unverified:true` when the status read failed (fail closed). */
@@ -1379,8 +1379,10 @@ function nestedRepoBlockWarning(block: { paths: string[]; truncated: boolean }):
  *  polling `worker_merge_confirm` would ever see. Shared by the Green path and the ALREADY_MERGED path
  *  ({@link SessionService.finishAlreadyMerged}) so the two can't drift. In every case the MERGE itself
  *  already landed successfully — this is purely additive cleanup reporting, never a failure. */
-function worktreeGcWarning(outcome: "wedged" | "left-on-disk" | "needs-human-skip", worktreePath: string): string {
+function worktreeGcWarning(outcome: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused", worktreePath: string): string {
   switch (outcome) {
+    case "path-refused":
+      return `worktree ${worktreePath} was NOT removed — it is not strictly under the worktrees root or it is/contains a registered repo checkout, so Loom refuses to delete it (card e21cfd5f). Non-blocking: the merge itself landed successfully. Check why the session row points at that path; nothing was touched.`;
     case "wedged":
       return `worktree ${worktreePath} could not be removed — a held OS file handle survived a force-kill retry (genuinely WEDGED). Non-blocking: the merge itself landed successfully. Loom retries this automatically (a low-frequency background sweep, plus every daemon boot) until it either clears on its own or crosses a give-up bound, at which point it flips to needsHuman and stops retrying — no action needed for now.`;
     case "left-on-disk":
@@ -19046,6 +19048,15 @@ export class SessionService {
       retainIfUncommitted?: boolean;
     },
   ): Promise<GcOutcomeResult> {
+    // @decision e21cfd5f — checked FIRST, before the reap/scan/any git call, and never overridable (forceRemoveWorktree included): a
+    //  worktreePath that is not strictly under the worktrees root, or that equals/contains ANY project's registered repo, is never removed.
+    const protectedRepoPaths = this.db.listProjects().flatMap((p) => [p.repoPath, ...p.repos.map((r) => r.path)]).filter((p): p is string => !!p);
+    const refusal = worktreeRemovalRefusal(worktreePath, [repoPath, ...protectedRepoPaths]);
+    if (refusal) {
+      // eslint-disable-next-line no-console
+      console.warn(`[worktree] REFUSED to remove ${worktreePath} — ${refusal}. Nothing was touched.`);
+      return { outcome: "path-refused" };
+    }
     if (this.db.getWedgedWorktree(worktreePath)?.needsHuman) return { outcome: "needs-human-skip" };
     if (!opts?.forceRemoveWorktree) {
       const scanFn = this.findNestedGitReposOverride ?? findNestedGitRepos;
@@ -19256,7 +19267,7 @@ export class SessionService {
     /** Task 035fb673: the non-"removed"/non-"nested-repo-blocked" gcWorktreeDir outcome, when one
      *  occurred — surfaced by the caller via {@link worktreeGcWarning}. `undefined` on a clean removal,
      *  byte-identical to before this field existed. */
-    worktreeGcOutcome?: "wedged" | "left-on-disk" | "needs-human-skip";
+    worktreeGcOutcome?: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused";
   }> {
     if (!args.releaseHold && await this.isBranchHeld(args.branch, args.repoPath)) {
       // eslint-disable-next-line no-console
@@ -19280,7 +19291,7 @@ export class SessionService {
     await this.retireSiblingSessionsForTask(args.taskId, args.workerSessionId);
     let nestedRepoBlock: { paths: string[]; truncated: boolean } | undefined;
     let dirtyWorktreeRetained: DirtyWorktreeRetained | undefined;
-    let worktreeGcOutcome: "wedged" | "left-on-disk" | "needs-human-skip" | undefined;
+    let worktreeGcOutcome: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused" | undefined;
     let worktreeRemoved = false;
     try {
       // The nested-git-repo guard (card b6d41db1) lives IN gcWorktreeDir — the single removal

@@ -123,6 +123,8 @@ export interface BoundedGitDeps {
    * resolves) and prove removeWorktree still returns within `timeoutMs` either way.
    */
   removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
+  /** Extra repo paths (the project's registered repos[]) {@link worktreeRemovalRefusal} must never let a removal equal or contain, beyond the `repoPath` argument itself. */
+  protectedRepoPaths?: readonly string[];
 }
 
 // @decision 0f965ab7 — catch simple-git's synchronous construct throw once, centrally, via this stub
@@ -1215,6 +1217,48 @@ function delay(ms: number): Promise<void> {
 const REMOVE_DIR_CLEAN_RETRY_ATTEMPTS = 3;
 const REMOVE_DIR_CLEAN_RETRY_DELAY_MS = 500;
 
+/** Normalize for containment comparison: resolved, no trailing separator, case-folded on win32. */
+function normForCompare(p: string): string {
+  const r = path.resolve(p).replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? r.toLowerCase() : r;
+}
+
+/** `child` is strictly below `parent` (never equal). Both already normalized. */
+function isStrictlyUnder(child: string, parent: string): boolean {
+  return child.startsWith(parent + path.sep) && child.length > parent.length + 1;
+}
+
+/**
+ * The ONE predicate every worktree directory removal must pass (null = allowed, else the refusal reason).
+ * @decision e21cfd5f — a removal target must be strictly under the worktrees root and neither equal nor contain a registered repo path;
+ * never relax it to "not equal the repo" (a repo's PARENT is as fatal), and never bypass it at a call site.
+ */
+export function worktreeRemovalRefusal(
+  target: string,
+  repoPaths: readonly string[],
+  worktreesRoot: string = WORKTREES_DIR,
+): string | null {
+  const forms = (p: string): string[] => {
+    const out = [normForCompare(p)];
+    try { out.push(normForCompare(fs.realpathSync(p))); } catch { /* absent path: the resolved form alone applies */ }
+    return out;
+  };
+  const roots = forms(worktreesRoot);
+  const targets = forms(target);
+  for (const t of targets) {
+    if (!roots.some((r) => isStrictlyUnder(t, r))) return `${target} is not strictly under the worktrees root ${worktreesRoot}`;
+  }
+  for (const repo of repoPaths) {
+    if (!repo) continue;
+    const repoForms = forms(repo);
+    for (const t of targets) for (const rp of repoForms) {
+      if (t === rp) return `${target} is a registered repo path (${repo})`;
+      if (isStrictlyUnder(rp, t)) return `${target} contains the registered repo path ${repo}`;
+    }
+  }
+  return null;
+}
+
 /**
  * Remove a worker's worktree and prune the admin record. Branch deletion (after merge) is
  * #16's concern, not here.
@@ -1232,6 +1276,12 @@ export async function removeWorktree(
   worktreePath: string,
   deps: BoundedGitDeps = {},
 ): Promise<{ removed: boolean; wedged: boolean }> {
+  const refusal = worktreeRemovalRefusal(worktreePath, [repoPath, ...(deps.protectedRepoPaths ?? [])]);
+  if (refusal) {
+    // eslint-disable-next-line no-console
+    console.warn(`[worktree] REFUSED to remove ${worktreePath} — ${refusal}. Nothing was touched.`);
+    return { removed: false, wedged: false };
+  }
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
     await withTimeout(git.raw(["worktree", "remove", worktreePath, "-f", "-f"]), timeoutMs, "git worktree remove");
