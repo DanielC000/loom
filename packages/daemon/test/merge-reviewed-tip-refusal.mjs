@@ -280,7 +280,7 @@ for (const mode of ["lt2", "gate-off"]) {
   check("(attrs) the daemon's own union under branch-side attributes is NOT falsely refused — the confirm lands", r?.merged === true && onMain(W.repo, "feature-a.txt"));
 }
 
-// ── (3j) `git replace` must not rewrite the history the walk judges (cheap hardening: --no-replace-objects on every walk call). A replace ref makes the worker's
+// ── (3j) `git replace` must not rewrite the history the walk judges (cheap hardening: canonicalGit applies core.useReplaceRefs=false to every git call, card 356538ef). A replace ref makes the worker's
 // late commit LOOK like a clean [reviewed, main] merge; the walk must still see the real commit.
 {
   const W = await world("replace", ["a"]);

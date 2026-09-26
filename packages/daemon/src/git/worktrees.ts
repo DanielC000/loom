@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
-import { withTimeout, withTimeoutKillingChild, boundedSimpleGit } from "./bounded.js";
+import { withTimeout, withTimeoutKillingChild, canonicalGit, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure } from "./bounded.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
@@ -146,7 +146,7 @@ export function gitConstructFailure<T extends object>(err: unknown): T {
  *  throws — see {@link gitConstructFailure}. */
 function boundedGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
   let git: Pick<SimpleGit, "raw">;
   try {
     git = makeGit(repoPath, timeoutMs);
@@ -170,7 +170,7 @@ function boundedGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleG
  */
 function boundedMergeGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms, nonInteractiveEnv()));
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, nonInteractiveEnv()));
   let git: Pick<SimpleGit, "raw">;
   try {
     git = makeGit(repoPath, timeoutMs);
@@ -229,7 +229,7 @@ export interface DiffBranchDeps {
 /** Build the bounded git instance + resolve the timeout for {@link diffBranch}'s ops, applying the seam's defaults. */
 function boundedDiffGit(repoPath: string, deps: DiffBranchDeps): { git: Pick<SimpleGit, "raw" | "diffSummary" | "diff">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
   let git: Pick<SimpleGit, "raw" | "diffSummary" | "diff">;
   try {
     git = makeGit(repoPath, timeoutMs);
@@ -912,7 +912,7 @@ export async function createWorktree(
   const boundedLockedRaw = (args: string[], label: string): Promise<string> => {
     if (gitDeps.gitFactory) return withTimeout(gitDeps.gitFactory(repoPath, timeoutMs).raw(args), timeoutMs, label);
     const controller = new AbortController();
-    return withTimeoutKillingChild(boundedSimpleGit(repoPath, timeoutMs, undefined, controller.signal).raw(args), timeoutMs, label, controller);
+    return withTimeoutKillingChild(canonicalGit(repoPath, timeoutMs, undefined, controller.signal).raw(args), timeoutMs, label, controller);
   };
   const branchExists = await withCanonicalIndexLock(repoPath, async () => {
     await boundedLockedRaw(["worktree", "prune"], "git worktree prune"); // drop any stale admin record for a since-deleted dir
@@ -1621,7 +1621,7 @@ export async function precheckWorkerDone(
   deps: BoundedGitDeps = {},
 ): Promise<DoneReportPrecheck> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
 
   // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),
   //     ignoring daemon-injected untracked `.claude/` noise (see uncommittedWorkFiles).
@@ -1846,7 +1846,7 @@ export async function attemptCodexAutoCommit(
   // factory, via boundedSimpleGit's own opt-in `extraUnsafe` param — never added to that shared
   // chokepoint's unconditional allowlist, so no OTHER caller's `unsafe` set is widened by this feature.
   const makeGit = deps.gitFactory
-    ?? ((p, ms) => boundedSimpleGit(p, ms, nonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }));
+    ?? ((p, ms) => canonicalGit(p, ms, nonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }));
   let git: Pick<SimpleGit, "raw">;
   try {
     git = makeGit(worktreePath, timeoutMs);
@@ -1946,7 +1946,7 @@ export async function attemptCodexAutoCommit(
     } else {
       const controller = new AbortController();
       await withTimeoutKillingChild(
-        boundedSimpleGit(worktreePath, timeoutMs, nonInteractiveEnv(), controller.signal, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }).raw(commitArgs),
+        canonicalGit(worktreePath, timeoutMs, nonInteractiveEnv(), controller.signal, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }).raw(commitArgs),
         timeoutMs, commitLabel, controller,
       );
     }
@@ -2006,7 +2006,7 @@ export async function worktreeHasWork(
   // whose methods reject instead), so the ops below already see that as an ordinary bounded failure and
   // fail safe through their own catches; no separate wrap is needed here.
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
 
   // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),
   //     ignoring daemon-injected untracked `.claude/` noise (see worktreeStatusHasWork).
@@ -2057,7 +2057,7 @@ export async function detectStrandedWork(
   deps: BoundedGitDeps = {},
 ): Promise<StrandedWork> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
   try {
     const mainSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD")).trim();
 
@@ -3153,7 +3153,7 @@ function repoTreeHasJsTsSourceFile(
   repoPath: string, treeish: string, timeoutMs: number,
 ): Promise<{ applicable: boolean; degradedReason?: string }> {
   return new Promise((resolve) => {
-    const child = spawn("git", ["ls-tree", "-r", "--name-only", treeish], {
+    const child = spawn("git", [...CANONICAL_GIT_CONFIG_ARGS, "ls-tree", "-r", "--name-only", treeish], {
       cwd: repoPath,
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
@@ -3207,7 +3207,7 @@ export async function repoTreeReferencesInertPrefix(
     // gated on above — without this pathspec the scan searched the WHOLE tree (markdown included), so a
     // doc merely QUOTING this pattern as a literal example (a real docs/decisions/1c0d4aa4-*.md hit) could
     // falsely confirm the token "referenced" and disable the docs/-inert skip repo-wide.
-    const child = spawn("git", ["grep", "-I", "-l", "-E", pattern, treeish, "--", ...JS_TS_SOURCE_EXTENSIONS.map((ext) => `*.${ext}`)], {
+    const child = spawn("git", [...CANONICAL_GIT_CONFIG_ARGS, "grep", "-I", "-l", "-E", pattern, treeish, "--", ...JS_TS_SOURCE_EXTENSIONS.map((ext) => `*.${ext}`)], {
       cwd: repoPath,
       stdio: ["ignore", "ignore", "pipe"],
       windowsHide: true,
@@ -5358,7 +5358,7 @@ export async function mergeMainIntoWorktree(
   repoPath: string, worktreePath: string, deps: BoundedGitDeps = {},
 ): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string }> {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
   const repoGit = makeGit(repoPath, timeoutMs);
   const wtGit = makeGit(worktreePath, timeoutMs);
 
@@ -5394,10 +5394,15 @@ export async function mergeMainIntoWorktree(
     : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
 
   let mergeThrew = false;
+  let mergeErr = "";
+  let mergeRefused = false;
   try {
     await withTimeout(wtGit.raw([...identityArgs, "merge", "--no-edit", mainSha]), timeoutMs, "git merge main into worktree");
-  } catch {
+  } catch (e) {
     mergeThrew = true; // a conflict OR a real failure — the explicit checks below decide which
+    const d = describeGitFailure(e); // surfaced in the reason: a canonicalGit refusal (unblankable merge driver) must not read as a bare "failed"
+    mergeErr = d.text;
+    mergeRefused = d.refusal;
   }
 
   let conflicted: boolean;
@@ -5422,7 +5427,8 @@ export async function mergeMainIntoWorktree(
     // `reset --hard HEAD` would not) — `git merge --abort` is a no-op error when there's nothing to
     // abort, so its failure here is swallowed exactly like the conflict path's own best-effort intent.
     try { await withTimeout(wtGit.raw(["merge", "--abort"]), timeoutMs, "git merge --abort (worktree)"); } catch { /* best-effort cleanup */ }
-    return { ok: false, reason: "git merge main into worktree failed" };
+    if (mergeRefused) return { ok: false, reason: `refused, nothing changed: ${mergeErr}` };
+    return { ok: false, reason: mergeErr ? `git merge main into worktree failed: ${mergeErr}` : "git merge main into worktree failed" };
   }
   return { ok: true, merged: true, mainSha };
 }
@@ -5444,8 +5450,8 @@ export async function verifyReviewedTipChain(
   repoPath: string, reviewed: string, live: string, deps: BoundedGitDeps = {},
 ): Promise<{ ok: true; hops: number } | { ok: false; reason: string }> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  // `--no-replace-objects` on EVERY call: a `git replace` ref must not rewrite the history this walk judges.
-  const raw = (args: string[], label: string) => withTimeout(git.raw(["--no-replace-objects", ...args]), timeoutMs, label);
+  // Replace refs are ignored on EVERY call by the shared `canonicalGit` factory (`core.useReplaceRefs=false`), not per call site.
+  const raw = (args: string[], label: string) => withTimeout(git.raw(args), timeoutMs, label);
   // `rev-list -n1 A ^B` prints a commit iff A is NOT reachable from B (a real git error throws, unlike `merge-base --is-ancestor`'s exit 1).
   const reachable = async (a: string, from: string) => (await raw(["rev-list", "-n1", a, `^${from}`], "git rev-list (reviewed-tip reachability)")).trim() === "";
   const short = (x: string) => x.slice(0, 8);
@@ -5614,6 +5620,7 @@ async function mergeBranchLocked(
   try {
     let rawError = false;
     let rawErrorMessage: string | undefined;
+    let squashRefusal: string | undefined;
     try {
       await withTimeout(git.raw(["merge", "--squash", squashTarget]), timeoutMs, "git merge --squash (canonical)");
     } catch (e) {
@@ -5624,7 +5631,11 @@ async function mergeBranchLocked(
       // failed" for a class of failure that actually has a specific, diagnosable cause and a specific,
       // different remedy (see that branch's own doc).
       rawErrorMessage = (e as Error).message;
+      squashRefusal = e instanceof CanonicalGitRefusal ? describeGitFailure(e).text : undefined;
     }
+    // A canonicalGit refusal is thrown BEFORE any git process runs: the squash never started, so the canonical repo is exactly as it entered. Say so — and do NOT
+    // run the reset/probes below (they are exec-capable and would be refused too, dressing a clean refusal up as "the canonical repo needs recovery").
+    if (squashRefusal !== undefined) return { ok: false, reason: `refused, nothing changed: ${squashRefusal}` };
     // Conflict? Unmerged index entries are the reliable signal. Under --squash there is no MERGE_HEAD, so
     // `git reset --hard HEAD` (NOT `merge --abort`) restores the canonical repo to its pre-merge state.
     // This probe used to be bare/uncaught (card 9e77050f): a throw here rejected mergeBranchLocked with no

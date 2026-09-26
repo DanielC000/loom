@@ -165,6 +165,7 @@ export function boundedSimpleGit(
   env?: Record<string, string | undefined>,
   abortSignal?: AbortSignal,
   extraUnsafe?: SimpleGitOptions["unsafe"],
+  config?: string[],
 ): SimpleGit {
   const scrubbedEnv = env ? scrubGitEnv(env) : undefined;
   const hasEnv = !!scrubbedEnv && Object.keys(scrubbedEnv).length > 0;
@@ -172,7 +173,177 @@ export function boundedSimpleGit(
   const git = simpleGit(repoPath, {
     timeout: { block: blockTimeoutMs },
     ...(abortSignal ? { abort: abortSignal } : {}),
-    ...(hasEnv ? { unsafe } : {}),
+    ...(hasEnv || extraUnsafe ? { unsafe } : {}),
+    ...(config && config.length > 0 ? { config } : {}),
   });
   return hasEnv ? git.env(scrubbedEnv as Record<string, string | undefined>) : git;
+}
+
+/**
+ * The ONE factory every CANONICAL merge-path git call uses (`git/worktrees.ts`, `git/batch-merge.ts`): ignores replace refs on every
+ * command and fails closed on worker-set merge drivers in the shared `.git`. Deny-by-default: an unrecognised subcommand is exec-capable.
+ *
+ * @decision 356538ef — do NOT construct git on the canonical path any other way (guarded by canonical-git-helper-guard.mjs), and do NOT
+ * swap the driver blanking for `--attr-source`/`core.attributesFile` (verified not to stop a driver). Residual + not-hardened: the record.
+ */
+export const CANONICAL_GIT_CONFIG = ["core.useReplaceRefs=false"] as const;
+/** The `-c` argv equivalent of {@link CANONICAL_GIT_CONFIG}, for a raw `spawn("git", …)` site that cannot use {@link canonicalGit}. */
+export const CANONICAL_GIT_CONFIG_ARGS: readonly string[] = CANONICAL_GIT_CONFIG.flatMap((c) => ["-c", c]);
+
+/** Subcommands that cannot run a merge driver UNLESS an arg asks them to (`--remerge-diff` on show/log/diff-tree does — see
+ *  {@link canRunMergeDriver}). ANYTHING else is exec-capable (deny-by-default). */
+const PURE_READ_SUBCOMMANDS = new Set([
+  "rev-parse", "rev-list", "log", "show", "cat-file", "ls-files", "ls-tree", "merge-base", "config", "diff-tree",
+  "diff", "status", "branch", "update-ref", "symbolic-ref", "for-each-ref", "show-ref", "worktree", "remote",
+  "count-objects", "describe", "name-rev", "grep", "init", "reflog",
+]);
+
+/** Global options that take their value as a SEPARATE arg when written without `=` (`--exec-path`/`--super-prefix` are deliberately absent: bare, they take no value, and mis-skipping a real subcommand would be the UNSAFE direction) — the value must never be read as the subcommand. */
+const GLOBAL_OPTS_WITH_VALUE = new Set(["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source"]);
+
+/** Parse a `raw` arg list's global options: the subcommand (or undefined). */
+function parseGitArgs(args: readonly string[]): { sub: string | undefined } {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (GLOBAL_OPTS_WITH_VALUE.has(a)) { i++; continue; }
+    if (a.startsWith("-")) continue;
+    return { sub: a };
+  }
+  return { sub: undefined };
+}
+
+/** The git subcommand of a `raw` arg list, skipping global options and their separate-arg values (`-c k=v`, `-C p`, `--git-dir p`, `--x[=y]`). */
+export function gitSubcommand(args: readonly string[]): string | undefined {
+  return parseGitArgs(args).sub;
+}
+
+/** Could this command run a merge driver? Deny-by-default; a known pure read is exec-capable only if an arg names `--remerge-diff` (any arg matching /remerge/). */
+export function canRunMergeDriver(args: readonly string[]): boolean {
+  const { sub } = parseGitArgs(args);
+  if (sub === undefined || !PURE_READ_SUBCOMMANDS.has(sub)) return true;
+  // `--remerge-diff`, `--diff-merges=r`, and `-m`/`--diff-merges=on` (a worker-set `log.diffMerges=remerge` turns those into remerge) all run merge drivers on a read.
+  return args.some((a) => /remerge/i.test(a) || /^--diff-merges/i.test(a) || /^-[A-Za-z]*m[A-Za-z]*$/.test(a));
+}
+
+/** A canonicalGit refusal: thrown BEFORE any git process runs, so nothing was changed. Callers tell it from a real git failure via {@link describeGitFailure}. */
+export class CanonicalGitRefusal extends Error {
+  constructor(message: string) { super(message); this.name = "CanonicalGitRefusal"; }
+}
+
+/** One shared way to describe a git failure in a result `reason`: the first line of the message (capped), and whether it was a {@link CanonicalGitRefusal} (nothing changed). */
+export function describeGitFailure(e: unknown): { text: string; refusal: boolean } {
+  const text = String((e as Error)?.message ?? e).split(/\r?\n/, 1)[0]!.slice(0, 400);
+  return { text, refusal: e instanceof CanonicalGitRefusal };
+}
+
+/** The global options in front of the subcommand (`--git-dir p`, `-C p`, `-c k=v`, `--work-tree=…`, …): the config-affecting context the REAL call runs in. */
+export function gitGlobalArgs(args: readonly string[]): string[] {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (GLOBAL_OPTS_WITH_VALUE.has(a)) { i++; continue; }
+    if (a.startsWith("-")) continue;
+    return args.slice(0, i);
+  }
+  return [...args];
+}
+
+const REPLACEMENT_CHAR = String.fromCharCode(0xfffd);
+/** `merge.<name>.driver`, matched in JS (any `<name>`, including empty, with `=`, or U+FFFD). Case-insensitive on section/variable as git canonicalises them. */
+const MERGE_DRIVER_KEY = /^merge\.([\s\S]*)\.driver$/i;
+
+/** A config key that cannot be trusted to round-trip through argv/UTF-8 decoding (a non-UTF-8 byte decodes to U+FFFD, colliding with our own `-c` key), or holds a control char. */
+const keyIsUnsafe = (k: string): boolean => k.includes(REPLACEMENT_CHAR) || /[\x00-\x1f\x7f]/.test(k);
+
+/**
+ * THE INVARIANT (rulings after review rounds 1-4): stop predicting key spelling and VERIFY the resulting state, self-sufficiently. With `prefix` applied
+ * — and with the call's OWN global options (`-C`, `--git-dir`, `-c`, …) so this read sees exactly the config the real call sees — re-read every
+ * `merge.*.driver` and THROW a {@link CanonicalGitRefusal} unless the EFFECTIVE (last-wins) value of every key is empty. Fails closed on anything it cannot
+ * PROVE empty: a key with no value is live, and so is any key containing U+FFFD or a control character (decoding collapses the real key and our
+ * blanking `-c` key into one map entry, so the blank would hide the live driver — this check must not depend on the enumeration having refused first).
+ */
+export async function assertNoLiveMergeDrivers(git: Pick<SimpleGit, "raw">, prefix: readonly string[], args: readonly string[]): Promise<void> {
+  const out = await git.raw([...prefix, ...gitGlobalArgs(args), "config", "-z", "--list"]);
+  const effective = new Map<string, string | null>();
+  for (const rec of out.split("\0")) {
+    if (rec === "") continue;
+    const nl = rec.indexOf("\n");
+    const key = nl < 0 ? rec : rec.slice(0, nl);
+    if (MERGE_DRIVER_KEY.test(key)) effective.set(key, nl < 0 ? null : rec.slice(nl + 1));
+  }
+  const live = [...effective].filter(([k, v]) => v !== "" || keyIsUnsafe(k)).map(([k]) => k);
+  if (live.length > 0) {
+    throw new CanonicalGitRefusal(`canonicalGit: refusing to run "git ${gitSubcommand(args) ?? ""}" — merge driver key(s) ${live.map((k) => JSON.stringify(k)).join(", ")} would still be live after neutralising (a name that cannot be carried in a -c override); remove them from the repository's git config`);
+  }
+}
+
+/** Names `<x>` of every `merge.<x>.driver` visible from the call's cwd/globals (includes + worktree config honoured). */
+async function configuredMergeDriverNames(git: Pick<SimpleGit, "raw">, globals: readonly string[]): Promise<string[]> {
+  // LIST every entry and filter IN JS — never `--get-regexp`: on glibc in a UTF-8 locale git's regex `.` does NOT match an invalid byte, so a regex read
+  // returned NOTHING for a raw-0xE9 driver name and the driver ran (a Windows git matches in every locale, so only POSIX could see it). A real error throws (fail closed).
+  const out = await git.raw([...globals, "config", "-z", "--list"]);
+  const names = new Set<string>();
+  for (const rec of out.split("\0")) {
+    const key = rec.split("\n", 1)[0]!;
+    const m = MERGE_DRIVER_KEY.exec(key);
+    if (m) names.add(m[1]!);
+  }
+  return [...names];
+}
+
+/** Builds the `-c merge.<x>.driver=` prefix from the enumerated names. The DEFAULT refuses names `-c` cannot carry; {@link canonicalRaw}'s post-check is the backstop. */
+export type MergeDriverPrefixBuilder = (names: readonly string[], args: readonly string[]) => string[];
+const defaultPrefixBuilder: MergeDriverPrefixBuilder = (names, args) => {
+  // `-c` splits key/value at the FIRST `=`, so a name containing `=` (gitattributes accept `merge=a=b`) can never be blanked that way; refuse rather than try
+  // (also control chars and U+FFFD).
+  const bad = names.find((n) => n.includes("=") || keyIsUnsafe(n));
+  if (bad !== undefined) {
+    throw new CanonicalGitRefusal(`canonicalGit: refusing to run "git ${gitSubcommand(args) ?? ""}" — the repository's git config defines merge driver key ${JSON.stringify(`merge.${bad}.driver`)}, whose name contains "=", a control character or a non-UTF-8 byte and so cannot be safely neutralised; remove that key from the shared .git/config (or worktree/included config)`);
+  }
+  return names.flatMap((n) => ["-c", `merge.${n}.driver=`]);
+};
+
+/**
+ * The whole `raw` pipeline of {@link canonicalGit}: enumerate (with the call's own globals) → build the blanking prefix → VERIFY it via
+ * {@link assertNoLiveMergeDrivers} → run. Exported ONLY so a test can inject a `buildPrefix` that deliberately misses a driver and prove the post-check is
+ * WIRED and is the last line of defence (production always uses the default builder).
+ */
+export async function canonicalRaw(git: Pick<SimpleGit, "raw">, args: string[], buildPrefix: MergeDriverPrefixBuilder = defaultPrefixBuilder): Promise<string> {
+  let prefix: string[] = [];
+  if (canRunMergeDriver(args)) {
+    const names = await configuredMergeDriverNames(git, gitGlobalArgs(args));
+    prefix = buildPrefix(names, args);
+    await assertNoLiveMergeDrivers(git, prefix, args);
+  }
+  return git.raw([...prefix, ...args]);
+}
+
+export function canonicalGit(
+  repoPath: string,
+  blockTimeoutMs: number,
+  env?: Record<string, string | undefined>,
+  abortSignal?: AbortSignal,
+  extraUnsafe?: SimpleGitOptions["unsafe"],
+): SimpleGit {
+  // Ambient `GIT_CONFIG` is honoured ONLY by the `git config` builtin (like `--file`), never by `git merge`: left in place it blinds both driver reads to a
+  // file the real merge never reads. Always strip it — from a scrubbed COPY of process.env when the caller gave none. (Every other config env var —
+  // GIT_CONFIG_GLOBAL/SYSTEM/NOSYSTEM/COUNT/KEY_n/VALUE_n/PARAMETERS, GIT_DIR, HOME/XDG_CONFIG_HOME — feeds the ONE config stack `merge` and `config` both read.)
+  // Keep env-less callers env-less: simple-git's blockUnsafeOperationsPlugin only inspects an EXPLICIT env, so an always-explicit env would make ambient
+  // GIT_ASKPASS/SSH_ASKPASS/GIT_SSH(_COMMAND)/GIT_PROXY_COMMAND/GIT_TEMPLATE_DIR/GIT_CONFIG_COUNT throw "unsafe" on EVERY canonical call. Build the stripped copy only when
+  // GIT_CONFIG is really present; otherwise pass the caller's env through unchanged (undefined stays undefined).
+  const base = env ?? process.env;
+  let cleanEnv = env;
+  if (base.GIT_CONFIG !== undefined) { cleanEnv = { ...base }; delete cleanEnv.GIT_CONFIG; }
+  // `allowUnsafeMergeDriver` is required for simple-git to pass OUR `-c merge.<x>.driver=` (a blanking, never a set).
+  const git = boundedSimpleGit(repoPath, blockTimeoutMs, cleanEnv, abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
+  const raw = async (...callArgs: unknown[]): Promise<string> => {
+    const args = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
+    return canonicalRaw(git, args);
+  };
+  return new Proxy(git, {
+    get(target, prop) {
+      if (prop === "raw") return raw;
+      const v = Reflect.get(target, prop, target);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
 }

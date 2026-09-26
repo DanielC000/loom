@@ -1,5 +1,5 @@
 import type { SimpleGit } from "simple-git";
-import { withTimeout, boundedSimpleGit } from "./bounded.js";
+import { withTimeout, canonicalGit, describeGitFailure } from "./bounded.js";
 import { findLandedSquashCommit, changedPathSetDigest, type MergeEmptyKind } from "./worktrees.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 
@@ -47,7 +47,7 @@ export interface BatchGitDeps {
 
 function boundedGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : boundedSimpleGit(repoPath, timeoutMs);
+  const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : canonicalGit(repoPath, timeoutMs);
   return { git, timeoutMs };
 }
 
@@ -57,7 +57,7 @@ function boundedGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit
  *  `worktrees.ts`'s identical reasoning: a test injecting a fake doesn't need env scrubbing applied to it. */
 function boundedMergeGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : boundedSimpleGit(repoPath, timeoutMs, nonInteractiveEnv());
+  const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : canonicalGit(repoPath, timeoutMs, nonInteractiveEnv());
   return { git, timeoutMs };
 }
 
@@ -328,10 +328,26 @@ async function landBranchCommitsIndividually(
     ? []
     : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
 
+  // A rollback that itself FAILS (e.g. a canonicalGit refusal that also blocks `reset`) must not vanish: it is recorded here and appended to the failing
+  // result's reason by `fail`, so a batch worktree left holding residue reads as such instead of as a clean refusal. (`cherry-pick --abort` erroring is
+  // expected when no cherry-pick is in progress, so only the `reset --hard` outcome counts.)
+  let rollbackIssue = "";
   const rollback = async (): Promise<void> => {
     try { await withTimeout(git.raw(["cherry-pick", "--abort"]), timeoutMs, "git cherry-pick --abort (batch land)"); } catch { /* best-effort */ }
-    try { await withTimeout(git.raw(["reset", "--hard", batchHeadBefore]), timeoutMs, "git reset --hard (batch land rollback)"); } catch { /* best-effort */ }
+    try { await withTimeout(git.raw(["reset", "--hard", batchHeadBefore]), timeoutMs, "git reset --hard (batch land rollback)"); } catch (e) {
+      // The failed reset only matters if there was something to roll back: a canonicalGit refusal thrown at the FIRST git call of a candidate changed nothing.
+      // Both probes are pure reads (never refused), so this stays truthful either way.
+      try {
+        const head = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch rollback probe)")).trim();
+        const dirty = (await withTimeout(git.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (batch rollback probe)")).trim();
+        // An EMPTY cherry-pick leaves CHERRY_PICK_HEAD behind with a clean tree, so that must be absent too (`-q --verify` prints nothing when it is).
+        const inProgress = (await withTimeout(git.raw(["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"]), timeoutMs, "git rev-parse CHERRY_PICK_HEAD (batch rollback probe)")).trim();
+        if (head === batchHeadBefore && dirty === "" && inProgress === "") return;
+      } catch { /* cannot prove it clean — fall through and report the failure */ }
+      rollbackIssue = describeGitFailure(e).text;
+    }
   };
+  const fail = <T extends { reason?: string }>(r: T): T => rollbackIssue ? { ...r, reason: `${r.reason} (ROLLBACK FAILED — the batch worktree may hold residue: ${rollbackIssue})` } : r;
 
   let strippedTrailerCount = 0;
   let pathSetStamped = true;
@@ -360,8 +376,8 @@ async function landBranchCommitsIndividually(
       } catch { /* treat as a non-conflict failure below */ }
       await rollback();
       return conflicted
-        ? { ok: false, conflict: true, reason: `${branch}: conflict cherry-picking ${sha.slice(0, 7)} onto the batch` }
-        : { ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} failed: ${(e as Error).message}` };
+        ? fail({ ok: false, conflict: true, reason: `${branch}: conflict cherry-picking ${sha.slice(0, 7)} onto the batch` })
+        : fail({ ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} failed: ${describeGitFailure(e).text}` });
     }
     // @decision 2eb78eb2 — detect an ALREADY-PRESENT (redundant) commit's empty stage EXPLICITLY, before
     // the manual commit below, via `git diff --cached --name-only` (not `--quiet`, whose exit-code signal
@@ -373,7 +389,7 @@ async function landBranchCommitsIndividually(
       );
     } catch (e) {
       await rollback();
-      return { ok: false, reason: `${branch}: failed to probe staged changes after cherry-picking ${sha.slice(0, 7)}: ${(e as Error).message}` };
+      return fail({ ok: false, reason: `${branch}: failed to probe staged changes after cherry-picking ${sha.slice(0, 7)}: ${(e as Error).message}` });
     }
     if (stagedPaths.trim() === "") {
       // DoD-2's deliberate choice (b): the CONSERVATIVE default. This does NOT skip just the redundant
@@ -381,7 +397,7 @@ async function landBranchCommitsIndividually(
       // reviewed the absence of. The whole branch drops, exactly like every other failure in this loop,
       // with an honest reason instead of a misleading one.
       await rollback();
-      return { ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} produced an empty commit — its content was already present in the batch tree; dropping this branch rather than risk amending an unrelated commit` };
+      return fail({ ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} produced an empty commit — its content was already present in the batch tree; dropping this branch rather than risk amending an unrelated commit` });
     }
     // Read the ORIGINAL message + author identity (name/email/date), then commit manually — preserving
     // authorship explicitly, since a bare `git commit` here would otherwise stamp the CURRENT committer
@@ -397,7 +413,7 @@ async function landBranchCommitsIndividually(
       authorDate = (await withTimeout(git.raw(["log", "-1", "--format=%aI", sha]), timeoutMs, "git log -1 (batch land, author date)")).trim();
     } catch (e) {
       await rollback();
-      return { ok: false, reason: `${branch}: failed to read original commit metadata for ${sha.slice(0, 7)}: ${(e as Error).message}` };
+      return fail({ ok: false, reason: `${branch}: failed to read original commit metadata for ${sha.slice(0, 7)}: ${(e as Error).message}` });
     }
     const { message: cleanedMessage, stripped } = stripClaudeSessionTrailer(originalMessage);
     if (stripped) strippedTrailerCount++;
@@ -409,7 +425,7 @@ async function landBranchCommitsIndividually(
       );
     } catch (e) {
       await rollback();
-      return { ok: false, reason: `${branch}: commit failed while landing commit ${sha.slice(0, 7)}: ${(e as Error).message}` };
+      return fail({ ok: false, reason: `${branch}: commit failed while landing commit ${sha.slice(0, 7)}: ${(e as Error).message}` });
     }
     // FAIL CLOSED on an empty commit (card 43a9182d) — a BACKSTOP behind the explicit empty-stage probe
     // above (card 2eb78eb2), which already catches the ordinary "nothing staged" case before the manual
@@ -427,11 +443,11 @@ async function landBranchCommitsIndividually(
       )).trim();
     } catch (e) {
       await rollback();
-      return { ok: false, reason: `${branch}: failed to verify commit landed for ${sha.slice(0, 7)}: ${(e as Error).message}` };
+      return fail({ ok: false, reason: `${branch}: failed to verify commit landed for ${sha.slice(0, 7)}: ${(e as Error).message}` });
     }
     if (newHead === currentHead) {
       await rollback();
-      return { ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} produced an empty commit — its content was already present in the batch tree; dropping this branch rather than risk amending an unrelated commit` };
+      return fail({ ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} produced an empty commit — its content was already present in the batch tree; dropping this branch rather than risk amending an unrelated commit` });
     }
     currentHead = newHead;
     if (!isLast) continue;
