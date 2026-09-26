@@ -51,6 +51,8 @@ export interface MainlineFacts {
   watermarkMissing: boolean;
   /** The loom-tip signal exceeded one of its own caps and was SKIPPED (not "no hits"); the reflog-raw-write signal is unaffected. */
   loomTipsSkipped?: boolean;
+  /** Set with `loomTipsSkipped` when the skip was caused by the aggregate deadline (not a cap): an "explained" verdict is then NOT final. */
+  loomTipsDeadline?: boolean;
 }
 
 export type MainlineEvidence = "reflog-raw-write" | "loom-branch-reachable" | "rewind-raw-write";
@@ -83,10 +85,15 @@ export function classifyMainlineMove(watermarkSha: string, f: MainlineFacts): Ma
   return out("alert", evidence, [...new Set(suspect)].slice(0, 10), raw.slice(0, 5));
 }
 
-const withTimeout = <T>(p: Promise<T>, ms: number, what: string): Promise<T> => {
+const withTimeout = <T>(p: Promise<T>, ms: number, what: string, onTimeout: () => Error = () => new Error(`${what} timed out after ${ms}ms`)): Promise<T> => {
   let t: NodeJS.Timeout;
-  return Promise.race([p, new Promise<T>((_, rej) => { t = setTimeout(() => rej(new Error(`${what} timed out after ${ms}ms`)), ms); })]).finally(() => clearTimeout(t));
+  return Promise.race([p, new Promise<T>((_, rej) => { t = setTimeout(() => rej(onTimeout()), ms); })]).finally(() => clearTimeout(t));
 };
+
+/** Thrown by {@link readMainlineFacts}'s bounded runner once the aggregate deadline has passed. */
+export class MainlineDeadlineError extends Error {
+  constructor(what: string) { super(`mainline check deadline exceeded (${what})`); this.name = "MainlineDeadlineError"; }
+}
 
 /** The canonical checkout's current branch + tip. `null` when detached/unborn (nothing to watch). */
 export async function readMainlineHead(repoPath: string, timeoutMs: number): Promise<{ branch: string; tip: string } | null> {
@@ -141,12 +148,20 @@ export async function isAncestorCommit(repoPath: string, ancestor: string, desce
 }
 
 /** Reads everything {@link classifyMainlineMove} needs, through `canonicalGit`, every call bounded by `timeoutMs`. THROWS on any git failure — the caller fails open. */
-export async function readMainlineFacts(repoPath: string, watermarkSha: string, head: { branch: string; tip: string }, timeoutMs: number): Promise<MainlineFacts> {
+export async function readMainlineFacts(repoPath: string, watermarkSha: string, head: { branch: string; tip: string }, timeoutMs: number, deadlineAt?: number): Promise<MainlineFacts> {
   const git = canonicalGit(repoPath, timeoutMs);
-  const run = (args: string[]) => withTimeout(git.raw(args), timeoutMs, `git ${args[0]}`);
+  // Aggregate deadline (card 0eb7ff27; `deadlineAt` is a `performance.now()` value, monotonic): each call is bounded by min(per-call timeout, time left). When the TIME LEFT is what bounds the call,
+  // the timer itself rejects with MainlineDeadlineError — the cause is never inferred from the clock afterwards (a timer can fire a hair early, which would read as an ordinary error).
+  const run = async (args: string[]): Promise<string> => {
+    const what = `git ${args[0]}`;
+    if (deadlineAt === undefined) return withTimeout(git.raw(args), timeoutMs, what);
+    const left = deadlineAt - performance.now();
+    if (left <= 0) throw new MainlineDeadlineError(what);
+    return left >= timeoutMs ? withTimeout(git.raw(args), timeoutMs, what) : withTimeout(git.raw(args), left, what, () => new MainlineDeadlineError(what));
+  };
   const facts: MainlineFacts = { branch: head.branch, tip: head.tip, reflog: null, forward: true, untrailered: [], loomTipHits: [], truncated: false, watermarkMissing: false };
-  try { await run(["rev-parse", "--verify", "--quiet", `${watermarkSha}^{commit}`]); } catch { facts.watermarkMissing = true; return facts; }
-  try { await run(["merge-base", "--is-ancestor", watermarkSha, head.tip]); } catch { facts.forward = false; }
+  try { await run(["rev-parse", "--verify", "--quiet", `${watermarkSha}^{commit}`]); } catch (err) { if (err instanceof MainlineDeadlineError) throw err; facts.watermarkMissing = true; return facts; }
+  try { await run(["merge-base", "--is-ancestor", watermarkSha, head.tip]); } catch (err) { if (err instanceof MainlineDeadlineError) throw err; facts.forward = false; }
   // Reflog (newest-first). One extra entry past the cap distinguishes "cap hit" from "exactly the cap".
   const rl = (await run(["reflog", "show", `--max-count=${MAINLINE_RANGE_CAP + 1}`, "--format=%H%x1f%gs", `refs/heads/${head.branch}`])).split("\n").filter(Boolean);
   facts.reflog = rl.length === 0 ? null : rl.map((l) => { const [sha = "", msg = ""] = l.split("\x1f"); return { sha, msg }; });
@@ -162,9 +177,14 @@ export async function readMainlineFacts(repoPath: string, watermarkSha: string, 
     if (!parseLoomTrailerBlock(body)) facts.untrailered.push(sha.trim());
   }
   // Loom worker branch tips that became reachable (any parent) — a squash/cherry-pick landing never puts a worker tip into main's history.
-  // The loom-tip signal is best-effort: exceeding one of ITS caps skips ONLY this signal (recorded in `loomTipsSkipped`) — the reflog-raw-write evidence above is independent and still applies.
-  const hits = await collectLoomTipHits(run, watermarkSha, head.tip);
-  if (hits === null) facts.loomTipsSkipped = true; else facts.loomTipHits = hits;
+  // The loom-tip signal is best-effort: exceeding one of ITS caps — or the aggregate deadline — skips ONLY this signal (recorded in `loomTipsSkipped`); the reflog-raw-write evidence above is independent and still applies.
+  // A deadline hit BEFORE the reflog + range reads finish still throws (fail-open, W untouched) — there is no evidence yet to keep.
+  // `loomTipsDeadline` marks a skip CAUSED BY THE DEADLINE (unlike a cap skip): the loom-tip signal is the only one that catches a bypass with a porcelain-looking reflog message,
+  // so the caller must not treat "explained" as final after it (see checkMainlineMove).
+  let hits: string[] | null; let deadlineHit = false;
+  try { hits = await collectLoomTipHits(run, watermarkSha, head.tip); }
+  catch (err) { if (!(err instanceof MainlineDeadlineError)) throw err; hits = null; deadlineHit = true; }
+  if (hits === null) { facts.loomTipsSkipped = true; if (deadlineHit) facts.loomTipsDeadline = true; } else facts.loomTipHits = hits;
   return facts;
 }
 
@@ -188,11 +208,35 @@ async function collectLoomTipHits(run: (args: string[]) => Promise<string>, wate
   // The cap applies to what is LEFT after trailered (Loom-landed) tips are dropped — those need no reflog check.
   const candidates = inRangeRefs.filter((r) => !trailered.has(r.sha));
   if (candidates.length > MAINLINE_LOOM_TIP_CHECK_CAP) return null;
+  return authoredTipHits(run, candidates);
+}
+
+/**
+ * Which candidates' branches AUTHORED their tip. ONE `git log -g` over every candidate ref (the `%gD` selector, the FULL ref as passed, names the ref each entry belongs to, so per-branch discrimination is kept);
+ * only when that shared read fills its own cap (a chatty branch could crowd another out of a global count) does it fall back to the exact per-branch {@link branchAuthoredTip} calls.
+ */
+async function authoredTipHits(run: (args: string[]) => Promise<string>, candidates: Array<{ sha: string; ref: string }>): Promise<string[]> {
+  if (candidates.length === 0) return []; // `git log -g` with no ref would walk HEAD's reflog
   const hits: string[] = [];
+  const cap = MAINLINE_RANGE_CAP * candidates.length;
+  const lines = (await run(["log", "-g", `--max-count=${cap}`, "--format=%H%x1f%gs%x1f%gD", ...candidates.map((c) => c.ref)])).split("\n").filter(Boolean);
+  if (lines.length >= cap) {
+    for (const r of candidates) { if (await branchAuthoredTip(run, r.ref, r.sha)) hits.push(r.sha); }
+    return hits;
+  }
+  const perRef = new Map<string, Array<{ sha: string; msg: string }>>();
+  for (const l of lines) {
+    const [s = "", msg = "", gd = ""] = l.split("\x1f");
+    const at = gd.lastIndexOf("@{");
+    const n = Number(gd.slice(at + 2, -1));
+    if (at < 0 || !(n < MAINLINE_RANGE_CAP)) continue; // same per-branch window as branchAuthoredTip
+    const sel = gd.slice(0, at);
+    const ref = candidates.find((c) => c.ref === sel)?.ref; // EXACT equality: a suffix match would credit one branch with another's entries (refs/heads/loom/0/loom/a vs refs/heads/loom/a)
+    if (ref === undefined) continue;
+    (perRef.get(ref) ?? perRef.set(ref, []).get(ref)!).push({ sha: s, msg });
+  }
   for (const r of candidates) {
-    // A branch with NO commits of its own has a tip that IS a mainline commit (createWorktree cuts off the current HEAD), so it is reachable from main
-    // through any ordinary move. Only a tip the branch itself CREATED can be a bypass — see branchAuthoredTip.
-    if (await branchAuthoredTip(run, r.ref, r.sha)) hits.push(r.sha);
+    if ((perRef.get(r.ref) ?? []).some((e) => e.sha === r.sha && isAuthoredBranchReflog(e.msg, r.sha))) hits.push(r.sha);
   }
   return hits;
 }

@@ -27,7 +27,7 @@ import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateR
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
-import { classifyMainlineMove, mainlineWatermarkKey, parseMainlineWatermark, isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead } from "../git/mainline-watch.js";
+import { classifyMainlineMove, mainlineWatermarkKey, parseMainlineWatermark, isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
@@ -17369,6 +17369,8 @@ export class SessionService {
   /** Test seam (card 59d2577a): the mainline check's head reader; a test wraps it to simulate a landing advancing W while the head is being read. */
   private mainlineHeadReader: typeof readMainlineHead = readMainlineHead;
   private mainlineGitMs(): number { return Math.min(this.gitOpMs ?? 10_000, 10_000); }
+  /** Aggregate budget for ONE mainline check (card 0eb7ff27): a few per-call timeouts, never more than 30s. The check holds the repo guard, so its total work must be bounded, not just each call. */
+  private mainlineDeadlineMs(): number { return Math.min(this.mainlineGitMs() * 4, 30_000); }
 
   /**
    * @decision 4fa36502 — NEVER throws, never refuses, never blocks the merge: any error or timeout logs and skips (no event, watermark unchanged); returns null then so the caller does not advance the watermark either. Runs under the repo guard just before the squash.
@@ -17377,10 +17379,12 @@ export class SessionService {
   private async checkMainlineMove(a: { projectId: string; repoKey: string; repoPath: string; managerSessionId: string | null; workerSessionId: string | null; taskId: string | null; source?: "landing" | "boot" }): Promise<string | null> {
     try {
       const ms = this.mainlineGitMs();
+      // @decision 4fa36502 — one aggregate deadline for the whole check. Past it: reads already made are kept (a loom-tip read that runs out skips only that signal); with nothing usable yet it is a fail-open skip (W untouched), never a store.
+      const deadlineAt = performance.now() + this.mainlineDeadlineMs(); // monotonic: a wall-clock step must not trip it
       const key = mainlineWatermarkKey(a.projectId, a.repoKey);
       // Read BEFORE the head read: the compare-and-set below then also catches a writer that advanced W while the head was being read (reading after would bless it and let this pass write an older tip over it).
       const rawW = this.db.getMeta(key);
-      const head = await this.mainlineHeadReader(a.repoPath, ms);
+      const head = await this.boundedByDeadline(this.mainlineHeadReader(a.repoPath, ms), deadlineAt, 0, "head read");
       if (!head) return null;
       const w = parseMainlineWatermark(rawW);
       // Compare-and-set: a concurrent writer (a landing's own advance) that changed the key since we read it wins — an unguarded boot check must never regress a newer watermark.
@@ -17388,8 +17392,11 @@ export class SessionService {
       const boot = a.source === "boot";
       if (!w || w.branch !== head.branch) { store(); return head.tip; }
       if (w.sha === head.tip) return head.tip;
-      const facts = await this.mainlineFactsReader(a.repoPath, w.sha, head, ms);
+      // The inner reader stops at `deadlineAt` itself (keeping what it read); the outer race, a little later, only bounds a reader that never returns.
+      const facts = await this.boundedByDeadline(this.mainlineFactsReader(a.repoPath, w.sha, head, ms, deadlineAt), deadlineAt, 100, "facts read");
       const v = classifyMainlineMove(w.sha, facts);
+      // @decision 4fa36502 — a loom-tip skip CAUSED BY THE DEADLINE is not "no evidence": that signal alone catches a bypass with a porcelain-looking reflog message. Unless the verdict is already an alert, fail open (W untouched) so the next check re-reads it.
+      if (facts.loomTipsDeadline && v.verdict !== "alert") throw new MainlineDeadlineError("loom-tip signal");
       const detail = { projectId: a.projectId, repoKey: a.repoKey, branch: head.branch, from: w.sha, to: head.tip, ...(boot ? { source: "boot" } : {}) };
       const file = (extra: Record<string, unknown>): void => this.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId ?? "", ...(a.workerSessionId ? { workerSessionId: a.workerSessionId } : {}), taskId: a.taskId, kind: "mainline_moved_outside_loom", detail: { ...detail, ...extra } });
       if (v.verdict === "unverifiable") {
@@ -17412,6 +17419,14 @@ export class SessionService {
       console.warn(`[mainline-watch] check skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
+  }
+
+  /** Rejects once `deadlineAt + graceMs` has passed. The losing promise is left to its own per-call git timeout. */
+  private boundedByDeadline<T>(p: Promise<T>, deadlineAt: number, graceMs: number, what: string): Promise<T> {
+    const left = Math.max(0, deadlineAt + graceMs - performance.now());
+    let t: NodeJS.Timeout;
+    p.catch(() => undefined);
+    return Promise.race([p, new Promise<T>((_, rej) => { t = setTimeout(() => rej(new MainlineDeadlineError(what)), left); })]).finally(() => clearTimeout(t));
   }
 
   /**

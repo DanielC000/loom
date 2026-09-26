@@ -208,11 +208,12 @@ try {
   // ── (S1c) a reflog with >cap entries BEFORE W must not make a small move "unverifiable" ──
   {
     const logFile = path.join(git(P.repo, "rev-parse", "--git-common-dir") === ".git" ? path.join(P.repo, ".git") : git(P.repo, "rev-parse", "--git-common-dir"), "logs", "refs", "heads", MAIN);
-    const seedSha = canonHead();
+    // A DISTINCT sha (the repo's root commit, never W): seeded lines must not be able to satisfy "W found inside the window" themselves — only the real reflog entry for W can.
+    const seedSha = git(P.repo, "rev-list", "--max-parents=0", "HEAD");
     const seed = Array.from({ length: MW.MAINLINE_RANGE_CAP + 20 }, (_, i) => `${seedSha} ${seedSha} mw <mw@loom> ${1_600_000_000 + i} +0000	commit: seeded history ${i}
 `).join("");
     fs.writeFileSync(logFile, seed + fs.readFileSync(logFile, "utf8"));
-    check("(S1c) setup control: the main reflog now holds MORE than the cap of entries", reflogMsgs(P.repo, MAINREF).length > MW.MAINLINE_RANGE_CAP);
+    check("(S1c) setup control: the seeded sha is not the watermark, and the main reflog now holds MORE than the cap of entries", seedSha !== watermark()?.sha && seedSha !== canonHead() && reflogMsgs(P.repo, MAINREF).length > MW.MAINLINE_RANGE_CAP);
   }
 
   // ── (S2) RED-FIRST: a worker's bare update-ref ─────────────────────────────
