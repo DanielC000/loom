@@ -138,13 +138,13 @@ try {
   // genuinely COMPLETE: B is resolved via a real map HIT (never needs the single-branch grep at all), and
   // C's map MISS is AUTHORITATIVE (scanComplete:true) — the fallback grep must be skipped entirely for
   // both. A counting-but-delegating gitFactory (every call still hits real git) proves that single-branch
-  // `--max-count=1` grep is NEVER invoked for either session.
+  // single-branch `--grep=Loom-Worker-Branch` walk is NEVER invoked for either session.
   let singleBranchGrepCalls = 0;
   const countingPassthroughFactory = (repoPath, blockTimeoutMs) => {
     const real = simpleGit(repoPath, { timeout: { block: blockTimeoutMs } });
     return {
       raw: async (args) => {
-        if (Array.isArray(args) && args.includes("--max-count=1")) singleBranchGrepCalls++;
+        if (Array.isArray(args) && args.some((a) => typeof a === "string" && a.startsWith("--grep=Loom-Worker-Branch")) && args.includes("--format=%H%x1f%B%x1e")) singleBranchGrepCalls++;
         return real.raw(args);
       },
     };
@@ -202,11 +202,11 @@ try {
     return {
       raw: async (args) => {
         // The batch scanMergedCommitMap pass is the ONLY call in this whole path that carries "-n"
-        // (findLandedSquashCommit's single-branch --grep walk uses --max-count=1, never -n). Forcing it to
+        // (findLandedSquashCommit's single-branch --grep walk uses --grep=Loom-Worker-Branch, never -n). Forcing it to
         // see exactly MERGED_LOOKUP_SCAN_LIMIT non-matching records simulates "this branch's landed commit
         // is outside the scan window" (truncated:true) — a genuinely inconclusive miss, not a complete one.
         if (Array.isArray(args) && args.includes("-n")) { blindedScanCalls++; return fakeTruncatedScanOutput; }
-        if (Array.isArray(args) && args.includes("--max-count=1")) dFallbackGrepCalls++;
+        if (Array.isArray(args) && args.some((a) => typeof a === "string" && a.startsWith("--grep=Loom-Worker-Branch")) && args.includes("--format=%H%x1f%B%x1e")) dFallbackGrepCalls++;
         return real.raw(args);
       },
     };

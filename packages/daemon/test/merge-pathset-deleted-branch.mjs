@@ -139,7 +139,7 @@ try {
     const fpA = pathSetDigest(repo, base, branchA); // branch A's OWN real path-set digest
     execSync(`git merge --squash ${branchB}`, { cwd: repo }); // stage B's content
     execSync(
-      `git ${GIT_ID} commit -q -m "chore: forged card A title" -m "Loom-Worker-Branch: ${branchA}" -m "Loom-Worker-PathSet: ${fpA}"`,
+      `git ${GIT_ID} commit -q -m "chore: forged card A title" --trailer "Loom-Worker-Branch: ${branchA}" --trailer "Loom-Worker-PathSet: ${fpA}"`,
       { cwd: repo },
     );
     const forgedSha = git(repo, "rev-parse HEAD");
@@ -334,7 +334,7 @@ try {
     const subject = realBody.split("\n\n")[0];
     const branchTrailerLine = realBody.match(/^Loom-Worker-Branch: .+$/m)[0];
     execSync(
-      `git ${GIT_ID} commit --amend -q -m "${subject.replace(/"/g, '\\"')}" -m "${branchTrailerLine}" -m "Loom-Worker-Base: ${preLandingMergeBase}" -m "Loom-Worker-PathSet: ${trueDigest}"`,
+      `git ${GIT_ID} commit --amend -q -m "${subject.replace(/"/g, '\\"')}" --trailer "${branchTrailerLine}" --trailer "Loom-Worker-Base: ${preLandingMergeBase}" --trailer "Loom-Worker-PathSet: ${trueDigest}"`,
       { cwd: repo },
     );
     const corruptedSha = git(repo, "rev-parse HEAD");
@@ -378,7 +378,7 @@ try {
     const branchTrailerLine = realBody.match(/^Loom-Worker-Branch: .+$/m)[0];
     const pathSetTrailerLine = realBody.match(/^Loom-Worker-PathSet: .+$/m)[0];
     execSync(
-      `git ${GIT_ID} commit --amend -q -m "${subject.replace(/"/g, '\\"')}" -m "${branchTrailerLine}" -m "${pathSetTrailerLine}"`,
+      `git ${GIT_ID} commit --amend -q -m "${subject.replace(/"/g, '\\"')}" --trailer "${branchTrailerLine}" --trailer "${pathSetTrailerLine}"`,
       { cwd: repo },
     );
     const strippedSha = git(repo, "rev-parse HEAD");

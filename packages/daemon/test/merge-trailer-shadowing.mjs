@@ -89,6 +89,13 @@ function buildFixture(label, withDecoy) {
       ]
     : [];
 
+  // The REAL block is ONE paragraph (blank line before it), exactly as a solo/batch landing writes it (card f62ef199).
+  const amendWithRealBlock = (realLines) => {
+    const msgFile = path.join(repo, ".git", "shadow-msg.txt");
+    fs.writeFileSync(msgFile, [subject, ...decoyParagraphs].join("\n\n") + "\n\n" + realLines.join("\n") + "\n");
+    execSync(`git ${GIT_ID} commit -q --amend -F "${msgFile}"`, { cwd: repo });
+  };
+
   // Commit WITHOUT the real trailer first (its digest depends on this commit's own sha^..sha), then amend
   // to append the real block — same two-step shape landBranchCommitsIndividually's own stamp uses.
   execSync(`git ${GIT_ID} commit -q -m "${subject}" ${asDashM(decoyParagraphs)}`, { cwd: repo });
@@ -99,10 +106,7 @@ function buildFixture(label, withDecoy) {
     `Loom-Worker-Base: ${baseSha}`,
     `Loom-Worker-PathSet: ${realDigest}`,
   ];
-  execSync(
-    `git ${GIT_ID} commit -q --amend -m "${subject}" ${asDashM(decoyParagraphs)} ${asDashM(realParagraphs)}`,
-    { cwd: repo },
-  );
+  amendWithRealBlock(realParagraphs);
   const sha = git(repo, "rev-parse HEAD");
 
   return { repo, taskId, realBranch, decoyBranch, decoyBase, decoyDigest, realDigest, baseSha, sha };

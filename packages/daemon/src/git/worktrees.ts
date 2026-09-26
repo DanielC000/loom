@@ -292,11 +292,12 @@ export async function findLaterBranchSquash(repoPath: string, branch: string, af
     // Compare merge-base OUTPUT to afterSha (never `--is-ancestor`: simple-git resolves its exit-1 "no" as success — see batch-merge.ts).
     const mb = (await withTimeout(git.raw(["merge-base", afterSha, "HEAD"]), timeoutMs, "git merge-base (later branch squash)")).trim();
     if (mb !== afterSha) return "error";
-    const out = (await withTimeout(
-      git.raw(["rev-list", "-n", "1", "--fixed-strings", `--grep=Loom-Worker-Branch: ${branch}`, `${afterSha}..HEAD`]),
-      timeoutMs, "git rev-list --grep (later branch squash)",
-    )).trim();
-    return out ? "found" : "none";
+    // The grep is a PREFILTER only (card f62ef199); the verdict is the parsed final trailer block, so a commit that merely quotes the line never counts.
+    const out = await withTimeout(
+      git.raw(["log", "--fixed-strings", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%B%x1e", `${afterSha}..HEAD`]),
+      timeoutMs, "git log --grep (later branch squash)",
+    );
+    return out.split("\x1e").some((message) => parseLoomTrailerBlock(message)?.branch === branch) ? "found" : "none";
   } catch {
     return "error";
   }
@@ -2890,46 +2891,64 @@ async function branchContentLandedInCommit(
  * from main itself with no fresh read. A recovery caller pins its finalize CAS to THIS, never to a fresh read or a content check (both bless a late whole-file revert). A squash
  * with no trailer (pre-cc9bce38, or an unresolved head) falls back to a stable-tip read.
  */
-const LOOM_LANDED_TIP_TRAILER = /^Loom-Landed-Tip:\s*([0-9a-f]{40,64})\s*$/m;
-
-/** Reads {@link LOOM_LANDED_TIP_TRAILER} off `sha`'s message; `null` when absent or unreadable (fail safe: the caller falls back). */
+/** Reads the `Loom-Landed-Tip:` trailer off `sha`'s message via {@link parseLoomTrailerBlock}; `null` when absent or unreadable (fail safe: the caller falls back). */
 export async function readLandedTipTrailer(repoPath: string, sha: string, deps: BoundedGitDeps = {}): Promise<string | null> {
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     const body = await withTimeout(git.raw(["log", "-1", "--format=%B", sha]), timeoutMs, "git log -1 (landed-tip trailer)");
-    // Only the FINAL trailer block counts: the solo layout puts it right after the last `Loom-Worker-Branch:` line, so a worker-authored body that merely QUOTES the text
-    // (a batch tip commit carries its body verbatim) is never read as a trailer.
-    const lastBranch = lastTrailerMatch(body, /^Loom-Worker-Branch:.*$/m);
-    if (!lastBranch || lastBranch.index === undefined) return null;
-    const block = body.slice(lastBranch.index).split(/\r?\n\s*\r?\n/)[0] ?? "";
-    return LOOM_LANDED_TIP_TRAILER.exec(block)?.[1] ?? null;
+    return parseLoomTrailerBlock(body)?.landedTip ?? null;
   } catch {
     return null;
   }
 }
 
-/** The `Loom-Worker-PathSet:` trailer {@link mergeBranchLocked} stamps — see {@link changedPathSetDigest}. */
-const LOOM_WORKER_PATHSET_TRAILER = /^Loom-Worker-PathSet:\s*(\S+)/m;
-
-/** @decision d62dad73 — the `Loom-Worker-Base:` trailer stamps the LANDED base (`sha^`, or a batch's
- *  `batchHeadBefore`), never `merge-base(HEAD, branch)`
+/**
+ * The Loom trailers a landing commit carries, as parsed by {@link parseLoomTrailerBlock}. `landedTip` is the `Loom-Landed-Tip:` value (a hex sha, solo squashes only);
+ * `base` is `Loom-Worker-Base:` and `pathSet` is `Loom-Worker-PathSet:` (see {@link changedPathSetDigest}).
  *
- *  — that's the branch's pre-landing fork point, which
- *  diverges once main has advanced past it (the rename-following case), degrading a genuinely landed commit to
- *  unverified. */
-const LOOM_WORKER_BASE_TRAILER = /^Loom-Worker-Base:\s*(\S+)/m;
+ * @decision d62dad73 — `base` stamps the LANDED base (`sha^`, or a batch's `batchHeadBefore`), never `merge-base(HEAD, branch)` (the branch's pre-landing fork point, which
+ * diverges once main has advanced past it).
+ */
+export interface LoomTrailers {
+  branch: string;
+  landedTip: string | null;
+  base: string | null;
+  pathSet: string | null;
+}
 
-/** @decision 1d3f500e — returns the LAST regex match in `body`, never the first: the real trailer sits at the
- *  message's END, and a worker-authored body passed through verbatim could otherwise pre-empt it with a quoted
- *  example line at column 0 (e.g. a commit to batch-merge.ts itself).
+/**
+ * The ONE reader of every Loom merge trailer (`Loom-Worker-Branch`, `Loom-Landed-Tip`, `Loom-Worker-Base`, `Loom-Worker-PathSet`) — card f62ef199. Both landing layouts (the solo
+ * squash in `mergeBranchLocked`, the batch tip in `batch-merge.ts`) end the message with a SEPARATE final paragraph holding `Loom-Worker-Branch:` and further `Key: value` lines
+ * ONLY, so that final paragraph is the only place a Loom trailer is real. `Loom-Worker-Branch:` may sit on ANY line of it (a commit-msg hook can insert e.g. `Change-Id:` ahead
+ * of ours; a hook or `-s` may append `Signed-off-by:` after) — the every-line-is-`Key: value` rule is what keeps a quoted line out. Remaining limit: a hook that adds a
+ * non-`Key: value` line (e.g. `[skip ci]`) or a folded continuation line to that paragraph yields `null`. A worker body is passed through verbatim by a batch landing, so a `Loom-*:` line
+ * anywhere earlier in the message (or in a non-final paragraph) is worker prose — never a trailer. Returns `null` when the final paragraph is not such a block.
  *
- *  `re` needs the `m` flag + exactly one
- *  capture group. */
-function lastTrailerMatch(body: string, re: RegExp): RegExpMatchArray | null {
-  const globalRe = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
-  let last: RegExpMatchArray | null = null;
-  for (const m of body.matchAll(globalRe)) last = m;
-  return last;
+ * BOUND: this proves the trailer sits in the message's final block, not that Loom wrote it — a worker whose LAST paragraph is exactly a `Loom-Worker-Branch:` line on a
+ * batch NON-tip commit (which gets no trailer of its own) is indistinguishable from a real trailer by text alone.
+ *
+ * @decision 1d3f500e — never a first-match lookup over the whole body (a quoted example line at column 0 would shadow the real trailer); f62ef199 tightens "last match" to
+ * "final block only", since a last-match over the whole body still reads a quoted line on a commit that has no real trailer.
+ */
+export function parseLoomTrailerBlock(message: string): LoomTrailers | null {
+  // A run of 2+ newlines (blank lines) separates paragraphs — never a single blank, or a 3-newline gap leaves an empty first line (commit.cleanup=verbatim, the batch writer's own append).
+  const paragraphs = message.replace(/\r\n/g, "\n").replace(/\s+$/, "").split(/\n(?:[ \t]*\n)+/);
+  if (paragraphs.length < 2) return null; // git never treats the SUBJECT line as a trailer — the block is always a paragraph AFTER the first
+  const lines = (paragraphs[paragraphs.length - 1] ?? "").split("\n");
+  let branch: string | null = null;
+  const out: LoomTrailers = { branch: "", landedTip: null, base: null, pathSet: null };
+  for (const line of lines) {
+    const kv = /^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.*?)[ \t]*$/.exec(line);
+    if (!kv) return null; // a prose line ⇒ the final paragraph is not a trailer block
+    const value = kv[2]!;
+    if (kv[1] === "Loom-Worker-Branch") branch = /^\S+$/.test(value) ? value : null;
+    else if (kv[1] === "Loom-Landed-Tip") out.landedTip = /^[0-9a-f]{40,64}$/.test(value) ? value : null;
+    else if (kv[1] === "Loom-Worker-Base") out.base = /^\S+$/.test(value) ? value : null;
+    else if (kv[1] === "Loom-Worker-PathSet") out.pathSet = /^\S+$/.test(value) ? value : null;
+  }
+  if (!branch) return null;
+  out.branch = branch;
+  return out;
 }
 
 /**
@@ -4498,14 +4517,25 @@ export async function findLandedSquashCommit(
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     // %x1f-separated sha+body in ONE call (mirrors scanMergedCommitMap) — the body carries the
     // Loom-Worker-PathSet trailer this function needs once the branch is gone (below).
+    // The grep is only a cheap PREFILTER (card f62ef199): it matches the text anywhere in a message, so no --max-count — the first hit may be a commit that merely
+    // QUOTES the line, hiding the real one behind it. The verdict comes from the parsed final trailer block.
     const out = await withTimeout(
-      git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B", "--max-count=1"]),
+      git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e"]),
       timeoutMs, "git log --grep trailer",
     );
-    const sepIdx = out.indexOf("\x1f");
-    const sha = (sepIdx === -1 ? out : out.slice(0, sepIdx)).trim();
-    if (!sha) return null;
-    const body = sepIdx === -1 ? "" : out.slice(sepIdx + 1);
+    let sha = "";
+    let trailers: LoomTrailers | null = null;
+    for (const record of out.split(MERGED_MAP_RECORD_SEP)) {
+      const sepIdx = record.indexOf("\x1f");
+      if (sepIdx === -1) continue;
+      const parsed = parseLoomTrailerBlock(record.slice(sepIdx + 1));
+      if (parsed?.branch === branch) {
+        sha = record.slice(0, sepIdx).trim();
+        trailers = parsed;
+        break;
+      }
+    }
+    if (!sha || !trailers) return null;
     const branchPresent = (await withTimeout(
       git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list",
     )).trim() !== "";
@@ -4520,14 +4550,13 @@ export async function findLandedSquashCommit(
       if (!(await branchContentLandedInCommit(repoPath, branch, sha, mergeBase, deps))) return null;
     } else {
       // Branch gone (card f621f185): verify against the persisted path-set trailer if this commit has one.
-      const pathSetMatch = lastTrailerMatch(body, LOOM_WORKER_PATHSET_TRAILER);
-      if (pathSetMatch) {
+      const pathSet = trailers.pathSet;
+      if (pathSet) {
         // Phase 2 (card d62dad73) + card 756a2cd8: prefer the commit's own Loom-Worker-Base trailer as the
         // verification base when present (every solo squash and batched landing now stamps one); undefined
         // here falls back to sha^ for a commit that predates either fix, or whose best-effort trailer
         // capture failed — see verifyPersistedPathSet's doc.
-        const baseMatch = lastTrailerMatch(body, LOOM_WORKER_BASE_TRAILER);
-        if (!(await verifyPersistedPathSet(git, timeoutMs, sha, pathSetMatch[1]!, baseMatch?.[1]))) return null;
+        if (!(await verifyPersistedPathSet(git, timeoutMs, sha, pathSet, trailers.base ?? undefined))) return null;
       } else if (onPreFixTrailerNotice) {
         onPreFixTrailerNotice(branch, sha);
       } else {
@@ -4825,7 +4854,6 @@ const MERGED_LOOKUP_SCAN_LIMIT = 5000;
 
 const MERGED_MAP_FIELD_SEP = "\x1f";
 const MERGED_MAP_RECORD_SEP = "\x1e";
-const LOOM_WORKER_BRANCH_TRAILER = /^Loom-Worker-Branch:\s*(\S+)/m;
 
 /**
  * Per-branch map entry: the landed commit's persisted `Loom-Worker-PathSet` digest, if this commit
@@ -4884,16 +4912,14 @@ async function scanMergedCommitMap(
       const sha = record.slice(0, sep1).trim();
       const date = record.slice(sep1 + 1, sep2).trim();
       const body = record.slice(sep2 + 1);
-      const trailer = lastTrailerMatch(body, LOOM_WORKER_BRANCH_TRAILER);
-      if (!sha || !trailer) continue;
-      const branch = trailer[1]!;
-      const pathSetTrailer = lastTrailerMatch(body, LOOM_WORKER_PATHSET_TRAILER);
-      const baseTrailer = lastTrailerMatch(body, LOOM_WORKER_BASE_TRAILER);
+      const trailers = parseLoomTrailerBlock(body);
+      if (!sha || !trailers) continue;
+      const branch = trailers.branch;
       if (!map.has(branch)) {
         map.set(branch, { // first hit = most recent (reverse-chron)
           sha, date,
-          pathSetDigest: pathSetTrailer ? pathSetTrailer[1]! : null,
-          baseSha: baseTrailer ? baseTrailer[1]! : null,
+          pathSetDigest: trailers.pathSet,
+          baseSha: trailers.base,
         });
       }
     }

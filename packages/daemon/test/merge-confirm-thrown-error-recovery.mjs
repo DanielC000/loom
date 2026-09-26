@@ -120,7 +120,7 @@ async function setup(sfx, { preLand } = {}) {
     // `-F` fixed-string --grep only needs the exact trailer text present as a SUBSTRING anywhere in the
     // message body — it doesn't require real newlines — and a single line sidesteps any cross-shell
     // newline-escaping ambiguity in how execSync passes this arg through cmd.exe on Windows.
-    execSync(`git ${GIT_ID} commit -q -m "feat: MTR-TASK -- Loom-Worker-Branch: ${branch}"`, { cwd: repo });
+    execSync(`git ${GIT_ID} commit -q -m "feat: MTR-TASK" --trailer "Loom-Worker-Branch: ${branch}"`, { cwd: repo });
   }
 
   return { db, repo, mgrId, projId, taskId, workerId, branch, worktreePath };
