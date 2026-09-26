@@ -14987,6 +14987,8 @@ export class SessionService {
       //  for a retry, or a queued same-repo sibling is admitted into the fail->retry gap.
       // Attempt 1's verdict, then each link's own, are folded into `gateResult` by the `next` callbacks below.
       let gateResult!: GateSequentialResult;
+      // The single-file retry's own PASS while gate steps are still unresolved (not yet a complete pass) — see `recordSoloRedOnce`.
+      let partialPassResult: GateSequentialResult | undefined;
       let gateAttempt1DurationMs = 0;
       // Live attempt number of the chain's CURRENT link (1 = attempt 1); every further link is `++linkAttempt`, so
       // a transient-kill retry that follows a resume reads attempt 4 — the number never goes backwards.
@@ -15136,6 +15138,7 @@ export class SessionService {
             // Only the LAST link's hold counts (the semaphore resets it per link), so a pass here that a
             // resume then follows is simply superseded — the card 7ad12202 self-deadlock cannot occur.
             if (rr.passed) holdRepoGuardOnExit();
+            if (rr.passed && chainRemaining.length > 0) partialPassResult = rr;
             return rr;
           },
           next: async (rr) => {
@@ -15182,13 +15185,13 @@ export class SessionService {
           },
         };
       };
-      // @decision 593cedc8 — the red is recorded from the semaphore's `beforeRelease` hook, still inside the admission + repo guard, so a
-      //  waiting skip-decided sibling's in-lock owed check sees it. That includes a later retry link's dirty-tree throw (the hook then
-      //  gets the last settled verdict). Any other throw records nothing, as before. The once-flag is set before the await (never a retry).
+      // @decision 593cedc8 — record the red from `beforeRelease`, inside the admission + repo guard; ONE rule (90db13d8): the hook's own
+      //  last-settled `result` (never the closure `gateResult`) decides, whatever ended the chain; a throw after an INCOMPLETE pass
+      //  (`partialPassResult`) also records, fail-safe. Once-flag set before the await.
       let solRedRecorded = false;
-      const recordSoloRedOnce = async (_r?: unknown, thrown?: unknown): Promise<void> => {
-        if (thrown !== undefined && !(thrown instanceof GateWorktreeDirtyError)) return;
-        if (solRedRecorded || !gate || !isMergeGateRed(gateResult)) return;
+      const recordSoloRedOnce = async (settled?: GateSequentialResult, thrown?: unknown): Promise<void> => {
+        if (solRedRecorded || !gate || !settled) return;
+        if (!isMergeGateRed(settled) && !(thrown !== undefined && settled === partialPassResult)) return;
         solRedRecorded = true;
         await this.recordMergeGateFailure(project.id, { repoPath, repoKey: worker.repoKey ?? "primary", opId: thisOpId, periodic: mergeGateDecision.cadence !== "every", branchTip: pinnedGateTip ?? ((await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? null), branch });
       };
@@ -16590,6 +16593,8 @@ export class SessionService {
             let batchGateAttempt1DurationMs = 0;
             let retriedFile: string | undefined;
             let retryPassed: boolean | undefined;
+            // The single-file retry's PASS while steps remain unresolved — not a complete pass (see the hook below).
+            let batchPartialPassResult: GateSequentialResult | undefined;
             // Code Review, card 67030bb9 finding [3]: WHY `identifyRetriableTestFiles` declined, when called.
             let retryDeclineReason: RetryDeclineReason | undefined;
             const afterAttempt1 = async (attempt1: GateSequentialResult): Promise<GateContinuation<GateSequentialResult> | null> => {
@@ -16621,6 +16626,7 @@ export class SessionService {
                   const rr = await runGateSeq(identification.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), false, undefined, hooks, gateSpillPath(opId));
                   // Only the LAST link's hold counts (the semaphore resets it per link).
                   if (rr.passed) holdRepoGuardOnExit();
+                  if (rr.passed && remaining.length > 0) batchPartialPassResult = rr;
                   return rr;
                 },
                 next: async (rr) => {
@@ -16669,9 +16675,9 @@ export class SessionService {
                 const gr = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks, gateSpillPath(opId));
                 if (gr.passed) holdRepoGuardOnExit();
                 return gr;
-              }, "high", afterAttempt1, async (_r, thrown) => {
-                // @decision 593cedc8 — same ordering point as the solo path: the batch red is recorded before the admission releases.
-                if (thrown === undefined && isMergeGateRed(r) && !batchRedRecorded) {
+              }, "high", afterAttempt1, async (settled, thrown) => {
+                // @decision 593cedc8 — same ordering point and ONE rule as the solo path (see `recordSoloRedOnce`): last-settled `settled`, any end.
+                if (!batchRedRecorded && (isMergeGateRed(settled) || (thrown !== undefined && settled === batchPartialPassResult))) {
                   batchRedRecorded = true;
                   await this.recordMergeGateFailure(finalProjectId, { repoPath: finalRepoPath, repoKey: batchRepoKey, opId, periodic: batchDecision.cadence !== "every", candidates: liveChosen.length });
                 }
