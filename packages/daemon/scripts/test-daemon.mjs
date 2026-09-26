@@ -880,6 +880,7 @@ const TEST_TIMEOUT_OVERRIDES = {
   "mainline-watch-batch": 300_000, // card 0eb7ff27 (measured after the bounds split, 2026-09-26, one host): solo 56s, loaded 100s per copy with 3 copies at once (n=3 copies, 1 wave); ~3x that loaded time. A batch landing per scenario, all real git + real createWorktree.
   "mainline-watch-batch-edges": 300_000, // card 0eb7ff27, the a9119abf concern (91s solo would be killed at the 120s ceiling when loaded): solo 72-91s (n=2), loaded 123-125s per copy with 3 copies at once (n=3 copies, 1 wave, 2026-09-26, one host); ~2.4x that loaded time.
   "merge-gate-off": 480_000, // card c188412a: 82.8s alone through the harness (unloaded), 151-187s per copy with 4 copies at once (n=16 bare runs, 2026-09-26) — ~11 real createWorktree/merge scenarios; killed at the 120s blanket ceiling in the merge gate. ~2.6x the loaded max (187s).
+  "merge-gate-reuse-admission": 250_000, // card f16bfbcf: solo 50-64s (n=4), loaded 93s per copy with 3 copies at once (n=3 copies, 1 wave, 2026-09-26, one host) — 1x120s ceiling was only ~1.3x loaded; ~2.7x that loaded time.
   "merge-repo-mutex": 300_000, // 15 trials x 2 concurrent real merges + a full content-integrity sweep
   "merge-stranded-backstop": 300_000, // 2x createWorktree + reviewWorkerMerge/confirmWorkerMerge, all real git
   "gate-timeout-circuit-breaker": 300_000, // measured ~50-52s standalone (3 runs); ~6x headroom for 8 blocks x real union-merges/createWorktree/commits under concurrent gate contention

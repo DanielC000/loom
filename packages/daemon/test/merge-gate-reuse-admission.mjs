@@ -17,7 +17,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // the original single file are conserved across all three files now; zero deleted at any split.
 //
 // Proves:
-//   (M) ALREADY-LANDED (preLanded) BRANCH GAINS NEW COMMITS DURING THE GATE — card b0ab78d6. The
+//   (M) BRANCH GAINS NEW COMMITS DURING THE GATE (a late commit made it not proven landed; the pure already-landed case skips the gate, @decision 293d418e) — card b0ab78d6. The
 //       preLanded path (union-merge deliberately skipped once a branch's squash already landed on main)
 //       now also captures canonical HEAD at the point the union-merge would have run, so the same in-lock
 //       `requireCanonicalHead` re-check fires here too and refuses rather than silently squashing a new
@@ -136,6 +136,14 @@ try {
     const landed = await mergeBranch(M.repo, branch, "MGRU-M initial land");
     check("(M) precondition: branch's initial work already landed in main", landed.ok === true);
 
+    // @decision 293d418e — a CLEAN, content-proven already-landed branch now finishes as ALREADY_MERGED with NO gate at all, so the old
+    // "preLanded branch gains a commit mid-gate" window no longer exists on that path (the skip is pinned by
+    // batch-fallback-already-landed-skips-gate.mjs). The window this scenario guards is still real for a branch that is NOT proven
+    // landed: a late commit on a NEW path (before this confirm) makes `preLanded` null, so the ordinary path runs a REAL gate, and the
+    // branch gaining yet another commit + main advancing mid-gate must still refuse via the gated-tip refusal.
+    fs.writeFileSync(path.join(worktreePath, "m-late.txt"), "late work before the confirm\n");
+    commitAll(worktreePath, "m late commit before confirm", GIT_ID);
+
     let calls = 0;
     const fakeGate = async () => {
       calls++;
@@ -156,7 +164,7 @@ try {
 
     const mainHeadBeforeConfirm = execSync("git rev-parse HEAD", { cwd: M.repo }).toString().trim();
     const confirm = await sessions.confirmWorkerMerge(M.mgrId, M.workerId);
-    check("(M) the gate ran for real (a real gate on the preLanded path, not the reuse path)", calls === 1);
+    check("(M) the gate ran for real (the late commit made the branch NOT proven landed, so no already-landed skip and no reuse)", calls === 1);
     check("(M) gateRan:true", confirm.gateRan === true);
     check("(M) confirmWorkerMerge REFUSES rather than silently squashing the new commit onto an advanced main", confirm.merged === false);
     // Card c59165b8: the branch itself moved mid-gate here, so the gated-tip refusal (not requireCanonicalHead's) now fires first; both are
@@ -235,28 +243,19 @@ try {
     const landed = await mergeBranch(N.repo, branch, "MGRU-N initial land");
     check("(N) precondition: branch's initial work already landed in main", landed.ok === true);
 
+    // @decision 293d418e — the pure already-landed re-confirm now finishes WITHOUT spawning a gate, so main can no longer move "mid-gate"
+    // on this path; it moves BEFORE the confirm instead, which still must not turn the idempotent finish into a refusal. The gate seam
+    // stays wired as a trap: `calls` must remain 0.
+    fs.writeFileSync(path.join(N.repo, "unrelated-main-advance-n.txt"), "some other merge landed\n");
+    commitAll(N.repo, "unrelated main advance n", GIT_ID);
     let calls = 0;
-    const fakeGate = async () => {
-      calls++;
-      if (calls === 1) {
-        // Main advances mid-gate — UNRELATED to this branch (a sibling merge, a human REST commit).
-        // Nothing whatsoever is added to the worktree/branch — the discriminator this scenario exists to
-        // prove: a TRUE pure duplicate must stay idempotent regardless of what main does elsewhere.
-        fs.writeFileSync(path.join(N.repo, "unrelated-main-advance-n.txt"), "some other merge landed\n");
-        commitAll(N.repo, "unrelated main advance n", GIT_ID);
-      }
-      return { passed: true };
-    };
+    const fakeGate = async () => { calls++; return { passed: true }; };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
     seed(db, N, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(N.mgrId, N.workerId);
-    // `calls === 1` is this scenario's own proof that a real gate ran (not the reuse path) — unlike (M)'s
-    // refusal, the ALREADY_MERGED success path returns via `finishAlreadyMerged`, whose result never
-    // carries `gateRan` at all (confirmed: merge-union-gate.mjs scenario D doesn't assert it either), so
-    // there is no `confirm.gateRan` field to check here.
-    check("(N) the gate ran for real (a real gate on the preLanded path, not the reuse path)", calls === 1);
-    check("(N) confirmWorkerMerge STAYS IDEMPOTENT — merged:true despite main moving mid-gate", confirm.merged === true);
+    check("(N) NO gate ran — a content-proven already-landed branch finishes without one (gateSkipped:'already-landed')", calls === 0 && confirm.gateSkipped === "already-landed");
+    check("(N) confirmWorkerMerge STAYS IDEMPOTENT — merged:true despite main having moved", confirm.merged === true);
     check("(N) emptyKind === 'ALREADY_MERGED' (a benign no-op, not a gateBaseInvalidated refusal)", confirm.emptyKind === "ALREADY_MERGED");
     check("(N) task moved to done", db.getTask(N.taskId).columnKey === "done");
     check("(N) worktree removed (idempotent cleanup completed, not left retained by a false refusal)", !fs.existsSync(worktreePath));
