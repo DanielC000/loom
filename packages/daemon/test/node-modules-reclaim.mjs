@@ -17,6 +17,7 @@ process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-nmr-home-${Date.now()}-${pr
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { reclaimNodeModulesDir, measureDirSize, killableRemoveDir } = await import("../dist/git/worktrees.js");
+const { WORKTREES_DIR } = await import("../dist/paths.js");
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -33,7 +34,7 @@ function writeFile(p, body) {
 }
 
 function makeWorktree(tag) {
-  const repo = path.join(os.tmpdir(), `loom-nmr-repo-${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+  const repo = path.join(WORKTREES_DIR, "nmr-fixture", `repo-${tag}-${Math.random().toString(36).slice(2, 7)}`); // under the worktrees root, or reclaimNodeModulesDir's e21cfd5f path guard refuses it
   fs.mkdirSync(repo, { recursive: true });
   writeFile(path.join(repo, "README.md"), "# nmr\n");
   writeFile(path.join(repo, ".gitignore"), "node_modules/\n"); // committed, matching a real project's own gitignore

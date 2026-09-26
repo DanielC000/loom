@@ -14,6 +14,10 @@ Card `79b8d8a9`: the git removal uses `-f -f` (not a single `--force`), git's ow
 - Do not treat `-f -f` as adding new destructive capability — the filesystem backstop already deletes dirty/untracked content unconditionally; `-f -f` only brings git's own admin bookkeeping in line with what already happens on disk.
 - Do not skip the `killableRemoveDir` backstop after a failed git removal — the git removal is not idempotent and can leave the admin record dropped while the dir remains on disk.
 
+## Superseded in part by card `e21cfd5f`
+
+`removeWorktree` no longer calls `git worktree remove -f -f` at all: git's recursive delete follows a junction planted inside the worktree (Windows, git 2.47.0.windows.2) and can empty a repo it points at. The order is now killable directory removal first, then `git worktree unlock` (best-effort) and `git worktree prune`, which clears the same locked-record ghost the `-f -f` existed for. The three Do-nots above still stand for the directory removal; the `-f -f` reasoning is historical. See `e21cfd5f-worktree-removal-never-touches-a-repo-checkout.md`.
+
 ## Source
 
 Inline comment in `packages/daemon/src/git/worktrees.ts`, `removeWorktree`'s own doc comment (~line 1472, the Windows handle-race / bounded-removal / `-f -f` paragraphs), as of commit `f8d18a2cbc315a3020b962ac7e85cf2194ca09ba`. Relocated by card `5b001dde`; wrapped source lines joined into flowing paragraphs, `*` comment markers stripped, no wording changed.
