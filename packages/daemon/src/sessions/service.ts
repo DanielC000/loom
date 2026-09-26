@@ -27,7 +27,7 @@ import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateR
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
-import { classifyMainlineMove, mainlineWatermarkKey, parseMainlineWatermark, readFirstParent, readMainlineFacts, readMainlineHead } from "../git/mainline-watch.js";
+import { classifyMainlineMove, mainlineWatermarkKey, parseMainlineWatermark, isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
@@ -16518,6 +16518,7 @@ export class SessionService {
         //  the runGate closure has returned (a throw before that never reached the fast-forward) and once `runBatchedMerge` has returned (`ok` = landed).
         let batchGateClosureDone = false;
         let batchFastForwarded: boolean | undefined;
+        let batchCheckedTip: string | null = null; // card 59d2577a: the tip the mainline-move check verified just before the ff
         try {
           // Card 6cc803b2 — phase instrumentation: wall time of cutting the dedicated batch worktree, the
           // FIRST of the five phases this card measures (batch-worktree cut · per-branch assembly · gate
@@ -16824,6 +16825,8 @@ export class SessionService {
             const reducedGateWarning = batchReduced
               ? formatReducedGateWarning(batchEmitCompare!, ASSET_READING_TEST_REPO_PATHS.length, CHANGED_TS_TEXT_SCANNER_REPO_PATHS.length, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS.length, landedCount)
               : undefined;
+            // Card 59d2577a: the mainline-move tripwire, INSIDE the repo guard (held once the gate passed) and just before `runBatchedMerge`'s fast-forward. Fail-open; never a refusal.
+            if (r.passed) batchCheckedTip = await this.checkMainlineMove({ projectId: finalProjectId, repoKey: batchRepoKey, repoPath: finalRepoPath, managerSessionId, workerSessionId: null, taskId: null });
             batchGateClosureDone = true;
             return {
               passed: r.passed, emitCompareReduced: !!batchEmitCompare?.eligible, ...(reducedGateWarning ? { reducedGateWarning } : {}), reason: r.passed ? undefined : (r.outputTail ?? "batch gate failed"), detail: { steps: r.steps },
@@ -16841,6 +16844,7 @@ export class SessionService {
           try {
             result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
             batchFastForwarded = result.ok;
+            if (result.ok && result.landed.length > 0) await this.advanceMainlineWatermarkForBatch(finalProjectId, batchRepoKey, finalRepoPath, batchCheckedTip, baseMainSha, result.batchHeadSha); // card 59d2577a
             // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (the `finally` below) — ONCE, with
             // the batch's final landed tip, so the counter's order equals main's order (see the solo record after `mergeBranch`).
             if (result.ok && result.landed.length > 0) {
@@ -17330,31 +17334,40 @@ export class SessionService {
   }
   /** Test seam (card 4fa36502): the mainline check's git reader; a test replaces it with a failing one to prove the check is FAIL-OPEN. */
   private mainlineFactsReader: typeof readMainlineFacts = readMainlineFacts;
+  /** Test seam (card 59d2577a): the mainline check's head reader; a test wraps it to simulate a landing advancing W while the head is being read. */
+  private mainlineHeadReader: typeof readMainlineHead = readMainlineHead;
   private mainlineGitMs(): number { return Math.min(this.gitOpMs ?? 10_000, 10_000); }
 
   /**
    * @decision 4fa36502 — NEVER throws, never refuses, never blocks the merge: any error or timeout logs and skips (no event, watermark unchanged); returns null then so the caller does not advance the watermark either. Runs under the repo guard just before the squash.
    * First sight of a (project, repoKey, branch) initialises the watermark silently.
    */
-  private async checkMainlineMove(a: { projectId: string; repoKey: string; repoPath: string; managerSessionId: string; workerSessionId: string; taskId: string | null }): Promise<string | null> {
+  private async checkMainlineMove(a: { projectId: string; repoKey: string; repoPath: string; managerSessionId: string | null; workerSessionId: string | null; taskId: string | null; source?: "landing" | "boot" }): Promise<string | null> {
     try {
       const ms = this.mainlineGitMs();
-      const head = await readMainlineHead(a.repoPath, ms);
-      if (!head) return null;
       const key = mainlineWatermarkKey(a.projectId, a.repoKey);
-      const w = parseMainlineWatermark(this.db.getMeta(key));
-      const store = (): void => this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip }));
+      // Read BEFORE the head read: the compare-and-set below then also catches a writer that advanced W while the head was being read (reading after would bless it and let this pass write an older tip over it).
+      const rawW = this.db.getMeta(key);
+      const head = await this.mainlineHeadReader(a.repoPath, ms);
+      if (!head) return null;
+      const w = parseMainlineWatermark(rawW);
+      // Compare-and-set: a concurrent writer (a landing's own advance) that changed the key since we read it wins — an unguarded boot check must never regress a newer watermark.
+      const store = (): void => { if (this.db.getMeta(key) === rawW) this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip })); };
+      const boot = a.source === "boot";
       if (!w || w.branch !== head.branch) { store(); return head.tip; }
       if (w.sha === head.tip) return head.tip;
       const facts = await this.mainlineFactsReader(a.repoPath, w.sha, head, ms);
       const v = classifyMainlineMove(w.sha, facts);
-      const detail = { projectId: a.projectId, repoKey: a.repoKey, branch: head.branch, from: w.sha, to: head.tip };
-      const file = (extra: Record<string, unknown>): void => this.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, kind: "mainline_moved_outside_loom", detail: { ...detail, ...extra } });
+      const detail = { projectId: a.projectId, repoKey: a.repoKey, branch: head.branch, from: w.sha, to: head.tip, ...(boot ? { source: "boot" } : {}) };
+      const file = (extra: Record<string, unknown>): void => this.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId ?? "", ...(a.workerSessionId ? { workerSessionId: a.workerSessionId } : {}), taskId: a.taskId, kind: "mainline_moved_outside_loom", detail: { ...detail, ...extra } });
       if (v.verdict === "unverifiable") {
         file({ severity: "low", unverifiable: true, reason: facts.watermarkMissing ? "watermark commit no longer resolvable" : "range exceeded the scan cap" });
       } else if (v.verdict === "alert") {
         file({ severity: "high", evidence: v.evidence, suspectShas: v.suspectShas, rawReflogMessages: v.rawReflogMessages });
+        // @decision 59d2577a — the BOOT path never absorbs an alert: it files the durable event but leaves W alone, so the next landing's check re-detects the same move WITH a manager to nudge.
+        if (boot) return null;
         try {
+          if (!a.managerSessionId) throw new Error("no manager to nudge");
           const suspects = v.suspectShas.map((x) => x.slice(0, 8)).join(", ") || "none";
           this.enqueueDurableMessage(a.managerSessionId,
             `[loom:mainline-moved] ${head.branch} in repo "${a.repoKey}" moved ${w.sha.slice(0, 8)} -> ${head.tip.slice(0, 8)} WITHOUT a Loom landing (evidence: ${v.evidence.join(", ")}; suspect ${suspects}). A worker can write refs/heads/${head.branch} through the shared .git; a human's own raw \`git update-ref\` looks the same. This is a tripwire, not a block: the merge continues. Check \`git reflog show ${head.branch}\` and \`git log ${w.sha.slice(0, 8)}..${head.tip.slice(0, 8)}\`.`,
@@ -17380,6 +17393,40 @@ export class SessionService {
     } catch (err) {
       console.warn(`[mainline-watch] watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  /**
+   * Batch twin of {@link advanceMainlineWatermark} (card 59d2577a). A batch fast-forward lands SEVERAL commits, so the solo first-parent rule cannot apply. Advance (to the landed tip) only when the checked
+   * tip IS the sha the batch was cut from (`fastForwardCanonicalMain` moves main only when HEAD === baseMainSha, so an ok result means main moved from exactly that tip) AND the checked tip is an ancestor
+   * of the landed tip. Anything else (a move between the check and the ff forfeits the batch; a failed read) leaves W alone so the move stays catchable. Fail-open.
+   */
+  private async advanceMainlineWatermarkForBatch(projectId: string, repoKey: string, repoPath: string, checkedTip: string | null, baseMainSha: string, batchHeadSha: string | undefined): Promise<void> {
+    try {
+      if (!checkedTip || !batchHeadSha || checkedTip !== baseMainSha) return;
+      const ms = this.mainlineGitMs();
+      if (!(await isAncestorCommit(repoPath, checkedTip, batchHeadSha, ms))) return;
+      const head = await readMainlineHead(repoPath, ms);
+      if (head) this.db.setMeta(mainlineWatermarkKey(projectId, repoKey), JSON.stringify({ branch: head.branch, sha: batchHeadSha }));
+    } catch (err) {
+      console.warn(`[mainline-watch] batch watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Boot pass (card 59d2577a): ONE {@link checkMainlineMove} read per (project, repoKey), sequential, no repo guard, each fail-open and bounded. Catches a move made while the daemon was down.
+   * @decision 59d2577a — an ALERT at boot files the durable event (source:"boot") but does NOT store W (no manager to nudge yet); the next landing's check re-detects it and nudges. A clean/unverifiable verdict stores W.
+   */
+  async checkMainlineMovesOnBoot(): Promise<{ checked: number }> {
+    let checked = 0;
+    for (const project of this.db.listProjects()) {
+      if (project.archivedAt) continue;
+      const repos: Array<{ key: string; path: string }> = [{ key: "primary", path: project.repoPath }, ...project.repos.map((r) => ({ key: r.key, path: r.path }))];
+      for (const r of repos) {
+        if (!r.path) continue;
+        try { await this.checkMainlineMove({ projectId: project.id, repoKey: r.key, repoPath: r.path, managerSessionId: null, workerSessionId: null, taskId: null, source: "boot" }); checked++; } catch { /* checkMainlineMove never throws; belt and braces */ }
+      }
+    }
+    return { checked };
   }
 
   /** THE outcome recorder (ungated landing / passing gate). A solo landing records right after its squash (inside the repo guard); a passing batch records ONCE, right after its fast-forward. */

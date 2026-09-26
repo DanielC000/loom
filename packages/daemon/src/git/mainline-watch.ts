@@ -131,6 +131,15 @@ export async function readFirstParent(repoPath: string, sha: string, timeoutMs: 
   } catch { return null; }
 }
 
+/**
+ * Is `ancestor` an ancestor of (or equal to) `descendant`? Compares `merge-base` OUTPUT, never `merge-base --is-ancestor`'s exit status (simple-git's `raw()` resolves a
+ * non-zero exit with empty stderr as success — decision bc2240d7). THROWS on a git failure — the caller fails open (no advance).
+ */
+export async function isAncestorCommit(repoPath: string, ancestor: string, descendant: string, timeoutMs: number): Promise<boolean> {
+  const out = (await withTimeout(canonicalGit(repoPath, timeoutMs).raw(["merge-base", ancestor, descendant]), timeoutMs, "git merge-base")).trim();
+  return out === ancestor;
+}
+
 /** Reads everything {@link classifyMainlineMove} needs, through `canonicalGit`, every call bounded by `timeoutMs`. THROWS on any git failure — the caller fails open. */
 export async function readMainlineFacts(repoPath: string, watermarkSha: string, head: { branch: string; tip: string }, timeoutMs: number): Promise<MainlineFacts> {
   const git = canonicalGit(repoPath, timeoutMs);

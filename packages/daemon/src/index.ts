@@ -1055,6 +1055,8 @@ async function main(): Promise<void> {
   // joins the ALREADY-read `latches` against its own `dirty` result for the richer cross-referenced message
   // (see describeMergeDangerLatchAtBoot's own doc), and the `.catch()` path now also reports any latch found,
   // just without that cross-reference (the scan that would have supplied it never resolved).
+  // @decision 59d2577a — the mainline-move tripwire's boot pass: kicked here, after listen, fire-and-forget (never awaited, never gates boot; each repo's read is bounded + fail-open).
+  void sessions.checkMainlineMovesOnBoot().catch((err) => { console.warn(`[boot] mainline-move check failed (continuing boot): ${(err as Error).message}`); });
   const latches = readAndClearMergeDangerLatches();
   void scanCanonicalReposForMergeResidue([...canonicalRepoPaths]).then((dirty) => {
     for (const d of dirty) {

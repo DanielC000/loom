@@ -23,7 +23,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        the very next landing (reader restored) still catches it.
 //   (S9) BOUNDED: a >cap first-parent range ⇒ ONE low-severity "unverifiable" event (no nudge) and the watermark advances (no unbounded scan).
 //
-// NOT COVERED: merge_batch and boot (a follow-up card); a worker that forges the message AND deletes its branch (S5); a `git -C <canon> commit`
+// NOT COVERED HERE: merge_batch and boot (mainline-watch-batch*.mjs / mainline-watch-boot.mjs); a worker that forges the message AND deletes its branch (S5); a `git -C <canon> commit`
 // (byte-identical to a human commit); a bare canonical repo (no reflog).
 // Run: 1) build daemon (pnpm build), 2) node test/mainline-watch.mjs
 import fs from "node:fs";
