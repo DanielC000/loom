@@ -1559,7 +1559,7 @@ const GATE_HISTORY_KINDS = ["worker_gate", "build_gate", "build_gate_retry", "de
 const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<OrchestrationEventKind>([
   // Security / trust-boundary
   "credential_revoked", "manager_manage", "deploy", "worker_gate", "discovery_block_injection",
-  "engine_session_rotated", "codex_auto_commit",
+  "engine_session_rotated", "codex_auto_commit", "mainline_moved_outside_loom",
   // Cross-board / cross-project escalation trail
   "platform_escalate", "escalation_triaged", "audit_finding", "workspace_audit_suggestion",
   "cross_project_message", "assistant_relay_message", "session_message", "session_steer_dropped",
@@ -3221,6 +3221,7 @@ export class Db {
       // deleted project's rows become an unbounded orphan class (see the schema doc).
       this.db.prepare("DELETE FROM pending_gate_ops WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM project_merge_gate_state WHERE project_id = ?").run(id); // card 6f13746c
+      this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`mainline-watermark:${id}:%`); // card 4fa36502
       // Card af08f7e8: delivered_credentials.project_id is a NOT NULL FK (enforced) with no session/agent
       // tie — deleteSession/deleteAgent never touch it (that's the point), but deleteProject genuinely
       // removes the project itself, so this must be cascaded explicitly or the transaction aborts.

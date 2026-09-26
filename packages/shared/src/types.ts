@@ -1581,6 +1581,8 @@ export type OrchestrationEventKind =
   | "batch_merge_branch_retained"
   // @decision cc9bce38 — SOLO twin: a worker_merge_confirm landed but finalize kept the branch (tip moved after the squash). `detail.source` is "solo"; it HOLDS via `isBranchHeld`, like the batch kind.
   | "merge_branch_retained"
+  // @decision 4fa36502 — the canonical mainline moved without a Loom landing (tripwire, never a refusal): `detail` {projectId, repoKey, branch, from, to, evidence, suspectShas, severity:"high"}; or severity:"low" + unverifiable:true when the check exceeded its cap. Filed under the confirming manager.
+  | "mainline_moved_outside_loom"
   // Card 932f13d4: a genuine engine-session-id ROTATION — the Claude Code CLI fired a SECOND
   // `SessionStart` reporting a DIFFERENT `session_id` for the SAME live pty (no new Loom spawn/resume/
   // fork — see `pty/host.ts`'s SessionStart handler doc / card 7c1fc117). `db.setEngineSessionId`
@@ -1653,7 +1655,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true,
-  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, engine_session_rotated: true,
+  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true,
   codex_auto_commit: true,

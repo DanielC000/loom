@@ -5,7 +5,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // silently reopens S11/S12 — the recurring defect class this card exists to stop.
 //
 // WHAT THIS ASSERTS (source-TEXT, comment-stripped; NOT a behaviour test — canonical-git-isolation.mjs is that):
-//  (1) STRICT files — `git/worktrees.ts` and `git/batch-merge.ts` (the canonical merge path): no `boundedSimpleGit(` /
+//  (1) STRICT files — `git/worktrees.ts`, `git/batch-merge.ts` and `git/mainline-watch.ts` (the canonical merge path + the mainline tripwire, card 4fa36502): no `boundedSimpleGit(` /
 //      `simpleGit(` call; every `spawn("git", [` carries `...CANONICAL_GIT_CONFIG_ARGS` as its first args; no other raw
 //      child-process git (`execFile*`/`exec*`/`spawnSync`).
 //  (2) WHOLE-TREE: any OTHER `packages/daemon/src/**/*.ts` file that constructs git directly must appear in ALLOWLIST below,
@@ -28,7 +28,7 @@ const SRC_DIR = path.join(TEST_DIR, "..", "src");
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const STRICT = ["git/worktrees.ts", "git/batch-merge.ts"];
+const STRICT = ["git/worktrees.ts", "git/batch-merge.ts", "git/mainline-watch.ts"];
 
 // Files that build git directly and are deliberately NOT the canonical merge path. Path (relative to src/) -> reason.
 const ALLOWLIST = {

@@ -27,6 +27,7 @@ import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateR
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
+import { classifyMainlineMove, mainlineWatermarkKey, parseMainlineWatermark, readFirstParent, readMainlineFacts, readMainlineHead } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
@@ -15622,7 +15623,9 @@ export class SessionService {
       const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null, squashTip ?? null);
       if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs }))) return refuseReviewedTipMoved(rt, "pre-squash");
     }
+    const mainlineCheckedTip = await this.checkMainlineMove({ projectId: project.id, repoKey: worker.repoKey ?? "primary", repoPath, managerSessionId, workerSessionId, taskId }); // card 4fa36502: fail-open tripwire, before the squash trusts main's tip
     merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip);
+    if (mainlineCheckedTip && merge.ok && !merge.noop && merge.sha) await this.advanceMainlineWatermark(project.id, worker.repoKey ?? "primary", repoPath, mainlineCheckedTip); // card 4fa36502: a successful Loom landing is the new "explained" tip — but ONLY when this landing's check completed, so an unverified move stays catchable
     // Card 6f13746c: record the landing HERE — at the squash, still INSIDE the repo guard (`endSquash` / `releaseInertRepoGuard` run in the
     // `finally` below) — so the counter's order equals main's order: a later pass resets only what precedes it on main, and an ungated landing
     // that squashed after a pass is never erased by it. (Recording in `finalizeMerge`, after the guard, raced exactly that.) An inert docs-only
@@ -17269,6 +17272,60 @@ export class SessionService {
     const o = this.mergeGateOrch(projectId, orch) ?? { mergeGate: "on" as const };
     return decideMergeGate(this.db.getMergeGateState(projectId, repoKey), o, K, this.mergeGatePending(projectId, repoKey));
   }
+  /** Test seam (card 4fa36502): the mainline check's git reader; a test replaces it with a failing one to prove the check is FAIL-OPEN. */
+  private mainlineFactsReader: typeof readMainlineFacts = readMainlineFacts;
+  private mainlineGitMs(): number { return Math.min(this.gitOpMs ?? 10_000, 10_000); }
+
+  /**
+   * @decision 4fa36502 — NEVER throws, never refuses, never blocks the merge: any error or timeout logs and skips (no event, watermark unchanged); returns null then so the caller does not advance the watermark either. Runs under the repo guard just before the squash.
+   * First sight of a (project, repoKey, branch) initialises the watermark silently.
+   */
+  private async checkMainlineMove(a: { projectId: string; repoKey: string; repoPath: string; managerSessionId: string; workerSessionId: string; taskId: string | null }): Promise<string | null> {
+    try {
+      const ms = this.mainlineGitMs();
+      const head = await readMainlineHead(a.repoPath, ms);
+      if (!head) return null;
+      const key = mainlineWatermarkKey(a.projectId, a.repoKey);
+      const w = parseMainlineWatermark(this.db.getMeta(key));
+      const store = (): void => this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip }));
+      if (!w || w.branch !== head.branch) { store(); return head.tip; }
+      if (w.sha === head.tip) return head.tip;
+      const facts = await this.mainlineFactsReader(a.repoPath, w.sha, head, ms);
+      const v = classifyMainlineMove(w.sha, facts);
+      const detail = { projectId: a.projectId, repoKey: a.repoKey, branch: head.branch, from: w.sha, to: head.tip };
+      const file = (extra: Record<string, unknown>): void => this.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, kind: "mainline_moved_outside_loom", detail: { ...detail, ...extra } });
+      if (v.verdict === "unverifiable") {
+        file({ severity: "low", unverifiable: true, reason: facts.watermarkMissing ? "watermark commit no longer resolvable" : "range exceeded the scan cap" });
+      } else if (v.verdict === "alert") {
+        file({ severity: "high", evidence: v.evidence, suspectShas: v.suspectShas, rawReflogMessages: v.rawReflogMessages });
+        try {
+          const suspects = v.suspectShas.map((x) => x.slice(0, 8)).join(", ") || "none";
+          this.enqueueDurableMessage(a.managerSessionId,
+            `[loom:mainline-moved] ${head.branch} in repo "${a.repoKey}" moved ${w.sha.slice(0, 8)} -> ${head.tip.slice(0, 8)} WITHOUT a Loom landing (evidence: ${v.evidence.join(", ")}; suspect ${suspects}). A worker can write refs/heads/${head.branch} through the shared .git; a human's own raw \`git update-ref\` looks the same. This is a tripwire, not a block: the merge continues. Check \`git reflog show ${head.branch}\` and \`git log ${w.sha.slice(0, 8)}..${head.tip.slice(0, 8)}\`.`,
+            { sender: "system", taskId: a.taskId, kind: "warning" });
+        } catch { /* the durable event above is the record; a failed nudge must not matter */ }
+      }
+      store();
+      return head.tip;
+    } catch (err) {
+      console.warn(`[mainline-watch] check skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Advance the watermark to the canonical branch tip after a successful Loom landing. Fail-open like {@link checkMainlineMove}.
+   * Only when the landing sits DIRECTLY on `checkedTip` (the tip the check verified): a move that slipped in between the check and the squash leaves the watermark unchanged, so the next check still sees it.
+   */
+  private async advanceMainlineWatermark(projectId: string, repoKey: string, repoPath: string, checkedTip: string): Promise<void> {
+    try {
+      const head = await readMainlineHead(repoPath, this.mainlineGitMs());
+      if (head && (await readFirstParent(repoPath, head.tip, this.mainlineGitMs())) === checkedTip) this.db.setMeta(mainlineWatermarkKey(projectId, repoKey), JSON.stringify({ branch: head.branch, sha: head.tip }));
+    } catch (err) {
+      console.warn(`[mainline-watch] watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   /** THE outcome recorder (ungated landing / passing gate). A solo landing records right after its squash (inside the repo guard); a passing batch records ONCE, right after its fast-forward. */
   recordMergeGateOutcome(projectId: string, ev: { kind: "ungated"; landed: number } | { kind: "pass"; sha: string | null; opId: string | null; periodic: boolean; candidates?: number }, repoKey = "primary"): void {
     const st = this.db.getMergeGateState(projectId, repoKey);
