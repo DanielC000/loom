@@ -768,10 +768,10 @@ what you checked. Found none? Treat it as live.
      several merges are pending at once you can tell which one just settled. If you need the answer sooner,
      poll the read-only `gate_status(opId)` (never starts a new run) or read `worker_list`'s `pendingMerge`
      field. Re-calling `worker_merge_confirm` with the same `workerSessionId` is also always safe, at any
-     delay: a re-call at the SAME commit returns the cached verdict; a re-call after new commits on the
-     branch gates them for real — that's a different question, not a silent re-run — but `gate_status`/
+     delay: a re-call at the SAME commit AND an unmoved mainline returns the cached verdict; a re-call after
+     new commits on the branch, or after the mainline advanced, gates for real — that's a different question, not a silent re-run — but `gate_status`/
      `worker_list` are read-only and cost nothing, so prefer them for a pure status check. The ONLY way to
-     force a genuine RE-RUN of the SAME commit (e.g. retry a flake, not new commits — those already gate
+     force a genuine RE-RUN of the SAME commit (e.g. retry a flake, not new commits or a moved mainline — those already gate
      normally on the next re-call) is `forceRemoveWorktree:true` on the re-call — a deliberate, named
      escalation, never an implicit side effect of just calling again. Don't fall back to `git log`
      guesswork while waiting.

@@ -105,8 +105,15 @@ interface Entry<T> {
  *  happened to exist, absent for `"genuinely-new"`. This is an OBSERVED FIELD, not an assertion of cause:
  *  it names what the registry recorded, never why the identity changed. */
 export interface FreshMintInfo {
-  reason: "identity-mismatch" | "forced" | "genuinely-new";
+  /** `"main-advanced"` (card c06f876a) is NEVER produced by this registry (it only compares opaque strings): a caller that
+   *  folds a mainline tip into its identity may re-label an `"identity-mismatch"` whose branch component matches but
+   *  whose main component differs. */
+  reason: "identity-mismatch" | "forced" | "genuinely-new" | "main-advanced";
   priorIdentity?: string;
+  /** Set ONLY by a caller that re-labels to `"main-advanced"` (card c06f876a): the mainline tips the prior verdict was
+   *  earned against and this call resolved, for reporting. */
+  priorMainTip?: string;
+  currentMainTip?: string;
   /** NEVER set by this registry — it only ever knows the identity a PAST settle recorded, not what a
    *  caller can freshly resolve NOW. A caller that also resolves its own "current" identity (e.g.
    *  confirmWorkerMergeTracked's `verdictIdentity`, read fresh before every `attach()` call) may fold it

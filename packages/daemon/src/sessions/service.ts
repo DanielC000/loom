@@ -651,6 +651,8 @@ type ConfirmMergeResult = {
    *  under, so a plain re-call at that same tip is a cache hit rather than a second gate. `undefined` on every
    *  other path, and after any failed read (fail-safe: the pre-forward `verdictIdentity` then stands). */
   gatedIdentity?: string;
+  /** @decision c06f876a — the canonical mainline tip captured at the SAME point as `gatedIdentity` (right before the FINAL gate spawn): the main the gate ran against. Set only alongside `gatedIdentity`; folded into the cached-verdict identity so a re-call after main advanced re-gates. */
+  gatedMain?: string;
   /** @decision 975c774b — the worktree was dirty before a gate spawn or changed across it: the verdict matches no
    *  commit. A PASS is refused (`gate_worktree_dirty`); a FAIL keeps its rejection, unstamped. Never cached. */
   gateWorktreeDirty?: { phase: "before-gate" | "during-gate"; detail: string };
@@ -881,8 +883,15 @@ function mergeGateIdentitySuffix(value: "on" | "off"): string {
 }
 /** Inverse of {@link mergeGateIdentitySuffix} — for manager-facing text that should name only the commit. */
 function stripMergeGateSuffix(identity: string): string {
-  const i = identity.indexOf("|mergeGate:");
+  const i = identity.search(/\|(?:main|mergeGate):/);
   return i < 0 ? identity : identity.slice(0, i);
+}
+/** @decision c06f876a — the `|main:<sha>` segment (solo merge identity only; sits BEFORE `|mergeGate:`). An identity WITHOUT it (an older format, or a fail-open read) never equals one with it, so it reads as a MISS. */
+function mainIdentitySegment(mainTip: string): string {
+  return `|main:${mainTip}`;
+}
+function mainTipOfIdentity(identity: string | undefined): string | undefined {
+  return identity === undefined ? undefined : /\|main:([0-9a-f]{40,64})(?=\||$)/.exec(identity)?.[1];
 }
 
 function deriveWorkerGateVerdict(
@@ -13981,6 +13990,8 @@ export class SessionService {
     // Card 8b1fb28f: the branch tip captured immediately BEFORE each gate spawn (see `captureGatedTip`) — i.e.
     // the tip the FINAL gate attempt actually ran on. `undefined` until a gate spawns, and again after any failed read.
     let gatedTip: string | undefined;
+    // @decision c06f876a — the canonical mainline tip read at the SAME point as `gatedTip` (same fail-safe: undefined ⇒ unstamped).
+    let gatedMain: string | undefined;
     // @decision 975c774b — the tip the WHOLE gate (attempt 1 / transient re-run) spawned on, pinned; single-file and resumed links
     // never overwrite it, so a commit landed mid-attempt-1 can't be laundered by a later link's fresh capture (it stays undefined
     // if that read failed, which the checks treat as "could not be verified").
@@ -14684,6 +14695,7 @@ export class SessionService {
         gateLinkLeft = false; gateLinkPreHeadOff = undefined; gateLinkPreUnverified = false;
         gatePreReflog = await this.snapshotReflogs(repoPath, branch, worktreePath, { timeoutMs: this.gitOpMs });
         try { gatedTip = (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined; } catch { gatedTip = undefined; }
+        try { gatedMain = (await readMainlineHead(repoPath, this.mainlineGitMs()))?.tip; } catch { gatedMain = undefined; }
         if (pin) pinnedGateTip = gatedTip;
         gatePreStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         if (gatePreStamp.dirty) throw new GateWorktreeDirtyError("the worktree carries uncommitted changes before the gate spawns");
@@ -15452,7 +15464,7 @@ export class SessionService {
           // a post-gate-pass squash refusal, a breaker/preflight rejection or a reused result never does.
           // @decision 975c774b — never stamped when the worktree changed under the gate; flagged so it is never cached either.
           // @decision d099087f — likewise never stamped/cached when the tip left the gated commit and came back mid-run.
-          ...(gatedTip && !gateWorktreeChanged && !gateRoundTrip && !gateIdentityVoid ? { gatedIdentity: gatedTip } : {}),
+          ...(gatedTip && gatedMain && !gateWorktreeChanged && !gateRoundTrip && !gateIdentityVoid ? { gatedIdentity: gatedTip, gatedMain } : {}),
           ...(gateRoundTrip ? { gateRoundTripFail: true as const } : {}),
           ...(gateIdentityVoid ? { gateIdentityVoid: true as const } : {}),
           ...(finalLink.unverified ? { gateTipUnverified: true as const } : {}),
@@ -17394,7 +17406,7 @@ export class SessionService {
         if (tip === v.gatedIdentity) return v;
       }
     } catch { /* fail-safe: fall through to unstamped */ }
-    return { ...v, gatedIdentity: undefined };
+    return { ...v, gatedIdentity: undefined, gatedMain: undefined };
   }
 
   async confirmWorkerMergeTracked(
@@ -17576,7 +17588,9 @@ export class SessionService {
             const repo = resolveRepoByKey(project, worker.repoKey);
             const sha = (await resolveGitRef(repo.path, worker.branch, { timeoutMs: this.gitOpMs })) ?? undefined;
             mergeGateSuffix = mergeGateIdentitySuffix(mergeGateValue);
-            verdictIdentity = sha ? `${sha}${mergeGateSuffix}` : undefined;
+            // @decision c06f876a — the mainline tip is part of the identity (ONE resolver, `readMainlineHead`, the same read the store side uses); any read failure ⇒ undefined ⇒ never hits ⇒ re-gate.
+            const mainTip = sha ? (await readMainlineHead(repo.path, this.mainlineGitMs()))?.tip : undefined;
+            verdictIdentity = sha && mainTip ? `${sha}${mainIdentitySegment(mainTip)}${mergeGateSuffix}` : undefined;
           }
         }
       } catch { /* fail-safe: undefined identity never dedupe-hits, see doc above */ }
@@ -17794,7 +17808,7 @@ export class SessionService {
         // `gatedIdentity`), not the pre-forward `verdictIdentity` above (which can name a commit the gate never ran on).
         // Dropped (unstamped) if the branch tip has since moved; every other outcome keeps `verdictIdentity`.
         // @decision 01777ceb — a void-identity FAIL is stored under `void:<opId>`, which no `<sha>|mergeGate:…` verdictIdentity can equal.
-        identityFromValue: (v) => (v.gateIdentityVoid ? `void:${v.opId}` : v.gatedIdentity ? `${v.gatedIdentity}${mergeGateSuffix}` : undefined),
+        identityFromValue: (v) => (v.gateIdentityVoid ? `void:${v.opId}` : v.gatedIdentity && v.gatedMain ? `${v.gatedIdentity}${mainIdentitySegment(v.gatedMain)}${mergeGateSuffix}` : undefined),
         // @decision 99a1cf6f — `gateBaseInvalidated` classifies distinctly from an ordinary "rejected",
         // checked before the plain merged-else-rejected fallback — a real test failure is safe to replay,
         // a stale-base one is not.
@@ -17837,7 +17851,11 @@ export class SessionService {
     let out = result;
     if (out.freshMint) {
       const fm = out.freshMint;
-      out = { ...out, freshMint: { ...fm, ...(fm.priorIdentity !== undefined ? { priorIdentity: stripMergeGateSuffix(fm.priorIdentity) } : {}), currentIdentity: verdictIdentity === undefined ? undefined : stripMergeGateSuffix(verdictIdentity) } };
+      // @decision c06f876a — same branch commit, both identities carry a main segment, main differs ⇒ "main-advanced"; anything else stays as the registry classified it (an old-format prior has no main segment ⇒ "identity-mismatch").
+      const priorMain = mainTipOfIdentity(fm.priorIdentity), curMain = mainTipOfIdentity(verdictIdentity);
+      const mainAdvanced = fm.reason === "identity-mismatch" && fm.priorIdentity !== undefined && verdictIdentity !== undefined && priorMain !== undefined && curMain !== undefined && priorMain !== curMain
+        && stripMergeGateSuffix(fm.priorIdentity) === stripMergeGateSuffix(verdictIdentity);
+      out = { ...out, freshMint: { ...fm, ...(mainAdvanced ? { reason: "main-advanced" as const, priorMainTip: priorMain, currentMainTip: curMain } : {}), ...(fm.priorIdentity !== undefined ? { priorIdentity: stripMergeGateSuffix(fm.priorIdentity) } : {}), currentIdentity: verdictIdentity === undefined ? undefined : stripMergeGateSuffix(verdictIdentity) } };
     }
     if (out.settled && out.cacheHit?.identity !== undefined) {
       out = { ...out, cacheHit: { ...out.cacheHit, identity: stripMergeGateSuffix(out.cacheHit.identity) } };

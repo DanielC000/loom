@@ -169,13 +169,14 @@ async function setupWorkerProject(sfx, reposDir, gateCommand = "pnpm gate") {
   check("(same-commit-after-forward) op 2's cacheHit names the POST-forward tip the gate actually validated", r2.cacheHit?.identity === shaAfterOp1);
   check("(same-commit-after-forward) op 1 (genuine fresh mint) carries NO cacheHit", r1.cacheHit === undefined);
 
-  // (d) Card 8b1fb28f DoD-3 — a behaviour PIN, not a design endorsement: identity is branch-tip-only, so if
-  // MAIN advances AGAIN after op 1 (worker pushes nothing) a re-call still replays the cached rejection.
+  // (d) Card c06f876a FLIPPED card 8b1fb28f's DoD-3 PIN: identity is (branch tip, main tip), so when MAIN advances
+  // AGAIN after op 1 (worker pushes nothing) a re-call RE-GATES for real, announced as "main-advanced".
   fs.writeFileSync(path.join(repo, "main-advance-2.txt"), "advanced again\n");
   commitAll(repo, "main advanced again", GIT_ID);
   const r3 = await settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
   check("(main-advanced-again) re-call settled", r3.settled === true && r3.ok === true);
-  check("(main-advanced-again) PIN: the cached rejection is replayed (no second gate) even though main moved again", gateCalls === 1 && r3.cacheHit?.identity === shaAfterOp1);
+  check("(main-advanced-again) the cached rejection is NOT replayed: a second gate ran for real", gateCalls === 2 && r3.cacheHit === undefined);
+  check("(main-advanced-again) announced as main-advanced, same branch commit, both main tips named", r3.freshMint?.reason === "main-advanced" && r3.freshMint?.priorIdentity === shaAfterOp1 && r3.freshMint?.currentIdentity === shaAfterOp1 && r3.freshMint?.priorMainTip === mainShaAfterAdvance && r3.freshMint?.currentMainTip === headSha(repo));
 }
 
 // ── (c) IDENTITY-MISMATCH VIA THE WORKER'S OWN NEW COMMIT (card a98f97bd DoD-6): the registry compares an
