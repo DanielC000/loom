@@ -19650,7 +19650,13 @@ export class SessionService {
         // git-level refusal already covers survival on its own).
         // Card 42daa283: a HELD branch is never reclaimed either — one shared definition (`isBranchHeld`), looked up once per RETAINED branch, not per swept one.
         const heldBranches = new Set<string>();
-        for (const b of this.db.listRetainedBranches()) { if (await this.isBranchHeld(b, repoPath)) heldBranches.add(b); }
+        // Card 4aee2e14: probe ONLY `merged ∩ retained` (minus checked-out, which is never deleted anyway) — a branch outside `merged` can never
+        // reach `deleteBranches`, so probing it (up to 2 git calls each, every retained branch × every swept repo, every boot) is pure waste.
+        const mergedSet = new Set(merged);
+        for (const b of this.db.listRetainedBranches()) {
+          if (!mergedSet.has(b) || checkedOut.has(b)) continue;
+          if (await this.isBranchHeld(b, repoPath)) heldBranches.add(b);
+        }
         const toDelete = merged.filter((branch) => !checkedOut.has(branch) && !heldBranches.has(branch));
         if (toDelete.length > 0) {
           // Batched (card 09f268a5's measured ~14x win over one-`deleteBranch`-call-per-branch: 14.1s →
