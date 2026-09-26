@@ -90,6 +90,21 @@ const HOOK_TOTAL_MS = HOOK_TICKS * HOOK_TICK_MS; // ~5000ms — the child's natu
                                                   // reproduction on a 16-core host reds the OLD 300ms/2000ms
                                                   // ~6.7x ratio; this wider ratio holds under the same
                                                   // reproduction — see this card's worker_report).
+// Card 4b271ca6: simple-git's IDLE `block` timer KILLS the child on expiry (see [[simple-git-block-timeout-is-idle-not-elapsed]]).
+// It used to share TIMEOUT_MS (300ms), so under host load — when the hook's first output (sh->node startup) arrives
+// later than 300ms — `block` killed git BEFORE the hook ever ticked: the RED commit never landed and the positive
+// control failed for a reason unrelated to what it proves. It is decoupled here: only a >BLOCK_MS silence (tick
+// gap; the hook ticks every HOOK_TICK_MS) could fire it. The [green] 'Abort signal received' suffix check still
+// turns a block-caused kill RED.
+const BLOCK_MS = HOOK_TOTAL_MS * 2;
+// Card 4b271ca6: withTimeoutKillingChild's give-up grace (`killGraceMs`, default = TIMEOUT_MS) is a wall-clock budget
+// for a Windows git.exe to DIE after abort — under load that exceeded 300ms and the PATH-2 give-up fired. It is set
+// once by the [calibrated] step below from a MEASURED kill round-trip (floor = today's 300ms; ceiling KILL_ROUNDTRIP_CEILING_MS,
+// beyond which the test FAILS LOUDLY rather than scaling further). PATH 2 stays a failure: the [green] path-1 suffix
+// check is untouched — only the budget it is given changes.
+let KILL_GRACE_MS = TIMEOUT_MS;
+const KILL_ROUNDTRIP_CEILING_MS = 1500;
+const HOOK_START_CEILING_MS = 10000; // the [green] run waits at most this long for the hook to START before failing loudly.
 const RED_POLL_WINDOW_MS = HOOK_TOTAL_MS * 3; // generous margin for the POSITIVE (RED) poll — pollUntil
                                                // fails fast the moment red-commit lands, so a wide ceiling
                                                // here costs nothing on a fast host and only buys robustness
@@ -194,6 +209,10 @@ function findLingeringKilltestProcesses() {
   }
 }
 
+// Card 4b271ca6: message -> how that attempt's raw git promise settled (and when, ms since attempt start).
+// `snapshotFixtureState` includes it so a RED-control failure names WHY the abandoned child never committed.
+const settleLog = {};
+
 function snapshotFixtureState(reason) {
   try {
     const ts = Date.now();
@@ -206,6 +225,22 @@ function snapshotFixtureState(reason) {
       "refs/heads/master": readGitStateFile(path.join(repo, ".git", "refs", "heads", "master")),
       HEAD: readGitStateFile(path.join(repo, ".git", "HEAD")),
       "packed-refs": readGitStateFile(path.join(repo, ".git", "packed-refs")),
+      // Card 4b271ca6: stale `*.lock` files / marker files a killed git can leave behind, and how the abandoned
+      // RED git child's own promise actually settled (see attemptCommit's `settleLog`).
+      gitDirListing: (() => { try { return fs.readdirSync(path.join(repo, ".git")).map((n) => { try { const st = fs.statSync(path.join(repo, ".git", n)); return `${n}${st.isDirectory() ? "/" : ""} (${st.size}b, mtime ${new Date(st.mtimeMs).toISOString()})`; } catch { return n; } }); } catch (e) { return `<unreadable: ${e?.message}>`; } })(),
+      settleLog,
+      // Card 4b271ca6: how the hook's `#!/bin/sh` + `node` resolve in THIS process tree (the merge gate's is the
+      // daemon's, not a terminal's) — the difference from a bare run is exactly what a gate-only red needs.
+      hookResolution: (() => {
+        const run = (cmd) => { try { return execSync(cmd, { encoding: "utf8", timeout: 5000, cwd: repo }).trim(); } catch (e) { return `<failed: ${String(e?.message).slice(0, 160)}>`; } };
+        return {
+          PATH: process.env.PATH ?? process.env.Path,
+          whereSh: run("where sh"), whereNode: run("where node"), whereGit: run("where git"),
+          gitVersion: run("git --version"), hooksPath: run("git config --show-origin --get-all core.hooksPath"),
+          gitEnvVars: Object.keys(process.env).filter((k) => /^GIT_|^LOOM_|^NODE_|^CI$/.test(k)).sort().join(","),
+          stdio: { stdinIsTTY: !!process.stdin.isTTY, stdoutIsTTY: !!process.stdout.isTTY },
+        };
+      })(),
       lingeringKilltestProcesses: findLingeringKilltestProcesses(),
     };
     const snapshotPath = path.join(SNAPSHOT_DIR, `bounded-git-kill-snapshot-${ts}-${process.pid}.json`);
@@ -274,15 +309,15 @@ function commitSubjectsOnRepo(repoPath) {
  *  synchronous check at the instant the wrapper settles, since a killed git.exe's own hook descendant can
  *  be orphaned and still catching up on its own process-spawn chain — see HOOK_STARTED_POLL_WINDOW_MS's
  *  own doc for why a single synchronous check can false-negative under host contention). */
-async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceMs, preAbort = false }) {
+async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceMs = KILL_GRACE_MS, preAbort = false, armAfterHookStart = false }) {
   const markerPath = hookStartMarkerPath(repo, message);
   try { fs.rmSync(markerPath, { force: true }); } catch { /* no prior marker for this message — fine */ }
   installSlowTalkingPreCommitHook(repo, markerPath);
-  const t0 = performance.now(); // MONOTONIC
+  let t0 = performance.now(); // MONOTONIC
   let rejected = false, rejectMessage = null;
   if (kill) {
     const controller = new AbortController();
-    const git = boundedSimpleGit(repo, timeoutMs, undefined, controller.signal);
+    const git = boundedSimpleGit(repo, BLOCK_MS, undefined, controller.signal);
     // `preAbort`: abort BEFORE `git.raw()` is even called — not merely before awaiting it — so the
     // signal is already aborted when simple-git's executor chain reaches its OWN `spawn.before` hook (see
     // the [setup] leg-2b control below for the source citation this relies on). Aborting any later (e.g.
@@ -292,11 +327,31 @@ async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceM
     // GIT_ID_ARGV (not ambient identity — see its own doc): identity resolution runs BEFORE git invokes
     // the pre-commit hook at all, so on a host with no ambient git identity configured this commit would
     // otherwise fail near-instantly with "unable to auto-detect email address", never reaching the hook.
-    await withTimeoutKillingChild(git.raw([...GIT_ID_ARGV, "commit", "--allow-empty", "-m", message]), timeoutMs, `git commit (${message})`, controller, killGraceMs)
+    const commit = git.raw([...GIT_ID_ARGV, "commit", "--allow-empty", "-m", message]);
+    if (armAfterHookStart) {
+      // Card 4b271ca6: the wrapper's kill timer starts only once the hook is PROVEN running (marker written). A
+      // fixed 300ms measured from spawn can precede git's own path to the hook by 130ms..2.4s under load (a
+      // heavy-tailed latency no calibrated multiplier bounds), which made the [green] run VACUOUS or killed git
+      // in a pre-hook state with a different kill latency. The wrapper cannot tell how old `p` is, so what it is
+      // proven to do is unchanged: kill an in-flight, ticking commit `timeoutMs` after arming and settle only
+      // once the child is confirmed dead. Its own kill/abort/give-up path is untouched. A never-started hook
+      // FAILS LOUDLY (throws) instead of silently passing. `t0` is re-based to arming so `elapsed` still
+      // measures the wrapper, not git's startup. The pre-hook kill window is covered by [setup] leg 2a/2b.
+      commit.catch(() => { /* settlement is observed via the wrapper below; avoid an early unhandled rejection */ });
+      const started = await pollUntil(() => fs.existsSync(markerPath), { timeoutMs: HOOK_START_CEILING_MS, intervalMs: 5 });
+      if (!started) throw new Error(`[green] the hook did not start within ${HOOK_START_CEILING_MS}ms — host too loaded/broken to arm the kill`);
+      t0 = performance.now();
+    }
+    await withTimeoutKillingChild(commit, timeoutMs, `git commit (${message})`, controller, killGraceMs)
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
   } else {
-    const git = boundedSimpleGit(repo, timeoutMs);
-    await withTimeout(git.raw([...GIT_ID_ARGV, "commit", "--allow-empty", "-m", message]), timeoutMs, `git commit (${message})`)
+    const git = boundedSimpleGit(repo, BLOCK_MS);
+    const commit = git.raw([...GIT_ID_ARGV, "commit", "--allow-empty", "-m", message]);
+    commit.then(
+      () => { settleLog[message] = `resolved @${Math.round(performance.now() - t0)}ms`; },
+      (e) => { settleLog[message] = `rejected @${Math.round(performance.now() - t0)}ms: ${String(e?.message ?? e).slice(0, 300)}`; },
+    );
+    await withTimeout(commit, timeoutMs, `git commit (${message})`)
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
   }
   // Captured BEFORE the hookStarted poll below, deliberately: the [green]/[red] elapsed-based checks
@@ -308,12 +363,47 @@ async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceM
   return { elapsed, rejected, rejectMessage, hookStarted };
 }
 
+/** One-shot baseline (card 4b271ca6): a real commit against the slow hook, aborted the moment the hook's start marker
+ *  appears. Measures L (spawn -> hook marker) and K (abort -> the wrapper-visible settle, i.e. git.exe confirmed dead)
+ *  — a COMPLETED reference measured before, and independent of, the runs it sizes, so the failure under test cannot
+ *  inflate it. Fails LOUDLY (throws) if either exceeds its ceiling: a pathological baseline must not silently
+ *  stretch the budgets into a test that can no longer fail. */
+async function measureBaseline() {
+  const message = "calibration-commit";
+  const markerPath = hookStartMarkerPath(repo, message);
+  try { fs.rmSync(markerPath, { force: true }); } catch { /* none */ }
+  installSlowTalkingPreCommitHook(repo, markerPath);
+  const controller = new AbortController();
+  const git = boundedSimpleGit(repo, BLOCK_MS, undefined, controller.signal);
+  const t0 = performance.now();
+  let settledAt = null;
+  const p = git.raw([...GIT_ID_ARGV, "commit", "--allow-empty", "-m", message])
+    .then(() => { settledAt = performance.now(); }, () => { settledAt = performance.now(); });
+  const seen = await pollUntil(() => fs.existsSync(markerPath), { timeoutMs: KILL_ROUNDTRIP_CEILING_MS * 2, intervalMs: 5 });
+  const L = performance.now() - t0;
+  const tAbort = performance.now();
+  controller.abort();
+  const settled = await pollUntil(() => settledAt !== null, { timeoutMs: KILL_ROUNDTRIP_CEILING_MS * 2, intervalMs: 5 });
+  if (!seen) throw new Error(`calibration: hook start marker never appeared within ${KILL_ROUNDTRIP_CEILING_MS * 2}ms — host too loaded/broken to calibrate`);
+  if (!settled) throw new Error(`calibration: git did not die within ${KILL_ROUNDTRIP_CEILING_MS * 2}ms of abort — a real kill defect or a pathological host, not a budget to widen`);
+  await p;
+  return { L, K: settledAt - tAbort };
+}
+
 const RED_MSG = "red-commit";
 const GREEN_MSG = "green-commit";
 
 try {
   check("[setup] baseline: exactly 1 commit (init) before either case runs",
     commitSubjectsOnRepo(repo).length === 1);
+
+  {
+    const { L, K } = await measureBaseline();
+    if (K > KILL_ROUNDTRIP_CEILING_MS) throw new Error(`calibration: kill round-trip ${Math.round(K)}ms exceeds ceiling ${KILL_ROUNDTRIP_CEILING_MS}ms`);
+    KILL_GRACE_MS = Math.max(TIMEOUT_MS, Math.ceil(K * 4 + 100));
+    console.log(`[calibrated] hookStartL=${Math.round(L)}ms (logged only) killRoundTripK=${Math.round(K)}ms -> ` +
+      `killGraceMs=${KILL_GRACE_MS} (floor ${TIMEOUT_MS}, K ceiling ${KILL_ROUNDTRIP_CEILING_MS}) timeoutMs=${TIMEOUT_MS} hookTotalMs=${HOOK_TOTAL_MS}`);
+  }
 
   // [setup] NEGATIVE CONTROL for the PATH 1 / PATH 2 discrimination used in the [green] check below:
   // manufacture a genuine PATH 2 (giveUpTimer) rejection — a promise that NEVER settles, with a REAL
@@ -449,12 +539,14 @@ try {
         red.elapsed < HOOK_TOTAL_MS / 2);
       // fail-fast poll, bounded by the hook's own KNOWN natural duration — not a guess: RED's git.exe is
       // never touched, so once its hook finishes naturally, the still-pending commit lands.
-      return pollUntil(() => commitSubjectsOnRepo(repo).includes(RED_MSG), { timeoutMs: RED_POLL_WINDOW_MS, intervalMs: 50 });
+      const landed = await pollUntil(() => commitSubjectsOnRepo(repo).includes(RED_MSG), { timeoutMs: RED_POLL_WINDOW_MS, intervalMs: 50 });
+      if (!landed) snapshotFixtureState(`RED positive control: "${RED_MSG}" never landed within ${RED_POLL_WINDOW_MS}ms (hookStarted=${red.hookStarted})`);
+      return landed;
     },
 
     // the real run — withTimeoutKillingChild + an abort-wired boundedSimpleGit.
     settle: async () => {
-      const green = await attemptCommit({ kill: true, message: GREEN_MSG });
+      const green = await attemptCommit({ kill: true, message: GREEN_MSG, armAfterHookStart: true });
       check("[green] the wrapper REJECTS near the bound (not a hang)", green.rejected);
       check(`[green] settled in ${Math.round(green.elapsed)}ms (bound ${TIMEOUT_MS}ms, well under the hook's ${HOOK_TOTAL_MS}ms — ` +
         `proves it did NOT wait for the hook to finish naturally)`, green.elapsed < HOOK_TOTAL_MS / 2);
@@ -486,8 +578,8 @@ try {
       // Belt-and-braces second leg (tighter than the elapsed check above, which only rules out a hang):
       // a genuine give-up would fire at TIMEOUT_MS + killGraceMs (both default to TIMEOUT_MS here) — a
       // clean path-1 settlement should land well under that.
-      check(`[green] settled in ${Math.round(green.elapsed)}ms, under the give-up threshold (${TIMEOUT_MS * 2}ms) too`,
-        green.elapsed < TIMEOUT_MS * 2);
+      check(`[green] settled in ${Math.round(green.elapsed)}ms, under the give-up threshold (${TIMEOUT_MS + KILL_GRACE_MS}ms) too`,
+        green.elapsed < TIMEOUT_MS + KILL_GRACE_MS);
       // card e083c9b7 leg 2 — the VACUOUS-PASS gap: without this, "the commit never lands" can pass
       // because the kill fired before the pre-commit hook (and thus the commit machinery) ever got a
       // genuine chance to run, not because the kill stopped an in-flight commit. The positive control
