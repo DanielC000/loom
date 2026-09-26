@@ -101,7 +101,7 @@ async function setupWorkerProject(sfx, reposDir, gateCommand = "pnpm gate") {
   fs.rmSync(path.join(repo, "feature.txt"));
   const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
   check("(gate-pass-squash-refused) after the human cleans the checkout the re-call does NOT replay the refusal — it re-gates", gateCalls === 2 && r2.cacheHit === undefined);
-  check("(gate-pass-squash-refused) UNSTAMPED FALLBACK: the old pre-forward identity was cached (priorIdentity === workerSha)", r2.freshMint?.priorIdentity === workerSha);
+  check("(gate-pass-squash-refused) card fb525c31: the refusal was NEVER cached, so the re-gate is a plain fresh op with no priorIdentity to announce (was: UNSTAMPED FALLBACK, priorIdentity === workerSha)", r2.freshMint === undefined || r2.freshMint.priorIdentity === undefined);
 }
 
 // ── (g) TIP MOVES DURING THE GATE, THEN IS RESET BACK TO WHERE IT STARTED (card 8b1fb28f re-review: the ABA shape).

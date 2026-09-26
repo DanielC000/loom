@@ -769,7 +769,7 @@ what you checked. Found none? Treat it as live.
      poll the read-only `gate_status(opId)` (never starts a new run) or read `worker_list`'s `pendingMerge`
      field. Re-calling `worker_merge_confirm` with the same `workerSessionId` is also always safe, at any
      delay: a re-call at the SAME commit AND an unmoved mainline returns the cached verdict; a re-call after
-     new commits on the branch, or after the mainline advanced, gates for real — that's a different question, not a silent re-run — but `gate_status`/
+     new commits on the branch, or after the mainline advanced, gates for real — that's a different question, not a silent re-run — and a refusal about the canonical checkout (dirty/staged overlap, or the squash itself failing) is never cached: clean the checkout and a plain re-call is a real re-attempt — but `gate_status`/
      `worker_list` are read-only and cost nothing, so prefer them for a pure status check. The ONLY way to
      force a genuine RE-RUN of the SAME commit (e.g. retry a flake, not new commits or a moved mainline — those already gate
      normally on the next re-call) is `forceRemoveWorktree:true` on the re-call — a deliberate, named

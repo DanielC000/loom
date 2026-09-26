@@ -693,6 +693,8 @@ type ConfirmMergeResult = {
   /** @decision 99a1cf6f — `gateBaseInvalidated` is a real, resolved verdict about canonical main, never
    *  an ordinary rejection against the branch; `NEVER_CACHED_OUTCOMES` must never serve it from cache. */
   gateBaseInvalidated?: boolean;
+  /** @decision fb525c31 — set ONLY via `squashRefusedResult` (the ONE constructor): a refusal caused by the state of the CANONICAL CHECKOUT (staged dirt, dirty/untracked overlap on a path the branch touches — at admission or at squash time) or by the squash itself failing after a passing gate (`conflict`/`merge_failed`). Not a verdict about the branch, so classified `"squash-refused"` and never cached (`NEVER_CACHED_OUTCOMES`): a re-call after the human cleans the checkout must be a real re-attempt. Deliberately NOT set for STAGE_EMPTY_RETRY/orphaned_zero_ahead (those ARE about the branch and stay cached). */
+  squashRefused?: true;
   /** Card 6f13746c: an UNGATED (gate-off / gate-interval) landing was refused in-lock because a gate became owed after its decision — nothing squashed,
    *  never cached (classified `"gate-owed"`). Deliberately NOT `gateBaseInvalidated`: that is a verdict about canonical main. */
   gateOwedRefusal?: boolean;
@@ -872,6 +874,9 @@ type WorkerGateResult = {
 const GATE_DISABLED_WARNING = "merge gate is OFF for this project (orchestration.mergeGate:\"off\") — merged WITHOUT running the gate command; recorded as skipReason:\"gate-disabled\", gateRan:false, NOT a pass";
 /** Card 6f13746c: the interval's own wording — a landing the gate INTERVAL let through ungated (never a pass). */
 const GATE_INTERVAL_WARNING = "merge gate is in INTERVAL mode for this project (orchestration.mergeGateInterval) and this was not the gated landing's turn — merged WITHOUT running the gate command; recorded as skipReason:\"gate-interval\", gateRan:false, NOT a pass";
+/** @decision fb525c31 — the ONE place a squash-blocking refusal gets its `squashRefused` marker (`classifyOutcome` reads only that field), so a new refusal site cannot forget it by hand-setting a flag; `merge-confirm-squash-refusal-recall.mjs` pins every call site. */
+function squashRefusedResult(r: Omit<ConfirmMergeResult, "squashRefused">): ConfirmMergeResult { return { ...r, squashRefused: true }; }
+
 function gateSkipWarning(reason: "gate-disabled" | "gate-interval" | undefined): string {
   return reason === "gate-interval" ? GATE_INTERVAL_WARNING : GATE_DISABLED_WARNING;
 }
@@ -13728,7 +13733,7 @@ export class SessionService {
       const detailText = stagedCanonicalDirtRefusalMessage(branch, stagedDirt.paths ?? "");
       const { suppressed, sha } = await rejectNotify("canonical_staged_dirt", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: "canonical_staged_dirt", sha, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: `canonical repo has staged, uncommitted changes unrelated to '${branch}' — a human must resolve the canonical checkout by hand`, detailText, notified: !suppressed, opId: thisOpId };
+      return squashRefusedResult({ merged: false, reason: `canonical repo has staged, uncommitted changes unrelated to '${branch}' — a human must resolve the canonical checkout by hand`, detailText, notified: !suppressed, opId: thisOpId });
     }
 
     // @decision 4b7ff996 — admission-time preflight for a canonical-dirty-tracked overlap that can never
@@ -13740,7 +13745,7 @@ export class SessionService {
       const detailText = `CANONICAL CHECKOUT DIRTY ON A PATH THIS BRANCH TOUCHES: ${paths}. The canonical repo has unstaged tracked changes on this path — 'git merge --squash' cannot overwrite unstaged local modifications, so this merge cannot land no matter how many times it's retried. This is NOT a stale-base problem — the branch's own base is fine, and rebasing it changes nothing here. Squash phase never reached; canonical repo AND worktree untouched. A HUMAN must resolve the canonical checkout by hand (commit or discard the dirty path there) — project managers have no canonical-repo git write access, so escalate this to the Platform Lead.`;
       const { suppressed, sha } = await rejectNotify("canonical_dirty_overlap", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: "canonical_dirty_overlap", sha, dirtyPaths: dirtyOverlap.paths, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: `canonical repo has unstaged tracked changes on a path '${branch}' also touches (${paths}); a rebase will not help — escalate to the Platform Lead to resolve the canonical checkout`, detailText, notified: !suppressed, opId: thisOpId };
+      return squashRefusedResult({ merged: false, reason: `canonical repo has unstaged tracked changes on a path '${branch}' also touches (${paths}); a rebase will not help — escalate to the Platform Lead to resolve the canonical checkout`, detailText, notified: !suppressed, opId: thisOpId });
     }
 
     // BACKSTOP (BEFORE the gate/merge) — card 98d6264d: the SAME defense as the tracked-path check just
@@ -13760,7 +13765,7 @@ export class SessionService {
       const detailText = `CANONICAL CHECKOUT HAS AN UNTRACKED FILE ON A PATH THIS BRANCH ALSO TOUCHES: ${paths}. The canonical repo has an untracked file at this path — 'git merge --squash' refuses to overwrite an untracked file it doesn't recognize (regardless of whether its content already matches), so this merge cannot land no matter how many times it's retried. This is NOT a stale-base problem — the branch's own base is fine, and rebasing it changes nothing here. Squash phase never reached; canonical repo AND worktree untouched. A HUMAN must resolve the canonical checkout by hand (move or remove the untracked path there) — project managers have no canonical-repo git write access, so escalate this to the Platform Lead.`;
       const { suppressed, sha } = await rejectNotify("canonical_dirty_overlap", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: "canonical_dirty_overlap", sha, dirtyPaths: untrackedOverlap.paths, untracked: true, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: `canonical repo has an untracked file on a path '${branch}' also adds (${paths}); a rebase will not help — escalate to the Platform Lead to resolve the canonical checkout`, detailText, notified: !suppressed, opId: thisOpId };
+      return squashRefusedResult({ merged: false, reason: `canonical repo has an untracked file on a path '${branch}' also adds (${paths}); a rebase will not help — escalate to the Platform Lead to resolve the canonical checkout`, detailText, notified: !suppressed, opId: thisOpId });
     }
 
     // @decision f324e8fa — pre-gate HTML-entity title check is an early advisory (a snapshot, saves a gate
@@ -15715,7 +15720,7 @@ export class SessionService {
         : `${why}; squash was attempted but never committed — canonical repo untouched, worktree retained. Re-task a rebase.`;
       const { suppressed, sha } = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateExtended, gateProximity };
+      return squashRefusedResult({ merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateExtended, gateProximity });
     }
     // GENUINE no-op (nothing staged): the staged set was re-derived from a clean index, so this is NOT a
     // stale-state false negative — it is a true empty merge. Distinguish the two kinds for the manager:
@@ -17815,7 +17820,7 @@ export class SessionService {
         //
         // Card 6325bc74 — a `NotYourWorkerError` throw classifies as "not-your-worker", not "unknown": it
         // is a fact about the CALLING MANAGER, a dimension `NEVER_CACHED_OUTCOMES` excludes from caching.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.
