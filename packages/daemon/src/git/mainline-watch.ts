@@ -77,7 +77,7 @@ export function classifyMainlineMove(watermarkSha: string, f: MainlineFacts): Ma
   const evidence: MainlineEvidence[] = [];
   const suspect: string[] = [];
   if (raw.length > 0) {
-    if (!f.forward) { evidence.push("rewind-raw-write"); }
+    if (!f.forward) { evidence.push("rewind-raw-write"); suspect.push(f.tip); } // a rewind/divergence has no in-range commits to name: the tip main was written onto is the suspect
     else if (f.untrailered.length > 0) { evidence.push("reflog-raw-write"); suspect.push(...f.untrailered); }
   }
   if (f.loomTipHits.length > 0) { evidence.push("loom-branch-reachable"); suspect.push(...f.loomTipHits); }
@@ -140,34 +140,39 @@ export async function readFirstParent(repoPath: string, sha: string, timeoutMs: 
 
 /**
  * Is `ancestor` an ancestor of (or equal to) `descendant`? Compares `merge-base` OUTPUT, never `merge-base --is-ancestor`'s exit status (simple-git's `raw()` resolves a
- * non-zero exit with empty stderr as success — decision bc2240d7). THROWS on a git failure — the caller fails open (no advance).
+ * non-zero exit with empty stderr as success — decision bc2240d7). THROWS on a git failure — the caller fails open (no advance). `run` (default: a bounded canonical read) lets
+ * {@link readMainlineFacts} route the same check through its deadline-bounded runner: ONE helper, no second copy.
  */
-export async function isAncestorCommit(repoPath: string, ancestor: string, descendant: string, timeoutMs: number): Promise<boolean> {
-  const out = (await withTimeout(canonicalGit(repoPath, timeoutMs).raw(["merge-base", ancestor, descendant]), timeoutMs, "git merge-base")).trim();
+export async function isAncestorCommit(repoPath: string, ancestor: string, descendant: string, timeoutMs: number, run?: (args: string[]) => Promise<string>): Promise<boolean> {
+  const args = ["merge-base", ancestor, descendant];
+  const out = (await (run ? run(args) : withTimeout(canonicalGit(repoPath, timeoutMs).raw(args), timeoutMs, "git merge-base"))).trim();
   return out === ancestor;
 }
 
 /** Reads everything {@link classifyMainlineMove} needs, through `canonicalGit`, every call bounded by `timeoutMs`. THROWS on any git failure — the caller fails open. */
-export async function readMainlineFacts(repoPath: string, watermarkSha: string, head: { branch: string; tip: string }, timeoutMs: number, deadlineAt?: number): Promise<MainlineFacts> {
+export async function readMainlineFacts(repoPath: string, watermarkSha: string, head: { branch: string; tip: string }, timeoutMs: number, deadlineAt?: number, runOverride?: (args: string[]) => Promise<string>): Promise<MainlineFacts> {
   const git = canonicalGit(repoPath, timeoutMs);
   // Aggregate deadline (card 0eb7ff27; `deadlineAt` is a `performance.now()` value, monotonic): each call is bounded by min(per-call timeout, time left). When the TIME LEFT is what bounds the call,
   // the timer itself rejects with MainlineDeadlineError — the cause is never inferred from the clock afterwards (a timer can fire a hair early, which would read as an ordinary error).
-  const run = async (args: string[]): Promise<string> => {
+  const run = runOverride ?? (async (args: string[]): Promise<string> => {
     const what = `git ${args[0]}`;
     if (deadlineAt === undefined) return withTimeout(git.raw(args), timeoutMs, what);
     const left = deadlineAt - performance.now();
     if (left <= 0) throw new MainlineDeadlineError(what);
     return left >= timeoutMs ? withTimeout(git.raw(args), timeoutMs, what) : withTimeout(git.raw(args), left, what, () => new MainlineDeadlineError(what));
-  };
+  });
   const facts: MainlineFacts = { branch: head.branch, tip: head.tip, reflog: null, forward: true, untrailered: [], loomTipHits: [], truncated: false, watermarkMissing: false };
-  try { await run(["rev-parse", "--verify", "--quiet", `${watermarkSha}^{commit}`]); } catch (err) { if (err instanceof MainlineDeadlineError) throw err; facts.watermarkMissing = true; return facts; }
-  try { await run(["merge-base", "--is-ancestor", watermarkSha, head.tip]); } catch (err) { if (err instanceof MainlineDeadlineError) throw err; facts.forward = false; }
+  // @decision 4fa36502 — both reads compare git's OUTPUT, never an exit status (simple-git resolves a non-zero exit with empty stderr as success, bc2240d7), and ANY error here (timeout, spawn
+  // failure, deadline) propagates: the caller fails open with W untouched. An error must never be filed as "W missing" or "rewound" — that would store W and absorb the move.
+  const resolved = (await run(["rev-parse", "--verify", "--quiet", `${watermarkSha}^{commit}`])).trim();
+  if (!/^[0-9a-f]{40,64}$/.test(resolved)) { facts.watermarkMissing = true; return facts; }
+  facts.forward = await isAncestorCommit(repoPath, watermarkSha, head.tip, timeoutMs, run);
   // Reflog (newest-first). One extra entry past the cap distinguishes "cap hit" from "exactly the cap".
   const rl = (await run(["reflog", "show", `--max-count=${MAINLINE_RANGE_CAP + 1}`, "--format=%H%x1f%gs", `refs/heads/${head.branch}`])).split("\n").filter(Boolean);
   facts.reflog = rl.length === 0 ? null : rl.map((l) => { const [sha = "", msg = ""] = l.split("\x1f"); return { sha, msg }; });
   // The cap bounds the WINDOW, not the reflog: a long history BEFORE W is irrelevant. It is only "unverifiable" when the window filled up without ever reaching W.
   if (rl.length > MAINLINE_RANGE_CAP && !(facts.reflog ?? []).some((e) => e.sha === watermarkSha)) { facts.truncated = true; return facts; }
-  if (!facts.forward) return facts;
+  // @decision 4fa36502 — NO derived fact (forward, …) short-circuits the range read and the loom-tip scan: a divergence has a well-defined `W..tip`, and the loom-tip signal is the only one that sees a forged-message bypass. Only the cap/deadline paths skip it.
   // First-parent range with messages (trailers).
   const log = await run(["log", "--first-parent", `--max-count=${MAINLINE_RANGE_CAP + 1}`, "--format=%x1e%H%x1f%B", `${watermarkSha}..${head.tip}`]);
   const commits = log.split("\x1e").filter((r) => r.trim() !== "");
