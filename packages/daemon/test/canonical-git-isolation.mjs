@@ -29,7 +29,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, mergeMainIntoWorktree, verifyReviewedTipChain } = await import("../dist/git/worktrees.js");
 const { assembleBatchBranches } = await import("../dist/git/batch-merge.js");
-const { boundedSimpleGit, CANONICAL_GIT_CONFIG, canonicalGit, CANONICAL_GIT_CONFIG_ARGS, gitSubcommand, canRunMergeDriver, assertNoLiveMergeDrivers, describeGitFailure, CanonicalGitRefusal, canonicalRaw } = await import("../dist/git/bounded.js");
+const { boundedSimpleGit, CANONICAL_GIT_CONFIG, canonicalGit, CANONICAL_GIT_CONFIG_ARGS, gitSubcommand, canRunMergeDriver, assertNoLiveMergeDrivers, describeGitFailure, CanonicalGitRefusal, canonicalRaw, scrubGitEnv } = await import("../dist/git/bounded.js");
 
 const GIT_ID = "-c user.email=cgi@loom -c user.name=cgi";
 const now = new Date().toISOString();
@@ -414,6 +414,46 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
     } finally { if (saved === undefined) delete process.env.GIT_CONFIG; else process.env.GIT_CONFIG = saved; }
   }
 
+  // ── (e93703d9) Windows env names are case-insensitive: an ambient `Git_Config=<file>` is honoured by git-for-windows AND found by Node's `process.env.GIT_CONFIG`,
+  // but a `{...process.env}` copy keeps the key as spelled, so a case-sensitive `delete` missed it and the driver reads went blind again. win32-only: on POSIX
+  // `Git_Config` is a DIFFERENT, inert variable (nothing to test — and the strip deliberately stays case-sensitive there).
+  if (process.platform !== "win32") {
+    console.log("SKIP  (GIT_CONFIG casing) win32-only: POSIX env names are case-sensitive, so `Git_Config` is not `GIT_CONFIG` there");
+  } else {
+    for (const [si, spelling] of ["Git_Config", "git_config"].entries()) {
+      const stag = `s${si}`; // NOT the spelling: temp paths differ only in case on a case-insensitive FS
+      const repo = mkMergeRepo(`gitconfig-${stag}`);
+      const { mark, cmd } = driverFor(`e937-${stag}`);
+      plantDriver(repo, null, "config", cmd, `e937-${stag}`);
+      const empty = path.join(os.tmpdir(), `loom-cgi-empty-gitconfig-${stag}-${sfx}`); registerForCleanup(empty); fs.writeFileSync(empty, "");
+      const saved = process.env.GIT_CONFIG;
+      delete process.env.GIT_CONFIG; // drop any existing spelling so the assignment below fixes THIS one
+      process.env[spelling] = empty;
+      try {
+        check(`(GIT_CONFIG casing ${spelling}) the env really carries the odd spelling (${Object.keys(process.env).filter((k) => k.toUpperCase() === "GIT_CONFIG").join(",")})`, Object.keys(process.env).includes(spelling));
+        const seen = (() => { try { return git(repo, "config --get-regexp ^merge"); } catch { return ""; } })();
+        check(`(GIT_CONFIG casing ${spelling}) CONTROL: a bare \`git config\` read under the same env sees NO driver (the env is honoured)`, !seen.includes("merge.evil.driver"));
+        try { execSync(`git ${mergeTree.join(" ")}`, { cwd: repo, stdio: "ignore", env: process.env }); } catch { /* only the marker matters */ }
+        check(`(GIT_CONFIG casing ${spelling}) CONTROL: …while a bare \`git merge-tree\` under the same env DOES exec the driver`, exists(mark));
+        fs.rmSync(mark, { force: true });
+        for (const [label, g] of [["env-less", canonicalGit(repo, 15_000)], ["caller env", canonicalGit(repo, 15_000, { ...process.env, GIT_TERMINAL_PROMPT: "0" })]]) {
+          await g.raw(mergeTree).catch(() => {}); // a conflict/refusal is fine — only the marker matters
+          check(`(GIT_CONFIG casing ${spelling}, ${label}) …and the driver did NOT run`, !exists(mark));
+          fs.rmSync(mark, { force: true });
+        }
+        // The read itself: enumeration through the instance must list the driver (blindness would list none).
+        const listed = await canonicalGit(repo, 15_000).raw(["config", "-z", "--list"]);
+        check(`(GIT_CONFIG casing ${spelling}) canonicalGit's own \`config -z --list\` read sees the repo's merge.evil.driver (not the empty GIT_CONFIG file)`, listed.includes("merge.evil.driver"));
+      } finally {
+        delete process.env[spelling];
+        if (saved !== undefined) process.env.GIT_CONFIG = saved;
+      }
+    }
+    // scrubGitEnv is the same case-sensitivity class: a `Git_Pager` must not survive on win32.
+    const scrubbed = scrubGitEnv({ Git_Pager: "less", pager: "less", Git_Editor: "vi", KEEP_ME: "1" });
+    check("(scrubGitEnv casing) Git_Pager / pager / Git_Editor are stripped on win32, unrelated keys kept", Object.keys(scrubbed).join(",") === "KEEP_ME");
+  }
+
   // ── MINOR 4: enumeration and post-check use the call's OWN global options, so `-C <path>` / `--git-dir <path>` calls are protected against the config THEY see.
   for (const style of ["-C", "--git-dir", "--git-dir="]) {
     const styleTag = style === "-C" ? "C" : style === "--git-dir" ? "gd-sep" : "gd-eq";
@@ -478,7 +518,7 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
       check("(ambient env) with GIT_ASKPASS/SSH_ASKPASS/GIT_SSH_COMMAND/GIT_PROXY_COMMAND set, a PURE READ through canonicalGit succeeds (not 'unsafe')", head !== null && head.length === 40 && headErr === null);
       let mtErr = null; try { await g.raw(mergeTree); } catch (e) { mtErr = e; }
       check("(ambient env) …and an exec-capable call is not rejected as 'unsafe' either", !mtErr || !/unsafe/i.test(String(mtErr.message)));
-      // …and an ambient GIT_CONFIG is STILL stripped (the only case that needs an explicit env).
+      // (an ambient GIT_CONFIG being stripped is asserted in the "MAJOR 2" (GIT_CONFIG) block above; its casing twin is the (e93703d9) block.)
     } finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
   }
 

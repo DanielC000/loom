@@ -129,8 +129,20 @@ export const GIT_ENV_STRIP_KEYS = [
  */
 export function scrubGitEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
   const out = { ...env };
-  for (const key of GIT_ENV_STRIP_KEYS) delete out[key];
+  deleteEnvKeys(out, GIT_ENV_STRIP_KEYS);
   return out;
+}
+
+/** The keys of `env` that name one of `names` — on win32 case-INSENSITIVELY (env names are case-insensitive there: `Git_Pager` IS `GIT_PAGER` to git-for-windows, and
+ *  a `{...process.env}` copy keeps the key as spelled); on POSIX exact-match only (`Git_Config` is a different, inert variable). Card e93703d9. */
+export function envKeysNamed(env: Record<string, string | undefined>, names: readonly string[]): string[] {
+  if (process.platform !== "win32") return names.filter((n) => Object.prototype.hasOwnProperty.call(env, n));
+  const upper = new Set(names.map((n) => n.toUpperCase()));
+  return Object.keys(env).filter((k) => upper.has(k.toUpperCase()));
+}
+/** Delete every key {@link envKeysNamed} finds, in place. */
+export function deleteEnvKeys(env: Record<string, string | undefined>, names: readonly string[]): void {
+  for (const k of envKeysNamed(env, names)) delete env[k];
 }
 
 /**
@@ -332,7 +344,9 @@ export function canonicalGit(
   // GIT_CONFIG is really present; otherwise pass the caller's env through unchanged (undefined stays undefined).
   const base = env ?? process.env;
   let cleanEnv = env;
-  if (base.GIT_CONFIG !== undefined) { cleanEnv = { ...base }; delete cleanEnv.GIT_CONFIG; }
+  // Presence check AND strip both go through the ONE case-aware helper (win32: `Git_Config` is `GIT_CONFIG` — card e93703d9); a bare `base.GIT_CONFIG` read would find
+  // it on process.env (Node's case-insensitive accessor) while a plain-object `delete` misses it.
+  if (envKeysNamed(base, ["GIT_CONFIG"]).some((k) => base[k] !== undefined)) { cleanEnv = { ...base }; deleteEnvKeys(cleanEnv, ["GIT_CONFIG"]); }
   // `allowUnsafeMergeDriver` is required for simple-git to pass OUR `-c merge.<x>.driver=` (a blanking, never a set).
   const git = boundedSimpleGit(repoPath, blockTimeoutMs, cleanEnv, abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
   const raw = async (...callArgs: unknown[]): Promise<string> => {
