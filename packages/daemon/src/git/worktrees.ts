@@ -5378,6 +5378,51 @@ export async function mergeMainIntoWorktree(
   return { ok: true, merged: true, mainSha };
 }
 
+/**
+ * Card bbccf470 — the STRUCTURAL check behind "is this branch's tip still the tip the manager reviewed, plus only Loom's own advances?". Derived from git alone
+ * (nothing is stored, so nothing can be forged, overwritten or left behind): walk back from `live`; a step prev→cur is a daemon advance only if
+ *  (a) `cur` is on canonical main's history and `reviewed` is an ancestor of `cur` (a fast-forward through main — e.g. the stale-base forward of a branch with no own
+ *      commits), which ends the walk as unmoved; or
+ *  (b) `cur` is a merge commit whose parents are exactly [prev, M], with M on canonical main and `cur`'s tree equal to `git merge-tree --write-tree prev M` — i.e. exactly
+ *      what {@link mergeMainIntoWorktree}'s `git merge` produces; the walk continues from `prev`.
+ * Reaching `reviewed` ⇒ ok. Anything else (a worker commit, a merge with conflict-resolution content, a foreign parent) ⇒ not ok. Bounded (`REVIEWED_TIP_WALK_MAX_HOPS`) and
+ * FAIL CLOSED on any git error. Read-only.
+ *
+ * @decision bbccf470 — never store or trust a per-branch "advanced to" record (a shared ref/file is agent-writable and was forged in review); never accept "some merge commit" as daemon-authored.
+ */
+export const REVIEWED_TIP_WALK_MAX_HOPS = 32;
+export async function verifyReviewedTipChain(
+  repoPath: string, reviewed: string, live: string, deps: BoundedGitDeps = {},
+): Promise<{ ok: true; hops: number } | { ok: false; reason: string }> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  // `--no-replace-objects` on EVERY call: a `git replace` ref must not rewrite the history this walk judges.
+  const raw = (args: string[], label: string) => withTimeout(git.raw(["--no-replace-objects", ...args]), timeoutMs, label);
+  // `rev-list -n1 A ^B` prints a commit iff A is NOT reachable from B (a real git error throws, unlike `merge-base --is-ancestor`'s exit 1).
+  const reachable = async (a: string, from: string) => (await raw(["rev-list", "-n1", a, `^${from}`], "git rev-list (reviewed-tip reachability)")).trim() === "";
+  const short = (x: string) => x.slice(0, 8);
+  try {
+    let cur = live;
+    for (let hops = 0; hops <= REVIEWED_TIP_WALK_MAX_HOPS; hops++) {
+      if (cur === reviewed) return { ok: true, hops };
+      if (await reachable(cur, "HEAD") && await reachable(reviewed, cur)) return { ok: true, hops };
+      const parents = (await raw(["rev-list", "--parents", "-n1", cur], "git rev-list --parents (reviewed-tip walk)")).trim().split(/\s+/).slice(1);
+      if (parents.length !== 2) return { ok: false, reason: `${short(cur)} is not a merge of main (${parents.length} parent(s)) — a commit made after the review` };
+      const [prev, m] = parents as [string, string];
+      if (!(await reachable(m, "HEAD"))) return { ok: false, reason: `${short(cur)} merges ${short(m)}, which is not on main` };
+      const tree = (await raw(["rev-parse", `${cur}^{tree}`], "git rev-parse tree (reviewed-tip walk)")).trim();
+      // The daemon's union ran in the WORKTREE, so it used the BRANCH's attributes (e.g. `merge=union`); merge-tree here runs in canonical, so point it at `prev`'s tree.
+      // `merge-tree --write-tree` exits 1 on a conflict WITHOUT throwing through simple-git: the conflicted tree oid is the first line and the conflict info follows —
+      // so anything but exactly one oid line is a conflict, never a clean union.
+      const mt = (await raw([`--attr-source=${prev}`, "merge-tree", "--write-tree", prev, m], "git merge-tree (reviewed-tip walk)")).trim().split(/\r?\n/);
+      if (mt.length !== 1 || !/^[0-9a-f]{40,64}$/.test(mt[0]!) || tree !== mt[0]) return { ok: false, reason: `${short(cur)} could not be verified as a clean union of ${short(prev)} and ${short(m)} (conflicted, or not what merging main would produce)` };
+      cur = prev;
+    }
+    return { ok: false, reason: `more than ${REVIEWED_TIP_WALK_MAX_HOPS} steps between the reviewed tip and the branch tip` };
+  } catch (e) {
+    return { ok: false, reason: `could not verify (${(e as Error).message.split("\n")[0]})` };
+  }
+}
+
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string,

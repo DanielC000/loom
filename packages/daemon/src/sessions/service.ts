@@ -22,7 +22,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -525,6 +525,8 @@ type GateRejectionDetail = {
  *  - "pre-stop": caught before the worker was touched — nothing finalized, worker kept (live).
  *  - "at-finalize": caught after the worker's hard stop — nothing finalized, worker kept (stopped).
  *  - "ref-kept-after-finalize": the CAS ref delete refused after finalize had already run — FINALIZED, only the ref kept. */
+/** Card bbccf470 — {@link SessionService.reviewedTipVerdict}'s result. `tip` is the live branch tip that verdict read (null when unreadable) — the batch pins THAT sha. */
+type ReviewedTipVerdict = { state: "never-reviewed" | "unmoved"; tip: string | null } | { state: "moved"; reviewed: string | null; live: string | null; text: string; why: string; tip: string | null };
 type BranchAdvancedDuringGate = { assembledTip: string | null; liveTip: string | null; phase: "pre-stop" | "at-finalize" | "ref-kept-after-finalize" };
 /** One line naming what happened to a batch candidate whose tip moved. An UNREADABLE live tip is a different fact from a
  *  moved one (nothing was proven about a commit), so it is worded as a failed verification. */
@@ -673,6 +675,8 @@ type ConfirmMergeResult = {
   /** Card 6f13746c: an UNGATED (gate-off / gate-interval) landing was refused in-lock because a gate became owed after its decision — nothing squashed,
    *  never cached (classified `"gate-owed"`). Deliberately NOT `gateBaseInvalidated`: that is a verdict about canonical main. */
   gateOwedRefusal?: boolean;
+  /** Card bbccf470: refused BEFORE any gate/union/squash because the branch tip moved after the manager's last worker_merge review (classified `"reviewed-tip-moved"`, never cached — a re-review changes the answer). */
+  reviewedTipMoved?: boolean;
   /** Card 344ce950 (bounded multi-file since card 67030bb9): the bare name(s) of the test file(s) this
    *  merge's gate retried together in isolation before reaching this verdict (see gate-runner.ts's
    *  `identifyRetriableTestFiles`) — `undefined` when no such retry fired (the overwhelming majority of
@@ -13189,6 +13193,10 @@ export class SessionService {
     // The full unified patch is opt-in (includePatch) — see the worker_merge tool's `fullDiff` flag. An
     // OPTIONAL files/pathGlob filter (additive — see diffBranch) further scopes BOTH the diffstat and the
     // patch to matching file(s), so a manager can pull one file's hunk at a time instead of the whole patch.
+    // Card bbccf470: the branch tip this review covers, read BEFORE the diff so a commit landing between the two reads can only be UNDER-covered
+    // (later refused), never recorded as reviewed. Consumed only by `reviewedTipFor`. `null` (unreadable) is recorded, not omitted: an event with
+    // no `tip` key is a pre-bbccf470 review (treated as never-reviewed), while `tip:null` fails CLOSED at the check.
+    const reviewedTip = await resolveGitRef(repoPath, worker.branch, { timeoutMs: this.gitOpMs });
     const includePatch = opts.includePatch === true;
     const diff = await diffBranch(repoPath, worker.branch, "HEAD", { includePatch, files: opts.files, pathGlob: opts.pathGlob, includeStatus: true }, { timeoutMs: this.gitOpMs });
     // BACKSTOP: a worker that committed to a SELF-CREATED branch instead of its assigned `loom/<key>`
@@ -13231,7 +13239,7 @@ export class SessionService {
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "merge_request",
       detail: {
-        branch: worker.branch, filesChanged: diff.filesChanged,
+        branch: worker.branch, filesChanged: diff.filesChanged, tip: reviewedTip, repoKey: worker.repoKey ?? null,
         ...(stranded.stranded ? { stranded: stranded.branch } : {}),
         ...(behindMain ? { behindMain } : {}),
         ...(deniedAdds.length ? { deniedAdds: deniedAdds.length } : {}),
@@ -13643,6 +13651,21 @@ export class SessionService {
       }
       return { suppressed, sha };
     };
+
+    // REVIEWED-TIP REFUSAL (card bbccf470): the branch must still be the tip the manager reviewed (plus Loom's own union-merge advances — see `reviewedTipVerdict`).
+    // Checked at TWO points, both via the one resolver: here (BEFORE everything that touches the branch or a gate lane — in particular before the union-merge below) and
+    // again right before the squash, against the PINNED landing tip, so a commit made while this op waited in the gate queue cannot land either. Skipped for a branch that
+    // has already landed (an idempotent re-confirm). Never cached (`reviewed-tip-moved`): a re-review changes the answer.
+    const refuseReviewedTipMoved = async (rt: Extract<ReviewedTipVerdict, { state: "moved" }>, phase: "confirm-start" | "pre-squash"): Promise<ConfirmMergeResult> => {
+      const detailText = `REVIEWED-TIP: ${rt.text} ${phase === "confirm-start" ? "Squash phase never reached; canonical repo and worktree untouched." : "Refused at the squash point: nothing was squashed."}`;
+      const { suppressed, sha } = await rejectNotify("reviewed_tip_moved", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "reviewed_tip_moved", sha, phase, reviewedTip: rt.reviewed, liveTip: rt.live, why: rt.why, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: rt.text, detailText, notified: !suppressed, opId: thisOpId, gateRan: false, reviewedTipMoved: true };
+    };
+    {
+      const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null);
+      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs }))) return refuseReviewedTipMoved(rt, "confirm-start");
+    }
 
     // BACKSTOP (BEFORE the gate/merge): refuse if the worker's commits are STRANDED on a self-created
     // branch instead of its assigned `loom/<key>`. The assigned branch is then 0-ahead, so the squash
@@ -15560,7 +15583,14 @@ export class SessionService {
       evt("merge_rejected", { reason: "gate_owed", sha, ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: false, gateOwedRefusal: true };
     }
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, expectedTipForLanding(landingPin));
+    // Card bbccf470: the SAME reviewed-tip check, against the tip the squash is pinned to (every landing kind: gated, reuse, inert, gate-interval/gate-disabled; a
+    // no-gate-configured landing has no pin, so it is checked — and then pinned — at the tip read here, which the squash then freezes).
+    const squashTip = expectedTipForLanding(landingPin) ?? (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined;
+    {
+      const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null, squashTip ?? null);
+      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs }))) return refuseReviewedTipMoved(rt, "pre-squash");
+    }
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip);
     // Card 6f13746c: record the landing HERE — at the squash, still INSIDE the repo guard (`endSquash` / `releaseInertRepoGuard` run in the
     // `finally` below) — so the counter's order equals main's order: a later pass resets only what precedes it on main, and an ungated landing
     // that squashed after a pass is never erased by it. (Recording in `finalizeMerge`, after the guard, raced exactly that.) An inert docs-only
@@ -15893,6 +15923,33 @@ export class SessionService {
     if (later === "found") return undefined;
     return { retain, gitUnverified: later === "error" };
   }
+  /**
+   * Card bbccf470 — THE ONE reader of "is this branch's tip still the one the manager reviewed?" (the solo confirm at BOTH its check points and the batch assembly all
+   * call it; nothing else compares against a review). The reviewed tip is the tip on the LATEST `merge_request` event for this branch AND repoKey (a recycled successor
+   * shares the branch, so the predecessor's review binds; a re-review replaces it; a stale review from an earlier incarnation simply fails the walk-back below — a
+   * re-review clears it). `tip` (default: read live now) is the tip to judge — the solo pre-squash check passes the PINNED landing tip. The verdict is
+   * {@link verifyReviewedTipChain}'s structural walk from that tip back to the reviewed one — Loom's own union-merge of main passes, a worker commit does not.
+   *  - no `merge_request` event, or one with no `tip` key (a review filed before this card) ⇒ `never-reviewed`: NOT refused (the rule is "no unreviewed commits
+   *    AFTER a review", not "must review");
+   *  - reviewed tip unreadable (`tip:null`), tip unreadable, or any git error in the walk ⇒ `moved` (fail CLOSED).
+   * @decision bbccf470 — one resolver; state is derived from git, never stored (no agent-writable edge); never re-derive "reviewed tip" at a call site.
+   */
+  private async reviewedTipVerdict(branch: string, repoPath: string, repoKey: string | null, tip?: string | null): Promise<ReviewedTipVerdict> {
+    const last = this.db.listEventsForBranch(branch, "merge_request").filter((e) => (e.detail?.repoKey ?? null) === repoKey).at(-1);
+    const live = tip !== undefined ? tip : await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs });
+    if (!last || !Object.prototype.hasOwnProperty.call(last.detail ?? {}, "tip")) return { state: "never-reviewed", tip: live };
+    const recorded = typeof last.detail?.tip === "string" && last.detail.tip ? last.detail.tip : null;
+    let why = recorded === null ? "the reviewed tip could not be read at review time" : live === null ? "the branch tip could not be read" : "";
+    if (recorded !== null && live !== null) {
+      const chain = await verifyReviewedTipChain(repoPath, recorded, live, { timeoutMs: this.gitOpMs });
+      if (chain.ok) return { state: "unmoved", tip: live };
+      why = chain.reason;
+    }
+    const short = (x: string | null) => (x ? x.slice(0, 8) : "unreadable");
+    const text = `${branch} advanced after your last worker_merge review (reviewed ${short(recorded)}, now ${short(live)}: ${why}) — the new content could not be verified as the reviewed work plus Loom's own union-merge of main, so it was NOT merged; ` +
+      `re-review with worker_merge, then re-run. (Loom's own union-merge of main does not count; a worker that was never reviewed is not refused.)`;
+    return { state: "moved", reviewed: recorded, live, text, why, tip: live };
+  }
   private async finishAlreadyMerged(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
     worktreePath: string; branch: string; repoPath: string; projectId: string; opId: string;
@@ -16095,13 +16152,27 @@ export class SessionService {
       });
     }
 
+    // REVIEWED-TIP REFUSAL (card bbccf470): a candidate whose branch tip moved after its last worker_merge review is NOT assembled, NOT stranded-checked and NEVER
+    // solo-fallback-confirmed — like a held candidate it counts toward neither K nor the `< 2` check, and is reported `started:false` with the re-review message.
+    // A finished candidate (worktree gone) and a never-reviewed one are not refused; the verdict comes from the ONE resolver `reviewedTipVerdict`.
+    const reviewMoved = new Map<string, string>();
+    const verifiedTip = new Map<string, string>(); // candidate → the tip its verdict read; assembly cherry-picks exactly this sha (never re-reads the ref)
+    for (const cand of resolved) {
+      if (retainedOutstanding.has(cand.workerSessionId)) continue;
+      const w = this.db.getSession(cand.workerSessionId);
+      if (!w || !fs.existsSync(w.worktreePath ?? w.cwd)) continue;
+      const rt = await this.reviewedTipVerdict(cand.branch, finalRepoPath, cand.repoKey);
+      if (rt.state === "moved") reviewMoved.set(cand.workerSessionId, rt.text);
+      else if (rt.tip) verifiedTip.set(cand.workerSessionId, rt.tip);
+    }
+
     // STRANDED-WORK BACKSTOP (mirrors confirmWorkerMerge's own pre-gate check): a worker whose real commits
     // sit on some OTHER self-created branch would squash NOTHING into the batch — pull it out to the
     // fallback path up front rather than silently wasting a batch slot on an empty diff.
     const candidates: Candidate[] = [];
     const strandedFallback: { workerSessionId: string; reason: string }[] = [];
     for (const r of resolved) {
-      if (retainedOutstanding.has(r.workerSessionId)) { candidates.push(r); continue; } // held: no stranded check, no fallback
+      if (retainedOutstanding.has(r.workerSessionId) || reviewMoved.has(r.workerSessionId)) { candidates.push(r); continue; } // held / review-moved: no stranded check, no fallback
       const worker = this.db.getSession(r.workerSessionId)!;
       const worktreePath = worker.worktreePath ?? worker.cwd;
       const stranded = await detectStrandedWork(finalRepoPath, worktreePath, r.branch, { timeoutMs: this.gitOpMs });
@@ -16109,14 +16180,14 @@ export class SessionService {
       candidates.push(r);
     }
 
-    const batchable = candidates.filter((c) => !retainedOutstanding.has(c.workerSessionId));
+    const batchable = candidates.filter((c) => !retainedOutstanding.has(c.workerSessionId) && !reviewMoved.has(c.workerSessionId));
     // Held candidates are excluded from `batchable`, so they count toward neither K nor the `liveChosen.length < 2` check below (a
     // [held, X] pair must not cut a batch worktree for one real candidate) — but they STAY in `chosen`, so the dedupe key over the
     // original set, and with it the cached retained verdict a degraded caller's same-ids re-call recovers, is unchanged. They are
     // never assembled: `liveChosen` (chosen minus held) is what every batch member list below is built from.
     const K = computeBatchSize(batchable.length, Math.max(1, orchestration.maxConcurrentWorkers));
     const liveChosen = batchable.slice(0, K);
-    const chosen = candidates.filter((c) => retainedOutstanding.has(c.workerSessionId) || liveChosen.includes(c));
+    const chosen = candidates.filter((c) => retainedOutstanding.has(c.workerSessionId) || reviewMoved.has(c.workerSessionId) || liveChosen.includes(c));
     const overflow = batchable.slice(K);
     // Card 19256231: `batchOpId`, when given, is threaded onto every fallback confirm this call spawns
     // (via confirmWorkerMergeTracked's own `opts.fallbackOfBatchOpId`) so each one's gate_queue row is
@@ -16147,6 +16218,9 @@ export class SessionService {
         const unit = reservations?.get(f.workerSessionId); // card 6f13746c: this candidate's reserved ungated landing (idempotent handle)
         const held = retainedOutstanding.get(f.workerSessionId);
         if (held) { out.push({ workerSessionId: f.workerSessionId, reason: heldReason(held), started: false }); unit?.release(); continue; }
+        // Card bbccf470: a review-moved candidate is skipped EXACTLY like a held one — never solo-confirmed from ANY caller path (the `< 2`, gate-off and no-gate returns included).
+        const movedText = reviewMoved.get(f.workerSessionId);
+        if (movedText) { out.push({ workerSessionId: f.workerSessionId, reason: movedText, started: false }); unit?.release(); continue; }
         const owner = this.resolveLineageOwnerForWorker(managerSessionId, f.workerSessionId);
         if (!owner) {
           const why = `fallback NOT started: worker is not a child of this manager or its recycle lineage`;
@@ -16182,6 +16256,9 @@ export class SessionService {
       // no list (it is never assembled — see `retainedOutstanding`).
       for (const [id, held] of retainedOutstanding) {
         if (!out.some((o) => o.workerSessionId === id)) out.push({ workerSessionId: id, reason: heldReason(held), started: false });
+      }
+      for (const [id, text] of reviewMoved) {
+        if (!out.some((o) => o.workerSessionId === id)) out.push({ workerSessionId: id, reason: text, started: false });
       }
       return out;
     };
@@ -16598,7 +16675,7 @@ export class SessionService {
             };
           };
 
-          const batchCandidates: BatchCandidate[] = liveChosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle }));
+          const batchCandidates: BatchCandidate[] = liveChosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle, ...(verifiedTip.has(c.workerSessionId) ? { tip: verifiedTip.get(c.workerSessionId)! } : {}) }));
           const result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
           // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (`endSquash` just below) — ONCE, with
           // the batch's final landed tip, so the counter's order equals main's order (see the solo record after `mergeBranch`).
@@ -17531,7 +17608,7 @@ export class SessionService {
         //
         // Card 6325bc74 — a `NotYourWorkerError` throw classifies as "not-your-worker", not "unknown": it
         // is a fact about the CALLING MANAGER, a dimension `NEVER_CACHED_OUTCOMES` excludes from caching.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

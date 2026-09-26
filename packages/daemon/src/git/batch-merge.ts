@@ -86,6 +86,9 @@ export interface BatchCandidate {
   taskId: string | null;
   branch: string;
   taskTitle?: string | null;
+  /** Card bbccf470: the branch tip the caller VERIFIED (the reviewed-tip check). When set, assembly cherry-picks exactly this sha and never re-reads the branch ref,
+   *  so a commit added after the check cannot ride into the batch; it is stripped from the landed/dropped rows. */
+  tip?: string;
 }
 
 export interface BatchLandedBranch extends BatchCandidate {
@@ -237,14 +240,14 @@ async function mergeCommitBlocksLinearization(
  * `reset --hard` is safe without the canonical path's own dirty-tree preconditions.
  */
 async function landBranchCommitsIndividually(
-  batchWorktreePath: string, branch: string, deps: BatchGitDeps,
+  batchWorktreePath: string, branch: string, deps: BatchGitDeps, pinnedTip?: string,
 ): Promise<LandResult> {
   const { git, timeoutMs } = boundedMergeGit(batchWorktreePath, deps);
 
   let branchTip: string;
   try {
     branchTip = (await withTimeout(
-      git.raw(["rev-parse", "--verify", `${branch}^{commit}`]), timeoutMs, "git rev-parse branch (batch land)",
+      git.raw(["rev-parse", "--verify", `${pinnedTip ?? branch}^{commit}`]), timeoutMs, "git rev-parse branch (batch land)",
     )).trim();
   } catch (e) {
     return { ok: false, reason: `failed to resolve branch tip: ${(e as Error).message}` };
@@ -582,8 +585,9 @@ export async function assembleBatchBranches(
   const orderedCandidates = initialHead
     ? await sortCandidatesByEarliestAuthorDate(sortGit, initialHead, candidates, sortTimeoutMs)
     : candidates;
-  for (const c of orderedCandidates) {
-    const r = await landBranchCommitsIndividually(batchWorktreePath, c.branch, deps);
+  for (const cWithTip of orderedCandidates) {
+    const { tip: pinnedTip, ...c } = cWithTip;
+    const r = await landBranchCommitsIndividually(batchWorktreePath, c.branch, deps, pinnedTip);
     if (!r.ok) {
       dropped.push({ ...c, reason: r.reason ?? "batch land failed", conflict: !!r.conflict });
       continue;
