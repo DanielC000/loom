@@ -83,16 +83,17 @@ const now = new Date().toISOString();
 
   const db = new Db();
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {}, getPid() { return undefined; } };
-  // The injected removeDir seam (see the file-level doc): git's OWN `worktree remove --force` step
-  // already deletes a healthy, unlocked directory for real — this mock re-creates it and reports failure
-  // EVERY time it's called, deterministically reproducing "left on disk, not yet swept" on any platform.
+  // The injected removeDir seam (see the file-level doc): removeWorktree now removes the directory FIRST (e21cfd5f) and only then lets git
+  // prune its admin record, so this mock deletes the tree for real (leaving git's record stale, which `prune` drops), then re-creates an empty
+  // dir and reports failure EVERY time it's called — deterministically reproducing "left on disk, not yet swept" on any platform.
   let removeDirCalls = 0;
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
     reapWorktreeProcesses: async () => ({ killedPids: [] }),
     gitOpMs: 5_000,
     removeDir: async (target) => {
       removeDirCalls++;
-      if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+      fs.rmSync(target, { recursive: true, force: true });
+      fs.mkdirSync(target, { recursive: true });
       return { removed: false, killed: false };
     },
   });
