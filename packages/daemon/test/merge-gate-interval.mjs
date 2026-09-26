@@ -33,6 +33,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (B) BATCH, N=3: K=2 at ungated 0 is not due ⇒ ONE decision, both branches land through the fallback with reason
 //       "merge gate interval: not this landing's turn" (gate never called), recorder twice, counter 2; a second K=2
 //       (2+2>3) is due ⇒ the REAL shared batch gate runs ONCE, both land, counter resets, ONE ring row (candidates 2).
+//   (W) RED ORDER (card 593cedc8): a gated solo FAILS while a skip-decided solo waits on the guard ⇒ the waiter is refused in-lock as gate-owed,
+//       nothing squashed; the red's bookkeeping waits for a WITNESS (the waiter's confirm settling, else an 8s bound) so a red recorded AFTER the release loses deterministically (RED pre-fix).
+//       (WB) the batch analogue; (W2) under cadence `every` recording a red early is harmless (no owed).
 //   (BF) BATCH failing gate under interval: recorded ONCE with candidates:K (no branchTip), gateOwed true.
 //
 // NOT COVERED: the web UI; a batch dropped-candidate mix; the 479f449f evicted-predecessor rescue landing (it carries
@@ -44,7 +47,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, deferred } from "./_wait.mjs";
 const noReap = async () => ({ killedPids: [] });
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgint-home-${Date.now()}-${process.pid}`);
@@ -171,6 +174,32 @@ const confirm = async (sessions, mgrId, workerId) => {
   return r.settled && r.ok ? r.value : { __unsettled: r };
 };
 const reset = (ctx) => { ctx.gate.calls = 0; ctx.spy.decide = 0; ctx.spy.record = 0; ctx.spy.recorded.length = 0; };
+
+/** RED-ORDER WITNESS (card 593cedc8). Stubs the red's bookkeeping to wait until EITHER the skip-decided waiter's confirm has SETTLED
+ *  ("waiter-settled" — the waiter got through its in-lock owed check before the red existed, i.e. the red is recorded AFTER the release: the
+ *  bug) OR a bounded timeout elapses ("bound" — the waiter could not settle while the red was recorded: the fix). `fired` names which one
+ *  happened. The bound is a cap; the waiter's settlement is the witness. Call `w.watch(promise)` with the waiter's confirm. */
+function armRedWitness(ctx, boundMs = 8_000) {
+  const w = { fired: null, calls: 0, waiterHadGuard: null };
+  const settled = deferred();
+  // Second, TIMING-INDEPENDENT witness: has the waiter ALREADY acquired its repo guard when the trigger fires? Under the fix the gate still holds
+  // the guard while the red is recorded, so it cannot have; under any post-release ordering it acquires within ms, however slowly it settles.
+  let guardAcquired = false;
+  const sem = ctx.sessions.gateSemaphore;
+  const origAcq = sem.acquireRepoGuardOnly.bind(sem);
+  sem.acquireRepoGuardOnly = async (...a) => { const rel = await origAcq(...a); guardAcquired = true; return rel; };
+  w.watch = (p) => { p.then(() => settled.resolve(), () => settled.resolve()); return p; };
+  const origFail = ctx.sessions.recordMergeGateFailure.bind(ctx.sessions);
+  ctx.sessions.recordMergeGateFailure = async (...args) => {
+    w.calls++;
+    let timer;
+    w.fired = await Promise.race([settled.promise.then(() => "waiter-settled"), new Promise((r) => { timer = setTimeout(() => r("bound"), boundMs); })]);
+    clearTimeout(timer);
+    w.waiterHadGuard = guardAcquired;
+    return origFail(...args);
+  };
+  return w;
+}
 
 const dbs = [];
 const worktrees = [];
@@ -485,6 +514,65 @@ try {
     check("(B2) decide ONCE; a passing BATCH gate records ONCE (not per candidate), as a PASS", ctx.spy.decide === 1 && ctx.spy.record === 1 && ctx.spy.recorded.every((k) => k === "pass"));
     const sb = db.getMergeGateState(P.projId);
     check("(B2) counter reset to 0; lastPassSha = main HEAD; ONE ring row for the batch op (candidates 2)", sb.ungatedSinceLastPass === 0 && sb.lastPassSha === head(P.repo) && sb.recent.length === 1 && sb.recent[0].candidates === 2 && sb.recent[0].result === "pass" && sb.recent[0].toSha === sb.lastPassSha);
+  }
+
+  // ── (W) a gate RED is recorded before the gate releases its repo guard (card 593cedc8) ─────────────
+  {
+    const P = mk("w"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    await seedProject(db, P, { mergeGate: "off", mergeGateInterval: 2 });
+    db.putMergeGateState(P.projId, { ...db.getMergeGateState(P.projId), ungatedSinceLastPass: 2 }); // 2+1 > 2 ⇒ the first solo is GATED
+    const a = await addWorker(db, P, "wa", { "src/wa.ts": "export const wa = 1;\n" });
+    const b = await addWorker(db, P, "wb", { "src/wb.ts": "export const wb = 2;\n" });
+    const w = armRedWitness(ctx);
+    let releaseGate; ctx.gate.hold = new Promise((r) => { releaseGate = r; }); ctx.gate.failNext = true;
+    const aP = confirm(ctx.sessions, P.mgrId, a.workerId);
+    await waitUntil(() => ctx.gate.calls === 1, { timeoutMs: 60000, intervalMs: 20, label: "merge-gate-interval (W): the gated solo's gate is running" });
+    db.putMergeGateState(P.projId, { ...db.getMergeGateState(P.projId), ungatedSinceLastPass: 0 }); // an interleaved pass elsewhere: the next decision is a SKIP
+    const bP = w.watch(confirm(ctx.sessions, P.mgrId, b.workerId));
+    await waitUntil(() => ctx.spy.decide >= 2, { timeoutMs: 60000, intervalMs: 20, label: "merge-gate-interval (W): the second solo has taken its skip decision" });
+    releaseGate();
+    const va = await aP; const vb = await bP;
+    check("(W) precondition: the waiter could NOT settle or take the repo guard before the red was recorded (witness fired: " + w.fired + ", waiterHadGuard: " + w.waiterHadGuard + ")", w.calls >= 1 && w.fired === "bound" && w.waiterHadGuard === false);
+    check("(W) the gated solo FAILED (merged:false) and owes the next landing a gate", va.merged === false && db.getMergeGateState(P.projId).gateOwed === true);
+    check("(W) the skip-decided waiter was REFUSED in-lock as gate-owed and nothing was squashed (a landing on top of a known red is the bug)", vb.merged === false && /a gate is now owed/.test(vb.reason ?? "") && !fs.existsSync(path.join(P.repo, "src", "wb.ts")));
+    check("(W) the red was recorded exactly ONCE (opId-deduped ring)", db.getMergeGateState(P.projId).recent.filter((e) => e.result === "fail").length === 1);
+  }
+  // ── (WB) the BATCH analogue: a failing batch gate records its red before releasing the guard (card 593cedc8) ──
+  {
+    const P = mk("wb"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    await seedProject(db, P, { mergeGate: "off", mergeGateInterval: 2 });
+    db.putMergeGateState(P.projId, { ...db.getMergeGateState(P.projId), ungatedSinceLastPass: 1 });
+    const b1 = await addWorker(db, P, "wb1", { "src/wb1.ts": "export const wb1 = 1;\n" });
+    const b2 = await addWorker(db, P, "wb2", { "src/wb2.ts": "export const wb2 = 2;\n" });
+    const sw = await addWorker(db, P, "wbs", { "src/wbs.ts": "export const wbs = 3;\n" });
+    const w = armRedWitness(ctx);
+    let releaseGate; ctx.gate.hold = new Promise((r) => { releaseGate = r; }); ctx.gate.failNext = true;
+    const batchP = ctx.sessions.mergeBatchTracked(P.mgrId, [b1.workerId, b2.workerId]); // 1+2 > 2 ⇒ gated; its gate will FAIL
+    await waitUntil(() => ctx.gate.calls === 1, { timeoutMs: 60000, intervalMs: 20, label: "merge-gate-interval (WB): the batch gate is running" });
+    const soloP = w.watch(confirm(ctx.sessions, P.mgrId, sw.workerId)); // 1+0+1 > 2 is false ⇒ skip-decided, waits on the guard
+    await waitUntil(() => ctx.spy.decide >= 2, { timeoutMs: 60000, intervalMs: 20, label: "merge-gate-interval (WB): the solo has taken its skip decision" });
+    releaseGate();
+    await batchP;
+    const vs = await soloP;
+    check("(WB) precondition: the waiter could NOT settle or take the repo guard before the red was recorded (witness fired: " + w.fired + ", waiterHadGuard: " + w.waiterHadGuard + ")", w.calls >= 1 && w.fired === "bound" && w.waiterHadGuard === false);
+    check("(WB) the skip-decided waiter was REFUSED in-lock as gate-owed and nothing was squashed", vs.merged === false && /a gate is now owed/.test(vs.reason ?? "") && !fs.existsSync(path.join(P.repo, "src", "wbs.ts")));
+    check("(WB) the batch red was recorded exactly ONCE with candidates:2", db.getMergeGateState(P.projId).recent.filter((e) => e.result === "fail" && e.candidates === 2).length === 1);
+  }
+  // ── (W2) cadence `every`: recording a red before the release is harmless (no owed flag) ─────────────
+  {
+    const P = mk("w2"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    await seedProject(db, P, { mergeGate: "on" });
+    const a = await addWorker(db, P, "w2a", { "src/w2a.ts": "export const w2a = 1;\n" });
+    ctx.gate.failNext = true;
+    const va = await confirm(ctx.sessions, P.mgrId, a.workerId);
+    const s = db.getMergeGateState(P.projId);
+    check("(W2) under `every` the red is recorded once but does NOT owe", va.merged === false && s.gateOwed === false && s.recent.filter((e) => e.result === "fail").length === 1);
   }
 
   // ── (BF) BATCH failing gate ───────────────────────────────────────────────────────────────────────

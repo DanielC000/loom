@@ -281,5 +281,37 @@ async function assertDrained(sem, label) {
   await assertDrained(sem, "(S)");
 }
 
+// (H) card 593cedc8 — `beforeRelease` runs BEFORE the slot + repo guard are freed, on a normal end AND when a LATER link throws (it then gets the
+// LAST SETTLED result + the error); a same-repo waiter is not admitted until it returns, and a throwing hook masks neither the verdict nor the error.
+{
+  const sem = new GateSemaphore();
+  const d1 = deferred();
+  let seen = null; let waiterRunningInHook = null;
+  const p = sem.runExclusive(1, desc("h1"), async () => d1.promise, "high",
+    (r) => (r.passed ? null : { descriptorPatch: { attempt: 2, priorAttemptMs: 1 }, fn: async () => { throw new Error("boom"); } }),
+    async (r, thrown) => { seen = { r, thrown }; waiterRunningInHook = isRunning(sem, "h1b"); });
+  const waiter = plain(sem, 1, "h1b");
+  d1.resolve({ passed: false });
+  let err = null; await p.catch((e) => { err = e; });
+  check("(H1) a later link's throw still propagates unchanged", err?.message === "boom");
+  check("(H1) the hook got the LAST SETTLED result (attempt 1's red) and the thrown error", seen?.r?.passed === false && seen?.thrown?.message === "boom");
+  check("(H1) the same-repo waiter was NOT yet running inside the hook (slot + guard still held)", waiterRunningInHook === false);
+  await waitUntil(() => isRunning(sem, "h1b"), { label: "(H1) waiter admitted after release" });
+  waiter.finish(); await waiter.done;
+  await assertDrained(sem, "(H1)");
+
+  const sem2 = new GateSemaphore();
+  let seen2 = null;
+  const v = await sem2.runExclusive(1, desc("h2"), async () => ({ passed: false }), "high", undefined, async (r, thrown) => { seen2 = { r, thrown }; throw new Error("hook bug"); });
+  check("(H2) a normal end runs the hook once with thrown undefined; a throwing hook does not mask the verdict", v.passed === false && seen2?.thrown === undefined && seen2?.r === v);
+  await assertDrained(sem2, "(H2)");
+
+  const sem3 = new GateSemaphore();
+  let hook3 = 0;
+  const e3 = await sem3.runExclusive(1, desc("h3"), async () => { throw new Error("first"); }, "high", undefined, () => { hook3++; }).catch((e) => e);
+  check("(H3) the FIRST fn throwing (no verdict yet) runs no hook", e3?.message === "first" && hook3 === 0);
+  await assertDrained(sem3, "(H3)");
+}
+
 if (failures > 0) { console.error(`\n${failures} FAILURE(S)`); process.exit(1); }
 console.log("\nOK");

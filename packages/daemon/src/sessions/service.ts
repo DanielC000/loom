@@ -15179,6 +15179,16 @@ export class SessionService {
           },
         };
       };
+      // @decision 593cedc8 — the red is recorded from the semaphore's `beforeRelease` hook, still inside the admission + repo guard, so a
+      //  waiting skip-decided sibling's in-lock owed check sees it. That includes a later retry link's dirty-tree throw (the hook then
+      //  gets the last settled verdict). Any other throw records nothing, as before. The once-flag is set before the await (never a retry).
+      let solRedRecorded = false;
+      const recordSoloRedOnce = async (_r?: unknown, thrown?: unknown): Promise<void> => {
+        if (thrown !== undefined && !(thrown instanceof GateWorktreeDirtyError)) return;
+        if (solRedRecorded || !gate || gateResult.passed) return;
+        solRedRecorded = true;
+        await this.recordMergeGateFailure(project.id, { repoPath, repoKey: worker.repoKey ?? "primary", opId: thisOpId, periodic: mergeGateDecision.cadence !== "every", branchTip: pinnedGateTip ?? ((await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? null), branch });
+      };
       try {
         // INERT-DIFF SKIP (card db9b0130): `{ passed: true, steps: [] }` mirrors the reuse producer's own
         // shape (card a2873f7e) — nothing spawned; the `build_gate` row stamps `skipped:true` explicitly.
@@ -15202,7 +15212,7 @@ export class SessionService {
             // guard held (`beginSquash`/`endSquash` extend then release it). A failing gate never squashes.
             if (r.passed) holdRepoGuardOnExit();
             return r;
-          }, "high", afterAttempt1);
+          }, "high", afterAttempt1, recordSoloRedOnce);
         }
       } catch (err) {
         if (err instanceof AdmissionReunionFailedError) return rejectAdmissionReunionFailure(err);
@@ -15415,8 +15425,7 @@ export class SessionService {
         // @decision 01777ceb — a pure round trip (settle head back on the pre-spawn head, readable reflogs) is never cached (94c28d2a). Any OTHER FAIL whose FINAL
         // link left the gated commit, or whose reflog could not be read, is cached under a VOID identity: it can never equal a future tip (so the re-call re-gates,
         // and still announces identity-mismatch), instead of falling back to the pre-forward sha a later reset to T1 would match.
-        // Card 6f13746c: a genuine gate FAILURE feeds the merge-gate interval state (owed after a periodic/owed red).
-        if (gate) await this.recordMergeGateFailure(project.id, { repoPath, repoKey: worker.repoKey ?? "primary", opId: thisOpId, periodic: mergeGateDecision.cadence !== "every", branchTip: pinnedGateTip ?? ((await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? null), branch });
+        // Card 6f13746c: the gate red feeds the merge-gate interval state — recorded earlier, before the admission released (`recordSoloRedOnce`, card 593cedc8).
         const gateRoundTrip = gateHeadLeftDuringRun && gateHeadReturned && !gateHeadLeftAt && !gateReflogUnverified;
         const finalLink = gateLinkCleanliness();
         const gateIdentityVoid = !gateRoundTrip && (finalLink.unclean || finalLink.unverified);
@@ -16470,6 +16479,7 @@ export class SessionService {
         // batch-merge.ts), so the `endSquash` call below never fires for an opId that was never admitted
         // for `finalRepoPath` in the first place.
         let batchGateRan = false;
+        let batchRedRecorded = false;
         try {
           // Card 6cc803b2 — phase instrumentation: wall time of cutting the dedicated batch worktree, the
           // FIRST of the five phases this card measures (batch-worktree cut · per-branch assembly · gate
@@ -16653,7 +16663,13 @@ export class SessionService {
                 const gr = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks, gateSpillPath(opId));
                 if (gr.passed) holdRepoGuardOnExit();
                 return gr;
-              }, "high", afterAttempt1);
+              }, "high", afterAttempt1, async (_r, thrown) => {
+                // @decision 593cedc8 — same ordering point as the solo path: the batch red is recorded before the admission releases.
+                if (thrown === undefined && !r.passed && !batchRedRecorded) {
+                  batchRedRecorded = true;
+                  await this.recordMergeGateFailure(finalProjectId, { repoPath: finalRepoPath, repoKey: batchRepoKey, opId, periodic: batchDecision.cadence !== "every", candidates: liveChosen.length });
+                }
+              });
             } catch (err) {
               // RECORD the verdict on EVERY exit from this try, mirroring the pass/fail path below — a
               // cancel/error here is exactly as capable of leaving the row permanently "pending" as a missing
@@ -16837,7 +16853,7 @@ export class SessionService {
           }
           const ownDropReason = new Map(result.dropped.map((d) => [d.workerSessionId, d.reason]));
           // Card 6f13746c: a genuine batch gate FAILURE feeds the interval state ONCE (no branch tip — `candidates: K`).
-          if (result.gateFailed) await this.recordMergeGateFailure(finalProjectId, { repoPath: finalRepoPath, repoKey: batchRepoKey, opId, periodic: batchDecision.cadence !== "every", candidates: liveChosen.length });
+          if (result.gateFailed && !batchRedRecorded) await this.recordMergeGateFailure(finalProjectId, { repoPath: finalRepoPath, repoKey: batchRepoKey, opId, periodic: batchDecision.cadence !== "every", candidates: liveChosen.length });
 
           if (result.forfeited) {
             // currentMainSha is `string | undefined` on RunBatchedMergeResult (batch-merge.ts) — passed

@@ -910,6 +910,7 @@ export class GateSemaphore {
     fn: GateRunFn<T>,
     priority: GatePriority = "high",
     next?: (result: T) => GateContinuation<T> | null | Promise<GateContinuation<T> | null>,
+    beforeRelease?: (result: T, thrown?: unknown) => void | Promise<void>,
   ): Promise<T> {
     // TRANSITION LOG (card 424ed9a8): fires exactly when THIS semaphore observes `cap` change from what
     // it last saw — i.e. what a gate run actually adopted, not merely what was written to config (those
@@ -949,21 +950,35 @@ export class GateSemaphore {
       // Card 68155573 — CHAIN: each further link runs INSIDE this same try, so the one `finally` below is the
       // only release on every exit (a throw in `next`/`fn`, a cancel, a normal end). No release, `grantEligible`
       // or re-queue happens between links; `holdRepoGuard` is per-link, so only the LAST link's hold counts.
-      let link = next ? await next(result) : null;
-      while (link) {
-        Object.assign(entry.descriptor, link.descriptorPatch);
-        entry.attemptStartedAt = Date.now();
-        entry.lastOutputAt = null;
-        entry.extended = false;
-        // A `cancelRunning` that landed while `next()` was awaited aborted the PREVIOUS controller; carry it
-        // onto the fresh one so the abort is never silently lost (a link that reads its signal sees it aborted).
-        const prevController = entry.controller;
-        entry.controller = new AbortController();
-        if (prevController.signal.aborted) entry.controller.abort(prevController.signal.reason);
-        holdRepoGuard = false;
-        result = await link.fn(entry.attemptStartedAt, entry.controller.signal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit);
-        link = link.next ? await link.next(result) : null;
+      // @decision 593cedc8 — `beforeRelease` runs on EVERY exit that follows a settled verdict, after the last settled link and
+      //  before the `finally` frees the slot + repo guard, so a same-repo waiter admitted by that release already sees the merge-gate
+      //  red (6f13746c's in-lock owed check). On a later link/`next` THROW it gets the LAST SETTLED result plus the error. Best-effort:
+      //  a throwing hook is logged, never masks the verdict or the original error. Not run when the first `fn` throws (no verdict yet).
+      const runBeforeRelease = async (thrown?: unknown): Promise<void> => {
+        if (!beforeRelease) return;
+        try { await beforeRelease(result, thrown); } catch (err) { console.warn(`[gate] beforeRelease hook failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+      };
+      try {
+        let link = next ? await next(result) : null;
+        while (link) {
+          Object.assign(entry.descriptor, link.descriptorPatch);
+          entry.attemptStartedAt = Date.now();
+          entry.lastOutputAt = null;
+          entry.extended = false;
+          // A `cancelRunning` that landed while `next()` was awaited aborted the PREVIOUS controller; carry it
+          // onto the fresh one so the abort is never silently lost (a link that reads its signal sees it aborted).
+          const prevController = entry.controller;
+          entry.controller = new AbortController();
+          if (prevController.signal.aborted) entry.controller.abort(prevController.signal.reason);
+          holdRepoGuard = false;
+          result = await link.fn(entry.attemptStartedAt, entry.controller.signal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit);
+          link = link.next ? await link.next(result) : null;
+        }
+      } catch (err) {
+        await runBeforeRelease(err);
+        throw err;
       }
+      await runBeforeRelease();
       return result;
     } finally {
       this.registry.delete(entry.id);
