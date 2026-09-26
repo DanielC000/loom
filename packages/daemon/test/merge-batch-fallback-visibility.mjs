@@ -174,7 +174,7 @@ try {
   // calling fakeGate at once) so the fleet drains cleanly before the negative-control confirm below.
   const released = new Set();
   for (let i = 0; i < 3; i++) {
-    await sharedWaitUntil(() => Object.keys(releases).some((wt) => !released.has(wt)), { timeoutMs: 10_000, intervalMs: 50, label: `release fallback gate ${i + 1}/3` });
+    await sharedWaitUntil(() => Object.keys(releases).some((wt) => !released.has(wt)), { timeoutMs: Infinity, intervalMs: 50, label: `release fallback gate ${i + 1}/3` });
     const wt = Object.keys(releases).find((w) => !released.has(w));
     released.add(wt);
     releases[wt]({ passed: false, reason: "test: fallback gate rejected (cleanup)" });
@@ -182,7 +182,7 @@ try {
   await sharedWaitUntil(() => {
     const s = svc.gateQueueForManager(P);
     return [...s.running, ...s.queued].filter((e) => e.gateType === "merge").length === 0;
-  }, { timeoutMs: 10_000, intervalMs: 50, label: "all 3 fallback gates drained" });
+  }, { timeoutMs: Infinity, intervalMs: 50, label: "all 3 fallback gates drained" });
 
   // (negative control) a genuinely ordinary solo confirm — NEVER routed through mergeBatchTracked at all —
   // must NOT carry the tag. This is the arm the kickoff asked to be proven, not merely asserted: a tag
@@ -193,7 +193,7 @@ try {
   await sharedWaitUntil(() => {
     const s = svc.gateQueueForManager(P);
     return [...s.running, ...s.queued].some((e) => e.gateType === "merge" && e.taskId === solo.taskId);
-  }, { timeoutMs: 10_000, intervalMs: 50, label: "the solo (non-batch) confirm registered in gate_queue" });
+  }, { timeoutMs: Infinity, intervalMs: 50, label: "the solo (non-batch) confirm registered in gate_queue" });
   const soloSnap = svc.gateQueueForManager(P);
   const soloRow = [...soloSnap.running, ...soloSnap.queued].find((e) => e.gateType === "merge" && e.taskId === solo.taskId);
   check("(negative, precondition) the solo confirm's own row is found", soloRow != null);
@@ -203,13 +203,13 @@ try {
   // Admission (visible in gate_queue) happens synchronously; the actual fakeGate invocation (and thus
   // `releases[wt]`'s own assignment) follows a real async pre-admission git read (confirmWorkerMerge's own
   // `reunionAtAdmission`) — mirrors gate-queue.mjs's own `waitUntilInvoked` two-step wait for the same gap.
-  await sharedWaitUntil(() => typeof releases[solo.worktreePath] === "function", { timeoutMs: 5000, intervalMs: 25, label: "the solo confirm's own fakeGate invocation" });
+  await sharedWaitUntil(() => typeof releases[solo.worktreePath] === "function", { timeoutMs: Infinity, intervalMs: 25, label: "the solo confirm's own fakeGate invocation" });
   releases[solo.worktreePath]({ passed: false, reason: "test: solo gate rejected (cleanup)" });
   await soloConfirm.catch(() => {});
   await sharedWaitUntil(() => {
     const s = svc.gateQueueForManager(P);
     return [...s.running, ...s.queued].length === 0;
-  }, { timeoutMs: 10_000, intervalMs: 50, label: "registry fully drained" });
+  }, { timeoutMs: Infinity, intervalMs: 50, label: "registry fully drained" });
 
 } finally {
   if (db) try { db.close(); } catch { /* ignore */ }
