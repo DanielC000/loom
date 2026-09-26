@@ -1,4 +1,4 @@
-import { canonicalGit } from "./bounded.js";
+import { canonicalGit, localReadGitEnv } from "./bounded.js";
 import { parseLoomTrailerBlock } from "./worktrees.js";
 
 /**
@@ -55,7 +55,38 @@ export interface MainlineFacts {
   loomTipsDeadline?: boolean;
 }
 
-export type MainlineEvidence = "reflog-raw-write" | "loom-branch-reachable" | "rewind-raw-write";
+export type MainlineEvidence = "reflog-raw-write" | "loom-branch-reachable" | "rewind-raw-write" | "watermark-missing";
+
+/** Reason text on the event a POSITIVELY-missing watermark files (alert-class: a mainline commit never becomes unresolvable in normal operation). */
+export const MAINLINE_WATERMARK_MISSING_REASON = "watermark commit no longer resolvable (possible reflog expire/prune or force-rewrite)";
+/** Reason text on the LOW event a loom-tip CAP skip files (the reflog signal still ran; only the loom-tip signal was blind). */
+export const MAINLINE_LOOM_TIP_CAP_REASON = "loom-tip signal skipped (cap)";
+
+/**
+ * @decision 4fa36502 — a boot alert is remembered per (project, repoKey) as an `app_meta` marker so it is filed ONCE per move and delivered ONCE to a manager (`nudgedAt`, claimed by compare-and-set).
+ * JSON `{branch, from, to, evidence, suspectShas, nudgedAt}`; deleted when the move is settled (W stored) and by `deleteProject`.
+ */
+export const MAINLINE_BOOT_ALERT_PREFIX = "mainline-boot-alerted:";
+export const mainlineBootAlertKey = (projectId: string, repoKey: string): string => `${MAINLINE_BOOT_ALERT_PREFIX}${projectId}:${repoKey}`;
+export interface MainlineBootAlert { branch: string; from: string; to: string; evidence: string[]; suspectShas: string[]; nudgedAt: string | null }
+export function parseMainlineBootAlert(raw: string | undefined): MainlineBootAlert | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as Partial<MainlineBootAlert>;
+    if (typeof v.branch !== "string" || typeof v.from !== "string" || typeof v.to !== "string") return null;
+    return { branch: v.branch, from: v.from, to: v.to, evidence: Array.isArray(v.evidence) ? v.evidence.map(String) : [], suspectShas: Array.isArray(v.suspectShas) ? v.suspectShas.map(String) : [], nudgedAt: typeof v.nudgedAt === "string" ? v.nudgedAt : null };
+  } catch { return null; }
+}
+
+/** THE `[loom:mainline-moved]` nudge text — an addressed directive (exact commands + who to ask), shared by the landing path and the boot-alert delivery so there is ONE copy. */
+export function mainlineMovedNudgeText(a: { branch: string; repoKey: string; from: string; to: string; evidence: string[]; suspectShas: string[]; atBoot: boolean }): string {
+  const suspects = a.suspectShas.map((x) => x.slice(0, 8)).join(", ") || "none";
+  return `[loom:mainline-moved] ${a.branch} in repo "${a.repoKey}" moved ${a.from.slice(0, 8)} -> ${a.to.slice(0, 8)} WITHOUT a Loom landing${a.atBoot ? " (found when the daemon started)" : ""} (evidence: ${a.evidence.join(", ")}; suspect ${suspects}). ` +
+    `A worker can write refs/heads/${a.branch} through the shared .git; a human's own raw \`git update-ref\` looks the same. This is a tripwire, not a block: merges continue. ` +
+    (a.evidence.includes("watermark-missing")
+      ? `The baseline ${a.from.slice(0, 8)} no longer exists in the repo (a rewrite plus prune, or a reflog expire). ACTION for you (the manager): in that repo run \`git reflog show ${a.branch}\` and \`git log --oneline -20 ${a.to}\`, ask the owner whether they rewrote or pruned history, and report what you find; if they did not, treat it as a bypass of the merge gate.`
+      : `ACTION for you (the manager): in that repo run \`git log --oneline ${a.from}..${a.to}\` and \`git reflog show ${a.branch}\`, ask the owner whether this move was theirs, and report what you find; if it was not, treat it as a bypass of the merge gate.`);
+}
 export interface MainlineVerdict {
   verdict: "unchanged" | "explained" | "alert" | "unverifiable";
   evidence: MainlineEvidence[];
@@ -67,7 +98,9 @@ export interface MainlineVerdict {
 export function classifyMainlineMove(watermarkSha: string, f: MainlineFacts): MainlineVerdict {
   const out = (verdict: MainlineVerdict["verdict"], evidence: MainlineEvidence[] = [], suspectShas: string[] = [], raw: string[] = []): MainlineVerdict => ({ verdict, evidence, suspectShas, rawReflogMessages: raw });
   if (f.tip === watermarkSha) return out("unchanged");
-  if (f.truncated || f.watermarkMissing) return out("unverifiable");
+  // @decision 4fa36502 — a POSITIVELY missing W is ALERT-class (a mainline commit never becomes unresolvable in normal operation: rewrite + prune, or a reflog expire); "unverifiable" here absorbed a deliberate erasure. An ERROR reading it never reaches here (readMainlineFacts throws).
+  if (f.watermarkMissing) return out("alert", ["watermark-missing"], [f.tip]);
+  if (f.truncated) return out("unverifiable");
   let raw: string[] = [];
   if (f.reflog) {
     const at = f.reflog.findIndex((e) => e.sha === watermarkSha);
@@ -154,18 +187,29 @@ export async function readMainlineFacts(repoPath: string, watermarkSha: string, 
   const git = canonicalGit(repoPath, timeoutMs);
   // Aggregate deadline (card 0eb7ff27; `deadlineAt` is a `performance.now()` value, monotonic): each call is bounded by min(per-call timeout, time left). When the TIME LEFT is what bounds the call,
   // the timer itself rejects with MainlineDeadlineError — the cause is never inferred from the clock afterwards (a timer can fire a hair early, which would read as an ordinary error).
-  const run = runOverride ?? (async (args: string[]): Promise<string> => {
+  const runOn = (g: typeof git) => async (args: string[]): Promise<string> => {
     const what = `git ${args[0]}`;
-    if (deadlineAt === undefined) return withTimeout(git.raw(args), timeoutMs, what);
+    if (deadlineAt === undefined) return withTimeout(g.raw(args), timeoutMs, what);
     const left = deadlineAt - performance.now();
     if (left <= 0) throw new MainlineDeadlineError(what);
-    return left >= timeoutMs ? withTimeout(git.raw(args), timeoutMs, what) : withTimeout(git.raw(args), left, what, () => new MainlineDeadlineError(what));
-  });
+    return left >= timeoutMs ? withTimeout(g.raw(args), timeoutMs, what) : withTimeout(g.raw(args), left, what, () => new MainlineDeadlineError(what));
+  };
+  const run = runOverride ?? runOn(git);
+  // @decision 4fa36502 — the missing-watermark probe reads git's not-found MESSAGE, so it runs with the locale pinned (LC_ALL/LANGUAGE=C): a localized or reworded message would otherwise fail open forever (W stays missing, every check rethrows, nothing is filed).
+  const runProbe = runOverride ?? runOn(canonicalGit(repoPath, timeoutMs, localReadGitEnv(process.env, { LC_ALL: "C", LANGUAGE: "C" })));
   const facts: MainlineFacts = { branch: head.branch, tip: head.tip, reflog: null, forward: true, untrailered: [], loomTipHits: [], truncated: false, watermarkMissing: false };
   // @decision 4fa36502 — both reads compare git's OUTPUT, never an exit status (simple-git resolves a non-zero exit with empty stderr as success, bc2240d7), and ANY error here (timeout, spawn
   // failure, deadline) propagates: the caller fails open with W untouched. An error must never be filed as "W missing" or "rewound" — that would store W and absorb the move.
   const resolved = (await run(["rev-parse", "--verify", "--quiet", `${watermarkSha}^{commit}`])).trim();
-  if (!/^[0-9a-f]{40,64}$/.test(resolved)) { facts.watermarkMissing = true; return facts; }
+  if (!/^[0-9a-f]{40,64}$/.test(resolved)) {
+    // @decision 4fa36502 — empty output is NOT proof: simple-git resolves an EXTERNALLY killed child (no exit code, empty stderr) as success with empty stdout. "Missing" needs git's OWN answer: `cat-file -t` REJECTS with its not-found message
+    // for an absent object (a killed child cannot say that); a `commit` answer means the empty rev-parse was a kill; anything else is a read error.
+    let type = "";
+    try { type = (await runProbe(["cat-file", "-t", watermarkSha])).trim(); }
+    catch (err) { if (err instanceof MainlineDeadlineError || !/could not get object info|not a valid object|bad object|unable to read|invalid object/i.test(err instanceof Error ? err.message : String(err))) throw err; facts.watermarkMissing = true; return facts; }
+    if (type && type !== "commit") { facts.watermarkMissing = true; return facts; } // exists but is not a commit: no usable baseline
+    throw new Error("watermark rev-parse printed nothing and git gave no positive not-found answer (killed child?): a read error, never 'missing'");
+  }
   facts.forward = await isAncestorCommit(repoPath, watermarkSha, head.tip, timeoutMs, run);
   // Reflog (newest-first). One extra entry past the cap distinguishes "cap hit" from "exactly the cap".
   const rl = (await run(["reflog", "show", `--max-count=${MAINLINE_RANGE_CAP + 1}`, "--format=%H%x1f%gs", `refs/heads/${head.branch}`])).split("\n").filter(Boolean);

@@ -7791,13 +7791,14 @@ export class PtyHost {
    * as "the client reached us"). Idempotent; a no-op for an unknown/dead session or one already marked.
    * Wakes every pending waitForMcpSeen caller. See Live.mcpSeen for why this proxy signal exists.
    */
-  markMcpSeen(sessionId: string): void {
+  markMcpSeen(sessionId: string): boolean {
     const live = this.findAnyLive(sessionId);
-    if (!live?.alive || live.mcpSeen) return;
+    if (!live?.alive || live.mcpSeen) return false;
     live.mcpSeen = true;
     const waiters = live.mcpSeenWaiters;
     live.mcpSeenWaiters = [];
     for (const w of waiters) w(true);
+    return true; // newly seen: the caller (gateway) may run its once-per-pty hook
   }
 
   /**

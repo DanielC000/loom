@@ -133,6 +133,27 @@ export function scrubGitEnv(env: Record<string, string | undefined>): Record<str
   return out;
 }
 
+/**
+ * The env keys simple-git's `blockUnsafeOperationsPlugin` refuses that {@link GIT_ENV_STRIP_KEYS} does NOT strip and {@link boundedSimpleGit} does not pass through:
+ * the transport/auth family (ask-pass, ssh, proxy programs), the template dir and the config-env count. Derived from `@simple-git/argv-parser@1.1.1`'s own `dist/index.mjs`
+ * (the `const y = { … }` env→category map read by `parseEnv`); the remaining keys of that map are the editor/pager keys (stripped by {@link scrubGitEnv}) and the
+ * config-path keys (`GIT_CONFIG_GLOBAL/SYSTEM`, `GIT_CONFIG`, `GIT_EXEC_PATH`, `PREFIX`: allowed by {@link boundedSimpleGit}).
+ */
+export const GIT_ENV_TRANSPORT_KEYS = ["GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND", "GIT_TEMPLATE_DIR", "GIT_CONFIG_COUNT"] as const;
+
+/**
+ * The env for a LOCAL, read-only git probe that needs a pinned setting (e.g. `LC_ALL=C`, to read git's English message): `base` (case-aware) MINUS {@link GIT_ENV_TRANSPORT_KEYS},
+ * with `overrides` applied (any differently-cased spelling of an override key removed first, win32 env names being case-insensitive). Such a probe never authenticates or talks
+ * to a remote, so the stripped keys cannot matter to it, whereas an EXPLICIT env carrying one (VS Code's terminal sets `GIT_ASKPASS`) would make simple-git throw "unsafe" on
+ * EVERY call. Returns a NEW object; never mutates `base`. Callers that DO reach a remote must not use this: those keep the loud failure (see {@link GIT_ENV_STRIP_KEYS}).
+ */
+export function localReadGitEnv(base: Record<string, string | undefined>, overrides: Record<string, string>): Record<string, string | undefined> {
+  const out = { ...base };
+  deleteEnvKeys(out, GIT_ENV_TRANSPORT_KEYS);
+  deleteEnvKeys(out, Object.keys(overrides));
+  return { ...out, ...overrides };
+}
+
 /** The keys of `env` that name one of `names` — on win32 case-INSENSITIVELY (env names are case-insensitive there: `Git_Pager` IS `GIT_PAGER` to git-for-windows, and
  *  a `{...process.env}` copy keeps the key as spelled); on POSIX exact-match only (`Git_Config` is a different, inert variable). Card e93703d9. */
 export function envKeysNamed(env: Record<string, string | undefined>, names: readonly string[]): string[] {

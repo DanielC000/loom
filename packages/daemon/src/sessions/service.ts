@@ -27,7 +27,7 @@ import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateR
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
-import { classifyMainlineMove, mainlineWatermarkKey, parseMainlineWatermark, isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
+import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, parseMainlineWatermark, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
@@ -17394,10 +17394,13 @@ export class SessionService {
       if (!head) return null;
       const w = parseMainlineWatermark(rawW);
       // Compare-and-set: a concurrent writer (a landing's own advance) that changed the key since we read it wins — an unguarded boot check must never regress a newer watermark.
-      const store = (): void => { if (this.db.getMeta(key) === rawW) this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip })); };
+      const alertKey = mainlineBootAlertKey(a.projectId, a.repoKey);
+      // @decision 4fa36502 — ONE predicate for every marker delete (`dropBootAlert`): a marker goes only once DELIVERED, or when this check's baseline IS the marker's own `from` (a true re-detection / undo). An undelivered one is an alert no manager has read; W moving must never drop it.
+      const dropBootAlert = (sameBaseline?: string): void => { const m = parseMainlineBootAlert(this.db.getMeta(alertKey)); if (m && (m.nudgedAt || (sameBaseline !== undefined && m.from === sameBaseline))) this.db.deleteMeta(alertKey); };
+      const store = (): void => { if (this.db.getMeta(key) === rawW) { this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip })); dropBootAlert(); } };
       const boot = a.source === "boot";
       if (!w || w.branch !== head.branch) { store(); return head.tip; }
-      if (w.sha === head.tip) return head.tip;
+      if (w.sha === head.tip) { dropBootAlert(head.tip); return head.tip; } // main is on W: only a marker whose `from` IS the tip (the alerted move was truly UNDONE) or a delivered one goes; a move W absorbed unread stays
       // The inner reader stops at `deadlineAt` itself (keeping what it read); the outer race, a little later, only bounds a reader that never returns.
       const facts = await this.boundedByDeadline(this.mainlineFactsReader(a.repoPath, w.sha, head, ms, deadlineAt), deadlineAt, 100, "facts read");
       const v = classifyMainlineMove(w.sha, facts);
@@ -17406,18 +17409,30 @@ export class SessionService {
       const detail = { projectId: a.projectId, repoKey: a.repoKey, branch: head.branch, from: w.sha, to: head.tip, ...(boot ? { source: "boot" } : {}) };
       const file = (extra: Record<string, unknown>): void => this.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId ?? "", ...(a.workerSessionId ? { workerSessionId: a.workerSessionId } : {}), taskId: a.taskId, kind: "mainline_moved_outside_loom", detail: { ...detail, ...extra } });
       if (v.verdict === "unverifiable") {
-        file({ severity: "low", unverifiable: true, reason: facts.watermarkMissing ? "watermark commit no longer resolvable" : "range exceeded the scan cap" });
+        // Only a cap/range overflow reaches here now (a positively-missing W is an alert). W is stored: re-scanning a window that stays over the cap can never get cheaper.
+        file({ severity: "low", unverifiable: true, reason: "range exceeded the scan cap" });
       } else if (v.verdict === "alert") {
-        file({ severity: "high", evidence: v.evidence, suspectShas: v.suspectShas, rawReflogMessages: v.rawReflogMessages });
-        // @decision 59d2577a — the BOOT path never absorbs an alert: it files the durable event but leaves W alone, so the next landing's check re-detects the same move WITH a manager to nudge.
-        if (boot) return null;
+        const missing = v.evidence.includes("watermark-missing");
+        const alertDetail = { severity: "high", evidence: v.evidence, suspectShas: v.suspectShas, rawReflogMessages: v.rawReflogMessages, ...(missing ? { reason: MAINLINE_WATERMARK_MISSING_REASON } : {}) };
+        if (boot) {
+          // @decision 4fa36502 — the BOOT path never absorbs an alert (W untouched) and files it ONCE per move: the marker holds (from, to), so the next boot passes over the same unhandled move stay silent. The alert then reaches a manager through deliverPendingBootAlerts.
+          const prev = parseMainlineBootAlert(this.db.getMeta(alertKey));
+          if (!(prev && prev.from === w.sha && prev.to === head.tip)) {
+            file(alertDetail);
+            this.db.setMeta(alertKey, JSON.stringify({ branch: head.branch, from: w.sha, to: head.tip, evidence: v.evidence, suspectShas: v.suspectShas, nudgedAt: null } satisfies MainlineBootAlert));
+          }
+          this.deliverPendingBootAlerts(a.projectId);
+          return null;
+        }
+        file(alertDetail);
         try {
           if (!a.managerSessionId) throw new Error("no manager to nudge");
-          const suspects = v.suspectShas.map((x) => x.slice(0, 8)).join(", ") || "none";
-          this.enqueueDurableMessage(a.managerSessionId,
-            `[loom:mainline-moved] ${head.branch} in repo "${a.repoKey}" moved ${w.sha.slice(0, 8)} -> ${head.tip.slice(0, 8)} WITHOUT a Loom landing (evidence: ${v.evidence.join(", ")}; suspect ${suspects}). A worker can write refs/heads/${head.branch} through the shared .git; a human's own raw \`git update-ref\` looks the same. This is a tripwire, not a block: the merge continues. Check \`git reflog show ${head.branch}\` and \`git log ${w.sha.slice(0, 8)}..${head.tip.slice(0, 8)}\`.`,
-            { sender: "system", taskId: a.taskId, kind: "warning" });
+          this.enqueueDurableMessage(a.managerSessionId, mainlineMovedNudgeText({ branch: head.branch, repoKey: a.repoKey, from: w.sha, to: head.tip, evidence: v.evidence, suspectShas: v.suspectShas, atBoot: false }), { sender: "system", taskId: a.taskId, kind: "warning" });
+          dropBootAlert(w.sha); // this landing's nudge re-reported the SAME move only if the marker's baseline is this check's W; a boot alert about an older move stays (a failed nudge above keeps it too)
         } catch { /* the durable event above is the record; a failed nudge must not matter */ }
+      } else if (facts.loomTipsSkipped && !facts.loomTipsDeadline) {
+        // @decision 4fa36502 — a loom-tip CAP skip (not a deadline skip: that one failed open above) keeps storing W, but the blind spot is made visible in the audit trail.
+        file({ severity: "low", unverifiable: true, reason: MAINLINE_LOOM_TIP_CAP_REASON });
       }
       store();
       return head.tip;
@@ -17425,6 +17440,48 @@ export class SessionService {
       console.warn(`[mainline-watch] check skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
+  }
+
+  /**
+   * THE reader of a boot-time mainline alert (card 05e7f246): the project's live MANAGER(S), told once, as an addressed directive. ONE helper, two callers: the boot check after it files (managers already up) and
+   * {@link onOrchestrationMcpFirstSeen} (the ONE chokepoint every manager spawn path crosses), so the text and the claim exist once. The delivery is claimed by an ATOMIC compare-and-set on the marker (`nudgedAt` null -> now); only the caller that wins delivers, to every live manager.
+   * A project with no live manager is left un-nudged (the marker keeps `nudgedAt:null`), so the next manager that resumes/spawns is the reader; a project that never has one stays event-only (a stated gap).
+   * @decision 4fa36502 — never split this into per-site copies; never claim by read-then-write; never let it throw into a spawn/resume/boot path.
+   */
+  deliverPendingBootAlerts(projectId: string): number {
+    let delivered = 0;
+    try {
+      const managers = this.db.listLiveManagersInProject(projectId);
+      if (managers.length === 0) return 0;
+      for (const row of this.db.listMetaByPrefix(`${MAINLINE_BOOT_ALERT_PREFIX}${projectId}:`)) {
+        const alert = parseMainlineBootAlert(row.value);
+        if (!alert || alert.nudgedAt) continue;
+        const claimed = JSON.stringify({ ...alert, nudgedAt: new Date().toISOString() });
+        if (!this.db.compareAndSetMeta(row.key, row.value, claimed)) continue; // another path claimed it
+        const repoKey = row.key.slice(`${MAINLINE_BOOT_ALERT_PREFIX}${projectId}:`.length);
+        const text = mainlineMovedNudgeText({ branch: alert.branch, repoKey, from: alert.from, to: alert.to, evidence: alert.evidence, suspectShas: alert.suspectShas, atBoot: true });
+        try {
+          // The durable record is written by THIS synchronous call, in the same step as the claim above: enqueueDurableNudge (which defers on an up-to-9s MCP wait) would leave a claimed alert with no record if the daemon died in that window.
+          for (const m of managers) this.enqueueDurableMessage(m.id, text, { sender: "system", kind: "warning", taskId: null });
+        } catch (err) {
+          // A throw must not leave a claimed marker with no record: hand the claim back (compare-and-set, so a concurrent writer is never clobbered). At-least-once: a manager enqueued before the throw may be told again.
+          this.db.compareAndSetMeta(row.key, claimed, row.value);
+          throw err;
+        }
+        delivered++;
+      }
+    } catch (err) {
+      console.warn(`[mainline-watch] boot-alert delivery skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return delivered;
+  }
+
+  /**
+   * The chokepoint (card 05e7f246): the gateway calls this the FIRST time a session's `/mcp-orch/` route is hit (PtyHost.markMcpSeen newly true). Every manager spawn path (fresh, resume, fork, profile-derived startNew,
+   * recycle successor) mounts that surface, so none needs its own call; a non-manager is ignored. Never throws.
+   */
+  onOrchestrationMcpFirstSeen(sessionId: string): void {
+    try { const s = this.db.getSession(sessionId); if (s?.role === "manager") this.deliverPendingBootAlerts(s.projectId); } catch { /* fail-open: never into the MCP request path */ }
   }
 
   /** Rejects once `deadlineAt + graceMs` has passed. The losing promise is left to its own per-call git timeout. */
@@ -17467,7 +17524,7 @@ export class SessionService {
 
   /**
    * Boot pass (card 59d2577a): ONE {@link checkMainlineMove} read per (project, repoKey), sequential, no repo guard, each fail-open and bounded. Catches a move made while the daemon was down.
-   * @decision 59d2577a — an ALERT at boot files the durable event (source:"boot") but does NOT store W (no manager to nudge yet); the next landing's check re-detects it and nudges. A clean/unverifiable verdict stores W.
+   * @decision 59d2577a — an ALERT at boot files the durable event (source:"boot") but does NOT store W, files ONCE per move (marker) and is delivered to the project's manager(s) by deliverPendingBootAlerts; a clean/unverifiable verdict stores W.
    */
   async checkMainlineMovesOnBoot(): Promise<{ checked: number }> {
     let checked = 0;

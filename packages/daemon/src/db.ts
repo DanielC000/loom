@@ -3225,6 +3225,7 @@ export class Db {
       this.db.prepare("DELETE FROM pending_gate_ops WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM project_merge_gate_state WHERE project_id = ?").run(id); // card 6f13746c
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`mainline-watermark:${id}:%`); // card 4fa36502
+      this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`mainline-boot-alerted:${id}:%`); // card 05e7f246
       // Card af08f7e8: delivered_credentials.project_id is a NOT NULL FK (enforced) with no session/agent
       // tie — deleteSession/deleteAgent never touch it (that's the point), but deleteProject genuinely
       // removes the project itself, so this must be cascaded explicitly or the transaction aborts.
@@ -3344,6 +3345,16 @@ export class Db {
       `INSERT INTO app_meta (key, value, updated_at) VALUES (@key, @value, @updatedAt)
        ON CONFLICT(key) DO UPDATE SET value = @value, updated_at = @updatedAt`,
     ).run({ key, value, updatedAt: new Date().toISOString() });
+  }
+  /** Atomic compare-and-set: ONE statement that replaces the value only while it still equals `expected` (card 05e7f246 — an exactly-once claim). True = this caller won. */
+  compareAndSetMeta(key: string, expected: string, next: string): boolean {
+    return this.db.prepare("UPDATE app_meta SET value = @next, updated_at = @updatedAt WHERE key = @key AND value = @expected")
+      .run({ key, expected, next, updatedAt: new Date().toISOString() }).changes === 1;
+  }
+  /** Every app_meta row whose key starts with `prefix` (LIKE prefix scan, escaped like {@link deleteMetaPrefix}). */
+  listMetaByPrefix(prefix: string): Array<{ key: string; value: string }> {
+    const escaped = prefix.replace(/[\\%_]/g, "\\$&");
+    return (this.db.prepare("SELECT key, value FROM app_meta WHERE key LIKE ? ESCAPE '\\'").all(`${escaped}%`) as Row[]).map((r) => ({ key: r.key as string, value: r.value as string }));
   }
   /** Delete a daemon-global meta value (a no-op when unset). Used by a one-shot corrective reset to clear
    *  a fire-exactly-once marker so its guarded work re-runs on the next pass (e.g. re-priming the usage

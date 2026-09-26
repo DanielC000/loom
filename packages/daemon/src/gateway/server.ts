@@ -762,7 +762,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // counts as "the client's MCP connection reached us" — the resume-continuation-nudge race guard
     // (sessions/service.ts resumeFleetOnBoot/recoverCrashOrphanedWorkers) only needs to know contact was
     // made, not that this particular call succeeded.
-    deps.pty.markMcpSeen(sessionId);
+    if (deps.pty.markMcpSeen(sessionId) === true) deps.sessions.onOrchestrationMcpFirstSeen?.(sessionId); // card 05e7f246: once per pty; a manager's first contact is when a pending boot-time mainline alert is delivered
     const attributions = computeAttributions(sessionId, LOOM_ORCHESTRATION_SERVER_ID, req.body);
     logInboundMcpRequest("orchestration", sessionId, req.body, (sid, tool) => attributions.get(tool), recordRepeatedCall); // card 98c4a651; cd0c7fee; 2d8d2e42
     reply.hijack();

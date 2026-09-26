@@ -2,7 +2,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Card 864bdd63 — the mainline tripwire's rewind + missing-watermark reads take git's real OUTPUT answer, and any error in them fails OPEN (card 4fa36502, docs/decisions/4fa36502-mainline-move-tripwire.md). REAL git on temp repos.
 //   (A) a real rewind of main (update-ref to an older commit) ⇒ ONE high `rewind-raw-write` event.
 //   (E) control: a forward porcelain move stays silent (the (A) fix did not turn every move into a rewind).
-//   (B) a W that no longer resolves ⇒ watermarkMissing ⇒ ONE low "unverifiable" event.
+//   (B) a W that no longer resolves ⇒ watermarkMissing ⇒ ONE HIGH alert-class event (card 05e7f246; it was a low "unverifiable" store).
 //   (C) a rev-parse / merge-base that ERRORS (timeout-shaped, spawn-shaped) ⇒ fail-open: check returns null, W untouched, no event — never "unverifiable"+store, never "explained"+store.
 //   (F) isAncestorCommit's default path stays output-based (it is the ONE helper both callers use).
 // Run: 1) build daemon (pnpm build), 2) node test/mainline-watch-reads.mjs
@@ -86,7 +86,7 @@ try {
   setW(fake); const nB = events().length;
   const rB = await runCheck();
   const evB = events().slice(nB);
-  check("(B2) the service check files ONE low unverifiable event naming the unresolvable watermark, and stores W at the tip", rB === w4 && evB.length === 1 && evB[0].detail.severity === "low" && evB[0].detail.unverifiable === true && /no longer resolvable/.test(evB[0].detail.reason) && watermark()?.sha === w4);
+  check("(B2) card 05e7f246: the LANDING-path check files ONE HIGH alert (watermark-missing) naming the unresolvable watermark, and stores W at the tip (the next landing has a fresh baseline)", rB === w4 && evB.length === 1 && evB[0].detail.severity === "high" && evB[0].detail.evidence.join() === "watermark-missing" && /no longer resolvable/.test(evB[0].detail.reason) && watermark()?.sha === w4);
 
   // ── (C) an ERROR in either read fails OPEN ──
   const w5 = addCommit(5); setW(w4); // a healthy forward move w4 → w5 to be read
