@@ -161,10 +161,22 @@ const HOOK_STARTED_POLL_WINDOW_MS = GREEN_POLL_WINDOW_MS; // card 6799aa3b: the 
                                            // creation overhead, not anything under test, at 2x-oversubscribed
                                            // saturation.
 
-const repo = path.join(os.tmpdir(), `loom-killtest-repo-${Date.now()}-${process.pid}`);
-fs.mkdirSync(repo, { recursive: true });
-execSync(`git init -q "${repo}"`);
-execSync(`git -C "${repo}" ${GIT_ID} commit -q --allow-empty -m init`);
+// @decision acf3d337 — the calibration + [setup] leg 2a/2b commits run in `setupRepo`, NEVER in `repo`: a git
+// from an earlier attempt that outlives its abort lands its commit into whatever repo it targets, moving
+// HEAD under the RED control's own pending commit (RED's ref update then fails; "red-commit never landed").
+// Do not run a killed/aborted attempt in the repo a later control depends on. Record: docs/decisions/acf3d337-*.md.
+function makeFixtureRepo(name) {
+  const dir = path.join(os.tmpdir(), `loom-killtest-${name}-${Date.now()}-${process.pid}`);
+  fs.mkdirSync(dir, { recursive: true });
+  execSync(`git init -q "${dir}"`);
+  // Pinned locally (beats any ambient/global value): commitSubjectsOnRepo reads the HEAD reflog, so the
+  // fixture must not depend on the host's core.logAllRefUpdates. The [setup] baseline check below proves it.
+  execSync(`git -C "${dir}" config core.logAllRefUpdates true`);
+  execSync(`git -C "${dir}" ${GIT_ID} commit -q --allow-empty -m init`);
+  return dir;
+}
+const repo = makeFixtureRepo("repo");
+const setupRepo = makeFixtureRepo("setup-repo");
 
 // Card 58d2462c — this fixture repo has TWICE presented with zero commits mid-run (a `git log` hitting
 // "fatal: your current branch 'master' does not have any commits yet", exit 128) despite its own
@@ -229,6 +241,8 @@ function snapshotFixtureState(reason) {
       // RED git child's own promise actually settled (see attemptCommit's `settleLog`).
       gitDirListing: (() => { try { return fs.readdirSync(path.join(repo, ".git")).map((n) => { try { const st = fs.statSync(path.join(repo, ".git", n)); return `${n}${st.isDirectory() ? "/" : ""} (${st.size}b, mtime ${new Date(st.mtimeMs).toISOString()})`; } catch { return n; } }); } catch (e) { return `<unreadable: ${e?.message}>`; } })(),
       settleLog,
+      // acf3d337: every commit that actually landed, with when — names WHICH attempt moved HEAD.
+      reflogHEAD: (() => { try { return fs.readFileSync(path.join(repo, ".git", "logs", "HEAD"), "utf8"); } catch (e) { return `<unreadable: ${e?.message}>`; } })(),
       // Card 4b271ca6: how the hook's `#!/bin/sh` + `node` resolve in THIS process tree (the merge gate's is the
       // daemon's, not a terminal's) — the difference from a bare run is exactly what a gate-only red needs.
       hookResolution: (() => {
@@ -279,10 +293,16 @@ function hookStartMarkerPath(repoPath, message) {
   return path.join(repoPath, ".git", `hook-started-${message}.marker`);
 }
 
+// @decision acf3d337 — observe commits through the append-only HEAD reflog, NOT `git log`: git-for-windows
+// replaces refs/heads/master non-atomically, and a `git log` polled while a commit lands can see an unborn
+// branch ("does not have any commits yet", exit 128 — the card 58d2462c signature, reproduced 4/2024 polls
+// against a concurrent committer). The reflog is only ever appended to, so a read has no such window.
+// Subjects are the reflog messages ("commit (initial): init" / "commit: red-commit"), newest first.
 function commitSubjectsOnRepo(repoPath) {
   try {
-    return execSync(`git -C "${repoPath}" log --format=%s`, { encoding: "utf8" })
-      .split("\n").map((l) => l.trim()).filter(Boolean);
+    return fs.readFileSync(path.join(repoPath, ".git", "logs", "HEAD"), "utf8")
+      .split("\n").slice(0, -1) // drop the tail after the last "\n": a half-appended line is not an entry yet
+      .map((l) => /\tcommit(?: \([a-z]+\))?: (.*)$/.exec(l.replace(/\r$/, ""))?.[1]?.trim()).filter(Boolean).reverse();
   } catch (e) {
     // Card 58d2462c — this is the ONE call site that has, twice now, observed the fixture repo present
     // with zero commits mid-run. Snapshot BEFORE re-throwing: the top-level try/finally's fs.rmSync would
@@ -309,15 +329,15 @@ function commitSubjectsOnRepo(repoPath) {
  *  synchronous check at the instant the wrapper settles, since a killed git.exe's own hook descendant can
  *  be orphaned and still catching up on its own process-spawn chain — see HOOK_STARTED_POLL_WINDOW_MS's
  *  own doc for why a single synchronous check can false-negative under host contention). */
-async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceMs = KILL_GRACE_MS, preAbort = false, armAfterHookStart = false }) {
-  const markerPath = hookStartMarkerPath(repo, message);
+async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceMs = KILL_GRACE_MS, preAbort = false, armAfterHookStart = false, repoPath = repo }) {
+  const markerPath = hookStartMarkerPath(repoPath, message);
   try { fs.rmSync(markerPath, { force: true }); } catch { /* no prior marker for this message — fine */ }
-  installSlowTalkingPreCommitHook(repo, markerPath);
+  installSlowTalkingPreCommitHook(repoPath, markerPath);
   let t0 = performance.now(); // MONOTONIC
   let rejected = false, rejectMessage = null;
   if (kill) {
     const controller = new AbortController();
-    const git = boundedSimpleGit(repo, BLOCK_MS, undefined, controller.signal);
+    const git = boundedSimpleGit(repoPath, BLOCK_MS, undefined, controller.signal);
     // `preAbort`: abort BEFORE `git.raw()` is even called — not merely before awaiting it — so the
     // signal is already aborted when simple-git's executor chain reaches its OWN `spawn.before` hook (see
     // the [setup] leg-2b control below for the source citation this relies on). Aborting any later (e.g.
@@ -345,11 +365,11 @@ async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceM
     await withTimeoutKillingChild(commit, timeoutMs, `git commit (${message})`, controller, killGraceMs)
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
   } else {
-    const git = boundedSimpleGit(repo, BLOCK_MS);
+    const git = boundedSimpleGit(repoPath, BLOCK_MS);
     const commit = git.raw([...GIT_ID_ARGV, "commit", "--allow-empty", "-m", message]);
     commit.then(
       () => { settleLog[message] = `resolved @${Math.round(performance.now() - t0)}ms`; },
-      (e) => { settleLog[message] = `rejected @${Math.round(performance.now() - t0)}ms: ${String(e?.message ?? e).slice(0, 300)}`; },
+      (e) => { settleLog[message] = `rejected @${Math.round(performance.now() - t0)}ms: ${String(e?.message ?? e).slice(-400)}`; }, // the TAIL: git's own error follows the hook's tick output (acf3d337: a head slice kept only "tick N")
     );
     await withTimeout(commit, timeoutMs, `git commit (${message})`)
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
@@ -368,13 +388,13 @@ async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceM
  *  — a COMPLETED reference measured before, and independent of, the runs it sizes, so the failure under test cannot
  *  inflate it. Fails LOUDLY (throws) if either exceeds its ceiling: a pathological baseline must not silently
  *  stretch the budgets into a test that can no longer fail. */
-async function measureBaseline() {
+async function measureBaseline(repoPath) {
   const message = "calibration-commit";
-  const markerPath = hookStartMarkerPath(repo, message);
+  const markerPath = hookStartMarkerPath(repoPath, message);
   try { fs.rmSync(markerPath, { force: true }); } catch { /* none */ }
-  installSlowTalkingPreCommitHook(repo, markerPath);
+  installSlowTalkingPreCommitHook(repoPath, markerPath);
   const controller = new AbortController();
-  const git = boundedSimpleGit(repo, BLOCK_MS, undefined, controller.signal);
+  const git = boundedSimpleGit(repoPath, BLOCK_MS, undefined, controller.signal);
   const t0 = performance.now();
   let settledAt = null;
   const p = git.raw([...GIT_ID_ARGV, "commit", "--allow-empty", "-m", message])
@@ -398,7 +418,7 @@ try {
     commitSubjectsOnRepo(repo).length === 1);
 
   {
-    const { L, K } = await measureBaseline();
+    const { L, K } = await measureBaseline(setupRepo);
     if (K > KILL_ROUNDTRIP_CEILING_MS) throw new Error(`calibration: kill round-trip ${Math.round(K)}ms exceeds ceiling ${KILL_ROUNDTRIP_CEILING_MS}ms`);
     KILL_GRACE_MS = Math.max(TIMEOUT_MS, Math.ceil(K * 4 + 100));
     console.log(`[calibrated] hookStartL=${Math.round(L)}ms (logged only) killRoundTripK=${Math.round(K)}ms -> ` +
@@ -508,11 +528,11 @@ try {
   // or eventually the giveUpTimer's "...giving up (hung git child?)" if the child truly runs unkilled),
   // instead of silently reverting to a probabilistic race or a hung/landed commit.
   {
-    const raced = await attemptCommit({ kill: true, message: "vacuous-control-commit-raced", timeoutMs: 5, killGraceMs: 5000 });
+    const raced = await attemptCommit({ kill: true, message: "vacuous-control-commit-raced", timeoutMs: 5, killGraceMs: 5000, repoPath: setupRepo });
     check(`[setup] positive control (leg 2a): a 5ms kill-trigger still rejects, not hangs — actual message: ` +
       `"${raced.rejectMessage}"`, raced.rejected);
 
-    const preAborted = await attemptCommit({ kill: true, message: "vacuous-control-commit-preabort", timeoutMs: 5000, killGraceMs: 300, preAbort: true });
+    const preAborted = await attemptCommit({ kill: true, message: "vacuous-control-commit-preabort", timeoutMs: 5000, killGraceMs: 300, preAbort: true, repoPath: setupRepo });
     const rejectedViaPreSpawnShortCircuit = /Abort already signaled$/.test(preAborted.rejectMessage ?? "");
     check(`[setup] positive control (leg 2b): pre-aborting BEFORE git.raw() is called rejects via simple-` +
       `git's pre-spawn short-circuit ("Abort already signaled"), NOT withTimeoutKillingChild's own killTimer ` +
@@ -612,6 +632,7 @@ try {
   check("[green] no OTHER unexpected commit landed either (still just init + red-commit)",
     commitSubjectsOnRepo(repo).length === 2);
 } finally {
+  try { fs.rmSync(setupRepo, { recursive: true, force: true }); } catch { /* best-effort, same as below */ }
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort: a killed git.exe can
     leave transient lock files; a stale orphaned hook may still hold something briefly */ }
 }
