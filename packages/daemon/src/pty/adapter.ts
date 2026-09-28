@@ -97,7 +97,8 @@ export interface HarnessCapabilities {
   livenessWatch: boolean;
   /** How doctrine (skills/MCP config) reaches the CLI. "directory" = mirrored into a project-local dir
    *  (Claude's `.claude/skills` convention); "file" = a single project-local file (Codex's `AGENTS.md`
-   *  convention — see `pty/codex-doctrine.ts#injectCodexDoctrine`); "none" = no such mechanism. */
+   *  convention — see `pty/codex-doctrine.ts#injectCodexDoctrine`, worker role only; the other Loom-driven
+   *  roles get a store-file pointer atop their kickoff instead, `codexRoleDoctrinePointer`); "none" = no such mechanism. */
   doctrineInjection: "directory" | "file" | "none";
   /** `vendorProcessSlashCommand` returns a real in-band command for at least one `kind`. */
   builtinReset: boolean;

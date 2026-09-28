@@ -32,7 +32,7 @@ import { resolveCapabilityServer, RESERVED_CAPABILITY_SLUGS, type CapabilityDefR
  * `profiles/codex-compat.ts`. One string for the spawn-time report below AND `SessionService`'s default-harness guard (card 961da6c6).
  */
 export const CODEX_CODESCAPE_REASON = `codescape is enabled for this project but codex has no per-tool allow/disallow mechanism to pair with its write-tool restriction — never mounted for this harness, use harness "claude" for codescape access`;
-import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
+import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine, withCodexRoleDoctrine } from "./codex-doctrine.js";
 import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail } from "./codex-host.js";
 import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
 
@@ -5224,7 +5224,8 @@ export class PtyHost {
         // this was never a bug, only a stale comment asserting an invariant that doesn't hold.
         if (opts.startupPrompt !== undefined && !live.kickoffDelivered) {
           live.kickoffDelivered = true; // latch BEFORE calling out — never deliver twice
-          this.enqueueStdin(opts.sessionId, opts.startupPrompt, "system", undefined, undefined, "agent");
+          // Non-worker roles get their doctrine as a pointer atop the kickoff (see codexRoleDoctrinePointer).
+          this.enqueueStdin(opts.sessionId, withCodexRoleDoctrine(opts.startupPrompt, opts.role ?? null), "system", undefined, undefined, "agent");
         } else if (!live.busy) {
           // No kickoff to deliver (e.g. a resume) — release anything that queued while boot wasn't ready
           // yet (drainCodexPending's own `!live.bootReady` guard was blocking it until this instant).

@@ -5,6 +5,8 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import chokidar, { type FSWatcher } from "chokidar";
 import { resolveExecutable } from "./resolve-bin.js";
+import { SKILLS_DIR } from "../paths.js";
+import { roleDoctrineSkillName } from "../skills/inject.js";
 
 /**
  * HarnessAdapter seam (multi-harness epic df1f94b0, Phase 1, card 353f6dc4): the codex adapter's
@@ -443,6 +445,37 @@ function codexDoctrineBlock(): string {
 }
 
 /**
+ * Codex counterpart of a claude session's role doctrine skill, for every Loom-driven role EXCEPT worker
+ * (whose condensed doctrine is inlined into AGENTS.md above): a short pointer telling the session to read
+ * the canonical Loom store copy `<SKILLS_DIR>/<skill>/SKILL.md` first. Null when the role has no doctrine
+ * skill (same table as claude's `injectSkills`, so `assistant`/`operator`/plain get none there either) or
+ * that SKILL.md is not in the store (a pointer at a missing file would only mislead).
+ *
+ * Delivered in the session's KICKOFF, not AGENTS.md: non-worker sessions run in the SHARED `project.repoPath`
+ * (sessions/service.ts), where one AGENTS.md is contended by every concurrent role (last writer would win)
+ * and is usually the repo's own file, which is never clobbered. The kickoff is per-session and race-free; a
+ * resumed session keeps the pointer in its own conversation history.
+ */
+export function codexRoleDoctrinePointer(role: string | null | undefined, storeDir: string = SKILLS_DIR): string | null {
+  if (role === "worker") return null;
+  const skill = roleDoctrineSkillName(role);
+  if (!skill) return null;
+  const file = path.join(storeDir, skill, "SKILL.md");
+  if (!fs.existsSync(file)) return null;
+  return [
+    `[loom:role-doctrine] You are a Loom "${role}" session on the Codex CLI, which has no skill-invocation tool.`,
+    `Your operating doctrine is the file ${file} — read it in full BEFORE acting on anything below, and follow it`,
+    `as if it had been loaded as a skill. Its instructions apply for the whole session.`,
+  ].join("\n");
+}
+
+/** Prefix a codex kickoff with the role's doctrine pointer (no-op when there is none). */
+export function withCodexRoleDoctrine(prompt: string, role: string | null | undefined): string {
+  const pointer = codexRoleDoctrinePointer(role);
+  return pointer ? `${pointer}\n\n${prompt}` : prompt;
+}
+
+/**
  * Resolve the git dir `info/exclude` actually lives in for `cwd` — duplicated from
  * `skills/inject.ts#resolveGitCommonDir` (small + self-contained; kept local rather than cross-imported so
  * this file's git-hygiene concern doesn't create a new pty↔skills coupling for one helper). See that
@@ -481,10 +514,9 @@ function hideCodexDoctrineFromGit(cwd: string): void {
 
 /**
  * Deliver the condensed worker doctrine into `<cwd>/AGENTS.md` for a codex WORKER session — the codex
- * counterpart of `skills/inject.ts#injectSkills` for claude. Only `role === "worker"` gets doctrine
- * injected for now (a named, disclosed Phase-1 scope limit: no other codex role is dispatched in
- * production yet, so building per-role content nothing exercises would be speculative rather than
- * verified work — mirrors `skills/inject.ts#ROLE_DOCTRINE_SKILL`'s per-role shape for a future pass).
+ * counterpart of `skills/inject.ts#injectSkills` for claude. Only `role === "worker"` writes this file;
+ * every other Loom-driven role gets its doctrine as a pointer atop its kickoff instead
+ * ({@link codexRoleDoctrinePointer}, card 4bb795bb) because its cwd is the shared repo root.
  *
  * Idempotent + non-destructive: writes ONLY when the file doesn't exist yet, or exists and is ENTIRELY a
  * prior Loom-managed block (starts with {@link CODEX_DOCTRINE_BEGIN}) — refreshed to the CURRENT content on

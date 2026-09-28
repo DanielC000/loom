@@ -22,6 +22,12 @@ const ROLE_DOCTRINE_SKILL: Partial<Record<SessionRole, string>> = {
   setup: "setup-assistant",
 };
 
+/** The store skill name carrying `role`'s operating doctrine, or null when the role has none (run/plain/
+ *  assistant/operator/null). The single source for both harnesses' role→doctrine mapping. */
+export function roleDoctrineSkillName(role: string | null | undefined): string | null {
+  return (role && ROLE_DOCTRINE_SKILL[role as SessionRole]) || null;
+}
+
 /** Per-session injected-skill record for a shared `.claude/skills`: `{ "<sessionId>": ["worker", …] }`.
  *  Keyed by session so a concurrent session sharing the cwd never strips another's (or the repo's) skills. */
 type Manifest = Record<string, string[]>;
