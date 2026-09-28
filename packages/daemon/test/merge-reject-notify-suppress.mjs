@@ -119,11 +119,23 @@ try {
     B.worktreePath = worktreePath; B.branch = branch;
     // Simulate the incident: the manager manually squash-merged the branch out-of-band WHILE the
     // daemon's own confirmWorkerMerge run is about to fail its gate (e.g. a stale client-timeout retry).
-    const landed = await mergeBranch(B.repo, branch, "MRS manual merge");
-    check("(B) precondition: branch's work already landed in main (trailer present)", landed.ok === true);
+    // @decision 293d418e — the old construction landed the branch BEFORE the confirm and let the confirm run (and fail) a real gate; a content-proven
+    // already-landed branch now finishes as ALREADY_MERGED with NO gate, so that confirm can no longer reach a rejection at all. The out-of-band land
+    // therefore happens INSIDE the gate (the incident's real timing) via the runGate seam, which then reports the failure: the branch was NOT landed when
+    // the confirm started (so the ordinary gated path runs), and IS reachable from main by the time the rejection would notify.
+    let gateCallsB = 0;
+    let landedB = null;
+    const failGateAfterOutOfBandLand = async () => {
+      gateCallsB++;
+      if (gateCallsB === 1) landedB = await mergeBranch(B.repo, branch, "MRS manual merge");
+      return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "gate red" };
+    };
+    const sessionsB = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: failGateAfterOutOfBandLand });
     seed(B, FAIL_GATE);
+    check("(B) precondition: branch NOT landed when the confirm starts (a landed branch would skip the gate and never reject)", !fs.existsSync(path.join(B.repo, B.file)));
 
-    const confirmB = await sessions.confirmWorkerMerge(B.mgrId, B.workerId);
+    const confirmB = await sessionsB.confirmWorkerMerge(B.mgrId, B.workerId);
+    check("(B) the gate ran for real and the out-of-band land happened inside it (trailer present)", gateCallsB >= 1 && landedB?.ok === true);
     check("(B) merged:false (gate still reports failed — return contract unchanged)", confirmB.merged === false);
     check("(B) notify SUPPRESSED (branch already reachable from main)", notifyCount(B.mgrId) === 0);
     check("(B) merge_rejected event STILL recorded, marked suppressed",

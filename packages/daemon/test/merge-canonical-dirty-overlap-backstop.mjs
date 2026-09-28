@@ -32,8 +32,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       branch's exact content at P (landed out-of-band, WITH the Loom-Worker-Branch trailer, mirroring
 //       46ebf16e), then P is dirtied AGAIN with unrelated unstaged content: detectCanonicalDirtyOverlap →
 //       overlap:false (despite P being both branch-changed AND canonical-dirty), confirmWorkerMerge
-//       reaches the real gate (marker DOES fire) and classifies ALREADY_MERGED (merged:true) — no false
-//       refusal, and the fresh unstaged edit on P survives untouched (the squash never touches it).
+//       gets past the admission preflight and classifies ALREADY_MERGED (merged:true) — no false
+//       refusal, and the fresh unstaged edit on P survives untouched. Since @decision 293d418e a
+//       content-proven already-landed branch finishes WITHOUT a gate (marker ABSENT,
+//       gateSkipped:"already-landed"); (E2) is the gated twin: the same setup plus a LATE commit on a new
+//       path makes the branch not proven landed, so the real gate runs (marker present), the late
+//       content really lands, and P's unstaged edit still survives.
 //   (D) UNSTAGED DELETE (real positive-overlap control) — canonical has an UNSTAGED DELETE on P (never
 //       `git rm`'d), branch modifies P: detectCanonicalDirtyOverlap → overlap:false, and a DIRECT
 //       mergeBranch() call proves real git actually succeeds (restores + stages P) rather than merely
@@ -124,6 +128,15 @@ const E = {
 };
 E.gateCommand = markerCommand(E.marker);
 
+// ── (E2) ALREADY-LANDED CONTENT + a LATE commit on a new path: the gated-path twin of (E) (@decision 293d418e) ──────────────────────
+const E2 = {
+  projId: `cdo-e2-proj-${sfx}`, agentId: `cdo-e2-top-${sfx}`, taskId: `cdo-e2-task-${sfx}`,
+  mgrId: `cdo-e2-mgr-${sfx}`, workerId: `cdo-e2-wkr-${sfx}`,
+  repo: path.join(os.tmpdir(), `loom-cdo-e2-repo-${sfx}`),
+  marker: path.join(os.tmpdir(), `loom-cdo-e2-marker-${sfx}.log`),
+};
+E2.gateCommand = markerCommand(E2.marker);
+
 // ── (S) STAGED canonical dirt — unconditional admission refusal, no path overlap needed ────────────────
 const S = {
   projId: `cdo-s-proj-${sfx}`, agentId: `cdo-s-top-${sfx}`, taskId: `cdo-s-task-${sfx}`,
@@ -159,6 +172,7 @@ try {
 
   await setup(A);
   await setup(E);
+  await setup(E2);
   await setup(S);
   await setup(U);
 
@@ -183,6 +197,14 @@ try {
   // THEN re-dirty the SAME path again — unstaged, unrelated content — mirroring "canonical then dirty on P".
   fs.writeFileSync(path.join(E.repo, "shared.txt"), "a further live edit, unrelated to the branch\n");
   check("(E) setup: shared.txt is unstaged-dirty AGAIN in canonical E, not staged", git(E.repo, "diff --cached --name-only") === "" && git(E.repo, "diff --name-only") === "shared.txt");
+
+  // (E2) same out-of-band land as (E), THEN a late worker commit on a NEW path (so the branch is no longer proven landed), THEN the same re-dirty of shared.txt.
+  fs.writeFileSync(path.join(E2.repo, "shared.txt"), "worker-version\n");
+  commitAll(E2.repo, ["manual out-of-band resolve", `Loom-Worker-Branch: ${E2.branch}`], GIT_ID);
+  fs.writeFileSync(path.join(E2.worktreePath, "late-e2.txt"), "late work after the out-of-band land\n");
+  commitAll(E2.worktreePath, "late-e2.txt late work", GIT_ID);
+  fs.writeFileSync(path.join(E2.repo, "shared.txt"), "a further live edit, unrelated to the branch\n");
+  check("(E2) setup: shared.txt is unstaged-dirty in canonical E2, not staged", git(E2.repo, "diff --cached --name-only") === "" && git(E2.repo, "diff --name-only") === "shared.txt");
 
   // (S) STAGE unrelated content in canonical S — `git add`ed, never committed.
   fs.writeFileSync(path.join(S.repo, "unrelated.txt"), "STAGED unrelated residue\n");
@@ -216,12 +238,29 @@ try {
   const detE = await detectCanonicalDirtyOverlap(E.repo, E.branch);
   check("(E) detectCanonicalDirtyOverlap → overlap:false (HEAD already matches the branch's content)", detE.overlap === false);
 
-  // ── (E) confirmWorkerMerge reaches the real gate and classifies ALREADY_MERGED — no false refusal ──
+  // ── (E) confirmWorkerMerge gets PAST the admission overlap preflight and classifies ALREADY_MERGED — no false refusal ──
+  // @decision 293d418e — a clean, content-proven already-landed branch now finishes as ALREADY_MERGED WITHOUT running the gate (`gateSkipped:"already-landed"`), so the marker is
+  // ABSENT here by design and no longer proves the confirm got past the preflights. What still does: the skip is ordered AFTER the canonical dirty-overlap preflight, so a false
+  // refusal would surface as merged:false / canonical_dirty_overlap (asserted below), never as this skip. The gated variant of this control is (E2).
   const confirmE = await sessions.confirmWorkerMerge(E.mgrId, E.workerId);
-  check("(E) GATE DID RUN (marker present) — already-landed content is NOT a false refusal", fs.existsSync(E.marker));
+  check("(E) NO gate ran (marker absent) — a content-proven already-landed branch finishes without one, gateSkipped:'already-landed'", !fs.existsSync(E.marker) && confirmE.gateSkipped === "already-landed");
+  check("(E) already-landed content is NOT a false refusal — no canonical_dirty_overlap rejection recorded",
+    !db.listEvents(E.mgrId).some((ev) => ev.kind === "merge_rejected" && ev.detail && ev.detail.reason === "canonical_dirty_overlap"));
   check("(E) confirmWorkerMerge → merged:true", confirmE.merged === true);
   check("(E) classified ALREADY_MERGED", confirmE.emptyKind === "ALREADY_MERGED");
   check("(E) the fresh unstaged edit on shared.txt survives UNTOUCHED (the squash never writes there)", readText(path.join(E.repo, "shared.txt")) === "a further live edit, unrelated to the branch\n");
+
+  // ── (E2) the same control on the GATED path: a late commit on a NEW path makes the branch NOT proven landed ──
+  // The late commit adds a path outside `mergeBase..branch`'s already-landed content, so `preLanded` is null and the ordinary path runs a REAL gate (marker present). The
+  // overlap preflight must STILL not false-refuse shared.txt (branch-changed AND canonical-dirty, but HEAD already carries the branch's exact blob), and the squash must not
+  // write the unstaged shared.txt.
+  const detE2 = await detectCanonicalDirtyOverlap(E2.repo, E2.branch);
+  check("(E2) detectCanonicalDirtyOverlap → overlap:false (HEAD already matches the branch's content at shared.txt; late-e2.txt is not dirty)", detE2.overlap === false);
+  const confirmE2 = await sessions.confirmWorkerMerge(E2.mgrId, E2.workerId);
+  check("(E2) GATE DID RUN (marker present) — the late commit made the branch NOT proven landed, so no already-landed skip", fs.existsSync(E2.marker) && confirmE2.gateSkipped === undefined);
+  check("(E2) confirmWorkerMerge → merged:true (no false refusal)", confirmE2.merged === true);
+  check("(E2) NOT classified ALREADY_MERGED — the late commit's content really landed", confirmE2.emptyKind !== "ALREADY_MERGED" && readText(path.join(E2.repo, "late-e2.txt")) === "late work after the out-of-band land\n");
+  check("(E2) the fresh unstaged edit on shared.txt survives UNTOUCHED (the squash never writes there)", readText(path.join(E2.repo, "shared.txt")) === "a further live edit, unrelated to the branch\n");
 
   // ── (S) unit + confirmWorkerMerge: STAGED dirt refuses at admission, UNCONDITIONALLY ────────────────
   const mainBeforeS = git(S.repo, "rev-parse HEAD");
