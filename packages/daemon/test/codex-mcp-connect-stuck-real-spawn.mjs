@@ -40,7 +40,7 @@
 // deliberately exotic firewall has ~nil realistic incidence, but that variant was never tested and could
 // plausibly behave differently. Recorded as an explicit, named, untested bound — not "tested and fine".
 //
-// SHAPE: PtyHost.spawn with a DELIBERATELY, VERIFIED-unreachable port (see findUnreachablePort below) — a
+// SHAPE: PtyHost.spawn with a DELIBERATELY, VERIFIED-unreachable port (see _unreachable-port.mjs) — a
 // real gotcha found developing this file: `PORT` (paths.ts) defaults to 4317, which a real, live
 // self-hosting Loom daemon on this very host was ALREADY listening on (confirmed via a live TCP probe
 // while this test's first draft ran). Simply "not starting a gateway in this process" does NOT mean
@@ -67,13 +67,13 @@ import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import net from "node:net";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
+import { pinUnreachableLoomPort } from "./_unreachable-port.mjs";
 
 const execFileAsync = promisify(execFile);
 let failures = 0;
@@ -99,21 +99,8 @@ process.env.LOOM_HOME = TMP;
 
 // Force a genuinely unreachable port instead of assuming none is bound (see this file's own header for
 // why that assumption is unsafe on a shared dev host) — confirm nothing answers it before trusting it.
-async function findUnreachablePort() {
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const candidate = 41000 + Math.floor(Math.random() * 9000);
-    const reachable = await new Promise((resolve) => {
-      const sock = net.connect({ host: "127.0.0.1", port: candidate, timeout: 300 });
-      sock.on("connect", () => { sock.destroy(); resolve(true); });
-      sock.on("error", () => resolve(false));
-      sock.on("timeout", () => { sock.destroy(); resolve(false); });
-    });
-    if (!reachable) return candidate;
-  }
-  throw new Error("could not find an unreachable port after 20 attempts");
-}
-const unreachablePort = await findUnreachablePort();
-process.env.LOOM_PORT = String(unreachablePort);
+// The probe lives in _unreachable-port.mjs (card 0e63034a), shared with the other codex real-spawn fixtures.
+const unreachablePort = await pinUnreachableLoomPort();
 console.log(`[repro] confirmed port ${unreachablePort} is unreachable (connection refused/timeout) — using it as LOOM_PORT so codex's MCP servers have nothing real to reach`);
 
 const { PtyHost } = await import("../dist/pty/host.js");

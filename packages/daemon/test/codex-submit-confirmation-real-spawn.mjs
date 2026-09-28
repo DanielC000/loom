@@ -47,6 +47,7 @@ import { promisify } from "node:util";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
+import { pinUnreachableLoomPort } from "./_unreachable-port.mjs";
 
 const execFileAsync = promisify(execFile);
 let failures = 0;
@@ -68,6 +69,10 @@ try {
 
 const TMP = mkdtempManaged("loom-codex-submit-real-");
 process.env.LOOM_HOME = TMP;
+// Card 0e63034a: this file stands up no gateway, so codex's Loom MCP URLs (embedded from paths.ts's PORT,
+// read once at module load) must point at a VERIFIED-unreachable port — never the harness's lane port,
+// where an accept-but-silent listener stretches codex's MCP handshake and boot-ready past this file's budget.
+await pinUnreachableLoomPort();
 
 const { PtyHost } = await import("../dist/pty/host.js");
 // Creates LOOM_HOME's logs dir — without it every run logs a misleading `log stream error … ENOENT` (card a1ad730a).
