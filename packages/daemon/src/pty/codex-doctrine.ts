@@ -495,12 +495,52 @@ function adaptDoctrineLoadForCodex(prompt: string, role: string | null | undefin
   });
 }
 
-/** Prefix a codex kickoff with the role's doctrine pointer (no-op when there is none), and rewrite the seeded
- *  "load your doctrine skill" clause to point at that delivery instead of a skill codex cannot load. */
-export function withCodexRoleDoctrine(prompt: string, role: string | null | undefined, storeDir: string = SKILLS_DIR): string {
+/**
+ * Codex-only note atop the kickoff for every OTHER by-name skill instruction — the Web Designer's "invoke the
+ * web-design skill by name", a DB brief's Step 0 "Run /worker" — which {@link adaptDoctrineLoadForCodex}
+ * deliberately does not touch (it matches one exact seeded clause). Rather than rewriting user text it tells the
+ * session how to READ such an instruction: open `<storeDir>/<name>/SKILL.md`. The list is computed at spawn from
+ * store dirs that really hold a SKILL.md (∩ the profile-pinned `skills` subset when non-empty, plus the role's own
+ * doctrine skill, mirroring `injectSkills`), so it can never point at a missing or out-of-profile file.
+ * A worker's `/worker` is NOT the store copy: its doctrine is the condensed AGENTS.md already loaded from its
+ * worktree root, and the full store file (~14k tokens, written for claude tools) would only duplicate it.
+ * Emitted unconditionally, with no sniffing of the brief. Null when there is nothing to say (empty list, non-worker).
+ * The single alias rule (`loom-<name>`) exists because bundled skills were renamed with that prefix to dodge
+ * collisions with users' personal skills; there is deliberately no other aliasing.
+ * @decision 8b2efa99 — do not rewrite the user's brief to fix by-name skill instructions, and do not add
+ * aliasing beyond `loom-<name>`: the note tells the session how to read them.
+ */
+export function codexSkillsNote(role: string | null | undefined, skills: string[] | null | undefined, storeDir: string = SKILLS_DIR): string | null {
+  const isWorker = role === "worker";
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(storeDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && fs.existsSync(path.join(storeDir, e.name, "SKILL.md")))
+      .map((e) => e.name);
+  } catch { /* no store yet */ }
+  const roleSkill = roleDoctrineSkillName(role);
+  if (skills && skills.length) names = names.filter((n) => skills.includes(n) || n === roleSkill);
+  if (isWorker) names = names.filter((n) => n !== "worker");
+  names.sort();
+  if (!names.length && !isWorker) return null;
+  const parts = [
+    `[loom:skills-note] This Codex session has no skill loader. Where an instruction below says to load, run or invoke a skill by name (e.g. "run /x", "the x skill"), read ${path.join(storeDir, "<name>", "SKILL.md")} instead.`,
+    names.length
+      ? `Skills available: ${names.join(", ")}. A skill not listed is unavailable — skip that instruction and do not search for it; the one exception: if <name> is not listed but loom-<name> is, use loom-<name>.`
+      : `No skill files are available — skip any such instruction and do not search for one.`,
+  ];
+  if (isWorker) parts.push("Your `/worker` doctrine is the condensed AGENTS.md at your worktree root (if present), already loaded — do not open a store copy.");
+  return parts.join(" ");
+}
+
+/** Prefix a codex kickoff with the role's doctrine pointer (no-op when there is none) and the by-name skills note,
+ *  and rewrite the seeded "load your doctrine skill" clause to point at that delivery instead of a skill codex
+ *  cannot load. `skills` is the session's profile-pinned subset (null/empty ⇒ every store skill). */
+export function withCodexRoleDoctrine(prompt: string, role: string | null | undefined, storeDir: string = SKILLS_DIR, skills: string[] | null = null): string {
   const pointer = codexRoleDoctrinePointer(role, storeDir);
+  const note = codexSkillsNote(role, skills, storeDir);
   const adapted = adaptDoctrineLoadForCodex(prompt, role, pointer !== null);
-  return pointer ? `${pointer}\n\n${adapted}` : adapted;
+  return [pointer, note, adapted].filter((p): p is string => p !== null).join("\n\n");
 }
 
 /**

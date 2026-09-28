@@ -5225,7 +5225,7 @@ export class PtyHost {
         if (opts.startupPrompt !== undefined && !live.kickoffDelivered) {
           live.kickoffDelivered = true; // latch BEFORE calling out — never deliver twice
           // Non-worker roles get their doctrine as a pointer atop the kickoff (see codexRoleDoctrinePointer).
-          this.enqueueStdin(opts.sessionId, withCodexRoleDoctrine(opts.startupPrompt, opts.role ?? null), "system", undefined, undefined, "agent");
+          this.enqueueStdin(opts.sessionId, withCodexRoleDoctrine(opts.startupPrompt, opts.role ?? null, undefined, opts.skills ?? null), "system", undefined, undefined, "agent");
         } else if (!live.busy) {
           // No kickoff to deliver (e.g. a resume) — release anything that queued while boot wasn't ready
           // yet (drainCodexPending's own `!live.bootReady` guard was blocking it until this instant).

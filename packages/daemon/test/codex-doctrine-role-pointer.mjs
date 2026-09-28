@@ -41,7 +41,13 @@ for (const [role, skill] of Object.entries(ROLE_SKILL)) {
 // --- roles with no doctrine / worker / missing store file ------------------------------------------------
 for (const role of ["worker", "operator", "assistant", "run", null, undefined]) {
   check(`role ${String(role)}: no pointer`, doctrine.codexRoleDoctrinePointer(role) === null);
-  check(`role ${String(role)}: kickoff unchanged`, doctrine.withCodexRoleDoctrine("KICK", role) === "KICK");
+  // Card 2f1c7846: such a session may now get the by-name [loom:skills-note] paragraph (codex-skills-note.mjs owns
+  // that); what this test pins is that it never gets a ROLE pointer and the kickoff body is left verbatim.
+  const k = doctrine.withCodexRoleDoctrine("KICK", role);
+  check(`role ${String(role)}: no role-doctrine pointer, kickoff body verbatim`, !k.includes("[loom:role-doctrine]") && (k === "KICK" || k.endsWith("\n\nKICK")));
+  const kEmpty = doctrine.withCodexRoleDoctrine("KICK", role, path.join(TMP, "empty-store"));
+  check(`role ${String(role)}: with no skill files in the store the kickoff is ${role === "worker" ? "only the AGENTS.md note + body" : "fully unchanged"}`,
+    role === "worker" ? (kEmpty.startsWith("[loom:skills-note]") && kEmpty.endsWith("\n\nKICK")) : kEmpty === "KICK");
 }
 check("missing store SKILL.md: no pointer (never point at a file that isn't there)", doctrine.codexRoleDoctrinePointer("manager", path.join(TMP, "empty-store")) === null);
 check("withCodexRoleDoctrine keeps the kickoff body verbatim after the pointer", doctrine.withCodexRoleDoctrine("KICK-BODY", "manager").endsWith("\n\nKICK-BODY"));
@@ -86,7 +92,9 @@ for (const role of ["manager", "worker"]) {
     check("spawned manager kickoff carries the orchestrate store pointer AND the original task body",
       k.includes(path.join(SKILLS_DIR, "orchestrate", "SKILL.md")) && k.endsWith("TASK-BODY"));
   } else {
-    check("spawned worker kickoff is byte-identical (worker doctrine stays in AGENTS.md)", k === "TASK-BODY");
+    // Card 2f1c7846: a worker now also gets the [loom:skills-note] (its /worker -> AGENTS.md mapping); still no role pointer.
+    check("spawned worker kickoff carries no role pointer and the task body verbatim (worker doctrine stays in AGENTS.md)",
+      !k.includes("[loom:role-doctrine]") && k.endsWith("\n\nTASK-BODY") && k.startsWith("[loom:skills-note]"));
   }
 }
 

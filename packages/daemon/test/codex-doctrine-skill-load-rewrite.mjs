@@ -114,8 +114,10 @@ for (const [label, { prompt, role }] of seeded) {
 
 // --- (C) edge cases ---------------------------------------------------------------------------------------------
 const EDITED = "My own customized manager prompt — no load instruction here.\n\nBe concise.";
-check("(C) a user-edited prompt without the exact clause is byte-identical after the pointer (worker: fully byte-identical)",
-  doctrine.withCodexRoleDoctrine(EDITED, "worker") === EDITED &&
+// Card 2f1c7846: a codex session now also gets the [loom:skills-note] paragraph (a worker always does), so the
+// user's text is byte-identical AFTER the prepended paragraphs rather than the whole output being the prompt.
+check("(C) a user-edited prompt without the exact clause is left byte-identical (only paragraphs are prepended)",
+  doctrine.withCodexRoleDoctrine(EDITED, "worker").endsWith(`\n\n${EDITED}`) &&
   doctrine.withCodexRoleDoctrine(EDITED, "manager").endsWith(`\n\n${EDITED}`));
 const orch = seeded.get("template/Orchestrator").prompt;
 const noStore = doctrine.withCodexRoleDoctrine(orch, "manager", path.join(TMP, "empty-store"));
