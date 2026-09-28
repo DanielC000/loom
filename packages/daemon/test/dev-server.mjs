@@ -1205,6 +1205,60 @@ if (SUPERVISOR_CODE_UNDER_TEST) {
   check("(o) supervisor's log file records the spawn-error diagnostic (survives the exit, not lost to the async-write/exit race)", false);
 }
 
+// (o) card 049a5b41 — a SEPARATE, DIFFERENT race on the same log file, found as a first-specimen CI flake
+// after the above (o) checks (the write/exit race) already passed: `out`'s own `fs.createWriteStream`
+// open is issued asynchronously via the libuv threadpool (the real O_TRUNC open syscall runs on a
+// separate OS thread), and can complete AFTER the 'error' handler's synchronous `fs.appendFileSync`
+// diagnostic write — even though that write is durable on the main thread before `process.exit()` runs,
+// a LATER truncating open from a different thread wipes it out from under it regardless. Undetectable at
+// normal load (0/300 combined trials on Windows + real Linux/WSL2 in isolated loops — see @decision
+// 4946f01d) because the race window is normally far too small to hit; reproduced DETERMINISTICALLY (15/15
+// on both platforms against the pre-fix helper) by saturating the threadpool with async, non-blocking
+// `crypto.pbkdf2` calls immediately before `out`'s own createWriteStream, delaying its open while leaving
+// spawn()'s own error path (which does not depend on the threadpool) unaffected. The forcing MUST run
+// inside the SAME process as the extracted supervisor code (not a wrapper around it) or it never actually
+// contends with `out`'s own open — injected directly into the extracted SUPERVISOR_CODE_UNDER_TEST string
+// below, immediately ahead of its own `createWriteStream` line, for exactly that reason.
+const RACE_FORCE_PRESSURE_LINE =
+  "const _pressureCrypto = require('crypto'); " +
+  "for (let _i = 0; _i < 64; _i++) { _pressureCrypto.pbkdf2('x', 'y' + _i, 150000, 64, 'sha512', () => {}); }";
+const RACE_OPEN_ANCHOR = "const out = fs.createWriteStream(payload.logPath,";
+const SUPERVISOR_CODE_RACE_FORCED = SUPERVISOR_CODE_UNDER_TEST && SUPERVISOR_CODE_UNDER_TEST.includes(RACE_OPEN_ANCHOR)
+  ? SUPERVISOR_CODE_UNDER_TEST.replace(RACE_OPEN_ANCHOR, `${RACE_FORCE_PRESSURE_LINE}\n${RACE_OPEN_ANCHOR}`)
+  : null;
+check(
+  "(o) race-forcing pressure line injected ahead of the supervisor's own createWriteStream call (a failure here means the helper's own createWriteStream call shape has drifted, not that the race is fixed or broken)",
+  SUPERVISOR_CODE_RACE_FORCED != null,
+);
+
+const RACE_TRIALS = 10;
+let raceLostCount = 0;
+if (SUPERVISOR_CODE_RACE_FORCED) {
+  for (let i = 0; i < RACE_TRIALS; i++) {
+    const raceDir = path.resolve(mkdtempManaged("loom-dev-server-supervisor-race-"));
+    const raceCmd = path.join(raceDir, `does-not-exist-${crypto.randomBytes(6).toString("hex")}`);
+    const raceLogPath = path.join(raceDir, "supervisor-race.log");
+    const racePayload = JSON.stringify({ logPath: raceLogPath, cmd: raceCmd, args: [], cwd: raceDir, shell: false });
+    spawnSync(process.execPath, ["-e", SUPERVISOR_CODE_RACE_FORCED, racePayload], { encoding: "utf8", timeout: 10_000 });
+    const raceLog = fs.existsSync(raceLogPath) ? fs.readFileSync(raceLogPath, "utf8") : "<missing>";
+    if (!/spawn error/.test(raceLog)) raceLostCount++;
+  }
+}
+// RED-PROOF (run manually to confirm this fails against the pre-fix helper; not part of this file's own
+// execution — same convention as section (k)'s own manual positive control):
+//   1. git diff -- packages/daemon/assets/skills/orchestrate/scripts/dev-server.mjs > /tmp/049a5b41.patch
+//   2. git checkout HEAD~1 -- packages/daemon/assets/skills/orchestrate/scripts/dev-server.mjs   (or hand-edit
+//      the supervisor's `createWriteStream` flags back to 'w')
+//   3. node packages/daemon/test/dev-server.mjs → this check FAILS (measured 15/15 lost trials pre-fix)
+//   4. git checkout HEAD -- packages/daemon/assets/skills/orchestrate/scripts/dev-server.mjs → PASSES again
+check(
+  `(o) RACE-FORCING regression (card 049a5b41): under injected threadpool pressure that delays the ` +
+    `supervisor's own log-stream open, the spawn-error diagnostic survives in ${RACE_TRIALS}/${RACE_TRIALS} ` +
+    `forced trials (0 lost) — this check is RED against the pre-fix helper (measured 15/15 lost, both ` +
+    `Windows and real Linux/WSL2), see this section's own RED-PROOF comment`,
+  SUPERVISOR_CODE_RACE_FORCED != null && raceLostCount === 0,
+);
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched, records the ACTUAL bound port (not the configured one) even under port contention, records a directly-usable url alongside the port (mapping 0.0.0.0 to a concrete loopback host), that recorded url connects on a real single-stack server where a naively-rebuilt one refuses, requires an absolute <dir> — refusing a relative one loudly rather than silently keying off the invoking process's own cwd, refuses an ERROR line's host:port rather than recording it as a confident (wrong) bind, steps around a genuinely EACCES-reserved port the same way it already stepped around EADDRINUSE, and still kills a tracked dev-server child even when a section crashes mid-test without ever calling stop() itself."
   : `\n❌ ${failures} FAILURE(S).`);

@@ -275,9 +275,12 @@ const SUPERVISOR_CODE = [
   "const fs = require('fs');",
   "const { spawn } = require('child_process');",
   "const payload = JSON.parse(process.argv[1]);",
-  // 'w': fresh truncate each `start` — a leftover log from a previous run at this <dir> could otherwise
-  // be mistaken for this one's port banner.
-  "const out = fs.createWriteStream(payload.logPath, { flags: 'w' });",
+  // 'a', not 'w': `start()` already truncates this file synchronously before ever spawning this
+  // supervisor. A truncating open here raced (and could wipe) the 'error' handler's own diagnostic
+  // write below — a DIFFERENT race than 4946f01d's write/exit one.
+  //
+  // @decision 4946f01d
+  "const out = fs.createWriteStream(payload.logPath, { flags: 'a' });",
   "const child = spawn(payload.cmd, payload.args, { cwd: payload.cwd, shell: payload.shell, stdio: ['ignore', 'pipe', 'pipe'] });",
   // { end: false } on BOTH — the exit handler below owns closing `out` once the real command exits, so
   // whichever of stdout/stderr happens to end first (e.g. a framework that only ever writes to stderr,
