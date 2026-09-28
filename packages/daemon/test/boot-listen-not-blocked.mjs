@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 const { removeWorktree } = await import("../dist/git/worktrees.js");
+const { WORKTREES_DIR } = await import("../dist/paths.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -136,7 +137,8 @@ const TIMER_SLACK_MS = 50;
   async function serialPassB() {
     let processed = 0;
     for (let i = 0; i < N; i++) {
-      await removeWorktree(repoDummy, path.join(repoDummy, `stuck-${i}`), { gitFactory: stubFastGit, removeDir: neverRemoveDir, timeoutMs: tinyMs });
+      // Under the worktrees root, or removeWorktree's e21cfd5f path guard refuses the target before the removeDir seam is ever reached.
+      await removeWorktree(repoDummy, path.join(WORKTREES_DIR, "bln-fixture", `stuck-${i}`), { gitFactory: stubFastGit, removeDir: neverRemoveDir, timeoutMs: tinyMs });
       processed++;
     }
     return processed;
