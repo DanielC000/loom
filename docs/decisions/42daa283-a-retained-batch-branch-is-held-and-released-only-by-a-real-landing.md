@@ -6,7 +6,7 @@ The batch now records each candidate's assembled tip; a moved or unreadable tip 
 
 ## The hold
 
-- **Keyed on the BRANCH**, not the worker session id: `worker_recycle` mints a new session id on the same branch/worktree, and boot Pass A finalizes by branch.
+- **Keyed on the BRANCH (scoped to its repo, see "The hold is scoped to (branch, repo)" below)**, not the worker session id: `worker_recycle` mints a new session id on the same branch/worktree, and boot Pass A finalizes by branch.
 - **Durable**: read from the event log, so it survives a re-fire, a mixed batch and a daemon restart (never from the process-local verdict cache).
 - **Held means**: never assembled, never fallback-confirmed (`runFallback` reports it `started:false`), never finalized or deleted by ANY path — batch assembly, `runFallback`, boot Pass A, `finishAlreadyMerged`, `finalizeMerge`, the boot branch-ref sweep. Held candidates count toward neither K nor the `< 2` check and are not batch members.
 - **Released by exactly two arms** (the latest retain event for the branch):
@@ -32,6 +32,25 @@ The batch now records each candidate's assembled tip; a moved or unreadable tip 
 ## Landing a held branch
 
 A held branch is reviewed and landed by the range it still owes main, `assembledTip..liveTip` (card 13fc5227; see `13fc5227-a-held-branch-is-reviewed-and-landed-by-its-late-range.md`). This replaced an earlier known limit: a late commit that only reverted part of the branch's own change squashed to NOTHING against the fork point, so `worker_merge_confirm` could only refuse it with cherry-pick guidance. The refusal remains for a range that cannot be determined (fail closed) and for the already-landed finish paths.
+
+## The hold is scoped to (branch, repo) (card a5be590f)
+
+The branch name (`loom/` + sha256(taskId)[:12]) is unique per task but has NO repo axis, so a task retargeted to a second repo (a `repoKey` change) and re-spawned is cut onto the SAME branch name there. Keyed on the branch alone, that had two effects: repo 2 inherited repo 1's hold (a false hold; measured RED in `batch-merge-hold-repo-scoped.mjs` on the pre-fix code: repo 2's confirm was refused as HELD), and, once repo 2 could land, repo 2's `merge_done` would have released repo 1's still-held branch and exposed its late commit to boot Pass A's content-fooled finalize.
+
+Chosen fix: option (a) — carry `repoKey` on the events and match on it inside the ONE `isBranchHeld(branch, repoPath, repoKey)`, not option (b), refusing a `repoKey` retarget while held. (b) would have left every other same-name collision (a hand-made branch, a task re-cut in a second repo without a retarget) and would have needed its own hold check on the retarget path — a second, divergent definition of "held". (a) is one predicate and needs no new refusal surface.
+
+- `batch_merge_branch_retained`, `merge_branch_retained` and `merge_done` details carry `repoKey` (`null` = the primary repo, the same convention as `merge_request`); every caller of `isBranchHeld` states its repo scope (the session's stamped `repoKey`, not the task's current one).
+- Only events in the caller's scope count, for the retain AND for the release. A LEGACY row with no `repoKey` key at all (written before this card) matches any scope, i.e. by branch only — an absent key is distinct from `repoKey: null`.
+- The boot branch-ref sweep asks under every `repoKey` that names the swept path (primary → `null`, registered repos → their key) and keeps the branch if any scope holds it.
+- Boot Pass A's held-branch skip is now counted in the reconcile result (`mergesHeld`) and the boot log line, not only a `console.warn`.
+- Reachability: pre-fix, only the false hold was reachable end to end — it blocked repo 2's confirm before any repo-2 `merge_done` could exist. The release half became reachable the moment the inherit half was fixed in isolation, so the test proves it with a negative control: leaving the `merge_done` filter unscoped turns four checks red (repo 2's `merge_done` releases repo 1's hold, and boot Pass A then finalizes it).
+
+### Do not (repo scope)
+
+- Do not read or write a hold event without its `repoKey`, and do not add a second, repo-aware check beside `isBranchHeld`.
+- Do not treat an absent `repoKey` key as `null`: absent means a legacy row that matches any repo, `null` means the primary repo.
+- Do not scope only the retain and leave the `merge_done` release unscoped: that reopens the cross-repo release.
+- Do not make `repoKey` optional again on a `merge_done` writer (`finalizeMerge`, `finishAlreadyMerged`): an omitted one writes a legacy-shaped row that releases the hold in every repo. It is a required `string | null` argument, so an omission is a compile error.
 
 ## Uncommitted work is a separate retain, and is NOT a hold
 

@@ -1011,12 +1011,12 @@ async function main(): Promise<void> {
   // boot" was false comfort for a repoKey that can never resolve (three records retried every boot for 26+ days,
   // never clearing) — the wedged count points at the per-entry warn for detail.
   void sessions.reconcileOrchestrationOnBoot(protectedSessionIds).then((reconciled) => {
-    if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.staleMergesResolved || reconciled.worktreesPruned || reconciled.worktreesKept || reconciled.worktreesNeedsHuman || reconciled.worktreesStillWedged) {
+    if (reconciled.mergesFinished || reconciled.mergesHeld || reconciled.mergesFailed || reconciled.staleMergesResolved || reconciled.worktreesPruned || reconciled.worktreesKept || reconciled.worktreesNeedsHuman || reconciled.worktreesStillWedged) {
       const retriableFailed = reconciled.mergesFailed - reconciled.mergeReconcileWedged;
       const wedgedPhrase = reconciled.mergeReconcileWedged > 0
         ? `, ${reconciled.mergeReconcileWedged} permanently wedged on an unresolvable repoKey — NOT retriable, see the dedicated [reconcile] warn above for which`
         : "";
-      console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${retriableFailed} failed (retry next boot)${wedgedPhrase}, resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s), ${reconciled.worktreesStillWedged} still wedged (retried, not skipped, until it clears), kept ${reconciled.worktreesKept} holding unmerged/uncommitted work, gave up on ${reconciled.worktreesNeedsHuman} worktree(s) wedged too long (needs a human)`);
+      console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesHeld} skipped as HELD by a merge retain (branch/worktree kept for review), ${retriableFailed} failed (retry next boot)${wedgedPhrase}, resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s), ${reconciled.worktreesStillWedged} still wedged (retried, not skipped, until it clears), kept ${reconciled.worktreesKept} holding unmerged/uncommitted work, gave up on ${reconciled.worktreesNeedsHuman} worktree(s) wedged too long (needs a human)`);
     }
   }).catch((err) => {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
