@@ -469,10 +469,38 @@ export function codexRoleDoctrinePointer(role: string | null | undefined, storeD
   ].join("\n");
 }
 
-/** Prefix a codex kickoff with the role's doctrine pointer (no-op when there is none). */
-export function withCodexRoleDoctrine(prompt: string, role: string | null | undefined): string {
-  const pointer = codexRoleDoctrinePointer(role);
-  return pointer ? `${pointer}\n\n${prompt}` : prompt;
+/** The exact opening the seeded agent prompts carry (`setup/templates.ts`, `setup/seed.ts`, `platform/seed.ts`):
+ *  "Load your <bold-slash-skill> doctrine skill first" (the skill name bold-wrapped with a leading slash). Matched on THAT sentence only — a prompt a user has edited
+ *  away from it is left byte-identical, never guessed at. */
+const DOCTRINE_SKILL_LOAD_RE = /Load your \*\*\/([A-Za-z0-9_-]+)\*\* doctrine skill first/g;
+
+/**
+ * Codex counterpart of the seeded "Load your (slash-skill) doctrine skill first" instruction, which a claude session
+ * satisfies through its skill loader and a codex session cannot (no skill-invocation tool). Rewrites ONLY that
+ * clause, so the rest of the seeded prompt (" — it is your operating manual (...)") still reads on. Applied
+ * at spawn time, to the codex kickoff only, so the claude-resolved prompt and the DB row are never touched.
+ * @decision 8b2efa99 — do not move this into the seeds or rewrite the stored prompts: a user-edited prompt
+ * would be clobbered, and the claude prompt must stay byte-identical.
+ */
+function adaptDoctrineLoadForCodex(prompt: string, role: string | null | undefined, hasPointer: boolean): string {
+  const roleSkill = roleDoctrineSkillName(role);
+  return prompt.replace(DOCTRINE_SKILL_LOAD_RE, (_m, skill: string) => {
+    if (skill === roleSkill && hasPointer) {
+      return `Follow your **${skill}** doctrine first (the file named in the [loom:role-doctrine] pointer above; Codex cannot load skills)`;
+    }
+    if (skill === roleSkill && role === "worker") {
+      return `Follow your **${skill}** doctrine first (the condensed copy in the AGENTS.md at your worktree root, if present; Codex cannot load skills)`;
+    }
+    return `Your **${skill}** doctrine is NOT available in this Codex session (no skill loader, and no doctrine file was provided) — work from the rest of this prompt and your task, and treat what follows as a description of it`;
+  });
+}
+
+/** Prefix a codex kickoff with the role's doctrine pointer (no-op when there is none), and rewrite the seeded
+ *  "load your doctrine skill" clause to point at that delivery instead of a skill codex cannot load. */
+export function withCodexRoleDoctrine(prompt: string, role: string | null | undefined, storeDir: string = SKILLS_DIR): string {
+  const pointer = codexRoleDoctrinePointer(role, storeDir);
+  const adapted = adaptDoctrineLoadForCodex(prompt, role, pointer !== null);
+  return pointer ? `${pointer}\n\n${adapted}` : adapted;
 }
 
 /**
