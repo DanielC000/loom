@@ -352,9 +352,11 @@
                 Loom server to upload them to. Every UI write route needs a local
                 access credential, so another process on the box can't drive the
                 API just by reaching the socket. What does leave the machine — the
-                agents' own conversations with Anthropic, a plan-usage poll, an
-                update check on an npm install — is listed in the README, with how
-                to stop each one that can be stopped.
+                agents' own conversations with Anthropic (or, on the opt-in
+                Codex harness, your Codex CLI's provider), a plan-usage poll, an
+                update check on an npm install, and opt-in webhooks and package
+                downloads — is listed in the README, with how to stop each one
+                that can be stopped.
               </p>
             </li>
 
@@ -374,7 +376,9 @@
                 Loom can also bind an interface itself — a gateway token per
                 client, TLS required off a tailnet, a fail-closed route allowlist
                 — but read that as an authenticated API, not a second cockpit.
-                Off by default.
+                A same-host reverse proxy such as Tailscale Serve is supported
+                as a read-and-steer cockpit, not yet verified on a live
+                tailnet. Off by default.
               </p>
             </li>
 

@@ -201,9 +201,12 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         note: "createPty injects the profile-resolved skill subset via injectSkills.",
       },
     ],
-    // codex-host.ts has zero references to skills at all — codex has no analogous skill-file-delivery
-    // mechanism (verified: `grep -i skill packages/daemon/src/pty/codex-host.ts` → 0 hits). Not a bug to
-    // fix; nothing exists on the codex side for this field to bind to.
+    // codex-host.ts has zero references to skills at all — codex has no skill-file-delivery mechanism, so
+    // nothing is injected (verified: `grep -i skill packages/daemon/src/pty/codex-host.ts` → 0 hits). The
+    // one place a profile's pinned `skills` subset still reaches codex is the kickoff's skills note:
+    // `codexSkillsNote` (pty/codex-doctrine.ts) intersects its list of readable store skills with the
+    // pinned subset. That is text telling the session what it may read, not delivery, so the exemption
+    // below stands.
     exempt: [
       { harness: "codex", reason: "harness-lacks-equivalent-mechanism", note: "codex-host.ts has no skill-injection mechanism at all (0 references) — there is nothing for this field to wire into on the codex path." },
     ],

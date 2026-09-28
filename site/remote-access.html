@@ -6,7 +6,7 @@
     <title>Remote access · Loom</title>
     <meta
       name="description"
-      content="Reach your Loom daemon from another device. The recommended path keeps the daemon loopback-only behind an SSH port-forward; a narrower alternative is a direct authenticated bind with a gateway token and mandatory TLS off the tailnet, which serves the API rather than the cockpit."
+      content="Reach your Loom daemon from another device. The recommended path keeps the daemon loopback-only behind an SSH port-forward; alternatives are a same-host reverse proxy such as Tailscale Serve (read-and-steer cockpit, unverified on a live tailnet) or a direct authenticated bind with a gateway token and mandatory TLS off the tailnet, which serves the API rather than the cockpit."
     />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <meta name="color-scheme" content="dark" />
@@ -15,7 +15,7 @@
     <meta property="og:title" content="Remote access · Loom" />
     <meta
       property="og:description"
-      content="Reach your Loom daemon from another device: an SSH port-forward (recommended, zero new listening surface) or a direct authenticated bind with a gateway token and TLS."
+      content="Reach your Loom daemon from another device: an SSH port-forward (recommended, zero new listening surface), a same-host reverse proxy such as Tailscale Serve (unverified), or a direct authenticated bind with a gateway token and TLS."
     />
     <meta property="og:type" content="article" />
 
@@ -722,8 +722,9 @@
         </a>
         <p class="footer-note">
           Loom runs on your own machine, bound to loopback by default. Remote
-          access is opt-in and gated: an SSH port-forward, or a direct
-          authenticated bind with a gateway token and TLS.
+          access is opt-in and gated: an SSH port-forward, a same-host reverse
+          proxy such as Tailscale Serve (unverified on a live tailnet), or a
+          direct authenticated bind with a gateway token and TLS.
         </p>
         <a class="footer-link" href="https://github.com/DanielC000/loom"
           >github.com/DanielC000/loom</a

@@ -19,16 +19,16 @@ Because every agent is a genuine `claude` session rather than an API-key agent l
 ## Features
 
 - **🖥️ Durable real sessions.** Real `claude` sessions that survive a closed tab or a reboot without losing the thread.
-- **⛓️ Review-gated orchestration.** A lead agent delegates to workers on isolated git branches, reviews each diff, and merges through a build gate (docs-only diffs skip it).
+- **⛓️ Review-gated orchestration.** A lead agent delegates to workers on isolated git branches, reviews each diff, and merges through a build gate (docs-only diffs skip it; a human can switch the gate off per project, or with it off set an interval N so N merges land ungated and the next one runs the gate).
 - **🚦 Gates page.** A read-only view of every merge, deploy and self-check gate: what's running, what's queued, and past results.
 - **🗂️ Multi-repo projects.** One project can span several repos, with each board card routed to the right one.
 - **✦ A versioned knowledge layer.** An Obsidian vault of notes and decisions kept versioned with the code, plus a Memory view of what the fleet remembers across sessions.
 - **📌 Decision records.** Load-bearing decisions are written to `docs/decisions/` and linked from the code, so the reasoning reaches whoever edits it next.
-- **◧ A task board agents can use.** A per-project kanban that agents read and update as part of the same loop.
+- **◧ A task board agents can use.** A per-project kanban that agents read and update as part of the same loop, with parent cards and blocks/related/discovered-from relations.
 - **💳 Runs on your subscription.** Uses your Claude Pro/Max plan instead of per-token API billing, within its usage and rate limits.
 - **❯ The terminal cockpit.** A web UI that attaches to live sessions and detaches freely, alongside your board, Memory and repository views.
 - **💬 A personal companion.** A long-lived agent you chat with over Telegram or in the app, with durable memory and reminders.
-- **🧪 An experimental second harness.** Off by default: a profile can run the Codex CLI instead of `claude`, with narrower support: only worker sessions get Loom's doctrine, there is no context or usage telemetry, and `allowDelta` and pinned skills are ignored.
+- **🧪 An experimental second harness.** Off by default: a profile can run the Codex CLI instead of `claude`, with narrower support: a worker gets a condensed doctrine in its `AGENTS.md` while other roles get a pointer to their doctrine skill atop the kickoff, there is no context or usage telemetry, sessions can't be forked, and `allowDelta` is ignored (a profile's pinned skills only narrow the list Codex is told it may read; nothing is injected).
 - **🌐 Per-worker browser testing.** Opt-in: give a worker profile its own headless browser to test a running app.
 - **🚀 A Platform operator.** A built-in assistant that helps you set up projects, agents, and profiles, confirming big moves first.
 - **🔐 An Elevated Operator.** Off by default: a session whose Loom tools are limited to one project's branch, commit, push and vault — a tool boundary, not a sandbox.
@@ -219,10 +219,11 @@ Step-by-step instructions live on the landing site's **Remote access** page ([`s
 
 ## Network
 
-- Your agents' own conversations with Anthropic. They carry your code, as any coding agent's do.
+- Your agents' own conversations with Anthropic — or, for a session on the opt-in Codex harness, with whichever provider your Codex CLI is set up to use. They carry your code, as any coding agent's do.
 - A plan-usage poll of `api.anthropic.com/api/oauth/usage` every 60s, only when Claude OAuth credentials exist (`LOOM_SUPPRESS_USAGE_POLLER=1` stops it).
 - npm-installed daemons check `registry.npmjs.org` for `loomctl` updates every 6h (none from source; not switchable off, `LOOM_NPM_REGISTRY` only redirects). New worker worktrees run your package manager's install.
-- Opt-in and able to carry session content: the Telegram companion, outbound alert webhooks, and any Connection you bind.
+- Opt-in and able to carry session content: the Telegram companion, outbound alert webhooks, Agent Runs completion webhooks (they post the run's id, status, result and error — the result is agent output), and any Connection you bind.
+- Opt-in downloads that carry no session content: a profile with document conversion pip-installs `markitdown` from PyPI into Loom's own Python venv, and the GitHub capability downloads a pinned `github-mcp-server` release from github.com.
 
 ## How it works
 
