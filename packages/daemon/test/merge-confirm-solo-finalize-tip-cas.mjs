@@ -11,8 +11,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (D) commit lands AFTER finalize's tip check but before the CAS delete (in the worktree GC reap step) => FINALIZED, only the ref kept.
 //   (E) UNPINNED landing (no gateCommand, so no landing pin): the tip comes from mergeBranchLocked's landedTip; a stop-window commit is still kept.
 //   (F) landedTip is returned by mergeBranch on both the squash and the ALREADY_MERGED noop.
-//   (G) PARTIAL REVERT (Code Review Major 1, reproduced): the stop-window commit reverts part of the branch's own change, so a re-confirm's squash is EMPTY (ALREADY_MERGED).
-//       The held branch must be REFUSED with the cherry-pick guidance and NOT deleted: the late commit stays reachable.
+//   (G) PARTIAL REVERT (Code Review Major 1): the stop-window commit reverts part of the branch's own change, so a fork-point squash of a re-confirm would be EMPTY.
+//       Since card 13fc5227 the re-confirm lands the LATE RANGE (landedTip..liveTip) instead: main loses the reverted file and the hold is released.
 //   (H) the retention is visible on the async path: the [loom:already-merged] push (sent AFTER finalize) says RETAINED, never "finishing the worktree cleanup".
 //   (J) STATE-BASED HOLD (Code Review round 2): a retention with NOTHING unlanded releases itself: the hold lasts only while the branch tip differs from the landed tip
 //       (solo landedTip, batch assembledTip, or — when the retention recorded none — the landed squash's Loom-Landed-Tip trailer). The next confirm FINISHES.
@@ -179,9 +179,8 @@ async function setup(sfx, { gateCommand = "pnpm gate" } = {}) {
   const r1 = await confirm(t.sessions, t.mgrId, t.workerId);
   check("(G) first confirm: merged, retained (not finalized), HELD", r1.settled === true && r1.ok && r1.value.merged === true && t.branchExists() && t.mergeDone() === 0 && !!(await t.sessions.isBranchHeld(t.wt.branch, t.repo)));
   const r2 = await confirm(t.sessions, t.mgrId, t.workerId);
-  check("(G) re-confirm of the held branch is REFUSED (merged:false, HELD reason with the cherry-pick guidance), not finalized", r2.settled === true && r2.ok && r2.value.merged === false && /HELD/.test(r2.value.reason ?? "") && /cherry-pick/.test(r2.value.reason ?? ""));
-  check("(G) the branch is NOT deleted and the late revert commit is still reachable", t.branchExists() && t.subjects().includes("revert-feature"));
-  check("(G) the worktree is retained, no merge_done, main still holds the branch's change", fs.existsSync(t.wt.worktreePath) && t.mergeDone() === 0 && fs.existsSync(path.join(t.repo, "feature.txt")));
+  check("(G) re-confirm of the held branch lands its late range (merged:true), not a refusal", r2.settled === true && r2.ok && r2.value.merged === true);
+  check("(G) main lost the reverted feature.txt and the branch was finalized (merge_done filed, hold released)", !fs.existsSync(path.join(t.repo, "feature.txt")) && !t.branchExists() && t.mergeDone() === 1 && (await t.sessions.isBranchHeld(t.wt.branch, t.repo)) === undefined);
 }
 {
   // (I) the branch is checked out in ANOTHER worktree: the worktree finalize is handed (a decoy) is removed, but the CAS delete must still be skipped.

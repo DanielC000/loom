@@ -13,6 +13,7 @@ import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-wi
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
 import { isCodexDoctrinePath } from "../pty/codex-doctrine.js";
 import { checkTitleHtmlEntities, CONVENTIONAL_TYPES } from "../tasks/title-guard.js";
+import { mergeCommitBlocksLinearization, MAX_MERGE_COMMITS_CHECKED } from "./merge-linearization.js";
 import {
   emitCompareSoundnessOk,
   transpileIgnoringCommentsAndWhitespace,
@@ -5494,8 +5495,12 @@ async function hasConfiguredGitIdentity(git: Pick<SimpleGit, "raw">): Promise<bo
 // making confirmWorkerMerge's `gateBaseMainHead` capture (and therefore mergeBranch's requireCanonicalHead
 // re-check) vanish, fail-OPEN. The `ok:false` variant carries no such guarantee (nothing was unioned) and
 // keeps its existing optional fields.
+//
+// `owedBase` (card 13fc5227): set ONLY for a HELD (batch-retained) branch, whose earlier commits main already carries as the batch's own cherry-picks. A plain `git merge` would
+// resurrect main's copy of a file the branch's LATE commit deleted, so the union commit's tree is main plus the branch's still-owed COMMITS ({@link computeOwedLanding}), and the
+// ordinary squash that follows lands exactly those. {@link verifyReviewedTipChain}'s `extraUnionBases` accepts a merge built this way.
 export async function mergeMainIntoWorktree(
-  repoPath: string, worktreePath: string, deps: BoundedGitDeps = {},
+  repoPath: string, worktreePath: string, deps: BoundedGitDeps = {}, owedBase?: string,
 ): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string }> {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
@@ -5519,7 +5524,8 @@ export async function mergeMainIntoWorktree(
   // Already caught up? (worktree HEAD already has mainSha as an ancestor — the common case for a
   // freshly-cut branch.) A merge-base probe failure isn't fatal — fall through and let the merge attempt
   // below settle it either way.
-  try {
+  // A HELD branch (owedBase) never takes this shortcut: a worker's own merge of main can already contain main yet still carry a resurrected copy of what its late commit deleted.
+  if (!owedBase) try {
     const mergeBase = (await withTimeout(wtGit.raw(["merge-base", "HEAD", mainSha]), timeoutMs, "git merge-base (worktree)")).trim();
     if (mergeBase === mainSha) return { ok: true, merged: false, mainSha };
   } catch { /* fall through to attempt the merge */ }
@@ -5532,6 +5538,26 @@ export async function mergeMainIntoWorktree(
   const identityArgs = (await hasConfiguredGitIdentity(wtGit))
     ? []
     : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
+
+  if (owedBase) {
+    // @decision 13fc5227 — a HELD branch's union is built from the COMMITS it still owes (computeOwedLanding), never from a chosen merge base: the commit is (tip, main) with tree = main + those commits.
+    // The commit is made by hand (commit-tree, then a fast-forward of the worktree) because `git merge` cannot produce that tree.
+    try {
+      const wtRaw = (args: string[]) => withTimeout(wtGit.raw(args), timeoutMs, `git ${args[0]} (owed landing)`);
+      const tip = (await wtRaw(["rev-parse", "--verify", "HEAD"])).trim();
+      const landing = await computeOwedLanding(wtRaw, owedBase, tip, mainSha, timeoutMs);
+      if (!landing.ok) return { ok: false, ...(landing.kind === "conflict" ? { conflict: true } : {}), reason: describeOwedFailure(landing) };
+      const tipTree = (await wtRaw(["rev-parse", `${tip}^{tree}`])).trim();
+      const mainIsAncestor = (await wtRaw(["merge-base", tip, mainSha])).trim() === mainSha;
+      if (mainIsAncestor && landing.tree === tipTree) return { ok: true, merged: false, mainSha }; // the branch already IS main plus its owed commits
+      const commit = (await wtRaw([...identityArgs, "commit-tree", landing.tree, "-p", tip, "-p", mainSha, "-m", `Merge main into branch (owed commits over ${owedBase.slice(0, 8)})`])).trim();
+      await wtRaw(["merge", "--ff-only", commit]);
+    } catch (e) {
+      const d = describeGitFailure(e);
+      return { ok: false, reason: d.refusal ? `refused, nothing changed: ${d.text}` : `late-range union of main into the worktree failed: ${d.text}` };
+    }
+    return { ok: true, merged: true, mainSha };
+  }
 
   let mergeThrew = false;
   let mergeErr = "";
@@ -5586,8 +5612,98 @@ export async function mergeMainIntoWorktree(
  * @decision bbccf470 — never store or trust a per-branch "advanced to" record (a shared ref/file is agent-writable and was forged in review); never accept "some merge commit" as daemon-authored.
  */
 export const REVIEWED_TIP_WALK_MAX_HOPS = 32;
+
+/**
+ * Card 13fc5227 — the work a HELD branch still owes main, modelled as COMMITS and never as a merge base (three merge-base rules were each defeated by some history): the NON-MERGE commits of
+ * `base..tip` (`base` = the tip a retaining merge landed) that are not reachable from `main`, in TOPOLOGICAL order (`--topo-order`: parents first whatever the committer dates say), each
+ * cherry-picked onto main with git's own three-way (`merge-tree --write-tree --merge-base=<c>^ <cur> <c>`, i.e. what `cherry-pick` computes) into throwaway commit objects: nothing is checked
+ * out and no ref moves. Merge commits are skipped ONLY when `merge_batch`'s own predicate allows it ({@link mergeCommitBlocksLinearization}: every non-first parent on main and no resolution
+ * content of its own) or when the merge is Loom's own union (its tree is exactly what this function makes of its parents); any other merge REFUSES (`kind:"merge"`), because skipping it would
+ * silently lose what it carries (card bc2240d7). A commit that does not apply fails closed naming it (`kind:"conflict"`, never auto-resolved); one that applies as a no-op is skipped and flagged
+ * `emptyOnMain`. `tree` is main plus the owed commits — what worker_merge_confirm lands and the gate tests, and what worker_merge shows. ONE function, so review and landing cannot diverge;
+ * every merge-tree pins `--attr-source=<tip>` so worktree and canonical callers read the same merge drivers. THROWS on a git error (callers fail closed). Needs git >= 2.40.
+ */
+export type OwedLanding =
+  | { ok: true; tree: string; mainTree: string; commits: { sha: string; subject: string; emptyOnMain: boolean }[] }
+  | { ok: false; kind: "conflict"; commit: string; subject: string }
+  | { ok: false; kind: "merge"; commit: string; subject: string; why: string };
+
+export async function computeOwedLanding(
+  raw: (args: string[]) => Promise<string>, base: string, tip: string, main: string, timeoutMs: number, depth = 0,
+): Promise<OwedLanding> {
+  const oid = /^[0-9a-f]{40,64}$/;
+  const lines = (text: string) => text.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+  const identity = ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
+  const subjectOf = async (sha: string) => (await raw(["log", "-1", "--format=%s", sha])).trim();
+  const merges = lines(await raw(["rev-list", "--merges", `${base}..${tip}`, "--not", main]));
+  if (merges.length > MAX_MERGE_COMMITS_CHECKED) return { ok: false, kind: "merge", commit: merges[0]!, subject: await subjectOf(merges[0]!), why: `is one of ${merges.length} merge commits in the range (more than ${MAX_MERGE_COMMITS_CHECKED} are checked)` };
+  for (const m of merges) {
+    const why = await mergeCommitBlocksLinearization({ raw: raw as unknown as SimpleGit["raw"] }, m, main, timeoutMs);
+    if (!why) continue;
+    // Loom's own union commit (parents [previous tip, main-at-the-time], tree = that tip plus main plus the owed commits) legitimately differs from a plain merge; accept exactly that shape.
+    const parents = lines(await raw(["rev-list", "--parents", "-n", "1", m])).flatMap((l) => l.split(/\s+/)).slice(1);
+    let ownUnion = false;
+    if (parents.length === 2 && depth < 8) {
+      const inner = await computeOwedLanding(raw, base, parents[0]!, parents[1]!, timeoutMs, depth + 1);
+      ownUnion = inner.ok && inner.tree === (await raw(["rev-parse", `${m}^{tree}`])).trim();
+    }
+    if (!ownUnion) return { ok: false, kind: "merge", commit: m, subject: await subjectOf(m), why };
+  }
+  const owed = lines(await raw(["rev-list", "--reverse", "--topo-order", "--no-merges", `${base}..${tip}`, "--not", main]));
+  const mainTree = (await raw(["rev-parse", `${main}^{tree}`])).trim();
+  let cur = main;
+  let curTree = mainTree;
+  const commits: { sha: string; subject: string; emptyOnMain: boolean }[] = [];
+  for (const sha of owed) {
+    const subject = await subjectOf(sha);
+    const out = lines(await raw([`--attr-source=${tip}`, "merge-tree", "--write-tree", `--merge-base=${sha}^`, cur, sha]));
+    if (out.length !== 1 || !oid.test(out[0]!)) return { ok: false, kind: "conflict", commit: sha, subject };
+    const empty = out[0] === curTree;
+    commits.push({ sha, subject, emptyOnMain: empty });
+    if (empty) continue;
+    curTree = out[0]!;
+    cur = (await raw([...identity, "commit-tree", curTree, "-p", cur, "-m", `owed ${sha.slice(0, 8)}`])).trim();
+  }
+  return { ok: true, tree: curTree, mainTree, commits };
+}
+
+/** The refusal/warning text for a failed {@link computeOwedLanding}: one wording for the union, the review and the confirm. */
+export function describeOwedFailure(f: Extract<OwedLanding, { ok: false }>): string {
+  return f.kind === "conflict"
+    ? `the late commit ${f.commit.slice(0, 8)} ("${f.subject}") does not apply cleanly onto current main — nothing was changed; rebase the late commits onto main, then re-run`
+    : `the merge commit ${f.commit.slice(0, 8)} ("${f.subject}") in the branch's late range ${f.why} — nothing was changed; a merge that carries its own content, or merges a branch that is not on main, cannot be replayed: rebase the late commits onto main, then re-run`;
+}
+
+/**
+ * Card 13fc5227 — what landing a HELD branch would put on main, for review: {@link computeOwedLanding}'s tree diffed against main, with the same commit list, so the subjects and the diffstat
+ * come from one computation. `failure` carries the refusal when the owed work cannot be replayed; `undefined` on any git error (the caller says so).
+ */
+export async function diffOwedLanding(repoPath: string, tip: string, owedBase: string, deps: BoundedGitDeps = {}): Promise<
+  { failure: Extract<OwedLanding, { ok: false }> } | { failure?: undefined; filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; commits: { sha: string; subject: string; emptyOnMain: boolean }[]; commitSubjects: string[] } | undefined
+> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const raw = (args: string[]) => withTimeout(git.raw(args), timeoutMs, `git ${args.find((a) => !a.startsWith("-")) ?? args[0]} (owed landing)`);
+    const main = (await raw(["rev-parse", "--verify", "HEAD"])).trim();
+    const landing = await computeOwedLanding(raw, owedBase, tip, main, timeoutMs);
+    if (!landing.ok) return { failure: landing };
+    const files: DiffstatFile[] = [];
+    let insertions = 0, deletions = 0;
+    for (const line of (await raw(["diff", "--numstat", landing.mainTree, landing.tree])).split(/\r?\n/)) {
+      const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line);
+      if (!m) continue;
+      const binary = m[1] === "-";
+      const ins = binary ? 0 : Number(m[1]), del = binary ? 0 : Number(m[2]);
+      files.push({ file: m[3]!, insertions: ins, deletions: del, binary });
+      insertions += ins; deletions += del;
+    }
+    return { filesChanged: files.length, insertions, deletions, files, commits: landing.commits, commitSubjects: landing.commits.map((c) => c.subject) };
+  } catch {
+    return undefined;
+  }
+}
 export async function verifyReviewedTipChain(
-  repoPath: string, reviewed: string, live: string, deps: BoundedGitDeps = {},
+  repoPath: string, reviewed: string, live: string, deps: BoundedGitDeps = {}, extraUnionBases: readonly string[] = [],
 ): Promise<{ ok: true; hops: number } | { ok: false; reason: string }> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   // Replace refs are ignored on EVERY call by the shared `canonicalGit` factory (`core.useReplaceRefs=false`), not per call site.
@@ -5609,7 +5725,14 @@ export async function verifyReviewedTipChain(
       // `merge-tree --write-tree` exits 1 on a conflict WITHOUT throwing through simple-git: the conflicted tree oid is the first line and the conflict info follows —
       // so anything but exactly one oid line is a conflict, never a clean union.
       const mt = (await raw([`--attr-source=${prev}`, "merge-tree", "--write-tree", prev, m], "git merge-tree (reviewed-tip walk)")).trim().split(/\r?\n/);
-      if (mt.length !== 1 || !/^[0-9a-f]{40,64}$/.test(mt[0]!) || tree !== mt[0]) return { ok: false, reason: `${short(cur)} could not be verified as a clean union of ${short(prev)} and ${short(m)} (conflicted, or not what merging main would produce)` };
+      let unionOk = mt.length === 1 && /^[0-9a-f]{40,64}$/.test(mt[0]!) && tree === mt[0];
+      // Card 13fc5227: a HELD branch's union is main plus the commits it still owes (see mergeMainIntoWorktree's `owedBase`): accepted only when its tree is EXACTLY what {@link computeOwedLanding}
+      // makes of `prev` and `m` for the caller's owed base — a merge of main adds nothing else, and a non-merge commit never reaches this point (it fails the two-parent check above).
+      for (const base of unionOk ? [] : extraUnionBases) {
+        const landing = await computeOwedLanding((args) => raw(args, `git ${args.find((a) => !a.startsWith("-")) ?? args[0]} (owed landing walk)`), base, prev, m, timeoutMs);
+        if (landing.ok && landing.tree === tree) { unionOk = true; break; }
+      }
+      if (!unionOk) return { ok: false, reason: `${short(cur)} could not be verified as a clean union of ${short(prev)} and ${short(m)} (conflicted, or not what merging main would produce)` };
       cur = prev;
     }
     return { ok: false, reason: `more than ${REVIEWED_TIP_WALK_MAX_HOPS} steps between the reviewed tip and the branch tip` };

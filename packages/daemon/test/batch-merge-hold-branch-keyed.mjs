@@ -10,7 +10,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //              worktree and the late commit intact, no merge_done filed.
 //   (release)  the ONE deliberate release is a real new squash of the live tip (worker_merge_confirm's Green path): with the gate ON (E) and
 //              with the merge gate OFF (F). Its merge_done releases the hold; nothing else does.
-//   (empty squash) A's own late commit nets to nothing against main, so confirm cannot land it: it is REFUSED with guidance, never destroyed.
+//   (late range) A's own late commit only REVERTS part of A's own change, so a fork-point squash would net to nothing against main; confirm lands the LATE RANGE instead
+//              (card 13fc5227; the full review/land/fail-closed coverage is batch-merge-late-range-landing.mjs): main loses extra-a.txt and the hold is released.
 // Fixture: A commits two files; the (idempotent) gate command `git rm`s one of them on A's branch mid-gate ⇒ A retained by a real merge_batch.
 // Run: 1) pnpm build, 2) node packages/daemon/test/batch-merge-hold-branch-keyed.mjs
 import fs from "node:fs";
@@ -100,7 +101,7 @@ try {
   check("(setup) A's branch carries the late-revert commit and no extra-a.txt", subjects(repo, a.branch).includes("late-revert") && !fs.existsSync(path.join(a.worktreePath, "extra-a.txt")));
   let mainAfterFirst = git(repo, "rev-parse HEAD");
   // E: a synthetic retain on a branch with a real, un-landed commit.
-  for (const [w, x] of [[wE, e], [wF, f]]) db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrId, kind: "batch_merge_branch_retained", workerSessionId: w, taskId: x.taskId, detail: { opId: "synthetic", branch: x.branch, assembledTip: "0".repeat(40), liveTip: "1".repeat(40), phase: "pre-stop" } });
+  for (const [w, x] of [[wE, e], [wF, f]]) db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrId, kind: "batch_merge_branch_retained", workerSessionId: w, taskId: x.taskId, detail: { opId: "synthetic", branch: x.branch, assembledTip: git(repo, `rev-parse ${x.branch}~1`), liveTip: git(repo, `rev-parse ${x.branch}`), phase: "pre-stop" } });
 
   const nothingLanded = (tag) => {
     check(`(${tag}) main did not move and the late revert is not on main (extra-a.txt still there)`, git(repo, "rev-parse HEAD") === mainAfterFirst && fs.existsSync(path.join(repo, "extra-a.txt")));
@@ -146,13 +147,12 @@ try {
   check("(release, gate off) the manual confirm lands F (merged:true, gate skipped, feature-f.txt on main)", fRes.merged === true && fRes.skipped === true && fs.existsSync(path.join(repo, "feature-f.txt")));
   check("(release, gate off) F is released and its branch finalized", (await offSvc.isBranchHeld(f.branch, repo)) === undefined && !refExists(repo, f.branch));
 
-  // ── (empty squash) A's late commit only REVERTS part of A's own change, so a squash of its live tip nets to nothing against main: confirm
-  // ── cannot land it. It must be REFUSED (held, intact, with guidance) — never finalized-and-deleted (the reviewer's data-loss repro). ─────
-  mainAfterFirst = git(repo, "rev-parse HEAD"); // E and F legitimately landed since; A's refused confirm must not move main any further
+  // ── (late range) A's late commit only REVERTS part of A's own change, so a squash of its live tip against the fork point nets to nothing — the old behaviour was a
+  // ── refusal with cherry-pick guidance. Since card 13fc5227 confirm lands exactly the late range (assembledTip..liveTip): main loses extra-a.txt and A is released. ─────
   const aRes = await offSvc.confirmWorkerMerge(mgrId, wA);
-  check("(empty squash) confirming A is refused (merged:false) with the cherry-pick guidance", aRes.merged === false && /HELD/.test(aRes.reason ?? "") && /cherry-pick/.test(aRes.reason ?? ""));
-  nothingLanded("empty squash");
-  check("(empty squash) A is STILL held", !!(await offSvc.isBranchHeld(a.branch, repo)));
+  check("(late range) confirming A lands its late range (merged:true)", aRes.merged === true);
+  check("(late range) main ends WITHOUT the reverted extra-a.txt and still WITH feature-a.txt", !fs.existsSync(path.join(repo, "extra-a.txt")) && fs.existsSync(path.join(repo, "feature-a.txt")));
+  check("(late range) A is released and its branch finalized", (await offSvc.isBranchHeld(a.branch, repo)) === undefined && !refExists(repo, a.branch));
 
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

@@ -22,7 +22,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -13159,6 +13159,8 @@ export class SessionService {
     behindMain?: number; rawTitle?: string; commitSubject?: string; coerced?: boolean; tasklessSubjectPreview?: string;
     ownTipSubject?: string; ownTipSubjectConventional?: boolean;
     ownNonTipCommitSubjects?: string[]; ownNonTipCommitSubjectsConventional?: boolean; ownNonTipCommitSubjectsTruncated?: boolean;
+    /** Card 13fc5227: present ONLY for a HELD (batch-retained) branch — the range it still owes main (`assembledTip..liveTip`), distinct from the fork-point diff above (which mixes in what already landed). */
+    lateRange?: { assembledTip: string; liveTip: string; filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; commitSubjects: string[]; commits: { sha: string; subject: string; emptyOnMain: boolean }[]; note: string };
     /** Card 6f13746c: the project's merge-gate cadence + ungated counter (READ-only; agents never set any of it). */
     mergeGate?: MergeGateAgentView;
   }> {
@@ -13296,7 +13298,31 @@ export class SessionService {
       const commentBlocks = await detectUnanchoredAddedCommentBlocks(repoPath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs }, { allFiles: diff.allFiles });
       commentBlockWarning = formatUnanchoredCommentBlocksAdvisory(commentBlocks, "manager");
     } catch { /* fail safe: no warning, no throw */ }
-    const warning = [strandedWarning, staleWarning, denyGlobWarning, retractedPremiseWarning, entityWarning, commentBlockWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    // Card 13fc5227: a HELD branch's fork-point diff above mixes what the batch already landed with the late commits (and shows a late REVERT as nothing), so the
+    // range it still owes main is shown separately; a held branch whose range cannot be determined says so instead (worker_merge_confirm refuses it too — same resolver).
+    let lateRange: Awaited<ReturnType<SessionService["reviewWorkerMerge"]>>["lateRange"];
+    let heldWarning: string | undefined;
+    try {
+      const owed = await this.resolveOwedRange(worker.branch, repoPath);
+      if (owed.kind === "refuse") heldWarning = `HELD BRANCH: ${owed.reason}.`;
+      else if (owed.kind === "range") {
+        // What will ACTUALLY land — the same computeOwedLanding worker_merge_confirm's union uses: the branch's own NON-MERGE commits in assembledTip..liveTip that main does not reach,
+        // cherry-picked onto current main. The commit list and the diffstat come from that one computation, so they cannot disagree.
+        const late = await diffOwedLanding(repoPath, owed.tip, owed.base, { timeoutMs: this.gitOpMs });
+        if (!late) throw new Error("the owed commits could not be evaluated against main");
+        if (late.failure) throw new Error(`${describeOwedFailure(late.failure)} (worker_merge_confirm would refuse it the same way)`);
+        const emptied = late.commits.filter((c) => c.emptyOnMain);
+        lateRange = {
+          assembledTip: owed.base, liveTip: owed.tip, filesChanged: late.filesChanged, insertions: late.insertions, deletions: late.deletions, files: late.files,
+          commitSubjects: late.commitSubjects, commits: late.commits,
+          note: `HELD BRANCH: a merge_batch landed ${owed.base.slice(0, 8)} and this branch then moved to ${owed.tip.slice(0, 8)} (commits never gated). The fork-point diffstat above includes what already landed; worker_merge_confirm lands ONLY the ${late.commits.length} non-merge commit(s) listed here (assembledTip..liveTip, not reachable from main), cherry-picked onto current main; the diffstat here is that result against main.` +
+            (emptied.length ? ` ${emptied.length} of them (${emptied.map((c) => c.sha.slice(0, 8)).join(", ")}) change nothing on current main and are skipped.` : ""),
+        };
+      }
+    } catch (e) {
+      heldWarning = `HELD BRANCH: the late range could not be computed for review (${e instanceof Error ? e.message.split("\n")[0] : String(e)}) — worker_merge_confirm re-derives it and refuses if it cannot.`;
+    }
+    const warning = [strandedWarning, staleWarning, denyGlobWarning, retractedPremiseWarning, entityWarning, commentBlockWarning, heldWarning].filter((w): w is string => !!w).join(" ") || undefined;
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "merge_request",
@@ -13343,6 +13369,7 @@ export class SessionService {
         ownNonTipCommitSubjectsConventional,
         ...(ownNonTipCommitSubjects.truncated ? { ownNonTipCommitSubjectsTruncated: true } : {}),
       } : {}),
+      ...(lateRange ? { lateRange } : {}),
       ...(mergeGateView ? { mergeGate: mergeGateView } : {}),
     };
   }
@@ -13661,6 +13688,15 @@ export class SessionService {
       const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null });
       if (finished) return finished;
     }
+
+    // Card 13fc5227: a HELD (retained) branch is landed by the range it still owes main (`assembledTip..liveTip`), through the ONE resolver review also uses. Fail closed before
+    // anything runs: an unreadable/rewritten range is refused with guidance, and the late-range union below is built only on the gated path.
+    const owed = await this.resolveOwedRange(branch, repoPath);
+    const owedRefusal = owed.kind === "refuse" ? owed.reason
+      : owed.kind === "range" && !gate ? `${branch} is HELD and owes a late range (${owed.base.slice(0, 8)}..${owed.tip.slice(0, 8)}), but this repo has no gateCommand, and the late range is landed only through the gated union of main — inspect it and cherry-pick it onto a follow-up card's worker`
+      : undefined;
+    if (owedRefusal) return { merged: false, reason: `${owedRefusal}. Nothing was landed, finalized or deleted.`, notified: false, opId: thisOpId };
+    const owedBase = owed.kind === "range" ? owed.base : undefined;
 
     // OP-ID STAMPED ONTO EVERY EVENT (card 7d492f8b): merged in here — not at each call site — so no
     // future evt() call can forget it. Gives `Db.findGateOpEventsByOpId` an exact join key back to this
@@ -14194,11 +14230,12 @@ export class SessionService {
       // Indistinguishable from a RE-CUT branch carrying genuinely new work, which is exactly what
       // `findLandedSquashCommit`'s re-task guard (below, via `mergeBranch`'s own noop classification) exists
       // to detect — misclassifying a legitimate ALREADY_MERGED re-confirm as STAGE_EMPTY_RETRY otherwise.
-      const preLanded = await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
+      // Card 13fc5227: a HELD branch (owedBase set) is never "already landed" as a whole — its late range is still owed, so it must not take the already-landed shortcut.
+      const preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
       if (!preLanded) {
-        const union = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs });
+        const union = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs }, owedBase);
         if (!union.ok) {
-          const why = union.conflict ? "branch conflicts with current main — rebase/resolve before merge" : (union.reason ?? "union merge failed");
+          const why = union.conflict ? (union.reason ?? "branch conflicts with current main — rebase/resolve before merge") : (union.reason ?? "union merge failed");
           const failReason = union.conflict ? "union_conflict" : "union_merge_failed";
           // Card 522cf573 DoD 4: squash phase never reached — the union-merge (a pre-gate step) failed
           // before the gate or the squash itself ever ran.
@@ -14557,7 +14594,7 @@ export class SessionService {
               } catch {
                 // Best-effort, same guard as every other reap call in this method.
               }
-              const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs });
+              const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs }, owedBase);
               if (reunion.ok) {
                 // Keep `gateBaseMainHead` current regardless of the inert verdict below: if this ends up
                 // NOT provably inert, the real-gate path's own `reunionAtAdmission` reads this value and
@@ -14907,10 +14944,10 @@ export class SessionService {
             } catch {
               // Best-effort, same guard as the pre-gate sweep above.
             }
-            const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs });
+            const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs }, owedBase);
             if (!reunion.ok) {
               const why = reunion.conflict
-                ? "branch conflicts with current main — rebase/resolve before merge"
+                ? (reunion.reason ?? "branch conflicts with current main — rebase/resolve before merge")
                 : (reunion.reason ?? "union merge failed");
               throw new AdmissionReunionFailedError(reunion.conflict ? "union_conflict_at_admission" : "union_merge_failed_at_admission", why);
             }
@@ -16016,9 +16053,7 @@ export class SessionService {
     // (solo `landedTip`, batch `assembledTip`; a retention that recorded none resolves it from the landed squash's trailer). A retention with nothing unlanded
     // (a transient unreadable tip, a sentinel, a ref-kept branch at the landed tip) releases itself. An unreadable or MISSING current tip stays held (fail closed; 42daa283).
     // RESIDUAL: a retention that recorded no tip on a squash with no trailer (pre-cc9bce38) has nothing to compare, so it stays held until a merge_done or a later squash.
-    const recordedTip = typeof retain.detail?.landedTip === "string" ? retain.detail.landedTip
-      : typeof retain.detail?.assembledTip === "string" ? retain.detail.assembledTip
-      : landedSha ? await readLandedTipTrailer(repoPath, landedSha, { timeoutMs: this.gitOpMs }) : null;
+    const recordedTip = await this.heldRecordedTip(retain, repoPath);
     const currentTip = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs });
     // A MISSING branch does NOT release (42daa283: a ref probe reads a transiently locked ref as missing, and a hand-deleted branch is harmless to keep reporting): only a
     // current tip that is READABLE and equals the recorded one releases.
@@ -16027,6 +16062,36 @@ export class SessionService {
     const later = await findLaterBranchSquash(repoPath, branch, landedSha, { timeoutMs: this.gitOpMs, gitFactory: this.heldProbeGitFactory });
     if (later === "found") return undefined;
     return { retain, gitUnverified: later === "error" };
+  }
+  /** The tip a retaining merge landed the branch at: a solo `landedTip`, a batch `assembledTip`, else the landed squash's `Loom-Landed-Tip` trailer; `null` when none is recorded. The ONE reader — {@link isBranchHeld} and {@link resolveOwedRange} both call it. */
+  private async heldRecordedTip(retain: OrchestrationEvent, repoPath: string): Promise<string | null> {
+    const landedSha = typeof retain.detail?.landedSha === "string" ? retain.detail.landedSha : undefined;
+    return typeof retain.detail?.landedTip === "string" ? retain.detail.landedTip
+      : typeof retain.detail?.assembledTip === "string" ? retain.detail.assembledTip
+      : landedSha ? await readLandedTipTrailer(repoPath, landedSha, { timeoutMs: this.gitOpMs }) : null;
+  }
+  /**
+   * @decision 13fc5227 — THE one resolver of "what range a held branch still owes main" (review, confirm's union and the reviewed-tip walk all call it): `recordedTip..liveTip`,
+   * never the fork-point range (a fork-point squash nets a late self-revert to nothing). FAIL CLOSED with `refuse` on an unreadable/non-ancestor tip; never a guess.
+   */
+  private async resolveOwedRange(branch: string, repoPath: string): Promise<{ kind: "none" } | { kind: "range"; base: string; tip: string } | { kind: "refuse"; reason: string }> {
+    const held = await this.isBranchHeld(branch, repoPath);
+    if (!held) return { kind: "none" };
+    const guidance = "inspect the branch by hand and cherry-pick what is still owed onto a follow-up card's worker";
+    if (held.gitUnverified) return { kind: "refuse", reason: `${branch} is HELD and its release could not be verified (reading main for a later Loom-Worker-Branch commit failed) — usually transient, retry; else ${guidance}` };
+    const base = await this.heldRecordedTip(held.retain, repoPath);
+    if (!base) return { kind: "refuse", reason: `${branch} is HELD but its retain event records no readable assembledTip/landedTip, so the range it still owes main cannot be determined — ${guidance}` };
+    const tip = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs });
+    if (!tip) return { kind: "refuse", reason: `${branch} is HELD and its current tip could not be read — ${guidance}` };
+    let baseIsCommit = false;
+    let baseIsAncestor = false;
+    try {
+      baseIsCommit = (await resolveGitRef(repoPath, `${base}^{commit}`, { timeoutMs: this.gitOpMs })) !== null;
+      baseIsAncestor = baseIsCommit && await isAncestorCommit(repoPath, base, tip, this.gitOpMs ?? 15_000); // 15_000: git/worktrees.ts GIT_OP_TIMEOUT_MS default, as elsewhere in this file
+    } catch { /* fall through: unreadable ⇒ not provably an ancestor ⇒ refuse below */ }
+    if (!baseIsCommit) return { kind: "refuse", reason: `${branch} is HELD but its recorded assembledTip ${base.slice(0, 8)} could not be read as a commit, so the range it still owes main cannot be determined — ${guidance}` };
+    if (!baseIsAncestor) return { kind: "refuse", reason: `${branch} is HELD but its recorded assembledTip ${base.slice(0, 8)} is not an ancestor of the branch tip ${tip.slice(0, 8)} (the branch was rewritten), so the range it still owes main cannot be determined — ${guidance}` };
+    return { kind: "range", base, tip };
   }
   /**
    * Card bbccf470 — THE ONE reader of "is this branch's tip still the one the manager reviewed?" (the solo confirm at BOTH its check points and the batch assembly all
@@ -16046,7 +16111,9 @@ export class SessionService {
     const recorded = typeof last.detail?.tip === "string" && last.detail.tip ? last.detail.tip : null;
     let why = recorded === null ? "the reviewed tip could not be read at review time" : live === null ? "the branch tip could not be read" : "";
     if (recorded !== null && live !== null) {
-      const chain = await verifyReviewedTipChain(repoPath, recorded, live, { timeoutMs: this.gitOpMs });
+      // Card 13fc5227: a held branch's union of main is built over its owed base (see mergeMainIntoWorktree's `owedBase`), so the walk must accept that base too.
+      const owed = await this.resolveOwedRange(branch, repoPath);
+      const chain = await verifyReviewedTipChain(repoPath, recorded, live, { timeoutMs: this.gitOpMs }, owed.kind === "range" ? [owed.base] : []);
       if (chain.ok) return { state: "unmoved", tip: live };
       why = chain.reason;
     }
@@ -16161,7 +16228,7 @@ export class SessionService {
     if (heldAtFinish) {
       const reason = heldAtFinish.gitUnverified
         ? `branch ${args.branch} is HELD by a merge retain (merge_batch or a solo worker_merge_confirm) and its release could not be VERIFIED: reading main for a later Loom-Worker-Branch commit (which would mean it was already landed) failed. Nothing was finalized or deleted. This is usually transient — retry worker_merge_confirm (or restart the daemon) to re-check.`
-        : `branch ${args.branch} is HELD: a merge (a merge_batch or a solo worker_merge_confirm) retained it because commit(s) landed on it after that merge fixed its tip, and main carries no later Loom-Worker-Branch commit for it, so those were never gated or landed. Nothing was finalized or deleted. Review it with worker_merge, then land it with worker_merge_confirm (a real squash of the live tip releases the hold). If that squash would be EMPTY — e.g. the late commit only reverts part of the branch's own change, so the branch nets to nothing against main — confirm cannot land it (this refusal is what you get instead): cherry-pick the late commit(s) (the landed..live range on the retained event, i.e. the tip that landed up to the branch's current tip) onto a follow-up card's worker. The branch stays held until a real merge_done, a later Loom-Worker-Branch squash on main, or the branch tip returning to the tip that landed.`;
+        : `branch ${args.branch} is HELD: a merge (a merge_batch or a solo worker_merge_confirm) retained it because commit(s) landed on it after that merge fixed its tip, and main carries no later Loom-Worker-Branch commit for it, so those were never gated or landed. Nothing was finalized or deleted. Review it with worker_merge (its \`lateRange\` shows the commits added after the landing), then land it with worker_merge_confirm, which lands exactly that late range (a real landing releases the hold). You reach THIS refusal instead when the finish found the branch's work already on main without landing the late range (a card sitting in the terminal column, or a late range that nets to nothing against main): inspect the branch and cherry-pick what is still owed onto a follow-up card's worker. The branch stays held until a real merge_done, a later Loom-Worker-Branch squash on main, or the branch tip returning to the tip that landed.`;
       return { merged: false, reason, notified: false, opId: args.opId };
     }
     // @decision cc9bce38 — the success announcement is sent AFTER finalize (it may RETAIN the branch, and "finishing the cleanup" must never contradict that);

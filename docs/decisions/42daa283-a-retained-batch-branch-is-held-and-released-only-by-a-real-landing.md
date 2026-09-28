@@ -29,9 +29,9 @@ The batch now records each candidate's assembled tip; a moved or unreadable tip 
 
 "Only the merge code writes a `Loom-Worker-Branch` commit" is a claim about PRODUCERS, not a proof. A HUMAN commit carrying the trailer (e.g. re-cherry-picking the batch commit onto main) would falsely release a hold. That is accepted, because every destructive site stays independently content-guarded — boot Pass A's `branchContentLandedInCommit`, the `--merged`-only branch-ref sweep, and `finishAlreadyMerged` (only reached after an empty squash) — and because a batch landing is itself gated. The arm is a crash-recovery anchor, not the only safety.
 
-## Known limit
+## Landing a held branch
 
-A held branch whose live tip squashes to NOTHING against main (a late commit that only reverts part of the branch's own change) cannot be landed by `worker_merge_confirm`; the finish is refused with cherry-pick guidance and the branch stays held. Reviewing/landing a held branch by `assembledTip..liveTip` is carded separately.
+A held branch is reviewed and landed by the range it still owes main, `assembledTip..liveTip` (card 13fc5227; see `13fc5227-a-held-branch-is-reviewed-and-landed-by-its-late-range.md`). This replaced an earlier known limit: a late commit that only reverted part of the branch's own change squashed to NOTHING against the fork point, so `worker_merge_confirm` could only refuse it with cherry-pick guidance. The refusal remains for a range that cannot be determined (fail closed) and for the already-landed finish paths.
 
 ## Uncommitted work is a separate retain, and is NOT a hold
 
