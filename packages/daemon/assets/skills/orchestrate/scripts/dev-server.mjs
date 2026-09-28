@@ -374,12 +374,16 @@ async function start(dir, cmdArgs) {
   });
   // Truncate the log HERE, in the launcher, synchronously, BEFORE spawning the supervisor. This is the
   // actual fix for the stale-port race (card 7d0eceab): waitForBinding's first read fires immediately
-  // after spawn, while the detached supervisor is still booting its own node process — well before it
-  // reaches its own `fs.createWriteStream(logPath, { flags: 'w' })` truncation below. A leftover log from
-  // a previous `start` at this same <dir> would otherwise be read as this run's port banner, and since
-  // this first read is essentially instantaneous, it wins virtually always when a stale log exists. The
-  // supervisor's own truncating open still runs too (harmless, and correct for its own writes) but must
-  // never be the ONLY barrier — this synchronous truncate is what actually closes the race.
+  // after spawn, while the detached supervisor is still booting its own node process — well before the
+  // supervisor ever touches this file. A leftover log from a previous `start` at this same <dir> would
+  // otherwise be read as this run's port banner, and since this first read is essentially instantaneous,
+  // it wins virtually always when a stale log exists.
+  //
+  // This is also the ONLY truncation of the log: the supervisor's own log stream (see SUPERVISOR_CODE
+  // above) opens in append mode, not truncate — a truncating open there could land after, and wipe, the
+  // supervisor's own spawn-error diagnostic.
+  //
+  // @decision 4946f01d
   fs.writeFileSync(logPath, "", "utf8");
 
   // See the SUPERVISOR note at the top of this file: the detached, TRACKED process is this supervisor,
