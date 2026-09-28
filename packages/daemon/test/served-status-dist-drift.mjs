@@ -27,7 +27,11 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 const HOUR = 3_600_000;
-const T0 = Date.now() - 2 * HOUR; // the "real build" — old, like a gate's build long before this test runs
+// Whole-second, not just "old": on Linux/ext4, fs.utimesSync()→fs.statSync().mtimeMs loses sub-ms
+// precision (a float64 round-trip quirk, not a computeDeployStaleness bug) for an arbitrary ms value,
+// intermittently truncating the read-back mtime 1ms below what was set — flaking (1-setup)'s exact-ms
+// equality check below. A whole-second value has a zero ns fraction, so there's nothing to round away.
+const T0 = Math.floor((Date.now() - 2 * HOUR) / 1000) * 1000; // the "real build" — old, like a gate's build long before this test runs
 const processStartedAt = new Date(Date.now() - HOUR).toISOString(); // gate: process starts long after the build
 
 /** Fresh fixture: dist (one file at T0) + repo with an empty init commit; returns helpers. */
