@@ -131,6 +131,23 @@ function captureArmWarnings(fn) {
   return lines;
 }
 
+// Card 7c1487c8: ONE console.log override collecting the plain diagnostic, the arm line and the dropped-char
+// near-miss together. The capture helpers above each REPLACE console.log, so nesting them leaves only the
+// innermost one seeing anything — a single-override collector is the only correct way to read all three
+// from one deliverHook call.
+function captureMismatchFamily(fn) {
+  const out = { mismatch: [], arm: [], nearMiss: [] };
+  const orig = console.log;
+  console.log = (msg) => {
+    if (typeof msg !== "string") return;
+    if (msg.includes("[prompt-mismatch-arm]")) out.arm.push(msg);
+    else if (msg.includes("[prompt-mismatch-pasted-content-wrap-near-miss]")) out.nearMiss.push(msg);
+    else if (msg.includes("[prompt-mismatch] ")) out.mismatch.push(msg);
+  };
+  try { fn(); } finally { console.log = orig; }
+  return out;
+}
+
 // Card b1cc4f01: captures the pasted-content-wrap single-character-deficit diagnostic's own
 // [prompt-mismatch-pasted-content-wrap-near-miss] line — exact-scoped, same shape as captureArmWarnings.
 function captureNearMissWarnings(fn) {
@@ -506,6 +523,8 @@ try {
   // id-backreferenced regex as 6f), but the wrapped body is missing exactly ONE character relative to
   // `intended`. Measured directly off 6/6 real production specimens (all six residual arms after card
   // 7c1487c8 shipped showed exactly this shape, always Δ+57 — one byte short of the clean +58 in 6f).
+  // Card 7c1487c8 later showed that dropped byte was the message's own TRAILING WHITESPACE (now recognized,
+  // scenario 6p); this fixture drops a MID-STRING char, so it stays the near-miss.
   // POSITIVE CONTROL for `detectPastedContentWrapSingleCharDeficit`, and THE SAFETY CASE again: naming
   // the shape must never suppress the notice — a one-character divergence is still a real divergence. =====
   {
@@ -704,6 +723,87 @@ try {
     await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
     const noticeWrite6o = fake.writes.slice(writesBeforeMismatch).join("");
     check("6o: the notice actually reached the pty", noticeWrite6o.includes("[loom:prompt-mismatch]"));
+  }
+
+  // ===== 6p. Card 7c1487c8 — the REAL +57 residual: the engine's composer TRIMS TRAILING WHITESPACE off the
+  // pasted body, so an `intended` ending in whitespace comes back as `intended.trimEnd()` inside an
+  // otherwise-intact wrap (hash-verified on 13 production specimens: 12 trailing "\n", 1 trailing " ").
+  // POSITIVE CONTROL: each shape must be RECOGNIZED as benign — no arm, no session-facing notice — and,
+  // load-bearing (manager ruling), must NOT ALSO be tagged as the b1cc4f01 dropped-char near-miss, whose
+  // one-char-deficit shape it otherwise matches exactly. `"\n\n"` covers a multi-char trim (unmeasured,
+  // accepted by trimEnd's own semantics). =====
+  for (const [label, tail] of [["LF", "\n"], ["SP", " "], ["LFLF", "\n\n"]]) {
+    const sid = newSession(`PastedContentWrapTrimmedTail${label}`); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = `[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.${tail}`;
+    const reported = `\n\n<pasted_content id="7714">\n${intended.trimEnd()}\n</pasted_content id="7714">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const fam6p = captureMismatchFamily(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check(`6p[${label}]: the raw scan still diverges (corpus preserved) at the wrap's own +${58 - tail.length} delta`,
+      fam6p.mismatch.length === 1 && new RegExp(`lenDelta=${58 - tail.length}\\b`).test(fam6p.mismatch[0] ?? ""));
+    check(`6p[${label}]: POSITIVE CONTROL — the trimmed-trailing-whitespace wrap is RECOGNIZED: no [prompt-mismatch-arm] line`, fam6p.arm.length === 0);
+    check(`6p[${label}]: and NOT also tagged as the single-char dropped-char near-miss`, fam6p.nearMiss.length === 0);
+    // TIMING-GUARD-SAFE: sync-probe-no-macrotask — see scenario 8's own comment for why exactly one tick is
+    // provably sufficient; the negative check below runs synchronously immediately after, no further await.
+    await new Promise((r) => setTimeout(r, 0));
+    check(`6p[${label}]: no session-facing notice enqueues`, !hasPendingMismatchNotice(sid));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    check(`6p[${label}]: nothing resembling the notice reached the pty`, !fake.writes.slice(writesBeforeMismatch).join("").includes("[loom:prompt-mismatch]"));
+    check(`6p[${label}]: getLastMismatchReplay stays null`, host.getLastMismatchReplay(sid) === null);
+  }
+
+  // ===== 6q. Card 7c1487c8 — THE CONTENT-MISMATCH CONTROL (the one that can fail): `intended` ENDS in
+  // whitespace, so the trimEnd clause is live, but the wrapped inner has one INTERIOR character
+  // substituted (same length as `intended.trimEnd()`, same +57 delta as 6p). It must NOT be accepted via
+  // trimEnd — it still arms and the session-facing notice still lands. =====
+  {
+    const sid = newSession("PastedContentWrapTrimmedTailContentMismatch"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.\n";
+    const trimmed = intended.trimEnd();
+    const origChar = trimmed[30];
+    const innerSubstituted = trimmed.slice(0, 30) + (origChar === "Q" ? "Z" : "Q") + trimmed.slice(31);
+    check("6q: fixture sanity — same length as intended.trimEnd() (so same +57 delta as 6p), content differs", innerSubstituted.length === trimmed.length && innerSubstituted !== trimmed);
+    const reported = `\n\n<pasted_content id="7714">\n${innerSubstituted}\n</pasted_content id="7714">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const fam6q = captureMismatchFamily(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6q: THE CONTROL — a content-mismatched inner is NOT accepted via the trimEnd clause: the arm line fires", fam6q.arm.length === 1);
+    const noticeLanded6q = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6q: and the session-facing notice still enqueues", noticeLanded6q);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    check("6q: the notice actually reached the pty", fake.writes.slice(writesBeforeMismatch).join("").includes("[loom:prompt-mismatch]"));
+  }
+
+  // ===== 6r. Card 7c1487c8 — `intended` has NO trailing whitespace and the wrapped inner is `intended`
+  // minus its LAST NON-WHITESPACE character (delta 57, exactly 6p's shape). The trimEnd clause must not
+  // accept it: it still lands as the b1cc4f01 dropped-char near-miss AND still notifies (manager
+  // addition 2). Also proves the trailing-whitespace fixtures in 6p are what makes the difference. =====
+  {
+    const sid = newSession("PastedContentWrapNoTrailingWsLastCharDropped"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.";
+    check("6r: fixture sanity — intended has no trailing whitespace", intended === intended.trimEnd());
+    const innerLastDropped = intended.slice(0, -1);
+    const reported = `\n\n<pasted_content id="7714">\n${innerLastDropped}\n</pasted_content id="7714">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const fam6r = captureMismatchFamily(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6r: NOT recognized — the arm line fires", fam6r.arm.length === 1);
+    check("6r: still named as the dropped-char near-miss (the last char, index = intended.length-1)", fam6r.nearMiss.length === 1 && (fam6r.nearMiss[0] ?? "").includes(`droppedIndex=${intended.length - 1}`));
+    const noticeLanded6r = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6r: and the session-facing notice still enqueues", noticeLanded6r);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    check("6r: the notice actually reached the pty", fake.writes.slice(writesBeforeMismatch).join("").includes("[loom:prompt-mismatch]"));
   }
 
   // ===== 7. Card 201d0d95 Q1 — POSITIVE: a mismatch must now SURFACE to the affected session itself, not

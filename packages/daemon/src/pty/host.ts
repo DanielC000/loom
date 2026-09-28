@@ -447,10 +447,14 @@ const PASTED_CONTENT_WRAP_RE = /^\n\n<pasted_content id="([0-9a-zA-Z]+)">\n([\s\
  *  framing; the literal appears nowhere else in this repo). Verified against a real engine transcript
  *  (session 80ea0c0d, reportedLen=538/intendedLen=480): the wrapper's own prefix+suffix is a fixed 58
  *  chars regardless of payload size and stripping it leaves `intended` byte-for-byte — the id is
- *  captured/backreferenced, never assumed to be any particular length or charset. */
+ *  captured/backreferenced, never assumed to be any particular length or charset.
+ *
+ *  The engine also trims TRAILING whitespace off the pasted body, so an `intended` ending in whitespace
+ *  comes back as `intended.trimEnd()` inside the wrap (the +57).
+ *  @decision 7c1487c8 — accept ONLY `intended` or `intended.trimEnd()` as inner; never widen further. */
 function isRecognizedPastedContentWrap(reported: string, intended: string): boolean {
   const m = PASTED_CONTENT_WRAP_RE.exec(reported);
-  return m !== null && m[2] === intended;
+  return m !== null && (m[2] === intended || m[2] === intended.trimEnd());
 }
 
 /** Card b1cc4f01 — sibling diagnostic to `isRecognizedPastedContentWrap`: the wrap FRAMING matches the
@@ -459,7 +463,10 @@ function isRecognizedPastedContentWrap(reported: string, intended: string): bool
  *  exact shape, AND Loom's own write was independently verified byte-exact against `intended` for one of
  *  them via the `[pty-write]` chunk log (the chunk lengths summed to `intended.length` precisely) — so the
  *  single-character drop happens strictly AFTER Loom's write, inside the engine's own paste round-trip,
- *  never in Loom's writer. Diagnostic only, like `detectAnsiEscapeStripDeficit`/`wrapperDeficit` — this
+ *  never in Loom's writer. Card 7c1487c8's later hash-verified reconstruction of the +57 population found
+ *  those specimens' dropped character was the message's own TRAILING WHITESPACE (the composer's trim),
+ *  which `isRecognizedPastedContentWrap` now accepts — so this detector only names a drop of anything else.
+ *  Diagnostic only, like `detectAnsiEscapeStripDeficit`/`wrapperDeficit` — this
  *  does NOT suppress the "possible LOSS" notice and must never be used to relax
  *  `isRecognizedPastedContentWrap`'s own `m[2] === intended` check: a one-character content divergence is
  *  still, genuinely, the exact shape that safety property exists to catch — this only NAMES the shape so
