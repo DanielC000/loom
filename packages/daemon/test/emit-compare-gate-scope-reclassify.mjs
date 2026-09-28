@@ -30,12 +30,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       293d418e a CLEAN, content-proven already-landed branch finishes as ALREADY_MERGED with NO gate
 //       (`gateSkipped:"already-landed"`), so that producer no longer queues on the semaphore at all: this
 //       scenario now pins that a pure preLanded confirm settles while another op still holds the cap's
-//       only slot, spawning no gate — reduced or full — even when main gained a behavioral edit. The
-//       ORIGINAL discriminator (a preLanded op queued at the cap whose main moves during the wait) has no
-//       end-to-end witness left: a dirty preLanded worktree is refused before the queue (@decision
-//       975c774b), so only a lookup race between the two landed-proofs could still reach it. The
-//       unconditional main-leg read in `confirmWorkerMerge` is unchanged; only the branch-move leg keeps an
-//       end-to-end witness, (L)/(N) on the `!preLanded` producer.
+//       only slot, spawning no gate — reduced or full — even when main gained a behavioral edit.
+//   (M2) card 805b98d1 — the ORIGINAL (M) discriminator, restored through the one route that still reaches
+//       it: a preLanded branch whose worktree reads dirty at the no-gate skip's stamp but clean at the gate
+//       path's later stamp (a lookup race, staged deterministically) queues at the cap, and main gains a
+//       behavioral edit during the wait. Only the main leg's own admission-time HEAD read can reclassify
+//       that gate to FULL; mutation-verified (removing the main leg from `moved` turns it RED).
 //   (N) card abaaf16e — RECLASSIFICATION PATH FOR DIST-TEXT SCANNERS: same cap-queue-admission shape as
 //       (L), but the further commit landing on the branch while queued is ALSO comment-only, so the
 //       admission-time re-derivation reclassifies to eligible:true again (not a fallback to FULL) — and
@@ -182,6 +182,105 @@ try {
     check("(M) M2 spawned NO gate — reduced or full — despite main gaining a behavioral edit (@decision 293d418e)", gate2Calls === 0 && capturedGate2 === undefined);
     check("(M) M2 finished as ALREADY_MERGED with gateSkipped:'already-landed'",
       confirm2.merged === true && confirm2.emptyKind === "ALREADY_MERGED" && confirm2.gateSkipped === "already-landed");
+  }
+
+  // ── (M2) card 805b98d1 — THE ONE REMAINING WAY A PRELANDED BRANCH REACHES THE CAP QUEUE, AND THE END-TO-END WITNESS (M) above gave up.
+  //        `confirmWorkerMerge` takes its "preLanded" decision (`findLandedSquashCommit`) and then, for the no-gate skip, a worktree stamp (dirty/unreadable ⇒
+  //        fall through, @decision 293d418e); the gate path re-stamps the worktree LATER (the reuse check) and refuses a dirty/unreadable tree only on THAT stamp
+  //        (@decision 975c774b). A worktree that reads dirty (or transiently unreadable) at the first stamp and clean at the second therefore reaches the gate with
+  //        `preLanded` still truthy: no union-merge ran, `gateBaseMainHead` is a plain HEAD read, and the reduced-gate classification is taken pre-wait. This is
+  //        the lookup race the (M) header names; it is staged here DETERMINISTICALLY by cleaning the tree from a wrapper around `checkGateTimeoutBreaker` — the
+  //        only awaited step that sits between the two stamps. P1 holds the cap's only slot; P2 (preLanded, branch byte-stable) queues behind it; a BEHAVIORAL
+  //        edit then lands on P2's MAIN during the wait. Only the main leg's own admission-time HEAD read (@decision 66b3112a) can notice — the branch leg sees
+  //        nothing and `gateBaseMainHead` is inert on this producer — so the gate P2 finally runs must be the FULL command, not the stale REDUCED one. ───────────
+  {
+    const P1 = mk("p1"), P2 = mk("p2");
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const { mergeBranch } = await import("../dist/git/worktrees.js");
+
+    fs.mkdirSync(P1.repo, { recursive: true });
+    registerForCleanup(P1.repo);
+    fs.writeFileSync(path.join(P1.repo, "README.md"), "# ecg\n");
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: P1.repo });
+    commitAll(P1.repo, "init", GIT_ID);
+
+    makeRepoWithBaseSrcFile(P2, BASE_SRC);
+
+    let gate1Calls = 0, gate2Calls = 0;
+    let capturedGate2;
+    let gate1AdmittedResolve;
+    const gate1Admitted = new Promise((res) => { gate1AdmittedResolve = res; });
+    let releaseGate1;
+    const fakeGate = async (gateCmd, cwd) => {
+      if (cwd === P1.worktreePath) {
+        gate1Calls++;
+        gate1AdmittedResolve();
+        await new Promise((res) => { releaseGate1 = res; });
+        return { passed: true };
+      }
+      gate2Calls++;
+      capturedGate2 = gateCmd;
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+
+    const wt1 = await createWorktree(P1.repo, P1.projId, P1.taskId);
+    P1.worktreePath = wt1.worktreePath; P1.branch = wt1.branch; worktrees.push(wt1.worktreePath);
+    mkdirp(path.join(P1.worktreePath, "packages", "other"));
+    fs.writeFileSync(path.join(P1.worktreePath, "packages", "other", "note.txt"), "unrelated\n");
+    commitAll(P1.worktreePath, "chore: unrelated cap-slot occupant", GIT_ID);
+    seed(db, P1);
+
+    const wt2 = await createWorktree(P2.repo, P2.projId, P2.taskId);
+    P2.worktreePath = wt2.worktreePath; P2.branch = wt2.branch; worktrees.push(wt2.worktreePath);
+    fs.writeFileSync(path.join(P2.worktreePath, "feature-p2.txt"), "work for P2\n");
+    commitAll(P2.worktreePath, "feat: P2's own work", GIT_ID);
+    const landed = await mergeBranch(P2.repo, P2.branch, "ECG-P2 initial land");
+    check("(M2) precondition: P2's branch already landed on main (preLanded)", landed.ok === true);
+
+    // Comment-only edit on P2's MAIN (branch untouched): gives the pre-wait classification a genuinely eligible (REDUCED) diff.
+    const commentOnlyMain = BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed on main)");
+    fs.writeFileSync(path.join(P2.repo, "packages", "daemon", "src", "example.ts"), commentOnlyMain);
+    commitAll(P2.repo, "docs: fix comment typo on main", GIT_ID);
+    seed(db, P2);
+
+    // The transient dirt the first (skip-path) stamp sees. Untracked, so the branch tip — and therefore the preLanded proof — is untouched.
+    const dirtPath = path.join(P2.worktreePath, "scratch-dirt.txt");
+    fs.writeFileSync(dirtPath, "transient\n");
+    let racedClean = false;
+    const realBreaker = sessions.checkGateTimeoutBreaker.bind(sessions);
+    sessions.checkGateTimeoutBreaker = async (...a) => {
+      if (!racedClean && a[0] === P2.branch) { racedClean = true; fs.rmSync(dirtPath, { force: true }); }
+      return realBreaker(...a);
+    };
+
+    const p1 = sessions.confirmWorkerMerge(P1.mgrId, P1.workerId);
+    await gate1Admitted;
+    check("(M2) P1 genuinely admitted and holds the cap's only slot", sessions.gateSemaphore.snapshot().active === 1);
+
+    const p2 = sessions.confirmWorkerMerge(P2.mgrId, P2.workerId);
+    const queued = await pollUntil(
+      () => sessions.gateSemaphore.snapshot().entries.some((e) => e.phase === "queued" && e.projectId === P2.projId),
+      { timeoutMs: 30000 },
+    );
+    check("(M2) the race was staged (dirty at the skip-path stamp, clean at the gate-path stamp)", racedClean);
+    check("(M2) P2 (preLanded) genuinely reached the semaphore's CAP-queue wait before P1 released", queued);
+
+    // NOW, while P2 is queued, a BEHAVIORAL edit lands on P2's MAIN; the branch stays byte-stable.
+    fs.writeFileSync(path.join(P2.repo, "packages", "daemon", "src", "example.ts"), commentOnlyMain.replace("x === 0", "x === 1"));
+    commitAll(P2.repo, "fix: correct isReady threshold on main while P2 is queued", GIT_ID);
+
+    releaseGate1("go");
+    const confirm1 = await p1;
+    const confirm2 = await p2;
+
+    check("(M2) P1 merged successfully, ran its own gate exactly once", confirm1.merged === true && gate1Calls === 1);
+    check("(M2) P2's confirm settled without a gate refusal", confirm2.merged === true);
+    check("(M2) P2 ran exactly one gate", gate2Calls === 1);
+    // ⭐ The discriminator: with the main leg's own HEAD read removed, `moved` stays false (branch byte-stable), the pre-wait REDUCED command survives, and
+    // this captures a command that is NOT the full gate.
+    check("(M2) ⭐ P2's admitted gate was reclassified to the FULL command after main gained a behavioral edit during the wait (main leg, @decision 66b3112a)", capturedGate2 === FULL_GATE);
   }
 
   // ── (N) card abaaf16e — Code Review MINOR: THE RECLASSIFICATION PATH itself must fold
