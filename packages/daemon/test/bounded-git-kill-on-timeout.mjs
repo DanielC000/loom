@@ -166,8 +166,7 @@ const HOOK_STARTED_POLL_WINDOW_MS = GREEN_POLL_WINDOW_MS; // card 6799aa3b: the 
 // HEAD under the RED control's own pending commit (RED's ref update then fails; "red-commit never landed").
 // Do not run a killed/aborted attempt in the repo a later control depends on. Record: docs/decisions/acf3d337-*.md.
 function makeFixtureRepo(name) {
-  const dir = path.join(os.tmpdir(), `loom-killtest-${name}-${Date.now()}-${process.pid}`);
-  fs.mkdirSync(dir, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `loom-killtest-${name}-`)); // unique by construction (the clock-path guard's shape)
   execSync(`git init -q "${dir}"`);
   // Pinned locally (beats any ambient/global value): commitSubjectsOnRepo reads the HEAD reflog, so the
   // fixture must not depend on the host's core.logAllRefUpdates. The [setup] baseline check below proves it.
