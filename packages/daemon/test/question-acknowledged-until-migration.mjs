@@ -66,7 +66,11 @@ const staleId = "legacy-stale-pending";
     );
     CREATE TABLE tasks (
       id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL,
-      body TEXT NOT NULL DEFAULT '', column_key TEXT NOT NULL, position REAL NOT NULL DEFAULT 0
+      body TEXT NOT NULL DEFAULT '', column_key TEXT NOT NULL, position REAL NOT NULL DEFAULT 0,
+      -- created_at/updated_at have been on the real tasks table since the phase-1 scaffold (b3c7c221); the
+      -- shape must carry them because migrateTasks()'s one-shot deferral-edge backfill (a9622859) SELECTs
+      -- tasks.created_at on every upgrade boot.
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     -- The pre-889ae619 shape — every column questions has TODAY except acknowledged_until.
     CREATE TABLE questions (
