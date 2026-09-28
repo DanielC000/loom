@@ -10,8 +10,8 @@ import {
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
   type GatesActive, type GateRun, type GateType, type MergeGateAgentView, type MergeGateStatus, type CompanionRoute, type ProjectMemoryEntry,
 } from "@loom/shared";
-// Card 66b1b40d: its own statement (not folded into the import above) — orchestration-mcp-role-guard.mjs regex-scans
-// that import within a fixed window of `usesOrchestrationMcp`, which a longer name list would push out of range.
+// Card 66b1b40d: its own statement (not folded into the import above). orchestration-mcp-role-guard.mjs now matches the
+// `usesOrchestrationMcp` import as a whole statement, so the split is no longer load-bearing for that guard.
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry } from "../db.js";

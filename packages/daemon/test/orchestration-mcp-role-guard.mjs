@@ -35,7 +35,13 @@ const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
 const serviceSrc = stripComments(fs.readFileSync(path.join(repoRoot, "packages", "daemon", "src", "sessions", "service.ts"), "utf8"));
 const hostSrc = stripComments(fs.readFileSync(path.join(repoRoot, "packages", "daemon", "src", "pty", "host.ts"), "utf8"));
 
-check("sessions/service.ts imports usesOrchestrationMcp from @loom/shared", /\busesOrchestrationMcp\b[\s\S]{0,400}\} from "@loom\/shared";/.test(serviceSrc));
+// The import is matched as ONE `import { ... } from "@loom/shared"` statement (`[^}]*` cannot cross a closing
+// brace, so it cannot straddle two statements) rather than a fixed character window after the name: the old
+// `[\s\S]{0,400}` window silently went red whenever an unrelated type name was appended to the same import list
+// (card 6f13746c's two MergeGate* types pushed it from 384 to 431 chars) although the intent still held.
+// `import type {` is deliberately NOT matched — a type-only import is erased at runtime, so it cannot supply the predicate.
+const SHARED_IMPORT_OF_PREDICATE = /\bimport\s*\{[^}]*\busesOrchestrationMcp\b[^}]*\}\s*from\s*"@loom\/shared";/;
+check("sessions/service.ts imports usesOrchestrationMcp from @loom/shared", SHARED_IMPORT_OF_PREDICATE.test(serviceSrc));
 check("sessions/service.ts's dispatch gate calls the shared predicate", /if \(usesOrchestrationMcp\(role\)\)/.test(serviceSrc));
 check("sessions/service.ts no longer hand-defines its own usesOrchestrationMcp method", !/\busesOrchestrationMcp\(role: SessionRole \| null\): boolean \{/.test(serviceSrc));
 
@@ -63,6 +69,19 @@ check(
   check("(control) POSITIVE: the same text as REAL code still trips both checks after stripping",
     /\busesOrchestrationMcp\(role: SessionRole \| null\): boolean \{/.test(r)
     && /const gateOnMcp = l0\?\.role === "manager" \|\| l0\?\.role === "worker" \|\| l0\?\.role === "assistant";/.test(r));
+}
+
+// (control) the import matcher itself: it must survive a long name list, and still REJECT each shape that is not
+// a runtime import of the predicate from @loom/shared.
+{
+  const longList = 'import {\n  usesOrchestrationMcp, ' + Array.from({ length: 40 }, (_, i) => `type SomeLongTypeName${i}`).join(", ") + ',\n} from "@loom/shared";\n';
+  check("(control) POSITIVE: a >400-char name list after the predicate still matches", longList.length > 800 && SHARED_IMPORT_OF_PREDICATE.test(longList));
+  check("(control) NEGATIVE: the predicate imported from a local module does not match",
+    !SHARED_IMPORT_OF_PREDICATE.test('import { usesOrchestrationMcp } from "./local.js";\nimport { other } from "@loom/shared";\n'));
+  check("(control) NEGATIVE: a type-only import of the predicate does not match",
+    !SHARED_IMPORT_OF_PREDICATE.test('import type { usesOrchestrationMcp } from "@loom/shared";\n'));
+  check("(control) NEGATIVE: the predicate absent from the @loom/shared import list does not match",
+    !SHARED_IMPORT_OF_PREDICATE.test('import { resolveConfig } from "@loom/shared";\nconst usesOrchestrationMcp = 1;\n'));
 }
 
 if (failures > 0) {
