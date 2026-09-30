@@ -11,6 +11,7 @@ import { checkTaskRepoKeyRebind } from "../projects/rebind.js";
 import { findSuspectedDuplicate, type DuplicateMatch } from "./duplicateDetection.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { checkTitleHtmlEntities, checkTitleConventionalType } from "../tasks/title-guard.js";
+import { stripEscapeAndControlChars } from "../security/control-chars.js";
 import {
   planTaskStructure, applyTaskPlan, hasStructureInput, buildRelationView, boardRollup, openBlockersByTask,
   type TaskStructureInput, type StructurePlan,
@@ -1081,6 +1082,14 @@ export function createProjectTaskChecked(
    *  refusal, not folded into either of the others. */
   allowNonConventionalType?: boolean,
 ): (Task & { related?: DuplicateMatch }) | { error: string } {
+  // @decision e7dabf95 — strip BEFORE every title guard below (db.ts strips again, now a redundant
+  // backstop): a control byte hidden inside a guard-rejected token can hide the pattern from that guard,
+  // then get silently stripped later — reassembling exactly the shape the guard exists to reject.
+  const strippedTitle = stripEscapeAndControlChars(input.title).text;
+  if (!strippedTitle.trim()) {
+    return { error: "title must not be empty (or contain only escape/control bytes) after stripping — retry with real title text" };
+  }
+  input = { ...input, title: strippedTitle };
   const titleGuard = checkTitleHtmlEntities(input.title, allowHtmlEntitiesInTitle);
   if (titleGuard) return titleGuard;
   const typeGuard = checkTitleConventionalType(input.title, allowNonConventionalType);
@@ -1312,9 +1321,17 @@ export async function updateProjectTask(
   // become a permanent, unrewritable commit subject on a solo merge. `appendBody` never touches `title`,
   // so this doesn't need to run after that block.
   if (patch.title !== undefined) {
-    const titleGuard = checkTitleHtmlEntities(patch.title, allowHtmlEntities);
+    // @decision e7dabf95 — strip BEFORE the guards, same reasoning as createProjectTaskChecked's own
+    // anchor (§2a of the decision record): a raw-title guard can be blinded by a hidden control byte that
+    // db.ts's later strip then silently uncovers.
+    const strippedTitle = stripEscapeAndControlChars(patch.title).text;
+    if (!strippedTitle.trim()) {
+      return { error: "title must not be empty (or contain only escape/control bytes) after stripping — retry with real title text" };
+    }
+    patch = { ...patch, title: strippedTitle };
+    const titleGuard = checkTitleHtmlEntities(strippedTitle, allowHtmlEntities);
     if (titleGuard) return titleGuard;
-    const typeGuard = checkTitleConventionalType(patch.title, allowNonConventionalType);
+    const typeGuard = checkTitleConventionalType(strippedTitle, allowNonConventionalType);
     if (typeGuard) return typeGuard;
   }
   if (appendBody !== undefined) {

@@ -39,6 +39,35 @@ always present on create); `updateTask` strips only when the patch actually supp
 absent field is left alone, matching the function's existing PATCH semantics — see `Task.version`'s own
 "content counter, not a row counter" doc, `docs/decisions/d0978321-...md`).
 
+### 2a. Correction (Code Review `f19a98e5`): the title guards must see the STRIPPED title, not the raw one
+
+The first pass of this card left `checkTitleHtmlEntities`/`checkTitleConventionalType` (`tasks/title-guard.ts`)
+running on the RAW `title` in `createProjectTaskChecked`/`updateProjectTask` (`mcp/tasks.ts`), with `db.ts`'s
+strip happening only later, at the actual write. That ordering is exploitable: a control byte hidden INSIDE
+a token a guard would otherwise reject breaks that guard's own regex match (`TITLE_HTML_ENTITY_PATTERN`/
+`TYPE_PREFIXED_TITLE_RE` both require a CONTIGUOUS match), so the guard sees no violation and passes — and
+`db.ts`'s later strip then silently removes the hidden byte, reassembling exactly the rejected shape.
+Reproduced: `"fea\x01ture(x): y"` (guard sees no type-shaped prefix, since `\x01` breaks the match) is
+accepted and stored as `"feature(x): y"`; `"fix(web): a &\x01amp; b"` is stored as `"&amp;"` (a real HTML
+entity, unrejected); a title of just `"\x1b"` is stored as `""` (an empty title, having bypassed every
+guard because there was nothing for either pattern to match against).
+
+Fix: `createProjectTaskChecked`/`updateProjectTask` now strip `title` FIRST — before either guard runs, and
+before the duplicate detector (`findSuspectedDuplicate`) ever sees it — and REJECT outright if nothing
+printable survives the strip (an all-control-byte title). `db.ts`'s own strip is left in place, now a
+genuinely redundant backstop (the title reaching it is already clean) rather than the ONLY strip. `body` is
+NOT pre-stripped at this layer — it has no guard of its own to protect (only `db.ts`'s unconditional strip
+applies to it), so there is no analogous ordering bug for it.
+
+Scope: this bug is TASK-TITLE-SPECIFIC. Companion memory (§1) REJECTS before any write happens at all (no
+strip-then-reassemble window exists). Agent startupPrompt (§3) has no pre-storage guard of any kind — only
+`db.ts`'s strip applies, so there is nothing for a hidden byte to hide FROM. Every other title-consuming
+task entry point funnels through one of these two functions already (`tasks_create`/`tasks_update`,
+`project_task_create`/`project_task_update`, and the companion's own board-update capability all call
+`createProjectTaskChecked`/`updateProjectTask`) — companion `board_create` and every human-REST task route
+call the RAW, UNGUARDED `createProjectTask`/`db.insertTask` directly and always have (see §2 above and
+`docs/decisions/5b221bf2-...md`), so they were never exposed to this guard-ordering bug in the first place.
+
 ## 3. Agent startupPrompt — STRIP (`db.ts`, `insertAgent` + `updateAgent`)
 
 Same reasoning as task title/body, for the same structural reason: `insertAgent`/`updateAgent` are reached
@@ -51,6 +80,20 @@ deliberately NOT where this check lives: it resolves the patch's target string, 
 `agent_create` doesn't call it at all (there's no "current" to edit for a brand-new agent), so a check
 there would still miss the create path and the boot-seed path. `db.ts` is the one place both paths and
 every future one converge.
+
+### 3a. Correction (Code Review `f19a98e5`, found while reproducing the §2a task case): REST agent-create
+echoed the wrong object
+
+`POST /api/projects/:id/agents` (`gateway/server.ts`) used to `reply.send(agent)` — the in-memory object it
+built BEFORE calling `insertAgent`, never re-read from the DB. Since `insertAgent` strips ESC/C0/C1 at
+write time, a control byte in the request's `startupPrompt` meant the STORED row was clean but the HTTP
+response echoed it back raw — a harmless self-disclosure (the caller already had the bytes it sent), but a
+genuine data-consistency gap: the response no longer described what was actually persisted. Fixed by
+re-reading via `db.getAgent(agent.id)` before responding, mirroring the sibling `POST /api/agents/:id`
+(update) route and the task-create route (`POST /api/projects/:id/agents`'s own OWN task-store twin) —
+both already did this. No equivalent gap exists for task create (`createProjectTaskChecked`'s callers
+already read `db.getTask(created.id) ?? created` before returning) or companion memory (REJECT means
+nothing is ever echoed back that wasn't already rejected).
 
 ## 4. Platform Lead resume doc — sanitize at the one place Loom's own code touches the file's bytes
 
@@ -79,10 +122,15 @@ second, silent channel for a poisoned base doc's bytes into a brand-new file.
 - Do not add a control-char check to `mcp/orchestration.ts`'s companion `memory_write` handler INSTEAD of
   `authorCompanionMemory` — the `/internal/test/seed` route (`gateway/server.ts`) calls
   `authorCompanionMemory` directly too; either caller alone can be bypassed by the other.
-- Do not move the task/agent checks into `mcp/tasks.ts`'s `createProjectTaskChecked`/`updateProjectTask`
-  or `agents/validate.ts`'s `resolveStartupPromptEdit`/`validateAgentPatch` INSTEAD of `db.ts` — every one
-  of those is an agent-facing-only chokepoint that the Loom-internal writers named above bypass entirely;
-  the check must live in the function ALL of them funnel through.
+- Do not move the task/agent STRIP itself into `mcp/tasks.ts`'s `createProjectTaskChecked`/
+  `updateProjectTask` or `agents/validate.ts`'s `resolveStartupPromptEdit`/`validateAgentPatch` INSTEAD OF
+  `db.ts` — every one of those is an agent-facing-only chokepoint that the Loom-internal writers named
+  above bypass entirely; the authoritative strip must live in the function ALL of them funnel through.
+  §2a's title pre-strip in `mcp/tasks.ts` is a NARROWER, ADDITIONAL fix (so the title GUARDS see clean
+  input before `db.ts` ever runs) — it does not replace `db.ts`'s own strip, which stays the backstop.
+- Do not let a title-consuming guard run on `input.title`/`patch.title` before stripping it in
+  `createProjectTaskChecked`/`updateProjectTask` — see §2a; this is the exact regression Code Review
+  `f19a98e5` caught in this card's own first pass.
 - Do not change `insertTask`/`updateTask`/`insertAgent`/`updateAgent`'s return type to surface a rejection
   — they are `void` by design, called by many non-error-checking sites; a REJECT posture was deliberately
   ruled out for exactly this reason (see §2/§3 above).

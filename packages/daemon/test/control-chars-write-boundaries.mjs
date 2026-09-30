@@ -18,11 +18,28 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (D) Platform Lead resume doc seed-copy (sessions/platform-lead-prompt.ts,
 //       resolvePlatformLeadResumeDocPath) — a SECOND (non-primary) lineage's seeded copy of the base doc
 //       has its ESC/C0/C1 bytes stripped, never copied byte-for-byte.
+//   (E)-(G) Code Review `f19a98e5`'s regression on this card's first commit (a7e3feee): the ENTRY-POINT
+//       functions `createProjectTaskChecked`/`updateProjectTask` (mcp/tasks.ts) ran the title guards
+//       (checkTitleHtmlEntities/checkTitleConventionalType) on the RAW title, with db.ts's strip happening
+//       only later at the actual write — so a control byte hidden INSIDE a would-be-rejected token broke
+//       the guard's own regex match, and the later strip then silently reassembled the rejected shape.
+//       Proves the exact three reviewer repros are now REJECTED (or, for the duplicate detector, that it
+//       receives the STRIPPED title) at both entry points.
+//   (H) A real, non-db-direct agent path for startupPrompt — the human REST route (gateway/server.ts,
+//       POST /api/agents/:id and POST /api/projects/:id/agents), which shares `validateAgentPatch`/
+//       `db.insertAgent`/`db.updateAgent` with every elevated MCP `agent_update`/`agent_create` surface.
+//   (I) A real, non-db-direct companion-memory path — the `/internal/test/seed` REST route's
+//       `companionMemories` field (gateway/server.ts), which calls `authorCompanionMemory` directly, the
+//       SAME function the real `memory_write` MCP tool calls (see that route's own comment).
 //
 // RED on main before card e7dabf95: (A) `authorCompanionMemory` wrote the control byte straight into
 // MEMORY.md with no rejection; (B)/(C) `insertTask`/`updateTask`/`insertAgent`/`updateAgent` persisted the
 // control byte verbatim; (D) `resolvePlatformLeadResumeDocPath` used a raw `fs.copyFileSync`, copying the
 // control byte byte-for-byte into the new lineage's file.
+//
+// RED on a7e3feee (this card's first commit, BEFORE the f19a98e5 fix) for (E)-(G): all three reviewer
+// repros were silently ACCEPTED (and, for the duplicate case, the detector missed a real duplicate) —
+// see each assertion's own comment for the exact pre-fix behavior.
 //
 // Run after build: node test/control-chars-write-boundaries.mjs
 import fs from "node:fs";
@@ -50,6 +67,8 @@ const {
   resolvePlatformLeadResumeDocPath, platformLeadBaseResumeDocPath, platformLeadLineageResumeDocPath,
 } = await import("../dist/sessions/platform-lead-prompt.js");
 const { stripEscapeAndControlChars } = await import("../dist/security/control-chars.js");
+const { createProjectTaskChecked, updateProjectTask } = await import("../dist/mcp/tasks.js");
+const { buildServer } = await import("../dist/gateway/server.js");
 
 const ESC = "\x1b";
 const C0 = "\x07"; // BEL — an ordinary C0 byte, not ESC
@@ -185,12 +204,129 @@ try {
   // reflects this section — reuse leadHome (base file was just overwritten above, lineage file didn't exist yet).
   const thirdPath = resolvePlatformLeadResumeDocPath(db, leadHome, thirdLineage);
   check("(D4) a clean base doc is seeded byte-identical", fs.readFileSync(thirdPath, "utf8") === "# Clean Resume\n\nAll good here.\n");
+
+  // ===== (E) createProjectTaskChecked — title-guard-ordering regression (Code Review f19a98e5) =====
+  // Pre-fix (a7e3feee): the raw title "fea\x01ture(x): y" has NO type-shaped prefix (the \x01 breaks
+  // TYPE_PREFIXED_TITLE_RE's contiguous match), so checkTitleConventionalType saw nothing to reject and
+  // the card was CREATED — then db.ts's strip silently reassembled "feature(x): y", a bogus (unrecognized)
+  // conventional type that would ship to main verbatim on a solo squash merge, with no merge-time backstop.
+  const badType = createProjectTaskChecked(db, projId, { title: `fea${C0}ture(x): y` });
+  check("(E1) a control byte hidden inside a bogus conventional-type prefix is now REJECTED",
+    "error" in badType && !("id" in badType));
+  check("(E1) the rejection is the type-guard's own (post-strip 'feature' is not a recognized type)",
+    "error" in badType && badType.error.includes("feature") && badType.error.includes("not a recognized Conventional Commits type"));
+
+  // Pre-fix: the raw title "fix(web): a &\x1bamp; b" has no CONTIGUOUS "&amp;" (the ESC breaks it), so
+  // checkTitleHtmlEntities saw nothing to reject and the card was CREATED — then db.ts's strip silently
+  // reassembled a real "&amp;" HTML entity into the stored, permanent title.
+  const badEntity = createProjectTaskChecked(db, projId, { title: `fix(web): a &${ESC}amp; b` });
+  check("(E2) a control byte hidden inside a would-be HTML entity is now REJECTED",
+    "error" in badEntity && !("id" in badEntity));
+  check("(E2) the rejection is the HTML-entity guard's own (post-strip '&amp;' is a real entity)",
+    "error" in badEntity && badEntity.error.includes("&amp;") && badEntity.error.includes("HTML entity"));
+
+  // Pre-fix: a title of just ESC has no type prefix and no HTML entity, so both guards passed and the
+  // card was CREATED — then db.ts's strip reduced it to an EMPTY title, stored as "".
+  const allControlTitle = createProjectTaskChecked(db, projId, { title: ESC });
+  check("(E3) a title that is ALL control/escape bytes is now REJECTED (never silently stored as empty)",
+    "error" in allControlTitle && !("id" in allControlTitle));
+  check("(E3) the rejection names the empty-after-strip reason", "error" in allControlTitle && allControlTitle.error.includes("empty"));
+
+  // A genuinely clean, already-valid conventional title is unaffected — this is a rejection of the
+  // exploit shape, not new friction on ordinary titles.
+  const goodCreate = createProjectTaskChecked(db, projId, { title: "fix(daemon): a perfectly normal title" });
+  check("(E4) a clean, valid conventional title still succeeds", !("error" in goodCreate) && goodCreate.title === "fix(daemon): a perfectly normal title");
+
+  // ===== (F) updateProjectTask — the SAME title-guard-ordering regression, on the update path =====
+  // Each case gets its OWN fresh task with its OWN correct baseVersion: reusing one task/version across
+  // cases would let an earlier case's unrejected write (a false PASS on the buggy code) advance the row's
+  // real version, so a LATER case's call with the now-stale `toUpdate.version` hits a version CONFLICT
+  // instead of the title guard — a false PASS for the wrong reason, masking the exact regression being
+  // tested. Independent fixtures make each assertion discriminate on the title guard alone.
+  const seedF1 = createProjectTaskChecked(db, projId, { title: "fix(daemon): F1 seed title" });
+  const badTypeUpdate = await updateProjectTask(db, projId, seedF1.id, { title: `fea${C0}ture(x): y` }, undefined, seedF1.version);
+  check("(F1) updateProjectTask: hidden-byte bogus conventional type is now REJECTED", "error" in badTypeUpdate);
+  check("(F1) the row is untouched by the rejected attempt", db.getTask(seedF1.id).title === "fix(daemon): F1 seed title");
+
+  const seedF2 = createProjectTaskChecked(db, projId, { title: "fix(daemon): F2 seed title" });
+  const badEntityUpdate = await updateProjectTask(db, projId, seedF2.id, { title: `fix(web): a &${ESC}amp; b` }, undefined, seedF2.version);
+  check("(F2) updateProjectTask: hidden-byte HTML entity is now REJECTED", "error" in badEntityUpdate);
+  check("(F2) the row is untouched by the rejected attempt", db.getTask(seedF2.id).title === "fix(daemon): F2 seed title");
+
+  const seedF3 = createProjectTaskChecked(db, projId, { title: "fix(daemon): F3 seed title" });
+  const allControlUpdate = await updateProjectTask(db, projId, seedF3.id, { title: ESC }, undefined, seedF3.version);
+  check("(F3) updateProjectTask: an all-control-byte title is now REJECTED, never stored empty", "error" in allControlUpdate && allControlUpdate.error.includes("empty"));
+  check("(F3) the row is untouched by the rejected attempt", db.getTask(seedF3.id).title === "fix(daemon): F3 seed title");
+
+  const seedF4 = createProjectTaskChecked(db, projId, { title: "fix(daemon): F4 seed title" });
+  const goodUpdate = await updateProjectTask(db, projId, seedF4.id, { title: "fix(daemon): a clean revised title" }, undefined, seedF4.version);
+  check("(F4) a clean title update still succeeds", !("error" in goodUpdate) && db.getTask(seedF4.id).title === "fix(daemon): a clean revised title");
+
+  // ===== (G) the duplicate detector (findSuspectedDuplicate) receives the STRIPPED title, not the raw one =====
+  // Pre-fix: `coreInput.title` (fed to findSuspectedDuplicate) was the RAW, unstripped title — a control
+  // byte hidden INSIDE a strong identifier (a UUID) breaks STRONG_PATTERNS' contiguous match, so the
+  // detector would see NO shared identifier and miss a real duplicate.
+  const sharedUuid = randomUUID();
+  const dupBase = createProjectTaskChecked(db, projId, { title: `Investigate crash in session ${sharedUuid}` });
+  check("(G setup) base task (carrying the real, clean UUID) created cleanly", !("error" in dupBase));
+
+  const brokenUuid = `${sharedUuid.slice(0, 8)}${ESC}${sharedUuid.slice(8)}`;
+  const dupCandidate = createProjectTaskChecked(db, projId, { title: `Investigate crash in session ${brokenUuid}` });
+  check("(G1) the second create itself succeeds (a hidden ESC inside a UUID is not itself a guard violation)", !("error" in dupCandidate));
+  check("(G2) the stored title's UUID is the CLEAN one (ESC stripped) — same UUID as the base task's",
+    dupCandidate.title === `Investigate crash in session ${sharedUuid}`);
+  check("(G3) the duplicate detector matched on the (stripped) shared UUID — 'related' is populated, naming the base task",
+    dupCandidate.related !== undefined && dupCandidate.related.taskId === dupBase.id);
+
+  // ===== (H) a REAL, non-db-direct agent path for startupPrompt: the human REST route, which shares
+  // validateAgentPatch/db.insertAgent/db.updateAgent with every elevated MCP agent_update/agent_create
+  // surface (see docs/decisions/e7dabf95-....md §3). Should already be GREEN on a7e3feee — no ordering bug
+  // exists for this store (no pre-storage guard runs on startupPrompt at all, see §2a's "Scope" note). =====
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, runMcp: stub, control: stub, usageStatus: stub });
+  const restCreateRes = await app.inject({
+    method: "POST",
+    url: `/api/projects/${projId}/agents`,
+    payload: { name: "REST Agent", startupPrompt: `You are helpful.${ESC}\nDo X.` },
+  });
+  check("(H1) REST agent create with a control byte in startupPrompt -> 201 (never rejected)", restCreateRes.statusCode === 201);
+  const restCreatedAgent = JSON.parse(restCreateRes.body);
+  check("(H1) the stored startupPrompt is STRIPPED, via the real REST entry point", restCreatedAgent.startupPrompt === "You are helpful.\nDo X.");
+
+  const restUpdateRes = await app.inject({
+    method: "POST",
+    url: `/api/agents/${restCreatedAgent.id}`,
+    payload: { startupPrompt: `Revised with a ${C1} byte.` },
+  });
+  check("(H2) REST agent update with a control byte -> 200", restUpdateRes.statusCode === 200);
+  check("(H2) the stored startupPrompt is STRIPPED, via the real REST entry point", db.getAgent(restCreatedAgent.id).startupPrompt === "Revised with a  byte.");
+
+  // ===== (I) a REAL, non-db-direct companion-memory path: the /internal/test/seed REST route's
+  // companionMemories field, which calls authorCompanionMemory DIRECTLY (gateway/server.ts's own comment:
+  // "the same writer the companion's own memory_author MCP tool calls"). Should already be GREEN on
+  // a7e3feee — no ordering bug exists for this store (REJECT happens before any write, see §1). =====
+  const seedRejRes = await app.inject({
+    method: "POST",
+    url: "/internal/test/seed",
+    payload: { companionMemories: [{ sessionId: "comp-sess-seed", name: "seeded-fact", content: `bad ${ESC} content` }] },
+  });
+  check("(I1) seeding a companion memory with a control byte -> 400 (not 200, not 500)", seedRejRes.statusCode === 400);
+  check("(I1) the 400 body names the byte class", JSON.parse(seedRejRes.body).error?.includes("ESC"));
+  check("(I1) nothing was written to disk", readCompanionMemory("comp-sess-seed", "seeded-fact") === null);
+
+  const seedCleanRes = await app.inject({
+    method: "POST",
+    url: "/internal/test/seed",
+    payload: { companionMemories: [{ sessionId: "comp-sess-seed", name: "seeded-fact", content: "perfectly clean seeded content" }] },
+  });
+  check("(I2) seeding a clean companion memory -> 201, still works", seedCleanRes.statusCode === 201);
+  check("(I2) the clean seeded memory IS written", readCompanionMemory("comp-sess-seed", "seeded-fact") === "perfectly clean seeded content");
 } finally {
   try { db?.close(); } catch { /* ignore */ }
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — companion MEMORY.md rejects an ESC/C0/C1 control byte at authorCompanionMemory (never echoing content); task title/body and agent startupPrompt are silently STRIPPED at the shared db.ts write boundary (insertTask/updateTask/insertAgent/updateAgent), covering both the agent-facing chokepoints and the direct, non-retryable bypasses (appendEscalationDetail-shaped task writes, boot-seeding-shaped agent inserts) that would otherwise skip a higher-layer-only check; and the Platform Lead resume doc's seed-copy strips a poisoned base doc's control bytes instead of a raw byte-for-byte fs.copyFileSync. \\t\\n\\r survive everywhere, and every clean write/copy is unaffected."
+  ? "\n✅ ALL PASS — companion MEMORY.md rejects an ESC/C0/C1 control byte at authorCompanionMemory (never echoing content); task title/body and agent startupPrompt are silently STRIPPED at the shared db.ts write boundary (insertTask/updateTask/insertAgent/updateAgent), covering both the agent-facing chokepoints and the direct, non-retryable bypasses (appendEscalationDetail-shaped task writes, boot-seeding-shaped agent inserts) that would otherwise skip a higher-layer-only check; the Platform Lead resume doc's seed-copy strips a poisoned base doc's control bytes instead of a raw byte-for-byte fs.copyFileSync; createProjectTaskChecked/updateProjectTask now strip a title BEFORE the HTML-entity/conventional-type guards run (and before the duplicate detector sees it), closing the guard-ordering regression Code Review f19a98e5 found in this card's first commit; and a real REST entry point per store (agent create/update, companion-memory seed) confirms the fix reaches through more than a direct Db call. \\t\\n\\r survive everywhere, and every clean write/copy/create/update is unaffected."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -4704,9 +4704,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       endpoint: false, ioSchema: null, // Agent Runs R1: new agents are non-endpoint (flip via PATCH below)
     };
     deps.db.insertAgent(agent);
+    // @decision e7dabf95 — re-read from the DB rather than echoing the in-memory `agent` object:
+    // insertAgent silently strips control bytes at write time, so the local object can diverge from it.
+    const created = deps.db.getAgent(agent.id) ?? agent;
     // Advisory only (card 5338a86a) — never blocks the create; see agents/promptLint.ts.
-    const warning = agentCreatePromptWarning(deps.db, { startupPrompt: agent.startupPrompt, profileId: agent.profileId });
-    return reply.code(201).send(warning ? { ...agent, promptWarning: warning } : agent);
+    const warning = agentCreatePromptWarning(deps.db, { startupPrompt: created.startupPrompt, profileId: created.profileId });
+    return reply.code(201).send(warning ? { ...created, promptWarning: warning } : created);
   });
 
   // Edit an agent preset (name / startup prompt / profile / Agent Runs endpoint flag). Same store the
