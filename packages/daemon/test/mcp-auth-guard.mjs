@@ -24,12 +24,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       isMcpReachable is a REAL second check, not redundant with verifyMcpToken.
 //   (G) the isLoomDev() gate on /mcp-platform's OWN resolveRole (mcp/platform.ts) — independent of this
 //       gateway hook, which is deliberately identity+liveness-only (role gates stay in the routers).
-//   (H) Card 9a8bc38f: verifyMcpToken compares in CONSTANT TIME, never `===` — rejects a shorter token,
-//       a longer token, and a right-length-but-wrong token alike (behavioral), plus a structural proof
-//       (AST-narrowed method/function body extraction, card fdf93d3a's pattern — comment-immune, so a
-//       comment-only diff can never flip it) that verifyMcpToken's compiled body routes through the
-//       timingSafeEqualToken helper, and that the helper itself hashes to a fixed-length digest before
-//       calling node:crypto's timingSafeEqual — never a raw string `===`.
+//   (H) Card 9a8bc38f: verifyMcpToken AND its sibling verifyHookToken (/internal/hook) both compare in
+//       CONSTANT TIME, never `===` — each rejects a shorter token, a longer token, and a
+//       right-length-but-wrong token alike (behavioral), plus a structural proof (AST-narrowed
+//       method/function body extraction, card fdf93d3a's pattern — comment-immune, so a comment-only
+//       diff can never flip it) that each compiled body routes through the shared timingSafeEqualToken
+//       helper, and that the helper itself hashes to a fixed-length digest before calling node:crypto's
+//       timingSafeEqual — never a raw string `===`.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -152,6 +153,8 @@ try {
   const tokenS2 = host.live.get("S2").mcpToken;
   const tokenDead = host.live.get("SDEAD").mcpToken;
   check("setup: S1/S2/SDEAD each minted a real, distinct mcpToken", !!tokenS1 && !!tokenS2 && !!tokenDead && new Set([tokenS1, tokenS2, tokenDead]).size === 3);
+  const hookTokenS1 = host.live.get("S1").hookToken;
+  check("setup: S1 also minted a real, non-empty hookToken (distinct from its mcpToken — card 9a8bc38f (a))", typeof hookTokenS1 === "string" && hookTokenS1.length > 0 && hookTokenS1 !== tokenS1);
   // (F) LIVENESS setup: stop SDEAD — its Live entry survives with alive:false (host.ts's own documented
   // "never removed from this.live on exit" invariant), keeping the SAME mcpToken.
   host.stop("SDEAD", "hard");
@@ -236,6 +239,27 @@ try {
     const helperBody = functionDeclBodyText(hostSrc, hostJsPath, "timingSafeEqualToken");
     check("(H) timingSafeEqualToken hashes both sides to a fixed-length digest before comparing", helperBody !== null && /createHash\(/.test(helperBody));
     check("(H) timingSafeEqualToken compares via node:crypto's timingSafeEqual (constant-time)", helperBody !== null && /timingSafeEqual\(/.test(helperBody));
+
+    // Sibling path (card 9a8bc38f (a)): verifyHookToken (/internal/hook) had the identical raw `===`
+    // shape and now routes through the SAME timingSafeEqualToken comparator. Same behavioral +
+    // structural pattern as verifyMcpToken above, against the real /internal/hook route.
+    const postHook = (sessionId, hook, token) => appReal.inject({
+      method: "POST", url: "/internal/hook", remoteAddress: "127.0.0.1",
+      payload: token === undefined ? { sessionId, hook } : { sessionId, hook, token },
+    });
+    const wrongLenHookRes = await postHook("S1", { hook_event_name: "SessionStart", session_id: "engine-h1" }, hookTokenS1.slice(0, 8));
+    check("(H) verifyHookToken: a SHORTER-than-real hook token → 403", wrongLenHookRes.statusCode === 403);
+    const longHookRes = await postHook("S1", { hook_event_name: "SessionStart", session_id: "engine-h2" }, hookTokenS1 + "extra");
+    check("(H) verifyHookToken: a LONGER-than-real hook token → 403", longHookRes.statusCode === 403);
+    const sameLenWrongHookRes = await postHook("S1", { hook_event_name: "SessionStart", session_id: "engine-h3" }, "0".repeat(hookTokenS1.length));
+    check("(H) verifyHookToken: a RIGHT-LENGTH-but-wrong hook token → 403", sameLenWrongHookRes.statusCode === 403);
+    const rightHookRes = await postHook("S1", { hook_event_name: "SessionStart", session_id: "engine-h-ok" }, hookTokenS1);
+    check("(H) verifyHookToken: POSITIVE CONTROL — S1's OWN correct hook token → 200", rightHookRes.statusCode === 200);
+
+    const verifyHookBody = classMethodBodyText(hostSrc, hostJsPath, "verifyHookToken");
+    check("(H) verifyHookToken's compiled body calls timingSafeEqualToken", verifyHookBody !== null && /timingSafeEqualToken\(/.test(verifyHookBody));
+    const hasRawHookCompare = verifyHookBody !== null && (/token\s*===\s*live\.hookToken/.test(verifyHookBody) || /===\s*token\b/.test(verifyHookBody));
+    check("(H) verifyHookToken's compiled body does NOT compare the token with a raw `===`", verifyHookBody !== null && !hasRawHookCompare);
   }
 } finally {
   try { await appNoStub?.close(); } catch { /* ignore */ }
@@ -246,6 +270,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the per-session-token guard on every first-party /mcp* route (card 280b1e44) fails CLOSED with a bare pty stub, 401s every one of the 8 patterns with no/wrong/cross-session credential without ever invoking the real router handler, accepts the exact right session-scoped token (positive control), refuses an exited-but-unarchived session's own still-matching token (the liveness half, distinct from the token-match half), PlatformMcpRouter's OWN resolveRole independently gates on isLoomDev(), and verifyMcpToken compares in CONSTANT TIME via a fixed-length-digest + timingSafeEqual, never a raw `===` (card 9a8bc38f)."
+  ? "\n✅ ALL PASS — the per-session-token guard on every first-party /mcp* route (card 280b1e44) fails CLOSED with a bare pty stub, 401s every one of the 8 patterns with no/wrong/cross-session credential without ever invoking the real router handler, accepts the exact right session-scoped token (positive control), refuses an exited-but-unarchived session's own still-matching token (the liveness half, distinct from the token-match half), PlatformMcpRouter's OWN resolveRole independently gates on isLoomDev(), and verifyMcpToken AND the sibling /internal/hook guard verifyHookToken both compare in CONSTANT TIME via a shared fixed-length-digest + timingSafeEqual comparator, never a raw `===` (card 9a8bc38f)."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

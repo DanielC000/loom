@@ -4375,14 +4375,15 @@ function writeLog(live: Live | CodexLive, buf: Buffer): void {
 }
 
 /**
- * Card 9a8bc38f: constant-time compare of a caller-presented `/mcp*` bearer token against the
- * session's own `Live.mcpToken`/`CodexLive.mcpToken` — the shared comparator `verifyMcpToken` (below)
- * runs for every first-party MCP route (core/orchestration/setup/platform/audit/user-audit/operator/
- * run all resolve through the ONE gateway onRequest hook that calls it). Unlike
- * `verifyLoopbackSecret` (gateway/loopback-secret.ts), which length-checks its two fixed-format
- * buffers before `timingSafeEqual`, this hashes BOTH sides to a fixed-length (32-byte) SHA-256 digest
- * first — a caller here can present a token of ANY length, so hashing first means the two buffers
- * compared are always equal-length and there is no length-mismatch branch to early-exit on at all.
+ * Card 9a8bc38f: constant-time compare of a caller-presented bearer token against a session's own
+ * secret — shared by `verifyMcpToken` (the `/mcp*` route guard, covering every first-party MCP route:
+ * core/orchestration/setup/platform/audit/user-audit/operator/run all resolve through the ONE gateway
+ * onRequest hook that calls it) and `verifyHookToken` (the `/internal/hook` guard) below — two sibling
+ * secrets on two sibling paths, same comparator. Unlike `verifyLoopbackSecret`
+ * (gateway/loopback-secret.ts), which length-checks its two fixed-format buffers before
+ * `timingSafeEqual`, this hashes BOTH sides to a fixed-length (32-byte) SHA-256 digest first — a
+ * caller here can present a token of ANY length, so hashing first means the two buffers compared are
+ * always equal-length and there is no length-mismatch branch to early-exit on at all.
  */
 function timingSafeEqualToken(presented: string, expected: string): boolean {
   const a = createHash("sha256").update(presented, "utf8").digest();
@@ -6386,7 +6387,10 @@ export class PtyHost {
   verifyHookToken(sessionId: string, token: string | undefined): boolean {
     const live = this.live.get(sessionId);
     if (!live || live.kind !== "claude") return false;
-    return typeof token === "string" && token.length > 0 && token === live.hookToken;
+    if (typeof token !== "string" || token.length === 0) return false;
+    // Card 9a8bc38f: same constant-time comparator as verifyMcpToken (above) — a sibling secret on a
+    // sibling path, same raw-`===` shape, same fix (house consistency; reviews keep finding this asymmetry).
+    return timingSafeEqualToken(token, live.hookToken);
   }
 
   // Card 280b1e44: sessionId -> mcpToken, populated ONLY by registerTestMcpSession (itself a no-op
