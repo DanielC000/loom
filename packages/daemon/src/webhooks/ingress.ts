@@ -47,6 +47,9 @@ export interface WebhookIngressDeps {
    *  in gateway/remote-rate-limit.ts, which this reuses directly rather than a bespoke counter). */
   spawnRateLimiter?: SlidingWindowCounter;
   spawnRatePerMin?: number;
+  /** Injectable clock — test seam (mirrors spawnRateLimiter's own shape), so a test can pin `now` to a
+   *  fixed instant instead of depending on the real wall clock. Defaults to `Date.now`. */
+  now?: () => number;
 }
 
 /** Deliver an already-verified, already-deduped event to its endpoint's wake/spawn target — mirrors
@@ -71,6 +74,11 @@ async function fireWebhookTarget(deps: WebhookIngressDeps, endpoint: WebhookEndp
 export function registerWebhookIngress(app: FastifyInstance, deps: WebhookIngressDeps): void {
   const rateLimiter = deps.spawnRateLimiter ?? new SlidingWindowCounter();
   const spawnRatePerMin = deps.spawnRatePerMin ?? DEFAULT_SPAWN_RATE_PER_MIN;
+  const now = deps.now ?? Date.now;
+  // Deprecation warning for a generic endpoint still on the LEGACY (pre-07af871d) signature format —
+  // logged ONCE per endpoint id (disclosure-safe: no payload/secret/signature content), so a human running
+  // the daemon notices without the log line repeating on every single delivery.
+  const legacyFormatWarned = new Set<string>();
 
   app.register(async (instance) => {
     // RAW-body capture (must-fix): overrides the JSON parser ONLY within this encapsulated plugin — HMAC
@@ -96,29 +104,42 @@ export function registerWebhookIngress(app: FastifyInstance, deps: WebhookIngres
         return reply.code(401).send({ error: "verification failed" });
       }
 
-      const result = verifyWebhookSignature(endpoint.sourceType, secret, rawBody, req.headers as WebhookHeaders, Date.now());
-      if (!result.ok) return reply.code(401).send({ error: "verification failed" });
+      const nowMs = now();
+      const nowIso = new Date(nowMs).toISOString();
+      const result = verifyWebhookSignature(endpoint.sourceType, secret, rawBody, req.headers as WebhookHeaders, nowMs);
+      // A rejection can carry its own status (e.g. 400 for a malformed X-Loom-Delivery-Id) — anything
+      // else defaults to 401, the historical "verification failed" shape for every other case.
+      if (!result.ok) return reply.code(result.httpStatus ?? 401).send({ error: "verification failed" });
       const deliveryId = result.deliveryId!;
+      if (deliveryId.startsWith("generic:legacy:") && !legacyFormatWarned.has(endpoint.id)) {
+        legacyFormatWarned.add(endpoint.id);
+        // eslint-disable-next-line no-console
+        console.warn(`[webhook] endpoint ${endpoint.id} is using the deprecated pre-07af871d generic signature format (delivery id not bound into the signature) — see docs/decisions/07af871d-webhook-delivery-dedupe-signed-value.md to migrate`);
+      }
 
       // Idempotency (must-fix): a provider's at-least-once retry of the SAME delivery is ACK'd and
       // dropped, never a second spawn.
       if (deps.db.hasWebhookDelivery(endpoint.id, deliveryId)) {
         return reply.code(200).send({ ok: true, duplicate: true });
       }
-      const nowMs = Date.now();
-      const nowIso = new Date(nowMs).toISOString();
+
+      // Per-endpoint spawn-rate cap (must-fix), checked BEFORE the dedupe row is written (card 07af871d):
+      // a flood of AUTHENTIC events must not spawn unbounded sessions. Still ACK 2xx (so the provider
+      // doesn't retry-storm on a non-2xx) but drop the fire — and, critically, NEVER record the dedupe
+      // row for a delivery that was dropped here. Recording it anyway would permanently swallow a genuine
+      // delivery: any later redelivery of the SAME id (a provider's manual "resend" button, or the same
+      // delivery arriving again once capacity frees up) would then dead-end on the dedupe check above
+      // instead of getting a chance to actually fire.
+      if (!rateLimiter.allow(`webhook:${endpoint.id}`, spawnRatePerMin, nowMs)) {
+        return reply.code(200).send({ ok: true, rateLimited: true });
+      }
+
       // PER-SCHEME retention (Code Reviewer fix, card 8fbedcac): a timestampless scheme's dedupe row is
       // its ONLY replay defense (see webhookDeliveryRetentionMs's doc) — sweeping it on the same short
       // window a timestamp-bearing scheme uses would let a captured GitHub delivery replay successfully
       // once some LATER delivery on this endpoint triggers a sweep past that point.
       const cutoffIso = new Date(nowMs - webhookDeliveryRetentionMs(endpoint.sourceType)).toISOString();
       deps.db.recordWebhookDelivery(endpoint.id, deliveryId, nowIso, cutoffIso);
-
-      // Per-endpoint spawn-rate cap (must-fix): a flood of AUTHENTIC events must not spawn unbounded
-      // sessions. Still ACK 2xx (so the provider doesn't retry-storm on a non-2xx) but drop the fire.
-      if (!rateLimiter.allow(`webhook:${endpoint.id}`, spawnRatePerMin, nowMs)) {
-        return reply.code(200).send({ ok: true, rateLimited: true });
-      }
 
       let payload: unknown;
       try { payload = JSON.parse(rawBody.toString("utf8")); } catch { payload = rawBody.toString("utf8"); }

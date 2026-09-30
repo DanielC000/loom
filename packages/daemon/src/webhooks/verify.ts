@@ -47,6 +47,10 @@ export interface WebhookVerifyResult {
   deliveryId?: string;
   /** Present only when ok:false — a short, non-sensitive reason (never echoes secret/signature material). */
   reason?: string;
+  /** Present only when ok:false, for a rejection that isn't a verification failure at all (e.g. a
+   *  malformed X-Loom-Delivery-Id) — the caller (webhooks/ingress.ts) uses this instead of the default
+   *  401 "verification failed". Absent means 401, the historical/default behavior for every other case. */
+  httpStatus?: number;
 }
 
 /** Fastify's `req.headers` shape: a header may be absent, a single string, or (rarely) an array. Always
@@ -92,9 +96,11 @@ function verifyGithub(secret: string, rawBody: Buffer, headers: WebhookHeaders):
   const expected = hmacSha256(secret, rawBody);
   const provided = Buffer.from(m[1]!, "hex");
   if (!timingSafeEqualBuf(expected, provided)) return { ok: false, reason: "signature mismatch" };
-  // GitHub sends no timestamp — no tolerance check applies to this scheme (see module doc); the
-  // X-GitHub-Delivery-keyed dedupe is the replay defense here instead.
-  return { ok: true, deliveryId: `github:${deliveryId}` };
+  // GitHub sends no timestamp — no tolerance check applies to this scheme (see module doc); the dedupe
+  // key is the replay defense here instead, and it's a hash of the SIGNED body bytes, never the raw
+  // (unsigned) X-GitHub-Delivery header, so a replay under a fresh, never-seen delivery id still dedupes
+  // to the SAME key. Card 07af871d.
+  return { ok: true, deliveryId: `github:${createHash("sha256").update(rawBody).digest("hex")}` };
 }
 
 function verifyStripe(secret: string, rawBody: Buffer, headers: WebhookHeaders, nowMs: number): WebhookVerifyResult {
@@ -156,9 +162,19 @@ function verifyStandard(secret: string, rawBody: Buffer, headers: WebhookHeaders
   return { ok: false, reason: "signature mismatch" };
 }
 
+// @decision 07af871d — this charset gates the CURRENT (v1) attempt ONLY, never LEGACY: a `.` in the id
+// would make CURRENT's id/ts/body split ambiguous (Shape B), but LEGACY doesn't sign the id at all, so an
+// existing legacy sender's id (which may contain '.' or run long) must not be broken by this rule.
+const GENERIC_DELIVERY_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
 /** Loom's own scheme for a provider with no established convention — `X-Loom-Signature: sha256=<hex>` +
- *  `X-Loom-Timestamp: <unix seconds>` + `X-Loom-Delivery-Id: <string>`; signed content is
- *  `${timestampSeconds}.${rawBody}` (timestamp bound in, mirroring stripe/standard). */
+ *  `X-Loom-Timestamp: <unix seconds>` + `X-Loom-Delivery-Id: <string>`. Two accepted signed-content
+ *  formats, CURRENT and LEGACY (accepted indefinitely — see the decision record for why).
+ *
+ *  CURRENT signs `v1.${id}.${ts}.${body}`; the `v1.` literal can never collide with LEGACY's
+ *  `${ts}.${body}` (ts is digits-only, so it can never start with "v1"), and the id charset above removes
+ *  the same-format re-split ambiguity — together these close both relabel shapes a Code Review found. A
+ *  LEGACY match still dedupes on a hash of what was signed, never the raw header. */
 function verifyGeneric(secret: string, rawBody: Buffer, headers: WebhookHeaders, nowMs: number): WebhookVerifyResult {
   const sigHeader = header(headers, "x-loom-signature");
   const ts = header(headers, "x-loom-timestamp");
@@ -169,11 +185,31 @@ function verifyGeneric(secret: string, rawBody: Buffer, headers: WebhookHeaders,
   if (Math.abs(nowMs - tsMs) > WEBHOOK_TIMESTAMP_TOLERANCE_MS) return { ok: false, reason: "timestamp outside tolerance" };
   const m = /^sha256=([0-9a-f]+)$/i.exec(sigHeader.trim());
   if (!m) return { ok: false, reason: "malformed X-Loom-Signature header" };
-  const signedContent = Buffer.concat([Buffer.from(`${ts}.`, "utf8"), rawBody]);
-  const expected = hmacSha256(secret, signedContent);
   const provided = Buffer.from(m[1]!, "hex");
-  if (!timingSafeEqualBuf(expected, provided)) return { ok: false, reason: "signature mismatch" };
-  return { ok: true, deliveryId };
+
+  // CURRENT (v1) — only attempted when the id satisfies the charset. A legacy sender's id was never
+  // charset-restricted (see GENERIC_DELIVERY_ID_RE's own decision comment), so a charset-invalid id must
+  // not be rejected outright here — it just can't reach the v1 branch; LEGACY below is still tried regardless.
+  const idValidForCurrent = GENERIC_DELIVERY_ID_RE.test(deliveryId);
+  if (idValidForCurrent) {
+    const currentSignedContent = Buffer.concat([Buffer.from(`v1.${deliveryId}.${ts}.`, "utf8"), rawBody]);
+    if (timingSafeEqualBuf(hmacSha256(secret, currentSignedContent), provided)) {
+      return { ok: true, deliveryId: `generic:${deliveryId}` };
+    }
+  }
+
+  const legacySignedContent = Buffer.concat([Buffer.from(`${ts}.`, "utf8"), rawBody]);
+  if (timingSafeEqualBuf(hmacSha256(secret, legacySignedContent), provided)) {
+    // Namespaced "generic:legacy:" (vs. "generic:") is also how the caller (webhooks/ingress.ts) detects
+    // a legacy-format match, to log its once-per-endpoint deprecation warning.
+    const legacyKey = createHash("sha256").update(legacySignedContent).digest("hex");
+    return { ok: true, deliveryId: `generic:legacy:${legacyKey}` };
+  }
+
+  // Neither format matched. If the id was never even eligible for CURRENT, surface that specifically
+  // (400 — a format problem, not a forged-signature attempt) rather than the generic 401.
+  if (!idValidForCurrent) return { ok: false, reason: "invalid X-Loom-Delivery-Id format for the v1 (current) signature format", httpStatus: 400 };
+  return { ok: false, reason: "signature mismatch" };
 }
 
 /**

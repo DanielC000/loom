@@ -17,10 +17,23 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   7. Per-endpoint spawn-rate cap: request #11 within a minute is ACK'd but does not spawn.
 //   8. Wake-mode delivery: resume() called only when not already alive; enqueueStdin always called.
 //   9. Unknown/disabled endpoint -> the SAME 404 either way.
+//  10. (card 07af871d) Replay-with-a-fresh-delivery-id-header: a github/generic-legacy delivery replayed
+//      under a NEW, never-seen delivery-id header (signature otherwise untouched/still valid) must dedupe
+//      to the SAME key end-to-end through the real route -> only ONE spawn ever, not two.
+//  11. (card 07af871d) A genuine delivery that hits the per-endpoint rate cap is never permanently
+//      swallowed: the dedupe row is NOT written when the rate check drops it, so the SAME delivery
+//      resent once capacity frees up still fires (not treated as a stale duplicate).
+//  12. (Code Review e089cd2b) Shape A (current->legacy relabel) and Shape B (same-format re-split relabel)
+//      through the REAL route: a second, relabeled request must NOT produce a second spawn/fire.
+//  13. (Code Review e089cd2b) X-Loom-Delivery-Id charset violation -> 400 through the real route (CURRENT
+//      only), the once-per-endpoint deprecation warning for a legacy-format delivery fires once, and a
+//      LEGACY sender whose id violates that charset (never restricted for legacy) still fires + dedupes
+//      normally — the backward-compat regression found reviewing commit 16aa36b9.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHmac } from "node:crypto";
+import { createHmac, createHash } from "node:crypto";
+import Fastify from "fastify";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -41,14 +54,32 @@ requireHermeticEnv();
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { createWebhookEndpoint, setWebhookEndpointEnabled } = await import("../dist/webhooks/store.js");
-const { WEBHOOK_BODY_LIMIT } = await import("../dist/webhooks/ingress.js");
+const { WEBHOOK_BODY_LIMIT, registerWebhookIngress } = await import("../dist/webhooks/ingress.js");
 const { formatWebhookEventBlock } = await import("../dist/webhooks/format.js");
 
 const dbFile = (name) => path.join(tmpHome, name);
 const hexHmac = (secret, data) => createHmac("sha256", secret).update(data).digest("hex");
+const sha256Hex = (data) => createHash("sha256").update(data).digest("hex");
 
-// Sign a "generic" (Loom's own scheme) request — the simplest scheme to drive in bulk.
+// Sign a "generic" (Loom's own scheme) request — the simplest scheme to drive in bulk. CURRENT format
+// (card 07af871d, v1-prefixed since Code Review e089cd2b): the delivery id is bound INTO the signed
+// content, and a literal "v1." prefix keeps it from ever colliding with the LEGACY format's signed bytes.
 function signGeneric(secret, rawBodyStr, deliveryId, nowMs = Date.now()) {
+  const rawBody = Buffer.from(rawBodyStr, "utf8");
+  const tsSec = Math.floor(nowMs / 1000);
+  const signedContent = Buffer.concat([Buffer.from(`v1.${deliveryId}.${tsSec}.`, "utf8"), rawBody]);
+  const sig = "sha256=" + hexHmac(secret, signedContent);
+  return {
+    payload: rawBodyStr,
+    headers: {
+      "content-type": "application/json",
+      "x-loom-signature": sig, "x-loom-timestamp": String(tsSec), "x-loom-delivery-id": deliveryId,
+    },
+  };
+}
+// LEGACY generic format (pre-07af871d): id NOT bound into the signed content — accepted INDEFINITELY
+// (Code Review ruling: no hard sunset). Used to prove the dedupe fix on the legacy path too.
+function signGenericLegacy(secret, rawBodyStr, deliveryId, nowMs = Date.now()) {
   const rawBody = Buffer.from(rawBodyStr, "utf8");
   const tsSec = Math.floor(nowMs / 1000);
   const signedContent = Buffer.concat([Buffer.from(`${tsSec}.`, "utf8"), rawBody]);
@@ -197,6 +228,74 @@ try {
     check("(3) the duplicate response is explicitly flagged", secondBody.duplicate === true);
   }
 
+  // ===================== (10, card 07af871d) replay under a FRESH delivery-id header — github =====
+  // THE VULNERABILITY: GitHub's dedupe used to key on the raw (unsigned) X-GitHub-Delivery header. An
+  // attacker who captured one valid, signed request could replay it forever just by sending a fresh,
+  // never-seen header value each time — this test varies ONLY that header on an otherwise byte-identical
+  // signed request and proves it still dedupes to ONE spawn, end to end through the real route.
+  {
+    const rawBodyStr = '{"delivery":"github-header-replay-test"}';
+    const original = signGithub(SECRET, rawBodyStr, "delivery-replay-original");
+    const spawnsBefore = spawnCalls.length;
+    const r1 = await app.inject({ method: "POST", url, payload: original.payload, headers: original.headers });
+    await settle();
+    check("(10) github: original signed delivery -> 200, spawns", r1.statusCode === 200 && spawnCalls.length === spawnsBefore + 1);
+
+    // SAME rawBody + SAME signature (never recomputed) — ONLY the delivery-id header changes.
+    const replayed = signGithub(SECRET, rawBodyStr, "delivery-replay-NEVER-SEEN-BEFORE");
+    const r2 = await app.inject({ method: "POST", url, payload: replayed.payload, headers: replayed.headers });
+    await settle();
+    check("(10) github: replay under a fresh, never-seen delivery-id header -> still 200 (verifies)", r2.statusCode === 200);
+    check("(10) github: ...but it did NOT spawn a second time (dedupes on the SIGNED body, not the header)",
+      spawnCalls.length === spawnsBefore + 1);
+    check("(10) github: the replay response is explicitly flagged as a duplicate", JSON.parse(r2.payload).duplicate === true);
+  }
+
+  // ===================== (10, card 07af871d) replay under a FRESH delivery-id header — generic legacy ===
+  // Same attack, on the LEGACY generic format (id unsigned there too, by design — see verify.ts's own
+  // doc). Pinned to a FIXED clock via the injectable `now` seam (Code Review ruling) rather than the real
+  // wall clock or the shared buildServer-based `app` — a DEDICATED app + registerWebhookIngress call.
+  {
+    const FIXED_NOW_MS = 1_750_000_000_000; // fixed instant — deterministic, no dependency on the real date
+    const dbLegacy = new Db(dbFile("legacy-replay.db"));
+    const nowIsoLegacy = new Date().toISOString();
+    dbLegacy.insertProject({ id: "legacy-proj", name: "legacy", repoPath: "legacy-proj", vaultPath: "legacy-proj", config: {}, createdAt: nowIsoLegacy, archivedAt: null });
+    dbLegacy.insertAgent({ id: "legacy-agent", projectId: "legacy-proj", name: "legacy-target", startupPrompt: "", position: 0 });
+    const legacySecret = "legacy-generic-secret-789";
+    const legacyEndpoint = createWebhookEndpoint(dbLegacy, {
+      name: "Legacy generic sender", sourceType: "generic", secret: legacySecret, mode: "spawn", targetSessionId: null, agentId: "legacy-agent",
+    });
+    const legacySpawnCalls = [];
+    const legacyApp = Fastify();
+    registerWebhookIngress(legacyApp, {
+      db: dbLegacy,
+      sessions: { startNew: (agentId, opts) => { legacySpawnCalls.push({ agentId, opts }); return { id: `legacy-${legacySpawnCalls.length}` }; }, resume: () => ({}) },
+      pty: { isAlive: () => false, enqueueStdin: () => ({ delivered: true }) },
+      now: () => FIXED_NOW_MS,
+    });
+    await legacyApp.ready();
+    const legacyUrl = `/hooks/${legacyEndpoint.path}`;
+
+    const rawBodyStr = '{"delivery":"generic-legacy-header-replay-test"}';
+    const original = signGenericLegacy(legacySecret, rawBodyStr, "legacy-replay-original", FIXED_NOW_MS);
+    const r1 = await legacyApp.inject({ method: "POST", url: legacyUrl, payload: original.payload, headers: original.headers });
+    await settle();
+    check("(10) generic (legacy): original signed delivery -> 200, spawns", r1.statusCode === 200 && legacySpawnCalls.length === 1);
+
+    // SAME rawBody + SAME timestamp + SAME signature (never recomputed) — ONLY the delivery-id header
+    // changes. The legacy format doesn't sign the id, so this signature still verifies as-is.
+    const replayed = { ...original, headers: { ...original.headers, "x-loom-delivery-id": "legacy-replay-NEVER-SEEN-BEFORE" } };
+    const r2 = await legacyApp.inject({ method: "POST", url: legacyUrl, payload: replayed.payload, headers: replayed.headers });
+    await settle();
+    check("(10) generic (legacy): replay under a fresh, never-seen delivery-id header -> still 200 (verifies)", r2.statusCode === 200);
+    check("(10) generic (legacy): ...but it did NOT spawn a second time (dedupes on the SIGNED content, not the header)",
+      legacySpawnCalls.length === 1);
+    check("(10) generic (legacy): the replay response is explicitly flagged as a duplicate", JSON.parse(r2.payload).duplicate === true);
+
+    await legacyApp.close();
+    dbLegacy.close();
+  }
+
   // ===================== (BLOCKING fix, card 8fbedcac) GitHub replay survives the short-TTL sweep =====
   // GitHub has no timestamp, so its dedupe row is its ONLY replay defense. Prove a delivery recorded
   // PAST the short (600s) window a timestamp-bearing scheme would use is still caught — because github's
@@ -204,10 +303,10 @@ try {
   {
     const rawBodyStr = '{"delivery":"old-github-replay-test"}';
     const oldDeliveryId = "delivery-old-github-1";
-    // verifyGithub's own deliveryId is PREFIXED ("github:<X-GitHub-Delivery>") — the dedupe row must be
-    // seeded under that SAME prefixed key, or the real route's lookup (which always uses the prefixed
-    // form) can never find it.
-    const oldDedupeKey = `github:${oldDeliveryId}`;
+    // verifyGithub's own deliveryId is a hash of the SIGNED body, PREFIXED ("github:<sha256hex(rawBody)>",
+    // card 07af871d — never the raw X-GitHub-Delivery header) — the dedupe row must be seeded under that
+    // SAME key, or the real route's lookup (which always computes it the same way) can never find it.
+    const oldDedupeKey = `github:${sha256Hex(Buffer.from(rawBodyStr, "utf8"))}`;
     const { payload: oldPayload, headers: oldHeaders } = signGithub(SECRET, rawBodyStr, oldDeliveryId);
     // Seed the dedupe row directly as if recorded ~601s ago (just past a 600s window, nowhere near
     // github's actual 30-day retention) — an epoch cutoff on the SEED call itself so nothing is swept by
@@ -305,10 +404,226 @@ try {
     await settle();
     check("(7) all 11 AUTHENTIC requests are ACK'd 200 (the cap never surfaces as an error to the sender)", results.every((s) => s === 200));
     check("(7) but only 10 of the 11 actually spawned (the 11th silently dropped by the rate cap)", spawnCalls.length - spawnCountBefore === 10);
+
+    // (11, card 07af871d) THE FIX: the rate-limited 11th delivery must NOT have been recorded in the
+    // dedupe store — recording it would permanently swallow it (a later legitimate resend of the SAME
+    // delivery, once capacity frees up, would dead-end on the dedupe check instead of getting a chance to
+    // fire). This is the ordering bug's direct, checkable symptom: on unfixed main (dedupe write BEFORE
+    // the rate check), this assertion is FALSE.
+    check("(11) the rate-limited delivery was NOT written to the dedupe store", db.hasWebhookDelivery(rateEndpoint.id, "generic:rate-delivery-10") === false);
   }
 
   await app.close();
   db.close();
+
+  // ===================== (11, card 07af871d) a genuine delivery survives a rate-limit-then-retry =====
+  // Full round trip on a SEPARATE Fastify instance (built directly with registerWebhookIngress, not
+  // buildServer) so the rate limiter is a controllable stub rather than the real sliding-window clock —
+  // proving the actual end-to-end consequence: the SAME delivery, resent once capacity frees up, is NOT
+  // treated as a stale duplicate and actually fires.
+  {
+    const dbRR = new Db(dbFile("rate-recovery.db"));
+    const nowRR = new Date().toISOString();
+    dbRR.insertProject({ id: "rr-proj", name: "rr", repoPath: "rr-proj", vaultPath: "rr-proj", config: {}, createdAt: nowRR, archivedAt: null });
+    dbRR.insertAgent({ id: "rr-agent", projectId: "rr-proj", name: "rr-target", startupPrompt: "", position: 0 });
+    const rrEndpoint = createWebhookEndpoint(dbRR, {
+      name: "Rate recovery target", sourceType: "generic", secret: "rr-secret-abc", mode: "spawn",
+      targetSessionId: null, agentId: "rr-agent",
+    });
+    const rrSpawnCalls = [];
+    const rrApp = Fastify();
+    let rrAllow = false; // controllable: false = rate-limited, true = capacity available
+    registerWebhookIngress(rrApp, {
+      db: dbRR,
+      sessions: { startNew: (agentId, opts) => { rrSpawnCalls.push({ agentId, opts }); return { id: `rr-${rrSpawnCalls.length}` }; }, resume: () => ({}) },
+      pty: { isAlive: () => false, enqueueStdin: () => ({ delivered: true }) },
+      spawnRateLimiter: { allow: () => rrAllow },
+      spawnRatePerMin: 10,
+    });
+    await rrApp.ready();
+    const rrUrl = `/hooks/${rrEndpoint.path}`;
+    const { payload, headers } = signGeneric("rr-secret-abc", '{"i":"rate-recovery"}', "rr-delivery-1");
+
+    rrAllow = false;
+    const r1 = await rrApp.inject({ method: "POST", url: rrUrl, payload, headers });
+    check("(11) rate-limited genuine delivery -> 200 {rateLimited:true}", r1.statusCode === 200 && JSON.parse(r1.payload).rateLimited === true);
+    await settle();
+    check("(11) ...and it did NOT spawn", rrSpawnCalls.length === 0);
+    check("(11) ...and it was NOT recorded in the dedupe store", dbRR.hasWebhookDelivery(rrEndpoint.id, "generic:rr-delivery-1") === false);
+
+    rrAllow = true; // capacity frees up
+    const r2 = await rrApp.inject({ method: "POST", url: rrUrl, payload, headers }); // SAME delivery, resent
+    const r2Body = JSON.parse(r2.payload);
+    check("(11) resending the SAME genuine delivery once capacity frees up -> 200, NOT flagged as a duplicate",
+      r2.statusCode === 200 && r2Body.ok === true && r2Body.duplicate !== true);
+    await settle();
+    check("(11) ...and it actually fired this time (not permanently swallowed by the earlier rate-limit hit)", rrSpawnCalls.length === 1);
+
+    await rrApp.close();
+    dbRR.close();
+  }
+
+  // ===================== (12, Code Review e089cd2b) Shape A/B relabel — end to end, only ONE spawn ====
+  // Both shapes use an INJECTABLE `now` (WebhookIngressDeps.now) rather than the real wall clock, so the
+  // freshness-window arithmetic (a numeric id T "looking like" a fresh timestamp) is fully deterministic.
+  {
+    const FIXED_NOW_MS = 1_800_000_000_000; // fixed instant — deterministic, no dependency on the real date
+    const nowSec = Math.floor(FIXED_NOW_MS / 1000);
+
+    const dbShape = new Db(dbFile("shape-relabel.db"));
+    const nowIsoShape = new Date().toISOString();
+    dbShape.insertProject({ id: "shape-proj", name: "shape", repoPath: "shape-proj", vaultPath: "shape-proj", config: {}, createdAt: nowIsoShape, archivedAt: null });
+    dbShape.insertAgent({ id: "shape-agent", projectId: "shape-proj", name: "shape-target", startupPrompt: "", position: 0 });
+    const shapeSecret = "shape-relabel-secret-xyz";
+    const shapeEndpoint = createWebhookEndpoint(dbShape, {
+      name: "Shape relabel target", sourceType: "generic", secret: shapeSecret, mode: "spawn",
+      targetSessionId: null, agentId: "shape-agent",
+    });
+    const shapeSpawnCalls = [];
+    const shapeApp = Fastify();
+    registerWebhookIngress(shapeApp, {
+      db: dbShape,
+      sessions: { startNew: (agentId, opts) => { shapeSpawnCalls.push({ agentId, opts }); return { id: `shape-${shapeSpawnCalls.length}` }; }, resume: () => ({}) },
+      pty: { isAlive: () => false, enqueueStdin: () => ({ delivered: true }) },
+      now: () => FIXED_NOW_MS,
+    });
+    await shapeApp.ready();
+    const shapeUrl = `/hooks/${shapeEndpoint.path}`;
+
+    // ----- Shape A: current -> legacy re-split -----
+    {
+      const rawBodyStr = '{"kind":"shapeA-e2e"}';
+      const rawBody = Buffer.from(rawBodyStr, "utf8");
+      const T = String(nowSec); // numeric id, itself a fresh-looking unix-seconds value
+      const TS0 = String(nowSec - 5); // the real timestamp, also fresh
+      const originalContent = Buffer.concat([Buffer.from(`v1.${T}.${TS0}.`, "utf8"), rawBody]);
+      const originalSig = "sha256=" + hexHmac(shapeSecret, originalContent);
+
+      const spawnsBefore = shapeSpawnCalls.length;
+      const original = await shapeApp.inject({
+        method: "POST", url: shapeUrl, payload: rawBodyStr,
+        headers: { "content-type": "application/json", "x-loom-signature": originalSig, "x-loom-timestamp": TS0, "x-loom-delivery-id": T },
+      });
+      await settle();
+      check("(12 Shape A) the real, legitimate delivery (id=T, ts=TS0) -> 200, spawns", original.statusCode === 200 && shapeSpawnCalls.length === spawnsBefore + 1);
+
+      const relabeledBodyStr = `${TS0}.${rawBodyStr}`;
+      const relabel = await shapeApp.inject({
+        method: "POST", url: shapeUrl, payload: relabeledBodyStr,
+        headers: { "content-type": "application/json", "x-loom-signature": originalSig, "x-loom-timestamp": T, "x-loom-delivery-id": "shapeA-attacker-chosen-id" },
+      });
+      await settle();
+      check("(12 Shape A) the captured signature resubmitted as ts=T + body=TS0.+B -> rejected (does NOT verify as legacy)", relabel.statusCode !== 200 || JSON.parse(relabel.payload).ok !== true || JSON.parse(relabel.payload).duplicate === true);
+      check("(12 Shape A) ...and, critically, NO second spawn happened end to end", shapeSpawnCalls.length === spawnsBefore + 1);
+    }
+
+    // ----- Shape B: same-format re-split relabel -----
+    {
+      const rawBodyStr = '{"kind":"shapeB-e2e"}';
+      const rawBody = Buffer.from(rawBodyStr, "utf8");
+      const ts0 = String(nowSec);
+      const originalId = `evt.${ts0}`; // dotted — never acceptable as a real X-Loom-Delivery-Id
+      const originalContent = Buffer.concat([Buffer.from(`v1.${originalId}.${ts0}.`, "utf8"), rawBody]);
+      const originalSig = "sha256=" + hexHmac(shapeSecret, originalContent);
+
+      const spawnsBefore = shapeSpawnCalls.length;
+      const original = await shapeApp.inject({
+        method: "POST", url: shapeUrl, payload: rawBodyStr,
+        headers: { "content-type": "application/json", "x-loom-signature": originalSig, "x-loom-timestamp": ts0, "x-loom-delivery-id": originalId },
+      });
+      await settle();
+      check("(12 Shape B) a request with a DOTTED delivery id -> 400 (rejected before verification, never fires)", original.statusCode === 400);
+      check("(12 Shape B) ...and it did NOT spawn", shapeSpawnCalls.length === spawnsBefore);
+
+      // The re-split replay (id='evt', body absorbs the split-off suffix) DOES verify — it's the FIRST
+      // and ONLY successful acceptance of this underlying content, since the dotted original never fired.
+      const relabeledBodyStr = `${ts0}.${rawBodyStr}`;
+      const relabel = await shapeApp.inject({
+        method: "POST", url: shapeUrl, payload: relabeledBodyStr,
+        headers: { "content-type": "application/json", "x-loom-signature": originalSig, "x-loom-timestamp": ts0, "x-loom-delivery-id": "evt" },
+      });
+      await settle();
+      check("(12 Shape B) the re-split replay (id='evt') -> 200, fires EXACTLY ONCE (the dotted original never got a first fire to duplicate)",
+        relabel.statusCode === 200 && shapeSpawnCalls.length === spawnsBefore + 1);
+
+      // Re-sending the SAME re-split replay a second time must dedupe normally (ordinary idempotency).
+      const replayAgain = await shapeApp.inject({
+        method: "POST", url: shapeUrl, payload: relabeledBodyStr,
+        headers: { "content-type": "application/json", "x-loom-signature": originalSig, "x-loom-timestamp": ts0, "x-loom-delivery-id": "evt" },
+      });
+      await settle();
+      check("(12 Shape B) resending the SAME re-split replay again -> 200 duplicate, still only ONE total spawn",
+        replayAgain.statusCode === 200 && JSON.parse(replayAgain.payload).duplicate === true && shapeSpawnCalls.length === spawnsBefore + 1);
+    }
+
+    await shapeApp.close();
+    dbShape.close();
+  }
+
+  // ===================== (13, Code Review e089cd2b) delivery-id charset -> 400, dedupe warning once ====
+  {
+    const dbCs = new Db(dbFile("charset.db"));
+    const nowIsoCs = new Date().toISOString();
+    dbCs.insertProject({ id: "cs-proj", name: "cs", repoPath: "cs-proj", vaultPath: "cs-proj", config: {}, createdAt: nowIsoCs, archivedAt: null });
+    dbCs.insertAgent({ id: "cs-agent", projectId: "cs-proj", name: "cs-target", startupPrompt: "", position: 0 });
+    const csSecret = "charset-secret-abc";
+    const csEndpoint = createWebhookEndpoint(dbCs, {
+      name: "Charset target", sourceType: "generic", secret: csSecret, mode: "spawn", targetSessionId: null, agentId: "cs-agent",
+    });
+    const csSpawnCalls = [];
+    const warnLines = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => { warnLines.push(args.join(" ")); };
+    const csApp = Fastify();
+    try {
+      registerWebhookIngress(csApp, {
+        db: dbCs,
+        sessions: { startNew: (agentId, opts) => { csSpawnCalls.push({ agentId, opts }); return { id: `cs-${csSpawnCalls.length}` }; }, resume: () => ({}) },
+        pty: { isAlive: () => false, enqueueStdin: () => ({ delivered: true }) },
+      });
+      await csApp.ready();
+      const csUrl = `/hooks/${csEndpoint.path}`;
+
+      // (13a) a dotted delivery id -> 400 through the real route, never spawns.
+      const dotted = signGeneric(csSecret, '{"i":1}', "has.a.dot");
+      const rDotted = await csApp.inject({ method: "POST", url: csUrl, payload: dotted.payload, headers: dotted.headers });
+      await settle();
+      check("(13a) X-Loom-Delivery-Id with a '.' -> 400 through the real route", rDotted.statusCode === 400);
+      check("(13a) ...and it did NOT spawn", csSpawnCalls.length === 0);
+
+      // (13b) once-per-endpoint deprecation warning for a legacy-format delivery: fires on the FIRST
+      // legacy delivery, and never again for a SECOND, DIFFERENT legacy delivery on the SAME endpoint.
+      check("(13b) no deprecation warning logged yet (no legacy delivery has landed)", warnLines.length === 0);
+      const legacy1 = signGenericLegacy(csSecret, '{"i":"legacy-1"}', "legacy-cs-1");
+      await csApp.inject({ method: "POST", url: csUrl, payload: legacy1.payload, headers: legacy1.headers });
+      await settle();
+      check("(13b) first legacy-format delivery -> exactly ONE deprecation warning logged", warnLines.length === 1);
+      check("(13b) ...and the warning names the endpoint id but no secret/signature/payload content", warnLines[0].includes(csEndpoint.id) && !warnLines[0].includes(csSecret) && !warnLines[0].includes("legacy-1"));
+      const legacy2 = signGenericLegacy(csSecret, '{"i":"legacy-2"}', "legacy-cs-2");
+      await csApp.inject({ method: "POST", url: csUrl, payload: legacy2.payload, headers: legacy2.headers });
+      await settle();
+      check("(13b) a SECOND, different legacy delivery on the SAME endpoint -> still only ONE warning total (not re-logged)", warnLines.length === 1);
+      check("(13b) ...and both legacy deliveries still fired normally (the warning never blocks the fire)", csSpawnCalls.length === 2);
+
+      // (13c, backward-compat fix) a LEGACY sender whose id contains '.' — legacy never had a charset
+      // rule, and this exact regression shipped on commit 16aa36b9 (the charset check ran before either
+      // signed-content attempt, so this would 400 and never fire). Must fire normally, and a replay of the
+      // SAME dotted-id delivery must dedupe (not "succeed twice" and not "400 as a bad id" either way).
+      const spawnsBeforeDotted = csSpawnCalls.length;
+      const legacyDotted = signGenericLegacy(csSecret, '{"i":"legacy-dotted"}', "legacy.sender.id.with.dots");
+      const rLegacyDotted = await csApp.inject({ method: "POST", url: csUrl, payload: legacyDotted.payload, headers: legacyDotted.headers });
+      await settle();
+      check("(13c) a LEGACY-signed delivery whose id contains dots -> 200, fires (NOT 400)", rLegacyDotted.statusCode === 200 && csSpawnCalls.length === spawnsBeforeDotted + 1);
+      const rLegacyDottedReplay = await csApp.inject({ method: "POST", url: csUrl, payload: legacyDotted.payload, headers: legacyDotted.headers });
+      await settle();
+      check("(13c) resubmitting the EXACT same dotted-id legacy delivery -> 200 duplicate, still only ONE spawn",
+        rLegacyDottedReplay.statusCode === 200 && JSON.parse(rLegacyDottedReplay.payload).duplicate === true && csSpawnCalls.length === spawnsBeforeDotted + 1);
+    } finally {
+      console.warn = originalWarn;
+      await csApp.close();
+      dbCs.close();
+    }
+  }
 
   // ===================== (4) cross-tier isolation, over a REMOTE bind =====================
   {
@@ -385,6 +700,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Tier-2 webhook ingress route verifies HMAC pass/fail per scheme, preserves raw bytes end-to-end through Fastify's own content-type parser, dedupes a replayed delivery id (ACK+drop, no second spawn), caps a flood of authentic events per endpoint (ACK'd but dropped past 10/min), 413s an oversized body BEFORE any endpoint lookup or verify work, wraps the verified payload in the untrusted-DATA envelope, delivers correctly to both wake (resume-if-not-alive + enqueueStdin) and spawn targets, treats an unknown and a disabled endpoint identically (404), and is fully isolated from Tier 1 — a valid gateway token grants nothing on a Tier-2 route, a Tier-2 request grants nothing on a Tier-0 admin route, and the HMAC gate applies regardless of loopback vs. remote peer."
+  ? "\n✅ ALL PASS — the Tier-2 webhook ingress route verifies HMAC pass/fail per scheme, preserves raw bytes end-to-end through Fastify's own content-type parser, dedupes a replayed delivery id (ACK+drop, no second spawn), caps a flood of authentic events per endpoint (ACK'd but dropped past 10/min), 413s an oversized body BEFORE any endpoint lookup or verify work, wraps the verified payload in the untrusted-DATA envelope, delivers correctly to both wake (resume-if-not-alive + enqueueStdin) and spawn targets, treats an unknown and a disabled endpoint identically (404), and is fully isolated from Tier 1 — a valid gateway token grants nothing on a Tier-2 route, a Tier-2 request grants nothing on a Tier-0 admin route, and the HMAC gate applies regardless of loopback vs. remote peer. Card 07af871d: a github/generic-legacy replay that varies ONLY the delivery-id header still dedupes to one spawn end to end, and a genuine delivery dropped by the rate cap is never permanently swallowed — it is not recorded in the dedupe store, and the same delivery resent once capacity frees up actually fires."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
