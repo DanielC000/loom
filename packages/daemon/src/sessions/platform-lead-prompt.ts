@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Db } from "../db.js";
 import { resumeDocSizeWarning } from "./resume-doc-notes.js";
 import { readCodescapeToolDriftNote, readCodescapeBuildDriftNote } from "../codescape/drift-notice.js";
+import { stripEscapeAndControlChars } from "../security/control-chars.js";
 
 // Recycle-lineage helpers (`lineageRootId`/`liveLineageSuccessor`/`lineageResolvedPendingOp`) moved to
 // `./lineage.js` (card `1c51de69`) — a general session-lineage module, not specific to this file's own
@@ -63,7 +64,10 @@ export function resolvePlatformLeadResumeDocPath(db: Db, homePath: string, linea
   const lineagePath = platformLeadLineageResumeDocPath(homePath, lineageId);
   if (!fs.existsSync(lineagePath) && fs.existsSync(basePath)) {
     try {
-      fs.copyFileSync(basePath, lineagePath);
+      // @decision e7dabf95 — read + STRIP + write here (never a raw copyFileSync): this is the one place
+      // Loom's own code touches the base doc's bytes and hands them to a session that didn't author them.
+      const seeded = stripEscapeAndControlChars(fs.readFileSync(basePath, "utf8")).text;
+      fs.writeFileSync(lineagePath, seeded);
     } catch {
       /* best-effort seed — the successor Lead just starts its doc fresh instead of cold-booting on the base's content */
     }

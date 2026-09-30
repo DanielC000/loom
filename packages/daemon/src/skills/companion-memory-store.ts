@@ -1,6 +1,7 @@
 import { companionMemoryDir } from "../paths.js";
 import { descriptionOf } from "./store.js";
 import { PerCompanionStore, NEAR_DUP_THRESHOLD, MIN_DEDUP_UNION_TOKENS } from "./per-companion-store.js";
+import { findControlCharViolation } from "../security/control-chars.js";
 
 /**
  * The Loom Companion's SELF-AUTHORED memory store — the sibling of `companion-store.ts` (skills), same
@@ -54,8 +55,20 @@ export function readCompanionMemory(sessionId: string, name: string): string | n
  * the companion supplies the full rewritten content). Authoring a NEW name that is a near-duplicate
  * (content Jaccard ≥ NEAR_DUP_THRESHOLD) of an existing entry is REJECTED, steering the companion to refine
  * that entry instead. Every write is atomic (tmp+rename) and CONFINED under the base.
+ *
+ * @decision e7dabf95 — REJECTS `content` carrying an ESC/C0/C1 control byte (never silently strips it);
+ * do not also check `name` — it is already structurally control-byte-free (kebab-slug-only).
  */
 export function authorCompanionMemory(sessionId: string, name: string, content: string): CompanionMemoryAuthorResult {
+  const violation = findControlCharViolation(content);
+  if (violation) {
+    return {
+      ok: false,
+      error: `memory "content" contains a rejected ${violation.byteClass} control byte at character index ` +
+        `${violation.index} — control/escape bytes have no legitimate role in a memory entry and are never ` +
+        "accepted; remove it and retry (the offending byte itself is not echoed here)",
+    };
+  }
   const r = store.author(sessionId, name, content);
   return r.ok ? { ok: true, memories: r.entries } : r;
 }

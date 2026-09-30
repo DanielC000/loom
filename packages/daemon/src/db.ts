@@ -89,7 +89,7 @@ import { emptyMergeGateState, type MergeGateState } from "./orchestration/merge-
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
-import { findControlCharViolation, type ControlByteClass } from "./security/control-chars.js";
+import { findControlCharViolation, stripEscapeAndControlChars, type ControlByteClass } from "./security/control-chars.js";
 // Type-only — companion/types.ts has zero runtime imports, so this can never form a runtime cycle with
 // the companion/* modules that import `Db` from here. CompanionReminder.route reuses THIS module's
 // CompanionRoute (never a duplicate route type, unlike Wake/CompanionBinding's shared/types.ts twins).
@@ -4243,6 +4243,9 @@ export class Db {
        VALUES (@id,@projectId,@name,@startupPrompt,@position,@profileId,@endpoint,@ioSchema)`,
     ).run({
       ...a, profileId: a.profileId ?? null,
+      // @decision e7dabf95 — STRIP (never reject) startupPrompt here: boot-time seeding/cloning callers
+      // return void and must never throw mid-boot.
+      startupPrompt: stripEscapeAndControlChars(a.startupPrompt).text,
       // Agent Runs R1: absent on plain phase-1/2 agent literals ⇒ endpoint 0 + io_schema NULL (additive).
       endpoint: a.endpoint ? 1 : 0,
       ioSchema: a.ioSchema == null ? null : JSON.stringify(a.ioSchema),
@@ -4257,7 +4260,8 @@ export class Db {
   updateAgent(id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null; endpoint?: boolean; ioSchema?: unknown | null }): void {
     const cols: Record<string, unknown> = {
       name: patch.name,
-      startup_prompt: patch.startupPrompt,
+      // @decision e7dabf95 — STRIP (never reject), same posture as insertAgent above.
+      startup_prompt: patch.startupPrompt === undefined ? undefined : stripEscapeAndControlChars(patch.startupPrompt).text,
       // present (incl. null → clear) writes; absent (undefined) is filtered out below and left as-is.
       profile_id: "profileId" in patch ? patch.profileId ?? null : undefined,
       // Agent Runs R1 (HUMAN-only — only the agent-edit REST surface passes these; no MCP path does,
@@ -6611,7 +6615,9 @@ export class Db {
     this.db.prepare(
       `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key,parent_id,deferred_stuck,deferred_at,deferred_reason,deferred_items,deferred_until_event)
        VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey,@parentId,@deferredStuck,@deferredAt,@deferredReason,@deferredItems,@deferredUntilEvent)`,
-    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, parentId: t.parentId ?? null, deferredStuck: t.deferredStuck ? 1 : 0, deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null, deferredItems: JSON.stringify(t.deferredItems ?? []), deferredUntilEvent: serializeDeferredUntilEvent(t.deferredUntilEvent) }); // defaults when an (untyped) caller omits them
+      // @decision e7dabf95 — STRIP (never reject) title/body here: many callers (e.g.
+      // appendEscalationDetail) are non-retryable and return void; a reject would throw into them.
+    ).run({ ...t, title: stripEscapeAndControlChars(t.title).text, body: stripEscapeAndControlChars(t.body).text, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, parentId: t.parentId ?? null, deferredStuck: t.deferredStuck ? 1 : 0, deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null, deferredItems: JSON.stringify(t.deferredItems ?? []), deferredUntilEvent: serializeDeferredUntilEvent(t.deferredUntilEvent) }); // defaults when an (untyped) caller omits them
     // Card 3df86c87: the deferredUntilTaskId alias is stored as flagged blocks edges, not the frozen column.
     const created = t.deferredUntilTaskId == null ? [] : Array.isArray(t.deferredUntilTaskId) ? t.deferredUntilTaskId : [t.deferredUntilTaskId];
     if (created.length > 0) this.setDeferralEdges(t.id, t.projectId, created);
@@ -6643,6 +6649,9 @@ export class Db {
     // LATER stale agent write get caught by updateTaskChecked even though THIS write itself wasn't gated.
     const touchesContent = patch.title !== undefined || patch.body !== undefined;
     const next = { ...t, ...patch, updatedAt: new Date().toISOString(), version: touchesContent ? t.version + 1 : t.version };
+    // @decision e7dabf95 — STRIP (never reject), same posture as insertTask above.
+    if (patch.title !== undefined) next.title = stripEscapeAndControlChars(next.title).text;
+    if (patch.body !== undefined) next.body = stripEscapeAndControlChars(next.body).text;
     this.db.prepare(
       "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, held_request_id=@heldRequestId, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, parent_id=@parentId, deferred_stuck=@deferredStuck, deferred_at=@deferredAt, deferred_reason=@deferredReason, deferred_until_event=@deferredUntilEvent, version=@version WHERE id=@id",
     ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, heldRequestId: next.heldRequestId ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null,
