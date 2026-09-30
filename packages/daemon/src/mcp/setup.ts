@@ -381,12 +381,26 @@ export class SetupMcpRouter {
           const wrote = setProjectConfigSafe(db, projectId, merged, callerSessionId ? `setup:${callerSessionId}` : "setup");
           if (!wrote.ok) return ok({ error: wrote.error });
         }
-        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and (newly on
-        // THIS surface) refuse an explicit "" that would strand a VAULT-ONLY project — the same guard the
-        // human REST PATCH path, the manager's project_update, and platform's project_update all now share.
+        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, refuse an
+        // explicit "" that would strand a VAULT-ONLY project, and refuse a rebind that ALIASES repoPath
+        // or a registered repo — the same guard the human REST PATCH path, the manager's project_update,
+        // and platform's project_update all now share.
         const vaultCheck = await checkVaultPathUpdate(project, vaultPath);
         if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
         vaultPath = vaultCheck.value;
+        // RE-CHECK against a FRESH read, immediately before the write: the call above is this handler's
+        // ONLY await depending on project state (isGitRepo — a real git subprocess call), a window in
+        // which a concurrent write elsewhere could change this project's repoPath/vaultPath/repos —
+        // exactly what that guard just validated against. See sessions/service.ts's updateProjectStructural
+        // for the full reasoning (db.updateProject only SETs the columns this patch names, so this
+        // re-check is solely about keeping the vaultPath VALIDATION honest, not about a lost write).
+        if (vaultPath !== undefined) {
+          const fresh = db.getProject(projectId);
+          if (!fresh) return ok({ error: "project not found" });
+          const recheck = await checkVaultPathUpdate(fresh, vaultPath);
+          if (!recheck.ok) return ok({ error: recheck.error });
+          vaultPath = recheck.value;
+        }
         if (name !== undefined || vaultPath !== undefined) db.updateProject(projectId, { name, vaultPath });
         return ok(projectFields(db.getProject(projectId)));
       },

@@ -1,13 +1,18 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 6a48b759 (Full review lane 4 486d4238 M4): the manager's OWN project_update
 // (sessions/service.ts `updateProjectStructural`) wrote `patch.vaultPath` RAW — no expandTilde, no
-// validateVaultPath (absolute), and no vault-only unbind refusal. The setup + platform project_update
-// surfaces already ran a real rebind through validateVaultPath (card 96c4b245 — see
+// validateVaultPath (absolute), no vault-only unbind refusal, and no alias check. The setup + platform
+// project_update surfaces already ran a real rebind through validateVaultPath (card 96c4b245 — see
 // vault-path-absolute.mjs) but, unlike the REST PATCH twin, neither refused an explicit `vaultPath:""`
-// that would strand a VAULT-ONLY project (no separate repoPath to fall back on). This fix introduces ONE
-// shared guard, `checkVaultPathUpdate` (projects/vault-path.ts), used by ALL FOUR project_update-shaped
-// write surfaces (REST PATCH, the manager, setup, platform) — so a rebind/unbind now validates
-// identically everywhere.
+// that would strand a VAULT-ONLY project (no separate repoPath to fall back on), and NEITHER checked
+// whether a rebind ALIASES repoPath itself (REST/platform's existing registry re-check only ever
+// compared a REGISTRY ENTRY against repoPath/vaultPath, never vaultPath against repoPath directly) — the
+// most damaging failure the card names: "a vaultPath aliasing repoPath points the vault auto-committer
+// (git add -A) at the code repo". This fix introduces ONE shared guard, `checkVaultPathUpdate`
+// (projects/vault-path.ts), used by ALL FOUR project_update-shaped write surfaces (REST PATCH, the
+// manager, setup, platform) — so a rebind/unbind now validates identically everywhere, including the
+// alias check (reusing `validateRepoRegistry`'s own registry logic + `repos.ts`'s path-normalization
+// primitives for the direct repoPath comparison, not a second alias rule).
 //
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE. Proves the DoD:
 //   PART A — MANAGER (SessionService.updateProjectStructural, the project_update MCP tool's backing
@@ -26,6 +31,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //            (this surface ALREADY did this — no prior test covered the actual refusal case, only the
 //            regression "still succeeds on a repo-bound project" shape in mgmt-project-agent.mjs A2) —
 //            proves the refactor onto the shared helper preserved it byte-identically.
+//   PART E — ALIAS CHECK on MANAGER: (E1) rebinding vaultPath to literally equal repoPath (a real git
+//            repo) is REJECTED; (E2) rebinding to a genuinely distinct path still SUCCEEDS (regression);
+//            (E3) a VAULT-ONLY project re-asserting vaultPath==repoPath (its own design) still SUCCEEDS
+//            (the legitimate case the alias check must not break); (E4) rebinding vaultPath to alias a
+//            REGISTERED `repos` entry (not the primary repoPath) is REJECTED via the shared
+//            validateRepoRegistry check.
+//   PART F — ALIAS CHECK on SETUP: (F1) direct repoPath alias REJECTED; (F2) the vault-only legitimate
+//            case still SUCCEEDS.
+//   PART G — ALIAS CHECK on PLATFORM: (G1) direct repoPath alias REJECTED (light coverage for symmetry —
+//            platform already ran the registry-entries half of this via validateRepoRegistry).
+//   PART H — ALIAS CHECK on REST PATCH: (H1) direct repoPath alias REJECTED (light coverage for symmetry).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/vault-path-update-guard.mjs
 import fs from "node:fs";
@@ -239,11 +255,160 @@ try {
       db.close();
     }
   }
+  // =====================================================================================================
+  // PART E — ALIAS CHECK on MANAGER project_update: a vaultPath rebind must not alias repoPath (unless
+  // vault-only by design) or a registered `repos` entry (code-review ruling on card 6a48b759 — the
+  // Failure line's most damaging case: "a vaultPath aliasing repoPath points the vault auto-committer
+  // (git add -A) at the code repo").
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "alias-manager.db"));
+    const svc = new SessionService(db, pty, new OrchestrationControl());
+
+    const codeRepo = mkRepo("alias-mgr-code");
+    cleanupDirs.push(codeRepo);
+    const separateVault = path.join(tmpHome, "alias-mgr-vault");
+    db.insertProject({ id: "pAliasMgr", name: "AliasMgr", repoPath: codeRepo, vaultPath: separateVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+    const vaultOnlyDir = mkVaultOnlyDir("alias-mgr");
+    cleanupDirs.push(vaultOnlyDir);
+    db.insertProject({ id: "pAliasMgrVaultOnly", name: "AliasMgrVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+    const secondaryRepo = mkRepo("alias-mgr-secondary");
+    cleanupDirs.push(secondaryRepo);
+    db.insertProject({ id: "pAliasMgrRegistry", name: "AliasMgrRegistry", repoPath: codeRepo, vaultPath: separateVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [{ key: "secondary", path: secondaryRepo }] });
+
+    for (const [sid, pid] of [["MA1", "pAliasMgr"], ["MA2", "pAliasMgrVaultOnly"], ["MA3", "pAliasMgrRegistry"]]) {
+      db.insertAgent({ id: `a${sid}`, projectId: pid, name: "Mgr", startupPrompt: "", position: 0, profileId: null });
+      db.insertSession({
+        id: sid, projectId: pid, agentId: `a${sid}`, engineSessionId: null, title: null, cwd: tmpHome,
+        processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+        lastError: null, role: "manager", parentSessionId: null,
+      });
+    }
+
+    // (E1) rebind vaultPath to literally equal repoPath (a real git repo) → REJECTED (alias).
+    let e1Err = null;
+    try { await svc.updateProjectStructural("MA1", "pAliasMgr", { vaultPath: codeRepo }); }
+    catch (e) { e1Err = e instanceof Error ? e.message : String(e); }
+    check("(E1) manager project_update rebinding vaultPath to equal repoPath → rejected (alias)", typeof e1Err === "string" && /aliases the project's repoPath/.test(e1Err));
+    check("(E1) rejected alias rebind left vaultPath UNCHANGED", db.getProject("pAliasMgr").vaultPath === separateVault);
+
+    // (E2) rebind vaultPath to a genuinely DISTINCT path → SUCCEEDS (regression: not every rebind aliases).
+    const distinctVault = path.join(tmpHome, "alias-mgr-distinct-vault");
+    const e2 = await svc.updateProjectStructural("MA1", "pAliasMgr", { vaultPath: distinctVault });
+    check("(E2) manager project_update rebinding vaultPath to a DISTINCT path → succeeds", !e2.error && e2.vaultPath === distinctVault);
+
+    // (E3) a VAULT-ONLY project re-asserting vaultPath == repoPath (its own design, not an unbind) →
+    // SUCCEEDS — the legitimate case the alias check must not break.
+    const e3 = await svc.updateProjectStructural("MA2", "pAliasMgrVaultOnly", { vaultPath: vaultOnlyDir });
+    check("(E3) manager project_update re-asserting vaultPath==repoPath on a VAULT-ONLY project → succeeds (legitimate design)", !e3.error && e3.vaultPath === vaultOnlyDir);
+
+    // (E4) rebind vaultPath to alias a REGISTERED repos entry (not the primary repoPath) → REJECTED via
+    // the shared validateRepoRegistry check — the SAME validator REST/platform already run, not a second rule.
+    let e4Err = null;
+    try { await svc.updateProjectStructural("MA3", "pAliasMgrRegistry", { vaultPath: secondaryRepo }); }
+    catch (e) { e4Err = e instanceof Error ? e.message : String(e); }
+    check("(E4) manager project_update rebinding vaultPath to alias a REGISTERED repo → rejected", typeof e4Err === "string" && /conflicts with the existing repos registry/.test(e4Err));
+    check("(E4) rejected registry-alias rebind left vaultPath UNCHANGED", db.getProject("pAliasMgrRegistry").vaultPath === separateVault);
+
+    db.close();
+  }
+
+  // =====================================================================================================
+  // PART F — ALIAS CHECK on SETUP project_update (MCP) — the other surface named in the ruling.
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "alias-setup.db"));
+    const codeRepo = mkRepo("alias-setup-code");
+    cleanupDirs.push(codeRepo);
+    const separateVault = path.join(tmpHome, "alias-setup-vault");
+    db.insertProject({ id: "pAliasSetup", name: "AliasSetup", repoPath: codeRepo, vaultPath: separateVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+    const vaultOnlyDir = mkVaultOnlyDir("alias-setup");
+    cleanupDirs.push(vaultOnlyDir);
+    db.insertProject({ id: "pAliasSetupVaultOnly", name: "AliasSetupVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+
+    class SeamHost extends createSeamHost(PtyHost) { stop() {} }
+    const events = { onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); }, onBusy(id, busy) { db.setBusy(id, busy); }, onContextStats() {}, onRateLimited() {}, onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); } };
+    const host = new SeamHost(events);
+    const svc = new SessionService(db, host, new OrchestrationControl());
+    const router = new SetupMcpRouter(db, svc);
+    const server = router.buildServer();
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const client = new Client({ name: "vaultpath-upd-alias-setup-test", version: "0" });
+    await client.connect(clientT);
+    const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+    // (F1) rebind vaultPath to equal repoPath (a real git repo) → REJECTED (alias).
+    const f1 = await call("project_update", { projectId: "pAliasSetup", vaultPath: codeRepo });
+    check("(F1) setup project_update rebinding vaultPath to equal repoPath → rejected (alias)", typeof f1.error === "string" && /aliases the project's repoPath/.test(f1.error));
+    check("(F1) rejected alias rebind left vaultPath UNCHANGED", db.getProject("pAliasSetup").vaultPath === separateVault);
+
+    // (F2) a VAULT-ONLY project re-asserting vaultPath == repoPath → SUCCEEDS (legitimate design).
+    const f2 = await call("project_update", { projectId: "pAliasSetupVaultOnly", vaultPath: vaultOnlyDir });
+    check("(F2) setup project_update re-asserting vaultPath==repoPath on a VAULT-ONLY project → succeeds (legitimate design)", !f2.error && f2.vaultPath === vaultOnlyDir);
+
+    await client.close();
+    db.close();
+  }
+
+  // =====================================================================================================
+  // PART G — ALIAS CHECK on PLATFORM project_update (MCP) — light coverage for symmetry.
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "alias-platform.db"));
+    const codeRepo = mkRepo("alias-plat-code");
+    cleanupDirs.push(codeRepo);
+    const separateVault = path.join(tmpHome, "alias-plat-vault");
+    db.insertProject({ id: "pAliasPlat", name: "AliasPlat", repoPath: codeRepo, vaultPath: separateVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+
+    class SeamHost extends createSeamHost(PtyHost) { stop() {} }
+    const events = { onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); }, onBusy(id, busy) { db.setBusy(id, busy); }, onContextStats() {}, onRateLimited() {}, onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); } };
+    const host = new SeamHost(events);
+    const svc = new SessionService(db, host, new OrchestrationControl());
+    const router = new PlatformMcpRouter(db, svc);
+    const server = router.buildServer();
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const client = new Client({ name: "vaultpath-upd-alias-platform-test", version: "0" });
+    await client.connect(clientT);
+    const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+    // (G1) rebind vaultPath to equal repoPath (a real git repo) → REJECTED (alias).
+    const g1 = await call("project_update", { projectId: "pAliasPlat", vaultPath: codeRepo });
+    check("(G1) platform project_update rebinding vaultPath to equal repoPath → rejected (alias)", typeof g1.error === "string" && /aliases the project's repoPath/.test(g1.error));
+    check("(G1) rejected alias rebind left vaultPath UNCHANGED", db.getProject("pAliasPlat").vaultPath === separateVault);
+
+    await client.close();
+    db.close();
+  }
+
+  // =====================================================================================================
+  // PART H — ALIAS CHECK on REST PATCH /api/projects/:id — light coverage for symmetry.
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "alias-rest.db"));
+    const codeRepo = mkRepo("alias-rest-code");
+    cleanupDirs.push(codeRepo);
+    const separateVault = path.join(tmpHome, "alias-rest-vault");
+    db.insertProject({ id: "pAliasRest", name: "AliasRest", repoPath: codeRepo, vaultPath: separateVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+
+    const stub = {};
+    const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, control: stub, usageStatus: stub });
+    try {
+      // (H1) rebind vaultPath to equal repoPath (a real git repo) → REJECTED (alias).
+      const h1 = await app.inject({ method: "PATCH", url: "/api/projects/pAliasRest", payload: { vaultPath: codeRepo } });
+      check("(H1) REST PATCH rebinding vaultPath to equal repoPath → 400 (alias)", h1.statusCode === 400);
+      check("(H1) error names the alias refusal", /aliases the project's repoPath/.test(h1.json().error ?? ""));
+      check("(H1) rejected alias rebind left vaultPath UNCHANGED", db.getProject("pAliasRest").vaultPath === separateVault);
+    } finally {
+      db.close();
+    }
+  }
 } finally {
   for (const d of cleanupDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — ONE shared vaultPath-update guard (checkVaultPathUpdate) now runs on every project_update-shaped write surface: the manager's own project_update (previously had NO vaultPath validation of any kind — relative paths stored raw, \"~\" never expanded, a vault-only unbind silently accepted), setup's and platform's project_update (previously validated absolute-path but NOT the vault-only unbind refusal), and REST PATCH (already correct — proves the refactor onto the shared helper preserved it byte-identically). A vault-only project's vaultPath can no longer be silently unbound, a relative/\"~\" rebind is rejected/expanded identically everywhere, and a repo-bound project's unbind still works everywhere (regression) — claude-free, network-free."
+  ? "\n✅ ALL PASS — ONE shared vaultPath-update guard (checkVaultPathUpdate) now runs on every project_update-shaped write surface: the manager's own project_update (previously had NO vaultPath validation of any kind — relative paths stored raw, \"~\" never expanded, a vault-only unbind silently accepted, no alias check), setup's and platform's project_update (previously validated absolute-path but NOT the vault-only unbind refusal or the direct repoPath alias), and REST PATCH (unbind refusal already correct — proves the refactor onto the shared helper preserved it byte-identically; the direct repoPath alias check is NEW everywhere). A vault-only project's vaultPath can no longer be silently unbound or aliased onto repoPath/a registered repo, a relative/\"~\" rebind is rejected/expanded identically everywhere, the vault-only vaultPath==repoPath design case still works, and a repo-bound project's unbind/distinct-rebind still works everywhere (regression) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

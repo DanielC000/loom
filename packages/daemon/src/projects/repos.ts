@@ -18,7 +18,7 @@ import { expandTilde } from "../paths.js";
  * defensive backstop, not the expected path, since every caller here has already confirmed the target
  * exists (via `isGitRepo`) before this runs.
  */
-function canonicalizeExistingPath(p: string): string {
+export function canonicalizeExistingPath(p: string): string {
   try {
     return fs.realpathSync.native(p);
   } catch {
@@ -33,7 +33,7 @@ function canonicalizeExistingPath(p: string): string {
  * return). Used ONLY for equality checks (aliasing / dedup) — the STORED path keeps its real on-disk case
  * from `canonicalizeExistingPath`, never lowercased, so stored registry paths stay human-readable.
  */
-function comparisonKey(canonicalPath: string): string {
+export function comparisonKey(canonicalPath: string): string {
   return process.platform === "win32" ? canonicalPath.toLowerCase() : canonicalPath;
 }
 

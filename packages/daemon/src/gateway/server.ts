@@ -4328,19 +4328,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(400).send({ error: "name must be a non-empty string" });
     if (b.vaultPath !== undefined && typeof b.vaultPath !== "string")
       return reply.code(400).send({ error: "vaultPath must be a string" });
-    // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and refuse an
-    // explicit "" (UNBIND — card 9fe578b3, completing cdc3792d's vault-optional story) that would strand a
-    // VAULT-ONLY project — identical across every project_update-shaped write surface, mirroring
-    // checkRepoRebind's role for repoPath. `vaultPath` omitted (undefined) leaves the stored value
-    // untouched below.
-    const vaultCheck = await checkVaultPathUpdate(p, b.vaultPath as string | undefined);
-    if (!vaultCheck.ok) return reply.code(400).send({ error: vaultCheck.error });
-    const vaultPath = vaultCheck.value;
     if (b.repoPath !== undefined && (typeof b.repoPath !== "string" || !b.repoPath.trim()))
       return reply.code(400).send({ error: "repoPath must be a non-empty string" });
     // repoPath REBIND (human-only): the SHARED guard (isGitRepo + live-worktree refusal), identical to
     // the elevated platform MCP project_update. A non-repo or a live worktree session blocks the write.
     // expandTilde runs right after trim, before the isGitRepo check, so the STORED repoPath is expanded.
+    // Parsed BEFORE the vaultPath guard below (card 6a48b759) so that guard's alias check compares
+    // against the EFFECTIVE post-patch repoPath (a same-call repoPath/vaultPath rebind), not the
+    // pre-patch one — same reasoning as the repos-registry re-check further down.
     const repoPath = b.repoPath === undefined ? undefined : expandTilde((b.repoPath as string).trim());
     if (repoPath !== undefined) {
       // A repoPath REBIND repoints the project's git — more than metadata; REFUSE it on the reserved
@@ -4350,6 +4345,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const check = await checkRepoRebind(deps.db, id, repoPath);
       if (!check.ok) return reply.code(400).send({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
     }
+    // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, refuse an
+    // explicit "" (UNBIND — card 9fe578b3, completing cdc3792d's vault-optional story) that would strand a
+    // VAULT-ONLY project, and refuse a rebind that ALIASES repoPath or a registered repo — identical
+    // across every project_update-shaped write surface, mirroring checkRepoRebind's role for repoPath.
+    // `vaultPath` omitted (undefined) leaves the stored value untouched below.
+    const vaultCheck = await checkVaultPathUpdate({ ...p, repoPath: repoPath ?? p.repoPath }, b.vaultPath as string | undefined);
+    if (!vaultCheck.ok) return reply.code(400).send({ error: vaultCheck.error });
+    const vaultPath = vaultCheck.value;
     // referenceRepos (reference-repos epic Phase 2, card f4888775): HUMAN-only on this REST PATCH path —
     // same validator + trust posture as the REST create path above.
     let referenceRepos: string[] | undefined;

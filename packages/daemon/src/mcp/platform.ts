@@ -2428,10 +2428,12 @@ export class PlatformMcpRouter {
           const check = await checkRepoRebind(db, projectId, repoPath);
           if (!check.ok) return ok({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
         }
-        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and (newly on
-        // THIS surface) refuse an explicit "" that would strand a VAULT-ONLY project — the same guard the
-        // human REST PATCH path, the manager's project_update, and setup's project_update all now share.
-        const vaultCheck = await checkVaultPathUpdate(project, vaultPath);
+        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, refuse an
+        // explicit "" that would strand a VAULT-ONLY project, and refuse a rebind that ALIASES repoPath
+        // or a registered repo — the same guard the human REST PATCH path, the manager's project_update,
+        // and setup's project_update all now share. Compared against the EFFECTIVE post-patch repoPath
+        // (a same-call repoPath rebind), matching the registry re-check just below.
+        const vaultCheck = await checkVaultPathUpdate({ ...project, repoPath: repoPath ?? project.repoPath }, vaultPath);
         if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
         vaultPath = vaultCheck.value;
         // repos re-check (code-review Major 1): this surface never accepts a `repos` value itself (see the
