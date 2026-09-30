@@ -26,13 +26,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       gateway hook, which is deliberately identity+liveness-only (role gates stay in the routers).
 //   (H) Card 9a8bc38f: verifyMcpToken AND its sibling verifyHookToken (/internal/hook) both compare in
 //       CONSTANT TIME, never `===` — each rejects a shorter token, a longer token, and a
-//       right-length-but-wrong token alike (behavioral), plus a structural proof (AST-narrowed
-//       method/function body extraction, card fdf93d3a's pattern — comment-immune, so a comment-only
-//       diff can never flip it) that each compiled body routes through the shared timingSafeEqualToken
-//       helper, and that the helper itself hashes to a fixed-length digest before calling node:crypto's
-//       timingSafeEqual — never a raw string `===`. Also: FAIL-CLOSED when the session's own stored
-//       secret is undefined (a corrupted/partial Live entry) — 401/403, never a 500 (createHash().update()
-//       would otherwise throw on undefined).
+//       right-length-but-wrong token alike (behavioral), plus a structural proof that each compiled body
+//       routes through the shared timingSafeEqualToken helper, and that the helper itself calls
+//       node:crypto's createHash and timingSafeEqual — never a raw string `===`. The body is located by
+//       AST extent (card fdf93d3a's pattern), and the MATCHING inside it walks the real AST (CallExpression
+//       callee identity / BinaryExpression operator+operand identity via the parser's own `.text`, never
+//       a regex over `.getText()`) — genuinely comment-immune end to end (Code Review 95ffc2dc: an
+//       earlier version regexed `.getText()` instead, which keeps comment trivia — tsc preserves comments
+//       in dist, so a comment-only host.ts edit could flip that version; verified it no longer can).
+//       Also: FAIL-CLOSED when the session's own stored secret is undefined (a corrupted/partial Live
+//       entry) — 401/403,
+//       never a 500 (createHash().update() would otherwise throw on undefined).
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,11 +44,13 @@ import ts from "typescript";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-// Find a class method's REAL body text by its actual syntax-tree extent (card fdf93d3a's pattern, also
+// Find a class method's REAL body NODE by its actual syntax-tree extent (card fdf93d3a's pattern, also
 // used by gateway-token.mjs/task-version-guard.mjs) — never a fixed character window, which is sensitive
 // to unrelated text growth (e.g. an added comment) near the call site rather than the property it claims
-// to verify.
-function classMethodBodyText(srcText, srcPath, methodName) {
+// to verify. Returns the ts.Block NODE itself (not .getText()) — see the Code Review correction below:
+// getText() keeps comment trivia (tsc preserves comments in dist), so a regex over it is NOT
+// comment-immune; the actual matching below walks this returned node's real AST instead.
+function classMethodBody(srcText, srcPath, methodName) {
   const sourceFile = ts.createSourceFile(srcPath, srcText, ts.ScriptTarget.Latest, /* setParentNodes */ true);
   let found;
   const visit = (node) => {
@@ -54,12 +60,12 @@ function classMethodBodyText(srcText, srcPath, methodName) {
     if (!found) ts.forEachChild(node, visit);
   };
   visit(sourceFile);
-  return found ? found.getText(sourceFile) : null;
+  return found ?? null;
 }
 
 // Same idea, for a top-level (non-class) function declaration — `timingSafeEqualToken` is a free
-// function in pty/host.ts, not a method.
-function functionDeclBodyText(srcText, srcPath, fnName) {
+// function in pty/host.ts, not a method. Also returns the NODE, not text — see classMethodBody's doc.
+function functionDeclBody(srcText, srcPath, fnName) {
   const sourceFile = ts.createSourceFile(srcPath, srcText, ts.ScriptTarget.Latest, /* setParentNodes */ true);
   let found;
   const visit = (node) => {
@@ -69,7 +75,46 @@ function functionDeclBodyText(srcText, srcPath, fnName) {
     if (!found) ts.forEachChild(node, visit);
   };
   visit(sourceFile);
-  return found ? found.getText(sourceFile) : null;
+  return found ?? null;
+}
+
+// Card 9a8bc38f Code Review (95ffc2dc) fix: TRUE comment-immune matching — walks the real AST structure
+// (CallExpression callee identity, BinaryExpression operator + operand identity) rather than regexing
+// getText(). A comment can carry ANY text a regex might match; it can NEVER itself become a
+// CallExpression or a BinaryExpression node, so structural matching on node KIND + the parser's own
+// `.text` property (never `.getText()`) cannot be fooled by comment content.
+function bodyCallsFunction(bodyNode, calleeName) {
+  if (!bodyNode) return false;
+  let found = false;
+  const visit = (n) => {
+    if (found) return;
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === calleeName) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(bodyNode);
+  return found;
+}
+
+// True if the body contains a `===` BinaryExpression where either operand is the BARE identifier
+// `identifierName` (e.g. `token === live.mcpToken` OR `this.testMcpTokens.get(id) === token`) — the
+// exact pre-9a8bc38f raw-compare shape. `.text` on an Identifier node is the parser's own resolved
+// name, not a text-window read, so this can't match inside a comment or be defeated by one.
+function bodyHasRawStrictEqualityWithBareIdentifier(bodyNode, identifierName) {
+  if (!bodyNode) return false;
+  let found = false;
+  const isBareIdent = (n) => ts.isIdentifier(n) && n.text === identifierName;
+  const visit = (n) => {
+    if (found) return;
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken) {
+      if (isBareIdent(n.left) || isBareIdent(n.right)) { found = true; return; }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(bodyNode);
+  return found;
 }
 
 const TMP = mkdtempManaged("loom-mcp-auth-guard-");
@@ -233,14 +278,15 @@ try {
     // `===` compare of the presented token against live.mcpToken/testToken (the pre-fix shape).
     const hostJsPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "pty", "host.js");
     const hostSrc = fs.readFileSync(hostJsPath, "utf8");
-    const verifyBody = classMethodBodyText(hostSrc, hostJsPath, "verifyMcpToken");
-    check("(H) verifyMcpToken's compiled body calls timingSafeEqualToken", verifyBody !== null && /timingSafeEqualToken\(/.test(verifyBody));
-    const hasRawTokenCompare = verifyBody !== null && (/token\s*===\s*live\.mcpToken/.test(verifyBody) || /===\s*token\b/.test(verifyBody));
-    check("(H) verifyMcpToken's compiled body does NOT compare the token with a raw `===`", verifyBody !== null && !hasRawTokenCompare);
+    const verifyBody = classMethodBody(hostSrc, hostJsPath, "verifyMcpToken");
+    check("(H) verifyMcpToken's method body was found in the compiled source", verifyBody !== null);
+    check("(H) verifyMcpToken's compiled body calls timingSafeEqualToken", bodyCallsFunction(verifyBody, "timingSafeEqualToken"));
+    check("(H) verifyMcpToken's compiled body does NOT compare the token with a raw `===`", verifyBody !== null && !bodyHasRawStrictEqualityWithBareIdentifier(verifyBody, "token"));
 
-    const helperBody = functionDeclBodyText(hostSrc, hostJsPath, "timingSafeEqualToken");
-    check("(H) timingSafeEqualToken hashes both sides to a fixed-length digest before comparing", helperBody !== null && /createHash\(/.test(helperBody));
-    check("(H) timingSafeEqualToken compares via node:crypto's timingSafeEqual (constant-time)", helperBody !== null && /timingSafeEqual\(/.test(helperBody));
+    const helperBody = functionDeclBody(hostSrc, hostJsPath, "timingSafeEqualToken");
+    check("(H) timingSafeEqualToken's function body was found in the compiled source", helperBody !== null);
+    check("(H) timingSafeEqualToken hashes both sides to a fixed-length digest before comparing", bodyCallsFunction(helperBody, "createHash"));
+    check("(H) timingSafeEqualToken compares via node:crypto's timingSafeEqual (constant-time)", bodyCallsFunction(helperBody, "timingSafeEqual"));
 
     // Sibling path (card 9a8bc38f (a)): verifyHookToken (/internal/hook) had the identical raw `===`
     // shape and now routes through the SAME timingSafeEqualToken comparator. Same behavioral +
@@ -258,10 +304,10 @@ try {
     const rightHookRes = await postHook("S1", { hook_event_name: "SessionStart", session_id: "engine-h-ok" }, hookTokenS1);
     check("(H) verifyHookToken: POSITIVE CONTROL — S1's OWN correct hook token → 200", rightHookRes.statusCode === 200);
 
-    const verifyHookBody = classMethodBodyText(hostSrc, hostJsPath, "verifyHookToken");
-    check("(H) verifyHookToken's compiled body calls timingSafeEqualToken", verifyHookBody !== null && /timingSafeEqualToken\(/.test(verifyHookBody));
-    const hasRawHookCompare = verifyHookBody !== null && (/token\s*===\s*live\.hookToken/.test(verifyHookBody) || /===\s*token\b/.test(verifyHookBody));
-    check("(H) verifyHookToken's compiled body does NOT compare the token with a raw `===`", verifyHookBody !== null && !hasRawHookCompare);
+    const verifyHookBody = classMethodBody(hostSrc, hostJsPath, "verifyHookToken");
+    check("(H) verifyHookToken's method body was found in the compiled source", verifyHookBody !== null);
+    check("(H) verifyHookToken's compiled body calls timingSafeEqualToken", bodyCallsFunction(verifyHookBody, "timingSafeEqualToken"));
+    check("(H) verifyHookToken's compiled body does NOT compare the token with a raw `===`", verifyHookBody !== null && !bodyHasRawStrictEqualityWithBareIdentifier(verifyHookBody, "token"));
 
     // FAIL-CLOSED on a missing/undefined EXPECTED secret (manager review follow-up): createHash().update()
     // THROWS on undefined — a corrupted/partial Live entry (a race during spawn, a future partial row)
