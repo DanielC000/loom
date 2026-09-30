@@ -403,6 +403,98 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO PARTIAL-CLEAR-WRITE-FAILURE (Code Review of eae23ebe, item 1) — the partial-clear path used
+  // to sweep tmp residue BEFORE its own rewrite succeeded. If the final was already absent (an earlier
+  // failed write left ONLY a tmp — deliberately kept since round 2) and this rewrite ALSO fails, nothing
+  // durable would be left for a repo whose remaining token is still genuinely unconfirmed.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const repo = makeRepo("pcwf");
+    enterMergeQuarantine(repo, "discover", "discover path"); // resolve this repo's real latch path/hash
+    const finalPath = fs.readdirSync(MERGE_QUARANTINE_DIR)
+      .map((f) => path.join(MERGE_QUARANTINE_DIR, f))
+      .find((p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")).repoPath === repo; } catch { return false; } });
+    const hash = path.basename(finalPath, ".json");
+    clearMergeQuarantine(repo);
+
+    fs.mkdirSync(finalPath, { recursive: true }); // block EVERY rename for this repo
+    fs.writeFileSync(path.join(finalPath, "blocker.txt"), "x");
+    const tokenA = enterMergeQuarantine(repo, "branch-a", "reason a");
+    enterMergeQuarantine(repo, "branch-b", "reason a"); // appends tokenB to the SAME entry (round 7, M1)
+    const tmpPath = fs.readdirSync(MERGE_QUARANTINE_DIR).map((f) => path.join(MERGE_QUARANTINE_DIR, f)).find((p) => p.startsWith(`${finalPath}.tmp-`));
+    const tokenB = activeMergeQuarantineFor(repo)?.tokens?.find((t) => t !== tokenA);
+    check("(PCWF) precondition: only a tmp exists (finalPath is still just the directory blocker), holding BOTH tokens",
+      !!tmpPath && fs.statSync(finalPath).isDirectory() && activeMergeQuarantineFor(repo)?.tokens?.length === 2);
+
+    // Patch fs.openSync to fail ONLY this repo's own tmp writes (EMFILE-shaped) — simulates the
+    // partial-clear's OWN rewrite failing for an unrelated reason, never the rename blocker above.
+    const realOpenSync = fs.openSync;
+    fs.openSync = (p, ...rest) => {
+      if (typeof p === "string" && p.includes(hash) && p.includes(".tmp-")) throw Object.assign(new Error("EMFILE: too many open files"), { code: "EMFILE" });
+      return realOpenSync(p, ...rest);
+    };
+    try { clearMergeQuarantineByToken(repo, tokenA); } finally { fs.openSync = realOpenSync; }
+    check("(PCWF) THE REGRESSION: the sweep must NOT delete the pre-existing tmp when the rewrite fails", fs.existsSync(tmpPath));
+
+    // Genuinely clear the in-memory entry THIS process's own calls above already set — otherwise the
+    // "fresh boot" checks below could pass VACUOUSLY off that stale entry alone (same trap as SCENARIO
+    // TORN-WRITE's own (a)/(c) cases). Park the tmp first if it's still there, so the clear's own sweep
+    // can't touch it; if the bug already deleted it, there's nothing to park.
+    if (fs.existsSync(tmpPath)) {
+      const parked = path.join(os.tmpdir(), `loom-mqbh-parked-pcwf-${path.basename(tmpPath)}`);
+      fs.renameSync(tmpPath, parked);
+      clearMergeQuarantine(repo);
+      fs.renameSync(parked, tmpPath);
+    } else {
+      clearMergeQuarantine(repo);
+    }
+    check("(PCWF) precondition: in-memory is genuinely clean before the fresh boot", !activeMergeQuarantineFor(repo));
+
+    fs.rmSync(finalPath, { recursive: true, force: true }); // blocker/env issue resolved
+    const found = reenterMergeQuarantinesAtBoot([repo]);
+    check("(PCWF) a fresh boot still quarantines this repo", found.some((q) => q.repoPath === repo) && !!activeMergeQuarantineFor(repo));
+    check("(PCWF) tokenB's own protection survived (never silently lost)", activeMergeQuarantineFor(repo)?.tokens?.includes(tokenB));
+    clearMergeQuarantine(repo);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO PASS1B-PROMOTE-FAILURE (Code Review of eae23ebe, item 2) — PASS 1b used to unlink the
+  // recovered tmp even when its own re-persist (the self-healing promote) FAILED, losing the only durable
+  // copy. Only unlink once the promote actually succeeds.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const repo = makeRepo("p1bpf");
+    enterMergeQuarantine(repo, "p1bpf-branch", "p1bpf reason");
+    const latchPath = fs.readdirSync(MERGE_QUARANTINE_DIR)
+      .map((f) => path.join(MERGE_QUARANTINE_DIR, f))
+      .find((p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")).repoPath === repo; } catch { return false; } });
+    const hash = path.basename(latchPath, ".json");
+    const tmpPath = `${latchPath}.tmp-999999`;
+    fs.renameSync(latchPath, tmpPath); // simulate a torn write: tmp only, no final
+    const parked = path.join(os.tmpdir(), `loom-mqbh-parked-${path.basename(tmpPath)}`);
+    fs.renameSync(tmpPath, parked);
+    clearMergeQuarantine(repo); // genuinely clear the stale in-memory entry first
+    fs.renameSync(parked, tmpPath);
+
+    // Patch fs.openSync to fail ONLY the promote's own NEW tmp write (a different pid-suffix than the
+    // surviving `tmpPath` above), never a read of the surviving tmp itself.
+    const realOpenSync = fs.openSync;
+    fs.openSync = (p, ...rest) => {
+      if (typeof p === "string" && p.includes(hash) && p.includes(".tmp-") && p !== tmpPath) throw Object.assign(new Error("EMFILE: too many open files"), { code: "EMFILE" });
+      return realOpenSync(p, ...rest);
+    };
+    let found;
+    try { found = reenterMergeQuarantinesAtBoot([repo]); } finally { fs.openSync = realOpenSync; }
+    check("(P1BPF) this boot still recovers the quarantine in-process despite the promote failing", found.some((q) => q.repoPath === repo) && !!activeMergeQuarantineFor(repo));
+    check("(P1BPF) THE REGRESSION: the recovered tmp must SURVIVE on disk since the promote failed", fs.existsSync(tmpPath));
+    check("(P1BPF) no final latch was created (the promote genuinely failed)", !fs.existsSync(latchPath));
+
+    const found2 = reenterMergeQuarantinesAtBoot([repo]); // a further boot, promote now unblocked
+    check("(P1BPF) the NEXT boot recovers from the surviving tmp and self-heals", found2.some((q) => q.repoPath === repo) && fs.existsSync(latchPath) && !fs.existsSync(tmpPath));
+    clearMergeQuarantine(repo);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // SCENARIO ITEM-8 — real AST-shape check: index.ts calls reenterMergeQuarantinesAtBoot( BEFORE it binds
   // the port. Mirrors boot-listen-not-blocked.mjs's own technique (position in the AST, never a fixed
   // character-offset slice).

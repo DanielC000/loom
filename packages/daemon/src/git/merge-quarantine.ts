@@ -165,13 +165,14 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
   }
   const updated: MergeQuarantineEntry = { ...current, tokens: remaining };
   activeQuarantines.set(key, updated);
-  // Code Review of b4315b52, item 1 — sweep any stray tmp residue from an EARLIER failed write for this
-  // repo too (this is still a "clear" path, just a partial one — the repo staying quarantined under its
-  // remaining tokens doesn't make a leftover tmp from a prior failed attempt any less stale).
-  deleteMergeQuarantineTmpResidue(repoPath);
-  if (!writeMergeQuarantineLatch(updated)) {
+  // @decision bde5d1fe (Code Review of eae23ebe) — a sweep may only run AFTER a durable write of the
+  // state that supersedes it has succeeded, never before: sweeping THEN failing this write would leave
+  // NOTHING durable for a repo whose only prior copy was this same tmp.
+  if (writeMergeQuarantineLatch(updated)) {
+    deleteMergeQuarantineTmpResidue(repoPath);
+  } else {
     // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] could not durably persist the reduced token set for ${repoPath} after a partial clear — a restart before this is fixed would re-arm with the just-cleared token STILL counted as outstanding (harmless: it only delays the eventual full lift, never a false lift).`);
+    console.error(`[merge-quarantine] could not durably persist the reduced token set for ${repoPath} after a partial clear — the PRE-EXISTING durable state (this repo's own latch file, final or tmp) is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
   }
 }
 
@@ -390,14 +391,18 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
       };
       byRepoKey.set(canonicalRepoLockKey(entry.repoPath), entry);
       // SELF-HEALING: the content was durable (fsync'd) before the crash — promote it to its proper final
-      // name, then drop the tmp. A failed promote still leaves the recovered entry ACTIVE in-process.
-      if (!writeMergeQuarantineLatch(entry)) {
+      // name, then drop the tmp — but ONLY once that promote actually succeeded (Code Review of eae23ebe):
+      // unlinking unconditionally could delete the ONLY durable copy while leaving NO final behind, if the
+      // promote itself failed (EMFILE/EACCES/disk). A failed promote still leaves the recovered entry
+      // ACTIVE in-process for THIS boot; the surviving tmp is what makes the NEXT boot recover it too.
+      if (writeMergeQuarantineLatch(entry)) {
+        try { fs.unlinkSync(tmpPath); } catch { /* best-effort — a leftover tmp beside a good final write is harmless */ }
+      } else {
         // eslint-disable-next-line no-console
-        console.error(`[merge-quarantine] recovered a torn-write latch (${f}) for ${entry.repoPath} but could NOT durably re-persist it under its final name — it will NOT survive another restart until this is fixed.`);
+        console.error(`[merge-quarantine] recovered a torn-write latch (${f}) for ${entry.repoPath} but could NOT durably re-persist it under its final name — the tmp is left IN PLACE so the next boot can still recover it.`);
       }
-      try { fs.unlinkSync(tmpPath); } catch { /* best-effort — a leftover tmp beside a good final write is harmless */ }
       // eslint-disable-next-line no-console
-      console.log(`[merge-quarantine] recovered a torn-write quarantine latch (${f}) for ${entry.repoPath} at boot — the crash landed between its fsync and its rename; re-armed under its final name.`);
+      console.log(`[merge-quarantine] recovered a torn-write quarantine latch (${f}) for ${entry.repoPath} at boot — the crash landed between its fsync and its rename; re-armed.`);
     } catch (e) {
       // Genuinely unreadable/unparsable tmp content (a crash mid-write, before fsync even completed) —
       // same fail-closed treatment as a corrupt `.json` file: matched hash quarantines that repo, unmatched
