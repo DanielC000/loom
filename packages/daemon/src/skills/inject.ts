@@ -3,6 +3,7 @@ import path from "node:path";
 import type { SessionRole } from "@loom/shared";
 import { SKILLS_DIR, OBSIDIAN_PREFLIGHT_FRAGMENT } from "../paths.js";
 import { claudeSkillsDir, doctrineGitExcludeEntries } from "../pty/claude-doctrine.js";
+import { isValidSkillName } from "./store.js";
 
 const MANIFEST = ".loom-skills.json"; // records which skill names EACH session injected into the doctrine dir's skills subtree
 
@@ -32,12 +33,47 @@ export function roleDoctrineSkillName(role: string | null | undefined): string |
  *  Keyed by session so a concurrent session sharing the cwd never strips another's (or the repo's) skills. */
 type Manifest = Record<string, string[]>;
 
+/** A manifest entry is only ever used to build a path under `targetDir` for delivery/pruning — including
+ *  `fs.rmSync(..., { recursive: true, force: true })`. The manifest file lives in the repo/worktree and is
+ *  committable, so it's untrusted input: an entry like `"../../../victim"` or `""`/`"."` must never reach
+ *  that path.join unvalidated. Require the SAME kebab-slug shape the skill store itself enforces (also a
+ *  basename — no separators — and never `.`/`..`, though those are already excluded by the shape). */
+function isSafeManifestEntry(n: unknown): n is string {
+  return typeof n === "string" && isValidSkillName(n) && path.basename(n) === n;
+}
+
+/** Filter a raw manifest entry list (one session's record) down to safe names. A non-array value (e.g. a
+ *  dict `{"x":5}` where an array was expected) is COERCED to `[]` rather than thrown on — readManifest's
+ *  caller must never have injection disabled for the whole session just because one record is malformed.
+ *  Dropped entries are logged, bounded + truncated (untrusted content, but still worth seeing what/how many). */
+function sanitizeManifestEntries(raw: unknown, context: string): string[] {
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined) console.log(`[skills] manifest record for '${context}' is not an array (${typeof raw}); treating as empty`);
+    return [];
+  }
+  const safe: string[] = [];
+  const dropped: string[] = [];
+  for (const n of raw) {
+    if (isSafeManifestEntry(n)) safe.push(n);
+    else dropped.push(typeof n === "string" ? n.slice(0, 80) : `<${typeof n}>`);
+  }
+  if (dropped.length) {
+    const shown = dropped.slice(0, 5).join(", ");
+    console.log(`[skills] dropped ${dropped.length} invalid manifest entr${dropped.length === 1 ? "y" : "ies"} for '${context}': ${shown}${dropped.length > 5 ? ", …" : ""}`);
+  }
+  return safe;
+}
+
 /** Read the manifest map. A legacy ARRAY (the pre-subset single-session format) is adopted AS the current
  *  session's record so it reconciles + retires cleanly on this run. Any other shape ⇒ empty map.
  *  A MISSING file is the normal first-run case (silent empty map); a present-but-CORRUPT manifest (a torn
  *  write, bad JSON) is SURFACED — it means we lost the record of what other sessions injected, so we log it
  *  rather than swallow it — then recover to an empty map (safe: every existing dir then reads as the repo's
- *  own and is left untouched; we only add our own `want`). */
+ *  own and is left untouched; we only add our own `want`).
+ *  Every entry — in the legacy array form and in every session's record in the dict form — is validated by
+ *  `sanitizeManifestEntries` before it's trusted: the manifest is repo/worktree-committable and its entries
+ *  flow straight into a prune `rmSync`, so an invalid entry here would otherwise be a path-escape/wipe
+ *  vector (card 97e6a1c6). */
 function readManifest(manifestPath: string, sessionId: string): Manifest {
   let text: string;
   try { text = fs.readFileSync(manifestPath, "utf8"); }
@@ -45,8 +81,12 @@ function readManifest(manifestPath: string, sessionId: string): Manifest {
   let raw: unknown;
   try { raw = JSON.parse(text); }
   catch (e) { console.log(`[skills] ignoring corrupt manifest at ${manifestPath}: ${(e as Error).message}`); return {}; }
-  if (Array.isArray(raw)) return { [sessionId]: raw as string[] }; // legacy global array → this session owns it now
-  if (raw && typeof raw === "object") return raw as Manifest;
+  if (Array.isArray(raw)) return { [sessionId]: sanitizeManifestEntries(raw, sessionId) }; // legacy global array → this session owns it now
+  if (raw && typeof raw === "object") {
+    const out: Manifest = {};
+    for (const [sid, ns] of Object.entries(raw as Record<string, unknown>)) out[sid] = sanitizeManifestEntries(ns, sid);
+    return out;
+  }
   return {};
 }
 
@@ -159,7 +199,12 @@ function appendObsidianFragment(skillDir: string, fragment: string): void {
 export function injectSkills(cwd: string, sessionId: string, subset?: string[] | null, role?: SessionRole | null, obsidianEnabled = false): void {
   let storeNames: string[];
   try {
-    storeNames = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+    // Filtered through the SAME `isValidSkillName` predicate the manifest-entry sanitizer uses (card
+    // 97e6a1c6 review): what we WRITE into the manifest must always be a subset of what the read side
+    // accepts, or a store dir outside that shape gets recorded on spawn 1, dropped on spawn 2 (since
+    // sanitizeManifestEntries rejects it), then permanently misread as "repo's own" — never refreshed,
+    // never pruned, and logged as invalid on every subsequent spawn.
+    storeNames = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).filter(isValidSkillName);
   } catch { return; } // no store yet
   const targetDir = claudeSkillsDir(cwd);
   fs.mkdirSync(targetDir, { recursive: true });
@@ -218,7 +263,12 @@ export function injectSkills(cwd: string, sessionId: string, subset?: string[] |
   for (const stale of myPrev) {
     if (want.includes(stale)) continue;        // still want it (placed this run, or a repo collision left alone)
     if (otherClaimed.has(stale)) continue;     // a concurrent session still needs it — keep
-    try { fs.rmSync(path.join(targetDir, stale), { recursive: true, force: true }); } catch { /* ignore */ }
+    const target = path.join(targetDir, stale);
+    // Defense in depth (card 97e6a1c6): `myPrev` is already sanitized by readManifest, so this should
+    // never trip in practice — but never rmSync anything that isn't a DIRECT CHILD of targetDir, in case
+    // a future manifest source (or a validation bug) ever lets something else through.
+    if (path.dirname(target) !== targetDir) { console.log(`[skills] refusing to prune out-of-scope manifest entry: ${stale}`); continue; }
+    try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
   manifest[sessionId] = placed; // record ONLY what I actually injected (never the repo's own / collisions)
