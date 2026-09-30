@@ -89,6 +89,7 @@ import { emptyMergeGateState, type MergeGateState } from "./orchestration/merge-
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
+import { findControlCharViolation, type ControlByteClass } from "./security/control-chars.js";
 // Type-only — companion/types.ts has zero runtime imports, so this can never form a runtime cycle with
 // the companion/* modules that import `Db` from here. CompanionReminder.route reuses THIS module's
 // CompanionRoute (never a duplicate route type, unlike Wake/CompanionBinding's shared/types.ts twins).
@@ -6991,6 +6992,7 @@ export class Db {
   }
 
   // --- project memory (card 2fd9abf9: project-scoped SHARED agent memory, FTS5-retrieved at kickoff) ---
+
   /** UPSERT by `(projectId, key)` — a second write to the same key overwrites in place (title/text/pinned/
    *  tags/updated_at + a `version` bump), never a duplicate row; `id`/`created_at`/`lastRetrievedAt`/
    *  `retrievalCount` are preserved across an update (the INSERT's values for those only apply on a true
@@ -6999,12 +7001,18 @@ export class Db {
    *  concurrency a future caller might add. Runs the bounded-store eviction sweep afterward (owner
    *  decision #2) so the store never grows past `maxNotes` unpinned rows. BLIND — no concurrency guard;
    *  used as-is only by the e2e test-seed route (gateway/server.ts), which has no reader to race against.
-   *  The agent-facing memory_write path goes through {@link upsertProjectMemoryChecked} instead. */
+   *  The agent-facing memory_write path goes through {@link upsertProjectMemoryChecked} instead.
+   *
+   * @decision ea5fb00a — control-char rejection lives HERE, the one store boundary both callers share,
+   * never in either caller alone where a future writer could skip it. See its own record.
+   */
   upsertProjectMemory(
     projectId: string,
     input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[]; triggerGlob?: string },
     maxNotes: number,
-  ): ProjectMemoryEntry {
+  ): ProjectMemoryEntry | ProjectMemoryControlCharRejection {
+    const rejection = findProjectMemoryControlCharRejection(input);
+    if (rejection) return rejection;
     const now = new Date().toISOString();
     // PATCH semantics on update (card 249004c3, extended to requestIds by card e6d270b3, triggerGlob by
     // card aeec1880): title/pinned/tags/requestIds/triggerGlob each bind as SQL NULL when the caller omits
@@ -7072,19 +7080,25 @@ export class Db {
    *   - key exists and `baseVersion` equals the current version → proceeds exactly like the old upsert.
    * Wrapped in one `db.transaction()` so the read-current + conditional-write stays atomic even though
    * Node + better-sqlite3 are already single-threaded/synchronous within this call.
+   *
+   * A third outcome (card ea5fb00a) — `{ok:false, rejected:true, ...}` — surfaces a control-char
+   * rejection from `upsertProjectMemory` unchanged; distinguished from the version-conflict outcome by
+   * the `rejected` discriminant (the conflict shape carries `current` instead).
    */
   upsertProjectMemoryChecked(
     projectId: string,
     input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[]; triggerGlob?: string },
     maxNotes: number,
     baseVersion: number | undefined,
-  ): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } {
-    const run = this.db.transaction((): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } => {
+  ): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } | ({ ok: false } & ProjectMemoryControlCharRejection) {
+    const run = this.db.transaction((): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } | ({ ok: false } & ProjectMemoryControlCharRejection) => {
       const existing = this.getProjectMemoryByKey(projectId, input.key);
       if (existing && existing.version !== baseVersion) {
         return { ok: false, current: existing };
       }
-      return { ok: true, entry: this.upsertProjectMemory(projectId, input, maxNotes) };
+      const result = this.upsertProjectMemory(projectId, input, maxNotes);
+      if ("rejected" in result) return { ok: false, ...result };
+      return { ok: true, entry: result };
     });
     return run();
   }
@@ -9301,6 +9315,59 @@ function toTask(r0: unknown, deferralIds?: string[]): Task {
     version: (r.version as number) ?? 1,
   };
 }
+/** REJECTED shape returned by {@link Db.upsertProjectMemory} (never thrown) when a free-text field on
+ *  the row carries an ESC/C0/C1 control byte. `field` names which column; `index` is a 0-based character
+ *  offset into that field's OWN string (never a byte offset into the whole row) — like
+ *  {@link findControlCharViolation} itself, this never carries the offending bytes, only class + position,
+ *  so a rejection can be logged/returned without echoing untrusted content. See
+ *  {@link Db.upsertProjectMemory}'s own doc comment (card ea5fb00a) for why this check lives here. */
+export interface ProjectMemoryControlCharRejection {
+  rejected: true;
+  field: "key" | "title" | "text" | "tags" | "triggerGlob" | "requestIds";
+  byteClass: ControlByteClass;
+  index: number;
+  error: string;
+}
+
+/** Scans every free-text column {@link Db.upsertProjectMemory} would otherwise write, in a fixed
+ *  deterministic order (`key`, `title`, `text`, each `tags` entry, `triggerGlob`, each `requestIds`
+ *  entry), returning the FIRST ESC/C0/C1 violation found or `null` if all are clean. `key` is checked even
+ *  though the agent-facing `memory_write` path (mcp/memory.ts's `KEY_RE`) already restricts it upstream —
+ *  the raw e2e test-seed route (gateway/server.ts) binds a caller-supplied `key` with no such check, and
+ *  this function runs inside the ONE function both paths call, so neither can bypass it.
+ *
+ * @decision ea5fb00a — `requestIds` IS checked here: a linked id renders DIRECTLY into a kickoff-visible
+ * annotation line on the "not found" path (project-memory-request-links.ts), so it's a free-text injection
+ * surface like the others, not the opaque-id exception this card originally assumed. See its own record.
+ */
+function findProjectMemoryControlCharRejection(input: {
+  key: string; title?: string; text: string; tags?: string[]; triggerGlob?: string; requestIds?: string[];
+}): ProjectMemoryControlCharRejection | null {
+  const candidates: { field: ProjectMemoryControlCharRejection["field"]; value: string }[] = [
+    { field: "key", value: input.key },
+    { field: "title", value: input.title ?? "" },
+    { field: "text", value: input.text },
+    ...(input.tags ?? []).map((t) => ({ field: "tags" as const, value: t })),
+    { field: "triggerGlob", value: input.triggerGlob ?? "" },
+    ...(input.requestIds ?? []).map((id) => ({ field: "requestIds" as const, value: id })),
+  ];
+  for (const { field, value } of candidates) {
+    const violation = findControlCharViolation(value);
+    if (!violation) continue;
+    return {
+      rejected: true,
+      field,
+      byteClass: violation.byteClass,
+      index: violation.index,
+      error: `project memory "${field}" contains a rejected ${violation.byteClass} control byte at character ` +
+        `index ${violation.index} (measured in the value as stored — after trimming, for a field that is ` +
+        "trimmed before reaching this check) — control/escape bytes have no legitimate role in a memory " +
+        "note and are never accepted; remove it and retry (the offending byte itself is not echoed here)",
+    };
+  }
+  return null;
+}
+
 function toProjectMemoryEntry(r0: unknown): ProjectMemoryEntry {
   const r = r0 as Row;
   return {

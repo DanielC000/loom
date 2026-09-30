@@ -355,6 +355,9 @@ export function writeProjectMemory(
     input.baseVersion,
   );
   if (!result.ok) {
+    // Card ea5fb00a — a control-char rejection (see db.ts's `upsertProjectMemory`) is a DIFFERENT
+    // outcome from a version conflict: no `current` row to reconcile against, just a bad input to fix.
+    if ("rejected" in result) return { error: result.error };
     return {
       error: "this note changed since you last read it (or you never read it) — re-read it (memory_read) " +
         "and retry with the current version as baseVersion, merging your change into the current text",

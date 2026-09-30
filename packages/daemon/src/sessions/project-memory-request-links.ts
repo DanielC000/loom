@@ -1,4 +1,5 @@
 import type { Db } from "../db.js";
+import { stripEscapeAndControlChars } from "../security/control-chars.js";
 
 /**
  * Resolve a memory note's linked Request ids against the LIVE requests store, at RECALL time.
@@ -21,13 +22,19 @@ import type { Db } from "../db.js";
  *    zero interpretation — this module reports state, it does not decide anything.
  */
 
-/** One linked id's live annotation line, e.g. `[linked request req-123: PENDING as of 2026-07-24]`. */
+/** One linked id's live annotation line, e.g. `[linked request req-123: PENDING as of 2026-07-24]`.
+ *
+ * @decision ea5fb00a — never interpolate the raw `requestId` into the rendered line on any branch; strip
+ * ESC/C0/C1 first. A control-byte id never resolves to a real Request, so the "not found" branch below is
+ * reachable on every such id, not an edge case, and this render must always produce something.
+ */
 export function annotateRequestLink(db: Db, projectId: string, requestId: string, now: Date): string {
+  const safeId = stripEscapeAndControlChars(requestId).text;
   const q = db.getQuestion(requestId);
-  if (!q) return `[linked request ${requestId}: request not found — may be deleted]`;
-  if (q.projectId !== projectId) return `[linked request ${requestId}: not found in this project]`;
+  if (!q) return `[linked request ${safeId}: request not found — may be deleted]`;
+  if (q.projectId !== projectId) return `[linked request ${safeId}: not found in this project]`;
   const asOf = now.toISOString().slice(0, 10);
-  return `[linked request ${requestId}: ${q.state.toUpperCase()} as of ${asOf}]`;
+  return `[linked request ${safeId}: ${q.state.toUpperCase()} as of ${asOf}]`;
 }
 
 /**

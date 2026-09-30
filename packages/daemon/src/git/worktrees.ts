@@ -3984,6 +3984,15 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // constant", so there is no live twin to inherit immunity from — the same reasoning
   // emit-compare-soundness-single-definition-guard.mjs's own header already gives for its seat here.
   "packages/daemon/test/emit-compare-soundness-guard.mjs",
+  // Card ea5fb00a (Code Review 9f02dee5): (16) raw-scans compiled dist/pty/host.js for the ABSENCE of
+  // `const ESC_C0_C1_RE\s*=` (an unanchored .test() over the whole file, not `^`/`m`-anchored the way
+  // anchor-re-parity.mjs's immune shape is) — a comment-only edit reintroducing that literal text in prose
+  // (e.g. "this file used to define `const ESC_C0_C1_RE = ...` here") would flip it even though nothing
+  // behavioral changed; tsc keeps comments in dist/** by default. Its companion presence-check in the same
+  // section (matching the `security/control-chars.js` import path, a string-literal token) is immune under
+  // shape (1) — comments can't land inside a string literal — but one non-immune check is enough to seat
+  // the whole file here, same posture emit-compare-soundness-guard.mjs's own entry above documents.
+  "packages/daemon/test/project-memory-control-chars.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its

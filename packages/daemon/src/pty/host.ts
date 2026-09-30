@@ -26,6 +26,7 @@ import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, i
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, RESERVED_CAPABILITY_SLUGS, type CapabilityDefRow } from "../capabilities/registry.js";
+import { stripEscapeAndControlChars } from "../security/control-chars.js";
 
 /**
  * @decision b987f086 — the project-level codex-incompatibility reason, named distinctly from the profile-field reasons in
@@ -2321,20 +2322,8 @@ function isUntaggedSystemNudge(text: string, kind: QueuedMessageKind): boolean {
  * @decision 49b382d9 — strip ESC/C0/C1 ONCE, inside `submit()`/`submitCodex()`, never at `enqueueStdin`
  * alone. See its record for why and for the full call-site list.
  */
-const ESC_C0_C1_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x80-\x9F]/g;
-function stripEscapeAndControlChars(text: string): { text: string; stripped: boolean; escCount: number; c0Count: number; c1Count: number } {
-  let escCount = 0;
-  let c0Count = 0;
-  let c1Count = 0;
-  const cleaned = text.replace(ESC_C0_C1_RE, (ch) => {
-    const code = ch.charCodeAt(0);
-    if (code === 0x1b) escCount++;
-    else if (code <= 0x1f) c0Count++;
-    else c1Count++;
-    return "";
-  });
-  return { text: cleaned, stripped: cleaned !== text, escCount, c0Count, c1Count };
-}
+// The classification regex + strip function now live in `security/control-chars.ts` (card ea5fb00a),
+// shared with the project-memory write-boundary check (which rejects instead of stripping). Imported above.
 
 interface Live {
   pty: IPty;

@@ -3362,6 +3362,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         if (!project) return reply.code(400).send({ error: `projectMemory[]: no project ${m.projectId}` });
         const maxNotes = resolveConfig(project.config).memory.maxNotes;
         const row = deps.db.upsertProjectMemory(m.projectId, { key: m.key, title: m.title, text: m.text, pinned: m.pinned }, maxNotes);
+        // Card ea5fb00a — the store boundary rejects an ESC/C0/C1 control byte in any free-text field
+        // (same check the real memory_write path hits); an e2e spec that tries to seed one gets a 400
+        // naming the byte class + position, not a silent write or a 500.
+        if ("rejected" in row) return reply.code(400).send({ error: row.error });
         const bumps = Math.max(0, Math.floor(m.retrievalCount ?? 0));
         if (bumps > 0) deps.db.touchProjectMemoryRetrieved(Array.from({ length: bumps }, () => row.id));
         projectMemoryIds.push(row.id);
