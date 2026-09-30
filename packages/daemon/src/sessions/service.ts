@@ -38,6 +38,7 @@ import { readRunUsage, readRunUsageFromFile, readContextStats } from "./context.
 import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { runBootScratchGcSweep } from "./scratch-gc.js";
+import { sweepOrphanedMcpConfigs } from "../pty/mcp-config-gc.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt, appendScheduledPrompt } from "./manager-prompt.js";
 import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
@@ -6653,6 +6654,16 @@ export class SessionService {
     // card 1a686bad: runBootScratchGcSweep (not the bare sweepUnresumableScratchDirs call this replaces)
     // records the sweep's own outcome for served_status to read — see scratch-gc.ts's own doc.
     runBootScratchGcSweep(this.db);
+    // Card ed0757d6 DoD-3: the boot-time backstop for an mcp-config secret file a hard crash left behind
+    // (host.ts's own cleanup at markReady/onExit never ran) — see mcp-config-gc.ts's own doc. Synchronous
+    // (a handful of small file unlinks), so no fire-and-forget wrapper is needed; still guarded so a
+    // sweep failure can never block boot.
+    try {
+      const mcpConfigSwept = sweepOrphanedMcpConfigs(this.db);
+      if (mcpConfigSwept.reaped.length) console.log(`[boot] mcp-config sweep: reaped ${mcpConfigSwept.reaped.length}/${mcpConfigSwept.scanned} orphaned secret file(s)`);
+    } catch (e) {
+      console.warn(`[boot] mcp-config sweep failed: ${(e as Error).message}`);
+    }
     return { failed: interrupted.length };
   }
 

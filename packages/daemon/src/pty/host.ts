@@ -12,7 +12,7 @@ import { resolveProfileCapabilities, usesOrchestrationMcp } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
-import { writeSessionSettings, writeSessionMcpConfig, toCliPermissionMode, type CliPermissionMode } from "./claude-settings.js";
+import { writeSessionSettings, writeSessionMcpConfig, unlinkSessionMcpConfig, withSettingsDirDenyForSpawn, toCliPermissionMode, type CliPermissionMode } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
 import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, LOOM_PLATFORM_SERVER_ID, LOOM_AUDIT_SERVER_ID, LOOM_USER_AUDIT_SERVER_ID, LOOM_SETUP_SERVER_ID, LOOM_OPERATOR_SERVER_ID, LOOM_RUN_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tracker.js";
@@ -1699,7 +1699,11 @@ export function codescapeHttpMcpServer(opts: { repoPath: string; port: number | 
  * owner-added catalog capability, resolved via the injected `o.capabilityCatalog` + the generic
  * node-package/python-venv/bundled dispatcher (`resolveCapabilityServer`), with its bound connection's
  * secret (if any) resolved via `o.resolveConnectionSecret` and injected ONLY into that server's own `env`
- * — never a CLI argument, never reaching the `claude` process. Fully ADDITIVE: with nothing enabled the
+ * — never a CLI argument on `claude`'s own argv (see `writeSessionMcpConfig`'s doc, claude-settings.ts).
+ *
+ * @decision ed0757d6 — corrected: this DOES reach the `claude` process (every such server mounts stdio).
+ *
+ * Fully ADDITIVE: with nothing enabled the
  * map is byte-identical to today's. Pure + deterministic (no pty, no network — `capabilityCatalog`/
  * `resolveConnectionSecret` are plain injected values, never a live db handle), so the spawn-config test
  * can assert inclusion directly, incl. via a FAKE catalog + fake secret resolver (no real DB/venv/network).
@@ -4695,6 +4699,10 @@ export class PtyHost {
       // Card 2d8d2e42: same per-session-cleanup-point discipline — a dead session's repeat-streak bucket
       // would otherwise linger for the rest of the daemon's process lifetime. Fires on EVERY exit path.
       this.repeatedCalls.forget(opts.sessionId);
+      // Card ed0757d6 DoD-2: unconditional backstop — covers a session that crashes before ever reaching
+      // `ready` (markReady's own cleanup never ran) and stop/archive (both route through this same exit
+      // path). A no-op when this spawn carried no capability secret. Fires on EVERY exit path.
+      unlinkSessionMcpConfig(opts.sessionId);
       // Card 7d58a1aa: pid= added so this line joins by pid against the async `[pty-reap]` outcome
       // log above, without threading sessionId through reapOrphanedDescendants's own signature.
       // eslint-disable-next-line no-console
@@ -6099,7 +6107,9 @@ export class PtyHost {
     const workerProjectDenyRules = opts.role === "worker" && opts.projectId
       ? this.getOtherProjects(opts.projectId).flatMap((p) => otherProjectTranscriptDenyRules(p.id, p.repoPath))
       : undefined;
-    const permission = withTranscriptRootDenyForSpawn(permissionWithAllow, opts.role, workerProjectDenyRules);
+    // Card ed0757d6: SETTINGS_DIR read-deny, unconditional for every role (see withSettingsDirDenyForSpawn's
+    // own doc for why this — unlike the role-scoped transcript-root deny just below — has no carve-out).
+    const permission = withSettingsDirDenyForSpawn(withTranscriptRootDenyForSpawn(permissionWithAllow, opts.role, workerProjectDenyRules));
     // Card 51926260 — computed HERE (before writeSessionSettings) and reused verbatim at buildSpawnArgs
     // below: the settings.json `permissions.defaultMode` and the `--permission-mode` CLI flag must agree,
     // or the two boot-mode mechanisms could disagree about where this session actually lands. See
@@ -6144,7 +6154,22 @@ export class PtyHost {
     // form (see buildSpawnArgs' mcpConfigPath doc). The file is rewritten every spawn (fresh/resume/fork/
     // recycle all call createPty, which rebuilds mcpServers fresh each time), mirroring writeSessionSettings.
     const capabilitySecrets = collectMcpEnvSecrets(mcpServers);
-    const mcpConfigPath = capabilitySecrets.length ? writeSessionMcpConfig(opts.sessionId, mcpServers) : undefined;
+    // Card ed0757d6 DoD-1: a secret-free spawn unlinks any STALE mcp-config file a PRIOR spawn of this
+    // same sessionId left behind (rotation/connection-deletion/capability-removal all land here) — best
+    // effort, a no-op in the common case where none exists. See unlinkSessionMcpConfig's own doc for the
+    // other two cleanup sites (markReady, pty onExit) and the boot sweep backstop.
+    const mcpConfigPath = capabilitySecrets.length
+      ? writeSessionMcpConfig(opts.sessionId, mcpServers)
+      : (unlinkSessionMcpConfig(opts.sessionId), undefined);
+    // Card ed0757d6 Code Review fix: everything from here to the real node-pty spawn below can THROW
+    // (the Windows argv preflight, node-pty's own spawn call) — and a throw here means `spawn()`'s caller
+    // never gets a `pty` back, so NO `Live` entry is ever constructed for this attempt. That's exactly the
+    // gap `unlinkSessionMcpConfig`'s other call sites (markReady, pty onExit) all rely on a `Live`
+    // existing to reach — none of them would ever run, and the just-written secret file would leak on disk
+    // until the next boot sweep. try/catch/RE-THROW (never `finally`, which would also fire — and wrongly
+    // delete the file — on the ordinary SUCCESS path, where markReady/onExit are the correct deleters):
+    // unlink only on the throw path, then propagate the original error unchanged.
+    try {
     // Card 51926260 — `bootMode` (computed above, before writeSessionSettings) is reused here VERBATIM as
     // the `--permission-mode` flag value: booting DIRECTLY at the session's actual target mode, instead of
     // always booting at `acceptEdits` and Shift+Tab-climbing to the target afterward. The old
@@ -6219,6 +6244,10 @@ export class PtyHost {
       useConptyDll: isPtyUseConptyDllEnabled(),
     });
     return pty;
+    } catch (e) {
+      unlinkSessionMcpConfig(opts.sessionId);
+      throw e;
+    }
   }
 
   /**
@@ -10285,6 +10314,11 @@ export class PtyHost {
     // `live.ready` guard above means this whole function body runs AT MOST once per session, so this clear
     // can never be skipped by an early return on any call that reaches this line — there is only one.
     if (live.readyFallbackTimer) { clearTimeout(live.readyFallbackTimer); live.readyFallbackTimer = null; }
+    // Card ed0757d6 DoD-2: earliest safe point to remove THIS spawn's own mcp-config secret file (a no-op
+    // when it carried no capability secret) — see docs/decisions/ed0757d6-mcp-config-secret-file-lifecycle.md
+    // for the startup-only-read evidence. A respawn (resume/fork/recycle) rewrites the file fresh at ITS
+    // OWN spawn before its own next `ready`, so deleting here never starves a later respawn.
+    unlinkSessionMcpConfig(sessionId);
     // @decision 25813ecc — capture the kickoff from `live.startupPrompt`, never `live.lastPrompt`, before
     // `drainPending` runs: `drainPending`'s own `submit()` calls unconditionally overwrite `lastPrompt`,
     // so reading it after the drain silently substitutes the drained message for the real kickoff.

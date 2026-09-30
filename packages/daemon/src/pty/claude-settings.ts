@@ -308,6 +308,14 @@ export function writeSessionSettings(
   return file;
 }
 
+/** Card ed0757d6: the ONE place that constructs a session's `--mcp-config` file path — every reader
+ *  (writeSessionMcpConfig, unlinkSessionMcpConfig, host.ts's markReady/onExit cleanup, the boot sweep in
+ *  mcp-config-gc.ts) derives it from here so the write side and every delete side can never disagree on
+ *  the filename. */
+export function sessionMcpConfigPath(sessionId: string): string {
+  return path.join(SETTINGS_DIR, `${sessionId}.mcp-config.json`);
+}
+
 /**
  * Write the per-session `--mcp-config` FILE (agent-tooling P4 credential-tie hardening). Used ONLY when
  * the assembled mcpServers map carries a capability secret (see `mcpConfigHasSecret` in host.ts) —
@@ -321,10 +329,45 @@ export function writeSessionSettings(
  * a no-op on win32, where POSIX modes don't apply — NTFS ACLs are out of scope for this fix).
  */
 export function writeSessionMcpConfig(sessionId: string, mcpServers: Record<string, unknown>): string {
-  const file = path.join(SETTINGS_DIR, `${sessionId}.mcp-config.json`);
+  const file = sessionMcpConfigPath(sessionId);
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify({ mcpServers }), { mode: 0o600 });
   fs.renameSync(tmp, file);
   try { fs.chmodSync(file, 0o600); } catch { /* best-effort on win32 */ }
   return file;
+}
+
+/**
+ * Best-effort unlink of a session's `--mcp-config` secret file (see `sessionMcpConfigPath`). Safe to call
+ * even when no such file exists for this session (the common case — most spawns carry no capability
+ * secret). Called from createPty (stale-file cleanup on a secret-free spawn), `markReady` (host.ts,
+ * earliest safe deletion point for the current spawn's own file), and the pty `onExit` handler (backstop
+ * for a session that crashes before ready); a hard daemon crash that skips all three is caught by the
+ * boot sweep in `pty/mcp-config-gc.ts`.
+ *
+ * @decision ed0757d6 — see record for why nothing unlinked this file before, and why three call sites.
+ */
+export function unlinkSessionMcpConfig(sessionId: string): void {
+  try { fs.unlinkSync(sessionMcpConfigPath(sessionId)); } catch { /* common case: no such file */ }
+}
+
+/**
+ * SETTINGS_DIR (`<LOOM_HOME>/tmp/settings/`) holds every session's `--settings` file (a hook token) and,
+ * for a capability-secret-bearing spawn, the plaintext connection secret in its `--mcp-config` file.
+ * Glob-style, absolute (SETTINGS_DIR is not guaranteed to live under the engine's own homedir), forward-
+ * slashed to match the CLI's gitignore-style deny syntax on Windows.
+ *
+ * @decision ed0757d6 — see record for the read-bypass this closes and why it was previously uncovered.
+ */
+export const SETTINGS_DIR_READ_DENY_RULE = `Read(${SETTINGS_DIR.replace(/\\/g, "/")}/**)`;
+
+/**
+ * Union `SETTINGS_DIR_READ_DENY_RULE` into `permission.deny`, unconditionally — every role, no carve-out.
+ * Idempotent; never replaces `.deny`.
+ *
+ * @decision ed0757d6 — see record for why this is role-unconditional, unlike the transcript-root deny.
+ */
+export function withSettingsDirDenyForSpawn(permission: PermissionPolicy): PermissionPolicy {
+  if (permission.deny.includes(SETTINGS_DIR_READ_DENY_RULE)) return permission;
+  return { ...permission, deny: [...permission.deny, SETTINGS_DIR_READ_DENY_RULE] };
 }

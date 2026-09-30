@@ -123,6 +123,12 @@ if (process.platform !== "win32") {
   console.log("SKIP  transcript-root-deny-chokepoint.mjs part 2 — the LOOM_CLAUDE_BIN real-node.exe-substitution technique this file uses was only established/verified on Windows (process.platform !== 'win32' here); see boot-mode-settings-argv-coupling.mjs's own header for the same gap.");
 } else {
   const { ensureDirs, WORKTREES_DIR, SETTINGS_DIR } = await import("../dist/paths.js");
+  // Card ed0757d6: withSettingsDirDenyForSpawn unions ITS OWN rule into EVERY spawn's deny at the SAME
+  // createPty chokepoint, unconditionally (no role carve-out — see that function's own doc) — so a
+  // real-write assertion in THIS file (which predates that card) must account for it too, or an exact
+  // length/equality check here goes stale the moment that unrelated card lands. Import the real constant
+  // rather than hand-copying its literal value, so this file can never drift from it independently.
+  const { SETTINGS_DIR_READ_DENY_RULE } = await import("../dist/pty/claude-settings.js");
   ensureDirs();
   registerForCleanup(WORKTREES_DIR); // sibling of LOOM_HOME, created by production ensureDirs()
 
@@ -148,7 +154,8 @@ if (process.platform !== "win32") {
     const sidWorker = "trdc-real-worker";
     host.spawn({ sessionId: sidWorker, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [] }, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "worker" });
     spawned.push(sidWorker);
-    check("(real) worker spawn: WRITTEN settings.json permissions.deny is EMPTY (no role-scoped entry leaked)", JSON.stringify(readWrittenDeny(sidWorker)) === JSON.stringify([]));
+    check("(real) worker spawn: WRITTEN settings.json permissions.deny has NO role-scoped (transcript-root) entry leaked — only the unconditional SETTINGS_DIR rule (card ed0757d6)",
+      JSON.stringify(readWrittenDeny(sidWorker)) === JSON.stringify([SETTINGS_DIR_READ_DENY_RULE]));
 
     // (c) role="assistant" with a project's OWN custom deny — union survives through the REAL write.
     const sidCustom = "trdc-real-assistant-custom";
@@ -156,7 +163,9 @@ if (process.platform !== "win32") {
     spawned.push(sidCustom);
     const customWritten = readWrittenDeny(sidCustom) ?? [];
     check("(real) assistant+custom-deny spawn: WRITTEN settings.json KEEPS the project's own custom entry", customWritten.includes(CUSTOM_DENY));
-    check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the role-scoped rule (union)", customWritten.includes(ROLE_DENY) && customWritten.length === 2);
+    check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the role-scoped rule (union)", customWritten.includes(ROLE_DENY));
+    check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the unconditional SETTINGS_DIR rule (card ed0757d6)", customWritten.includes(SETTINGS_DIR_READ_DENY_RULE));
+    check("(real) assistant+custom-deny spawn: exactly 3 entries, no more (custom + transcript-root + SETTINGS_DIR)", customWritten.length === 3);
 
     // (d)-(f) card d78f8217: manager/platform/setup are now BLANKET-denied too.
     for (const [sid, role] of [["trdc-real-manager", "manager"], ["trdc-real-platform", "platform"], ["trdc-real-setup", "setup"]]) {
@@ -189,7 +198,8 @@ if (process.platform !== "win32") {
     check("(real, project-scoped) worker's deny INCLUDES both other projects' rules (negative half — DoD-2)",
       expectedOther.every((r) => scopedDeny.includes(r)));
     check("(real, project-scoped) worker's deny does NOT include the blanket root rule (worker never gets the blanket)", !scopedDeny.includes(ROLE_DENY));
-    check("(real, project-scoped) worker's deny has exactly the 4 expected other-project entries, no more", scopedDeny.length === 4);
+    check("(real, project-scoped) worker's deny ALSO carries the unconditional SETTINGS_DIR rule (card ed0757d6)", scopedDeny.includes(SETTINGS_DIR_READ_DENY_RULE));
+    check("(real, project-scoped) worker's deny has exactly the 5 expected entries, no more (2 other-project rules + SETTINGS_DIR)", scopedDeny.length === 5);
 
     // A worker spawned FOR one of the "other" projects gets denied the OTHER two, but not its own.
     const sidScopedWorkerB = "trdc-real-worker-scoped-b";
