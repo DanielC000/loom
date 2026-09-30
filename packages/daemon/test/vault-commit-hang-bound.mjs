@@ -5,33 +5,23 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // nothing bounding any of it — the exact hang vector card 816f0056 hardened on `flushSync`'s SHUTDOWN
 // path, left open here on the path a human's HTTP request (vault/writer.ts) actually blocks on.
 //
-// This induces a REAL hang — a genuine `git commit` child blocked inside an actual pre-commit hook
-// (`sleep`), not a mocked/injected promise — same proof shape and same reasoning as
-// test/merge-hang-does-not-wedge-queue.mjs and test/vault-flush-sync-hang-bound.mjs (see either file's own
-// header for why a real hook, not a mock, exercises the actual production spawn path — a fake `git` on
-// PATH falls through to the real git.exe on this host and proves nothing).
-//
-// RED PROOF (performed manually against this SAME file, not committed): reverting ONLY commitVault's
-// bounding (`git checkout HEAD -- packages/daemon/src/vault/versioner.ts` against the pre-fix commit),
-// rebuilding, and re-running this unchanged test shows Case A's `commitVault` call hanging for the full
-// HOOK_SLEEP_S (never resolving within the injected tiny timeout) instead of rejecting quickly — i.e. no
-// bound at all, exactly the defect this fix closes. Restoring the fix and rebuilding returns this file to
-// green. See the worker's own report for the observed numbers.
-//
-// Unlike `flushSync` (synchronous `execSync`, so a timeout ABANDONS the shell but the real `git.exe`
-// grandchild survives), `commitVault` goes through simple-git's async `spawn`-based runner: on a block
-// timeout it calls `spawned.kill("SIGINT")` on the DIRECTLY spawned `git.exe` (no shell wrapper, verified
-// against the installed simple-git package — see commitVault's own doc). Whether the killed `git commit`
-// still lands a commit object is therefore the SAME kind of race `flushSync`'s own doc describes (depends
-// on how far git.exe had progressed before the kill reached it) — this file asserts only what is genuinely
-// invariant: the call returns within its bound, the promise REJECTS (never a false success), no partial
-// commit is visible IMMEDIATELY after the call settles, and the hook genuinely fired.
+// @decision ffe98495 update (review round 2): this file originally forced the hang via a REAL git
+// exec-config trick (first a `.git/hooks/pre-commit` hook, then a hanging `gpg.program`) — but card
+// ffe98495 round 2 ALSO forces `-c commit.gpgsign=false` unconditionally, closing that mechanism too, on
+// top of the hooksPath/fsmonitor neutralisation that already closed the first one. With every git
+// exec-config surface this module can reach now neutralised BY DESIGN, this file switches to the
+// project's own established seam for exactly this situation (see test/vault-versioner-wiring.mjs's
+// `hangingFactory`): a `VaultGitDeps.gitFactory` that delegates every call to a REAL `simple-git` instance
+// against the real repo EXCEPT the one under test, which returns a promise that never resolves. This
+// still exercises the REAL, production `withTimeout` race and the real repo's own `checkIsRepo`/`add`/
+// `status` behaviour — only the one call being tested for hang-tolerance is a mock, not the whole git
+// interaction.
 // Run after build: node test/vault-commit-hang-bound.mjs
 import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { simpleGit } from "simple-git";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const { commitVault } = await import("../dist/vault/versioner.js");
 
@@ -48,92 +38,79 @@ function initRepo(dir) {
 // `git rev-list --all --count` is 0 (clean exit) on a fresh repo with no commits yet — unlike `git log`.
 const commitCount = (dir) => parseInt(git(dir, "rev-list --all --count").trim() || "0", 10);
 
-// Long enough to be unambiguously distinct from the injected TINY_TIMEOUT_MS bound below, with generous
-// headroom over suite contention (same reasoning as merge-hang-does-not-wedge-queue.mjs's own
-// HOOK_SLEEP_S comment); short enough that a worst-case (regression) run doesn't burn excessive wall time.
-const HOOK_SLEEP_S = 10;
 // The injected per-op timeout (VaultGitDeps.timeoutMs, threaded through commitVault's `opts.deps` — the
 // SAME test-only injection seam every other bounded git call in this module already accepts). Collapses
 // BOTH commitVault tiers (cheap plumbing + working-tree) onto this one small value (see commitVault's own
-// doc for why real callers never do this) — small relative to the real production ceilings (15s / 5min)
-// so this test settles in a couple of seconds on the fixed code, but not as tiny as this repo's other
-// tiny-timeout injections against a never-resolving MOCK git (spawn latency there is structurally zero).
-// This runs REAL git spawns (checkIsRepo/revparse/add/status/config x2/commit) — same measured-margin
-// reasoning as vault-flush-sync-hang-bound.mjs's own TINY_TIMEOUT_MS: on this host, under load, each real
-// op is under ~120ms; 2000ms leaves wide margin over that while keeping HOOK_SLEEP_S (10s) 5x above it.
+// doc for why real callers never do this).
 const TINY_TIMEOUT_MS = 2_000;
 
-// Written via plain fs calls (no bash chmod) — Git for Windows invokes a shebang script via its bundled
-// sh regardless of the exec bit; chmod is for POSIX hosts. Same convention as
-// merge-hang-does-not-wedge-queue.mjs's/vault-flush-sync-hang-bound.mjs's installHangingHook. Touches a
-// marker BEFORE sleeping so a caller can prove the hook genuinely fired, not merely that commitVault
-// returned on time — an earlier call (e.g. `git add .`) timing out first would ALSO produce a fast/
-// rejected result, indistinguishable from a real hooked-commit hang without this marker (the exact gap a
-// Code Reviewer proved on card 816f0056's own test by replication).
-function installHangingPreCommitHook(repo) {
-  const hookPath = path.join(repo, ".git", "hooks", "pre-commit");
-  fs.writeFileSync(hookPath, `#!/bin/sh\ntouch .git/pre-commit-fired\nsleep ${HOOK_SLEEP_S}\ntouch .git/pre-commit-done\n`);
-  fs.chmodSync(hookPath, 0o755);
+/**
+ * A `VaultGitDeps.gitFactory` that delegates `checkIsRepo`/`revparse`/`init`/`add`/`status`/`commit` to a
+ * REAL `simple-git` instance against `repo` (so the surrounding repo state behaves exactly as production
+ * would), except: any `raw()` call whose argv contains `"commit"` returns a promise that NEVER resolves —
+ * simulating a genuinely wedged commit without touching any git hook/gpg-program/exec-config surface
+ * (@decision ffe98495 review finding 2). `commitVault` calls this factory THREE times per invocation
+ * (once for its unpinned discovery instance, twice more for its two repo-pinned tiers) — `fired()` reports
+ * true the moment ANY of them reaches the wedged call, distinguishing "we genuinely reached commit" from
+ * "an earlier call (e.g. `add`) timed out first" — the same distinction the old hook-based marker proved.
+ */
+function makeHangingCommitGitFactory(repo) {
+  let firedFlag = false;
+  const factory = (repoPath) => {
+    const real = simpleGit(repoPath);
+    return {
+      checkIsRepo: () => real.checkIsRepo(),
+      revparse: (args) => real.revparse(args),
+      init: () => real.init(),
+      add: (paths) => real.add(paths),
+      status: () => real.status(),
+      commit: (msg) => real.commit(msg),
+      raw: (args) => {
+        const arr = Array.isArray(args) ? args : [args];
+        if (arr.includes("commit")) {
+          firedFlag = true;
+          return new Promise(() => {}); // never resolves — a wedged commit, no real exec-config trick
+        }
+        return real.raw(arr);
+      },
+    };
+  };
+  factory.fired = () => firedFlag;
+  factory.repo = repo;
+  return factory;
 }
-const hookFired = (repo) => fs.existsSync(path.join(repo, ".git", "pre-commit-fired"));
-const hookDonePath = (repo) => path.join(repo, ".git", "pre-commit-done");
-// Polls for an observable event rather than trusting a blind fixed wait.
-async function waitForFile(filePath, timeoutMs) {
-  try {
-    return await sharedWaitUntil(() => fs.existsSync(filePath), { timeoutMs, intervalMs: 100, label: "vault-commit-hang-bound: waitForFile" });
-  } catch (err) {
-    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
-    if (err?.exhaustedOnThrow !== false) throw err;
-    return fs.existsSync(filePath);
-  }
-}
-// KNOWN, ACCEPTED cleanup risk (same as the sibling hang tests' own note): simple-git's block-timeout kill
-// targets the immediate `git.exe` child directly (see commitVault's own doc — no shell wrapper here,
-// unlike flushSync's shell-string execSync calls), but the hooked `sleep`/its wrapping `sh` is itself a
-// GRANDCHILD of that `git.exe` and is not part of the kill — no job object, no tree kill — so it survives
-// and keeps running for the rest of HOOK_SLEEP_S regardless. repoA's directory can therefore stay locked
-// (a logged, non-fatal EBUSY from _tmp-fixture.mjs's best-effort cleanup) until that orphan exits on its
-// own, up to HOOK_SLEEP_S after this file's process exits. Harmless and self-clearing; not the concern
-// this test targets (commitVault's OWN bound on how long IT waits).
 
 {
-  // --- Case A: a REAL hung `git commit` (blocked inside an actual pre-commit hook) must not block
-  // commitVault past its bounded timeout, must REJECT (never a false success), must not leave a partial
-  // commit behind (checked immediately), and must be proven to have actually reached and blocked inside
-  // the REAL hook, not merely that some earlier call timed out first.
+  // --- Case A: a wedged `git commit` must not block commitVault past its bounded timeout, must REJECT
+  // (never a false success), must not leave a partial commit behind (checked immediately), and must be
+  // proven to have actually reached the commit step, not merely that some earlier call timed out first.
   const repoA = mkdtempManaged("loom-commit-hang-a-");
   initRepo(repoA);
-  installHangingPreCommitHook(repoA);
   fs.writeFileSync(path.join(repoA, "urgent.md"), "edited just before a wedged REST commit\n");
   const beforeA = commitCount(repoA);
+  const hangingFactory = makeHangingCommitGitFactory(repoA);
 
   const t0 = performance.now(); // MONOTONIC — survives an NTP/backward clock step (see test/worktrees.mjs)
   let resultA;
   let threwA;
   try {
-    resultA = await commitVault(repoA, "loom: write urgent.md (via UI)", { deps: { timeoutMs: TINY_TIMEOUT_MS } });
+    resultA = await commitVault(repoA, "loom: write urgent.md (via UI)", {
+      deps: { gitFactory: hangingFactory, timeoutMs: TINY_TIMEOUT_MS },
+    });
   } catch (err) {
     threwA = err;
   }
   const elapsedA = performance.now() - t0;
 
   check(
-    `commitVault against a REAL hung pre-commit hook returns within its bounded timeout ` +
+    `commitVault against a wedged commit returns within its bounded timeout ` +
     `(${Math.round(elapsedA)}ms, cap ${TINY_TIMEOUT_MS}ms)`,
-    // Generous headroom over real spawn latency (see TINY_TIMEOUT_MS's own measured-margin comment) while
-    // staying far below HOOK_SLEEP_S — also catches "an earlier call timed out too", not just commit.
     elapsedA < TINY_TIMEOUT_MS * 3,
   );
-  check("commitVault against a hung git child REJECTS (bounded, never hangs, never a false success)", threwA !== undefined && resultA === undefined);
+  check("commitVault against a wedged commit REJECTS (bounded, never hangs, never a false success)", threwA !== undefined && resultA === undefined);
   check("the rejection names a bound timeout (not some unrelated git error)", String(threwA?.message ?? "").includes("exceeded"));
-  check("commitVault against a hung git child leaves no partial commit behind YET (checked immediately)", commitCount(repoA) === beforeA);
-  check("the pre-commit hook genuinely fired (the hang is the REAL hooked commit, not an earlier call timing out first)", hookFired(repoA));
-
-  // Whether the commit OBJECT itself eventually lands is a race decided by how far git.exe got before the
-  // kill (see this file's header + commitVault's own doc) — not asserted either way. What IS observable
-  // and asserted: the hooked script itself genuinely ran to completion in the background.
-  const hookReallyFinished = await waitForFile(hookDonePath(repoA), (HOOK_SLEEP_S + 5) * 1000);
-  check(`the hooked script itself genuinely ran to completion (observed via its own done-marker, not a blind timer) within ${HOOK_SLEEP_S + 5}s`, hookReallyFinished);
+  check("commitVault against a wedged commit leaves no partial commit behind YET (checked immediately)", commitCount(repoA) === beforeA);
+  check("the wedged commit call genuinely fired (the hang is the REAL commit step, not an earlier call timing out first)", hangingFactory.fired());
 
   // --- Case B (control, on the SAME tiny timeout): an ordinary, un-hung commit still succeeds under the
   // exact same tiny injected timeout — proves the bound doesn't itself break the normal commit path (the
@@ -149,7 +126,7 @@ async function waitForFile(filePath, timeoutMs) {
   );
 
   console.log(failures === 0
-    ? "\nALL PASS — commitVault's git calls are bounded, a hung pre-commit hook is rejected without " +
+    ? "\nALL PASS — commitVault's git calls are bounded, a wedged commit is rejected without " +
       "wedging the caller, and an ordinary commit still succeeds under the same bound."
     : `\n${failures} FAILURE(S).`);
   // repoA/repoB were both created via mkdtempManaged, which already registers them for guaranteed cleanup

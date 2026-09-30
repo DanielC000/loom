@@ -16,11 +16,40 @@ export type VaultWriteOutcome =
   | { ok: true; committed: boolean }
   | { ok: false; reason: "traversal" | "exists" | "not-found" | "is-dir" | "error" | "operational-dir" };
 
+/** @decision ffe98495 — never remove `.git` or `.obsidian` from this refusal list, and never add
+ *  `node_modules`/`worktrees` to it — a vault write into either can plant a hook or a plugin the daemon
+ *  or Obsidian later executes. */
+const VAULT_CONTROL_DIR_NAMES = [".git", ".obsidian"] as const;
+
+/** @decision ffe98495 — a segment matching this SHAPE is refused outright, regardless of what precedes
+ *  the `~digit` — a Windows 8.3 short name can be a HASHED collision form (e.g. `GI7F32~1`), not just a
+ *  truncated-prefix one, so there is no fixed prefix to check against; reject the shape itself. */
+const WINDOWS_SHORTNAME_SHAPE = /~[0-9]+$/;
+
+/** @decision ffe98495 — refuse a trailing dot/space on EVERY segment, not only one that would otherwise
+ *  alias `.git`/`.obsidian`: Windows silently drops it on disk (`notes.` becomes a real dir `notes`),
+ *  and the mismatched leftover then makes every later `git add` in this vault fail permanently. */
+const TRAILING_DOT_OR_SPACE = /[.\s]$/;
+
+/** Whether `segment` (one `/`-split component of a vault-relative path) is refused outright: a literal
+ *  `:` anywhere (see {@link resolveInVault}'s own colon check for why), a trailing dot/space (see {@link
+ *  TRAILING_DOT_OR_SPACE}), a Windows 8.3 short-name shape (see {@link WINDOWS_SHORTNAME_SHAPE}), or an
+ *  exact case-insensitive match against {@link VAULT_CONTROL_DIR_NAMES} — including as the path's own
+ *  leaf (e.g. `relPath === ".git"`, a gitlink file). */
+function isRefusedVaultSegment(segment: string): boolean {
+  if (TRAILING_DOT_OR_SPACE.test(segment)) return true;
+  if (WINDOWS_SHORTNAME_SHAPE.test(segment)) return true;
+  const lower = segment.toLowerCase();
+  return VAULT_CONTROL_DIR_NAMES.some((name) => lower === name);
+}
+
 /**
  * Resolve a UI-supplied relative path to an absolute path that is PROVABLY inside the vault root,
- * or null if it escapes (`..`, an absolute path, or a symlinked ancestor pointing outside).
+ * or null if it escapes (`..`, an absolute path, or a symlinked ancestor pointing outside), touches a
+ * control directory or an outright-refused segment shape (see {@link isRefusedVaultSegment}), or resolves
+ * through the vault's own `.git`.
  * The lexical check rejects `..`/absolute escapes; the realpath check on the deepest existing
- * ancestor rejects an in-vault symlink/junction whose real target is outside the vault.
+ * ancestor rejects an in-vault symlink/junction whose real target is outside the vault (or inside its `.git`).
  */
 function resolveInVault(vaultPath: string, relPath: string): string | null {
   // Defense-in-depth: reject any backslash in the relative path on EVERY platform. On POSIX `\` is a
@@ -28,6 +57,11 @@ function resolveInVault(vaultPath: string, relPath: string): string | null {
   // vault-relative path is never legitimate and becomes a path separator — i.e. traversal — the moment
   // the vault is synced to Windows. Rejecting it everywhere keeps the guard uniform and the file safe.
   if (relPath.includes("\\")) return null;
+  // @decision ffe98495 — refuse ANY colon on every platform: NTFS resolves `<dir>::$INDEX_ALLOCATION`
+  // to `<dir>` ITSELF (an alternate-data-stream alias), so a segment-name check alone can still land
+  // inside a real `.git` this way; `<file>:<stream>` is the same alias class, one level down.
+  if (relPath.includes(":")) return null;
+  if (relPath.split("/").some(isRefusedVaultSegment)) return null;
   const root = path.resolve(vaultPath);
   const target = path.resolve(root, relPath);
   // Reject writing the root itself, and any path that is not strictly within root (lexical guard).
@@ -40,9 +74,15 @@ function resolveInVault(vaultPath: string, relPath: string): string | null {
   // mkdir the parent chain before writing). This is NOT a traversal case; it's just an uncreated root.
   if (!fs.existsSync(root)) return target;
   // Symlink guard: the target may not exist yet (create/write), so walk up to the deepest existing
-  // ancestor and confirm its REAL path is still within the real vault root.
+  // ancestor and confirm its REAL path is still within the real vault root, and outside the vault's own
+  // `.git` (a pre-existing symlink/junction, planted by some other means, could resolve into `.git` while
+  // nominally staying "inside the vault root").
+  //
+  // @decision ffe98495 — never drop the `.git`-realpath check below; it is defense in depth on top of
+  // the segment-name refusal above, not a replacement for it.
   try {
     const realRoot = fs.realpathSync(root);
+    const realGitDir = path.join(realRoot, ".git");
     let probe = target;
     while (!fs.existsSync(probe)) {
       const parent = path.dirname(probe);
@@ -51,6 +91,7 @@ function resolveInVault(vaultPath: string, relPath: string): string | null {
     }
     const realProbe = fs.realpathSync(probe);
     if (realProbe !== realRoot && !realProbe.startsWith(realRoot + path.sep)) return null;
+    if (realProbe === realGitDir || realProbe.startsWith(realGitDir + path.sep)) return null;
   } catch { return null; } // unreadable root/ancestor → reject
   return target;
 }

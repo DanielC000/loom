@@ -1,13 +1,14 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import chokidar, { type FSWatcher } from "chokidar";
-import type { SimpleGit } from "simple-git";
+import type { SimpleGit, SimpleGitOptions } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
-import { withTimeout, boundedSimpleGit } from "../git/bounded.js";
+import { withTimeout, boundedSimpleGit, localReadGitEnv } from "../git/bounded.js";
 
 /** Generic, non-personal identity used ONLY when the host has no git identity configured at all. */
 const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
@@ -91,21 +92,85 @@ export interface VaultGitDeps {
   /** Test-only, `flushSync`-specific override for its `git commit` call — see {@link flushAddTimeoutMs}.
    *  Real callers never pass this. */
   flushCommitTimeoutMs?: number;
+  /** Test-only override for `flushSync`'s git-invoking function (normally `execFileSync`). See the
+   *  decision comment at `flushSync`'s own call sites (card ffe98495) for why this exists and how a test
+   *  uses it. Real callers never pass this. */
+  flushExecFileSyncImpl?: typeof execFileSync;
 }
 
 /** @decision 54b839c5 — never re-add a `.env({ GIT_TERMINAL_PROMPT: "0" })` override here: tried and
  *  reverted — it throws on an ambient GIT_EDITOR/PAGER var, and `.env()` replaces rather than merges the
  *  whole child env, breaking config-path passthrough; moot anyway since commitVault never touches the network. */
 
+/**
+ * `os.devNull` (never a fresh `mkdtemp`'d dir): a `<devNull>/<hookname>` path can never exist, so git's
+ * `find_hook()` always reports "no such hook" — structurally, not just typically. Mirrors
+ * `git/worktrees.ts`'s `AUTOCOMMIT_HOOKS_PATH` (see that constant's own doc for the fuller threat-model
+ * reasoning against a background process racing a fresh tmp dir); the two are independent copies rather
+ * than a shared import to keep this leaf module's dependency surface unchanged.
+ *
+ * @decision ffe98495 — never apply `core.hooksPath`/`core.fsmonitor` to only the commit call — pin both
+ *  on EVERY vault git call via `boundedVaultGit`, and never drop `--no-verify` from `commitVault`'s own
+ *  commit calls as if the hooksPath override alone were sufficient.
+ */
+const VAULT_GIT_SAFETY_HOOKS_PATH = os.devNull;
+/** @decision ffe98495 — never scope `commit.gpgsign=false`/`safe.bareRepository=explicit` to only the
+ *  commit branch; they belong here, unconditionally, same as hooksPath/fsmonitor. Vault commits are
+ *  automated notes snapshots — gpgsign is FORCED off, not merely left at its default. */
+const VAULT_GIT_SAFETY_CONFIG: string[] = [
+  `core.hooksPath=${VAULT_GIT_SAFETY_HOOKS_PATH}`,
+  "core.fsmonitor=false",
+  "commit.gpgsign=false",
+  "safe.bareRepository=explicit",
+];
+const VAULT_GIT_SAFETY_UNSAFE: SimpleGitOptions["unsafe"] = { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true };
+/** The `-c` argv form of {@link VAULT_GIT_SAFETY_CONFIG}, for `flushSync`'s raw `execFileSync("git", […])`
+ *  spawns — it never goes through `boundedSimpleGit`, so it cannot pick up that constant's `config`
+ *  option and must carry these `-c` flags itself, on every one of its own git invocations. */
+const VAULT_GIT_SAFETY_ARGS: string[] = VAULT_GIT_SAFETY_CONFIG.flatMap((c) => ["-c", c]);
+
 /** Build the bounded git instance + resolve the timeout for one vault-versioner op, applying the seam's
- *  defaults. No `.env()` override (see the doc immediately above for why — card 54b839c5). */
+ *  defaults. No `.env()` override (see the doc immediately above for why — card 54b839c5). Every REAL
+ *  (non-test-injected) instance carries {@link VAULT_GIT_SAFETY_CONFIG} — see that constant's own doc.
+ *
+ * **DISCOVERY ONLY** — never repo-pinned (no `GIT_DIR`/`GIT_WORK_TREE`): a caller resolving whether
+ * `repoPath` IS a repo, or discovering its governing root via upward search (`resolveVaultRepoContext`,
+ * `commitVault`'s own pre-commit "externally managed" check), NEEDS git's normal cwd-based discovery to
+ * work — see {@link boundedVaultGitAtConfirmedRoot} for the pinned variant used once a call site has
+ * already confirmed which repo it means to act on. */
 function boundedVaultGit(
   repoPath: string,
   deps: VaultGitDeps,
 ): { git: BoundedVaultGit; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
+  const makeGit = deps.gitFactory
+    ?? ((p, ms) => boundedSimpleGit(p, ms, undefined, undefined, VAULT_GIT_SAFETY_UNSAFE, VAULT_GIT_SAFETY_CONFIG));
   return { git: makeGit(repoPath, timeoutMs), timeoutMs };
+}
+
+/**
+ * The REPO-PINNED sibling of {@link boundedVaultGit}: same safety config/unsafe-opt-ins, PLUS
+ * `GIT_DIR`/`GIT_WORK_TREE` pinned to `confirmedRoot` via `localReadGitEnv` (which also strips the
+ * transport env-var family — `GIT_ASKPASS`/`SSH_ASKPASS`/etc — so an ambiently-set one on the daemon host
+ * can't make simple-git throw "unsafe" the moment this becomes an EXPLICIT env; vault commits never touch
+ * a remote, so those keys can never matter here regardless).
+ *
+ * @decision ffe98495 — call this ONLY once `confirmedRoot` IS (or is about to become, via `git init`) the
+ *  actual repo root — pinning `GIT_DIR` before that is confirmed disables git's own upward discovery and
+ *  silently misbehaves; see `commitVault`'s own call site for the required ordering.
+ */
+function boundedVaultGitAtConfirmedRoot(
+  confirmedRoot: string,
+  deps: VaultGitDeps,
+): { git: BoundedVaultGit; timeoutMs: number } {
+  const timeoutMs = deps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
+  const pinnedEnv = localReadGitEnv(process.env, {
+    GIT_DIR: path.join(confirmedRoot, ".git"),
+    GIT_WORK_TREE: confirmedRoot,
+  });
+  const makeGit = deps.gitFactory
+    ?? ((p, ms) => boundedSimpleGit(p, ms, pinnedEnv, undefined, VAULT_GIT_SAFETY_UNSAFE, VAULT_GIT_SAFETY_CONFIG));
+  return { git: makeGit(confirmedRoot, timeoutMs), timeoutMs };
 }
 
 /**
@@ -365,6 +430,15 @@ function hasConfiguredGitIdentitySync(opts: { cwd: string; stdio: "pipe"; timeou
  *
  * @decision 68cc29db — never init/stage/commit an operational (LOOM_HOME-rooted) vault dir here — keep
  *  THIS guard AND the pre-disk guards in vault/writer.ts's three write functions, never just one.
+ *
+ * **Hook/fsmonitor/gpgsign neutralisation + repo pinning** (see {@link VAULT_GIT_SAFETY_CONFIG}'s own
+ * doc): every git call this function makes past the initial discovery step carries `-c
+ * core.hooksPath=<devNull>`, `-c core.fsmonitor=false`, `-c commit.gpgsign=false`, `-c
+ * safe.bareRepository=explicit`, AND `GIT_DIR`/`GIT_WORK_TREE` pinned to the confirmed root (see
+ * {@link boundedVaultGitAtConfirmedRoot}) — the commit call itself also passes `--no-verify`. A hostile
+ * `vault_write` can no longer plant a `.git/hooks/pre-commit`, a `core.fsmonitor` script, or a
+ * `gpg.program` signing hook for this function's next commit to execute, and every mutating call is
+ * pinned to exactly the repo this function itself confirmed, never one discoverable by cwd tricks.
  */
 export async function commitVault(
   vaultPath: string,
@@ -384,16 +458,30 @@ export async function commitVault(
   // real callers never set `deps`, so production always gets the real 15s/5min split.
   const cheapTimeoutMs = deps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
   const workTreeTimeoutMs = deps.timeoutMs ?? VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS;
+  // DISCOVERY ONLY, deliberately UNPINNED: whether `vaultPath` is a repo, or a subfolder of a larger one,
+  // can only be answered by git's own normal upward search. Everything AFTER this step operates on a
+  // CONFIRMED root (`vaultPath` itself, in both surviving branches below) and switches to the pinned
+  // instance.
+  //
+  // @decision ffe98495 — never pin GIT_DIR for this discovery step; a genuine subfolder-of-a-bigger-repo
+  //  would report "not a repo" and this function would wrongly `git init` a NESTED repo inside it.
   const { git } = boundedVaultGit(vaultPath, { ...deps, timeoutMs: cheapTimeoutMs });
-  const { git: workGit } = boundedVaultGit(vaultPath, { ...deps, timeoutMs: workTreeTimeoutMs });
 
   const isRepo = await withTimeout(git.checkIsRepo(), cheapTimeoutMs, "git check-is-repo (vault commit)").catch(() => false);
   if (isRepo) {
     const root = (await withTimeout(git.revparse(["--show-toplevel"]), cheapTimeoutMs, "git rev-parse --show-toplevel (vault commit)").catch(() => "")).trim();
     const externallyManaged = !!root && root.replace(/\\/g, "/") !== vaultPath.replace(/\\/g, "/");
     if (externallyManaged) return false;
-  } else {
-    await withTimeout(git.init(), cheapTimeoutMs, "git init (vault commit)");
+    // else: root === vaultPath — vaultPath IS the confirmed repo root.
+  }
+  // else: no repo discoverable anywhere up the chain — vaultPath itself will BECOME the repo root below.
+
+  // Every remaining call operates on a CONFIRMED root (vaultPath) — pin GIT_DIR/GIT_WORK_TREE to it.
+  const { git: pinnedGit } = boundedVaultGitAtConfirmedRoot(vaultPath, { ...deps, timeoutMs: cheapTimeoutMs });
+  const { git: workGit } = boundedVaultGitAtConfirmedRoot(vaultPath, { ...deps, timeoutMs: workTreeTimeoutMs });
+
+  if (!isRepo) {
+    await withTimeout(pinnedGit.init(), cheapTimeoutMs, "git init (vault commit)");
   }
 
   // Tracks the call in flight so the warn below names WHICH op hit its bound (mirrors flushSync's own
@@ -403,21 +491,23 @@ export async function commitVault(
     currentOp = { label: "git add .", timeoutMs: workTreeTimeoutMs };
     await withTimeout(workGit.add("."), workTreeTimeoutMs, currentOp.label);
     currentOp = { label: "git status", timeoutMs: cheapTimeoutMs };
-    const status = await withTimeout(git.status(), cheapTimeoutMs, currentOp.label);
+    const status = await withTimeout(pinnedGit.status(), cheapTimeoutMs, currentOp.label);
     if (status.files.length === 0) return false;
-    const skipped = await unstageOversizedFiles(git, vaultPath, status.files, maxFileBytes, cheapTimeoutMs);
+    const skipped = await unstageOversizedFiles(pinnedGit, vaultPath, status.files, maxFileBytes, cheapTimeoutMs);
     // NOTE: an unstaged file does NOT disappear from `git status` (it just reverts to untracked/modified),
     // so re-querying status here would still see it and wrongly think there's something left to commit.
     // Comparing counts against the ORIGINAL staged set is the correct "anything real left?" check.
     if (skipped.length >= status.files.length) return false; // everything staged was oversized — nothing left to commit
     currentOp = { label: "git commit", timeoutMs: workTreeTimeoutMs };
-    if (await hasConfiguredGitIdentity(git, cheapTimeoutMs)) {
-      await withTimeout(workGit.commit(message), workTreeTimeoutMs, currentOp.label);
+    // @decision ffe98495 — `--no-verify` on EVERY commit here, identity-fallback branch or not; belt-
+    // and-suspenders on top of boundedVaultGit's hooksPath override (see that constant's own doc).
+    if (await hasConfiguredGitIdentity(pinnedGit, cheapTimeoutMs)) {
+      await withTimeout(workGit.raw(["commit", "--no-verify", "-m", message]), workTreeTimeoutMs, currentOp.label);
     } else {
       await withTimeout(workGit.raw([
         "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`,
         "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`,
-        "commit", "-m", message,
+        "commit", "--no-verify", "-m", message,
       ]), workTreeTimeoutMs, currentOp.label);
     }
     return true;
@@ -844,7 +934,13 @@ export class VaultVersioner {
     // shell (`spawnSync ... cmd.exe ETIMEDOUT`), not the git command or the ceiling that fired.
     let currentOp: { label: string; timeoutMs: number } | undefined;
     try {
-      const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+      // @decision ffe98495 — pin GIT_DIR/GIT_WORK_TREE here too: `this.commitPath` is already the
+      // CONFIRMED governing root (resolved once, at `start()`), so — unlike `commitVault`'s own discovery
+      // step — there is no "might still be a subfolder" case left to preserve upward search for.
+      const env = {
+        ...process.env, GIT_TERMINAL_PROMPT: "0",
+        GIT_DIR: path.join(this.commitPath, ".git"), GIT_WORK_TREE: this.commitPath,
+      };
       const cheapTimeoutMs = this.gitDeps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
       // flushAddTimeoutMs/flushCommitTimeoutMs (test-only, see VaultGitDeps) each fall back to the shared
       // `timeoutMs` override, then to the real production default — see VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS.
@@ -853,11 +949,17 @@ export class VaultVersioner {
       const cheapOpts = { cwd: this.commitPath, stdio: "pipe" as const, timeout: cheapTimeoutMs, env, maxBuffer: VAULT_FLUSH_MAX_BUFFER_BYTES };
       const addOpts = { cwd: this.commitPath, stdio: "pipe" as const, timeout: addTimeoutMs, env, maxBuffer: VAULT_FLUSH_MAX_BUFFER_BYTES };
       const commitOpts = { cwd: this.commitPath, stdio: "pipe" as const, timeout: commitTimeoutMs, env, maxBuffer: VAULT_FLUSH_MAX_BUFFER_BYTES };
+      // Test-only override (see VaultGitDeps.flushExecFileSyncImpl's own doc) — real callers never set
+      // this, so production always calls the real execFileSync.
+      const runGit = this.gitDeps.flushExecFileSyncImpl ?? execFileSync;
 
+      // @decision ffe98495 — never move `add`/`status` back to shell-string `execSync`: `VAULT_GIT_SAFETY_ARGS`
+      //  interpolates a real path into these calls, so they need the same execFileSync argument-safety
+      //  `commit`'s own doc below already claims for itself.
       currentOp = { label: "git add -A", timeoutMs: addTimeoutMs };
-      execSync("git add -A", addOpts);
+      runGit("git", [...VAULT_GIT_SAFETY_ARGS, "add", "-A"], addOpts);
       currentOp = { label: "git status --porcelain", timeoutMs: cheapTimeoutMs };
-      const staged = execSync("git status --porcelain", cheapOpts).toString().trim();
+      const staged = runGit("git", [...VAULT_GIT_SAFETY_ARGS, "status", "--porcelain"], cheapOpts).toString().trim();
       if (!staged) return false; // nothing to commit — no-op
       const message = `loom: auto-commit ${new Date().toISOString()} (shutdown flush)`;
       currentOp = { label: "git commit", timeoutMs: commitTimeoutMs };
@@ -869,15 +971,14 @@ export class VaultVersioner {
       // shutdown commit — the exact failure class this card exists to close, reopened one constant edit
       // away. execFileSync passes each argument as a real array element, with no shell parsing at all, so
       // this is genuinely argument-safe rather than safe-by-coincidence — real ARGS, matching what this
-      // doc's "Identity fallback" paragraph below claims. `git add -A`/`git status --porcelain` above stay
-      // on shell-string `execSync`: both are fixed literals with no interpolation, so there is nothing for
-      // an argument boundary to protect there.
+      // doc's "Identity fallback" paragraph below claims.
+      // @decision ffe98495 — `--no-verify` PLUS the hooksPath/fsmonitor overrides on every branch here.
       if (hasConfiguredGitIdentitySync(cheapOpts)) {
-        execFileSync("git", ["commit", "-m", message], commitOpts);
+        runGit("git", [...VAULT_GIT_SAFETY_ARGS, "commit", "--no-verify", "-m", message], commitOpts);
       } else {
-        execFileSync(
+        runGit(
           "git",
-          ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`, "commit", "-m", message],
+          [...VAULT_GIT_SAFETY_ARGS, "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`, "commit", "--no-verify", "-m", message],
           commitOpts,
         );
       }
