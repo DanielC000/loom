@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import chokidar, { type FSWatcher } from "chokidar";
 import type { SimpleGit } from "simple-git";
 import type { Db } from "../db.js";
-import { LOOM_HOME } from "../paths.js";
+import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
 import { withTimeout, boundedSimpleGit } from "../git/bounded.js";
 
@@ -362,12 +362,20 @@ function hasConfiguredGitIdentitySync(opts: { cwd: string; stdio: "pipe"; timeou
  * @decision 54b839c5 — never collapse this onto one shared ceiling: plumbing calls get
  *  VAULT_GIT_OP_TIMEOUT_MS (15s), working-tree calls (add/commit, the actual hang vector) get
  *  VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS (5min) — one tight ceiling would fail a genuinely-working flush.
+ *
+ * @decision 68cc29db — never init/stage/commit an operational (LOOM_HOME-rooted) vault dir here — keep
+ *  THIS guard AND the pre-disk guards in vault/writer.ts's three write functions, never just one.
  */
 export async function commitVault(
   vaultPath: string,
   message: string,
   opts?: { maxFileBytes?: number; deps?: VaultGitDeps },
 ): Promise<boolean> {
+  // @decision 68cc29db — refuse unconditionally rather than init/stage/commit an operational dir.
+  if (isOperationalVaultDir(vaultPath)) {
+    console.warn(`[vault-versioner] refusing to git-init/commit operational vault dir: ${vaultPath}`);
+    return false;
+  }
   const maxFileBytes = opts?.maxFileBytes ?? DEFAULT_MAX_VAULT_FILE_BYTES;
   const deps = opts?.deps ?? {};
   // Two tiers, two bounded instances (same seam, different ceiling) — see this function's own doc for
@@ -1046,6 +1054,13 @@ export class VaultPushStatusWatcher {
   }
 }
 
+/** Resolve `p` through the filesystem (following symlinks/junctions to their real target) when it
+ *  exists, so an ancestor check below can't be fooled by a junction alias; falls back to a lexical
+ *  `path.resolve` when `p` doesn't exist yet (nothing on disk to resolve through). */
+function realpathOrResolve(p: string): string {
+  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+}
+
 /**
  * An OPERATIONAL/daemon-home directory is NOT a docs vault — it is Loom's own state dir (`LOOM_HOME`:
  * `loom.db` + its -wal/-shm, `backups/`, `worktrees/` with node_modules, `logs/`, `tmp/`). The reserved
@@ -1054,8 +1069,12 @@ export class VaultPushStatusWatcher {
  * chokidar walking `worktrees/`+node_modules thrashes. We detect it by CONTENT (a `loom.db` file or a
  * `worktrees/` dir present — env-independent, the robust PRIMARY signal) with `LOOM_HOME`-equality as
  * belt-and-suspenders. Checked against BOTH the raw vault dir and its resolved governing repo root.
+ *
+ * @decision 68cc29db — `dir` being an ANCESTOR of `LOOM_HOME`/`WORKTREES_DIR` (e.g. the user's home dir
+ *  itself as `vaultPath`) is ALSO operational — `git add .` there would sweep loom.db/secrets/worktrees
+ *  in too. Compared via realpath (junction/symlink-resolved) + win32 case-insensitive norm().
  */
-function isOperationalVaultDir(dir: string): boolean {
+export function isOperationalVaultDir(dir: string): boolean {
   const norm = (p: string) => {
     const r = path.resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
     return process.platform === "win32" ? r.toLowerCase() : r;
@@ -1063,6 +1082,13 @@ function isOperationalVaultDir(dir: string): boolean {
   if (norm(dir) === norm(LOOM_HOME)) return true; // belt-and-suspenders: equals the daemon home
   if (fs.existsSync(path.join(dir, "loom.db"))) return true; // the live daemon DB lives here
   if (fs.existsSync(path.join(dir, "worktrees"))) return true; // worker worktrees (node_modules churn)
+  const realDir = norm(realpathOrResolve(dir));
+  for (const home of [LOOM_HOME, WORKTREES_DIR]) {
+    const realHome = norm(realpathOrResolve(home));
+    // `dir` is operational if it IS LOOM_HOME/WORKTREES_DIR (realpath form) OR an ANCESTOR of one —
+    // i.e. realHome === realDir or realHome sits strictly inside realDir.
+    if (realHome === realDir || realHome.startsWith(`${realDir}/`)) return true;
+  }
   return false;
 }
 

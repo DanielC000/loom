@@ -3614,7 +3614,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "vault_write",
       {
-        description: "Write (create or overwrite) a UTF-8 text file under a project's vault, then commit it through the vault auto-committer (reuses vault/writer.ts writeVaultFile — its mandatory path-traversal guard confines the write to the vault root). Explicit projectId + a vault-relative path. Returns { ok:true, committed } or { ok:false, reason } ('traversal' on a path escape, 'is-dir', 'error'). 404 if the project is unknown.",
+        description: "Write (create or overwrite) a UTF-8 text file under a project's vault, then commit it through the vault auto-committer (reuses vault/writer.ts writeVaultFile — its mandatory path-traversal guard confines the write to the vault root). Explicit projectId + a vault-relative path. Returns { ok:true, committed } or { ok:false, reason } ('traversal' on a path escape, 'is-dir', 'operational-dir' if this project's vault points at Loom's own home directory, 'error'). 404 if the project is unknown.",
         inputSchema: strictShape({ projectId: z.string(), path: z.string(), content: z.string() }),
       },
       async ({ projectId, path: relPath, content }) => {

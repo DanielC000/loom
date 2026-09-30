@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { commitVault } from "./versioner.js";
+import { commitVault, isOperationalVaultDir } from "./versioner.js";
 
 // Sibling to browser.ts: the WRITE side of the vault. Every operation is confined to the
 // project's vault dir by a mandatory path-traversal guard (see resolveInVault), and on success
@@ -14,7 +14,7 @@ import { commitVault } from "./versioner.js";
 
 export type VaultWriteOutcome =
   | { ok: true; committed: boolean }
-  | { ok: false; reason: "traversal" | "exists" | "not-found" | "is-dir" | "error" };
+  | { ok: false; reason: "traversal" | "exists" | "not-found" | "is-dir" | "error" | "operational-dir" };
 
 /**
  * Resolve a UI-supplied relative path to an absolute path that is PROVABLY inside the vault root,
@@ -68,6 +68,9 @@ export function ensureVaultRoot(vaultPath: string): void {
 
 /** Write (create or overwrite) a file's text content within the vault, then commit. */
 export async function writeVaultFile(vaultPath: string, relPath: string, content: string): Promise<VaultWriteOutcome> {
+  // @decision 68cc29db — refuse BEFORE touching disk: an operational (LOOM_HOME-rooted) "vault" must
+  // never receive a file write, not just never be committed — see versioner.ts's commitVault chokepoint.
+  if (isOperationalVaultDir(vaultPath)) return { ok: false, reason: "operational-dir" };
   const target = resolveInVault(vaultPath, relPath);
   if (!target) return { ok: false, reason: "traversal" };
   try {
@@ -81,6 +84,7 @@ export async function writeVaultFile(vaultPath: string, relPath: string, content
 
 /** Create a NEW file (fails if it already exists), then commit. */
 export async function createVaultFile(vaultPath: string, relPath: string, content = ""): Promise<VaultWriteOutcome> {
+  if (isOperationalVaultDir(vaultPath)) return { ok: false, reason: "operational-dir" };
   const target = resolveInVault(vaultPath, relPath);
   if (!target) return { ok: false, reason: "traversal" };
   if (fs.existsSync(target)) return { ok: false, reason: "exists" };
@@ -94,6 +98,7 @@ export async function createVaultFile(vaultPath: string, relPath: string, conten
 
 /** Delete a file within the vault (files only — never a directory), then commit. */
 export async function deleteVaultFile(vaultPath: string, relPath: string): Promise<VaultWriteOutcome> {
+  if (isOperationalVaultDir(vaultPath)) return { ok: false, reason: "operational-dir" };
   const target = resolveInVault(vaultPath, relPath);
   if (!target) return { ok: false, reason: "traversal" };
   try {
