@@ -16,6 +16,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // This file proves the FIX directly: quarantine a real repo, then call each writer and assert it refuses
 // AND that nothing it would otherwise have done actually happened (no checkout, no branch, no commit).
 //
+// QUEUED-BEHIND-A-HOLDER (card bde5d1fe item 6) — every scenario above quarantines BEFORE calling its
+// writer, so the writer's own enqueue always finds an EMPTY queue. The lock's own doc claims the check
+// runs "once prior SETTLES ... never before enqueueing" specifically so a caller QUEUED behind another
+// still-live holder is covered too — this file's last scenario drives exactly that: two genuinely
+// concurrent callers, a quarantine raised while the second sits queued (not yet invoked), refused once it
+// finally acquires.
+//
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-lock-convergence.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -34,6 +41,7 @@ const distGitDir = path.join(__dirname, "..", "dist", "git");
 const { GitWriter } = await import(pathToFileURL(path.join(distGitDir, "writer.js")).href);
 const { mergeBranch, createWorktree } = await import(pathToFileURL(path.join(distGitDir, "worktrees.js")).href);
 const { fastForwardCanonicalMain } = await import(pathToFileURL(path.join(distGitDir, "batch-merge.js")).href);
+const { withCanonicalIndexLock } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 const { enterMergeQuarantine, clearMergeQuarantine, activeMergeQuarantineFor } =
   await import(pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href);
 
@@ -191,6 +199,52 @@ try {
     check("(createWorktree) control: once cleared, the SAME call succeeds", !!info.worktreePath);
     tmpDirs.push(info.worktreePath);
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // QUEUED-BEHIND-A-HOLDER (card bde5d1fe item 6) — the "check after acquiring" property, not just "check
+  // at the front of an empty queue": a caller enqueued while ANOTHER caller still holds the lock, with a
+  // quarantine raised WHILE it sits queued (before it ever runs), must still refuse once it finally
+  // acquires — repo-lock.ts's own doc says the check runs "once prior SETTLES ... never before enqueueing"
+  // specifically for this case, but no existing test drove two genuinely concurrent callers through it.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const repo = makeRepo("queued");
+    // `prior.then(guarded, guarded)` defers a caller's OWN quarantine check by one microtask, even for
+    // the very FIRST caller on an empty queue — so A's own check does not actually run the instant
+    // `withCanonicalIndexLock` is called, only once the event loop next drains microtasks. Wait for an
+    // explicit "A has genuinely started running" signal before raising the quarantine below, or A's own
+    // check (not yet run) would race the synchronous `enterMergeQuarantine` call below and get wrongly
+    // caught by it too — this is about B, a caller queued behind an ALREADY-ACQUIRED holder, not A.
+    let releaseAStarted;
+    const aStarted = new Promise((resolve) => { releaseAStarted = resolve; });
+    let aResolved = false;
+    const aPromise = withCanonicalIndexLock(repo, async () => {
+      releaseAStarted();
+      await new Promise((r) => setTimeout(r, 500));
+      aResolved = true;
+      return "A-done";
+    });
+    await aStarted; // A has now genuinely acquired the lock (passed its own check) and is running/asleep.
+
+    // Caller B's own enqueue happens HERE, synchronously, while A is still asleep — `canonicalIndexLocks`
+    // picks up A's still-pending promise as B's `prior`, so B is genuinely QUEUED behind A regardless of
+    // when the quarantine below is raised.
+    const writer = new GitWriter(repo);
+    const bPromise = writer.checkout("other-branch");
+
+    // Raised WHILE both A (running) and B (queued, not yet invoked) are in flight — B's own guarded()
+    // callback has not run yet; it only runs once A settles.
+    enterMergeQuarantine(repo, "n/a", "manufactured for the queued-behind-a-holder test (item 6)");
+    check("(queued) precondition: A has not yet resolved when the quarantine is raised (B is still queued behind it)", !aResolved);
+
+    const [aResult, bResult] = await Promise.all([aPromise, bPromise]);
+    check("(queued) A itself completed normally — it had ALREADY acquired before the quarantine was raised", aResult === "A-done");
+    check("(queued) B — queued behind A when the quarantine was raised, not yet invoked — is refused once it acquires", bResult.ok === false);
+    check("(queued) B's refusal names the quarantine (the 'check after acquiring' property, not a stale enqueue-time check)", /QUARANTINED/i.test(bResult.error ?? ""));
+    check("(queued) B's own checkout never actually ran — HEAD is untouched", git(repo, "rev-parse --abbrev-ref HEAD") !== "other-branch");
+
+    clearMergeQuarantine(repo);
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -200,6 +254,7 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — GitWriter.checkout/createBranch/commit, mergeBranch, fastForwardCanonicalMain, and " +
     "createWorktree ALL now refuse against a quarantined canonical repo (BLOCKER 1 closed: the check lives " +
-    "at the one true convergence point, withCanonicalIndexLock, so no canonical-index writer can bypass it)."
+    "at the one true convergence point, withCanonicalIndexLock, so no canonical-index writer can bypass it), " +
+    "and (card bde5d1fe item 6) a caller QUEUED behind a still-live holder is refused at ACQUIRE time too."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

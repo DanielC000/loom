@@ -22,6 +22,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //  SCENARIO ITEM-8 — a real AST-shape check (mirroring boot-listen-not-blocked.mjs's own technique) that
 //    `packages/daemon/src/index.ts` calls `reenterMergeQuarantinesAtBoot(` BEFORE it binds the port
 //    (`app.listen(`/`startGatewayListeners(`) — the position that actually closes the request-window race.
+//  SCENARIO TORN-WRITE (card bde5d1fe item 5) — `writeMergeQuarantineLatch` fsyncs BEFORE it renames, so a
+//    crash in that ms-scale window leaves a `.json.tmp-<pid>` file whose CONTENT is durable and complete,
+//    under a name the old filter silently dropped at boot (losing a genuine quarantine). Covers: a
+//    recovered tmp's real content is used (never a generic corrupt placeholder) and promoted/cleaned up;
+//    a STALE tmp beside an already-valid final latch never clobbers the real data; a genuinely corrupt tmp
+//    gets the same fail-closed (matched-repo) treatment a corrupt `.json` already gets.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-boot-hardening.mjs
 import fs from "node:fs";
@@ -216,6 +222,74 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO TORN-WRITE (card bde5d1fe item 5) — a leftover `.json.tmp-<pid>` must be RECOVERED, never
+  // silently dropped the way the old `.filter((f) => f.endsWith(".json") && !f.includes(".tmp-"))` did.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    // (a) VALID content, crash landed between fsync and rename ⇒ recovered under its real content, then
+    // self-healed (promoted to its final name, tmp cleaned up).
+    const repo = makeRepo("tw");
+    enterMergeQuarantine(repo, "tw-branch", "manufactured for TORN-WRITE (item 5)");
+    const findLatchPathFor = (r) => fs.readdirSync(MERGE_QUARANTINE_DIR)
+      .map((f) => path.join(MERGE_QUARANTINE_DIR, f))
+      .find((p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")).repoPath === r; } catch { return false; } });
+    const latchPath = findLatchPathFor(repo);
+    check("(TW) precondition: the well-formed latch file exists", !!latchPath && fs.existsSync(latchPath));
+    const tmpPath = `${latchPath}.tmp-999999`;
+    fs.renameSync(latchPath, tmpPath); // simulates: fsync completed, the rename to the final name never ran
+    clearMergeQuarantine(repo); // clears the in-memory map only — the final .json is already gone (renamed)
+    check("(TW) precondition: in-memory map is clean, only a .tmp-<pid> file is on disk (no final .json)",
+      !activeMergeQuarantineFor(repo) && fs.existsSync(tmpPath) && !fs.existsSync(latchPath));
+
+    const found = reenterMergeQuarantinesAtBoot([repo]);
+    check("(TW) the old filter silently DROPPED a .tmp-<pid> file — now it's recovered: the repo IS quarantined", !!activeMergeQuarantineFor(repo));
+    check("(TW) the re-entry result reports this repo", found.some((q) => q.repoPath === repo));
+    check("(TW) the RECOVERED entry carries the REAL reason (durable content, never a generic corrupt-latch placeholder)", activeMergeQuarantineFor(repo)?.reason === "manufactured for TORN-WRITE (item 5)");
+    check("(TW) SELF-HEALING: the content was promoted to its proper final name", fs.existsSync(latchPath));
+    check("(TW) SELF-HEALING: the tmp file was cleaned up", !fs.existsSync(tmpPath));
+
+    // A FURTHER re-entry (another restart) reads cleanly from the now-proper final file — no tmp involved.
+    const secondFound = reenterMergeQuarantinesAtBoot([repo]);
+    check("(TW) a further re-entry still reports this repo from the promoted final file", secondFound.some((q) => q.repoPath === repo) && activeMergeQuarantineFor(repo)?.reason === "manufactured for TORN-WRITE (item 5)");
+
+    clearMergeQuarantine(repo);
+
+    // (b) a STALE tmp beside an ALREADY-VALID final latch (an earlier interrupted write; a LATER write
+    // then succeeded normally) must be cleaned up as harmless residue — never clobber the real entry.
+    const repo2 = makeRepo("tw-stale");
+    enterMergeQuarantine(repo2, "tw-stale-branch", "the REAL current reason");
+    const latchPath2 = findLatchPathFor(repo2);
+    const staleTmpPath = `${latchPath2}.tmp-111111`;
+    fs.writeFileSync(staleTmpPath, JSON.stringify({ repoPath: repo2, branch: "STALE-EARLIER-ATTEMPT", reason: "an earlier, now-superseded attempt", enteredAt: 1, tokens: ["stale-token"] }));
+    check("(TW-stale) precondition: both a real final latch and a stale tmp exist", fs.existsSync(latchPath2) && fs.existsSync(staleTmpPath));
+
+    const foundStale = reenterMergeQuarantinesAtBoot([repo2]);
+    check("(TW-stale) re-entry reports this repo exactly once, with the REAL data (never the stale tmp's)",
+      foundStale.filter((q) => q.repoPath === repo2).length === 1 && activeMergeQuarantineFor(repo2)?.reason === "the REAL current reason");
+    check("(TW-stale) the stale tmp is cleaned up as harmless residue", !fs.existsSync(staleTmpPath));
+    check("(TW-stale) the real final latch is untouched", fs.existsSync(latchPath2));
+    clearMergeQuarantine(repo2);
+
+    // (c) a genuinely CORRUPT tmp (unreadable content, no final latch at all) whose filename hash MATCHES
+    // a registered repo gets the SAME fail-closed (matched-repo) treatment a corrupt `.json` already gets.
+    const repo3 = makeRepo("tw-corrupt");
+    enterMergeQuarantine(repo3, "tw-corrupt-branch", "will be corrupted as a tmp");
+    const latchPath3 = findLatchPathFor(repo3);
+    const corruptTmpPath = `${latchPath3}.tmp-222222`;
+    fs.writeFileSync(corruptTmpPath, "{not valid json");
+    fs.rmSync(latchPath3, { force: true }); // no final latch survives — only the corrupt tmp remains
+    clearMergeQuarantine(repo3); // clears the in-memory map (disk final is already gone)
+    check("(TW-corrupt) precondition: in-memory clean, only a CORRUPT tmp is on disk (no final .json)",
+      !activeMergeQuarantineFor(repo3) && fs.existsSync(corruptTmpPath) && !fs.existsSync(latchPath3));
+
+    const foundCorrupt = reenterMergeQuarantinesAtBoot([repo3]);
+    check("(TW-corrupt) a corrupt tmp matching a registered repo fails CLOSED (quarantines THAT repo)", !!activeMergeQuarantineFor(repo3));
+    check("(TW-corrupt) the re-entry result reports this repo", foundCorrupt.some((q) => q.repoPath === repo3));
+    check("(TW-corrupt) the fail-closed reason names the corruption", /corrupt|unparsable/i.test(activeMergeQuarantineFor(repo3)?.reason ?? ""));
+    clearMergeQuarantine(repo3);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // SCENARIO ITEM-8 — real AST-shape check: index.ts calls reenterMergeQuarantinesAtBoot( BEFORE it binds
   // the port. Mirrors boot-listen-not-blocked.mjs's own technique (position in the AST, never a fixed
   // character-offset slice).
@@ -285,7 +359,8 @@ try {
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — a durable quarantine latch re-arms in a genuinely FRESH process (NC2), a corrupt latch " +
-    "fails CLOSED (matched-repo-specific or every-registered-repo, never silently skipped — BLOCKER 2), and " +
-    "index.ts re-enters quarantines BEFORE binding the port (item #8)."
+    "fails CLOSED (matched-repo-specific or every-registered-repo, never silently skipped — BLOCKER 2), a " +
+    "torn .tmp-<pid> write is recovered rather than silently dropped (card bde5d1fe item 5), and index.ts " +
+    "re-enters quarantines BEFORE binding the port (item #8)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -16,6 +16,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       reporting itself healthy. buildDaemon snapshots dist before the "build" step and restores it on
 //       failure / discards it on success — driven here via the `root` test seam so NOTHING touches the
 //       real repo's packages/web/dist.
+//   (D) card bde5d1fe item 4 — a QUARANTINED checkout (an earlier merge's orphaned process that could not
+//       be confirmed dead may still be rewriting files in `root`) must refuse BEFORE install/build ever
+//       runs — compiling a half-written tree is exactly the risk 24c0bdba's kill-confirm mechanism exists
+//       to close everywhere else on the canonical-mutating path; the deploy build is no exception.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/build-gate-integrity.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -25,6 +29,7 @@ process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-bgi-home-${Date.now()}-${pr
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { buildDaemon, deployBuildSteps } = await import("../dist/orchestration/restart.js");
+const { enterMergeQuarantine, clearMergeQuarantine } = await import("../dist/git/merge-quarantine.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -139,12 +144,31 @@ try {
   await buildDaemon({ runStep: installOnlyFails, root: bgiRoot });
   check("(C install-only) dist is untouched when only install fails (build never runs)",
     fs.existsSync(webDistFile) && fs.readFileSync(webDistFile, "utf8") === "ORIGINAL-UI");
+
+  // --- (D) card bde5d1fe item 4 — a quarantined `root` refuses BEFORE install/build ever runs ---
+  seedWebDist();
+  enterMergeQuarantine(bgiRoot, "unrelated-branch", "manufactured for SCENARIO D");
+  const calls3 = [];
+  const trackedRunner = async (step) => { calls3.push(step.label); return { code: 0, out: `${step.label} ok` }; };
+  const quarantinedResult = await buildDaemon({ runStep: trackedRunner, root: bgiRoot });
+  check("(D) a quarantined root refuses the deploy build (non-zero)", quarantinedResult.code !== 0);
+  check("(D) neither install NOR build ever ran — refused before spending the cycle", calls3.length === 0);
+  check("(D) the refusal names the quarantine in its tail", /quarantined/i.test(quarantinedResult.tail));
+  check("(D) dist is untouched — never even reached the snapshot/build step", fs.existsSync(webDistFile) && fs.readFileSync(webDistFile, "utf8") === "ORIGINAL-UI");
+
+  // NEGATIVE CONTROL: once cleared, the IDENTICAL call runs normally — proves (D)'s refusal above was the
+  // quarantine specifically, not some unrelated defect vacuously failing every call.
+  clearMergeQuarantine(bgiRoot);
+  const calls4 = [];
+  const trackedRunner2 = async (step) => { calls4.push(step.label); return { code: 0, out: `${step.label} ok` }; };
+  const clearedResult = await buildDaemon({ runStep: trackedRunner2, root: bgiRoot });
+  check("(D) control: once cleared, the SAME call succeeds and runs both steps", clearedResult.code === 0 && JSON.stringify(calls4) === JSON.stringify(["install", "build"]));
 } finally {
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
   fs.rmSync(bgiRoot, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the deploy build installs (--frozen-lockfile) BEFORE it force-builds turbo directly, a failing install short-circuits the build, a broken build can't verify a broken main green, and (card 3d7dccb9) the same invocation also runs the uncached \"stamp\" task right after \"build\"."
+  ? "\n✅ ALL PASS — the deploy build installs (--frozen-lockfile) BEFORE it force-builds turbo directly, a failing install short-circuits the build, a broken build can't verify a broken main green, (card 3d7dccb9) the same invocation also runs the uncached \"stamp\" task right after \"build\", and (card bde5d1fe) a quarantined checkout refuses before either step runs."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

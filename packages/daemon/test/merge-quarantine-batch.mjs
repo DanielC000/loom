@@ -28,6 +28,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // SCENARIO C's is an explicit assertion that merely resetting the in-memory map (never durably clearing
 // it) does NOT survive a second re-entry, proving the durable half is load-bearing, not decorative.
 //
+// SCENARIO E (card bde5d1fe item 2, added after round 6/7) — `fastForwardCanonicalMain`'s own `git merge
+// --ff-only` used to run on a bare `withTimeout` (simple-git's single-process kill only): no tree-kill, no
+// quarantine raise on an unconfirmed kill, unlike every other mutating call on this path. Reuses SCENARIO
+// B's own double-forked-hook shape (a post-merge hook this time, since ff-only triggers that, not
+// pre-commit) to prove the ff-only call now gets the SAME kill-confirm + quarantine treatment, via the
+// SAME `killableCanonicalRaw` helper — never a second tree-killer.
+//
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-batch.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -268,6 +275,51 @@ try {
     const r2 = await runBatchedMerge(repo, batchWt2, baseMainSha, [a], passGate);
     check("(D) control: the IDENTICAL shape with no mid-gate quarantine lands normally", r2.ok === true);
     check("(D) control: canonical HEAD now advances", git(repo, "rev-parse HEAD") !== baseMainSha);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO E (card bde5d1fe item 2) — the ff-only merge ITSELF dies unconfirmed ⇒ tree-kill + QUARANTINE,
+  // not a bare withTimeout abandoning the orphan (which pre-fix left NO tree-kill and NO quarantine raise
+  // on this one call, unlike every other mutating call on this path).
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const markerNameE = "escaped-descendant-e.marker";
+    function installDoubleForkedPostMergeHook(repo, holdMs, mainMs) {
+      const hookPath = path.join(repo, ".git", "hooks", "post-merge");
+      fs.writeFileSync(hookPath,
+        `#!/bin/sh\n( (sleep ${holdMs / 1000}; echo escaped > ${markerNameE}) & )\nsleep ${mainMs / 1000}\n`);
+      fs.chmodSync(hookPath, 0o755);
+    }
+
+    const repo = makeRepo("e");
+    const baseMainSha = git(repo, "rev-parse HEAD");
+    // A real, linear-descendant commit sha to fast-forward onto — cut from a SEPARATE worktree of the SAME
+    // repo (shares the object database), exactly like a batch's own `batchHeadSha` is never a named ref.
+    const { worktreePath } = await createWorktree(repo, projId, `mqb-task-e-${sfx}`);
+    fs.writeFileSync(path.join(worktreePath, "e1.txt"), "e1\n");
+    commitAll(worktreePath, "feat(test): e1", GIT_ID);
+    const targetSha = git(worktreePath, "rev-parse HEAD");
+
+    // post-merge's own cwd is the repo the merge ran IN — the canonical repo itself here, never a worktree.
+    const markerPath = path.join(repo, markerNameE);
+    installDoubleForkedPostMergeHook(repo, S_HOLD_MS, S_MAIN_MS);
+
+    const r = await fastForwardCanonicalMain(repo, baseMainSha, targetSha, { timeoutMs: SMALL_MS });
+    console.log(`(E) info: fastForwardCanonicalMain -> ${JSON.stringify({ ok: r.ok, quarantined: r.quarantined, reason: r.reason })}`);
+    check("(E) fastForwardCanonicalMain refuses", r.ok === false);
+    check("(E) the TYPED quarantined flag is set (kill-confirm + quarantine, never a bare timeout failure)", r.quarantined === true);
+    check("(E) the repo reads as quarantined via the internal state too", !!activeMergeQuarantineFor(repo));
+
+    // POSITIVE CONTROL: the escaped descendant genuinely ran (this scenario is not vacuous) — a bounded
+    // poll on the real event, never a single fixed-length guessed sleep.
+    const markerAppeared = await pollUntil(() => fs.existsSync(markerPath), { timeoutMs: S_HOLD_MS + 5000 });
+    check("(E) the escaped descendant's marker write IS eventually observed (proves it genuinely ran)", markerAppeared);
+
+    // AUTO-CLEAR: once the descendant's own exit lets confirmation finally arrive, the quarantine lifts.
+    const autoCleared = await pollUntil(() => !activeMergeQuarantineFor(repo), { timeoutMs: 20000 });
+    check("(E) the quarantine auto-clears once the real tree-death confirmation eventually arrives", autoCleared);
+
+    fs.rmSync(path.join(repo, ".git", "hooks", "post-merge"), { force: true });
   }
 } finally {
   for (const d of tmpDirs) {

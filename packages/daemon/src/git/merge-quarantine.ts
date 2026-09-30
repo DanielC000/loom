@@ -266,9 +266,14 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
   for (const p of registeredRepoPaths) hashToRepo.set(quarantineHashFor(p), p);
 
   let files: string[];
+  // @decision bde5d1fe (item 5) — a leftover `.json.tmp-<pid>` is a write whose fsync completed but whose
+  // rename never ran (a crash in that ms window) — collected below and recovered, not silently dropped.
+  let tmpFiles: string[];
   try {
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
-    files = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.endsWith(".json") && !f.includes(".tmp-"));
+    const all = fs.readdirSync(MERGE_QUARANTINE_DIR);
+    files = all.filter((f) => f.endsWith(".json"));
+    tmpFiles = all.filter((f) => /\.json\.tmp-\d+$/.test(f));
   } catch (e) {
     return quarantineAllRegisteredFailClosed(
       registeredRepoPaths,
@@ -326,6 +331,70 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
       } else {
         // No registered repo matches this corrupt latch's hash — collect it; handled in PASS 2, AFTER
         // every file has been read, so a later file's own valid entry is never clobbered (round 7 cheap-minor).
+        orphanFilenames.push(f);
+        orphanReasonParts.push(`${f}: ${(e as Error).message}`);
+      }
+    }
+  }
+
+  // PASS 1b (item 5) — recover/repair any leftover `.json.tmp-<pid>` latch. Its filename is
+  // `<hash>.json.tmp-<pid>`, so the SAME hash-matching logic as a corrupt `.json` applies once the
+  // `.json.tmp-` suffix is stripped.
+  for (const f of tmpFiles) {
+    const hash = f.slice(0, f.indexOf(".json.tmp-"));
+    const tmpPath = path.join(MERGE_QUARANTINE_DIR, f);
+    const matchedRepo = hashToRepo.get(hash);
+    if (matchedRepo && byRepoKey.has(canonicalRepoLockKey(matchedRepo))) {
+      // A proper final `.json` for this repo already loaded cleanly in PASS 1 — this tmp is stale residue
+      // from an earlier interrupted write (crash, then a LATER write succeeded); best-effort clean it up.
+      try { fs.unlinkSync(tmpPath); } catch { /* best-effort — a leftover tmp beside a good final write is harmless */ }
+      continue;
+    }
+    try {
+      const raw = fs.readFileSync(tmpPath, "utf8");
+      const parsed = JSON.parse(raw) as Partial<MergeQuarantineEntry> & { token?: string };
+      if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") {
+        throw new Error("tmp latch JSON is missing repoPath/branch/reason");
+      }
+      const tokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
+        ? parsed.tokens
+        : [typeof parsed.token === "string" ? parsed.token : randomUUID()];
+      const entry: MergeQuarantineEntry = {
+        repoPath: parsed.repoPath, branch: parsed.branch, reason: parsed.reason,
+        opId: typeof parsed.opId === "string" ? parsed.opId : undefined,
+        enteredAt: typeof parsed.enteredAt === "number" ? parsed.enteredAt : Date.now(),
+        tokens,
+        orphanLatchFiles: Array.isArray(parsed.orphanLatchFiles) && parsed.orphanLatchFiles.every((s): s is string => typeof s === "string")
+          ? parsed.orphanLatchFiles : undefined,
+      };
+      byRepoKey.set(canonicalRepoLockKey(entry.repoPath), entry);
+      // SELF-HEALING: the content was durable (fsync'd) before the crash — promote it to its proper final
+      // name, then drop the tmp. A failed promote still leaves the recovered entry ACTIVE in-process.
+      if (!writeMergeQuarantineLatch(entry)) {
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] recovered a torn-write latch (${f}) for ${entry.repoPath} but could NOT durably re-persist it under its final name — it will NOT survive another restart until this is fixed.`);
+      }
+      try { fs.unlinkSync(tmpPath); } catch { /* best-effort — a leftover tmp beside a good final write is harmless */ }
+      // eslint-disable-next-line no-console
+      console.log(`[merge-quarantine] recovered a torn-write quarantine latch (${f}) for ${entry.repoPath} at boot — the crash landed between its fsync and its rename; re-armed under its final name.`);
+    } catch (e) {
+      // Genuinely unreadable/unparsable tmp content (a crash mid-write, before fsync even completed) —
+      // same fail-closed treatment as a corrupt `.json` file: matched hash quarantines that repo, unmatched
+      // joins the orphan sweep below.
+      if (matchedRepo) {
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable (${(e as Error).message}) but its filename hash matches registered repo ${matchedRepo} — quarantining THAT repo rather than risk discarding a real quarantine.`);
+        const entry: MergeQuarantineEntry = {
+          repoPath: matchedRepo, branch: "(unknown — corrupt boot-time latch)",
+          reason: `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}: ${(e as Error).message}) matching this repo's hash — fail-closed rather than risk discarding a real quarantine`,
+          enteredAt: Date.now(), tokens: [randomUUID()],
+        };
+        byRepoKey.set(canonicalRepoLockKey(matchedRepo), entry);
+        if (!writeMergeQuarantineLatch(entry)) {
+          // eslint-disable-next-line no-console
+          console.error(`[merge-quarantine] fail-closed quarantine for ${matchedRepo} (matched-corrupt tmp latch ${f}) could NOT be durably persisted — it will NOT survive another restart until this is fixed.`);
+        }
+      } else {
         orphanFilenames.push(f);
         orphanReasonParts.push(`${f}: ${(e as Error).message}`);
       }

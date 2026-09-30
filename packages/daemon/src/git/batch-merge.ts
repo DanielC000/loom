@@ -333,8 +333,11 @@ async function landBranchCommitsIndividually(
   // pick/commit in this loop will touch — an orphaned child here must never survive to corrupt that.
   const rollback = async (): Promise<void> => {
     try {
-      await killableCanonicalRaw(batchWorktreePath, ["cherry-pick", "--abort"], timeoutMs, "git cherry-pick --abort (batch land)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
+      await killableCanonicalRaw(batchWorktreePath, ["cherry-pick", "--abort"], timeoutMs, "git cherry-pick --abort (batch land)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
     } catch (e) {
+      // @decision bde5d1fe — already quarantined at the re-check (never THIS call's own kill) — refuse,
+      // never re-raise (no kill happened here to auto-clear later).
+      if (e instanceof RepoQuarantinedError) { quarantinedByRollback = true; rollbackIssue = e.message; return; }
       // Round 4: even this best-effort abort quarantines the CANONICAL repo on an unconfirmed kill — an
       // orphaned abort could still be mutating the SAME worktree a later candidate is about to touch.
       if (treeDeathUnconfirmed(e)) {
@@ -344,8 +347,9 @@ async function landBranchCommitsIndividually(
       /* otherwise best-effort, as before: expected when no cherry-pick is in progress */
     }
     try {
-      await killableCanonicalRaw(batchWorktreePath, ["reset", "--hard", batchHeadBefore], timeoutMs, "git reset --hard (batch land rollback)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
+      await killableCanonicalRaw(batchWorktreePath, ["reset", "--hard", batchHeadBefore], timeoutMs, "git reset --hard (batch land rollback)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
     } catch (e) {
+      if (e instanceof RepoQuarantinedError) { quarantinedByRollback = true; rollbackIssue = e.message; return; }
       if (treeDeathUnconfirmed(e)) {
         raisedToken = enterMergeQuarantine(repoPath, branch, "batch rollback (reset --hard) could not be confirmed dead after a kill");
         quarantinedByRollback = true; rollbackIssue = describeGitFailure(e).text; return;
@@ -387,9 +391,14 @@ async function landBranchCommitsIndividually(
       // later candidate in this loop) will also touch.
       await killableCanonicalRaw(
         batchWorktreePath, [...identityArgs, "cherry-pick", "--no-commit", sha],
-        timeoutMs, "git cherry-pick (batch land)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled,
+        timeoutMs, "git cherry-pick (batch land)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath,
       );
     } catch (e) {
+      // @decision bde5d1fe — already quarantined at the re-check (never THIS call's own kill) — refuse
+      // directly; rollback() would just refuse too, so skip it (nothing this call mutated).
+      if (e instanceof RepoQuarantinedError) {
+        return { ok: false, quarantined: true, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} refused — canonical repo is quarantined: ${e.message}` };
+      }
       // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill: rollback()'s own reset
       // --hard would race whatever might still be alive, never touch the worktree further in that case.
       if (treeDeathUnconfirmed(e)) {
@@ -449,9 +458,14 @@ async function landBranchCommitsIndividually(
       // this SAME worktree happens to be staging by the time it resumes (rollback, or the next candidate).
       await killableCanonicalRaw(
         batchWorktreePath, [...identityArgs, "commit", "--author", `${authorName} <${authorEmail}>`, "--date", authorDate, "-m", finalMessage],
-        timeoutMs, "git commit (batch land)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled,
+        timeoutMs, "git commit (batch land)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath,
       );
     } catch (e) {
+      // @decision bde5d1fe — already quarantined at the re-check (never THIS call's own kill) — refuse
+      // directly, same reasoning as the cherry-pick catch above.
+      if (e instanceof RepoQuarantinedError) {
+        return { ok: false, quarantined: true, reason: `${branch}: commit failed landing ${sha.slice(0, 7)} — refused: canonical repo is quarantined: ${e.message}` };
+      }
       // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill, same reasoning as the
       // cherry-pick catch above.
       if (treeDeathUnconfirmed(e)) {
@@ -504,9 +518,14 @@ async function landBranchCommitsIndividually(
       // @decision 24c0bdba — kill-confirmed, same reasoning as the plain commit above.
       await killableCanonicalRaw(
         batchWorktreePath, [...identityArgs, "commit", "--amend", "-m", amendedMessage],
-        timeoutMs, "git commit --amend (batch land, pathset)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled,
+        timeoutMs, "git commit --amend (batch land, pathset)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath,
       );
     } catch (e) {
+      // @decision bde5d1fe — already quarantined at the re-check (nothing spawned, so no HEAD recovery to
+      // attempt) — refuse directly, never re-raise.
+      if (e instanceof RepoQuarantinedError) {
+        return { ok: false, quarantined: true, reason: `${branch}: Loom-Worker-Base/PathSet amend for ${sha.slice(0, 7)} refused — canonical repo is quarantined: ${e.message}` };
+      }
       // An unverified amend can still be alive, able to rewrite HEAD again later — never warn-and-continue
       // with an unverified sha, and never let the NEXT candidate's cherry-pick race it. Checked BEFORE the
       // HEAD-based recovery read below, which assumes the child is done mutating.
@@ -748,11 +767,31 @@ export async function fastForwardCanonicalMain(
         };
       }
       if (targetSha === expectedBaseSha) return { ok: true }; // nothing landed on top — no-op fast-forward
+      // @decision bde5d1fe (item 2) — kill-confirmed, same helper + quarantine treatment as the solo
+      // squash commit (mergeBranchLocked): a bare withTimeout here abandoned an orphaned ff-only/post-merge
+      // hook child on timeout, exactly the race 24c0bdba closed everywhere else on this path.
+      let raisedToken: string | undefined;
+      const onTreeDeathSettled = (confirmed: boolean): void => {
+        if (confirmed && raisedToken) clearMergeQuarantineByToken(repoPath, raisedToken);
+      };
       try {
-        await withTimeout(
-          git.raw(["merge", "--ff-only", targetSha]), timeoutMs, "git merge --ff-only (canonical, batch fast-forward)",
+        await killableCanonicalRaw(
+          repoPath, ["merge", "--ff-only", targetSha], timeoutMs, "git merge --ff-only (canonical, batch fast-forward)",
+          deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled,
         );
       } catch (e) {
+        if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: `fast-forward refused — canonical repo is quarantined: ${e.message}` };
+        if (treeDeathUnconfirmed(e)) {
+          raisedToken = enterMergeQuarantine(repoPath, "(batch fast-forward)", "fast-forward merge could not be confirmed dead after a kill");
+          return { ok: false, quarantined: true, reason: `fast-forward merge's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${(e as Error).message}` };
+        }
+        // A hung post-merge hook can outlive the timeout AFTER HEAD already moved — re-verify before
+        // reporting a false failure (mirrors mergeBranchLocked's own post-commit-failure HEAD re-read).
+        let headAfterFailure: string | undefined;
+        try {
+          headAfterFailure = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-ff-failure verify)")).trim();
+        } catch { /* unknown — fall through to the ordinary failure below */ }
+        if (headAfterFailure === targetSha) return { ok: true };
         return { ok: false, reason: `fast-forward failed: ${(e as Error).message}` };
       }
       return { ok: true };

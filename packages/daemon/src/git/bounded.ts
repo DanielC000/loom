@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { simpleGit, type SimpleGit, type SimpleGitOptions } from "simple-git";
 import { killGateProcessTree } from "../orchestration/gate-runner.js";
+import { assertRepoNotQuarantined } from "./merge-quarantine.js";
+import { RepoQuarantinedError } from "./repo-lock.js";
 
 /**
  * Neutral extraction (card 9df3ea71) of the bounded-git primitives six independent copies across this
@@ -13,6 +15,10 @@ import { killGateProcessTree } from "../orchestration/gate-runner.js";
  * @decision 24c0bdba — one exception: `orchestration/gate-runner.ts`'s `killGateProcessTree`, reused by
  * {@link killableCanonicalRaw}'s tree-kill path rather than a second tree-killer — verified acyclic
  * (`gate-runner.ts` → `gate-spill.ts` → `paths.ts` → `pty/resolve-bin.ts` → node builtins only).
+ *
+ * @decision bde5d1fe — a second exception, same shape: `./merge-quarantine.js`/`./repo-lock.js`, reused by
+ * {@link killableCanonicalRaw}'s own re-check rather than a third quarantine-checking copy — do not swap
+ * either import for a hand-rolled quarantine check here; both are verified acyclic against this file.
  *
  * This module intentionally does NOT bundle a `withTimeout` race with `.env()` handling, a fixed timeout
  * constant, or non-interactive env into one opinionated helper: the six sites differ on purpose (per-
@@ -273,6 +279,10 @@ export function treeDeathUnconfirmed(e: unknown): boolean {
  *
  * `onTreeDeathSettled`, when supplied, is forwarded verbatim to {@link spawnCanonicalGitTree} — see that
  * function's own doc. Never invoked at all on the `gitFactory` test-seam path (no real child exists there).
+ *
+ * @decision bde5d1fe — RE-CHECKS the quarantine immediately before every call (real or test-seam), never
+ * just once at an outer entry. `quarantineRepoPath` (default `repoPath`) is the CANONICAL repo to check
+ * when `repoPath` itself is an ephemeral worktree. Throws {@link RepoQuarantinedError} before spawning.
  */
 export async function killableCanonicalRaw(
   repoPath: string,
@@ -282,7 +292,10 @@ export async function killableCanonicalRaw(
   gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">,
   env?: Record<string, string | undefined>,
   onTreeDeathSettled?: (confirmed: boolean) => void,
+  quarantineRepoPath: string = repoPath,
 ): Promise<string> {
+  const quarantineCheck = assertRepoNotQuarantined(quarantineRepoPath);
+  if (!quarantineCheck.ok) throw new RepoQuarantinedError(quarantineCheck.reason);
   if (gitFactory) return withTimeout(gitFactory(repoPath, timeoutMs).raw(args), timeoutMs, label);
   const controller = new AbortController();
   return withTimeoutKillingChild(

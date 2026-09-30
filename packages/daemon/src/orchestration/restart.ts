@@ -10,6 +10,7 @@ import { DEPLOY_PACKAGES } from "../deploy-packages.js";
 import type { CapQueuedSpawn } from "./cap-queue.js";
 import { boundedSimpleGit } from "../git/bounded.js";
 import { readBuildInfo } from "../deploy-staleness.js";
+import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 
 const require = createRequire(import.meta.url);
 
@@ -778,6 +779,13 @@ export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail:
   const root = deps.root ?? repoRoot();
   const run = deps.runStep ?? runBuildStep;
   return (async () => {
+    // @decision bde5d1fe (item 4) — refuse BEFORE an install+build cycle on a QUARANTINED checkout: an
+    // orphaned process that could not be confirmed dead may still be rewriting files in `root`, so
+    // compiling it now risks shipping a build over a half-written tree.
+    const quarantineCheck = assertRepoNotQuarantined(root);
+    if (!quarantineCheck.ok) {
+      return { code: 1, tail: `deploy build refused — ${quarantineCheck.reason}` };
+    }
     let lastOut = "";
     for (const step of deployBuildSteps(root)) {
       if (step.label === "build") {

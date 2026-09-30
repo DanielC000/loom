@@ -5871,6 +5871,9 @@ async function mergeBranchLocked(
         // index/tree while withCanonicalIndexLock is held, so an orphaned child must never outlive release.
         await killableCanonicalRaw(repoPath, ["reset", "--merge", "HEAD"], timeoutMs, "git reset --merge (canonical, residue clear)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
       } catch (e) {
+        // @decision bde5d1fe — re-checked AND already quarantined (never THIS call's own kill) — refuse,
+        // never re-raise (no kill happened here to auto-clear later).
+        if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message };
         // @decision 24c0bdba (round 4) — fail CLOSED + QUARANTINE on an unconfirmed tree-kill here too.
         if (treeDeathUnconfirmed(e)) {
           raisedToken = enterMergeQuarantine(repoPath, branch, "in-progress-merge residue clear could not be confirmed dead after a kill", opId);
@@ -5924,6 +5927,9 @@ async function mergeBranchLocked(
       await killableCanonicalRaw(repoPath, ["reset", "--hard", "HEAD"], timeoutMs, `git reset --hard (canonical, ${context})`, deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
       return null;
     } catch (e) {
+      // @decision bde5d1fe — re-checked AND already quarantined (never THIS call's own kill) — refuse,
+      // never re-raise.
+      if (e instanceof RepoQuarantinedError) return `reset --hard (${context}) refused — canonical repo is quarantined: ${e.message}`;
       // @decision 24c0bdba (round 4) — this IS itself a mutating canonical call; an unconfirmed kill of
       // ITS OWN child quarantines the repo too, the same as every other mutating call on this path.
       if (treeDeathUnconfirmed(e)) {
@@ -6003,6 +6009,11 @@ async function mergeBranchLocked(
     // is the primary fix (no concurrent op can leave leftover stage here anymore); this is the backstop for
     // anything outside it.
     if (rawError) {
+      // @decision bde5d1fe — already quarantined at the squash re-check (never THIS attempt's own kill) —
+      // refuse directly; resetOrSkip would just refuse too, so skip the redundant call.
+      if (rawErrorObject instanceof RepoQuarantinedError) {
+        return { ok: false, reason: `git merge --squash refused — canonical repo is quarantined: ${rawErrorMessage}` };
+      }
       // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill: resetOrSkip's own
       // reset --hard would race whatever might still be alive, never touch the repo further in that case.
       if (treeDeathUnconfirmed(rawErrorObject)) {
@@ -6110,6 +6121,9 @@ async function mergeBranchLocked(
     try {
       await killableCanonicalRaw(repoPath, ["commit", "-m", message], timeoutMs, "git commit (canonical, squash-merge)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
     } catch (e) {
+      // @decision bde5d1fe — already quarantined at the re-check (nothing spawned this call, so no HEAD
+      // recovery to attempt) — refuse directly, never re-raise.
+      if (e instanceof RepoQuarantinedError) return { ok: false, reason: `squash commit refused — canonical repo is quarantined: ${e.message}` };
       // Code Review (card 24c0bdba, finding B1 residual): the tree-kill's OWN confirmation can itself come
       // back unconfirmed (a descendant not reaped within grace) — fail CLOSED + QUARANTINE, never touch
       // the repo further, since resetOrSkip's `reset --hard` would race whatever might still be alive.

@@ -1417,6 +1417,18 @@ function worktreeGcWarning(outcome: "wedged" | "left-on-disk" | "needs-human-ski
   }
 }
 
+/**
+ * Whether `mergeBatchTracked`'s own batch-worktree removal `finally` may proceed — `batchQuarantinedSnapshot`
+ * alone (`runBatchedMerge`'s own return, captured BEFORE the per-branch finalize loop that follows it) is
+ * stale by the time this runs: an entirely separate op can quarantine the repo in that window. Exported for
+ * direct testing, since `removeWorktree`'s OTHER caller (`gcWorktreeDir`) already re-checks fresh inline.
+ *
+ * @decision bde5d1fe (item 3)
+ */
+export function safeToRemoveBatchWorktree(repoPath: string, batchQuarantinedSnapshot: boolean): boolean {
+  return !batchQuarantinedSnapshot && assertRepoNotQuarantined(repoPath).ok;
+}
+
 /** Card df14d55e — the shared hazard framing for an empty (0-commit) worker branch, reused by both the
  *  `[loom:worker-idle]` and `[loom:worker-exited]` nudges (`notifyManagerOfIdleWorker` /
  *  `notifyManagerOfExitedWorker`, below) so the two copies can't drift the way they did before this card:
@@ -17317,7 +17329,13 @@ export class SessionService {
           // Round 4 (Code Review b2ebf41f, ruling 1c): a QUARANTINED batch worktree is left for a human to
           // inspect, never removed — an unconfirmed tree-kill mid-batch means something may still be alive
           // in there, and `--force` removal would race whatever that is.
-          if (batchWorktreePath && !batchQuarantined) await removeWorktree(finalRepoPath, batchWorktreePath, { timeoutMs: this.gitOpMs }).catch(() => {});
+          //
+          // @decision bde5d1fe (item 3) — `batchQuarantined` is a stale SNAPSHOT from `runBatchedMerge`'s
+          // own return; re-check the LIVE state right before removal via the shared helper (this is
+          // `removeWorktree`'s OTHER caller — `gcWorktreeDir` already re-checks fresh at its own call).
+          if (batchWorktreePath && safeToRemoveBatchWorktree(finalRepoPath, batchQuarantined)) {
+            await removeWorktree(finalRepoPath, batchWorktreePath, { timeoutMs: this.gitOpMs }).catch(() => {});
+          }
         }
       },
       // @decision f944d4e4 — this async settle nudge fires ONLY for a caller that observed
