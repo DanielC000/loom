@@ -71,6 +71,11 @@ check("startArgv bakes start --no-open --port", svc.startArgv(4317).join(" ") ==
     plist.includes("<string>start</string>") && plist.includes("<string>--no-open</string>") &&
     plist.includes("<string>--port</string>") && plist.includes(`<string>${PORT}</string>`));
   check("mac plist: RunAtLoad + KeepAlive (autostart + keep-alive)", plist.includes("<key>RunAtLoad</key>") && plist.includes("<key>KeepAlive</key>"));
+  // Card 0da5a3f7: KeepAlive must be the SuccessfulExit:false qualifier form (crash-only restart), never
+  // unconditional <true/> — see that decision record for the launchd-vs-`loom update` race it prevents.
+  check("mac plist: KeepAlive is SuccessfulExit:false (crash-only, matches systemd's on-failure)",
+    /<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>\s*<\/dict>/.test(plist));
+  check("mac plist: KeepAlive is NOT the unconditional bare <true/> form", !/<key>KeepAlive<\/key>\s*<true\/>/.test(plist));
   check("mac plist: well-formed (declares plist + closes)", plist.startsWith("<?xml") && plist.trimEnd().endsWith("</plist>"));
 
   const plan = svc.servicePlan({ platform: "darwin", node: NODE, loomBin: LOOM_BIN, port: PORT, homedir: HOMEDIR, loomHome: null, userId: "" });

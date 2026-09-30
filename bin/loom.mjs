@@ -327,6 +327,19 @@ function postShutdown(port) {
   });
 }
 
+// Card 0da5a3f7: `update()`'s narrower stop path for a daemon that ANSWERS (fetchVersion succeeded) but
+// has no usable PID record — no pid file at all, or one whose recorded pid is no longer alive. There is
+// no pid to identify, let alone verify, so there is nothing safe to signal: this deliberately never falls
+// back to SIGTERM/SIGKILL/taskkill the way stop()'s own ladder does for a usable record. Only the
+// graceful loopback hook, then a bounded wait for the port to actually go down. Returns false on anything
+// short of that (a non-2xx/absent hook response, or a port still held once the wait elapses) — `update()`
+// treats false as "could not confirm stopped" and refuses to proceed to the reinstall.
+async function stopViaLoopbackOnly(port, timeoutMs = 12000) {
+  const hook = await postShutdown(port);
+  if (hook.status !== 200 && hook.status !== 202) return false;
+  return waitForDown(port, timeoutMs);
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitForExit(pid, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
@@ -364,12 +377,44 @@ This package looks incomplete (was it built/assembled with scripts/build-npm-pac
   return daemonEntry;
 }
 
+// Card 0da5a3f7: foreground has no separate child process to track — THIS CLI invocation IS the daemon
+// process (the daemon boots in-process via the dynamic import below), so `process.pid` already IS its
+// pid. Before this, `writePidFile` was called ONLY from `startDetached`, so a bare `loom`/`loom start`
+// (and, since `loom service` registers `loom start --no-open`, an OS-service-managed daemon too) never
+// had a PID record at all — `loom stop` then unconditionally reported "no PID file" and returned 0
+// *without ever attempting the graceful shutdown hook*, and `loom update` treated that false "already
+// stopped" as license to run `npm i -g` UNDER a still-live daemon. Writing this record here, in the same
+// shape `startDetached` already uses, fixes `loom stop` against a foreground/OS-service daemon for free
+// (see `stop()` — its logic is unchanged; it just now has a `rec` to work with).
+function writeForegroundPidRecord({ port, url }) {
+  writePidFile({ pid: process.pid, port, url, version: readVersion(), startedAt: new Date().toISOString() });
+}
+// Removes the pid file ONLY if it still names OUR OWN pid — never a later invocation's record we lost a
+// clobber race against (e.g. a stray second `loom start` on the same LOOM_HOME). Exported so a test can
+// exercise the exact write/remove pair without booting a real daemon (there is no `<repo-root>/dist` in
+// this monorepo checkout for `resolveDaemonEntry` to find — see this file's own header comment; the
+// packaged npm layout is what `startForeground` actually runs against).
+export function removeForegroundPidRecordIfOwnedBySelf() {
+  try {
+    const cur = readPidFile();
+    if (cur && cur.pid === process.pid) removePidFile();
+  } catch { /* best-effort — never block process exit */ }
+}
+export { writeForegroundPidRecord };
+
 // --- start (FOREGROUND): backward-compatible with the original bare `loom` -------------------------
 async function startForeground({ port, open }) {
   const daemonEntry = resolveDaemonEntry();
   process.env.LOOM_PORT = String(port);
   const url = urlFor(port);
   console.log(`Starting Loom v${readVersion()} …`);
+
+  // Record our own pid BEFORE booting (mirrors startDetached, which writes immediately after spawn,
+  // before the child is necessarily ready) — see writeForegroundPidRecord's own comment for why. Clean
+  // exit (Ctrl-C/SIGTERM/SIGHUP all funnel through the daemon's own gracefulShutdown → process.exit(0),
+  // which fires this process's 'exit' event synchronously) removes it again.
+  writeForegroundPidRecord({ port, url });
+  process.once("exit", removeForegroundPidRecordIfOwnedBySelf);
 
   // In-process boot: importing the daemon entry runs its main() (binds 127.0.0.1:LOOM_PORT and serves
   // the viewport). The daemon owns its own SIGINT/SIGTERM shutdown + "listening" log; we just await
@@ -604,6 +649,24 @@ async function serviceCmd({ action, port }) {
   });
 }
 
+// The real reinstall step, spawned through the SHELL (Windows `npm` is `npm.cmd`, and Node 22 refuses to
+// spawnSync a .cmd directly — EINVAL, a CVE mitigation — so shell:true is required there; it also
+// resolves bare `npm` on POSIX). The args are hardcoded safe tokens (`spec` is `loomctl@<dist-tag>` with
+// the channel validated to stable|beta), so there is no shell-injection surface.
+//
+// TEST SEAM (card 0da5a3f7): under LOOM_TEST=1 ONLY, LOOM_TEST_NPM_INSTALL_CMD — a JSON argv-prefix array,
+// e.g. `["node","/path/to/fixture.mjs"]` — replaces this call so a hermetic test can exercise update()'s
+// full stop → install → restart flow without ever touching the real global npm registry; `spec` is still
+// appended as the final argv entry so a fixture can assert exactly what would have been installed. Unset,
+// or outside LOOM_TEST, this is byte-identical to the original unconditional real-npm call.
+function runNpmInstall(spec) {
+  if (process.env.LOOM_TEST === "1" && process.env.LOOM_TEST_NPM_INSTALL_CMD) {
+    const [file, ...prefixArgs] = JSON.parse(process.env.LOOM_TEST_NPM_INSTALL_CMD);
+    return spawnSync(file, [...prefixArgs, spec], { stdio: "inherit" });
+  }
+  return spawnSync("npm", ["i", "-g", spec], { stdio: "inherit", shell: true });
+}
+
 // --- update: upgrade in place via npm, then a clean restart ----------------------------------------
 // END USERS run NO supervisor (the exit-75 restart sentinel is supervisor-only — see CLAUDE.md), so an
 // update can't be a self-restart; it's a deliberate stop → reinstall → start cycle driven from here:
@@ -615,6 +678,10 @@ async function serviceCmd({ action, port }) {
 //   (4) START the daemon back up (detached) if one had been running, now on the new code.
 // (Self-hosting note from CLAUDE.md: a dep-adding upgrade needs the install to land before the start —
 // step 3 precedes step 4, so that holds here.)
+//
+// @decision 0da5a3f7 — step (2) must NEVER let step (3) run against a still-live daemon: only a USABLE
+// pid record (rec && isAlive(rec.pid)) may go through stop()'s full ladder; anything else refuses the
+// update outright on anything short of a confirmed-down port via stopViaLoopbackOnly, never a signal.
 async function update({ channel, port: explicitPort }) {
   const home = loomHome();
   const chan = channel ? writeChannel(home, channel) : readChannel(home);
@@ -626,22 +693,28 @@ async function update({ channel, port: explicitPort }) {
 
   console.log(`loom: updating on the '${chan}' channel → npm i -g ${spec}`);
 
-  // (2) stop first (graceful, reusing the stop ladder) so files are unlocked for the reinstall.
+  // (2) stop first (graceful) so files are unlocked for the reinstall.
   if (wasRunning) {
-    console.log("loom: stopping the running daemon …");
-    const rc = await stop();
-    if (rc !== 0) { console.error("loom: could not stop the daemon — aborting update (nothing was reinstalled)."); return rc; }
+    if (rec && isAlive(rec.pid)) {
+      console.log("loom: stopping the running daemon …");
+      const rc = await stop();
+      if (rc !== 0) { console.error("loom: could not stop the daemon — aborting update (nothing was reinstalled)."); return rc; }
+    } else {
+      console.log("loom: a daemon is answering on the port but has no usable PID record (it may predate this fix, or the record is stale/foreign) — stopping it via the graceful shutdown hook only …");
+      if (!(await stopViaLoopbackOnly(port))) {
+        console.error(`loom: refusing to update — a daemon is still running at ${urlFor(port)} and could not be confirmed stopped (there is no PID record to identify it, so it can't be hard-killed safely either). Stop it yourself, then retry 'loom update'.`);
+        return 1;
+      }
+      removePidFile(); // clear any stale/foreign record now that the port is confirmed down
+      console.log("loom: daemon stopped (graceful, no PID record).");
+    }
   } else {
     console.log("loom: no daemon is running — installing the update only.");
   }
 
   // (3) reinstall the global package in place. npm respects the active npm prefix, so a staged/throwaway
-  //     prefix is upgraded rather than the dev global. Spawn through the SHELL: on Windows `npm` is
-  //     `npm.cmd`, and Node 22 refuses to spawnSync a .cmd directly (EINVAL — a CVE mitigation), so
-  //     shell:true is required there; it also resolves bare `npm` on POSIX. The args are hardcoded safe
-  //     tokens (`spec` is `loomctl@<dist-tag>` with the channel validated to stable|beta), so there is
-  //     no shell-injection surface.
-  const r = spawnSync("npm", ["i", "-g", spec], { stdio: "inherit", shell: true });
+  //     prefix is upgraded rather than the dev global — see runNpmInstall for the spawn shape + test seam.
+  const r = runNpmInstall(spec);
   if (r.error || r.status !== 0) {
     const why = r.error ? r.error.message : `exit ${r.status}`;
     console.error(`loom: npm install failed (${why}). The daemon was NOT restarted — start it with 'loom start'.`);

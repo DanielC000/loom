@@ -71,9 +71,15 @@ WantedBy=default.target
 `;
 }
 
-// launchd LaunchAgent plist. RunAtLoad starts it when the agent is loaded at login; KeepAlive restarts
-// it if it exits (the keep-alive). Stdout/stderr go to a log under LOOM_HOME so a background boot stays
-// debuggable.
+// launchd LaunchAgent plist. RunAtLoad starts it when the agent is loaded at login; KeepAlive restarts it
+// on a CRASH (a non-zero/signal exit) — the same "keep-alive on failure, not on every exit" posture as
+// Linux's `Restart=on-failure` and Windows' `RestartOnFailure`, via KeepAlive's SuccessfulExit qualifier
+// rather than the unconditional `<true/>` form.
+//
+// @decision 0da5a3f7 — do not revert to unconditional `<true/>`: it races launchd's own auto-respawn
+// against `loom update`'s stop → npm install → restart sequence (a graceful stop is a clean exit).
+//
+// Stdout/stderr go to a log under LOOM_HOME so a background boot stays debuggable.
 export function macPlistText({ node, loomBin, port, loomHome, logDir }) {
   const programArgs = [node, loomBin, ...startArgv(port)];
   const argXml = programArgs.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
@@ -99,7 +105,10 @@ ${envXml}
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>StandardOutPath</key>
   <string>${xmlEscape(outLog)}</string>
   <key>StandardErrorPath</key>
