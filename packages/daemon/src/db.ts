@@ -3235,13 +3235,9 @@ export class Db {
     const agentIds = (this.db.prepare("SELECT id FROM agents WHERE project_id = ?").all(id) as Row[]).map((r) => r.id as string);
     this.db.transaction(() => {
       for (const sid of sessionIds) {
-        this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
-        this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(sid);
-        this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(sid);
-        this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sid);
+        this.cascadeSessionForeignKeyChildren(sid); // card e152014c
         // orchestration_events is session-keyed (manager OR worker) with no project_id — drop per session id.
         this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
-        this.purgeBoardReadSnapshots(sid); // card 15bdb031
       }
       for (const aid of agentIds) this.db.prepare("DELETE FROM schedules WHERE agent_id = ?").run(aid);
       this.db.prepare("DELETE FROM run_events WHERE project_id = ?").run(id);
@@ -4295,17 +4291,13 @@ export class Db {
     const durablePlaceholders = durableKinds.map(() => "?").join(",");
     this.db.transaction(() => {
       for (const sid of sessionIds) {
-        this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
-        this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(sid);
-        this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(sid);
-        this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sid);
+        this.cascadeSessionForeignKeyChildren(sid); // card e152014c
         this.db.prepare(
           `DELETE FROM orchestration_events WHERE (manager_session_id = ? OR worker_session_id = ?) AND kind NOT IN (${durablePlaceholders})`,
         ).run(sid, sid, ...durableKinds);
         // pending_gate_ops is now a PERMANENT tombstone table (card e3e40167), keyed by owner_session_id
         // with no direct agent_id — cascade per session, mirroring deleteProject's own project_id cascade.
         this.db.prepare("DELETE FROM pending_gate_ops WHERE owner_session_id = ?").run(sid);
-        this.purgeBoardReadSnapshots(sid); // card 15bdb031
       }
       // run_events is project/run-keyed (not agent-keyed) — drop only the rows for THIS agent's runs.
       for (const rid of runIds) this.db.prepare("DELETE FROM run_events WHERE run_id = ?").run(rid);
@@ -5303,20 +5295,56 @@ export class Db {
     return changed;
   }
   /**
-   * Permanently delete a session row (the Archive tab's Delete). Also drops its pending wakes + reminders
-   * + capability grants + any decision-inbox questions it asked (any state — pending/answered/consumed).
-   * `questions.session_id` is a NOT NULL FK and better-sqlite3 enforces foreign keys by default (verified —
-   * the stale claim elsewhere in this file that FKs aren't enforced is wrong): without this, deleting a
-   * session that ever asked a question (even a long-consumed one) threw SQLITE_CONSTRAINT_FOREIGNKEY
-   * instead of succeeding.
+   * Cascade EVERY table with an enforced (or, for companion_capability_grants, application-level) FK to
+   * sessions(id) for ONE session id — the single per-session cleanup shared by deleteSession/deleteProject/
+   * deleteAgent, so there is one list to keep in sync instead of three copies that silently drift apart
+   * (card e152014c: the three used to carry three DIFFERENT partial lists). Caller MUST run this inside a
+   * transaction — better-sqlite3 enforces foreign keys by default (verified — a stale claim elsewhere in
+   * this file once said otherwise), so any of these rows still pointing at a deleted session throws
+   * SQLITE_CONSTRAINT_FOREIGNKEY.
+   *
+   * Two different shapes, by column semantics — mirrors the reparentWakes/reparentQuestions/
+   * reparentEventTriggerTargets/reparentPollJobTargets/reparentWebhookTargets family, which moves these
+   * same columns onto a recycle SUCCESSOR instead of clearing them:
+   *  - a plain `session_id` column (wakes, companion_reminders, companion_messages,
+   *    companion_conversations, questions) means the row is OWNED by that session — cascade-DELETE it.
+   *  - a `target_session_id`-shaped column (event_triggers.target_session_id,
+   *    webhook_endpoints.target_session_id, and poll_jobs.session_id — which predates the
+   *    target_session_id naming convention but functions identically, see reparentPollJobTargets' own
+   *    doc) is a standing, human-configured row that merely WAKES this session — NULL the reference so the
+   *    trigger/endpoint/poll job survives, inert, rather than silently vanishing a config the human set up.
+   *
+   * companion_capability_grants.session_id carries NO enforced FK (see its own schema doc) but is
+   * cascaded here anyway, for the reason that schema comment names deleteSession explicitly: a recycled
+   * session id must never inherit a stale grant.
+   *
+   * @decision e152014c
+   */
+  private cascadeSessionForeignKeyChildren(sessionId: string): void {
+    this.cancelWakesForSession(sessionId);
+    this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(sessionId);
+    this.deleteCompanionCapabilityGrantsForSession(sessionId);
+    this.db.prepare("DELETE FROM companion_messages WHERE session_id = ?").run(sessionId);
+    this.db.prepare("DELETE FROM companion_conversations WHERE session_id = ?").run(sessionId);
+    this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sessionId);
+    this.db.prepare("UPDATE poll_jobs SET session_id = NULL WHERE session_id = ?").run(sessionId);
+    this.db.prepare("UPDATE event_triggers SET target_session_id = NULL WHERE target_session_id = ?").run(sessionId);
+    this.db.prepare("UPDATE webhook_endpoints SET target_session_id = NULL WHERE target_session_id = ?").run(sessionId);
+    this.purgeBoardReadSnapshots(sessionId); // card 15bdb031
+  }
+  /**
+   * Permanently delete a session row (the Archive tab's Delete), atomically with its full FK-child
+   * cascade (see cascadeSessionForeignKeyChildren) — pending wakes, reminders, capability grants,
+   * companion chat history (messages + conversations), decision-inbox questions (any state —
+   * pending/answered/consumed), and nulling any poll job / event trigger / webhook endpoint that targets
+   * it. Wrapped in ONE transaction (card e152014c) so a mid-cascade failure can never half-apply — the
+   * session row and every one of its FK children live or die together.
    */
   deleteSession(id: string): void {
-    this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(id);
-    this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(id);
-    this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(id);
-    this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(id);
-    this.purgeBoardReadSnapshots(id); // card 15bdb031
-    this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    this.db.transaction(() => {
+      this.cascadeSessionForeignKeyChildren(id);
+      this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    })();
     this.notifySessionChanged(id);
   }
   insertSession(s: Session): void {
