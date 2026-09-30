@@ -395,7 +395,16 @@ export function TerminalCard({
             <SessionQueue sessionId={session.id} pending={subPanels.queueData} onMutated={subPanels.onQueueMutated} />
           </div>
         )}
-        {!watchOnly && <Composer sessionId={session.id} />}
+        {/* `key` is LOAD-BEARING, not a list-reconciliation hint (card 14c68c62). The Composer seeds its
+            draft from the per-session store with a LAZY useState initializer, which runs on MOUNT only —
+            so a card that stays mounted while `session.id` changes under it (the /session/:id deep-link
+            route reuses one SessionView element across an id change) would carry session A's unfinished
+            text into session B, write it INTO B's draft on the next keystroke, and Send it to B. Keying on
+            the id makes each session its OWN component instance: A's draft is never rendered under B, and
+            every `setDraft` call is closed over the one id that instance was mounted with, so no keystroke
+            can land under the wrong session mid-transition. This is the ONLY place a Composer is mounted —
+            keeping the key here means no call site can forget it. */}
+        {!watchOnly && <Composer key={session.id} sessionId={session.id} />}
       </div>
     </>
   );

@@ -18,6 +18,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
   // ZERO loss between the inline box and the expand-to-large editor below — both render from this one
   // `text` state, so there is no second copy to drift. writeText keeps the store in sync on every edit;
   // a successful send clears both (see onSuccess).
+  // ⚠️ Because that initializer runs on MOUNT ONLY, this component is correct only for ONE `sessionId`
+  // per instance: it does NOT re-seed if the prop changes underneath it. Its sole mount site keys it on
+  // the session id for exactly that reason (TerminalCard) — don't drop that key, and don't add a
+  // re-seeding effect in its place (an effect runs after commit, so it would render, and accept
+  // keystrokes into, the previous session's draft under the new id for one frame).
   const [text, setText] = useState(() => getDraft(sessionId));
   const [status, setStatus] = useState<string | null>(null);
   // The large-editor overlay. It shares EVERYTHING below (text/send/speech) with the inline box, so
