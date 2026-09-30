@@ -4376,16 +4376,19 @@ function writeLog(live: Live | CodexLive, buf: Buffer): void {
 
 /**
  * Card 9a8bc38f: constant-time compare of a caller-presented bearer token against a session's own
- * secret — shared by `verifyMcpToken` (the `/mcp*` route guard, covering every first-party MCP route:
- * core/orchestration/setup/platform/audit/user-audit/operator/run all resolve through the ONE gateway
- * onRequest hook that calls it) and `verifyHookToken` (the `/internal/hook` guard) below — two sibling
- * secrets on two sibling paths, same comparator. Unlike `verifyLoopbackSecret`
- * (gateway/loopback-secret.ts), which length-checks its two fixed-format buffers before
- * `timingSafeEqual`, this hashes BOTH sides to a fixed-length (32-byte) SHA-256 digest first — a
- * caller here can present a token of ANY length, so hashing first means the two buffers compared are
- * always equal-length and there is no length-mismatch branch to early-exit on at all.
+ * secret — shared by `verifyMcpToken` (every first-party `/mcp*` route) and `verifyHookToken`
+ * (`/internal/hook`) below. Unlike `verifyLoopbackSecret` (gateway/loopback-secret.ts), which
+ * length-checks its two fixed-format buffers before `timingSafeEqual`, this hashes BOTH sides to a
+ * fixed-length SHA-256 digest first — a caller here can present a token of ANY length, so there is no
+ * length-mismatch branch to early-exit on at all.
+ *
+ * FAIL-CLOSED on either side missing/empty: `createHash().update()` throws on `undefined`/`null`, and a
+ * token field isn't runtime-guaranteed non-empty for every caller — the pre-9a8bc38f `===` just
+ * returned `false` for an unset secret, so this must too, never a 500 in its place.
  */
-function timingSafeEqualToken(presented: string, expected: string): boolean {
+function timingSafeEqualToken(presented: string | undefined, expected: string | undefined): boolean {
+  if (typeof presented !== "string" || presented.length === 0) return false;
+  if (typeof expected !== "string" || expected.length === 0) return false;
   const a = createHash("sha256").update(presented, "utf8").digest();
   const b = createHash("sha256").update(expected, "utf8").digest();
   return timingSafeEqual(a, b);

@@ -30,7 +30,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       method/function body extraction, card fdf93d3a's pattern — comment-immune, so a comment-only
 //       diff can never flip it) that each compiled body routes through the shared timingSafeEqualToken
 //       helper, and that the helper itself hashes to a fixed-length digest before calling node:crypto's
-//       timingSafeEqual — never a raw string `===`.
+//       timingSafeEqual — never a raw string `===`. Also: FAIL-CLOSED when the session's own stored
+//       secret is undefined (a corrupted/partial Live entry) — 401/403, never a 500 (createHash().update()
+//       would otherwise throw on undefined).
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -260,6 +262,27 @@ try {
     check("(H) verifyHookToken's compiled body calls timingSafeEqualToken", verifyHookBody !== null && /timingSafeEqualToken\(/.test(verifyHookBody));
     const hasRawHookCompare = verifyHookBody !== null && (/token\s*===\s*live\.hookToken/.test(verifyHookBody) || /===\s*token\b/.test(verifyHookBody));
     check("(H) verifyHookToken's compiled body does NOT compare the token with a raw `===`", verifyHookBody !== null && !hasRawHookCompare);
+
+    // FAIL-CLOSED on a missing/undefined EXPECTED secret (manager review follow-up): createHash().update()
+    // THROWS on undefined — a corrupted/partial Live entry (a race during spawn, a future partial row)
+    // must still 401/403, never a 500. Mutate a real, live Live entry's own token fields directly (the
+    // seam this file already reads mcpToken/hookToken through), exercise the real route, then restore.
+    const liveS1 = host.live.get("S1");
+    const savedMcpToken = liveS1.mcpToken;
+    liveS1.mcpToken = undefined;
+    const undefMcpRes = await appReal.inject({ method: "POST", url: "/mcp/S1", headers: authH(tokenS1), payload: {} });
+    check("(H) FAIL-CLOSED: an undefined live.mcpToken → 401, never a 500/throw", undefMcpRes.statusCode === 401);
+    liveS1.mcpToken = savedMcpToken;
+    const restoredMcpRes = await appReal.inject({ method: "POST", url: "/mcp/S1", headers: authH(tokenS1), payload: {} });
+    check("(H) FAIL-CLOSED: restoring live.mcpToken lets S1's real token reach the handler again (299)", restoredMcpRes.statusCode === 299);
+
+    const savedHookToken = liveS1.hookToken;
+    liveS1.hookToken = undefined;
+    const undefHookRes = await postHook("S1", { hook_event_name: "SessionStart", session_id: "engine-undef-hook" }, hookTokenS1);
+    check("(H) FAIL-CLOSED: an undefined live.hookToken → 403, never a 500/throw", undefHookRes.statusCode === 403);
+    liveS1.hookToken = savedHookToken;
+    const restoredHookRes = await postHook("S1", { hook_event_name: "SessionStart", session_id: "engine-restored-hook" }, hookTokenS1);
+    check("(H) FAIL-CLOSED: restoring live.hookToken lets S1's own hook token succeed again (200)", restoredHookRes.statusCode === 200);
   }
 } finally {
   try { await appNoStub?.close(); } catch { /* ignore */ }
@@ -270,6 +293,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the per-session-token guard on every first-party /mcp* route (card 280b1e44) fails CLOSED with a bare pty stub, 401s every one of the 8 patterns with no/wrong/cross-session credential without ever invoking the real router handler, accepts the exact right session-scoped token (positive control), refuses an exited-but-unarchived session's own still-matching token (the liveness half, distinct from the token-match half), PlatformMcpRouter's OWN resolveRole independently gates on isLoomDev(), and verifyMcpToken AND the sibling /internal/hook guard verifyHookToken both compare in CONSTANT TIME via a shared fixed-length-digest + timingSafeEqual comparator, never a raw `===` (card 9a8bc38f)."
+  ? "\n✅ ALL PASS — the per-session-token guard on every first-party /mcp* route (card 280b1e44) fails CLOSED with a bare pty stub, 401s every one of the 8 patterns with no/wrong/cross-session credential without ever invoking the real router handler, accepts the exact right session-scoped token (positive control), refuses an exited-but-unarchived session's own still-matching token (the liveness half, distinct from the token-match half), PlatformMcpRouter's OWN resolveRole independently gates on isLoomDev(), verifyMcpToken AND the sibling /internal/hook guard verifyHookToken both compare in CONSTANT TIME via a shared fixed-length-digest + timingSafeEqual comparator never a raw `===`, and that same comparator FAILS CLOSED (401/403, never a 500) when a session's own stored secret is undefined (card 9a8bc38f)."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
