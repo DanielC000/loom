@@ -119,7 +119,7 @@ try {
     );
     gw.registerAdapter(adapter);
 
-    const r = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "999", body: "hello from my phone" });
+    const r = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "999", body: "hello from my phone", chatIsDirect: true });
     check("telegram inbound: accepted", r.accepted === true && r.sessionId === sessTg);
 
     const rows = db.listCompanionMessages(sessTg, TELEGRAM_CHANNEL);
@@ -136,7 +136,7 @@ try {
     );
     gw.registerAdapter(adapter);
 
-    const r = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "999", body: "", attachments: [{ type: "audio", fileId: "tg-file-id" }] });
+    const r = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "999", body: "", attachments: [{ type: "audio", fileId: "tg-file-id" }], chatIsDirect: true });
     check("telegram voice inbound: accepted, submittedText is the transcript", r.accepted === true && r.submittedText === "a voice note transcript");
 
     const rows = db.listCompanionMessages(sessTg, TELEGRAM_CHANNEL);
@@ -193,7 +193,7 @@ try {
 
     const before = db.listCompanionMessages(sessTg, IN_APP_CHANNEL).length;
     check("setup: no in-app rows recorded yet via this path", before === 0);
-    const r = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sessTg, body: "typed in the web panel" });
+    const r = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sessTg, body: "typed in the web panel", chatIsDirect: true });
     check("in-app inbound via the generic gateway hook: still accepted (routing unaffected)", r.accepted === true);
     check("in-app inbound: the generic recorder SKIPS in-app (0 rows) — controller.ts's own dedicated hook is the only in-app writer", db.listCompanionMessages(sessTg, IN_APP_CHANNEL).length === 0);
   }
@@ -228,7 +228,7 @@ try {
 
     throwOnRecord = true;
     let threwInbound = false;
-    const r = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "999", body: "history db is down" }).catch(() => { threwInbound = true; return null; });
+    const r = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "999", body: "history db is down", chatIsDirect: true }).catch(() => { threwInbound = true; return null; });
     check("containment: a THROWING recorder never breaks an accepted inbound", threwInbound === false && r?.accepted === true);
 
     let threwReply = false;
@@ -257,7 +257,7 @@ try {
     const gw = createCompanionGateway(cfg, () => ({ delivered: true }), db, new InAppChannel());
 
     const before = db.listCompanionMessages(sessReal, IN_APP_CHANNEL).length;
-    const r = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sessReal, body: "typed via the REAL factory-built gateway" });
+    const r = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sessReal, body: "typed via the REAL factory-built gateway", chatIsDirect: true });
     check("REAL factory guard: an in-app inbound through the production-wired gateway is still accepted", r.accepted === true);
     check(
       "REAL factory guard: ...but inserts ZERO companion_messages rows — factory.ts's ACTUAL recorder skips in-app, not just this test's stand-in",

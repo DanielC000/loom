@@ -62,7 +62,7 @@ import { resolveCompanionGrant } from "./capabilities.js";
 import { resolveAllEnabledConfigs } from "./store.js";
 import { IN_APP_CHANNEL, normalizeInAppMessage, type InAppChannel } from "./in-app.js";
 import type { CompanionConfig } from "./config.js";
-import type { CompanionRoute, CompanionSynthesizer, CompanionTranscriber, DeliverResult, InboundMessage, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
+import type { CompanionRoute, CompanionSynthesizer, CompanionTranscriber, DeliverResult, InboundResult, SessionBinding, SubmitTurn } from "./types.js";
 import type { Session } from "@loom/shared";
 
 /** The minimal lifecycle handle the controller needs from a heartbeat watcher (satisfied by
@@ -439,7 +439,11 @@ export class CompanionController implements CompanionControl {
   async handleInAppAudioInbound(sessionId: string, filePath: string): Promise<InboundResult | { accepted: false; reason: "companion-off" }> {
     const gateway = this.gateways.get(sessionId);
     if (!gateway) return { accepted: false, reason: "companion-off" };
-    const msg: InboundMessage = { channel: IN_APP_CHANNEL, chatId: sessionId, body: "", attachments: [{ type: "audio", fileId: filePath }] };
+    // Routed through the SAME shared in-app constructor as the typed-text path (card b4f124d8 minor fix) —
+    // a hand-built InboundMessage here previously omitted `chatIsDirect`, the one field the dm-scope
+    // authorization gate (auth.ts) now requires to authorize a dm binding.
+    const msg = normalizeInAppMessage(sessionId, "", [{ type: "audio", fileId: filePath }]);
+    if (!msg) return { accepted: false, reason: "no-text" };
     const result = await gateway.handleInbound(msg);
     if (result.accepted && result.submittedText) {
       // viaVoice:true (unified cross-channel chat, card 7d63e200 follow-up) — this whole method exists

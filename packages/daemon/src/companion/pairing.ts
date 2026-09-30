@@ -22,6 +22,7 @@
  *     report chat type) fails CLOSED, same no-oracle reject as any other invalid attempt.
  */
 import type { SessionBinding } from "./types.js";
+import { isConfirmedDirectChat } from "./types.js";
 import type { PairingRedeemResult } from "../db.js";
 import { parsePairingCode } from "../keys/hash.js";
 
@@ -112,10 +113,12 @@ export function createDbCompanionPairing(db: PairingStore, policy: PairingPolicy
       if (!a.senderId) return { outcome: "not-a-code" };
       // SECURITY (card db49891d): a dm-bind grant must never be minted from a chat the channel hasn't
       // CONFIRMED private — a `dm` binding authorizes by route-match alone, so binding a group/supergroup
-      // chat as "dm" would admit every member as the session's single owner. `chatIsDirect` must be an
-      // explicit `true`; `false` or omitted (unknown) fails CLOSED, same as the no-sender case above — the
-      // store is never even touched, so this can't be rate-limited or probed like a real wrong-code guess.
-      if (a.grantType === "dm-bind" && a.chatIsDirect !== true) return { outcome: "not-a-code" };
+      // chat as "dm" would admit every member as the session's single owner. `isConfirmedDirectChat`
+      // requires an explicit `true`; `false` or omitted (unknown) fails CLOSED, same as the no-sender case
+      // above — the store is never even touched, so this can't be rate-limited or probed like a real
+      // wrong-code guess. Shared verbatim with auth.ts's dm-scope authorization gate (card b4f124d8) so
+      // the write side (mint) and read side (authorize) can't drift apart on what counts as "confirmed".
+      if (a.grantType === "dm-bind" && !isConfirmedDirectChat(a.chatIsDirect)) return { outcome: "not-a-code" };
       // Only a plausibly-a-code body is a redemption candidate — everything else is normal chatter that
       // must NOT touch the pairing store (and so can't consume a rate-limit budget by accident).
       const parsed = parsePairingCode(a.body.trim());

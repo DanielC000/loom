@@ -128,7 +128,7 @@ try {
     check("dm-bind: the code is now consumed (single-use)", db.getPairingCodeById(codeId)?.consumed_at != null && db.getPairingCodeById(codeId)?.consumed_by === "user-9");
 
     // The SAME chat now ROUTES a normal message to sess-D (pairing took effect live, no restart).
-    const r2 = await gw.handleInbound({ channel: "telegram", chatId: "dm-new", body: "hello there", sender: { id: "user-9" } });
+    const r2 = await gw.handleInbound({ channel: "telegram", chatId: "dm-new", body: "hello there", sender: { id: "user-9" }, chatIsDirect: true });
     check("dm-bind: the paired chat now routes a normal turn to the bound session", r2.accepted === true && r2.sessionId === "sess-D" && submitted.length === 1 && submitted[0].text === "hello there");
 
     // Single-use: the same code redeemed from a DIFFERENT unbound chat is rejected (already consumed).

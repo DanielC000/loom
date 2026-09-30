@@ -21,7 +21,10 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const CFG = { botToken: "test-token", allowedChatId: "12345", sessionId: "companion-sess" };
 const CHANNEL = "telegram";
-const inbound = (chatId, body) => ({ channel: CHANNEL, chatId, body });
+// chatIsDirect:true — this file tests the end-to-end chat LOOP (submit/route/chat_reply), not the
+// dm-scope authorization boundary itself (companion-authz.mjs); dm-scope authorization now requires the
+// inbound to confirm a private chat (card b4f124d8).
+const inbound = (chatId, body) => ({ channel: CHANNEL, chatId, body, chatIsDirect: true });
 
 // A minimal fake ChannelAdapter that records outbound sends (no live network).
 function fakeAdapter(name, sent) {

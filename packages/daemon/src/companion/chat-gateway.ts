@@ -39,6 +39,7 @@ import type {
   SessionBinding,
   SubmitTurn,
 } from "./types.js";
+import { isConfirmedDirectChat } from "./types.js";
 import { allowIfDmMatch, type CompanionAuth } from "./auth.js";
 import { noPairing, type CompanionPairing } from "./pairing.js";
 import { inMemoryVoicePrefs, voicePrefRoute, type CompanionVoicePrefs } from "./voice-prefs.js";
@@ -93,6 +94,10 @@ export class ChatGateway {
    * stays globally unique (the db route index), so bindingForInbound still resolves to exactly one binding.
    */
   private readonly bindingsBySession = new Map<string, SessionBinding[]>();
+
+  /** Binding route keys (`channel:chatId`) already warned for the "dm-scope binding, unconfirmed-direct
+   *  inbound" security event (card b4f124d8) — see `warnUnconfirmedDirectInbound` below. */
+  private readonly warnedUnconfirmedDirectBindings = new Set<string>();
 
   /**
    * @param submitTurn  the injected pty turn-submit primitive (kept db-free — see SubmitTurn).
@@ -294,23 +299,39 @@ export class ChatGateway {
     }
     // Per-binding SENDER authz (Companion authz layer) — the load-bearing deny gate. Placed IMMEDIATELY
     // after the route match and BEFORE submitTurn, so an unauthorized sender PROVABLY never reaches turn
-    // submission. DM: authorized by the route match (single owner). GROUP: requires an allowlisted
-    // sender.id; a missing/unlisted sender is rejected here.
-    if (!this.auth.isSenderAuthorized(binding, msg.sender)) {
-      // Companion DM-pairing: BEFORE rejecting an unauthorized sender on a matched (group) binding, attempt
-      // a `group-sender` redemption. The added id is the AUTHENTICATED sender.id, and the code MUST be
-      // scoped to THIS binding's session (enforced in the db txn) — a code for session A can't grant into
-      // group B. On success the code text never reaches submitTurn; on failure we fall through to the SAME
-      // silent reject below.
-      const red = this.pairing.redeem({ grantType: "group-sender", channel: msg.channel, chatId: msg.chatId, senderId: msg.sender?.id, body: msg.body, bindingSessionId: binding.sessionId });
-      if (red.outcome === "sender-added") {
-        // Companion Trust Window close path (Framework Card 0): a new group member being paired in changes
-        // WHO may drive this session — revoke every window so the fresh member (and everyone else) starts
-        // cold, never inheriting an existing member's warm window.
-        this.closeTrustWindow?.(binding.sessionId);
-        const acked = await this.tryAck(binding, PAIRED_ACK);
-        this.debug(`inbound PAIRED (group-sender): sender allowlisted (channel=${msg.channel} chat=${msg.chatId} session=${binding.sessionId})`);
-        return { accepted: false, reason: "paired-sender", sessionId: binding.sessionId, acked };
+    // submission. DM: authorized by the route match ONLY when the inbound itself CONFIRMS a private chat
+    // (card b4f124d8 — see auth.ts / isConfirmedDirectChat). GROUP: requires an allowlisted sender.id; a
+    // missing/unlisted sender is rejected here.
+    if (!this.auth.isSenderAuthorized(binding, msg.sender, msg.chatIsDirect)) {
+      // SECURITY (card b4f124d8): a `dm`-scope binding whose inbound did NOT confirm a private chat — the
+      // binding may name a group/supergroup chatId (minted before card db49891d's write-side fix, or
+      // hand-bound by a human). Logged once per binding, disclosure-safe (routing metadata only — no
+      // message body, no sender identity) so a misconfigured binding is discoverable without spamming the
+      // log on every retried inbound.
+      if (binding.scope === "dm" && !isConfirmedDirectChat(msg.chatIsDirect)) {
+        this.warnUnconfirmedDirectInbound(binding, msg.chatIsDirect);
+      }
+      // Companion DM-pairing: BEFORE rejecting an unauthorized sender on a matched GROUP binding, attempt a
+      // `group-sender` redemption. SCOPED TO `group` ONLY (Code Review, card b4f124d8 follow-up): a `dm`
+      // binding falling into this branch (the unconfirmed-direct-chat case just above) must NOT also
+      // attempt a group-sender redemption — a group member holding a valid group-sender code for this
+      // session would otherwise get "paired" (allowlist row written, code consumed, trust window closed)
+      // while still remaining UNAUTHORIZED against the dm binding, misleading the owner and burning the
+      // code for nothing. The added id is the AUTHENTICATED sender.id, and the code MUST be scoped to THIS
+      // binding's session (enforced in the db txn) — a code for session A can't grant into group B. On
+      // success the code text never reaches submitTurn; on failure we fall through to the SAME silent
+      // reject below.
+      if (binding.scope === "group") {
+        const red = this.pairing.redeem({ grantType: "group-sender", channel: msg.channel, chatId: msg.chatId, senderId: msg.sender?.id, body: msg.body, bindingSessionId: binding.sessionId });
+        if (red.outcome === "sender-added") {
+          // Companion Trust Window close path (Framework Card 0): a new group member being paired in
+          // changes WHO may drive this session — revoke every window so the fresh member (and everyone
+          // else) starts cold, never inheriting an existing member's warm window.
+          this.closeTrustWindow?.(binding.sessionId);
+          const acked = await this.tryAck(binding, PAIRED_ACK);
+          this.debug(`inbound PAIRED (group-sender): sender allowlisted (channel=${msg.channel} chat=${msg.chatId} session=${binding.sessionId})`);
+          return { accepted: false, reason: "paired-sender", sessionId: binding.sessionId, acked };
+        }
       }
       this.debug(
         `inbound REJECTED: sender not authorized (channel=${msg.channel} chat=${msg.chatId} ` +
@@ -870,6 +891,28 @@ export class ChatGateway {
     if (!process.env.LOOM_COMPANION_DEBUG) return;
     // eslint-disable-next-line no-console
     console.debug(`[companion] ${msg}`);
+  }
+
+  /**
+   * SECURITY (card b4f124d8), ALWAYS ON (unlike `debug` above): a `dm`-scope binding rejected an inbound
+   * the channel did not confirm as a private chat — a strong signal the binding names a group/supergroup
+   * chatId. Logged at most ONCE per binding (keyed by its route, not the session — a re-bound session gets
+   * a fresh warning if it names a new route) so a misconfigured binding surfaces without spamming the log
+   * on every retried inbound from the same chat. Disclosure-safe: only server-known routing metadata
+   * (session id, channel) — never the binding's own chatId, nor the inbound's `body`/`sender`, all of
+   * which are either identifying or untrusted, attacker-influenced content.
+   */
+  private warnUnconfirmedDirectInbound(binding: SessionBinding, chatIsDirect: boolean | undefined): void {
+    const key = `${binding.channel}:${binding.chatId}`;
+    if (this.warnedUnconfirmedDirectBindings.has(key)) return;
+    this.warnedUnconfirmedDirectBindings.add(key);
+    const confirmedState = chatIsDirect === undefined ? "unknown (not reported)" : String(chatIsDirect);
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[companion] SECURITY: dm-scope binding (session=${binding.sessionId} channel=${binding.channel}) ` +
+        `rejected an inbound whose chat was NOT confirmed private (chatIsDirect=${confirmedState}). This ` +
+        `binding may name a group/supergroup chat — re-bind it with scope "group" if so.`,
+    );
   }
 }
 

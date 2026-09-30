@@ -39,8 +39,10 @@ requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this tes
 const { Db } = await import("../dist/db.js");
 const { ChatGateway } = await import("../dist/companion/chat-gateway.js");
 const { createDbCompanionAuth, allowIfDmMatch } = await import("../dist/companion/auth.js");
+const { createDbCompanionPairing } = await import("../dist/companion/pairing.js");
 const { readCompanionConfig } = await import("../dist/companion/config.js");
 const { IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
+const { normalizeTelegramMessage } = await import("../dist/companion/telegram.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -106,11 +108,23 @@ try {
     check("group: MISSING sender → sender-not-authorized (hard reject)", rNoSender.accepted === false && rNoSender.reason === "sender-not-authorized");
     check("group: missing sender NOT submitted", submitted.length === 1);
 
-    // (4b) DM binding with a matching chatId → accept (single-owner path, sender irrelevant).
-    const rDm = await gw.handleInbound({ channel: "telegram", chatId: "dm-1", body: "owner here", sender: { id: "owner" } });
-    check("dm: matching chatId → accepted, submitted to sess-D", rDm.accepted === true && submitted.length === 2 && submitted[1].sid === "sess-D");
-    const rDmNoSender = await gw.handleInbound({ channel: "telegram", chatId: "dm-1", body: "still owner" });
-    check("dm: matching chatId with NO sender → still accepted (route IS the proof)", rDmNoSender.accepted === true && submitted.length === 3);
+    // (4b) DM binding with a matching chatId + a CONFIRMED-private chat → accept (single-owner path,
+    // sender irrelevant). `chatIsDirect: true` mirrors what the real Telegram normalizer reports for a
+    // genuine chat.type:"private" update (card b4f124d8 — dm-scope authorization now REQUIRES it).
+    const rDm = await gw.handleInbound({ channel: "telegram", chatId: "dm-1", body: "owner here", sender: { id: "owner" }, chatIsDirect: true });
+    check("dm: matching chatId + confirmed-private → accepted, submitted to sess-D", rDm.accepted === true && submitted.length === 2 && submitted[1].sid === "sess-D");
+    const rDmNoSender = await gw.handleInbound({ channel: "telegram", chatId: "dm-1", body: "still owner", chatIsDirect: true });
+    check("dm: matching chatId + confirmed-private, NO sender → still accepted (route IS the proof)", rDmNoSender.accepted === true && submitted.length === 3);
+
+    // SECURITY (card b4f124d8): the SAME dm binding, but the inbound does NOT confirm a private chat —
+    // rejected at AUTHORIZATION time, same silent reject as any unauthorized sender. Covers both the
+    // explicit-false (a confirmed group/supergroup) and undefined (unknown/malformed) cases.
+    const rDmGroup = await gw.handleInbound({ channel: "telegram", chatId: "dm-1", body: "not actually a dm", sender: { id: "member" }, chatIsDirect: false });
+    check("dm: chatIsDirect:false (confirmed NOT private) → sender-not-authorized", rDmGroup.accepted === false && rDmGroup.reason === "sender-not-authorized");
+    check("dm: chatIsDirect:false was NOT submitted", submitted.length === 3);
+    const rDmUnknown = await gw.handleInbound({ channel: "telegram", chatId: "dm-1", body: "unclear", sender: { id: "member" } });
+    check("dm: chatIsDirect omitted (unknown) → sender-not-authorized (fails closed)", rDmUnknown.accepted === false && rDmUnknown.reason === "sender-not-authorized");
+    check("dm: chatIsDirect omitted was NOT submitted", submitted.length === 3);
 
     // A removed allowlist entry takes effect LIVE (the auth reads the db per-inbound, no restart).
     db.removeAllowedSender(db.listAllowedSenders("sess-G")[0].id);
@@ -151,8 +165,15 @@ try {
   // ============ Part 3 — the default (db-free) allow-if-DM-match auth ============
   {
     const auth = allowIfDmMatch();
-    check("default-auth: DM binding authorized (single-owner route match)", auth.isSenderAuthorized({ sessionId: "s", channel: "telegram", chatId: "c", scope: "dm" }, { id: "x" }) === true);
-    check("default-auth: GROUP binding REJECTED (no allowlist to consult)", auth.isSenderAuthorized({ sessionId: "s", channel: "telegram", chatId: "c", scope: "group" }, { id: "x" }) === false);
+    const dm = { sessionId: "s", channel: "telegram", chatId: "c", scope: "dm" };
+    const group = { sessionId: "s", channel: "telegram", chatId: "c", scope: "group" };
+    check("default-auth: DM binding + confirmed-private → authorized (single-owner route match)", auth.isSenderAuthorized(dm, { id: "x" }, true) === true);
+    // SECURITY (card b4f124d8): a dm binding no longer authorizes on route match alone — the inbound must
+    // itself confirm the chat is private. Both `false` (confirmed non-private) and `undefined` (unknown)
+    // fail closed, mirroring pairing.ts's `isConfirmedDirectChat` write-side gate exactly.
+    check("default-auth: DM binding + chatIsDirect:false → REJECTED", auth.isSenderAuthorized(dm, { id: "x" }, false) === false);
+    check("default-auth: DM binding + chatIsDirect omitted → REJECTED (fails closed)", auth.isSenderAuthorized(dm, { id: "x" }) === false);
+    check("default-auth: GROUP binding REJECTED (no allowlist to consult)", auth.isSenderAuthorized(group, { id: "x" }, true) === false);
   }
 
   // ============ Part 4 — HUMAN-ONLY: no companion admin tool on ANY agent-facing MCP surface (test 7) ============
@@ -312,11 +333,104 @@ try {
     await app.close();
     db.close();
   }
+
+  // ============ Part 6 — dm-scope binding on a GROUP chatId, authorized AT INBOUND time (card b4f124d8) ============
+  // The remaining hole card db49891d's write-side fix left open: a `dm`-scope binding that ALREADY names a
+  // group/supergroup chatId (minted before that fix, or hand-bound by a human via REST) must not authorize
+  // every member of that chat as the session's single owner. Driven through the REAL Telegram normalizer
+  // (not a hand-built InboundMessage) so this exercises the actual adapter → gateway → auth path a live
+  // group-chat attack would take — mirroring companion-pairing.mjs's Part G for the WRITE side.
+  {
+    const db = new Db(dbFile("p6.db"));
+    // PRE-EXISTING dm binding on what is, in reality, a Telegram group chat id — exactly the shape the
+    // review flagged (a dm binding minted before card db49891d, or hand-bound by a human).
+    db.upsertCompanionBinding({ sessionId: "sess-P6", channel: "telegram", chatId: "grp-was-dm", scope: "dm" });
+
+    const submitted6 = [];
+    const submit6 = (sid, text) => { submitted6.push({ sid, text }); return { delivered: true }; };
+    const gw6 = new ChatGateway(submit6, [{ sessionId: "sess-P6", channel: "telegram", chatId: "grp-was-dm", scope: "dm" }], createDbCompanionAuth(db));
+    gw6.registerAdapter(fakeAdapter("telegram", []));
+
+    // A real Telegram "group" chat.type update, from an identified member, addressed at the pre-existing
+    // dm-bound chatId — ON UNFIXED CODE this used to be submitted as a turn (route match alone authorized
+    // any dm binding); AFTER the fix it is refused, same silent reject as an unauthorized group sender.
+    const groupUpdate = normalizeTelegramMessage({
+      message: { chat: { id: "grp-was-dm", type: "group" }, text: "let me drive this companion", from: { id: "member-1" } },
+    });
+    check("p6: normalizer reports chatIsDirect:false for the group update", groupUpdate?.chatIsDirect === false);
+    const rGroup = await gw6.handleInbound(groupUpdate);
+    check("p6: dm binding on a GROUP chat → REFUSED (sender-not-authorized), never submitted", rGroup.accepted === false && rGroup.reason === "sender-not-authorized");
+    check("p6: the group message was NOT submitted as a turn", submitted6.length === 0);
+
+    // Same for "supergroup".
+    const supergroupUpdate = normalizeTelegramMessage({
+      message: { chat: { id: "grp-was-dm", type: "supergroup" }, text: "me too", from: { id: "member-2" } },
+    });
+    const rSuper = await gw6.handleInbound(supergroupUpdate);
+    check("p6: dm binding on a SUPERGROUP chat → REFUSED", rSuper.accepted === false && rSuper.reason === "sender-not-authorized");
+    check("p6: the supergroup message was NOT submitted", submitted6.length === 0);
+
+    // A channel update that can't report chat type (chatIsDirect omitted) fails CLOSED too.
+    const rUnknown = await gw6.handleInbound({ channel: "telegram", chatId: "grp-was-dm", body: "unclear", sender: { id: "member-3" } });
+    check("p6: chatIsDirect omitted (unknown) → REFUSED (fails closed)", rUnknown.accepted === false && rUnknown.reason === "sender-not-authorized");
+    check("p6: the unknown-type message was NOT submitted", submitted6.length === 0);
+
+    // A REAL private chat at a DIFFERENT chatId on the SAME binding-scope still works — the fix rejects an
+    // unconfirmed chat, it does not break genuine dm routing.
+    db.upsertCompanionBinding({ sessionId: "sess-P6-real", channel: "telegram", chatId: "real-private", scope: "dm" });
+    const gw6b = new ChatGateway(submit6, [{ sessionId: "sess-P6-real", channel: "telegram", chatId: "real-private", scope: "dm" }], createDbCompanionAuth(db));
+    const privateUpdate = normalizeTelegramMessage({
+      message: { chat: { id: "real-private", type: "private" }, text: "hello", from: { id: "owner" } },
+    });
+    check("p6: normalizer reports chatIsDirect:true for the private update", privateUpdate?.chatIsDirect === true);
+    const rPrivate = await gw6b.handleInbound(privateUpdate);
+    check("p6: a REAL private chat still authorizes + submits normally", rPrivate.accepted === true && submitted6.length === 1 && submitted6[0].sid === "sess-P6-real" && submitted6[0].text === "hello");
+
+    db.close();
+  }
+
+  // ============ Part 7 — a MIS-SCOPED dm binding must NOT fall into group-sender redemption (Code Review ea493bbb, card b4f124d8) ============
+  // The review on the Part 6 fix found a NEW reachable path: once a dm binding stopped auto-authorizing on
+  // route match alone, an unauthorized inbound on it fell through to the SAME group-sender pairing attempt
+  // a real group binding uses. If that session ALSO happens to hold a valid, unconsumed group-sender code
+  // (minted for it before anyone noticed the binding was mis-scoped, or by a confused admin), a group
+  // member holding that code would get "paired" — an allowlist row written, the trust window closed, the
+  // code burned — while remaining genuinely UNAUTHORIZED (the binding is still `dm` scope, which never
+  // consults an allowlist). The owner sees a false "paired" ack and the code is gone for nothing.
+  {
+    const db = new Db(dbFile("p7.db"));
+    db.upsertCompanionBinding({ sessionId: "sess-P7", channel: "telegram", chatId: "grp-mis-scoped", scope: "dm" });
+    // A genuinely valid group-sender code, minted for this SAME session — plausible if the binding was
+    // dm-scoped by mistake AFTER a group-sender code had already been issued, or an admin mis-minted one.
+    const clock = { t: 1_000_000 };
+    const gcode = db.mintPairingCode({ sessionId: "sess-P7", channel: "telegram", grantType: "group-sender", ttlMs: 10 * 60_000 }, clock.t).code;
+    const gcodeId = gcode.slice("pair_".length).split(".")[0];
+
+    const submitted7 = [];
+    const submit7 = (sid, text) => { submitted7.push({ sid, text }); return { delivered: true }; };
+    const sent7 = [];
+    const pairing7 = createDbCompanionPairing(db, { now: () => clock.t });
+    const gw7 = new ChatGateway(submit7, [{ sessionId: "sess-P7", channel: "telegram", chatId: "grp-mis-scoped", scope: "dm" }], createDbCompanionAuth(db), pairing7);
+    gw7.registerAdapter(fakeAdapter("telegram", sent7));
+
+    // A group member sends the valid group-sender code's TEXT to the mis-scoped dm binding's chat.
+    const groupUpdate = normalizeTelegramMessage({
+      message: { chat: { id: "grp-mis-scoped", type: "group" }, text: gcode, from: { id: "member-1" } },
+    });
+    const r7 = await gw7.handleInbound(groupUpdate);
+    check("p7: a dm binding on a group chat REFUSES even a valid group-sender code (never attempts redemption)", r7.accepted === false && r7.reason === "sender-not-authorized");
+    check("p7: the code text was NOT submitted as a turn", submitted7.length === 0);
+    check("p7: NO 'paired' ack was sent (the redemption was never attempted)", sent7.length === 0);
+    check("p7: the code stayed UNCONSUMED", db.getPairingCodeById(gcodeId)?.consumed_at == null);
+    check("p7: NO allowlist row was written for member-1", db.isSenderAllowed("sess-P7", "telegram", "member-1") === false);
+
+    db.close();
+  }
 } finally {
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Companion authz layer holds: GROUP bindings require an allowlisted sender (missing/unlisted → hard reject, never submitted), DM stays single-owner, the durable store round-trips + the unique route index blocks a 2nd session per route, default-OFF writes nothing, the REST bind endpoint REQUIRES an explicit scope, and NO binding/allowlist/home tool exists on ANY agent-facing MCP surface (admin is loopback REST only)."
+  ? "\n✅ ALL PASS — the Companion authz layer holds: GROUP bindings require an allowlisted sender (missing/unlisted → hard reject, never submitted), DM authorizes ONLY when the inbound confirms a private chat (card b4f124d8 — a pre-existing/hand-bound dm binding on a group chatId no longer admits every member), the durable store round-trips + the unique route index blocks a 2nd session per route, default-OFF writes nothing, the REST bind endpoint REQUIRES an explicit scope, and NO binding/allowlist/home tool exists on ANY agent-facing MCP surface (admin is loopback REST only)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

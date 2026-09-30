@@ -95,7 +95,7 @@ try {
     gw.registerAdapter(tg);
 
     // (1) an IN-APP inbound starts a turn (idle → submitted); its chat_reply goes back IN-APP.
-    const inA = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sid, body: "hi via cockpit" });
+    const inA = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sid, body: "hi via cockpit", chatIsDirect: true });
     check("(a) in-app inbound routes to the session + starts a turn", inA.accepted === true && inA.sessionId === sid && inA.queued === false);
     const rA = await gw.deliverReply(sid, "reply to cockpit");
     check("(b) chat_reply for the in-app turn delivers IN-APP", rA.delivered === true && inApp.sent.length === 1 && inApp.sent[0].chatId === sid && inApp.sent[0].text === "reply to cockpit");
@@ -103,7 +103,7 @@ try {
 
     // (2) a TELEGRAM inbound INTERLEAVES while the in-app turn is still in flight → QUEUED, does NOT swap the
     //     in-flight turn's origin. A chat_reply now STILL goes to in-app (the turn it answers).
-    const inT = await gw.handleInbound({ channel: TELEGRAM, chatId: "tg-chat", body: "hi via telegram", sender: { id: "owner" } });
+    const inT = await gw.handleInbound({ channel: TELEGRAM, chatId: "tg-chat", body: "hi via telegram", sender: { id: "owner" }, chatIsDirect: true });
     check("(a) telegram inbound to the SAME session is accepted (queued behind the busy turn)", inT.accepted === true && inT.sessionId === sid && inT.queued === true);
     const rA2 = await gw.deliverReply(sid, "still cockpit");
     check("(b) NO-SWAP — a reply mid-turn still goes IN-APP despite the queued telegram inbound", rA2.delivered === true && inApp.sent.length === 2 && inApp.sent[1].text === "still cockpit" && tg.sent.length === 0);
@@ -165,7 +165,7 @@ try {
     check("(d) telegram group: allowlisted sender admitted", alice.accepted === true && submitted.length === 1 && submitted[0].s === sid);
     // in-app DM on the SAME session: authorized by the route match alone (sender-independent) — the group
     // authz on the telegram channel does NOT bleed onto the in-app channel.
-    const cockpit = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sid, body: "cockpit msg" });
+    const cockpit = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sid, body: "cockpit msg", chatIsDirect: true });
     check("(d) in-app DM on the same session: admitted by route match (authz is per-channel)", cockpit.accepted === true && submitted.length === 2 && submitted[1].s === sid);
     db.close();
   }
@@ -256,7 +256,7 @@ try {
 
     // The surviving in-app channel's routing/authz is undisturbed: a subsequent inbound is still accepted and
     // its reply still routes back in-app.
-    const inA = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sid, body: "still here via cockpit" });
+    const inA = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sid, body: "still here via cockpit", chatIsDirect: true });
     check("(g) in-app inbound still accepted + routes to the session after telegram unbind", inA.accepted === true && inA.sessionId === sid);
     const rA = await gw.deliverReply(sid, "reply after telegram unbind");
     check("(g) reply still delivers IN-APP after telegram unbind", rA.delivered === true && inApp.sent.some((s) => s.text === "reply after telegram unbind"));

@@ -52,6 +52,13 @@ export interface InboundMessage {
   metadata?: Record<string, unknown>;
 }
 
+// @decision b4f124d8 — do not authorize/mint a dm binding on anything less than an explicit
+// chatIsDirect:true; do not let pairing.ts's mint gate and auth.ts's authorization gate use a different
+// predicate for "confirmed direct" than this one.
+export function isConfirmedDirectChat(chatIsDirect?: boolean): boolean {
+  return chatIsDirect === true;
+}
+
 /** The gateway's inbound entrypoint, handed to each adapter so it can push normalized messages up. */
 export type InboundHandler = (msg: InboundMessage) => void;
 

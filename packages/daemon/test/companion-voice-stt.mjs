@@ -59,8 +59,11 @@ function makeTranscriber({ ready = true, result = "hello from voice" } = {}) {
   };
 }
 
-const audioMsg = (channel, chatId, sender) => ({ channel, chatId, body: "", sender, attachments: [{ type: "audio", fileId: "file-1" }] });
-const textMsg = (channel, chatId, body, sender) => ({ channel, chatId, body, sender });
+// chatIsDirect:true — this file tests the VOICE/STT pipeline, not the dm-scope authorization boundary
+// itself (companion-authz.mjs); dm-scope authorization now requires the inbound to confirm a private chat
+// (card b4f124d8). Irrelevant for this file's group-scope case (group auth never consults chatIsDirect).
+const audioMsg = (channel, chatId, sender) => ({ channel, chatId, body: "", sender, attachments: [{ type: "audio", fileId: "file-1" }], chatIsDirect: true });
+const textMsg = (channel, chatId, body, sender) => ({ channel, chatId, body, sender, chatIsDirect: true });
 
 try {
   // ============ 1a — UNAUTHORIZED sender (group scope, default auth rejects) → zero download/transcribe ============

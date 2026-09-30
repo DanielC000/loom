@@ -51,6 +51,31 @@ function toSessionBinding(b: CompanionBinding): SessionBinding {
 }
 
 /**
+ * BOOT-TIME HEURISTIC (card b4f124d8, optional DoD item) — logs a `dm`-scope Telegram binding whose
+ * chatId parses as a negative integer, Telegram's own convention for a group/supergroup id (a private
+ * chat's id is always positive). This is a HEURISTIC ONLY: it flags a binding worth a human's review, it
+ * does NOT and must NEVER gate authorization — the real security check is `isConfirmedDirectChat` at
+ * inbound authorization time (auth.ts), which requires the inbound's OWN `chatIsDirect` regardless of what
+ * this heuristic finds (a positive-looking chatId proves nothing either way; Telegram could change its id
+ * scheme, and this check would silently stop catching anything). Runs once per gateway build (effectively
+ * once per companion at boot, since `createCompanionGateway` is called once per enabled config).
+ */
+function warnLikelyGroupDmBindings(bindings: CompanionBinding[]): void {
+  for (const b of bindings) {
+    if (b.scope !== "dm" || b.channel !== TELEGRAM_CHANNEL) continue;
+    const id = Number(b.chatId);
+    if (Number.isFinite(id) && id < 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[companion] HEURISTIC: dm-scope Telegram binding (session=${b.sessionId}) names a NEGATIVE ` +
+          `chatId — Telegram's convention for a group/supergroup, not a private chat. This does not by ` +
+          `itself prove anything (the real check is at authorization time); review this binding.`,
+      );
+    }
+  }
+}
+
+/**
  * Build the ChatGateway. `originResolver` (multi-channel reply routing) resolves a session's in-flight turn
  * origin — the daemon injects `(sid) => pty.getActiveTurnOrigin(sid)` so chat_reply delivers to the exact
  * route of the turn it answers. Undefined ⇒ deliverReply has no target (`no-target`); test seams that don't
@@ -87,6 +112,7 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
     db.upsertCompanionBinding({ sessionId: cfg.sessionId, channel: TELEGRAM_CHANNEL, chatId: cfg.allowedChatId, scope: cfg.chatScope });
     bindings = db.listCompanionBindings().filter((b) => b.sessionId === cfg.sessionId);
   }
+  warnLikelyGroupDmBindings(bindings);
   // DM-pairing coordinator: the db-backed redemption path with the real wall clock (epoch ms). Default
   // rate-limit/lockout policy (5 attempts / 10-min window / 15-min lockout) — tests inject a fake clock.
   const pairing = createDbCompanionPairing(db, { now: () => Date.now() });

@@ -242,7 +242,7 @@ try {
     check("create: chat_reply gate ON for the bound session", rig.hooks.companionSessionIds.has("assist-1") && (await chatReplyOn(rig.orch, "assist-1")) === true);
     check("create: chat_reply still OFF for a DIFFERENT session (single-session gate)", (await chatReplyOn(rig.orch, "other-sess")) === false);
     // Binding registered: INBOUND routes to the bound session via submitTurn (NOT the outbound path).
-    const inb = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-1", body: "hello" });
+    const inb = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-1", body: "hello", chatIsDirect: true });
     check("create: inbound to the bound chat submits a TURN (binding registered, inbound=submitTurn)", inb.accepted === true && rig.submitted.length === 1 && rig.submitted[0].sid === "assist-1" && rig.submitted[0].text === "hello");
     // OUTBOUND routes back to the chat via the adapter — NEVER submits a turn (not cross-wired).
     const out = await rig.controller.deliverReply("assist-1", "hi back");
@@ -260,14 +260,14 @@ try {
     writeConfig(db, { sessionId: "assist-1", chatId: "chat-1", cadence: 0 });
     await rig.controller.startInitial(null);
     await rig.controller.reconcile();
-    check("no-reroute: seeded binding routes chat-1", (await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-1", body: "a" })).accepted === true);
+    check("no-reroute: seeded binding routes chat-1", (await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-1", body: "a", chatIsDirect: true })).accepted === true);
 
     // Change ONLY config.allowedChatId → chat-2. No rebuild; routing UNCHANGED (still chat-1, not chat-2).
     writeConfig(db, { sessionId: "assist-1", chatId: "chat-2", cadence: 0 });
     await rig.controller.reconcile();
     check("no-reroute: allowedChatId change did NOT rebuild the adapter", rig.gw.built.length === 1 && rig.gw.built[0].adapter.stopped === 0);
-    const stillOld = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-1", body: "b" });
-    const newRejected = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-2", body: "c" });
+    const stillOld = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-1", body: "b", chatIsDirect: true });
+    const newRejected = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-2", body: "c", chatIsDirect: true });
     check("no-reroute: the DURABLE binding (chat-1) still routes — config did not silently re-route", stillOld.accepted === true);
     check("no-reroute: the new config chatId (chat-2) is NOT routed (no phantom route from a config write)", newRejected.accepted === false && newRejected.reason === "chat-not-allowlisted");
     db.close();

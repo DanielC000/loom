@@ -39,7 +39,11 @@ function makeAdapter(name, { maxMessageLength = 4096, fail = false, failAfter = 
   };
 }
 
-const inbound = (channel, chatId, body) => ({ channel, chatId, body });
+// chatIsDirect:true — this file tests ADAPTER-PLUMBING (routing/chunking/lifecycle), not the dm-scope
+// authorization boundary itself (that's companion-authz.mjs's job); every inbound here represents an
+// already-authorized chat, so it must confirm private (card b4f124d8 — dm-scope authorization now
+// requires it) to keep exercising the plumbing these tests actually cover.
+const inbound = (channel, chatId, body) => ({ channel, chatId, body, chatIsDirect: true });
 
 // --- Adapter lifecycle: gateway drives start()/stop() -------------------------------------------
 {

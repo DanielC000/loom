@@ -35,7 +35,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { LOOM_HOME } from "../paths.js";
 import { vaultFileContentType } from "../vault/browser.js";
-import type { ChannelAdapter, CompanionRoute, InboundMessage } from "./types.js";
+import type { ChannelAdapter, CompanionRoute, InboundAttachment, InboundMessage } from "./types.js";
 
 /** The stable channel name — the key in the gateway registry and the `channel` on every in-app binding. */
 export const IN_APP_CHANNEL = "in-app";
@@ -160,17 +160,26 @@ export interface InAppMessageRecorder {
 }
 
 /**
- * Normalize an in-app inbound (a message typed in the cockpit companion chat panel) into the
- * platform-agnostic InboundMessage. `chatId` is the bound session id (the loopback self-address). There is
- * NO sender — the loopback cockpit is the single authenticated owner, so the binding's "dm" scope authorizes
- * on the route match alone (no per-sender allowlist, no pairing). Returns null for a non-string / empty body
- * (nothing to submit — mirrors the Telegram normalizer's empty-text guard).
+ * Normalize an in-app inbound (a message typed in the cockpit companion chat panel, or a web-mic audio
+ * clip carried as an attachment — Companion Voice epic, VOICE-P4 inbound) into the platform-agnostic
+ * InboundMessage. `chatId` is the bound session id (the loopback self-address). There is NO sender — the
+ * loopback cockpit is the single authenticated owner, so the binding's "dm" scope authorizes on the route
+ * match alone (no per-sender allowlist, no pairing). `attachments` (optional — the typed-text call site
+ * omits it) carries a non-text payload (e.g. an audio attachment) whose presence alone is enough to submit
+ * even with an empty body (mirrors chat-gateway.ts's own `audioAttachment` empty-body carve-out). Returns
+ * null when there is neither text NOR an attachment to submit (mirrors the Telegram normalizer's
+ * empty-text guard) — THE ONLY constructor for an in-app InboundMessage, so every in-app inbound (typed or
+ * audio) is guaranteed the same `chatIsDirect: true` (card b4f124d8's minor fix — a hand-built
+ * InboundMessage elsewhere in this codebase previously omitted it).
  */
-export function normalizeInAppMessage(chatId: string, body: unknown): InboundMessage | null {
-  if (typeof body !== "string" || body.length === 0) return null;
+export function normalizeInAppMessage(chatId: string, body: unknown, attachments?: InboundAttachment[]): InboundMessage | null {
+  const text = typeof body === "string" ? body : "";
+  if (text.length === 0 && (!attachments || attachments.length === 0)) return null;
   // chatIsDirect: true — this channel IS the loopback cockpit, structurally a single-owner 1:1 (see the
   // function doc above); there is no shared/group shape for it to ever be confused with.
-  return { channel: IN_APP_CHANNEL, chatId, body, chatIsDirect: true };
+  const msg: InboundMessage = { channel: IN_APP_CHANNEL, chatId, body: text, chatIsDirect: true };
+  if (attachments && attachments.length > 0) msg.attachments = attachments;
+  return msg;
 }
 
 /** Inbound web-mic audio size cap (Companion Voice epic, VOICE-P4 inbound) — a chat voice clip is far

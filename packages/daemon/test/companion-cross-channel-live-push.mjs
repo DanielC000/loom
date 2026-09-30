@@ -99,7 +99,7 @@ try {
     // upserts by name — TELEGRAM_CHANNEL — replacing the one createCompanionGateway registered for cfg.botToken).
     gw.registerAdapter(adapter);
 
-    const inboundResult = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "999", body: "hello from my phone" });
+    const inboundResult = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "999", body: "hello from my phone", chatIsDirect: true });
     check("(a) telegram inbound: accepted", inboundResult.accepted === true);
 
     const rows = db.listCompanionMessages(sessTg, TELEGRAM_CHANNEL);
@@ -135,7 +135,7 @@ try {
       { ...cfg }, () => ({ delivered: true }), db, inApp, undefined, fakeTranscriber,
     );
     gwVoice.registerAdapter(makeFakeTelegramAdapter().adapter);
-    const voiceResult = await gwVoice.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "999", body: "", attachments: [{ type: "audio", fileId: "tg-file-id" }] });
+    const voiceResult = await gwVoice.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "999", body: "", attachments: [{ type: "audio", fileId: "tg-file-id" }], chatIsDirect: true });
     check("(a) telegram voice inbound: accepted, submittedText is the transcript", voiceResult.accepted === true && voiceResult.submittedText === "a voice note transcript");
     const voiceFrame = frames[frames.length - 1];
     check(
@@ -159,7 +159,7 @@ try {
     };
     const gw = createCompanionGateway(cfg, () => ({ delivered: true }), db, inApp);
 
-    const r = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sessInApp, body: "typed in the web panel" });
+    const r = await gw.handleInbound({ channel: IN_APP_CHANNEL, chatId: sessInApp, body: "typed in the web panel", chatIsDirect: true });
     check("(b) in-app inbound: still accepted (routing unaffected)", r.accepted === true);
     check(
       "(b) in-app inbound: NO {type:cross-channel} frame pushed (in-app already renders live via its own {type:chat}/{type:transcript} path)",
@@ -184,7 +184,7 @@ try {
     gw.registerAdapter(adapter);
 
     let threwInbound = false;
-    const r = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "888", body: "still works despite a dead hub" }).catch(() => { threwInbound = true; return null; });
+    const r = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "888", body: "still works despite a dead hub", chatIsDirect: true }).catch(() => { threwInbound = true; return null; });
     check("(c) containment: a THROWING live-push never breaks an accepted inbound", threwInbound === false && r?.accepted === true);
     check("(c) containment: the turn was still RECORDED despite the live-push throwing", db.listCompanionMessages(sessTg, TELEGRAM_CHANNEL).some((m) => m.text === "still works despite a dead hub"));
 

@@ -102,14 +102,14 @@ try {
     gw.registerAdapter(fakeAdapter("telegram", sent));
     const route = { sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null };
 
-    const rLang = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/lang en" });
+    const rLang = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/lang en", chatIsDirect: true });
     check("/lang: NOT accepted as a turn", rLang.accepted === false && rLang.reason === "command" && rLang.command === "lang");
     check("/lang: acked via the adapter", rLang.acked === true && sent.length === 1 && /Language set to en/.test(sent[0].text));
     check("/lang: never submitted a turn", submitted.length === 0);
     check("/lang: wrote sttLang+ttsLang for the route", JSON.stringify(prefs.resolve(route)) === JSON.stringify({ sttLang: "en", ttsLang: "en", ttsVoice: null, voiceReplies: "off" }));
 
     sent.length = 0;
-    const rVoice = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/voice on" });
+    const rVoice = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/voice on", chatIsDirect: true });
     check("/voice on: NOT accepted as a turn", rVoice.accepted === false && rVoice.reason === "command" && rVoice.command === "voice");
     check("/voice on: acked", sent.length === 1 && /turned on/.test(sent[0].text));
     check("/voice on: toggles voiceReplies WITHOUT clobbering the /lang setting (partial write)", JSON.stringify(prefs.resolve(route)) === JSON.stringify({ sttLang: "en", ttsLang: "en", ttsVoice: null, voiceReplies: "on" }));
@@ -117,7 +117,7 @@ try {
 
     // VOICE-P4 (card edd11203): the tri-state third value — /voice auto parses, acks, and persists.
     sent.length = 0;
-    const rAuto = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/voice auto" });
+    const rAuto = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/voice auto", chatIsDirect: true });
     check("/voice auto: NOT accepted as a turn", rAuto.accepted === false && rAuto.reason === "command" && rAuto.command === "voice");
     check("/voice auto: acked with an auto-specific message", sent.length === 1 && /auto/i.test(sent[0].text) && !/turned on/.test(sent[0].text));
     check("/voice auto: persisted the mode WITHOUT clobbering the /lang setting", JSON.stringify(prefs.resolve(route)) === JSON.stringify({ sttLang: "en", ttsLang: "en", ttsVoice: null, voiceReplies: "auto" }));
@@ -125,27 +125,27 @@ try {
 
     // Case-normalization: primary lower, subtag upper.
     sent.length = 0;
-    await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/lang PT-br" });
+    await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/lang PT-br", chatIsDirect: true });
     check("/lang normalizes case (primary lower, region upper)", /Language set to pt-BR/.test(sent[0].text) && prefs.resolve(route).sttLang === "pt-BR");
 
     // Invalid args → usage ack, no write.
     sent.length = 0;
-    await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/lang" });
+    await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/lang", chatIsDirect: true });
     check("/lang with no code → usage ack, pref unchanged", /Usage: \/lang/.test(sent[0].text) && prefs.resolve(route).sttLang === "pt-BR");
     sent.length = 0;
-    await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/lang english" });
+    await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/lang english", chatIsDirect: true });
     check("/lang with an unrecognized code shape → usage ack, pref unchanged", /Usage: \/lang/.test(sent[0].text) && prefs.resolve(route).sttLang === "pt-BR");
     sent.length = 0;
-    await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/voice maybe" });
+    await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/voice maybe", chatIsDirect: true });
     check("/voice with neither on|off|auto → usage ack, pref unchanged", /Usage: \/voice on\|off\|auto/.test(sent[0].text) && prefs.resolve(route).voiceReplies === "auto");
 
     // Unrecognized command → falls through unchanged to the normal submit path.
-    const rUnknown = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/bogus me" });
+    const rUnknown = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "/bogus me", chatIsDirect: true });
     check("an unrecognized '/word' falls through: accepted as a normal turn", rUnknown.accepted === true);
     check("an unrecognized '/word' is submitted VERBATIM (never swallowed)", submitted.length === 1 && submitted[0].text === "/bogus me");
 
     // Plain text (byte-identical) — the existing pipeline is untouched.
-    const rText = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "hello there" });
+    const rText = await gw.handleInbound({ channel: "telegram", chatId: "111", body: "hello there", chatIsDirect: true });
     check("plain text: accepted as a normal turn", rText.accepted === true);
     check("plain text: submitted verbatim", submitted.length === 2 && submitted[1].text === "hello there");
   }
@@ -217,7 +217,7 @@ try {
     const dmBindings = [{ sessionId: "sess-D2", channel: "telegram", chatId: "777", scope: "dm" }];
     const gwDm = new ChatGateway(submit, dmBindings, undefined, undefined, undefined, prefs);
     gwDm.registerAdapter(fakeAdapter("telegram", sent));
-    const rDmOn = await gwDm.handleInbound({ channel: "telegram", chatId: "777", body: "/voice on" });
+    const rDmOn = await gwDm.handleInbound({ channel: "telegram", chatId: "777", body: "/voice on", chatIsDirect: true });
     check("DM /voice on: UNCHANGED — still claims success (the supported path)", rDmOn.accepted === false && rDmOn.reason === "command" && sent.length === 1 && /turned on/.test(sent[0].text));
   }
 
@@ -228,9 +228,9 @@ try {
     const gw = new ChatGateway(submit, [{ sessionId: "sess-D", channel: "telegram", chatId: "42", scope: "dm" }]);
     const sent = [];
     gw.registerAdapter(fakeAdapter("telegram", sent));
-    const r = await gw.handleInbound({ channel: "telegram", chatId: "42", body: "/voice on" });
+    const r = await gw.handleInbound({ channel: "telegram", chatId: "42", body: "/voice on", chatIsDirect: true });
     check("default (bare) ChatGateway ctor still intercepts /voice", r.reason === "command" && sent.some((s) => /turned on/.test(s.text)));
-    const r2 = await gw.handleInbound({ channel: "telegram", chatId: "42", body: "plain text unaffected" });
+    const r2 = await gw.handleInbound({ channel: "telegram", chatId: "42", body: "plain text unaffected", chatIsDirect: true });
     check("default (bare) ChatGateway ctor: plain text still submits (byte-identical)", r2.accepted === true && submitted.some((s) => s.text === "plain text unaffected"));
   }
 
