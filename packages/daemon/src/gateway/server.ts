@@ -98,6 +98,42 @@ import { detectIntegrations } from "../integrations/detect.js";
 /** Min gap between honoured `repaint` frames from one REMOTE /ws/term socket (card 5b4ddca5). */
 const REMOTE_REPAINT_MIN_INTERVAL_MS = 1000;
 
+/** Sane upper bound on a viewer-requested terminal resize — a viewport, not a data buffer, so this is
+ * generous headroom over any real pane, not a tuned value. Rejects a frame that would otherwise reach
+ * `PtyHost.resize`/node-pty with a bogus size (0 already refused there; this also rejects a huge or
+ * non-finite one node-pty is not guaranteed to handle gracefully). */
+const MAX_TERMINAL_RESIZE_DIMENSION = 2000;
+
+/** A `resize` frame's `cols`/`rows` must be a finite positive integer within `MAX_TERMINAL_RESIZE_DIMENSION`
+ * — used at the `/ws/term` handler (card 37d4325d) so a malformed field (null/NaN/string/negative/huge)
+ * never reaches `PtyHost.resize`/node-pty, rather than relying on downstream code to tolerate it. */
+function isValidTerminalDimension(n: unknown): n is number {
+  return typeof n === "number" && Number.isInteger(n) && n > 0 && n <= MAX_TERMINAL_RESIZE_DIMENSION;
+}
+
+/**
+ * Card 37d4325d: wrap a `/ws/*` message-listener BODY so an exception it throws — a field this handler
+ * didn't anticipate, a downstream call that throws on a malformed-but-type-valid value — is caught and
+ * logged instead of propagating out of the `message` listener. A synchronous throw there passes straight
+ * through EventEmitter.emit to `process`, past the socket's own 'error' handler, and crashlog's
+ * `uncaughtException` handler then does `process.exit(1)` — a plain exit the supervisor does NOT
+ * relaunch on (only the restart sentinel 75), so the whole daemon's fleet stays down until a human
+ * re-runs `pnpm daemon:stable`. This is the BACKSTOP, not a replacement for validating a field's type
+ * before acting on it (see `parseWsJsonObject` and `isValidTerminalDimension` above) — validate first,
+ * and keep this wrapper as the net for whatever a future field or downstream change still misses. Never
+ * rethrows.
+ */
+function guardWsMessage(route: string, handler: (raw: Buffer, isBinary: boolean) => void): (raw: Buffer, isBinary: boolean) => void {
+  return (raw, isBinary) => {
+    try {
+      handler(raw, isBinary);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[gateway] ${route} message handler threw (frame dropped): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+}
+
 // @decision cda454c8 — the ONLY writes exempt from the loopback-secret guard (they carry the run API key
 // in the same Bearer header). Never widen: a new entry needs an exact pattern AND authRunKey called first.
 export const LOOPBACK_GUARD_KEY_AUTHED_EXEMPT: readonly string[] = ["/api/runs", "/api/runs/:id/cancel"];
@@ -5840,7 +5876,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       onControl: (e) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(e)); },
     });
     let lastRemoteRepaintAt = 0;
-    socket.on("message", (raw: Buffer) => {
+    socket.on("message", guardWsMessage("/ws/term", (raw: Buffer) => {
       const msg = parseWsJsonObject(raw) as TerminalInput | null;
       if (!msg) return;
       // Remote peer: repaint only (stdin and resize dropped) — see the @decision 710a34fa note above.
@@ -5867,11 +5903,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // pty tile + STDIN Composer") — so refuse the WRITE for one here too (read/repaint/resize stay
       // unaffected; only stdin injection can forge an owner attestation). Sibling fix on POST
       // /api/sessions/:id/input above closes the same defect's other inbound surface.
-      if (msg.type === "stdin" && deps.db.getSession(sessionId)?.role !== "assistant") deps.pty.writeStdin(sessionId, msg.data);
-      else if (msg.type === "repaint") deps.pty.repaint(sessionId);
+      if (msg.type === "stdin") {
+        // Card 37d4325d: `data` must actually be a string — PtyHost.writeStdin reads `data.length`
+        // unconditionally for a live Claude session, so a malformed frame (e.g.
+        // `{"type":"stdin","data":null}`) used to throw a TypeError straight out of this listener and
+        // crash the daemon.
+        if (typeof msg.data === "string" && deps.db.getSession(sessionId)?.role !== "assistant") deps.pty.writeStdin(sessionId, msg.data);
+      } else if (msg.type === "repaint") deps.pty.repaint(sessionId);
       // resize is honored for SHELL terminals only; a no-op for pinned Claude ptys (see PtyHost.resize).
-      else if (msg.type === "resize") deps.pty.resize(sessionId, msg.cols, msg.rows);
-    });
+      // Card 37d4325d: cols/rows must be finite positive integers in bounds before reaching PtyHost.resize.
+      else if (msg.type === "resize" && isValidTerminalDimension(msg.cols) && isValidTerminalDimension(msg.rows)) {
+        deps.pty.resize(sessionId, msg.cols, msg.rows);
+      }
+    }));
     socket.on("close", unsub); // detach does NOT kill the pty — sessions/shells outlive viewers
   });
 
@@ -5889,7 +5933,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/ws/fleet", { websocket: true }, (socket: WebSocket) => {
     fleetHub.add(socket);
     socket.send(JSON.stringify({ t: "hello", v: 1 } satisfies ServerFleetMessage));
-    socket.on("message", (raw: Buffer) => {
+    socket.on("message", guardWsMessage("/ws/fleet", (raw: Buffer) => {
       const msg = parseWsJsonObject(raw) as ClientFleetMessage | null;
       if (!msg) return;
       // Bookkeeping only in this card — no replay/streaming (that's C7). Any other/unknown `t` is
@@ -5902,7 +5946,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       } else if (msg.t === "unsub:events") {
         if (typeof msg.managerId === "string") fleetHub.unsubscribeEvents(socket, msg.managerId);
       }
-    });
+    }));
     socket.on("close", () => fleetHub.remove(socket));
   });
 
@@ -5929,7 +5973,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const unsub = deps.inApp?.attach(sessionId, {
       deliver: (frame) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame)); },
     });
-    socket.on("message", (raw: Buffer) => {
+    socket.on("message", guardWsMessage("/ws/companion", (raw: Buffer) => {
       const msg = parseWsJsonObject(raw) as { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown } | null;
       if (!msg) return;
       if (msg.type === "chat" && typeof msg.text === "string") {
@@ -5961,7 +6005,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         return;
       }
       // Any other frame (control/garbage) is ignored — never the terminal stream.
-    });
+    }));
     socket.on("close", () => { unsub?.(); }); // detach never affects the session — it outlives viewers
   });
 
