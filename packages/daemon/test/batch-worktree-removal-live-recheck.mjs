@@ -19,15 +19,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // (the old shape), this file's own SCENARIO 2 ("snapshot says safe, but the repo is now quarantined")
 // flips from PASS to FAIL — see the worker's own report for the exact revert/run/restore commands.
 //
-// SCENARIO CALL-SITE-PIN (Code Review of b4315b52, item 5) — the scenarios above only prove the pure
-// helper is correct; they say nothing about whether `mergeBatchTracked`'s own call site (sessions/service.ts)
-// actually GATES its `removeWorktree` call on it. A real AST-shape check (mirroring
-// merge-quarantine-boot-hardening.mjs's own ITEM-8 technique — position/shape in the AST, never a fixed
-// character-offset slice, so a comment-only edit can't flip it) — finds the `removeWorktree(` call site
-// that is itself GUARDED by an `if (...)` condition (the ONE such site: `gcWorktreeDir`'s own call runs
-// unconditionally, every earlier check in that function already `return`ed before reaching it) and asserts
-// that guarding condition's own source text calls `safeToRemoveBatchWorktree(` — which fails outright if
-// this call site is ever reverted to a bare `!batchQuarantined` (no helper call at all).
+// SCENARIO CALL-SITE-PIN (Code Review of b4315b52, item 5; nitpick fixed in round 2) — the scenarios above
+// only prove the pure helper is correct; they say nothing about whether `mergeBatchTracked`'s own call
+// site (sessions/service.ts) actually GATES its `removeWorktree` call on it. A real AST-shape check
+// (mirroring merge-quarantine-boot-hardening.mjs's own ITEM-8 technique — position/shape in the AST, never
+// a fixed character-offset slice, so a comment-only edit can't flip it) — finds the `removeWorktree(` call
+// site that is itself GUARDED by an `if (...)` condition (the ONE such site: `gcWorktreeDir`'s own call
+// runs unconditionally, every earlier check in that function already `return`ed before reaching it) and
+// WALKS that condition's own AST for a real CallExpression whose callee is the identifier
+// `safeToRemoveBatchWorktree` — round 1 used `getText().includes(...)`/a regex instead, which a comment
+// merely CONTAINING that string inside the if-condition's own source span could spoof; a real
+// CallExpression node cannot be forged by a comment.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/batch-worktree-removal-live-recheck.mjs
 import fs from "node:fs";
@@ -97,11 +99,39 @@ try {
     .filter((x) => x.ifStmt !== undefined);
   check("(pin) exactly ONE removeWorktree( call site is guarded by an if-condition (the batch one — gcWorktreeDir's own call is unconditional)", guardedCalls.length === 1);
 
-  const batchGuardCondition = guardedCalls[0]?.ifStmt.expression.getText(sourceFile) ?? "";
+  // Walk the guarding condition's OWN AST subtree for a real CallExpression whose callee is the
+  // `safeToRemoveBatchWorktree` identifier — never a text/regex scan (round 1's own nitpick: a comment
+  // merely containing that string inside the if-condition's source span could spoof a `getText()` regex;
+  // a real CallExpression node cannot be forged by a comment).
+  const conditionCallsHelper = (node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "safeToRemoveBatchWorktree") {
+      return true;
+    }
+    let found = false;
+    ts.forEachChild(node, (child) => { if (!found && conditionCallsHelper(child)) found = true; });
+    return found;
+  };
   check(
-    "(pin) THE REGRESSION THIS CATCHES: that guarding condition calls safeToRemoveBatchWorktree( — reverting it to a bare `!batchQuarantined` (no helper call) fails this check",
-    /safeToRemoveBatchWorktree\s*\(/.test(batchGuardCondition),
+    "(pin) THE REGRESSION THIS CATCHES: that guarding condition contains a REAL CallExpression to safeToRemoveBatchWorktree( — reverting it to a bare `!batchQuarantined` (no helper call) fails this check",
+    !!guardedCalls[0] && conditionCallsHelper(guardedCalls[0].ifStmt.expression),
   );
+
+  // SPOOF-RESISTANCE PROOF (the exact nitpick this round fixes): a condition whose source span merely
+  // CONTAINS the helper's name inside a comment — never calling it — must NOT satisfy the AST walk, even
+  // though a `getText()` regex (round 1's own shape) would have matched it.
+  const findIfExpr = (sourceText) => {
+    const sf = ts.createSourceFile("spoof-check.ts", sourceText, ts.ScriptTarget.Latest, true);
+    let expr;
+    const find = (node) => { if (ts.isIfStatement(node) && !expr) expr = node.expression; ts.forEachChild(node, find); };
+    find(sf);
+    return expr;
+  };
+  const spoofedExpr = findIfExpr("if (batchWorktreePath && !batchQuarantined /* safeToRemoveBatchWorktree( */) { removeWorktree(); }");
+  check("(pin) spoof-resistance: a comment merely CONTAINING the helper's name does NOT satisfy the AST walk (round 1's getText()-regex would have wrongly passed this)", !conditionCallsHelper(spoofedExpr));
+
+  // Positive control on the walk itself: a genuine CallExpression to the helper DOES satisfy it.
+  const realExpr = findIfExpr("if (batchWorktreePath && safeToRemoveBatchWorktree(finalRepoPath, batchQuarantined)) { removeWorktree(); }");
+  check("(pin) positive control: a genuine CallExpression to the helper DOES satisfy the AST walk", conditionCallsHelper(realExpr));
 } finally {
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
 }

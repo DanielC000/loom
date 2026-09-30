@@ -73,28 +73,21 @@ function quarantinePathFor(repoPath: string): string {
  */
 function writeMergeQuarantineLatch(entry: MergeQuarantineEntry): boolean {
   let fd: number | undefined;
-  let tmp: string | undefined;
   try {
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
     const final = quarantinePathFor(entry.repoPath);
-    tmp = `${final}.tmp-${process.pid}`;
+    const tmp = `${final}.tmp-${process.pid}`;
     fd = fs.openSync(tmp, "w");
     fs.writeSync(fd, JSON.stringify(entry, null, 2) + "\n");
     fs.fsyncSync(fd); // round 6 — durable on disk BEFORE the rename makes it visible, not just buffered
     fs.closeSync(fd);
     fd = undefined;
     fs.renameSync(tmp, final);
-    tmp = undefined; // renamed away — nothing left for the catch below to clean up
     return true;
   } catch (e) {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already broken; nothing more to close */ } }
-    // Code Review of b4315b52, item 1 — a failed write/rename (e.g. a Windows EPERM on the rename) used to
-    // leave its own `.json.tmp-<pid>` behind: `deleteMergeQuarantineLatch` only ever unlinked the FINAL
-    // name, so a later `clearMergeQuarantine` never touched this tmp, and `reenterMergeQuarantinesAtBoot`'s
-    // PASS 1b would then wrongly RECOVER it as a genuine (already-cleared) quarantine at the next boot.
-    // Unlink it here, best-effort, whether the failure was in openSync/writeSync/fsyncSync (tmp exists) or
-    // renameSync (tmp still exists under its pre-rename name either way).
-    if (tmp !== undefined) { try { fs.unlinkSync(tmp); } catch { /* best-effort — may never have been created, or already gone */ } }
+    // @decision bde5d1fe (round 2, reverting round 1) — do NOT unlink: fsync'd, it's the ONLY durable
+    // record of an ACTIVE quarantine. PASS 1b recovers it at boot; CLEAR paths sweep it instead.
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] FAILED to durably persist the quarantine latch for ${entry.repoPath} (branch '${entry.branch}'): ${(e as Error).message}`);
     return false;
@@ -114,8 +107,8 @@ function deleteMergeQuarantineTmpResidue(repoPath: string): void {
 }
 
 /** Best-effort; a missing file is not an error. Never throws. Also sweeps any leftover `.json.tmp-<pid>`
- *  residue for this repo (Code Review of b4315b52, item 1) — a failed write can leave one behind even
- *  after this unlink, and PASS 1b would otherwise wrongly recover it as a genuine quarantine at boot. */
+ *  residue for this repo — a failed write DELIBERATELY leaves its tmp behind (round 2: it's the only
+ *  durable record of an active quarantine until resolved) — HERE, at clear time, is where it gets swept. */
 function deleteMergeQuarantineLatch(repoPath: string): void {
   try { fs.unlinkSync(quarantinePathFor(repoPath)); } catch { /* ENOENT is the common case */ }
   deleteMergeQuarantineTmpResidue(repoPath);
