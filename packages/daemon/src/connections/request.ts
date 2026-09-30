@@ -33,6 +33,7 @@
 import type { ConnectionsGuardConfig } from "@loom/shared";
 import { getConnectionMetadata, getSecretForUse, isConnectionUsableByProject, type ConnectionsDbStore } from "./store.js";
 import { ensureFreshOAuthToken } from "./oauth.js";
+import { boundedFetch } from "./boundedFetch.js";
 
 export interface AuthenticatedRequestInput {
   /** The P1 connection id to use (must be in the caller's session-pinned allowlist — checked by mcp/server.ts). */
@@ -106,55 +107,6 @@ function checkRateLimit(connectionId: string, guard: ConnectionsGuardConfig, now
 /** TEST-ONLY: clear all in-memory rate-limit state between test cases. */
 export function __resetConnectionsRateLimitState(): void {
   rateLimitState.clear();
-}
-
-/**
- * Read a fetch Response body bounded by `maxBytes` AND by `signal` (the SAME AbortController the caller
- * armed for the request timeout — kept alive across this read, not just the initial `fetch()` call). A
- * slow-drip upstream (headers arrive fast, body dribbles one byte at a time forever, staying under the
- * byte cap) would otherwise hang this read indefinitely — the byte cap alone does not bound TIME. Races
- * every `reader.read()` against the abort signal explicitly (rather than relying on a given Response's
- * ReadableStream to itself honor the signal, which a hand-rolled test stream — or a stream from a fetch
- * implementation that doesn't wire the signal into body consumption — would not do), so this is bounded
- * regardless of the underlying stream's own behavior.
- */
-async function readBoundedBody(
-  response: Response,
-  maxBytes: number,
-  signal: AbortSignal,
-): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  const reader = response.body?.getReader();
-  if (!reader) return { ok: true, text: "" };
-
-  let onAbort: (() => void) | undefined;
-  const aborted = new Promise<never>((_, reject) => {
-    if (signal.aborted) { reject(new Error("aborted")); return; }
-    onAbort = () => reject(new Error("aborted"));
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await Promise.race([reader.read(), aborted]);
-      if (done) break;
-      if (value) {
-        total += value.byteLength;
-        if (total > maxBytes) {
-          await reader.cancel().catch(() => {});
-          return { ok: false, error: `response exceeded the ${maxBytes}-byte cap` };
-        }
-        chunks.push(value);
-      }
-    }
-  } catch {
-    await reader.cancel().catch(() => {});
-    return { ok: false, error: "request timed out" };
-  } finally {
-    if (onAbort) signal.removeEventListener("abort", onAbort);
-  }
-  return { ok: true, text: Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8") };
 }
 
 export interface AuthenticatedRequestDeps {
@@ -244,7 +196,7 @@ export async function performAuthenticatedRequest(
   let secret: string | undefined;
   try {
     if (meta.authScheme === "oauth2") {
-      const fresh = await ensureFreshOAuthToken({ db: deps.db, keyPath: deps.keyPath, fetchImpl: deps.fetchImpl, now: deps.now }, connectionId);
+      const fresh = await ensureFreshOAuthToken({ db: deps.db, keyPath: deps.keyPath, fetchImpl: deps.fetchImpl, now: deps.now, guard }, connectionId);
       if (!fresh.ok) return { ok: false, error: fresh.error };
       secret = fresh.accessToken;
     } else {
@@ -271,49 +223,35 @@ export async function performAuthenticatedRequest(
     }
   }
 
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const controller = new AbortController();
-  // Armed across BOTH the fetch AND the bounded body read below (cleared only in the outer finally) —
-  // a slow-drip upstream (headers fast, body dribbled forever under the byte cap) must still be bounded
-  // by requestTimeoutMs, not just by maxResponseBytes. Clearing this the instant fetch() resolves (headers
-  // received) would disarm it for the whole body-read phase, letting a stalled read hang indefinitely.
-  const timeout = setTimeout(() => controller.abort(), guard.requestTimeoutMs);
-  try {
-    let response: Response;
-    try {
-      response = await fetchImpl(url, {
-        method,
-        headers,
-        body: requestBody,
-        redirect: "manual", // NEVER auto-follow — invariant 3
-        signal: controller.signal,
-      });
-    } catch (err) {
-      const isAbort = err instanceof Error && err.name === "AbortError";
-      return { ok: false, error: isAbort ? "request timed out" : `request failed: ${(err as Error).message}` };
-    }
+  // treatRedirectAsError: false — invariant 3. A 3xx is NEVER auto-followed (boundedFetch's redirect:
+  // "manual" is unconditional) but IS surfaced to the caller as {status, location} data, since the caller
+  // can't see the credential either way and may legitimately want to know a resource moved.
+  const result = await boundedFetch(url, {
+    method,
+    headers,
+    body: requestBody,
+    timeoutMs: guard.requestTimeoutMs,
+    maxResponseBytes: guard.maxResponseBytes,
+    fetchImpl: deps.fetchImpl,
+    treatRedirectAsError: false,
+  });
+  if (!result.ok) return { ok: false, error: result.error };
 
-    const bodyResult = await readBoundedBody(response, guard.maxResponseBytes, controller.signal);
-    if (!bodyResult.ok) return { ok: false, error: bodyResult.error };
+  const responseHeaders: Record<string, string> = {};
+  result.headers.forEach((value, key) => {
+    if (key.toLowerCase() === "set-cookie") return; // never forward Set-Cookie
+    responseHeaders[key] = redact(value, secret);
+  });
 
-    const responseHeaders: Record<string, string> = {};
-    response.headers.forEach((value, key) => {
-      if (key.toLowerCase() === "set-cookie") return; // never forward Set-Cookie
-      responseHeaders[key] = redact(value, secret);
-    });
-
-    const result: AuthenticatedRequestResult = {
-      ok: true,
-      status: response.status,
-      headers: responseHeaders,
-      body: redact(bodyResult.text, secret),
-    };
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("location");
-      if (location) result.location = redact(location, secret);
-    }
-    return result;
-  } finally {
-    clearTimeout(timeout);
+  const final: AuthenticatedRequestResult = {
+    ok: true,
+    status: result.status,
+    headers: responseHeaders,
+    body: redact(result.text, secret),
+  };
+  if (result.status >= 300 && result.status < 400) {
+    const location = result.headers.get("location");
+    if (location) final.location = redact(location, secret);
   }
+  return final;
 }

@@ -91,6 +91,30 @@ try {
       const r = await validateSonarQubeCredential({ fetchImpl }, "sonarcloud.io", TOKEN);
       check("1f 404: ok:false, mentions the host may be wrong", r.ok === false && /host/i.test(r.error));
     }
+
+    // --- 1g. a 3xx from the SonarQube host is now a hard error (card 25c93b6f: routed through the shared
+    // boundedFetch helper, whose default treats any redirect as an error) — never followed, never reported
+    // as if the redirect target's response were the real answer. ---
+    {
+      let calls = 0;
+      const fetchImpl = async () => { calls++; return new Response(null, { status: 302, headers: { location: "https://attacker.example/steal" } }); };
+      const r = await validateSonarQubeCredential({ fetchImpl }, "sonarcloud.io", TOKEN);
+      check("1g 302: ok:false", r.ok === false);
+      check("1g 302: error names the redirect, not a generic HTTP/JSON failure", /redirect/i.test(r.error));
+      check("1g 302: fetch called exactly once (never auto-followed)", calls === 1);
+    }
+
+    // --- 1h. an OVERSIZED 401 body must still be reported as "token rejected", not masked by a generic
+    // byte-cap error — the status check runs BEFORE the body-cap outcome is consulted (card 25c93b6f CR
+    // follow-up: boundedFetch always attempts to read/cap the body regardless of status, so a naive
+    // "check result.ok first" order would misreport this exact case as an oversized-response failure). ---
+    {
+      const hugeBody = "x".repeat(20_000); // comfortably over sonarqube.ts's internal 8_192-byte cap
+      const fetchImpl = async () => new Response(hugeBody, { status: 401 });
+      const r = await validateSonarQubeCredential({ fetchImpl }, "sonarcloud.io", TOKEN);
+      check("1h oversized 401: ok:false", r.ok === false);
+      check("1h oversized 401: STILL reported as a rejected token (not a byte-cap error)", r.ok === false && /rejected the token/i.test(r.error));
+    }
   }
 
   // ============ Part 2 — DoD-3 fail-closed: the SonarQube connection is a normal P1 connection, and the

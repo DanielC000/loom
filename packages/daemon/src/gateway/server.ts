@@ -2540,7 +2540,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     const result = await exchangeAuthorizationCode(fetch, row.tokenUrl, {
       clientId: row.clientId, clientSecret: bundle.clientSecret, code, redirectUri: oauthRedirectUri(), codeVerifier: pending.codeVerifier,
-    });
+    }, resolveConfig(undefined, deps.db.getPlatformConfig()).platform.connections);
     if (!result.ok) {
       return reply.code(502).send(oauthHtmlPage(`Token exchange failed: ${result.error}`));
     }

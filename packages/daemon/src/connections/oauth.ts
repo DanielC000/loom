@@ -6,8 +6,17 @@
  * every dispatch) — no MCP tool ever reaches this module, same trust posture as `connections/store.ts`.
  */
 import { randomBytes, createHash } from "node:crypto";
+import type { ConnectionsGuardConfig } from "@loom/shared";
 import type { ConnectionsDbStore } from "./store.js";
 import { getOAuthTokenBundle, saveOAuthTokens, markConnectionNeedsReauth, type OAuthTokenBundle } from "./store.js";
+import { boundedFetch } from "./boundedFetch.js";
+
+/** The request-timeout / response-byte-cap bounds a token-endpoint call needs — the SAME resolved
+ *  `ConnectionsGuardConfig` every other connections/ call site already reads, so a token exchange is
+ *  bounded by the SAME operator-tunable numbers as an ordinary authenticated_request dispatch rather than
+ *  a second, independent constant. Its rate-limit fields are irrelevant here (the token endpoint isn't a
+ *  rate-limited dispatch target), hence the narrower `Pick`. */
+export type TokenRequestGuard = Pick<ConnectionsGuardConfig, "requestTimeoutMs" | "maxResponseBytes">;
 
 function base64url(buf: Buffer): string {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -81,31 +90,47 @@ export interface OAuthTokenResponse {
 // meaning the refresh token is revoked/expired/wrong).
 export type OAuthTokenResult = { ok: true; tokens: OAuthTokenResponse } | { ok: false; error: string; recoverable: boolean };
 
-async function postTokenRequest(fetchImpl: typeof fetch, tokenUrl: string, params: Record<string, string>): Promise<OAuthTokenResult> {
-  let response: Response;
-  try {
-    response = await fetchImpl(tokenUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-      body: new URLSearchParams(params).toString(),
-    });
-  } catch (err) {
-    // A network-level failure (DNS, TCP, TLS, timeout) says nothing about the refresh token itself.
-    return { ok: false, error: `token request failed: ${(err as Error).message}`, recoverable: true };
+async function postTokenRequest(
+  fetchImpl: typeof fetch,
+  tokenUrl: string,
+  params: Record<string, string>,
+  guard: TokenRequestGuard,
+): Promise<OAuthTokenResult> {
+  const result = await boundedFetch(tokenUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: new URLSearchParams(params).toString(),
+    timeoutMs: guard.requestTimeoutMs,
+    maxResponseBytes: guard.maxResponseBytes,
+    fetchImpl,
+    // Default (true): a token endpoint redirecting is always a hard anomaly here, never data to hand
+    // back (see boundedFetch.ts's own decision record for the full rationale).
+  });
+  if (!result.ok) {
+    if (result.kind === "redirect") {
+      // A redirect is a persistent anomaly (misconfiguration, or a hijacked/attacker-controlled
+      // endpoint), not a transient blip — a retry with the SAME refresh token won't fix it, and the
+      // human should see it, so this is unrecoverable (mirrors the invalid_grant 4xx branch below).
+      return { ok: false, error: result.error, recoverable: false };
+    }
+    // "timeout" and "network" both say nothing about the refresh token itself — a blip is retry-safe.
+    return { ok: false, error: `token request failed: ${result.error}`, recoverable: true };
   }
-  const text = await response.text();
-  if (!response.ok) {
+  const { status, text } = result;
+  if (status < 200 || status >= 300) {
     // 4xx is the shape a provider uses for invalid_grant/invalid_client (revoked/expired/wrong token)
     // — not retry-fixable. 5xx (and any other non-2xx) is the provider's own failure, not the token's.
-    const recoverable = !(response.status >= 400 && response.status < 500);
-    return { ok: false, error: `token endpoint returned ${response.status}: ${text.slice(0, 500)}`, recoverable };
+    // Never the raw body here — only status + length reach the caller (which can be the agent, via
+    // ensureFreshOAuthToken -> performAuthenticatedRequest's error passthrough).
+    const recoverable = !(status >= 400 && status < 500);
+    return { ok: false, error: `token endpoint returned ${status} (${text.length} bytes)`, recoverable };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
     // A 2xx status with an unparseable body is the provider misbehaving, not evidence of a bad token.
-    return { ok: false, error: `token endpoint returned non-JSON response: ${text.slice(0, 200)}`, recoverable: true };
+    return { ok: false, error: `token endpoint returned non-JSON response (${text.length} bytes)`, recoverable: true };
   }
   const tokens = parsed as OAuthTokenResponse;
   if (typeof tokens?.access_token !== "string" || !tokens.access_token) {
@@ -127,6 +152,7 @@ export function exchangeAuthorizationCode(
   fetchImpl: typeof fetch,
   tokenUrl: string,
   params: { clientId: string; clientSecret: string; code: string; redirectUri: string; codeVerifier: string },
+  guard: TokenRequestGuard,
 ): Promise<OAuthTokenResult> {
   return postTokenRequest(fetchImpl, tokenUrl, {
     grant_type: "authorization_code",
@@ -135,7 +161,7 @@ export function exchangeAuthorizationCode(
     code: params.code,
     redirect_uri: params.redirectUri,
     code_verifier: params.codeVerifier,
-  });
+  }, guard);
 }
 
 /** Exchange a refresh token for a fresh access token (RFC 6749 §6). */
@@ -143,13 +169,14 @@ export function refreshOAuthToken(
   fetchImpl: typeof fetch,
   tokenUrl: string,
   params: { clientId: string; clientSecret: string; refreshToken: string },
+  guard: TokenRequestGuard,
 ): Promise<OAuthTokenResult> {
   return postTokenRequest(fetchImpl, tokenUrl, {
     grant_type: "refresh_token",
     client_id: params.clientId,
     client_secret: params.clientSecret,
     refresh_token: params.refreshToken,
-  });
+  }, guard);
 }
 
 // --- Refresh-on-use, with per-connection dedupe ----------------------------------------------------
@@ -174,6 +201,10 @@ export interface EnsureFreshTokenDeps {
   fetchImpl?: typeof fetch;
   /** Clock override — the expiry/dedupe test seam. */
   now?: () => number;
+  /** The request-timeout / response-byte-cap bounds for the refresh_token call — the caller's OWN
+   *  resolved `ConnectionsGuardConfig` (request.ts already has it in scope for the dispatch it's about
+   *  to make; there is no separate "oauth" guard). Required — there is no bare-fetch fallback. */
+  guard: TokenRequestGuard;
 }
 
 /**
@@ -217,7 +248,7 @@ export async function ensureFreshOAuthToken(deps: EnsureFreshTokenDeps, connecti
   const refreshToken = bundle.refreshToken;
   const promise = (async (): Promise<EnsureFreshResult> => {
     try {
-      const result = await refreshOAuthToken(fetchImpl, row.tokenUrl!, { clientId: row.clientId!, clientSecret, refreshToken });
+      const result = await refreshOAuthToken(fetchImpl, row.tokenUrl!, { clientId: row.clientId!, clientSecret, refreshToken }, deps.guard);
       if (!result.ok) {
         if (!result.recoverable) {
           markConnectionNeedsReauth(deps.db, connectionId);
