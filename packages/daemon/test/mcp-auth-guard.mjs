@@ -24,10 +24,50 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       isMcpReachable is a REAL second check, not redundant with verifyMcpToken.
 //   (G) the isLoomDev() gate on /mcp-platform's OWN resolveRole (mcp/platform.ts) — independent of this
 //       gateway hook, which is deliberately identity+liveness-only (role gates stay in the routers).
+//   (H) Card 9a8bc38f: verifyMcpToken compares in CONSTANT TIME, never `===` — rejects a shorter token,
+//       a longer token, and a right-length-but-wrong token alike (behavioral), plus a structural proof
+//       (AST-narrowed method/function body extraction, card fdf93d3a's pattern — comment-immune, so a
+//       comment-only diff can never flip it) that verifyMcpToken's compiled body routes through the
+//       timingSafeEqualToken helper, and that the helper itself hashes to a fixed-length digest before
+//       calling node:crypto's timingSafeEqual — never a raw string `===`.
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+
+// Find a class method's REAL body text by its actual syntax-tree extent (card fdf93d3a's pattern, also
+// used by gateway-token.mjs/task-version-guard.mjs) — never a fixed character window, which is sensitive
+// to unrelated text growth (e.g. an added comment) near the call site rather than the property it claims
+// to verify.
+function classMethodBodyText(srcText, srcPath, methodName) {
+  const sourceFile = ts.createSourceFile(srcPath, srcText, ts.ScriptTarget.Latest, /* setParentNodes */ true);
+  let found;
+  const visit = (node) => {
+    if (!found && ts.isMethodDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === methodName && node.body) {
+      found = node.body;
+    }
+    if (!found) ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found ? found.getText(sourceFile) : null;
+}
+
+// Same idea, for a top-level (non-class) function declaration — `timingSafeEqualToken` is a free
+// function in pty/host.ts, not a method.
+function functionDeclBodyText(srcText, srcPath, fnName) {
+  const sourceFile = ts.createSourceFile(srcPath, srcText, ts.ScriptTarget.Latest, /* setParentNodes */ true);
+  let found;
+  const visit = (node) => {
+    if (!found && ts.isFunctionDeclaration(node) && node.name && node.name.text === fnName && node.body) {
+      found = node.body;
+    }
+    if (!found) ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found ? found.getText(sourceFile) : null;
+}
 
 const TMP = mkdtempManaged("loom-mcp-auth-guard-");
 process.env.LOOM_HOME = TMP;
@@ -172,6 +212,31 @@ try {
     check("(G) PlatformMcpRouter.resolveRole accepts the SAME session once LOOM_DEV=1", router.resolveRole("SPLAT")?.id === "SPLAT");
     delete process.env.LOOM_DEV;
   }
+
+  // ===================== (H) CONSTANT-TIME compare (card 9a8bc38f) =====================
+  {
+    // Behavioral: a shorter token, a longer token, and a right-length-but-wrong token are all rejected —
+    // proves the fixed-length-digest hashing didn't regress ordinary mismatch rejection.
+    const shortRes = await appReal.inject({ method: "POST", url: "/mcp/S1", headers: authH(tokenS1.slice(0, 8)), payload: {} });
+    check("(H) a SHORTER-than-real token → 401", shortRes.statusCode === 401);
+    const longRes = await appReal.inject({ method: "POST", url: "/mcp/S1", headers: authH(tokenS1 + "extra"), payload: {} });
+    check("(H) a LONGER-than-real token → 401", longRes.statusCode === 401);
+    const sameLenWrongRes = await appReal.inject({ method: "POST", url: "/mcp/S1", headers: authH("0".repeat(tokenS1.length)), payload: {} });
+    check("(H) a RIGHT-LENGTH-but-wrong token → 401", sameLenWrongRes.statusCode === 401);
+
+    // Structural: the compiled verifyMcpToken body routes through timingSafeEqualToken, never a raw
+    // `===` compare of the presented token against live.mcpToken/testToken (the pre-fix shape).
+    const hostJsPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "pty", "host.js");
+    const hostSrc = fs.readFileSync(hostJsPath, "utf8");
+    const verifyBody = classMethodBodyText(hostSrc, hostJsPath, "verifyMcpToken");
+    check("(H) verifyMcpToken's compiled body calls timingSafeEqualToken", verifyBody !== null && /timingSafeEqualToken\(/.test(verifyBody));
+    const hasRawTokenCompare = verifyBody !== null && (/token\s*===\s*live\.mcpToken/.test(verifyBody) || /===\s*token\b/.test(verifyBody));
+    check("(H) verifyMcpToken's compiled body does NOT compare the token with a raw `===`", verifyBody !== null && !hasRawTokenCompare);
+
+    const helperBody = functionDeclBodyText(hostSrc, hostJsPath, "timingSafeEqualToken");
+    check("(H) timingSafeEqualToken hashes both sides to a fixed-length digest before comparing", helperBody !== null && /createHash\(/.test(helperBody));
+    check("(H) timingSafeEqualToken compares via node:crypto's timingSafeEqual (constant-time)", helperBody !== null && /timingSafeEqual\(/.test(helperBody));
+  }
 } finally {
   try { await appNoStub?.close(); } catch { /* ignore */ }
   try { await appReal?.close(); } catch { /* ignore */ }
@@ -181,6 +246,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the per-session-token guard on every first-party /mcp* route (card 280b1e44) fails CLOSED with a bare pty stub, 401s every one of the 8 patterns with no/wrong/cross-session credential without ever invoking the real router handler, accepts the exact right session-scoped token (positive control), refuses an exited-but-unarchived session's own still-matching token (the liveness half, distinct from the token-match half), and PlatformMcpRouter's OWN resolveRole independently gates on isLoomDev()."
+  ? "\n✅ ALL PASS — the per-session-token guard on every first-party /mcp* route (card 280b1e44) fails CLOSED with a bare pty stub, 401s every one of the 8 patterns with no/wrong/cross-session credential without ever invoking the real router handler, accepts the exact right session-scoped token (positive control), refuses an exited-but-unarchived session's own still-matching token (the liveness half, distinct from the token-match half), PlatformMcpRouter's OWN resolveRole independently gates on isLoomDev(), and verifyMcpToken compares in CONSTANT TIME via a fixed-length-digest + timingSafeEqual, never a raw `===` (card 9a8bc38f)."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

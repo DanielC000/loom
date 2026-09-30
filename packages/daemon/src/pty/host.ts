@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn as spawnProcess } from "node:child_process";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
 import { spawn, type IPty } from "node-pty";
@@ -4375,6 +4375,22 @@ function writeLog(live: Live | CodexLive, buf: Buffer): void {
 }
 
 /**
+ * Card 9a8bc38f: constant-time compare of a caller-presented `/mcp*` bearer token against the
+ * session's own `Live.mcpToken`/`CodexLive.mcpToken` — the shared comparator `verifyMcpToken` (below)
+ * runs for every first-party MCP route (core/orchestration/setup/platform/audit/user-audit/operator/
+ * run all resolve through the ONE gateway onRequest hook that calls it). Unlike
+ * `verifyLoopbackSecret` (gateway/loopback-secret.ts), which length-checks its two fixed-format
+ * buffers before `timingSafeEqual`, this hashes BOTH sides to a fixed-length (32-byte) SHA-256 digest
+ * first — a caller here can present a token of ANY length, so hashing first means the two buffers
+ * compared are always equal-length and there is no length-mismatch branch to early-exit on at all.
+ */
+function timingSafeEqualToken(presented: string, expected: string): boolean {
+  const a = createHash("sha256").update(presented, "utf8").digest();
+  const b = createHash("sha256").update(expected, "utf8").digest();
+  return timingSafeEqual(a, b);
+}
+
+/**
  * Owns all interactive `claude` ptys. Independent of any browser — sessions live here.
  * Implements the spike-validated gate-free spawn recipe (acceptEdits + allowlist,
  * --strict-mcp-config WITH an explicit --mcp-config so the .mcp.json prompt never blocks,
@@ -6402,12 +6418,18 @@ export class PtyHost {
    * test-registered), or a missing/empty/mismatched token, all return false. Deliberately checks a REAL
    * Live/CodexLive FIRST, falling back to the test-only map only when neither exists — so a real spawn's
    * token is always what's actually verified once one exists, even under inTestMode().
+   *
+   * Card 9a8bc38f: the actual comparison runs through `timingSafeEqualToken` (above), never `===` —
+   * house consistency with the sibling loopback-secret guard's `timingSafeEqual` use.
    */
   verifyMcpToken(sessionId: string, token: string | undefined): boolean {
     if (typeof token !== "string" || token.length === 0) return false;
     const live = this.findAnyLive(sessionId);
-    if (live) return token === live.mcpToken;
-    if (inTestMode()) return this.testMcpTokens.get(sessionId) === token;
+    if (live) return timingSafeEqualToken(token, live.mcpToken);
+    if (inTestMode()) {
+      const testToken = this.testMcpTokens.get(sessionId);
+      return typeof testToken === "string" && timingSafeEqualToken(token, testToken);
+    }
     return false;
   }
 
