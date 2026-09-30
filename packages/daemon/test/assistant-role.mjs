@@ -115,8 +115,12 @@ try {
   // for this role (mirrors workspace-auditor-role.mjs G2). The validateProfile enum DOES allow it (human REST).
   check("(lp) setupRoleError('assistant') returns an error (Setup operator can never mint an assistant rig)",
     typeof setupRoleError("assistant") === "string" && setupRoleError("assistant").length > 0);
-  check("(lp regression) setupRoleError still ALLOWS manager/worker/setup/null (returns null)",
-    setupRoleError("manager") === null && setupRoleError("worker") === null && setupRoleError("setup") === null && setupRoleError(null) === null);
+  check("(lp regression) setupRoleError still ALLOWS manager/worker/null (returns null)",
+    setupRoleError("manager") === null && setupRoleError("worker") === null && setupRoleError(null) === null);
+  // card 4d70cc06 (code-review mint-ratchet): "setup" is now excluded too — see workspace-auditor-role.mjs's
+  // matching (G2 ratchet) check for the full rationale.
+  check("(lp ratchet) setupRoleError now REJECTS 'setup' too (card 4d70cc06)",
+    typeof setupRoleError("setup") === "string" && setupRoleError("setup").length > 0);
 
   // =================== (b) RESUME across a simulated daemon restart carries role assistant ===================
   // (b-i) CAPTURE: the live assistant is in the restart fleet resume set WITH role assistant, and the

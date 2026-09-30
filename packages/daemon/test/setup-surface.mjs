@@ -53,6 +53,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (f) SKILLS — skill_list reads the user's store; skill_write is confirm-first (rejects without
 //       confirm:true) and BOUNDED to the USER store (rejects any bundled skill name + path traversal,
 //       leaving the shipped asset byte-unchanged), with a write→list round-trip + in-place update.
+//   (m) card 4d70cc06 (B2/M1/M2) — the ungated surface may never touch an EXISTING agent/profile whose
+//       CURRENT rig is elevated/locked (platform/auditor/workspace-auditor/operator/assistant/setup) or
+//       that lives in a reserved/system project, regardless of what the caller is trying to change it
+//       TO: profile_assign and agent_update({profileId}) both refuse rebinding OR clearing a Companion's
+//       profile (restrictedTools survives every variant); agent_update also refuses a startupPrompt edit
+//       on a Companion- or Workspace-Auditor-rigged agent (a rename-only edit is unaffected); agent_create
+//       refuses an assistant-role profileId; profile_update refuses ANY patch to an already-locked
+//       profile — including setup's own "Setup Assistant" rig (self-modification) and a role-null patch
+//       that would otherwise bypass the resolved-role check while also stripping another field.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/setup-surface.mjs
 import fs from "node:fs";
@@ -261,7 +270,7 @@ try {
   check("(c) profile_assign: an unknown agent is rejected", typeof badAssign.error === "string");
 
   // ============ (e) LEAST-PRIVILEGE: the ungated setup surface may NOT mint/edit an elevated-role rig ============
-  // profile_create accepts manager|worker|setup|null, but REJECTS the elevated "platform"/"auditor" roles
+  // profile_create accepts manager|worker|null, but REJECTS the elevated "platform"/"auditor" roles
   // (a default human spawn could otherwise silently elevate an agent carrying such a rig). The narrow
   // guard runs ON TOP of validateProfile (which is NOT loosened — it still allows "platform" for the
   // human REST + Platform Lead surfaces). nProfBefore proves a rejected create persists nothing.
@@ -270,15 +279,18 @@ try {
   check("(e) profile_create REJECTS role 'platform' (elevated, human-only)", typeof platProf.error === "string" && !platProf.id);
   const audProf = await call("profile_create", { profile: { name: "AuditRig", role: "auditor" } });
   check("(e) profile_create REJECTS role 'auditor' (elevated, human-only)", typeof audProf.error === "string" && !audProf.id);
+  // card 4d70cc06 (code-review ratchet): "setup" used to mint here while profile_update on that same row
+  // was immediately refused (it's locked) — a one-way ratchet with no legitimate use, since
+  // PROFILE_SPAWNABLE_ROLES already drops "setup" at spawn. Now REJECTED at mint time too.
+  const setProf = await call("profile_create", { profile: { name: "SetRig", role: "setup" } });
+  check("(e) profile_create REJECTS role 'setup' (mint-ratchet, card 4d70cc06)", typeof setProf.error === "string" && !setProf.id);
   check("(e) the rejected profile_create(s) persisted NOTHING", db.listProfiles().length === nProfBefore);
-  // The allowed roles all succeed (manager|worker|setup|null) — the assistant's core job is unbroken.
+  // The allowed roles all succeed (manager|worker|null) — the assistant's core job is unbroken.
   const okMgr = await call("profile_create", { profile: { name: "MgrRig", role: "manager" } });
   const okWrk = await call("profile_create", { profile: { name: "WrkRig", role: "worker" } });
-  const okSet = await call("profile_create", { profile: { name: "SetRig", role: "setup" } });
   const okNul = await call("profile_create", { profile: { name: "NulRig" } }); // role omitted ⇒ null
   check("(e) profile_create ACCEPTS role 'manager'", okMgr.role === "manager" && !okMgr.error);
   check("(e) profile_create ACCEPTS role 'worker'", okWrk.role === "worker" && !okWrk.error);
-  check("(e) profile_create ACCEPTS role 'setup'", okSet.role === "setup" && !okSet.error);
   check("(e) profile_create ACCEPTS a role-null rig", okNul.role === null && !okNul.error);
   // profile_update must not be able to ELEVATE an existing rig to platform/auditor via the patch.
   const upElev = await call("profile_update", { profileId: okWrk.id, patch: { role: "platform" } });
@@ -529,6 +541,138 @@ try {
   check("(g3) an append combined with an elevated profileId is STILL REJECTED (role gate untouched)",
     typeof g3Elev.error === "string" && /platform|elevat|cannot/i.test(g3Elev.error));
   check("(g3) the rejected combined call made NO prompt write either", db.getAgent(ID_G3)?.startupPrompt === g3ElevBefore);
+
+  // ============ (m) card 4d70cc06 — B2/M1/M2 + code-review follow-ups: never touch an already-locked ====
+  // ============     agent/profile, and never let a rename hijack a reserved-home agent's name =========
+  // The ungated surface may never rebind/clear/rename an EXISTING agent's profile or startupPrompt when
+  // the agent's CURRENT rig is anything but manager/worker/null, or when the agent lives in a
+  // reserved/system project — regardless of what the caller is trying to change it TO (that's the
+  // pre-existing (g) new-role gate, proved above). "setup" is now locked at MINT time too (the ratchet).
+  const companionProfile = db.listProfiles().find((p) => p.name === "Companion");
+  const setupAssistantProfile = db.listProfiles().find((p) => p.name === "Setup Assistant");
+  const workspaceAuditorProfile = db.listProfiles().find((p) => p.name === "Workspace Auditor");
+  check("(m) precondition: the seeded Companion rig ships restrictedTools:true", companionProfile?.restrictedTools === true);
+
+  // A Companion-bound agent in a NON-reserved project — isolates the CURRENT-ROLE lock from the
+  // reserved-project lock (tested separately below).
+  const companionAgentId = "companionAgent";
+  db.insertAgent({ id: companionAgentId, projectId: created.id, name: "My Companion", startupPrompt: "COMPANION BRIEF", position: 20, profileId: companionProfile.id });
+  // The REAL spawn-time effect, not the profile row's own field (a rebind never mutates the profile row —
+  // asserting the row's restrictedTools would be tautological, since it's the AGENT's assignment that
+  // moves, not the profile). Reads exactly what a fresh spawn under this agent would resolve.
+  const companionRestrictedToolsAtSpawn = () => svc.resolveAgentSpawn(db.getAgent(companionAgentId), resolveConfig({}), "assistant").restrictedTools;
+  check("(m) precondition: restrictedTools resolves true through resolveAgentSpawn before any rebind attempt", companionRestrictedToolsAtSpawn() === true);
+
+  // B2 variant 1: profile_assign rebinding the Companion AWAY to an allowed (worker) profile is REJECTED.
+  const paCompanion = await call("profile_assign", { agentId: companionAgentId, profileId: prof.id });
+  check("(m) profile_assign REJECTS rebinding a Companion-rig agent (B2)", typeof paCompanion.error === "string" && /role is "assistant"/.test(paCompanion.error));
+  check("(m) profile_assign: the Companion's profile assignment is UNCHANGED", db.getAgent(companionAgentId)?.profileId === companionProfile.id);
+  check("(m) profile_assign: restrictedTools STILL resolves true through resolveAgentSpawn after the rejected rebind", companionRestrictedToolsAtSpawn() === true);
+
+  // B2 variant 2: the SIBLING write path, agent_update({profileId}), enforces the identical bound.
+  const auCompanionRebind = await call("agent_update", { agentId: companionAgentId, profileId: prof.id });
+  check("(m) agent_update REJECTS rebinding a Companion-rig agent (B2)", typeof auCompanionRebind.error === "string" && /role is "assistant"/.test(auCompanionRebind.error));
+  check("(m) agent_update: the Companion's profile assignment is UNCHANGED", db.getAgent(companionAgentId)?.profileId === companionProfile.id);
+
+  // B2 variant 3: CLEARING the Companion's assignment (profileId:null) is rejected too.
+  const auCompanionClear = await call("agent_update", { agentId: companionAgentId, profileId: null });
+  check("(m) agent_update REJECTS clearing a Companion-rig agent's profile (B2)", typeof auCompanionClear.error === "string" && /role is "assistant"/.test(auCompanionClear.error));
+  check("(m) agent_update: the Companion's profile assignment is STILL unchanged", db.getAgent(companionAgentId)?.profileId === companionProfile.id);
+  check("(m) restrictedTools STILL resolves true through resolveAgentSpawn after every rejected rebind/clear variant", companionRestrictedToolsAtSpawn() === true);
+
+  // M1: a startupPrompt edit on the SAME locked-role agent is refused too.
+  const promptBefore = db.getAgent(companionAgentId)?.startupPrompt;
+  const auCompanionPrompt = await call("agent_update", { agentId: companionAgentId, startupPrompt: "HIJACKED BRIEF" });
+  check("(m) agent_update REJECTS a startupPrompt edit on a Companion-rig agent (M1)", typeof auCompanionPrompt.error === "string" && /role is "assistant"/.test(auCompanionPrompt.error));
+  check("(m) agent_update: the Companion's startupPrompt is UNCHANGED", db.getAgent(companionAgentId)?.startupPrompt === promptBefore);
+
+  // A Workspace-Auditor-bound agent (same non-reserved project) proves the lock isn't Companion-specific.
+  const auditorAgentId = "auditorAgent";
+  db.insertAgent({ id: auditorAgentId, projectId: created.id, name: "My Auditor", startupPrompt: "AUDITOR BRIEF", position: 21, profileId: workspaceAuditorProfile.id });
+  const auAuditorPrompt = await call("agent_update", { agentId: auditorAgentId, appendToStartupPrompt: "HIJACKED" });
+  check("(m) agent_update REJECTS a startupPrompt edit on a Workspace-Auditor-rig agent (M1)", typeof auAuditorPrompt.error === "string" && /role is "workspace-auditor"/.test(auAuditorPrompt.error));
+  check("(m) agent_update: the Workspace Auditor's startupPrompt is UNCHANGED", db.getAgent(auditorAgentId)?.startupPrompt === "AUDITOR BRIEF");
+
+  // Code-review finding: the lock must ALSO cover a BARE RENAME — otherwise the real "Companion" could be
+  // renamed away and an impostor agent_create'd under its vacated name (gateway/server.ts resolves the
+  // default companion BY NAME). A rename-only edit on a locked-role agent is now REJECTED too.
+  const companionNameBefore = db.getAgent(companionAgentId)?.name;
+  const auCompanionRename = await call("agent_update", { agentId: companionAgentId, name: "Renamed Companion" });
+  check("(m) agent_update REJECTS a bare rename of a locked-role agent (name-hijack close)", typeof auCompanionRename.error === "string" && /role is "assistant"/.test(auCompanionRename.error));
+  check("(m) agent_update: the rejected rename left the Companion's name UNCHANGED", db.getAgent(companionAgentId)?.name === companionNameBefore);
+
+  // M2: agent_create with an assistant-role profileId is refused — the two-path asymmetry with
+  // agent_update/profile_assign that let a brand-new agent be minted straight onto an assistant rig.
+  const nAgentsBeforeAssistant = db.listAgents(created.id).length;
+  const acAssistant = await call("agent_create", { projectId: created.id, name: "Sneaky Companion", profileId: companionProfile.id });
+  check("(m) agent_create REJECTS an assistant-role profileId (M2)", typeof acAssistant.error === "string" && /role "assistant"/.test(acAssistant.error) && !acAssistant.id);
+  check("(m) agent_create: the rejected create made NO agent", db.listAgents(created.id).length === nAgentsBeforeAssistant);
+
+  // profile_update: refuse ANY patch (including a role-clearing one) to an already-locked profile — this
+  // closes M1's self-modification gap (setup's own "Setup Assistant" rig) and the role-null bypass.
+  const upCompanion = await call("profile_update", { profileId: companionProfile.id, patch: { icon: "🔓" } });
+  check("(m) profile_update REJECTS an unrelated patch to the Companion profile (locked role)", typeof upCompanion.error === "string" && /role is "assistant"/.test(upCompanion.error));
+  check("(m) profile_update: the Companion profile's icon is UNCHANGED", db.getProfile(companionProfile.id)?.icon === companionProfile.icon);
+
+  const setupAssistantIconBefore = setupAssistantProfile.icon;
+  const upSetupSelf = await call("profile_update", { profileId: setupAssistantProfile.id, patch: { icon: "🔓" } });
+  check("(m) profile_update REJECTS self-modifying setup's OWN 'Setup Assistant' profile (M1)", typeof upSetupSelf.error === "string" && /role is "setup"/.test(upSetupSelf.error));
+  check("(m) profile_update: the rejected self-modify left the Setup Assistant profile's icon UNCHANGED", db.getProfile(setupAssistantProfile.id)?.icon === setupAssistantIconBefore);
+
+  // The role-null bypass this closes: a patch that clears role AND strips restrictedTools in the SAME
+  // call must still be refused — previously the RESOLVED role (null) always passed setupRoleError, so
+  // the write landed even though the profile was locked going in.
+  const upBypass = await call("profile_update", { profileId: companionProfile.id, patch: { role: null, restrictedTools: false } });
+  check("(m) profile_update REJECTS the role-null + restrictedTools-strip bypass", typeof upBypass.error === "string" && /role is "assistant"/.test(upBypass.error));
+  check("(m) profile_update: the bypass attempt left role UNCHANGED", db.getProfile(companionProfile.id)?.role === "assistant");
+  check("(m) profile_update: the bypass attempt left restrictedTools UNCHANGED", db.getProfile(companionProfile.id)?.restrictedTools === true);
+
+  // The guard is role-scoped, not a blanket freeze — a non-locked profile's unrelated patch still applies.
+  const upNonLocked = await call("profile_update", { profileId: prof.id, patch: { icon: "🆕" } });
+  check("(m) profile_update: a non-locked profile's patch still applies", upNonLocked.icon === "🆕" && !upNonLocked.error);
+
+  // The "reserved home" half of the predicate: an agent living in the reserved "pHome" project is
+  // refused regardless of its (possibly-null) profile — even the Setup Assistant's OWN agent row,
+  // seeded profileId:null at the top of this file.
+  const paReservedHome = await call("profile_assign", { agentId: "agentSetup", profileId: prof.id });
+  check("(m) profile_assign REJECTS an agent living in a reserved/system project", typeof paReservedHome.error === "string" && /reserved\/system project/.test(paReservedHome.error));
+  check("(m) profile_assign: the reserved-home agent's profile is UNCHANGED (still null)", db.getAgent("agentSetup")?.profileId === null);
+  const auReservedHome = await call("agent_update", { agentId: "agentSetup", startupPrompt: "HIJACKED" });
+  check("(m) agent_update REJECTS a prompt edit on an agent living in a reserved/system project", typeof auReservedHome.error === "string" && /reserved\/system project/.test(auReservedHome.error));
+  check("(m) agent_update: the reserved-home agent's startupPrompt is UNCHANGED", db.getAgent("agentSetup")?.startupPrompt === "SETUP");
+  // The name-hijack close applies to a BARE RENAME in the reserved home too (a different code path —
+  // project.reserved, not a locked role — from the Companion rename case above).
+  const agentSetupNameBefore = db.getAgent("agentSetup")?.name;
+  const auReservedRename = await call("agent_update", { agentId: "agentSetup", name: "Hijacked" });
+  check("(m) agent_update REJECTS a bare rename of an agent living in a reserved/system project", typeof auReservedRename.error === "string" && /reserved\/system project/.test(auReservedRename.error));
+  check("(m) agent_update: the reserved-home agent's name is UNCHANGED", db.getAgent("agentSetup")?.name === agentSetupNameBefore);
+
+  // Code-review finding: the reserved-home refusal must ALSO cover the two WRITERS that can mint a brand
+  // new agent there — agent_create and template_apply — or an impostor could simply be created fresh
+  // instead of hijacking an existing name.
+  const nAgentsBeforeReservedCreate = db.listAgents("pHome").length;
+  const acReserved = await call("agent_create", { projectId: "pHome", name: "Companion" });
+  check("(m) agent_create REJECTS creating an agent into a reserved/system project (name-hijack close)", typeof acReserved.error === "string" && /reserved\/system project/.test(acReserved.error) && !acReserved.id);
+  check("(m) agent_create: the rejected reserved-home create made NO agent", db.listAgents("pHome").length === nAgentsBeforeReservedCreate);
+
+  const nAgentsBeforeReservedTemplate = db.listAgents("pHome").length;
+  const taReserved = await call("template_apply", { projectId: "pHome", templateName: "Solo builder" });
+  check("(m) template_apply REJECTS applying to a reserved/system project", typeof taReserved.error === "string" && /reserved\/system project/.test(taReserved.error));
+  check("(m) template_apply: the rejected reserved-home apply made NO agent", db.listAgents("pHome").length === nAgentsBeforeReservedTemplate);
+
+  // Item 1 (code review, the setup-role mint RATCHET): profile_create({role:"setup"}) is now rejected too
+  // (proved in (e) above, alongside the sibling manager/worker/null-only acceptances) — here, prove the
+  // SAME ratchet on the two SIBLING write paths that bind an EXISTING setup-role profile (the seeded
+  // "Setup Assistant" rig) onto an ORDINARY, unlocked agent. Before the ratchet this was allowed (setup
+  // was in SETUP_ALLOWED_PROFILE_ROLES); now it's refused exactly like binding to platform/auditor.
+  const ratchetAgentId = "ratchetAgent";
+  db.insertAgent({ id: ratchetAgentId, projectId: created.id, name: "Plain For Ratchet", startupPrompt: "PLAIN", position: 22, profileId: null });
+  const paSetupBind = await call("profile_assign", { agentId: ratchetAgentId, profileId: setupAssistantProfile.id });
+  check("(m) profile_assign REJECTS binding an ordinary agent to a setup-role profile (mint-ratchet, card 4d70cc06)", typeof paSetupBind.error === "string" && /role "setup"/.test(paSetupBind.error));
+  check("(m) profile_assign: the ratchet-rejected bind left the agent's profile UNCHANGED (still null)", db.getAgent(ratchetAgentId)?.profileId === null);
+  const auSetupBind = await call("agent_update", { agentId: ratchetAgentId, profileId: setupAssistantProfile.id });
+  check("(m) agent_update REJECTS binding an ordinary agent to a setup-role profile (mint-ratchet, card 4d70cc06)", typeof auSetupBind.error === "string" && /role "setup"/.test(auSetupBind.error));
+  check("(m) agent_update: the ratchet-rejected bind left the agent's profile UNCHANGED (still null)", db.getAgent(ratchetAgentId)?.profileId === null);
 
   // ============ (h) single-record READ tools — stop reading via empty-payload mutators ============
   const gotAgent = await call("agent_get", { agentId: agent.id });

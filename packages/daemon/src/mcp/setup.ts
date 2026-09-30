@@ -9,7 +9,7 @@ import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { expandTilde } from "../paths.js";
-import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError, PROFILE_ROLE_SCHEMA } from "../profiles/validate.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, AGENT_CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
@@ -30,20 +30,68 @@ import { strictShape } from "./arg-alias.js";
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
 /**
- * Least-privilege guard: SETUP_ALLOWED_PROFILE_ROLES permits ONLY manager|worker|setup|null — never
- * an elevated platform/auditor/workspace-auditor (validateProfile stays deliberately broader, human/Lead-only).
+ * Least-privilege guard: SETUP_ALLOWED_PROFILE_ROLES permits ONLY manager|worker|null — never an
+ * elevated platform/auditor/workspace-auditor (validateProfile stays deliberately broader, human/Lead-only).
  * workspace-auditor is rejected here by construction, caller-set only by the future startWorkspaceAuditor.
  * @decision a933613e — operator/assistant are ALSO excluded here, but not as elevated roles: their
  * session role is locked at their own spawn path, never by this profile field alone.
  *
+ * "setup" is excluded here too (card 4d70cc06's code-review ratchet): `PROFILE_SPAWNABLE_ROLES`
+ * (`sessions/service.ts`) already drops "setup" at spawn, so a setup-role rig minted through THIS
+ * surface is useless — and since `setupLockedRoleError` below refuses ever editing one again once it
+ * exists, letting `profile_create` mint one while `profile_update` immediately refused to touch it again
+ * was a one-way ratchet with no legitimate use on the other side. Excluding it at MINT time too closes
+ * that gap instead of leaving it half-closed.
+ *
  * Returns an error string when the role is forbidden, else null. Exported so the role-guard unit test can
  * exercise it directly.
  */
-const SETUP_ALLOWED_PROFILE_ROLES = new Set<string>(["manager", "worker", "setup"]);
+const SETUP_ALLOWED_PROFILE_ROLES = new Set<string>(["manager", "worker"]);
 export function setupRoleError(role: string | null | undefined): string | null {
   if (role == null) return null; // null/undefined ⇒ a plain role-null profile, allowed
   if (SETUP_ALLOWED_PROFILE_ROLES.has(role)) return null;
-  return `the setup surface cannot create or edit a profile with role "${role}" — only manager, worker, setup, or no role are allowed (platform/auditor/workspace-auditor is elevated + human-only; operator/assistant are excluded here too, but because their session role is locked to an explicit spawn path, not because they're elevated).`;
+  return `the setup surface cannot create or edit a profile with role "${role}" — only manager, worker, or no role are allowed (platform/auditor/workspace-auditor is elevated + human-only; operator/assistant/setup are excluded here too, but because their session role — or, for "setup", this surface's own operating identity — is locked to an explicit spawn path, not because they're elevated).`;
+}
+
+/**
+ * Roles this ungated surface may never rebind AWAY FROM, clear, rename, or silently rewrite ONCE
+ * ASSIGNED — the target's CURRENT role, never the incoming one (that's `setupRoleError`'s job, above).
+ * Derived from `PROFILE_ROLE_SCHEMA` (profiles/validate.ts) as "every role except manager/worker" —
+ * fail-closed: a role added to that enum later is locked here automatically, never silently left
+ * touchable until someone remembers to add it by hand.
+ *
+ * @decision 4d70cc06 — do not let this surface rebind/clear/rename an agent, or edit a profile, whose
+ * role is anything but manager/worker/null — however the caller reached it (a fresh bind, a rename, a
+ * prompt append).
+ */
+const SETUP_LOCKED_ROLES = new Set<string>(PROFILE_ROLE_SCHEMA.options.filter((r) => r !== "manager" && r !== "worker"));
+
+/** Bare role-lock check against `SETUP_LOCKED_ROLES`, shared by `setupMayTouchAgentError` below and
+ *  `profile_update`'s own guard. `subject` names what's being checked, for the error text only. */
+function setupLockedRoleError(role: string | null | undefined, subject: string): string | null {
+  if (role == null || !SETUP_LOCKED_ROLES.has(role)) return null;
+  return `the setup surface cannot edit ${subject} — its role is "${role}", and it may already carry elevated or locked capabilities (e.g. a Companion's withdrawn restrictedTools, an Auditor's brief, or the Setup Assistant's own rig) that this ungated surface must never rebind, clear, or rewrite. Only a human (Profiles/Agents UI or REST) may touch it.`;
+}
+
+/**
+ * ONE predicate for "may the ungated setup surface touch this EXISTING agent AT ALL" — ANY edit,
+ * including a bare rename (card 4d70cc06, B2 + M1 + the code-review's reserved-home name-hijack finding:
+ * renaming the real "Companion" away and `agent_create`-ing an impostor under that name would DoS
+ * `gateway/server.ts`'s by-NAME default-companion resolution, so a rename can never be the exempt case).
+ * Refuses when the agent's CURRENT rig role is locked (`SETUP_LOCKED_ROLES` above) — regardless of what
+ * NEW role the caller is trying to assign, that's `setupRoleError`'s job — or when the agent lives in a
+ * reserved/system project (the Setup Assistant's own home, or the dev-only "Loom Platform" home): every
+ * standing agent seeded there (Setup Assistant, Companion, Workspace Auditor, Elevated Operator, and
+ * under LOOM_DEV the Platform Lead/Audit) is one of Loom's own agents, never a user's, even on the rare
+ * occasion one carries no profile at all. Returns an error string, or null when the agent is safe to touch.
+ */
+function setupMayTouchAgentError(db: Db, agent: Agent): string | null {
+  const project = db.getProject(agent.projectId);
+  if (project?.reserved) {
+    return "the setup surface cannot edit an agent that lives in a reserved/system project (the workspace home) — this may be the Setup Assistant, Companion, Workspace Auditor, Elevated Operator, or (dev-only) a Platform Lead/Audit agent. Only a human (Profiles/Agents UI or REST) may edit it.";
+  }
+  const role = agent.profileId != null ? db.getProfile(agent.profileId)?.role : null;
+  return setupLockedRoleError(role, "an agent (via its current rig)");
 }
 
 /**
@@ -368,7 +416,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "agent_create",
       {
-        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human/assistant-authored) profileId as the agent's rig — assignment only (use profile_create to mint a new one); a non-existent profileId is rejected.",
+        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human/assistant-authored) profileId as the agent's rig — assignment only (use profile_create to mint a new one); a non-existent profileId is rejected. LEAST-PRIVILEGE: profileId is rejected if its role is anything but manager/worker/null (setupRoleError), symmetric with agent_update/profile_assign. REJECTED outright when projectId is a reserved/system project (the workspace home) — this closes a name-hijack: a same-named impostor agent (e.g. a fake \"Companion\") could otherwise be created there to collide with the real one that gateway/server.ts resolves BY NAME.",
         inputSchema: strictShape({
           projectId: z.string(),
           name: z.string(),
@@ -377,8 +425,21 @@ export class SetupMcpRouter {
         }),
       },
       async ({ projectId, name, startupPrompt, profileId }) => {
-        if (!db.getProject(projectId)) return ok({ error: "project not found" });
-        if (profileId !== undefined && !db.getProfile(profileId)) return ok({ error: "profile not found" });
+        const project = db.getProject(projectId);
+        if (!project) return ok({ error: "project not found" });
+        // card 4d70cc06 (code review, reserved-home name-hijack): refuse creating ANY agent into a
+        // reserved/system project — otherwise a same-named impostor (e.g. "Companion") could be minted
+        // there to collide with gateway/server.ts's by-NAME resolution of the real one.
+        if (project.reserved) return ok({ error: "the setup surface cannot create an agent in a reserved/system project (the workspace home) — only a human (Agents UI or REST) may add an agent there." });
+        if (profileId !== undefined) {
+          const profile = db.getProfile(profileId);
+          if (!profile) return ok({ error: "profile not found" });
+          // M2 (card 4d70cc06): agent_update/profile_assign already gate a profileId through
+          // setupRoleError — agent_create was the odd path that skipped it, accepting e.g. an
+          // assistant-role profile straight onto a brand-new agent.
+          const roleErr = setupRoleError(profile.role);
+          if (roleErr) return ok({ error: roleErr });
+        }
         const agent: Agent = {
           id: randomUUID(), projectId, name,
           startupPrompt: startupPrompt ?? "", position: db.listAgents(projectId).length,
@@ -406,7 +467,7 @@ export class SetupMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is platform/auditor/workspace-auditor (a setup operator can never elevate an agent — that's human-only). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
+          "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is anything but manager/worker/null (a setup operator can never elevate an agent — that's human-only). And the WHOLE call is REJECTED outright — a bare rename included — when the TARGET agent's CURRENT rig role is anything but manager/worker/null, or when the agent lives in a reserved/system project (the Setup Assistant, Companion, Workspace Auditor, Elevated Operator, or dev-only Platform Lead/Audit): this surface can never touch one of Loom's own standing agents, however it's reached, including renaming one to collide with (hijack) another agent's name. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
         inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
@@ -423,6 +484,14 @@ export class SetupMcpRouter {
         // that reads fine here also writes, instead of a silent "agent not found".
         const resolved = getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent");
         if ("error" in resolved) return ok(resolved);
+        // LEAST-PRIVILEGE (card 4d70cc06, B2 + M1 + the code-review's reserved-home name-hijack finding):
+        // refuse the ENTIRE edit — a bare rename included — before even looking at the patch, when the
+        // TARGET agent is currently locked/reserved. A rename is exactly how "Companion" could be
+        // hijacked (rename the real one away, then agent_create an impostor under that name), so a
+        // rename can never be the exempt case. What the caller is trying to change it TO is a separate,
+        // later concern (setupRoleError below).
+        const lockErr = setupMayTouchAgentError(db, resolved);
+        if (lockErr) return ok({ error: lockErr });
         // Drop agentId; the rest IS the PATCH. Raw args so an explicit profileId:null is PRESENT (clears)
         // while an omitted key stays absent (left as-is) — the same presence semantics the REST path relies
         // on. allowEndpointFlags:false (also absent from inputSchema) keeps the Agent Runs surface human-only.
@@ -493,8 +562,9 @@ export class SetupMcpRouter {
           "Apply a named workflow template to an EXISTING project (by projectId): stands up its agents — " +
           "each bound to an EXISTING bundled profile by name, never minted — and seeds its starter board " +
           "cards. Reuses the existing agent_create + task-insert writers only, no new writer surface. " +
-          "Fail-closed: an unknown templateName, an unknown projectId, an unknown profileName, or a " +
-          "template whose agent resolves to an elevated profile role (platform/auditor/workspace-auditor) " +
+          "Fail-closed: an unknown templateName, an unknown projectId, an unknown profileName, a " +
+          "template whose agent resolves to a role other than manager/worker/null, or a reserved/system " +
+          "projectId (the workspace home — closes the same name-hijack agent_create refuses) " +
           "are all rejected and nothing is written.",
         inputSchema: strictShape({
           projectId: z.string(),
@@ -507,6 +577,9 @@ export class SetupMcpRouter {
         // exists, never widened to an arbitrary/unresolvable target.
         const project = db.getProject(projectId);
         if (!project) return ok({ error: "project not found" });
+        // card 4d70cc06 (code review): same reserved-home refusal as agent_create — a template's own
+        // agent-create writes are NOT exempt from the name-hijack this closes.
+        if (project.reserved) return ok({ error: "the setup surface cannot apply a workflow template to a reserved/system project (the workspace home) — only a human (Agents UI or REST) may add agents there." });
         const template = findWorkflowTemplate(templateName);
         if (!template) return ok({ error: `unknown workflow template: "${templateName}"` });
         try {
@@ -524,7 +597,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). role may be manager|worker|setup or omitted ONLY — an elevated \"platform\"/\"auditor\" role is rejected here (human-only). `connections`/`capabilities`/`vaultWrite` are ALSO rejected here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, `capabilities` can launch a host process / inject an MCP server, and `vaultWrite` grants confined write access into a project's vault. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). role may be manager|worker or omitted ONLY — every other role (elevated platform/auditor/workspace-auditor, or operator/assistant/setup, whose session role is locked to an explicit spawn path) is rejected here (human-only). `connections`/`capabilities`/`vaultWrite` are ALSO rejected here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, `capabilities` can launch a host process / inject an MCP server, and `vaultWrite` grants confined write access into a project's vault. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: strictShape({ profile: z.object({}).passthrough() }),
       },
       async ({ profile }) => {
@@ -543,12 +616,19 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker|setup or null ONLY — a patch that yields an elevated \"platform\"/\"auditor\" role is rejected (human-only). The patch may not touch `connections`/`capabilities`/`vaultWrite` (authenticated-egress grants / registry-capability grants / the confined vault-write grant — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker or null ONLY — a patch that yields any other role (elevated platform/auditor/workspace-auditor, or operator/assistant/setup) is rejected (human-only). LEAST-PRIVILEGE: REJECTED outright, before the patch is even validated, when the profile's CURRENT (pre-patch) role is anything but manager/worker/null — this includes the Setup Assistant's own rig, so this surface can never self-modify, and closes a patch that clears `role` to null in the SAME call that also strips another field (e.g. a Companion's restrictedTools), which would otherwise pass the resolved-role check below. The patch may not touch `connections`/`capabilities`/`vaultWrite` (authenticated-egress grants / registry-capability grants / the confined vault-write grant — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: strictShape({ profileId: z.string(), patch: z.object({}).passthrough() }),
       },
       async ({ profileId, patch }) => {
         const existing = db.getProfile(profileId);
         if (!existing) return ok({ error: "profile not found" });
+        // LEAST-PRIVILEGE (card 4d70cc06, M1): refuse ANY patch to an already-locked profile — including
+        // the Setup Assistant's own "setup"-role rig (self-modification) — checked on the EXISTING role,
+        // before the patch is merged/validated. Catches the bypass a post-merge-only check would miss: a
+        // patch that clears `role` to null in the SAME call that also strips e.g. restrictedTools would
+        // otherwise pass setupRoleError below (null is always allowed) while the write still landed.
+        const lockErr = setupLockedRoleError(existing.role, "a profile");
+        if (lockErr) return ok({ error: lockErr });
         // Mirror the REST PUT: drop `id` from both sides so a verbatim round-trip doesn't trip .strict().
         const { id: _pid, ...patchNoId } = patch as Record<string, unknown>;
         // Reject on the RAW incoming patch (before merge) — a profile that already has `connections` set
@@ -577,12 +657,17 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_assign",
       {
-        description: "Assign an EXISTING profile to an agent (explicit agentId + profileId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create).",
+        description: "Assign an EXISTING profile to an agent (explicit agentId + profileId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). LEAST-PRIVILEGE: REJECTED outright when the TARGET agent's CURRENT rig role is anything but manager/worker/null, or when it lives in a reserved/system project — regardless of which profile you're trying to assign it — and separately rejected when the NEW profile's role is anything but manager/worker/null.",
         inputSchema: strictShape({ agentId: z.string(), profileId: z.string() }),
       },
       async ({ agentId, profileId }) => {
         const agent = getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent");
         if ("error" in agent) return ok(agent);
+        // LEAST-PRIVILEGE (card 4d70cc06, B2): the TARGET agent's CURRENT rig/home, checked BEFORE the
+        // new profile even resolves — a rebind or clear away from an already-locked rig is refused
+        // regardless of what it's being rebound TO.
+        const lockErr = setupMayTouchAgentError(db, agent);
+        if (lockErr) return ok({ error: lockErr });
         const assigned = db.getProfile(profileId);
         if (!assigned) return ok({ error: "profile not found" });
         // LEAST-PRIVILEGE (setup-only): mirror agent_update — reject binding an agent to a profile whose

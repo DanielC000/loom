@@ -62,9 +62,13 @@ try {
     typeof setupRoleError(ROLE) === "string" && setupRoleError(ROLE).length > 0);
   check("(G2 regression) setupRoleError still rejects platform + auditor",
     typeof setupRoleError("platform") === "string" && typeof setupRoleError("auditor") === "string");
-  check("(G2 regression) setupRoleError still ALLOWS manager/worker/setup/null (returns null)",
-    setupRoleError("manager") === null && setupRoleError("worker") === null &&
-    setupRoleError("setup") === null && setupRoleError(null) === null);
+  check("(G2 regression) setupRoleError still ALLOWS manager/worker/null (returns null)",
+    setupRoleError("manager") === null && setupRoleError("worker") === null && setupRoleError(null) === null);
+  // card 4d70cc06 (code-review mint-ratchet): "setup" used to be allowed here too; a setup-role rig
+  // minted through the ungated surface was dead weight (PROFILE_SPAWNABLE_ROLES drops "setup" at spawn)
+  // while profile_update on that same row was immediately refused (locked) — now excluded at mint time.
+  check("(G2 ratchet) setupRoleError now REJECTS 'setup' too (card 4d70cc06)",
+    typeof setupRoleError("setup") === "string" && setupRoleError("setup").length > 0);
 
   // ===================== GUARD 3(b) — isPlatformProfile is FALSE for it (ungated CORE seed) =====================
   check("(G3b) isPlatformProfile({role:'workspace-auditor'}) === false (NOT platform-gated → ungated CORE seed)",

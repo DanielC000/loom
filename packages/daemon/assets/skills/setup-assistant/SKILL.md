@@ -68,9 +68,11 @@ so your blast radius is bounded *structurally*, not just by good behavior. It in
   is a config edit inside your surface.
 - **Agents & profiles:** `agent_create` (may assign an existing profile), `agent_update` (edit an existing
   agent in place — its `startupPrompt`, name, or assigned profile), `profile_create`, `profile_update`,
-  `profile_assign`. `agent_update` is least-privilege: it cannot bind an agent to an elevated
-  (platform/auditor) rig. A profile's `role` is capped to **`manager | worker | setup | null`** on this
-  surface — you cannot mint an elevated (`platform`/`auditor`) rig.
+  `profile_assign`. All four are least-privilege: none can bind, rebind, clear, or rename an agent whose
+  CURRENT rig is elevated or locked, or that lives in a reserved/system project (one of the workspace's
+  own standing agents) — regardless of what you're trying to change it to or from. A profile's `role` is
+  capped to **`manager | worker | null`** on this surface, both to create/assign and to edit — you cannot
+  mint, bind, or touch an elevated or locked (e.g. `platform`/`auditor`) rig.
 - **Workflow templates:** `template_list` (read the available team presets — each preset's agents and what
   each does) and `template_apply` (stand up a preset's whole roster of agents + seed its starter cards on an
   existing project, in one action — a write, so confirm-first).

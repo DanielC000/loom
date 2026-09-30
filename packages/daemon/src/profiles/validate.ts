@@ -10,6 +10,31 @@ import { CODEX_RESTRICTED_TOOLS_REASON, codexStdioCapabilityReason, codexStdioOf
 export const HARNESS_ID_SCHEMA = z.enum(["claude", "codex"]);
 
 /**
+ * The ONE spelling of the Profile role enum's runtime values. Exported so a caller that needs "every
+ * role" (e.g. `mcp/setup.ts`'s `SETUP_LOCKED_ROLES`, deriving "every role except manager/worker") reads
+ * it from here via `.options` rather than hand-copying the list — a hand-copy is exactly how a future
+ * role addition silently stays OFF such a derived set instead of failing closed onto it.
+ */
+// "setup" IS a valid profile role (the Setup Assistant rig). (End-User Platform tier B1.)
+// "assistant" (the long-lived Loom Companion) is a valid, low-privilege profile role — profile-spawnable
+// like manager/worker. Its surface is NOT just my_context + chat_reply (a stale undercount that
+// propagated into at least one defect report, card 4fc458c1): the unconditional base is
+// my_context + notify_lead, plus (gated on the companion binding/grants) chat_reply, the
+// skill_*/memory_*/wake_*/reminder_*/board_* tools, and the opt-in capability-lever framework
+// (session-status, media-out, session-steer, session-spawn, authored-content-grant) — see
+// mcp/orchestration.ts's buildServer, role === "assistant" branch, for the real registration. The
+// ungated Setup operator still can't mint one (setupRoleError's allowlist omits it) — human REST / dev only.
+// "operator" (Bucket 2b "Elevated Operator") IS a valid, human-mintable profile role too — but the
+// SESSION role it ends up carrying is ALWAYS locked by the explicit caller role at startOperator
+// (resolveAgentSpawn), never by this profile field alone, and the ungated Setup operator still can't
+// mint/assign one (setupRoleError's allowlist omits it, exactly like "platform").
+//
+// @decision 71bcb207 — "auditor"/"workspace-auditor" are in this enum so an edit to an already-
+// existing bundled profile of either role doesn't 400 on its own pre-existing value, but
+// `roleCarryForwardOnlyError` below still rejects any write that MINTS or REASSIGNS either role.
+export const PROFILE_ROLE_SCHEMA = z.enum(["manager", "worker", "platform", "setup", "assistant", "operator", "auditor", "workspace-auditor"]);
+
+/**
  * Strict zod validator for a Profile's WRITABLE shape (everything but the server-assigned id),
  * mirroring validateProjectConfigOverride (mcp/platform.ts): `.strict()` rejects unknown keys (typo
  * guard) and types are checked. ONE validator the future write paths (P3 REST + platform-MCP) share.
@@ -19,24 +44,7 @@ export const HARNESS_ID_SCHEMA = z.enum(["claude", "codex"]);
 const profileSchema = z
   .object({
     name: z.string().min(1),
-    // "setup" IS a valid profile role (the Setup Assistant rig). (End-User Platform tier B1.)
-    // "assistant" (the long-lived Loom Companion) is a valid, low-privilege profile role — profile-spawnable
-    // like manager/worker. Its surface is NOT just my_context + chat_reply (a stale undercount that
-    // propagated into at least one defect report, card 4fc458c1): the unconditional base is
-    // my_context + notify_lead, plus (gated on the companion binding/grants) chat_reply, the
-    // skill_*/memory_*/wake_*/reminder_*/board_* tools, and the opt-in capability-lever framework
-    // (session-status, media-out, session-steer, session-spawn, authored-content-grant) — see
-    // mcp/orchestration.ts's buildServer, role === "assistant" branch, for the real registration. The
-    // ungated Setup operator still can't mint one (setupRoleError's allowlist omits it) — human REST / dev only.
-    // "operator" (Bucket 2b "Elevated Operator") IS a valid, human-mintable profile role too — but the
-    // SESSION role it ends up carrying is ALWAYS locked by the explicit caller role at startOperator
-    // (resolveAgentSpawn), never by this profile field alone, and the ungated Setup operator still can't
-    // mint/assign one (setupRoleError's allowlist omits it, exactly like "platform").
-    //
-    // @decision 71bcb207 — "auditor"/"workspace-auditor" are in this enum so an edit to an already-
-    // existing bundled profile of either role doesn't 400 on its own pre-existing value, but
-    // `roleCarryForwardOnlyError` below still rejects any write that MINTS or REASSIGNS either role.
-    role: z.enum(["manager", "worker", "platform", "setup", "assistant", "operator", "auditor", "workspace-auditor"]).nullable().optional(),
+    role: PROFILE_ROLE_SCHEMA.nullable().optional(),
     description: z.string().optional(),
     allowDelta: z.array(z.string()).optional(),
     skills: z.array(z.string()).nullable().optional(),
