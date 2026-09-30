@@ -2317,6 +2317,25 @@ function isUntaggedSystemNudge(text: string, kind: QueuedMessageKind): boolean {
   return kind === "warning" && !text.startsWith("[loom:");
 }
 
+/**
+ * @decision 49b382d9 — strip ESC/C0/C1 ONCE, inside `submit()`/`submitCodex()`, never at `enqueueStdin`
+ * alone. See its record for why and for the full call-site list.
+ */
+const ESC_C0_C1_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x80-\x9F]/g;
+function stripEscapeAndControlChars(text: string): { text: string; stripped: boolean; escCount: number; c0Count: number; c1Count: number } {
+  let escCount = 0;
+  let c0Count = 0;
+  let c1Count = 0;
+  const cleaned = text.replace(ESC_C0_C1_RE, (ch) => {
+    const code = ch.charCodeAt(0);
+    if (code === 0x1b) escCount++;
+    else if (code <= 0x1f) c0Count++;
+    else c1Count++;
+    return "";
+  });
+  return { text: cleaned, stripped: cleaned !== text, escCount, c0Count, c1Count };
+}
+
 interface Live {
   pty: IPty;
   pid: number;
@@ -2602,6 +2621,9 @@ interface Live {
   // already-confirmed/superseded turn is harmless because the give-up branch itself bails on
   // `enterConfirmed`/a mismatched `submitGeneration` before ever reading it.
   giveUpOrigin: QueuedMessage[] | null;
+  // @decision 49b382d9 — never re-derive this via `joinSubmittedText(origin, gen-1)` (unstripped) —
+  // read ONLY this recorded, post-strip value, or a late-confirm content-match silently double-delivers.
+  giveUpOriginWrittenText: string | null;
   // Card 09e655d5: FIFO of generations that GIVE-UP RECOVERY requeued and which may still receive a late
   // confirming hook — pushed in `requeueGiveUpOrigin`, consulted (never `submitGeneration`) by
   // `purgeConfirmedGiveUpRequeue` to decide WHICH generation a hook confirms. `submitGeneration` alone is
@@ -4458,6 +4480,16 @@ export class PtyHost {
         console.warn(`[pty] startup-prompt decorator failed for ${opts.sessionId}; spawning undecorated:`, e);
       }
     }
+    // @decision 49b382d9 — defense-in-depth ONLY: submit()/submitCodex() remain authoritative; never rely
+    // on this spawn-time strip alone, and never skip it either — both must stay in sync.
+    if (opts.startupPrompt) {
+      const { text: strippedStartupPrompt, stripped, escCount, c0Count, c1Count } = stripEscapeAndControlChars(opts.startupPrompt);
+      if (stripped) {
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] ${opts.sessionId} stripped control byte(s) from the startup prompt at spawn (security — prevents escaping bracketed paste): esc=${escCount} c0=${c0Count} c1=${c1Count}`);
+      }
+      opts = { ...opts, startupPrompt: strippedStartupPrompt };
+    }
     // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #4/#5: dispatch to the codex
     // stateful runtime BEFORE any of the claude-specific machinery below runs. `spawnCodexProcess`
     // constructs its own CodexLive entry in the SEPARATE `liveCodex` map (never `this.live` — see
@@ -4550,6 +4582,7 @@ export class PtyHost {
       flushMarkerGen: null, flushMarkerWrittenAt: null, lastFlushAttribution: null, // card ac7884e3 — no worker_flush has ever run against a fresh spawn
       writeSeq: 0,
       giveUpOrigin: null,
+      giveUpOriginWrittenText: null,
       giveUpConfirmQueue: [],
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
@@ -4782,6 +4815,7 @@ export class PtyHost {
       flushMarkerGen: null, flushMarkerWrittenAt: null, lastFlushAttribution: null, // card ac7884e3 — not applicable (worker_flush never targets a shell/canned kind)
       writeSeq: 0,
       giveUpOrigin: null,
+      giveUpOriginWrittenText: null,
       giveUpConfirmQueue: [],
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
@@ -5601,6 +5635,17 @@ export class PtyHost {
    * writeChunked's own constants rather than inventing an untested codex-specific threshold.
    */
   private submitCodex(sessionId: string, live: CodexLive, text: string): void {
+    // @decision 49b382d9 — strip ONCE, here — codex's own single convergence point, mirroring submit()'s
+    // own strip. See that record.
+    {
+      const { text: escStrippedText, stripped, escCount, c0Count, c1Count } = stripEscapeAndControlChars(text);
+      if (stripped) {
+        // Counts only, never an excerpt — no message CONTENT in this line by design (card 49b382d9 review).
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] ${sessionId} stripped control byte(s) from a codex submitted turn before it reached the pty (security — prevents escaping bracketed paste): esc=${escCount} c0=${c0Count} c1=${c1Count}`);
+      }
+      text = escStrippedText;
+    }
     this.setCodexBusy(sessionId, live, true, "submit");
     live.submitConfirmAttempts = 0;
     live.enterPending = true; // this turn's Enter is not written yet — see CASE 0 on armCodexBusyStaleTimer's own doc
@@ -5899,6 +5944,7 @@ export class PtyHost {
       flushMarkerGen: null, flushMarkerWrittenAt: null, lastFlushAttribution: null, // card ac7884e3 — not applicable (worker_flush never targets a shell/canned kind)
       writeSeq: 0,
       giveUpOrigin: null,
+      giveUpOriginWrittenText: null,
       giveUpConfirmQueue: [],
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
@@ -8740,6 +8786,19 @@ export class PtyHost {
   private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue", origin?: QueuedMessage[]): void {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.kind === "shell") return; // @decision 710a34fa — never a programmatic turn into a host shell
+
+    // @decision 49b382d9 — strip ONCE, here, at the single point EVERY write path converges on (immediate,
+    // drainPending, kickoff, rate-limit replay, give-up requeue) — never per-caller, never at enqueueStdin
+    // alone. See its record.
+    {
+      const { text: escStrippedText, stripped, escCount, c0Count, c1Count } = stripEscapeAndControlChars(text);
+      if (stripped) {
+        // Counts only, never an excerpt — no message CONTENT in this line by design (card 49b382d9 review).
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] ${sessionId} stripped control byte(s) from a submitted turn (reason=${reason}, kind=${origin?.[0]?.kind ?? "unknown"}) before it reached the pty (security — prevents escaping bracketed paste): esc=${escCount} c0=${c0Count} c1=${c1Count}`);
+      }
+      text = escStrippedText;
+    }
     // Card 441499ee: remember the ORIGINAL queued message(s) this turn's text came from — see
     // `Live.giveUpOrigin`'s doc. Of the two direct submit() callers that don't originate from
     // enqueueStdin, only resumeAfterRateLimit's "rate-limit-replay" still calls with `origin` undefined
@@ -8750,6 +8809,10 @@ export class PtyHost {
     // discarding. (Card 25813ecc: this comment previously listed both callers as origin-less — stale
     // since 0050a17e; see `Live.giveUpOrigin`'s own doc, which was updated correctly at the time.)
     live.giveUpOrigin = origin ?? null;
+    // @decision 49b382d9 — record the ACTUAL (post-strip) text alongside `giveUpOrigin`, same lifecycle —
+    // `requeueGiveUpOrigin` must read this, never re-derive via `joinSubmittedText(origin, gen-1)` (see
+    // `Live.giveUpOriginWrittenText`'s own doc + the record for why).
+    live.giveUpOriginWrittenText = origin ? text : null;
     // DIAGNOSTIC ONLY (card 1f74080a instrumentation, no control-flow change): `reason` names WHICH of the
     // four call sites is writing this turn — the two queue-mediated ones ("immediate"/"drain", both already
     // busy-gated) and the two DIRECT-write bypasses (resumeAfterRateLimit's "rate-limit-replay", and
@@ -9396,32 +9459,31 @@ export class PtyHost {
     if (!origin || origin.length === 0) return;
     // Code Review Major finding (card 4a0af485, Major 4): seed the signature from the text ACTUALLY
     // SUBMITTED, never each message's own individual `.text` — `drainPending` may have COALESCED several
-    // origin messages into ONE physical write (`joinSubmittedText`, mirrored exactly here), and
-    // `live.lastPrompt`/the engine's echo reflect that JOINED text, not any one member's own. Seeding from
-    // the individual text meant NO stored signature could ever match a coalesced turn's real confirmation —
-    // content matching silently never fired for the default `warning`-kind drain path, nor for ANY `agent`
-    // message once the daemon-global `coalesceAgentMessages` setting is on. A single-element `origin` (the
-    // common case — one message, one turn) is unaffected: joining one element with a separator is that
-    // element itself, byte-identical to before this fix. Card 78e4b3f2: `joinSubmittedText` (not a bare
-    // `.map(m => m.text)`) is now load-bearing here for a SECOND reason too — it's the same function that
-    // decided whether the attempt that just failed carried the possible-duplicate marker, so this seeds the
-    // signature from EXACTLY what was written, not from `.text`'s own possibly-pristine value.
-    // Card 4af5aefa: `gen` is the ACTUAL (post-increment) generation number the failing write ran under —
-    // `joinSubmittedText`'s own `currentGen` needs the value `live.submitGeneration` held at the moment
-    // that write's text was ORIGINALLY assembled (pre-increment, i.e. `gen - 1`), or a message that got an
-    // age annotation baked into what was actually sent would have its reconstructed signature disagree
-    // with what the engine really echoes back — exactly the class of bug this function's OWN doc already
-    // documents for the possible-duplicate tag.
+    // origin messages into ONE physical write, and `live.lastPrompt`/the engine's echo reflect that JOINED
+    // text, not any one member's own. Seeding from the individual text meant NO stored signature could ever
+    // match a coalesced turn's real confirmation — content matching silently never fired for the default
+    // `warning`-kind drain path, nor for ANY `agent` message once the daemon-global `coalesceAgentMessages`
+    // setting is on.
     //
     // @decision 4a0af485 — a coalesced batch's stored signature must derive from the text ACTUALLY
     // WRITTEN, not any one member's own `.text`, or content matching can never fire for a joined turn.
     //
-    // @decision 78e4b3f2 — `annotatedMessageText` (the SAME transform `drainPending` used to write it)
-    // is what must be reconstructed here, since it also decided the possible-duplicate framing.
-    //
-    // @decision 4af5aefa — `currentGen` is threaded through for the same reason as the paste-recovery
-    // age annotation: both must reconstruct the EXACT text a prior `drainPending` actually wrote.
-    const submittedText = joinSubmittedText(origin, gen - 1);
+    // Card 49b382d9 (SECURITY, Code Review round 3): this used to RE-DERIVE that written text via
+    // `joinSubmittedText(origin, gen - 1)` — correct for reconstructing what `submit()` was ORIGINALLY
+    // HANDED, but `submit()` now ALSO strips ESC/C0/C1 before writing, and that re-derivation never ran
+    // the strip. The engine's own late confirming hook echoes the REAL (stripped) written bytes, so a
+    // signature built from the unstripped reconstruction could never content-match it — a measured,
+    // real double-delivery bug (a stripped-byte-bearing give-up never purged its own requeued duplicate).
+    // Read `live.giveUpOriginWrittenText` — captured verbatim by `submit()` itself, already post-strip —
+    // instead. See `Live.giveUpOriginWrittenText`'s own doc / this card's record: never re-derive this.
+    if (live.giveUpOriginWrittenText == null) {
+      // Should be structurally unreachable (submit() sets both fields together, and `origin` being
+      // non-empty here means the pairing submit() call had a real `origin`) — fail LOUD rather than
+      // silently falling back to the unstripped (and thus potentially double-delivering) reconstruction.
+      // eslint-disable-next-line no-console
+      console.error(`[submit] ${sessionId} INVARIANT VIOLATED: giveUpOrigin present but giveUpOriginWrittenText is null — falling back to the unstripped reconstruction (may not content-match a stripped engine echo)`);
+    }
+    const submittedText = live.giveUpOriginWrittenText ?? joinSubmittedText(origin, gen - 1);
     const submittedSig = textSignature(submittedText);
     const kept: QueuedMessage[] = [];
     for (const m of origin) {

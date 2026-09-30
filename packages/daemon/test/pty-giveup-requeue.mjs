@@ -496,6 +496,52 @@ try {
 
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
+
+  // ===================== (7) card 49b382d9 (SECURITY round 3): a give-up whose text contains a stripped ====
+  // ===================== control byte still gets its late-confirm content match, purging the duplicate =====
+  // THE REGRESSION THIS GUARDS (Code Review, real double-delivery, VERIFIED by a seam-host probe):
+  // `submit()` writes the STRIPPED text, but `requeueGiveUpOrigin` used to seed its stored signature from
+  // `joinSubmittedText(origin, gen-1)` — a reconstruction from each origin member's own UNSTRIPPED `.text`,
+  // never run through the strip. The engine's real late `UserPromptSubmit` echoes the bytes it ACTUALLY
+  // received (stripped), so that unstripped signature could never content-match it — the requeued
+  // duplicate then survived to drain later as a genuine double delivery. Fixed by recording the ACTUAL
+  // (post-strip) written text at `submit()` time (`Live.giveUpOriginWrittenText`) instead of re-deriving.
+  {
+    const SID = "sess-requeue-stripped-byte-confirm";
+    const RAW_TEXT = "REPORT_WITH_BELL\x07_CONTROL_BYTE"; // \x07 = BEL — stripped by submit()
+    const STRIPPED_TEXT = "REPORT_WITH_BELL_CONTROL_BYTE"; // what the engine actually receives and echoes back
+    const { bodyCount } = spawnReady(SID);
+    const r = host.enqueueStdin(SID, RAW_TEXT, "system", undefined, undefined, "agent");
+    check("(7) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
+
+    // Never confirms — a genuine give-up, same shape as scenario (1).
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
+    check("(7) setup: the pty received the STRIPPED text, never the raw control byte",
+      bodyCount(STRIPPED_TEXT) === 1 && bodyCount(RAW_TEXT) === 0);
+    check("(7) setup: RECOVERY requeued the message", host.getPendingEntries(SID).length === 1);
+
+    // The late confirmation carries the STRIPPED text — exactly what a real engine echoes, since that's
+    // the only thing it ever received. `prompt` must be set (content-matching is gated on a non-empty
+    // `reportedPrompt` — see `purgeConfirmedGiveUpRequeueCore`'s own top guard) so this exercises the
+    // CONTENT-MATCH branch specifically, not the content-blind FIFO-position fallback (which a single
+    // pending entry could satisfy regardless of whether this bug exists).
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: STRIPPED_TEXT });
+    // THE DISCRIMINATING CHECK — "pending is empty" ALONE is NOT this test's RED proof: with only one
+    // pending entry, the content-BLIND FIFO-position fallback trivially clears it too (measured: this
+    // stayed GREEN on 6d2581b4's pre-fix code). THIS check is what's RED on 6d2581b4 — pre-fix, the purge
+    // silently fell through to that fallback instead of ever genuinely content-matching the stripped bytes.
+    check("(7) THE FIX: the late confirmation content-matched the STRIPPED bytes (not the FIFO fallback) — RED on 6d2581b4",
+      submitLog.some((l) => l.startsWith(`[submit] ${SID} CONFIRMED`) && l.includes("content-matched")));
+    check("(7) setup sanity: the duplicate is also gone from pending either way", host.getPendingEntries(SID).length === 0);
+
+    host.reconcile();
+    check("(7) NO DOUBLE DELIVERY: the body landed exactly once even after a reconcile tick past the purge",
+      bodyCount(STRIPPED_TEXT) === 1);
+
+    host.deliverHook(SID, { hook_event_name: "Stop" });
+    check("(7) the turn finalizes cleanly, nothing left queued", busyLog[SID].at(-1) === false && host.getPendingEntries(SID).length === 0);
+    try { host.stop(SID, "hard"); } catch { /* ignore */ }
+  }
 } finally {
   for (const sid of ["sess-requeue-basic", "sess-requeue-order", "sess-requeue-kickoff"]) {
     try { host.stop(sid, "hard"); } catch { /* ignore */ }
@@ -504,6 +550,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a genuinely-lost give-up is requeued (visible, identity-preserved) and actually re-delivered on the next drain, ordering is preserved against messages that arrive while stuck, the requeue budget bounds it from looping forever, a SUPPRESSED (false-negative) give-up never requeues or double-delivers anything, a confirming hook arriving DURING the settle window means no requeue ever happens, a hook arriving AFTER RECOVERY already requeued still gets purged before it can double-deliver, and (card 0050a17e) a fresh spawn's KICKOFF — delivered via scheduleKickoffGuarantee's own direct submit() — gets the SAME give-up requeue/re-delivery protection, not silently dropped."
+  ? "\n✅ ALL PASS — a genuinely-lost give-up is requeued (visible, identity-preserved) and actually re-delivered on the next drain, ordering is preserved against messages that arrive while stuck, the requeue budget bounds it from looping forever, a SUPPRESSED (false-negative) give-up never requeues or double-delivers anything, a confirming hook arriving DURING the settle window means no requeue ever happens, a hook arriving AFTER RECOVERY already requeued still gets purged before it can double-deliver, (card 0050a17e) a fresh spawn's KICKOFF — delivered via scheduleKickoffGuarantee's own direct submit() — gets the SAME give-up requeue/re-delivery protection, not silently dropped, and (card 49b382d9) a give-up'd message containing a stripped control byte still gets its late-confirm content match against the ACTUAL (post-strip) written text, never re-deriving an unstripped signature that could never match the engine's real echo."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -461,6 +461,14 @@ try {
     const reported = `${prefix}${plainFail}\n`;
     check("SETUP: the specimen's own arithmetic closes exactly (5+4=9=lenDelta)", intended.length - reported.length === 9);
     host.enqueueStdin(sid, intended);
+    // Card 49b382d9 (SECURITY): submit() now strips ESC/C0/C1 from EVERY write path before it reaches
+    // live.lastPrompt, so `intended`'s real ESC bytes above never survive that call — no real production
+    // entry point can any longer manufacture this exact ANSI-in-intended precondition (a genuine, intended
+    // side effect — see its record's own "ANSI-strip-deficit classifier is now production-unreachable"
+    // section). Restore the raw ANSI-bearing text directly onto live.lastPrompt (what submit() would have
+    // recorded pre-49b382d9) to keep exercising the detector's own logic in isolation from the now-closed
+    // delivery vector.
+    host.live.get(sid).lastPrompt = intended;
     const fake = fakesById.get(sid);
     const writesBefore = fake.writes.length;
     const capturedLines = [];

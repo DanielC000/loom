@@ -367,6 +367,15 @@ try {
     // content; the engine reports it back with the styling stripped — exactly the earlier bare write.
     const ansiWrapped = `${bareText.slice(0, 20)}\x1b[31m${bareText.slice(20, 40)}\x1b[0m${bareText.slice(40)}`;
     host.enqueueStdin(sid, ansiWrapped); // gen=2
+    // Card 49b382d9 (SECURITY): `submit()` now strips ESC/C0/C1 from EVERY write path (immediate, drain,
+    // kickoff, rate-limit replay, give-up requeue) before it ever reaches `live.lastPrompt` — so
+    // `ansiWrapped`'s real ESC bytes never survive the call above; no real production entry point can any
+    // longer manufacture this exact ANSI-strip-deficit precondition (a genuine, intended side effect of
+    // that fix — see its record's own "ANSI-strip-deficit classifier is now production-unreachable"
+    // section). This detector's LOGIC is still correct and worth covering, so restore the raw ANSI-bearing
+    // text directly onto `live.lastPrompt` (what `submit()` would have recorded pre-49b382d9) to keep
+    // exercising it in isolation from the (now-closed) delivery vector.
+    host.live.get(sid).lastPrompt = ansiWrapped;
     host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: bareText }); // byteIdentical=false
     // Code Review (second pass): reworded to name only the half this assertion actually proves — the
     // replay half. The ANSI-strip-deficit half is what check 21 below demonstrates.
