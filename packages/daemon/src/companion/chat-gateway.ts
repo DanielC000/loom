@@ -279,7 +279,7 @@ export class ChatGateway {
       // body. The bound id is the AUTHENTICATED chat.id (never a body-supplied one). On success the code
       // text NEVER reaches submitTurn — we bind + live-sync + ack "paired" and return here. On ANY failure
       // (incl. a code-shaped body that doesn't redeem) we fall through to the SAME silent reject below.
-      const red = this.pairing.redeem({ grantType: "dm-bind", channel: msg.channel, chatId: msg.chatId, senderId: msg.sender?.id, body: msg.body });
+      const red = this.pairing.redeem({ grantType: "dm-bind", channel: msg.channel, chatId: msg.chatId, senderId: msg.sender?.id, body: msg.body, chatIsDirect: msg.chatIsDirect });
       if (red.outcome === "bound") {
         this.bind(red.binding); // live-sync the routing map so this chat routes immediately (no restart)
         // Companion Trust Window close path (Framework Card 0): a fresh re-pair changes WHO may drive this

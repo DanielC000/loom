@@ -79,7 +79,7 @@ export function normalizeTelegramMessage(update: unknown): InboundMessage | null
   const message = (
     update as {
       message?: {
-        chat?: { id?: unknown };
+        chat?: { id?: unknown; type?: unknown };
         text?: unknown;
         message_id?: unknown;
         from?: { id?: unknown; username?: unknown; first_name?: unknown; last_name?: unknown };
@@ -90,6 +90,12 @@ export function normalizeTelegramMessage(update: unknown): InboundMessage | null
   const chatId = message?.chat?.id;
   const text = message?.text;
   const voice = message?.voice;
+  // Telegram's own chat.type ("private" | "group" | "supergroup" | "channel") is the ONLY signal that
+  // distinguishes a 1:1 DM from a shared chat sharing the same message shape — a group's chatId is just as
+  // stable/numeric as a DM's. A malformed/missing type (never expected from the real Bot API) leaves
+  // `chatIsDirect` undefined rather than guessing, so the dm-bind pairing gate (pairing.ts) fails CLOSED.
+  const chatType = message?.chat?.type;
+  const chatIsDirect = typeof chatType === "string" ? chatType === "private" : undefined;
   // A voice note carries NO text (Telegram doesn't support a caption on `voice`) — the attachment alone
   // makes this inbound usable, so it must not be dropped by the text-only check below.
   const voiceFileId = typeof voice?.file_id === "string" && voice.file_id.length > 0 ? voice.file_id : undefined;
@@ -116,6 +122,7 @@ export function normalizeTelegramMessage(update: unknown): InboundMessage | null
     chatId: String(chatId),
     body: typeof text === "string" ? text : "",
     sender,
+    chatIsDirect,
     attachments,
     metadata: message?.message_id !== undefined ? { messageId: message.message_id } : undefined,
   };

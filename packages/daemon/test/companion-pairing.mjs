@@ -41,6 +41,7 @@ const { ChatGateway } = await import("../dist/companion/chat-gateway.js");
 const { createDbCompanionAuth } = await import("../dist/companion/auth.js");
 const { createDbCompanionPairing } = await import("../dist/companion/pairing.js");
 const { buildServer } = await import("../dist/gateway/server.js");
+const { normalizeTelegramMessage } = await import("../dist/companion/telegram.js");
 
 const TTL_MS = 10 * 60_000;
 const LOCKOUT_MS = 15 * 60_000;
@@ -118,7 +119,7 @@ try {
     const codeId = code.slice("pair_".length).split(".")[0];
 
     // A brand-new DM (no binding) redeems it → binds the AUTHENTICATED chat.id, acks "paired", NO submit.
-    const r = await gw.handleInbound({ channel: "telegram", chatId: "dm-new", body: code, sender: { id: "user-9" } });
+    const r = await gw.handleInbound({ channel: "telegram", chatId: "dm-new", body: code, sender: { id: "user-9" }, chatIsDirect: true });
     check("dm-bind: redemption → paired-dm for the targeted session", r.accepted === false && r.reason === "paired-dm" && r.sessionId === "sess-D");
     check("dm-bind: the code text was NOT submitted as a turn", submitted.length === 0);
     check("dm-bind: a 'paired' ack was sent to the authenticated chat", r.acked === true && sent.length === 1 && sent[0].chatId === "dm-new" && /paired/i.test(sent[0].text));
@@ -131,7 +132,7 @@ try {
     check("dm-bind: the paired chat now routes a normal turn to the bound session", r2.accepted === true && r2.sessionId === "sess-D" && submitted.length === 1 && submitted[0].text === "hello there");
 
     // Single-use: the same code redeemed from a DIFFERENT unbound chat is rejected (already consumed).
-    const r3 = await gw.handleInbound({ channel: "telegram", chatId: "dm-other", body: code, sender: { id: "user-x" } });
+    const r3 = await gw.handleInbound({ channel: "telegram", chatId: "dm-other", body: code, sender: { id: "user-x" }, chatIsDirect: true });
     check("dm-bind: single-use — a 2nd redemption of the same code is rejected", r3.accepted === false && r3.reason === "chat-not-allowlisted");
     check("dm-bind: the rejected 2nd redemption bound nothing new", !db.listCompanionBindings().some((b) => b.chatId === "dm-other"));
     check("dm-bind: the reused code text was NOT submitted", submitted.length === 1);
@@ -139,7 +140,7 @@ try {
     // TTL: a FRESH dm-bind code redeemed AFTER its TTL is rejected (clock advanced past expiry).
     const expiring = db.mintPairingCode({ sessionId: "sess-T", channel: "telegram", grantType: "dm-bind", ttlMs: TTL_MS }, clock.t).code;
     clock.t += TTL_MS + 1;
-    const rTtl = await gw.handleInbound({ channel: "telegram", chatId: "dm-late", body: expiring, sender: { id: "late" } });
+    const rTtl = await gw.handleInbound({ channel: "telegram", chatId: "dm-late", body: expiring, sender: { id: "late" }, chatIsDirect: true });
     check("dm-bind: an expired code is rejected (same silent reject)", rTtl.accepted === false && rTtl.reason === "chat-not-allowlisted");
     check("dm-bind: the expired code bound nothing", !db.listCompanionBindings().some((b) => b.chatId === "dm-late"));
 
@@ -192,23 +193,23 @@ try {
     // Three WRONG (but code-shaped) guesses from the same sender → lock out. Nonexistent code id ⇒ invalid.
     const wrong = "pair_00000000-0000-0000-0000-000000000000.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     for (let i = 0; i < 3; i++) {
-      const rw = await gw.handleInbound({ channel: "telegram", chatId: "atk", body: wrong, sender: { id: "attacker" } });
+      const rw = await gw.handleInbound({ channel: "telegram", chatId: "atk", body: wrong, sender: { id: "attacker" }, chatIsDirect: true });
       check(`lockout: wrong guess #${i + 1} rejected (chat-not-allowlisted)`, rw.accepted === false && rw.reason === "chat-not-allowlisted");
     }
     // Now locked: even the VALID code from the SAME sender is rejected without binding anything.
-    const rLocked = await gw.handleInbound({ channel: "telegram", chatId: "atk", body: valid, sender: { id: "attacker" } });
+    const rLocked = await gw.handleInbound({ channel: "telegram", chatId: "atk", body: valid, sender: { id: "attacker" }, chatIsDirect: true });
     check("lockout: a VALID code is rejected while locked out", rLocked.accepted === false && rLocked.reason === "chat-not-allowlisted");
     check("lockout: nothing was bound while locked", !db.listCompanionBindings().some((b) => b.chatId === "atk"));
     check("lockout: the valid code stayed UNCONSUMED under lockout", db.getPairingCodeById(valid.slice("pair_".length).split(".")[0])?.consumed_at == null);
 
     // A DIFFERENT sender is NOT locked — the lockout is keyed per (channel, sender.id).
     const other = db.mintPairingCode({ sessionId: "sess-L2", channel: "telegram", grantType: "dm-bind", ttlMs: TTL_MS }, clock.t).code;
-    const rOther = await gw.handleInbound({ channel: "telegram", chatId: "atk2", body: other, sender: { id: "innocent" } });
+    const rOther = await gw.handleInbound({ channel: "telegram", chatId: "atk2", body: other, sender: { id: "innocent" }, chatIsDirect: true });
     check("lockout: a different sender is unaffected (per-sender key)", rOther.accepted === false && rOther.reason === "paired-dm");
 
     // The lock is time-bounded: after the lockout window the SAME sender's valid code redeems.
     clock.t += LOCKOUT_MS + 1;
-    const rUnlocked = await gw.handleInbound({ channel: "telegram", chatId: "atk", body: valid, sender: { id: "attacker" } });
+    const rUnlocked = await gw.handleInbound({ channel: "telegram", chatId: "atk", body: valid, sender: { id: "attacker" }, chatIsDirect: true });
     check("lockout: unlocks after the lockout window (valid code then redeems)", rUnlocked.accepted === false && rUnlocked.reason === "paired-dm");
     check("lockout: never submitted a code body as a turn", submitted.length === 0);
 
@@ -224,7 +225,7 @@ try {
 
     // No oracle (dm path): a wrong code to an UNBOUND chat yields the SAME reason as a plain message.
     const plain = await gw.handleInbound({ channel: "telegram", chatId: "unbound", body: "just chatting", sender: { id: "x" } });
-    const wrongCode = await gw.handleInbound({ channel: "telegram", chatId: "unbound", body: "pair_11111111-1111-1111-1111-111111111111.ZZZZZZZZZZZZZZZZZZZZZZ", sender: { id: "x" } });
+    const wrongCode = await gw.handleInbound({ channel: "telegram", chatId: "unbound", body: "pair_11111111-1111-1111-1111-111111111111.ZZZZZZZZZZZZZZZZZZZZZZ", sender: { id: "x" }, chatIsDirect: true });
     check("no-oracle(dm): a wrong code and a plain message give the IDENTICAL reject", plain.reason === "chat-not-allowlisted" && wrongCode.reason === plain.reason);
 
     // No oracle (group path): an unlisted sender's wrong code == a plain unauthorized message.
@@ -234,7 +235,7 @@ try {
 
     // Anti-spoof: the bound id is ALWAYS the authenticated metadata id — a redeemer enrolls only THEMSELVES.
     const spoofCode = db.mintPairingCode({ sessionId: "sess-S", channel: "telegram", grantType: "dm-bind", ttlMs: TTL_MS }, clock.t);
-    const rSpoof = await gw.handleInbound({ channel: "telegram", chatId: "authentic-chat", body: spoofCode.code, sender: { id: "authentic-sender" } });
+    const rSpoof = await gw.handleInbound({ channel: "telegram", chatId: "authentic-chat", body: spoofCode.code, sender: { id: "authentic-sender" }, chatIsDirect: true });
     check("anti-spoof: redemption paired the AUTHENTICATED chat", rSpoof.reason === "paired-dm");
     const bound = db.listCompanionBindings().find((b) => b.sessionId === "sess-S");
     check("anti-spoof: the binding is the authenticated chat.id, not any body content", !!bound && bound.chatId === "authentic-chat");
@@ -282,6 +283,61 @@ try {
     const rSame = redeemDm(cB.code, "same-chat", "owner");
     check("re-pair: an exact-same-chat re-pair succeeds (idempotent)", rSame.outcome === "bound" && rSame.chatId === "same-chat");
     check("re-pair: the binding is unchanged + the code consumed", db.listCompanionBindings().find((b) => b.sessionId === "sess-B")?.chatId === "same-chat" && db.getPairingCodeById(cB.codeId)?.consumed_at != null);
+
+    db.close();
+  }
+
+  // ============ Part G — dm-bind REFUSED from a non-private chat (card db49891d) ============
+  // A dm-bind code must only ever be redeemable from a chat the CHANNEL confirms is private — a "dm"
+  // binding authorizes on route-match ALONE (auth.ts), so admitting a group/supergroup chat as "dm" would
+  // let EVERY member of that chat drive the session as if they were its single owner. Driven through the
+  // REAL Telegram normalizer (not a hand-built InboundMessage) so this exercises the actual adapter → gateway
+  // → pairing path a live group-chat attack would take.
+  {
+    const db = new Db(dbFile("G.db"));
+    const clock = { t: 6_000_000 };
+    const { gw, submitted, sent } = makeGateway(db, clock);
+
+    const code = db.mintPairingCode({ sessionId: "sess-Grp", channel: "telegram", grantType: "dm-bind", ttlMs: TTL_MS }, clock.t).code;
+    const codeId = code.slice("pair_".length).split(".")[0];
+
+    // A real Telegram "group" chat.type update carrying the valid code, from an identified member.
+    const groupUpdate = normalizeTelegramMessage({
+      message: { chat: { id: "grp-attack", type: "group" }, text: code, from: { id: "member-1" } },
+    });
+    check("group-attack: normalizer reports chatIsDirect:false for a group chat", groupUpdate?.chatIsDirect === false);
+    const rGroup = await gw.handleInbound(groupUpdate);
+    check("group-attack: dm-bind redemption from a GROUP chat is REFUSED (same silent reject)", rGroup.accepted === false && rGroup.reason === "chat-not-allowlisted");
+    check("group-attack: NO binding was created for the group chat", !db.listCompanionBindings().some((b) => b.chatId === "grp-attack"));
+    check("group-attack: no ack was sent (never reached the paired-ack branch)", sent.length === 0);
+    check("group-attack: the code text was NOT submitted as a turn", submitted.length === 0);
+    check("group-attack: the code stayed UNCONSUMED — the store was never touched", db.getPairingCodeById(codeId)?.consumed_at == null);
+
+    // Same for "supergroup" (Telegram's large-group chat type) — the same code, still unconsumed.
+    const supergroupUpdate = normalizeTelegramMessage({
+      message: { chat: { id: "sgrp-attack", type: "supergroup" }, text: code, from: { id: "member-2" } },
+    });
+    const rSuper = await gw.handleInbound(supergroupUpdate);
+    check("supergroup-attack: dm-bind redemption from a SUPERGROUP chat is REFUSED", rSuper.accepted === false && rSuper.reason === "chat-not-allowlisted");
+    check("supergroup-attack: NO binding was created for the supergroup chat", !db.listCompanionBindings().some((b) => b.chatId === "sgrp-attack"));
+    check("supergroup-attack: the code is STILL unconsumed", db.getPairingCodeById(codeId)?.consumed_at == null);
+
+    // A channel that CANNOT report chat type (chatIsDirect omitted) fails CLOSED too — not open-by-default.
+    const rUnknown = await gw.handleInbound({ channel: "telegram", chatId: "unknown-type-chat", body: code, sender: { id: "member-3" } });
+    check("unknown-chat-type: dm-bind is REFUSED when the channel can't confirm private (fail closed)", rUnknown.accepted === false && rUnknown.reason === "chat-not-allowlisted");
+    check("unknown-chat-type: NO binding was created", !db.listCompanionBindings().some((b) => b.chatId === "unknown-type-chat"));
+    check("unknown-chat-type: the code is STILL unconsumed", db.getPairingCodeById(codeId)?.consumed_at == null);
+
+    // The SAME never-consumed code legitimately redeems once a REAL private chat presents it.
+    const privateUpdate = normalizeTelegramMessage({
+      message: { chat: { id: "real-dm", type: "private" }, text: code, from: { id: "owner" } },
+    });
+    check("real-dm: normalizer reports chatIsDirect:true for a private chat", privateUpdate?.chatIsDirect === true);
+    const rPrivate = await gw.handleInbound(privateUpdate);
+    check("real-dm: the untouched code still redeems from the genuinely private chat", rPrivate.accepted === false && rPrivate.reason === "paired-dm" && rPrivate.sessionId === "sess-Grp");
+    check("real-dm: the binding is the genuinely private chat.id, dm scope", db.listCompanionBindings().find((b) => b.sessionId === "sess-Grp")?.chatId === "real-dm");
+    check("real-dm: the code is NOW consumed", db.getPairingCodeById(codeId)?.consumed_at != null);
+    check("group/supergroup/unknown attacks never submitted a turn", submitted.length === 0);
 
     db.close();
   }

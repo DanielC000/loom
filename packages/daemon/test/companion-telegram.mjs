@@ -46,6 +46,15 @@ const tick = () => new Promise((r) => setTimeout(r, 15));
   // A message with no sender still normalizes (chat-scoped only).
   const noFrom = normalizeTelegramMessage({ message: { chat: { id: 9 }, text: "hi" } });
   check("normalize: missing 'from' → sender undefined, still normalized", noFrom?.chatId === "9" && noFrom?.sender === undefined);
+
+  // chatIsDirect (card db49891d — the dm-bind pairing gate reads this): derived from Telegram's OWN
+  // chat.type, never guessed. "private" ⇒ true; any other real type ⇒ explicit false (never treated as
+  // unknown); a missing/malformed type ⇒ undefined (fail-closed — see pairing.ts), not defaulted to true.
+  check("normalize: chat.type 'private' → chatIsDirect:true", normalizeTelegramMessage({ message: { chat: { id: 1, type: "private" }, text: "x" } })?.chatIsDirect === true);
+  check("normalize: chat.type 'group' → chatIsDirect:false", normalizeTelegramMessage({ message: { chat: { id: 2, type: "group" }, text: "x" } })?.chatIsDirect === false);
+  check("normalize: chat.type 'supergroup' → chatIsDirect:false", normalizeTelegramMessage({ message: { chat: { id: 3, type: "supergroup" }, text: "x" } })?.chatIsDirect === false);
+  check("normalize: chat.type 'channel' → chatIsDirect:false", normalizeTelegramMessage({ message: { chat: { id: 4, type: "channel" }, text: "x" } })?.chatIsDirect === false);
+  check("normalize: missing chat.type → chatIsDirect:undefined (fail closed, not assumed private)", normalizeTelegramMessage({ message: { chat: { id: 5 }, text: "x" } })?.chatIsDirect === undefined);
 }
 
 // A fake grammY Bot implementing the minimal TelegramBotLike seam (no network).

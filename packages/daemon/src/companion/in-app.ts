@@ -168,7 +168,9 @@ export interface InAppMessageRecorder {
  */
 export function normalizeInAppMessage(chatId: string, body: unknown): InboundMessage | null {
   if (typeof body !== "string" || body.length === 0) return null;
-  return { channel: IN_APP_CHANNEL, chatId, body };
+  // chatIsDirect: true — this channel IS the loopback cockpit, structurally a single-owner 1:1 (see the
+  // function doc above); there is no shared/group shape for it to ever be confused with.
+  return { channel: IN_APP_CHANNEL, chatId, body, chatIsDirect: true };
 }
 
 /** Inbound web-mic audio size cap (Companion Voice epic, VOICE-P4 inbound) — a chat voice clip is far

@@ -16,6 +16,10 @@
  *     `sender-not-authorized`, never "bad code".
  *   • Rate-limit / lockout is keyed per (channel, sender.id); while locked the store rejects without even
  *     loading a code. The atomic grant+consume (and the counter mutations) all live in the db txn.
+ *   • A `dm-bind` grant requires the inbound's `chatIsDirect === true` (card db49891d) — a `dm` binding
+ *     authorizes by route-match ALONE (auth.ts), so redeeming one from a group/supergroup chat would admit
+ *     every member of that chat as the session's single owner. `false` or omitted (a channel that can't
+ *     report chat type) fails CLOSED, same no-oracle reject as any other invalid attempt.
  */
 import type { SessionBinding } from "./types.js";
 import type { PairingRedeemResult } from "../db.js";
@@ -34,6 +38,11 @@ export interface RedeemAttempt {
   senderId?: string;
   /** The raw message body — parsed ONLY as a pairing code (id+secret); never used as an identity source. */
   body: string;
+  /** The inbound's own InboundMessage.chatIsDirect (types.ts) — only an explicit `true` (the channel
+   *  CONFIRMS a private 1:1 chat) makes a `dm-bind` attempt eligible; `false` or omitted refuses (see
+   *  the grantType==="dm-bind" gate below). Irrelevant to `group-sender` (already scoped to an existing
+   *  group binding). */
+  chatIsDirect?: boolean;
   /** group-sender only: the matched group binding's session id — the code's session MUST equal it (a code
    *  for session A must not grant into group B). */
   bindingSessionId?: string;
@@ -101,6 +110,12 @@ export function createDbCompanionPairing(db: PairingStore, policy: PairingPolicy
     redeem(a) {
       // No authenticated sender ⇒ no id to bind or to key the rate-limit on ⇒ not redeemable. Fall through.
       if (!a.senderId) return { outcome: "not-a-code" };
+      // SECURITY (card db49891d): a dm-bind grant must never be minted from a chat the channel hasn't
+      // CONFIRMED private — a `dm` binding authorizes by route-match alone, so binding a group/supergroup
+      // chat as "dm" would admit every member as the session's single owner. `chatIsDirect` must be an
+      // explicit `true`; `false` or omitted (unknown) fails CLOSED, same as the no-sender case above — the
+      // store is never even touched, so this can't be rate-limited or probed like a real wrong-code guess.
+      if (a.grantType === "dm-bind" && a.chatIsDirect !== true) return { outcome: "not-a-code" };
       // Only a plausibly-a-code body is a redemption candidate — everything else is normal chatter that
       // must NOT touch the pairing store (and so can't consume a rate-limit budget by accident).
       const parsed = parsePairingCode(a.body.trim());

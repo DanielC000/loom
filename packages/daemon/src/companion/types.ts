@@ -36,6 +36,16 @@ export interface InboundMessage {
   body: string;
   /** The sender, when the platform identifies them (all optional — some channels are chat-scoped only). */
   sender?: { id?: string; username?: string; displayName?: string };
+  /**
+   * True iff the adapter's platform CONFIRMS this update came from a private 1:1 chat (Telegram:
+   * `chat.type === "private"`; in-app: always true — the loopback cockpit is inherently single-owner).
+   * SECURITY (card db49891d): the dm-bind pairing redemption path (pairing.ts) treats anything other than
+   * an explicit `true` — `false` OR omitted — as NOT eligible for a dm-bind grant. A channel that cannot
+   * report chat type must leave this undefined and thereby fail CLOSED, never assume private by omission —
+   * a group/supergroup chat bound as "dm" scope would authorize by route-match alone (auth.ts), admitting
+   * every member of that chat as the session's single owner.
+   */
+  chatIsDirect?: boolean;
   /** Non-text payloads carried by the update. */
   attachments?: InboundAttachment[];
   /** Free-form channel-specific extras (message id, timestamp, reply-to, …) — opaque to the gateway. */
