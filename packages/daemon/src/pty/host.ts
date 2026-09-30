@@ -5519,7 +5519,7 @@ export class PtyHost {
     live.busy = busy;
     // eslint-disable-next-line no-console
     console.log(`[busy] ${sessionId} -> ${busy ? "true" : "false"} (${reason})`);
-    this.events.onBusy(sessionId, busy);
+    this.persistBusy(sessionId, busy);
     this.broadcastControl(live, { type: "busy", busy });
   }
 
@@ -10282,6 +10282,17 @@ export class PtyHost {
     return true;
   }
 
+  /** @decision 72c58b1c — the ONE chokepoint for the `events.onBusy` persistence callout, shared by
+   *  `setBusy` and `setCodexBusy` (never a second copy of this try/catch) — see the decision record for why. */
+  private persistBusy(sessionId: string, busy: boolean): void {
+    try {
+      this.events.onBusy(sessionId, busy);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`[busy] ${sessionId} onBusy callout failed — busy persistence AND the manager idle-notification it also drives (notifyManagerOfIdleWorker/purgeStaleIdleNudgeForReengagedWorker, index.ts) may have been skipped, not fatal:`, (e as Error).message);
+    }
+  }
+
   /**
    * Persist + broadcast the turn-in-flight flag, and track it locally. Idempotent.
    *
@@ -10300,7 +10311,7 @@ export class PtyHost {
     live.busySince = busy ? Date.now() : null; // track the rising edge for the stuck-busy heal
     // eslint-disable-next-line no-console
     console.log(`[busy] ${sessionId} -> ${busy ? "true" : "false"} (${reason})${!busy && prevBusySince != null ? ` afterMs=${Date.now() - prevBusySince}` : ""}`);
-    this.events.onBusy(sessionId, busy);
+    this.persistBusy(sessionId, busy);
     this.broadcastControl(live, { type: "busy", busy });
   }
 

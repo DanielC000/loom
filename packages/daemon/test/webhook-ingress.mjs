@@ -463,6 +463,212 @@ try {
     dbRR.close();
   }
 
+  // ===================== (14, card 72c58b1c) a failed fire must not permanently swallow a delivery =====
+  // The out-of-band wake/spawn fire runs AFTER the dedupe row is recorded and AFTER the 200 ACK is sent
+  // (ingress.ts's own doc). A failure there (a resume/startNew error) used to leave that row in place for
+  // the whole retention window, permanently swallowing the delivery (including a provider's manual
+  // Redeliver, which reuses the same id/body). Proves BOTH halves end to end through the real route: a
+  // failed fire lets a redelivery of the SAME event actually fire, and a SUCCESSFUL fire still dedupes a
+  // redelivery normally (the fix must not weaken existing replay protection).
+  {
+    const dbFF = new Db(dbFile("fire-fail.db"));
+    const nowFF = new Date().toISOString();
+    dbFF.insertProject({ id: "ff-proj", name: "ff", repoPath: "ff-proj", vaultPath: "ff-proj", config: {}, createdAt: nowFF, archivedAt: null });
+    dbFF.insertAgent({ id: "ff-agent", projectId: "ff-proj", name: "ff-target", startupPrompt: "", position: 0 });
+    const ffEndpoint = createWebhookEndpoint(dbFF, {
+      name: "Fire-fail target", sourceType: "generic", secret: "ff-secret-abc", mode: "spawn", targetSessionId: null, agentId: "ff-agent",
+    });
+    const ffSpawnCalls = [];
+    let ffShouldFail = true; // controllable: true = startNew throws synchronously (fire fails)
+    const ffApp = Fastify();
+    registerWebhookIngress(ffApp, {
+      db: dbFF,
+      sessions: {
+        startNew: (agentId, opts) => {
+          if (ffShouldFail) throw new Error("simulated spawn failure");
+          ffSpawnCalls.push({ agentId, opts });
+          return { id: `ff-${ffSpawnCalls.length}` };
+        },
+        resume: () => ({}),
+      },
+      pty: { isAlive: () => false, enqueueStdin: () => ({ delivered: true }) },
+    });
+    await ffApp.ready();
+    const ffUrl = `/hooks/${ffEndpoint.path}`;
+    const { payload, headers } = signGeneric("ff-secret-abc", '{"i":"fire-fail"}', "ff-delivery-1");
+
+    // Silence the expected console.error from the simulated fire failure so it doesn't pollute output.
+    const originalError = console.error;
+    const errorLines = [];
+    console.error = (...args) => { errorLines.push(args.join(" ")); };
+    try {
+      ffShouldFail = true;
+      const r1 = await ffApp.inject({ method: "POST", url: ffUrl, payload, headers });
+      check("(14) a delivery whose fire FAILS -> still 200 (the ACK is sent BEFORE the fire)", r1.statusCode === 200 && JSON.parse(r1.payload).duplicate !== true);
+      await settle();
+      check("(14) ...and it did NOT spawn (the simulated failure)", ffSpawnCalls.length === 0);
+      check("(14) ...and the failure was logged", errorLines.length === 1 && errorLines[0].includes("fire failed"));
+      check("(14) ...and, critically, the dedupe row was REMOVED after the failed fire (not left behind)",
+        dbFF.hasWebhookDelivery(ffEndpoint.id, "generic:ff-delivery-1") === false);
+
+      // Redeliver the EXACT same event (same delivery id, same signature) — must NOT be treated as a
+      // stale duplicate; it must get a real chance to fire this time.
+      ffShouldFail = false;
+      const r2 = await ffApp.inject({ method: "POST", url: ffUrl, payload, headers });
+      const r2Body = JSON.parse(r2.payload);
+      check("(14) redelivering the SAME event after a failed fire -> 200, NOT flagged duplicate", r2.statusCode === 200 && r2Body.duplicate !== true);
+      await settle();
+      check("(14) ...and it actually fired this time (not permanently swallowed by the earlier failure)", ffSpawnCalls.length === 1);
+      check("(14) ...and the dedupe row exists again (the successful fire's row was NOT removed)",
+        dbFF.hasWebhookDelivery(ffEndpoint.id, "generic:ff-delivery-1") === true);
+
+      // The OTHER half: a SUCCESSFUL fire must still dedupe a redelivery normally (replay protection is
+      // not weakened by this fix).
+      const r3 = await ffApp.inject({ method: "POST", url: ffUrl, payload, headers }); // same delivery again
+      await settle();
+      check("(14) redelivering AGAIN after a SUCCESSFUL fire -> 200 duplicate (still deduped)", r3.statusCode === 200 && JSON.parse(r3.payload).duplicate === true);
+      check("(14) ...and no second spawn happened", ffSpawnCalls.length === 1);
+    } finally {
+      console.error = originalError;
+      await ffApp.close();
+      dbFF.close();
+    }
+  }
+
+  // ===================== (15, card 72c58b1c) wake-mode: an enqueueStdin DROP must fail the fire too =====
+  // fireWebhookTarget's wake-mode branch used to ignore enqueueStdin's return value entirely. enqueueStdin
+  // reports failure as a RETURN VALUE (EnqueueResult), never a throw — so a genuinely dropped nudge
+  // (deliveryState:"dropped", e.g. the target session died between the isAlive/resume check and the
+  // enqueue) used to resolve the fire's promise successfully, never trip the .catch(), and leave the
+  // dedupe row in place on a silently lost delivery — the same swallow the (14) fix addresses, through a
+  // path that fix didn't cover. Also proves the OTHER polarity (decision 13e32e1d): a "queued"/held
+  // outcome (delivered:false but NOT dropped) is a REAL success and must not be treated as a failure.
+  {
+    const dbWD = new Db(dbFile("wake-drop.db"));
+    const nowWD = new Date().toISOString();
+    dbWD.insertProject({ id: "wd-proj", name: "wd", repoPath: "wd-proj", vaultPath: "wd-proj", config: {}, createdAt: nowWD, archivedAt: null });
+    dbWD.insertAgent({ id: "wd-agent", projectId: "wd-proj", name: "wd-target", startupPrompt: "", position: 0 });
+    dbWD.insertSession({
+      id: "wd-target-sess", projectId: "wd-proj", agentId: "wd-agent", engineSessionId: "eng-wd", title: null,
+      cwd: "wd-proj", processState: "live", resumability: "resumable", busy: false,
+      createdAt: nowWD, lastActivity: nowWD, lastError: null, role: "manager",
+    });
+    const wdEndpoint = createWebhookEndpoint(dbWD, {
+      name: "Wake-drop target", sourceType: "generic", secret: "wd-secret-abc", mode: "wake",
+      targetSessionId: "wd-target-sess", agentId: null,
+    });
+    let wdEnqueueResult = { delivered: false, deliveryState: "dropped", reason: "session-dead" };
+    const wdEnqueueCalls = [];
+    const wdApp = Fastify();
+    const originalError2 = console.error;
+    const errorLines2 = [];
+    console.error = (...args) => { errorLines2.push(args.join(" ")); };
+    try {
+      registerWebhookIngress(wdApp, {
+        db: dbWD,
+        sessions: { startNew: () => { throw new Error("should not be called (wake mode)"); }, resume: () => ({}) },
+        pty: { isAlive: () => true, enqueueStdin: (...args) => { wdEnqueueCalls.push(args); return wdEnqueueResult; } },
+      });
+      await wdApp.ready();
+      const wdUrl = `/hooks/${wdEndpoint.path}`;
+      const { payload, headers } = signGeneric("wd-secret-abc", '{"i":"wake-drop"}', "wd-delivery-1");
+
+      // (15a) a DROPPED enqueue must be treated as a failed fire.
+      wdEnqueueResult = { delivered: false, deliveryState: "dropped", reason: "session-dead" };
+      const r1 = await wdApp.inject({ method: "POST", url: wdUrl, payload, headers });
+      check("(15a) a wake delivery whose enqueueStdin DROPS -> still 200 (ACK sent before the fire)", r1.statusCode === 200);
+      await settle();
+      check("(15a) ...and enqueueStdin was actually called once", wdEnqueueCalls.length === 1);
+      check("(15a) ...and the drop was logged as a fire failure", errorLines2.some((l) => l.includes("fire failed") && l.includes("dropped")));
+      check("(15a) ...and, critically, the dedupe row was REMOVED (a dropped enqueue is NOT a silent success)",
+        dbWD.hasWebhookDelivery(wdEndpoint.id, "generic:wd-delivery-1") === false);
+
+      // Redeliver the SAME event once the session comes back (enqueue now succeeds as "handed-off").
+      wdEnqueueResult = { delivered: true, deliveryState: "handed-off" };
+      const r2 = await wdApp.inject({ method: "POST", url: wdUrl, payload, headers });
+      check("(15a) redelivering after a dropped enqueue -> 200, NOT flagged duplicate", r2.statusCode === 200 && JSON.parse(r2.payload).duplicate !== true);
+      await settle();
+      check("(15a) ...and it actually enqueued this time (not permanently swallowed by the earlier drop)", wdEnqueueCalls.length === 2);
+      check("(15a) ...and the dedupe row exists again", dbWD.hasWebhookDelivery(wdEndpoint.id, "generic:wd-delivery-1") === true);
+
+      // (15b) the OTHER polarity: a "queued"/held outcome (delivered:false, deliveryState:"queued") is a
+      // REAL success per decision 13e32e1d — must NOT be treated as a failure.
+      errorLines2.length = 0;
+      wdEnqueueResult = { delivered: false, deliveryState: "queued", queued: true };
+      const { payload: p3, headers: h3 } = signGeneric("wd-secret-abc", '{"i":"wake-queued"}', "wd-delivery-2");
+      const r3 = await wdApp.inject({ method: "POST", url: wdUrl, payload: p3, headers: h3 });
+      check("(15b) a wake delivery whose enqueueStdin returns delivered:false but deliveryState:'queued' -> 200", r3.statusCode === 200);
+      await settle();
+      check("(15b) ...NOT logged as a fire failure (a queued/held outcome is a real success, not a drop)", errorLines2.length === 0);
+      check("(15b) ...and the dedupe row is KEPT (not treated as a drop)", dbWD.hasWebhookDelivery(wdEndpoint.id, "generic:wd-delivery-2") === true);
+    } finally {
+      console.error = originalError2;
+      await wdApp.close();
+      dbWD.close();
+    }
+  }
+
+  // ===================== (16, card 72c58b1c) a fire that SUCCEEDED must not be undone by a later, =====
+  // ===================== unrelated bookkeeping failure ====================================================
+  // Reviewer-reproduced BLOCKING regression: startNew() spawns a real session, then the informational
+  // updateWebhookEndpointLastFired stamp throws (e.g. SQLITE_BUSY) — the OLD code let that throw propagate
+  // out of fireWebhookTarget, which the route's .catch() then treated as "the fire failed" and deleted the
+  // dedupe row. A redelivery of the SAME event then spawned a SECOND live session for the same webhook
+  // delivery — the row must undo ONLY when the fire itself provably had no effect, never for a failure
+  // downstream of an already-successful one.
+  {
+    const dbBK = new Db(dbFile("bookkeeping-fail.db"));
+    const nowBK = new Date().toISOString();
+    dbBK.insertProject({ id: "bk-proj", name: "bk", repoPath: "bk-proj", vaultPath: "bk-proj", config: {}, createdAt: nowBK, archivedAt: null });
+    dbBK.insertAgent({ id: "bk-agent", projectId: "bk-proj", name: "bk-target", startupPrompt: "", position: 0 });
+    const bkEndpoint = createWebhookEndpoint(dbBK, {
+      name: "Bookkeeping-fail target", sourceType: "generic", secret: "bk-secret-abc", mode: "spawn", targetSessionId: null, agentId: "bk-agent",
+    });
+    const bkSpawnCalls = [];
+    const bkApp = Fastify();
+    const originalError3 = console.error;
+    const errorLines3 = [];
+    console.error = (...args) => { errorLines3.push(args.join(" ")); };
+    try {
+      // A real Db instance's updateWebhookEndpointLastFired is overridden to throw, standing in for a
+      // SQLITE_BUSY/closed-db failure on that ONE call — every other WebhookIngressDb method (including
+      // recordWebhookDelivery/deleteWebhookDelivery/hasWebhookDelivery) stays real.
+      const throwingDb = Object.create(dbBK);
+      throwingDb.updateWebhookEndpointLastFired = () => { throw new Error("simulated SQLITE_BUSY on lastFiredAt stamp"); };
+      registerWebhookIngress(bkApp, {
+        db: throwingDb,
+        sessions: {
+          startNew: (agentId, opts) => { bkSpawnCalls.push({ agentId, opts }); return { id: `bk-${bkSpawnCalls.length}` }; },
+          resume: () => ({}),
+        },
+        pty: { isAlive: () => false, enqueueStdin: () => ({ delivered: true }) },
+      });
+      await bkApp.ready();
+      const bkUrl = `/hooks/${bkEndpoint.path}`;
+      const { payload, headers } = signGeneric("bk-secret-abc", '{"i":"bookkeeping-fail"}', "bk-delivery-1");
+
+      const r1 = await bkApp.inject({ method: "POST", url: bkUrl, payload, headers });
+      check("(16) a delivery whose fire succeeds but bookkeeping throws -> still 200", r1.statusCode === 200 && JSON.parse(r1.payload).duplicate !== true);
+      await settle();
+      check("(16) ...and it DID spawn (the fire itself succeeded)", bkSpawnCalls.length === 1);
+      check("(16) ...and the bookkeeping failure was logged as informational, NOT as a fire failure", errorLines3.some((l) => l.includes("informational only")) && !errorLines3.some((l) => l.includes("fire failed")));
+      check("(16) ...and, critically, the dedupe row was KEPT (a successful fire must never be undone)",
+        dbBK.hasWebhookDelivery(bkEndpoint.id, "generic:bk-delivery-1") === true);
+
+      // Redeliver the SAME event — must still dedupe (no second spawn), proving the row's survival above
+      // actually prevents the double-fire the reviewer reproduced.
+      const r2 = await bkApp.inject({ method: "POST", url: bkUrl, payload, headers });
+      await settle();
+      check("(16) redelivering the SAME event -> 200 duplicate (still deduped, NOT a second spawn)",
+        r2.statusCode === 200 && JSON.parse(r2.payload).duplicate === true);
+      check("(16) ...and no second session was ever spawned for this one delivery", bkSpawnCalls.length === 1);
+    } finally {
+      console.error = originalError3;
+      await bkApp.close();
+      dbBK.close();
+    }
+  }
+
   // ===================== (12, Code Review e089cd2b) Shape A/B relabel — end to end, only ONE spawn ====
   // Both shapes use an INJECTABLE `now` (WebhookIngressDeps.now) rather than the real wall clock, so the
   // freshness-window arithmetic (a numeric id T "looking like" a fresh timestamp) is fully deterministic.
@@ -700,6 +906,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Tier-2 webhook ingress route verifies HMAC pass/fail per scheme, preserves raw bytes end-to-end through Fastify's own content-type parser, dedupes a replayed delivery id (ACK+drop, no second spawn), caps a flood of authentic events per endpoint (ACK'd but dropped past 10/min), 413s an oversized body BEFORE any endpoint lookup or verify work, wraps the verified payload in the untrusted-DATA envelope, delivers correctly to both wake (resume-if-not-alive + enqueueStdin) and spawn targets, treats an unknown and a disabled endpoint identically (404), and is fully isolated from Tier 1 — a valid gateway token grants nothing on a Tier-2 route, a Tier-2 request grants nothing on a Tier-0 admin route, and the HMAC gate applies regardless of loopback vs. remote peer. Card 07af871d: a github/generic-legacy replay that varies ONLY the delivery-id header still dedupes to one spawn end to end, and a genuine delivery dropped by the rate cap is never permanently swallowed — it is not recorded in the dedupe store, and the same delivery resent once capacity frees up actually fires."
+  ? "\n✅ ALL PASS — the Tier-2 webhook ingress route verifies HMAC pass/fail per scheme, preserves raw bytes end-to-end through Fastify's own content-type parser, dedupes a replayed delivery id (ACK+drop, no second spawn), caps a flood of authentic events per endpoint (ACK'd but dropped past 10/min), 413s an oversized body BEFORE any endpoint lookup or verify work, wraps the verified payload in the untrusted-DATA envelope, delivers correctly to both wake (resume-if-not-alive + enqueueStdin) and spawn targets, treats an unknown and a disabled endpoint identically (404), and is fully isolated from Tier 1 — a valid gateway token grants nothing on a Tier-2 route, a Tier-2 request grants nothing on a Tier-0 admin route, and the HMAC gate applies regardless of loopback vs. remote peer. Card 07af871d: a github/generic-legacy replay that varies ONLY the delivery-id header still dedupes to one spawn end to end, and a genuine delivery dropped by the rate cap is never permanently swallowed — it is not recorded in the dedupe store, and the same delivery resent once capacity frees up actually fires. Card 72c58b1c: a delivery whose out-of-band fire fails has its dedupe row removed, so a redelivery of the SAME event still fires (not permanently swallowed) — while a delivery whose fire SUCCEEDS still dedupes a redelivery normally."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

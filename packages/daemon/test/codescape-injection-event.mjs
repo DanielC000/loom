@@ -335,6 +335,33 @@ try {
     const evs = codescapeEventsFor(mgrNoGraph.id);
     check("(3k) no-project-id: injected:false, reason:'no-project-id', stamped:null", evs.length === 1 && evs[0].detail?.injected === false && evs[0].detail?.reason === "no-project-id" && evs[0].detail?.stamped === null);
   }
+
+  // ===================== (5, card 72c58b1c) an appendEvent failure must NOT make startNew() throw =====
+  // Reviewer-reproduced regression: this observability-only call sits AFTER pty.spawn has already
+  // succeeded — a caller relying on "startNew() throws ⟺ no live session resulted" (webhook ingress's
+  // fireWebhookTarget, docs/decisions/72c58b1c-webhook-dedupe-record-after-fire.md) would otherwise be
+  // WRONG here: the session IS live, yet startNew() used to still throw and propagate a DB error from this
+  // single, purely-informational appendEvent call. Proves RED on the unguarded call (a bare rethrow would
+  // fail this), GREEN once it's wrapped: startNew() must still return, the session must still be live, and
+  // the event that failed to record must genuinely be ABSENT (not silently faked as if it had succeeded).
+  db.insertAgent({ id: "agentMgrProfile2", projectId: "pLive", name: "Profile Orchestrator 2", startupPrompt: "AGENT_MGR_PROFILE_DOCTRINE_2", position: 4, profileId: "profMgr" });
+  const realAppendEvent = db.appendEvent.bind(db);
+  db.appendEvent = () => { throw new Error("simulated SQLITE_BUSY"); };
+  let mgrProfile2;
+  let startNewThrew = false;
+  try {
+    mgrProfile2 = svc.startNew("agentMgrProfile2");
+  } catch {
+    startNewThrew = true;
+  } finally {
+    db.appendEvent = realAppendEvent;
+  }
+  check("(5) startNew does NOT throw even though its observability appendEvent call fails", startNewThrew === false);
+  if (mgrProfile2) {
+    liveIds.push(mgrProfile2.id);
+    check("(5) ...and the session it returned is genuinely LIVE (the real fire happened)", mgrProfile2.processState === "live");
+    check("(5) ...and no discovery_block_injection event was recorded for it (the append genuinely failed, not silently faked)", codescapeEventsFor(mgrProfile2.id).length === 0);
+  }
 } finally {
   for (const wt of worktrees) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } }
   for (const id of liveIds) { try { svc.stopSession(id, "hard"); } catch { /* already gone / not found */ } }

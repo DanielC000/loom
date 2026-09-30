@@ -7673,6 +7673,12 @@ export class Db {
     this.db.prepare("INSERT OR IGNORE INTO webhook_deliveries (endpoint_id, delivery_id, received_at) VALUES (?, ?, ?)").run(endpointId, deliveryId, receivedAtIso);
     this.db.prepare("DELETE FROM webhook_deliveries WHERE endpoint_id = ? AND received_at < ?").run(endpointId, cutoffIso);
   }
+  /** Undo a `recordWebhookDelivery` for one delivery (card 72c58b1c) — called when the out-of-band
+   *  wake/spawn fire that followed it turns out to have failed, so a failed dispatch doesn't permanently
+   *  swallow that delivery for the whole retention window. Idempotent (a missing row matches nothing). */
+  deleteWebhookDelivery(endpointId: string, deliveryId: string): void {
+    this.db.prepare("DELETE FROM webhook_deliveries WHERE endpoint_id = ? AND delivery_id = ?").run(endpointId, deliveryId);
+  }
 
   // --- questions (manager→human Requests object, card 8701bdbb generalized by card 695ebab0) ---
   insertQuestion(q: Question): void {

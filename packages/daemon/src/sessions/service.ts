@@ -3042,12 +3042,20 @@ export class SessionService {
     }
     // Card badba5a8: observability only — record whether the codescape block was injected. Only fires for
     // the role==="manager" branch (the only one that ever computes codescapeStatus above).
+    //
+    // @decision 72c58b1c — wrapped so a DB failure here can NEVER make startNew() throw after pty.spawn
+    // has already succeeded (a live session must not be reported as a failed spawn to the caller).
     if (codescapeStatus) {
-      this.db.appendEvent({
-        id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId: session.id, kind: "discovery_block_injection",
-        detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
-      });
+      try {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId: session.id, kind: "discovery_block_injection",
+          detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
+        });
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error(`[sessions] failed to record discovery_block_injection observability event for ${session.id} (informational only, not fatal):`, (e as Error).message);
+      }
     }
     return { ...session, processState: "live" };
   }

@@ -34,6 +34,7 @@ export interface WebhookIngressDb {
   getWebhookEndpointByPath: Db["getWebhookEndpointByPath"];
   hasWebhookDelivery: Db["hasWebhookDelivery"];
   recordWebhookDelivery: Db["recordWebhookDelivery"];
+  deleteWebhookDelivery: Db["deleteWebhookDelivery"];
   updateWebhookEndpointLastFired: Db["updateWebhookEndpointLastFired"];
 }
 
@@ -52,18 +53,38 @@ export interface WebhookIngressDeps {
   now?: () => number;
 }
 
-/** Deliver an already-verified, already-deduped event to its endpoint's wake/spawn target — mirrors
- *  `EventTriggerService.fire`'s own wake/spawn branching exactly (gateway/../orchestration/event-triggers.ts). */
+/** Deliver an already-verified, already-deduped event to its endpoint's wake/spawn target — similar in
+ *  shape to `EventTriggerService`'s historical wake/spawn branching, though that path has since moved to
+ *  `SessionService.enqueueDurableNudge` (card 90b9e904); not converged with this one here.
+ *
+ *  @decision 72c58b1c — every branch must reject on a failure that means NO delivery effect happened, and
+ *  only that; the caller's `.catch()` undoes the dedupe row on that basis alone. See the decision record
+ *  for the full rule, the two throw/no-throw branches' individual guarantees, and known residuals. */
 async function fireWebhookTarget(deps: WebhookIngressDeps, endpoint: WebhookEndpointRow, kickoff: string, nowIso: string): Promise<void> {
   if (endpoint.mode === "wake") {
     const sessionId = endpoint.targetSessionId!;
     if (!deps.pty.isAlive(sessionId)) await deps.sessions.resume(sessionId);
     // kind:"agent" — a webhook-driven nudge is its own turn, never mashed with anything else queued.
-    deps.pty.enqueueStdin(sessionId, kickoff, "system", undefined, undefined, "agent");
+    const result = deps.pty.enqueueStdin(sessionId, kickoff, "system", undefined, undefined, "agent");
+    // enqueueStdin's failure signal is `deliveryState === "dropped"`, NEVER `delivered:false` alone
+    // (decision 13e32e1d: a "queued"/held outcome is a successful, durable enqueue that will be retried,
+    // not a drop) — reading `delivered:false` here would wrongly reject an outcome that will still
+    // deliver. Only a genuine drop (e.g. reason "session-dead") must reject, or this branch resolves
+    // successfully on a silently lost nudge and the dedupe row never gets undone.
+    if (result.deliveryState === "dropped") {
+      throw new Error(`enqueueStdin dropped the webhook nudge for session ${sessionId} (reason: ${result.reason ?? "none given"})`);
+    }
   } else {
     deps.sessions.startNew(endpoint.agentId!, { kickoffPrompt: kickoff });
   }
-  deps.db.updateWebhookEndpointLastFired(endpoint.id, nowIso);
+  // @decision 72c58b1c — best-effort, deliberately OUTSIDE the failure that undoes the dedupe row: a
+  // failure here (SQLITE_BUSY, a closed db) must never make an already-successful fire look like it failed.
+  try {
+    deps.db.updateWebhookEndpointLastFired(endpoint.id, nowIso);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(`[webhook] endpoint ${endpoint.id} (${endpoint.name}) failed to stamp lastFiredAt after a successful fire (informational only, not fatal):`, (e as Error).message);
+  }
 }
 
 /**
@@ -134,13 +155,6 @@ export function registerWebhookIngress(app: FastifyInstance, deps: WebhookIngres
         return reply.code(200).send({ ok: true, rateLimited: true });
       }
 
-      // PER-SCHEME retention (Code Reviewer fix, card 8fbedcac): a timestampless scheme's dedupe row is
-      // its ONLY replay defense (see webhookDeliveryRetentionMs's doc) — sweeping it on the same short
-      // window a timestamp-bearing scheme uses would let a captured GitHub delivery replay successfully
-      // once some LATER delivery on this endpoint triggers a sweep past that point.
-      const cutoffIso = new Date(nowMs - webhookDeliveryRetentionMs(endpoint.sourceType)).toISOString();
-      deps.db.recordWebhookDelivery(endpoint.id, deliveryId, nowIso, cutoffIso);
-
       let payload: unknown;
       try { payload = JSON.parse(rawBody.toString("utf8")); } catch { payload = rawBody.toString("utf8"); }
       // The untrusted-DATA envelope (must-fix) — reuses poll-format.ts's established framing.
@@ -149,9 +163,33 @@ export function registerWebhookIngress(app: FastifyInstance, deps: WebhookIngres
       // ACK 2xx FAST + spawn OUT-OF-BAND (must-fix): the response is sent BEFORE the wake/spawn fire, so
       // a session boot never holds the provider's HTTP connection open.
       reply.code(200).send({ ok: true });
+
+      // PER-SCHEME retention (Code Reviewer fix, card 8fbedcac): a timestampless scheme's dedupe row is
+      // its ONLY replay defense (see webhookDeliveryRetentionMs's doc) — sweeping it on the same short
+      // window a timestamp-bearing scheme uses would let a captured GitHub delivery replay successfully
+      // once some LATER delivery on this endpoint triggers a sweep past that point.
+      //
+      // @decision 72c58b1c — record immediately before the fire, with no `await` introduced between the
+      // `hasWebhookDelivery` check above and this INSERT; the fire's own `.catch()` below is the ONE undo
+      // point for every failure downstream of this line.
+      const cutoffIso = new Date(nowMs - webhookDeliveryRetentionMs(endpoint.sourceType)).toISOString();
+      deps.db.recordWebhookDelivery(endpoint.id, deliveryId, nowIso, cutoffIso);
+
       fireWebhookTarget(deps, endpoint, kickoff, nowIso).catch((err) => {
+        // A failed fire (resume/startNew throwing, or enqueueStdin reporting a drop — see
+        // fireWebhookTarget's own doc) must not leave this delivery permanently deduped for the rest of the
+        // retention window (card 72c58b1c) — undo the row recorded above so a genuine redelivery of the
+        // SAME event gets a real chance to fire. The original fire error is logged FIRST and
+        // unconditionally: a failure to remove the row (SQLITE_BUSY, a closed db at shutdown) must never
+        // suppress the record of what actually broke.
         // eslint-disable-next-line no-console
         console.error(`[webhook] endpoint ${endpoint.id} (${endpoint.name}) fire failed:`, (err as Error).message);
+        try {
+          deps.db.deleteWebhookDelivery(endpoint.id, deliveryId);
+        } catch (deleteErr) {
+          // eslint-disable-next-line no-console
+          console.error(`[webhook] endpoint ${endpoint.id} (${endpoint.name}) failed to remove its dedupe row after the fire failure above — this delivery stays deduped until retention sweeps it:`, (deleteErr as Error).message);
+        }
       });
     });
   });
