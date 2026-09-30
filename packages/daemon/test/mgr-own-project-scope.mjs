@@ -33,6 +33,15 @@ const rejects = (label, fn, re) => {
   check(label, msg !== null && (re ? re.test(msg) : true));
   return msg;
 };
+// Async twin of `rejects` — ONLY for a method that's genuinely async (updateProjectStructural, since
+// card 6a48b759 made it await the shared vaultPath-update guard). Every other method on this surface
+// stays synchronous, so `rejects` above is unchanged for them.
+const rejectsAsync = async (label, fn, re) => {
+  let msg = null;
+  try { await fn(); } catch (e) { msg = (e instanceof Error ? e.message : String(e)); }
+  check(label, msg !== null && (re ? re.test(msg) : true));
+  return msg;
+};
 
 const tmpHome = path.join(os.tmpdir(), `loom-mgrscope-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -98,10 +107,10 @@ const svc = new SessionService(db, pty, new OrchestrationControl());
 
 try {
   // ════════ project_update — cross-project REJECTED, no write; own-project OK ════════
-  rejects("project_update on a FOREIGN project (the reserved home) → rejected",
+  await rejectsAsync("project_update on a FOREIGN project (the reserved home) → rejected",
     () => svc.updateProjectStructural("M", "pOther", { name: "PWNED" }), /outside your project/);
   check("project_update made NO write to the foreign project", db.getProject("pOther").name === "Loom Platform");
-  const upd = svc.updateProjectStructural("M", "pMine", { name: "Mine Renamed" });
+  const upd = await svc.updateProjectStructural("M", "pMine", { name: "Mine Renamed" });
   check("project_update on the manager's OWN project SUCCEEDS (regression guard)",
     upd.name === "Mine Renamed" && db.getProject("pMine").name === "Mine Renamed");
 

@@ -68,7 +68,7 @@ import { activeMergeQuarantineFor, clearMergeQuarantine } from "../git/merge-qua
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
 import { validateRepoRegistry, resolveRepoKeyOrError, diffRepoRegistry, composeRepoRegistryChangeNote, type RepoRegistryDiff } from "../projects/repos.js";
-import { validateVaultPath } from "../projects/vault-path.js";
+import { validateVaultPath, checkVaultPathUpdate } from "../projects/vault-path.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
 import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
@@ -4328,26 +4328,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(400).send({ error: "name must be a non-empty string" });
     if (b.vaultPath !== undefined && typeof b.vaultPath !== "string")
       return reply.code(400).send({ error: "vaultPath must be a string" });
-    // expandTilde runs right after trim, before any other check, so every check below (and the eventual
-    // write) sees the expanded value — mirrors the repoPath handling just below.
-    const vaultPath = b.vaultPath === undefined ? undefined : expandTilde((b.vaultPath as string).trim());
-    // An explicit "" is an UNBIND (card 9fe578b3, completing cdc3792d's vault-optional story) — distinct
-    // from `vaultPath` omitted (undefined), which leaves the stored value untouched below. Keep the
-    // at-least-one-of-{repo,vault} invariant: refuse on a VAULT-ONLY project, whose repoPath was bound to
-    // the SAME folder as its vaultPath at create time (mcp/setup.ts / the no-repo branch above) — unbinding
-    // there would leave the project with nothing usable at all. repoPath===vaultPath ALONE over-matches a
-    // LEGACY repo-bound project from before cdc3792d (when the default was vaultPath=repoPath) — that
-    // project genuinely has a repo, so the isGitRepo check (card d867e478) distinguishes it from a real
-    // vault-only bare folder before refusing.
-    if (vaultPath !== undefined && !vaultPath && p.repoPath === p.vaultPath && !(await isGitRepo(p.repoPath))) {
-      return reply.code(400).send({ error: "cannot unbind the vault of a vault-only project (it has no separate repoPath) — archive it instead" });
-    }
-    // vaultPath must be an ABSOLUTE path when a real (non-empty) rebind is given — mirrors the REST
-    // create path + validateReferenceRepos (card 96c4b245); "" (unbind, handled above) is exempt.
-    if (vaultPath) {
-      const vaultCheck = validateVaultPath(vaultPath);
-      if (!vaultCheck.ok) return reply.code(400).send({ error: vaultCheck.error });
-    }
+    // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and refuse an
+    // explicit "" (UNBIND — card 9fe578b3, completing cdc3792d's vault-optional story) that would strand a
+    // VAULT-ONLY project — identical across every project_update-shaped write surface, mirroring
+    // checkRepoRebind's role for repoPath. `vaultPath` omitted (undefined) leaves the stored value
+    // untouched below.
+    const vaultCheck = await checkVaultPathUpdate(p, b.vaultPath as string | undefined);
+    if (!vaultCheck.ok) return reply.code(400).send({ error: vaultCheck.error });
+    const vaultPath = vaultCheck.value;
     if (b.repoPath !== undefined && (typeof b.repoPath !== "string" || !b.repoPath.trim()))
       return reply.code(400).send({ error: "repoPath must be a non-empty string" });
     // repoPath REBIND (human-only): the SHARED guard (isGitRepo + live-worktree refusal), identical to

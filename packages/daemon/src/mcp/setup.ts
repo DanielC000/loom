@@ -14,7 +14,7 @@ import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, AGENT_CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
 import { ensureVaultRoot } from "../vault/writer.js";
-import { validateVaultPath } from "../projects/vault-path.js";
+import { validateVaultPath, checkVaultPathUpdate } from "../projects/vault-path.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
@@ -381,12 +381,12 @@ export class SetupMcpRouter {
           const wrote = setProjectConfigSafe(db, projectId, merged, callerSessionId ? `setup:${callerSessionId}` : "setup");
           if (!wrote.ok) return ok({ error: wrote.error });
         }
-        if (vaultPath !== undefined) vaultPath = expandTilde(vaultPath);
-        if (vaultPath) {
-          const vaultCheck = validateVaultPath(vaultPath);
-          if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
-          vaultPath = vaultCheck.value;
-        }
+        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and (newly on
+        // THIS surface) refuse an explicit "" that would strand a VAULT-ONLY project — the same guard the
+        // human REST PATCH path, the manager's project_update, and platform's project_update all now share.
+        const vaultCheck = await checkVaultPathUpdate(project, vaultPath);
+        if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
+        vaultPath = vaultCheck.value;
         if (name !== undefined || vaultPath !== undefined) db.updateProject(projectId, { name, vaultPath });
         return ok(projectFields(db.getProject(projectId)));
       },

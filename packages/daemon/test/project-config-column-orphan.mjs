@@ -192,7 +192,7 @@ try {
   const cardG = randomUUID();
   db.insertTask({ id: cardG, projectId: "pG", title: "on review", body: "", columnKey: "review", position: 1, priority: "p2", createdAt: now, updatedAt: now });
   const newBoardG = [{ key: "backlog", label: "Backlog", role: "defaultLanding" }, { key: "done", label: "Done", role: "terminal" }];
-  svc.updateProjectStructural("MG", "pG", { config: { kanbanColumns: newBoardG } });
+  await svc.updateProjectStructural("MG", "pG", { config: { kanbanColumns: newBoardG } });
   check("(7) ★ the card on the dropped 'review' column was RE-KEYED to the landing lane (not orphaned)",
     db.getTask(cardG).columnKey === landing);
   check("(7) the new columns are stored exactly", JSON.stringify(db.getProject("pG").config.kanbanColumns) === JSON.stringify(newBoardG));

@@ -30,6 +30,7 @@ import { boundedSimpleGit } from "../git/bounded.js";
 import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, parseMainlineWatermark, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
+import { checkVaultPathUpdate } from "../projects/vault-path.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import type { RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
@@ -12776,14 +12777,21 @@ export class SessionService {
    * human REST PATCH keeps the full validator. repoPath is intentionally not editable (rebinding a
    * live project's repo is out of scope).
    */
-  updateProjectStructural(
+  async updateProjectStructural(
     managerSessionId: string, projectId: string,
     patch: { name?: string; vaultPath?: string; config?: unknown },
-  ): { id: string; name: string; vaultPath: string } {
+  ): Promise<{ id: string; name: string; vaultPath: string }> {
     this.requireManager(managerSessionId, "project_update");
     this.requireOwnProject(managerSessionId, projectId, "project_update");
     const project = this.db.getProject(projectId);
     if (!project) throw new Error("project not found");
+    // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and refuse an
+    // explicit "" that would strand a VAULT-ONLY project — the same guard the human REST PATCH path,
+    // platform's project_update, and setup's project_update all now share. This surface previously wrote
+    // patch.vaultPath raw below with no validation at all.
+    const vaultCheck = await checkVaultPathUpdate(project, patch.vaultPath);
+    if (!vaultCheck.ok) throw new Error(vaultCheck.error);
+    const vaultPath = vaultCheck.value;
     if (patch.config !== undefined) {
       const v = validateAgentProjectConfigOverride(patch.config);
       if (!v.ok) throw new Error(`invalid config: ${v.error}`);
@@ -12807,7 +12815,7 @@ export class SessionService {
       const wrote = setProjectConfigSafe(this.db, projectId, merged, `manager:${managerSessionId}`);
       if (!wrote.ok) throw new Error(wrote.error);
     }
-    this.db.updateProject(projectId, { name: patch.name, vaultPath: patch.vaultPath });
+    this.db.updateProject(projectId, { name: patch.name, vaultPath });
     this.auditManage(managerSessionId, "project_update", {
       projectId, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined),
     });

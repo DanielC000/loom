@@ -194,7 +194,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 
   try {
     // A manager patch that (deliberately or under pressure) tries to drop MGR122-FLOOR and lower the floor.
-    svc.updateProjectStructural("MRot", "pRot", {
+    await svc.updateProjectStructural("MRot", "pRot", {
       config: { orchestration: { rotationMarkers: [{ token: "QUIET-LANE" }], rotationLiveCommitmentsFloor: 3 } },
     });
     const after = db.getProject("pRot").config;
@@ -208,7 +208,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
     // floor check while `configured` stayed true (rotationMarkers is non-empty), so a manager under
     // rotation pressure could clear ONE STRING (cheaper than deleting a marker) and have resume_doc_check
     // still read as a fully-configured pass with the floor never applied.
-    svc.updateProjectStructural("MRot", "pRot", { config: { orchestration: { rotationLiveCommitmentsHeading: "" } } });
+    await svc.updateProjectStructural("MRot", "pRot", { config: { orchestration: { rotationLiveCommitmentsHeading: "" } } });
     const afterClear = db.getProject("pRot").config;
     check("project_update (agent path): a heading-CLEAR attempt is BLOCKED end-to-end — stays \"LIVE COMMITMENTS\"",
       afterClear.orchestration.rotationLiveCommitmentsHeading === "LIVE COMMITMENTS");
@@ -216,13 +216,13 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
     // ATTACK 2: re-point the heading to a different, unrelated section — before the fix this could
     // satisfy the floor check against UNRELATED content (findHeadingLine matches ANY heading line
     // containing the token as a case-insensitive substring), the same fail-open class as card a681aed5.
-    svc.updateProjectStructural("MRot", "pRot", { config: { orchestration: { rotationLiveCommitmentsHeading: "Some Other Section" } } });
+    await svc.updateProjectStructural("MRot", "pRot", { config: { orchestration: { rotationLiveCommitmentsHeading: "Some Other Section" } } });
     const afterRepoint = db.getProject("pRot").config;
     check("project_update (agent path): a heading-REPOINT attempt is BLOCKED end-to-end — stays \"LIVE COMMITMENTS\", not the new target",
       afterRepoint.orchestration.rotationLiveCommitmentsHeading === "LIVE COMMITMENTS");
 
     // The SAME manager CAN legitimately grow the set — adding a new marker and raising the floor.
-    svc.updateProjectStructural("MRot", "pRot", {
+    await svc.updateProjectStructural("MRot", "pRot", {
       config: { orchestration: { rotationMarkers: [{ token: "MGR122-FLOOR" }, { token: "QUIET-LANE" }, { token: "NEW-RULE" }], rotationLiveCommitmentsFloor: 15 } },
     });
     const after2 = db.getProject("pRot").config;

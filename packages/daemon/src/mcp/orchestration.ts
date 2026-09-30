@@ -5541,7 +5541,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ projectId, name, vaultPath, config }) => {
         try {
-          return ok(sessions.updateProjectStructural(managerSessionId, projectId, { name, vaultPath, config }));
+          return ok(await sessions.updateProjectStructural(managerSessionId, projectId, { name, vaultPath, config }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

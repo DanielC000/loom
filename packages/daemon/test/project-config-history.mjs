@@ -198,7 +198,7 @@ try {
     processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
     lastError: null, role: "manager", parentSessionId: null,
   });
-  svc.updateProjectStructural("mgr-sess-1", "pM", { config: { docLint: true } });
+  await svc.updateProjectStructural("mgr-sess-1", "pM", { config: { docLint: true } });
   const hM = db.listProjectConfigHistory("pM");
   check("(3e) manager project_update recorded exactly one entry", hM.length === 1);
   check("(3e) ★ actor carries the manager session id — NOT hardcoded \"human\"", hM[0].actor === "manager:mgr-sess-1");
@@ -233,7 +233,7 @@ try {
   check("(4) unknown project → 404", missingHist.statusCode === 404);
 
   // Newest-first ordering: a follow-up write on pM is prepended.
-  svc.updateProjectStructural("mgr-sess-1", "pM", { config: { docLint: false } });
+  await svc.updateProjectStructural("mgr-sess-1", "pM", { config: { docLint: false } });
   const afterSecond = (await app.inject({ method: "GET", url: "/api/projects/pM/config/history" })).json().entries;
   check("(4) newest entry first", afterSecond.length === 2 && afterSecond[0].next.docLint === false && afterSecond[0].prior.docLint === true);
 

@@ -69,7 +69,7 @@ try {
 
   // The manager patches ONE unrelated orchestration subkey — recycleAtContextRatio, an agent-settable
   // benign tuning number that has nothing to do with gateCommand/sessionEnv/kanbanColumns/memory.
-  const result = svc.updateProjectStructural("M", "pCfg", { config: { orchestration: { recycleAtContextRatio: 0.8 } } });
+  const result = await svc.updateProjectStructural("M", "pCfg", { config: { orchestration: { recycleAtContextRatio: 0.8 } } });
   check("project_update: the patch call itself succeeds (no error thrown)", !!result && result.id === "pCfg");
 
   const after = db.getProject("pCfg").config;
@@ -90,7 +90,7 @@ try {
   check("project_update MERGE: top-level memory.budgetTokens survives untouched", after.memory?.budgetTokens === 5000);
 
   // A second patch targeting a DIFFERENT top-level key (kanbanColumns) must not disturb orchestration/sessionEnv either.
-  svc.updateProjectStructural("M", "pCfg", { config: { kanbanColumns: [{ key: "todo", label: "Todo", role: "defaultLanding" }, { key: "wip", label: "WIP", role: "terminal" }] } });
+  await svc.updateProjectStructural("M", "pCfg", { config: { kanbanColumns: [{ key: "todo", label: "Todo", role: "defaultLanding" }, { key: "wip", label: "WIP", role: "terminal" }] } });
   const after2 = db.getProject("pCfg").config;
   check("project_update MERGE: a kanbanColumns-only patch still preserves sessionEnv + orchestration.gateCommand",
     after2.sessionEnv?.LOOM_DEJA_BIN === "C:/deja/dist/cli.js" && after2.orchestration?.gateCommand === seededConfig.orchestration.gateCommand);
@@ -99,7 +99,7 @@ try {
   // ════════ THE TRAP — re-submitting gateCommand through the agent path must still be REJECTED,
   // and that rejection must not disturb the already-preserved value from the merge above. ════════
   let rejectedMsg = null;
-  try { svc.updateProjectStructural("M", "pCfg", { config: { orchestration: { gateCommand: "calc.exe" } } }); }
+  try { await svc.updateProjectStructural("M", "pCfg", { config: { orchestration: { gateCommand: "calc.exe" } } }); }
   catch (e) { rejectedMsg = e instanceof Error ? e.message : String(e); }
   check("project_update: an agent-submitted gateCommand is still REJECTED (validator runs on the PATCH, not skipped)",
     typeof rejectedMsg === "string" && /invalid config/.test(rejectedMsg));

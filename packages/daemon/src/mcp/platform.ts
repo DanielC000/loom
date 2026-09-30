@@ -20,7 +20,7 @@ import { expandTilde, PORT, isLoomDev } from "../paths.js";
 import { isForbiddenAllowedHost, canonicalHost, canonicalTrustedProxyOrigin } from "../gateway/trust-tier.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
-import { validateVaultPath } from "../projects/vault-path.js";
+import { validateVaultPath, checkVaultPathUpdate } from "../projects/vault-path.js";
 import { validateRepoRegistry } from "../projects/repos.js";
 import { resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { GitWriter } from "../git/writer.js";
@@ -2428,15 +2428,12 @@ export class PlatformMcpRouter {
           const check = await checkRepoRebind(db, projectId, repoPath);
           if (!check.ok) return ok({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
         }
-        // vaultPath was previously never expandTilde'd or absolute-checked on THIS surface (unlike
-        // setup.ts's project_update) — fold in the same guard the other 5 write sites now share
-        // (card 96c4b245). Empty string ("") is the legitimate unbind case and stays unchecked.
-        if (vaultPath) {
-          vaultPath = expandTilde(vaultPath);
-          const vaultCheck = validateVaultPath(vaultPath);
-          if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
-          vaultPath = vaultCheck.value;
-        }
+        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and (newly on
+        // THIS surface) refuse an explicit "" that would strand a VAULT-ONLY project — the same guard the
+        // human REST PATCH path, the manager's project_update, and setup's project_update all now share.
+        const vaultCheck = await checkVaultPathUpdate(project, vaultPath);
+        if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
+        vaultPath = vaultCheck.value;
         // repos re-check (code-review Major 1): this surface never accepts a `repos` value itself (see the
         // tool description — repos is REST/UI-only), but a repoPath and/or vaultPath REBIND here still
         // changes what the project's EXISTING registry is compared against. Without this, this elevated
