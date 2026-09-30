@@ -220,6 +220,12 @@ try {
 
     check("(S4) mergeBranch refuses", result.ok === false);
     check("(S4) refusal names the quarantine, not a generic squash-commit failure", /quarantined/i.test(result.reason ?? ""));
+    // Code Review of b4315b52, item 4 — the refusal must make the real STAGED residue visible (the squash
+    // already landed before this refusal) and name the `git reset --hard` a human needs after clearing —
+    // otherwise the NEXT solo merge attempt would itself refuse at the entry-time dirty-tree check with no
+    // visible link back to why.
+    check("(S4) refusal names the STAGED squash residue by branch", result.reason?.includes(`${branch}'s STAGED squash residue`));
+    check("(S4) refusal names the required `git reset --hard` remedy", /git reset --hard/.test(result.reason ?? ""));
 
     // NO CLEANUP: resetOrSkip's "commit-failure cleanup" would reset --hard the canonical repo, clearing
     // the squash's staged diff. Since the refusal skipped it, the staged diff must still be there.

@@ -2050,6 +2050,10 @@ export async function attemptCodexAutoCommit(
   // otherwise still be followed by the real git child finishing the commit moments later, unobserved.
   // @decision 24c0bdba — `killableCanonicalRaw` (git/bounded.ts) only settles once the child is CONFIRMED
   // dead, closing that window structurally; the test seam (`deps.gitFactory`) stays a plain `withTimeout`.
+  //
+  // @decision bde5d1fe — DELIBERATE EXEMPTION from "always pass the real canonical repo as
+  // `quarantineRepoPath`": `24c0bdba` already disables hooks here (core.hooksPath=devNull, unrelated
+  // reason — see this function's own factory), so there's no hook-escape vector to close; left at default.
   const messageArgs = body ? ["-m", subject, "-m", body] : ["-m", subject];
   const commitArgs = [...cfg, "commit", "--no-verify", ...messageArgs];
   const commitLabel = "codex-auto-commit commit";
@@ -6121,9 +6125,18 @@ async function mergeBranchLocked(
     try {
       await killableCanonicalRaw(repoPath, ["commit", "-m", message], timeoutMs, "git commit (canonical, squash-merge)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
     } catch (e) {
-      // @decision bde5d1fe — already quarantined at the re-check (nothing spawned this call, so no HEAD
-      // recovery to attempt) — refuse directly, never re-raise.
-      if (e instanceof RepoQuarantinedError) return { ok: false, reason: `squash commit refused — canonical repo is quarantined: ${e.message}` };
+      // @decision bde5d1fe — already quarantined at the re-check; refuse directly, never re-raise. Name
+      // the real staged residue the squash already left behind (Code Review of b4315b52, item 4) so a
+      // human knows a `git reset --hard` is needed once cleared, or the NEXT merge refuses at entry too.
+      if (e instanceof RepoQuarantinedError) {
+        return {
+          ok: false,
+          reason: `squash commit refused — canonical repo is quarantined: ${e.message} — canonical now ` +
+            `holds ${branch}'s STAGED squash residue (the squash itself already landed in the index before ` +
+            `this refusal); once the quarantine clears, run \`git reset --hard\` in the canonical repo FIRST, ` +
+            `or every later solo merge attempt will itself refuse at the staged-dirty-tree entry check`,
+        };
+      }
       // Code Review (card 24c0bdba, finding B1 residual): the tree-kill's OWN confirmation can itself come
       // back unconfirmed (a descendant not reaped within grace) — fail CLOSED + QUARANTINE, never touch
       // the repo further, since resetOrSkip's `reset --hard` would race whatever might still be alive.

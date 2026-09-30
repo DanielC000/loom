@@ -28,6 +28,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //    recovered tmp's real content is used (never a generic corrupt placeholder) and promoted/cleaned up;
 //    a STALE tmp beside an already-valid final latch never clobbers the real data; a genuinely corrupt tmp
 //    gets the same fail-closed (matched-repo) treatment a corrupt `.json` already gets.
+//  SCENARIO WRITE-FAILURE-RESIDUE (Code Review of b4315b52, item 1) — a regression TORN-WRITE's own fix
+//    could re-trigger: a failed write/rename in a LIVE process left its OWN `.json.tmp-<pid>` behind
+//    forever (neither clear path swept it), so a stray tmp outlived a clear and PASS 1b's recovery
+//    wrongly re-quarantined an already-cleared repo at the next boot.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-boot-hardening.mjs
 import fs from "node:fs";
@@ -46,7 +50,7 @@ requireHermeticEnv();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
 const {
-  enterMergeQuarantine, clearMergeQuarantine, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot, MERGE_QUARANTINE_DIR,
+  enterMergeQuarantine, clearMergeQuarantine, clearMergeQuarantineByToken, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot, MERGE_QUARANTINE_DIR,
 } = await import(pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href);
 
 let failures = 0;
@@ -237,9 +241,13 @@ try {
     check("(TW) precondition: the well-formed latch file exists", !!latchPath && fs.existsSync(latchPath));
     const tmpPath = `${latchPath}.tmp-999999`;
     fs.renameSync(latchPath, tmpPath); // simulates: fsync completed, the rename to the final name never ran
-    clearMergeQuarantine(repo); // clears the in-memory map only — the final .json is already gone (renamed)
-    check("(TW) precondition: in-memory map is clean, only a .tmp-<pid> file is on disk (no final .json)",
-      !activeMergeQuarantineFor(repo) && fs.existsSync(tmpPath) && !fs.existsSync(latchPath));
+    // Deliberately do NOT call clearMergeQuarantine here (Code Review of b4315b52, item 1 made it ALSO
+    // sweep any `.json.tmp-<pid>` residue for this repo, which would delete the very tmp this precondition
+    // needs) — irrelevant to what's under test anyway: reenterMergeQuarantinesAtBoot's PASS 1/1b never
+    // read `activeQuarantines`, only overwrite it at the end, so a stale in-memory entry from the
+    // enterMergeQuarantine call above doesn't affect anything this scenario asserts.
+    check("(TW) precondition: only a .tmp-<pid> file is on disk (no final .json)",
+      fs.existsSync(tmpPath) && !fs.existsSync(latchPath));
 
     const found = reenterMergeQuarantinesAtBoot([repo]);
     check("(TW) the old filter silently DROPPED a .tmp-<pid> file — now it's recovered: the repo IS quarantined", !!activeMergeQuarantineFor(repo));
@@ -278,15 +286,74 @@ try {
     const corruptTmpPath = `${latchPath3}.tmp-222222`;
     fs.writeFileSync(corruptTmpPath, "{not valid json");
     fs.rmSync(latchPath3, { force: true }); // no final latch survives — only the corrupt tmp remains
-    clearMergeQuarantine(repo3); // clears the in-memory map (disk final is already gone)
-    check("(TW-corrupt) precondition: in-memory clean, only a CORRUPT tmp is on disk (no final .json)",
-      !activeMergeQuarantineFor(repo3) && fs.existsSync(corruptTmpPath) && !fs.existsSync(latchPath3));
+    // Same reasoning as SCENARIO TORN-WRITE (a) above — clearMergeQuarantine would now sweep this very
+    // corrupt tmp; skip it, since PASS 1/1b don't read in-memory state anyway.
+    check("(TW-corrupt) precondition: only a CORRUPT tmp is on disk (no final .json)",
+      fs.existsSync(corruptTmpPath) && !fs.existsSync(latchPath3));
 
     const foundCorrupt = reenterMergeQuarantinesAtBoot([repo3]);
     check("(TW-corrupt) a corrupt tmp matching a registered repo fails CLOSED (quarantines THAT repo)", !!activeMergeQuarantineFor(repo3));
     check("(TW-corrupt) the re-entry result reports this repo", foundCorrupt.some((q) => q.repoPath === repo3));
     check("(TW-corrupt) the fail-closed reason names the corruption", /corrupt|unparsable/i.test(activeMergeQuarantineFor(repo3)?.reason ?? ""));
     clearMergeQuarantine(repo3);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO WRITE-FAILURE-RESIDUE (Code Review of b4315b52, item 1) — a regression of the TORN-WRITE fix
+  // above: `writeMergeQuarantineLatch`'s own catch never unlinked its `.json.tmp-<pid>` when the write or
+  // rename failed in a LIVE process (e.g. a Windows EPERM on the rename), and neither `clearMergeQuarantine`
+  // nor `clearMergeQuarantineByToken` swept one either — so a stray tmp outlived a clear and PASS 1b's OWN
+  // recovery (the TORN-WRITE fix) wrongly re-quarantined an already-CLEARED repo at the next boot.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const repo = makeRepo("wfr");
+    // Resolve this repo's own real latch path + hash via a real, successful write first — never re-derive
+    // the hash algorithm by hand.
+    enterMergeQuarantine(repo, "wfr-branch", "resolve the real latch path");
+    const latchPath = fs.readdirSync(MERGE_QUARANTINE_DIR)
+      .map((f) => path.join(MERGE_QUARANTINE_DIR, f))
+      .find((p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")).repoPath === repo; } catch { return false; } });
+    check("(WFR) precondition: resolved this repo's real latch path", !!latchPath && fs.existsSync(latchPath));
+    const hash = path.basename(latchPath, ".json");
+    clearMergeQuarantine(repo);
+    check("(WFR) precondition: cleared — no active entry, no latch file", !activeMergeQuarantineFor(repo) && !fs.existsSync(latchPath));
+
+    // --- (1) a failed write/rename must leave NO tmp residue behind ---
+    // Force the rename to fail: pre-create the FINAL path as a non-empty directory — a real, deterministic,
+    // cross-platform rename failure (EPERM on Windows, EISDIR/ENOTEMPTY on POSIX), never a mocked fs call.
+    fs.mkdirSync(latchPath, { recursive: true });
+    fs.writeFileSync(path.join(latchPath, "blocker.txt"), "x");
+    check("(WFR-1) precondition: the final path is now a directory (the rename WILL fail)", fs.statSync(latchPath).isDirectory());
+    enterMergeQuarantine(repo, "wfr-branch-2", "manufactured failed write");
+    const tmpAfterFailure = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith(`${hash}.json.tmp-`));
+    check("(WFR-1) THE REGRESSION: a failed write used to leave a .tmp-<pid> behind — now it leaves NONE", tmpAfterFailure.length === 0);
+    fs.rmSync(latchPath, { recursive: true, force: true }); // drop the directory blocker
+    clearMergeQuarantine(repo); // reset to a clean slate (clears this scenario's own in-memory entry from the failed write above)
+    check("(WFR-1) back to a clean slate", !activeMergeQuarantineFor(repo) && !fs.existsSync(latchPath));
+
+    // --- (2) clearMergeQuarantine (the unconditional/human path) sweeps a PRE-EXISTING stray tmp ---
+    const strayTmpPath = path.join(MERGE_QUARANTINE_DIR, `${hash}.json.tmp-999999`);
+    fs.writeFileSync(strayTmpPath, JSON.stringify({ repoPath: repo, branch: "stray", reason: "stray tmp", enteredAt: Date.now(), tokens: ["stray-token"] }));
+    check("(WFR-2) precondition: a stray tmp exists on disk", fs.existsSync(strayTmpPath));
+    clearMergeQuarantine(repo);
+    check("(WFR-2) clearMergeQuarantine removes the stray tmp residue", !fs.existsSync(strayTmpPath));
+
+    // --- (3) THE ACTUAL BUG: with the stray tmp gone, a fresh boot re-entry must NOT re-quarantine ---
+    const found = reenterMergeQuarantinesAtBoot([repo]);
+    check("(WFR-3) THE REGRESSION: boot after the clear used to re-quarantine via the leftover tmp — now it does not",
+      !found.some((q) => q.repoPath === repo) && !activeMergeQuarantineFor(repo));
+
+    // --- (4) clearMergeQuarantineByToken's own PARTIAL-clear branch also sweeps stray residue ---
+    const tokenA = enterMergeQuarantine(repo, "wfr-a", "token A");
+    enterMergeQuarantine(repo, "wfr-b", "token B"); // appended to the SAME entry (round 7, M1 SET semantics)
+    const strayTmpPath2 = path.join(MERGE_QUARANTINE_DIR, `${hash}.json.tmp-888888`);
+    fs.writeFileSync(strayTmpPath2, JSON.stringify({ repoPath: repo, branch: "stray2", reason: "stray tmp 2", enteredAt: Date.now(), tokens: ["stray-token-2"] }));
+    check("(WFR-4) precondition: a second stray tmp exists; repo quarantined by TWO tokens", fs.existsSync(strayTmpPath2) && activeMergeQuarantineFor(repo)?.tokens?.length === 2);
+    clearMergeQuarantineByToken(repo, tokenA);
+    check("(WFR-4) repo STILL quarantined (one token remains) — this is a PARTIAL clear, not a full one", !!activeMergeQuarantineFor(repo));
+    check("(WFR-4) the PARTIAL-clear path ALSO swept the stray tmp", !fs.existsSync(strayTmpPath2));
+
+    clearMergeQuarantine(repo); // full cleanup for this scenario
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -360,7 +427,8 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — a durable quarantine latch re-arms in a genuinely FRESH process (NC2), a corrupt latch " +
     "fails CLOSED (matched-repo-specific or every-registered-repo, never silently skipped — BLOCKER 2), a " +
-    "torn .tmp-<pid> write is recovered rather than silently dropped (card bde5d1fe item 5), and index.ts " +
-    "re-enters quarantines BEFORE binding the port (item #8)."
+    "torn .tmp-<pid> write is recovered rather than silently dropped (card bde5d1fe item 5), a failed write " +
+    "leaves no tmp residue and both clear paths sweep any that exist anyway (Code Review of b4315b52 item " +
+    "1), and index.ts re-enters quarantines BEFORE binding the port (item #8)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

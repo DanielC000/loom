@@ -73,28 +73,52 @@ function quarantinePathFor(repoPath: string): string {
  */
 function writeMergeQuarantineLatch(entry: MergeQuarantineEntry): boolean {
   let fd: number | undefined;
+  let tmp: string | undefined;
   try {
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
     const final = quarantinePathFor(entry.repoPath);
-    const tmp = `${final}.tmp-${process.pid}`;
+    tmp = `${final}.tmp-${process.pid}`;
     fd = fs.openSync(tmp, "w");
     fs.writeSync(fd, JSON.stringify(entry, null, 2) + "\n");
     fs.fsyncSync(fd); // round 6 — durable on disk BEFORE the rename makes it visible, not just buffered
     fs.closeSync(fd);
     fd = undefined;
     fs.renameSync(tmp, final);
+    tmp = undefined; // renamed away — nothing left for the catch below to clean up
     return true;
   } catch (e) {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already broken; nothing more to close */ } }
+    // Code Review of b4315b52, item 1 — a failed write/rename (e.g. a Windows EPERM on the rename) used to
+    // leave its own `.json.tmp-<pid>` behind: `deleteMergeQuarantineLatch` only ever unlinked the FINAL
+    // name, so a later `clearMergeQuarantine` never touched this tmp, and `reenterMergeQuarantinesAtBoot`'s
+    // PASS 1b would then wrongly RECOVER it as a genuine (already-cleared) quarantine at the next boot.
+    // Unlink it here, best-effort, whether the failure was in openSync/writeSync/fsyncSync (tmp exists) or
+    // renameSync (tmp still exists under its pre-rename name either way).
+    if (tmp !== undefined) { try { fs.unlinkSync(tmp); } catch { /* best-effort — may never have been created, or already gone */ } }
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] FAILED to durably persist the quarantine latch for ${entry.repoPath} (branch '${entry.branch}'): ${(e as Error).message}`);
     return false;
   }
 }
 
-/** Best-effort; a missing file is not an error. Never throws. */
+/** The stable hash-prefixed glob for `repoPath`'s OWN tmp residue — `<hash>.json.tmp-<pid>`, any pid.
+ *  Best-effort; a missing/unreadable directory is not an error. Never throws. */
+function deleteMergeQuarantineTmpResidue(repoPath: string): void {
+  const prefix = `${quarantineHashFor(repoPath)}.json.tmp-`;
+  let files: string[];
+  try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return; }
+  for (const f of files) {
+    if (!f.startsWith(prefix)) continue;
+    try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, f)); } catch { /* best-effort */ }
+  }
+}
+
+/** Best-effort; a missing file is not an error. Never throws. Also sweeps any leftover `.json.tmp-<pid>`
+ *  residue for this repo (Code Review of b4315b52, item 1) — a failed write can leave one behind even
+ *  after this unlink, and PASS 1b would otherwise wrongly recover it as a genuine quarantine at boot. */
 function deleteMergeQuarantineLatch(repoPath: string): void {
   try { fs.unlinkSync(quarantinePathFor(repoPath)); } catch { /* ENOENT is the common case */ }
+  deleteMergeQuarantineTmpResidue(repoPath);
 }
 
 /**
@@ -148,6 +172,10 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
   }
   const updated: MergeQuarantineEntry = { ...current, tokens: remaining };
   activeQuarantines.set(key, updated);
+  // Code Review of b4315b52, item 1 — sweep any stray tmp residue from an EARLIER failed write for this
+  // repo too (this is still a "clear" path, just a partial one — the repo staying quarantined under its
+  // remaining tokens doesn't make a leftover tmp from a prior failed attempt any less stale).
+  deleteMergeQuarantineTmpResidue(repoPath);
   if (!writeMergeQuarantineLatch(updated)) {
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] could not durably persist the reduced token set for ${repoPath} after a partial clear — a restart before this is fixed would re-arm with the just-cleared token STILL counted as outstanding (harmless: it only delays the eventual full lift, never a false lift).`);
