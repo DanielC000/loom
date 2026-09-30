@@ -1,11 +1,18 @@
+import { spawn } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { simpleGit, type SimpleGit, type SimpleGitOptions } from "simple-git";
+import { killGateProcessTree } from "../orchestration/gate-runner.js";
 
 /**
  * Neutral extraction (card 9df3ea71) of the bounded-git primitives six independent copies across this
  * codebase each reimplemented: `git/worktrees.ts`, `git/writer.ts`, `orchestration/restart.ts`,
- * `sessions/service.ts`, `setup/bootstrap.ts`, `vault/versioner.ts`. Deliberately a LEAF module — imports
- * nothing from any of the six, only `simple-git` itself — so it can be imported by all of them without
- * reintroducing the `git/writer.ts` → `vault/versioner.ts` import cycle those two already have.
+ * `sessions/service.ts`, `setup/bootstrap.ts`, `vault/versioner.ts`. A LEAF module relative to those six —
+ * imports nothing from any of them, so it can be imported by all of them without reintroducing the
+ * `git/writer.ts` → `vault/versioner.ts` import cycle those two already have.
+ *
+ * @decision 24c0bdba — one exception: `orchestration/gate-runner.ts`'s `killGateProcessTree`, reused by
+ * {@link killableCanonicalRaw}'s tree-kill path rather than a second tree-killer — verified acyclic
+ * (`gate-runner.ts` → `gate-spill.ts` → `paths.ts` → `pty/resolve-bin.ts` → node builtins only).
  *
  * This module intentionally does NOT bundle a `withTimeout` race with `.env()` handling, a fixed timeout
  * constant, or non-interactive env into one opinionated helper: the six sites differ on purpose (per-
@@ -35,6 +42,25 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
 }
 
 /**
+ * A TYPED marker (a non-enumerable property, never a message-text change) carried on an Error to mean "we
+ * killed something, or gave up trying, without a positive confirmation the whole process TREE actually
+ * died." Message text is deliberately left unchanged everywhere this is applied —
+ * `test/bounded-git-kill-on-timeout.mjs` already pins the exact wording of every rejection shape this file
+ * produces, and this marker rides alongside it, never replaces it.
+ *
+ * @decision 24c0bdba (round 3, Code Review B-1) — {@link treeDeathUnconfirmed} checks this FIRST, not a
+ * string match alone: a string match alone is what let this bug happen (see {@link withTimeoutKillingChild}'s own doc).
+ */
+const UNCONFIRMED_KILL = Symbol("loom.unconfirmedKill");
+function markUnconfirmedKill<E extends Error>(e: E): E {
+  Object.defineProperty(e, UNCONFIRMED_KILL, { value: true, enumerable: false, configurable: true });
+  return e;
+}
+function isMarkedUnconfirmedKill(e: unknown): boolean {
+  return e instanceof Error && (e as unknown as Record<symbol, unknown>)[UNCONFIRMED_KILL] === true;
+}
+
+/**
  * Like {@link withTimeout}, but for a caller that CANNOT tolerate the underlying child outliving the
  * wrapper's settlement — concretely, a call made inside a lock that guards shared on-disk state. Unlike
  * {@link withTimeout}, this does not settle independently on expiry: it calls `controller.abort()` (`p`'s
@@ -47,6 +73,18 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
  *
  * `killGraceMs` (default `ms`) is the bounded fallback for a child that never dies on signal — past it,
  * this gives up and rejects anyway, the same abandon-the-child risk `withTimeout` always has.
+ *
+ * Giving up is ITSELF an unconfirmed-death outcome, not a distinct third thing: this rejection is tagged
+ * {@link markUnconfirmedKill} unconditionally. Because `giveUpTimer`'s deadline is measured from THIS
+ * call's own start while {@link spawnCanonicalGitTree}'s own confirmation only starts counting after the
+ * child's `close` fires (strictly later), give-up structurally wins the race whenever confirmation is
+ * genuinely slow — tagging give-up is what actually closes that gap, not a timing fix. When `p`'s own
+ * rejection wins the race first instead (the common case: a child that dies promptly), its own tag (or
+ * lack of one) is propagated onto the wrapped error unchanged below.
+ *
+ * @decision 24c0bdba (round 3, Code Review B-1) — before this, `giveUpTimer`'s message carried nothing
+ * {@link treeDeathUnconfirmed} matched, so a caller checking it after a give-up always saw `false` and ran
+ * further mutating cleanup (`resetOrSkip`/rollback) anyway — the exact bug the fail-closed path prevents.
  *
  * @decision 1a858805 — a successful kill only guarantees the child is dead, never that its on-disk
  * writes are undone; `createWorktree`'s own `worktree add` call site owns recovering any residue.
@@ -69,7 +107,7 @@ export function withTimeoutKillingChild<T>(
       controller.abort();
     }, ms);
     const giveUpTimer = setTimeout(() => {
-      reject(new Error(`${label} exceeded ${ms}ms, killed, but did not die within ${killGraceMs}ms — giving up (hung git child?)`));
+      reject(markUnconfirmedKill(new Error(`${label} exceeded ${ms}ms, killed, but did not die within ${killGraceMs}ms — giving up (hung git child?)`)));
     }, ms + killGraceMs);
     p.then(
       (v) => {
@@ -79,10 +117,178 @@ export function withTimeoutKillingChild<T>(
       },
       (e) => {
         clearTimeout(killTimer); clearTimeout(giveUpTimer);
-        reject(timedOut ? new Error(`${label} exceeded ${ms}ms (git child killed): ${e?.message ?? e}`) : e);
+        if (!timedOut) { reject(e); return; }
+        const wrapped = new Error(`${label} exceeded ${ms}ms (git child killed): ${e?.message ?? e}`);
+        if (isMarkedUnconfirmedKill(e)) markUnconfirmedKill(wrapped);
+        reject(wrapped);
       },
     );
   });
+}
+
+/**
+ * {@link killableCanonicalRaw}'s tree-kill spawn primitive. Bypasses simple-git entirely so an abort kills
+ * the WHOLE process tree, not just git's own direct child: simple-git's `abortPlugin` only ever sends
+ * `spawned.kill("SIGINT")` to that ONE process (verified on Windows 11 and Linux/WSL — a hook's own
+ * `sh`/`node` descendants survive it and can keep mutating the repo afterwards, e.g. a lint-staged-shaped
+ * `sleep; git add` tail landing a DIFFERENT merge's file under this call's own trailer). `canonicalRaw`
+ * (356538ef) still runs its full merge-driver enumeration/blanking/verification against this adapter —
+ * only WHAT executes the final git process changes, never the protection pipeline around it.
+ *
+ * @decision 24c0bdba — settle only once the DIRECT child's own `close` fires (never independently of it —
+ * same confirmed-dead contract {@link withTimeoutKillingChild} already documents), and, on POSIX, only
+ * once {@link confirmProcessGroupDead} also clears within `killGraceMs` — see {@link treeDeathUnconfirmed}.
+ *
+ * `onTreeDeathSettled`, when supplied, is invoked EXACTLY ONCE, asynchronously, the moment this function's
+ * OWN confirmation determination is finally made (win32/pid-less: once {@link killGateProcessTree}'s own
+ * promise resolves; POSIX: once {@link confirmProcessGroupDead} resolves) — independent of whether the
+ * OUTER {@link withTimeoutKillingChild} wrapper already gave up and settled first via its own
+ * `giveUpTimer` (round 3, Code Review B-1/B-2: a caller uses this to auto-clear a quarantine it entered on
+ * an outer give-up, once the real answer eventually arrives). Never invoked on the non-aborted path.
+ */
+function spawnCanonicalGitTree(
+  repoPath: string,
+  env: Record<string, string | undefined> | undefined,
+  signal: AbortSignal,
+  killGraceMs: number,
+  onTreeDeathSettled?: (confirmed: boolean) => void,
+): Pick<SimpleGit, "raw"> {
+  // Cast: simple-git's own `raw` is a heavily overloaded `Response<string>`-returning signature (chainable
+  // builder methods included) that a plain `(...args) => Promise<string>` can never structurally satisfy —
+  // `canonicalRaw`'s callers only ever invoke `.raw(argsArray)` and `await` it, so a plain Promise is all
+  // that's actually needed at runtime; the OLD `canonicalGit`'s own `raw` reassignment sidestepped this
+  // same mismatch by going through a `Proxy` instead, whose `get` trap TypeScript does not check per-
+  // property against the target's real type.
+  const raw = (...callArgs: unknown[]): Promise<string> => {
+    const rawArgs = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
+    const args = [...CANONICAL_GIT_CONFIG_ARGS, ...rawArgs];
+    return new Promise<string>((resolve, reject) => {
+      const child = spawn("git", args, {
+        cwd: repoPath,
+        env: prepareCanonicalEnv(env),
+        windowsHide: true,
+        detached: process.platform !== "win32",
+      });
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let aborted = false;
+      let killIssued: Promise<void> | undefined;
+      child.stdout?.on("data", (d: Buffer) => { stdout += d; });
+      child.stderr?.on("data", (d: Buffer) => { stderr += d; });
+      const onAbort = () => {
+        if (settled || aborted) return;
+        aborted = true;
+        // Captured (round 3, m-b), never `void`'d: the close handler below now AWAITS this — win32's own
+        // `taskkill /T /F` completing is part of what "confirmed" means there, not merely "issued".
+        killIssued = killGateProcessTree(child);
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+      child.on("error", (e) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      });
+      child.on("close", (code) => {
+        if (settled) return;
+        if (!aborted) {
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          if (code === 0) { resolve(stdout); return; }
+          const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n") || `git ${rawArgs.join(" ")} exited with code ${code}`;
+          reject(new Error(detail));
+          return;
+        }
+        settled = true;
+        void (async () => {
+          if (killIssued) await killIssued;
+          const pid = child.pid;
+          if (pid == null || process.platform === "win32") {
+            // win32: taskkill /T /F (awaited above) has now itself completed walking + killing the whole
+            // subtree, and this child's own close firing here is confirmation on top of that — no further
+            // poll available without extra tooling. Residual: a descendant reparented BEFORE taskkill ran
+            // (round 3, Code Review B-2) is unreachable by a PPID-walking taskkill and can hold this same
+            // pipe open indefinitely instead — `close` then never fires at all, and the OUTER
+            // `withTimeoutKillingChild` give-up timer (itself now tagged unconfirmed) is what catches it.
+            onTreeDeathSettled?.(true);
+            reject(new Error("Abort signal received"));
+            return;
+          }
+          const confirmed = await confirmProcessGroupDead(pid, killGraceMs);
+          onTreeDeathSettled?.(confirmed);
+          const e = new Error(confirmed ? "Abort signal received" : "Abort signal received (process tree not fully confirmed dead)");
+          if (!confirmed) markUnconfirmedKill(e);
+          reject(e);
+        })();
+      });
+    });
+  };
+  return { raw } as unknown as Pick<SimpleGit, "raw">;
+}
+
+/**
+ * POSIX-only: poll a pure liveness probe (`process.kill(-pid, 0)` — no signal delivered) until it throws
+ * ESRCH (the whole process GROUP is gone) or `graceMs` elapses. SIGKILL to a group is immediate and
+ * uncatchable, so a member not yet REAPED by its parent (a brief zombie window) can still make this probe
+ * see it as "present" for a few ms without being able to act further — an accepted, documented residual
+ * (a zombie cannot execute code), not a correctness gap.
+ */
+async function confirmProcessGroupDead(pid: number, graceMs: number): Promise<boolean> {
+  const deadline = performance.now() + graceMs;
+  for (;;) {
+    try { process.kill(-pid, 0); } catch { return true; }
+    if (performance.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+/**
+ * True iff `e` represents a kill (or a give-up waiting on one) that could NOT positively confirm the whole
+ * process tree actually died — checks {@link markUnconfirmedKill}'s typed marker FIRST, falling back to
+ * the two known message shapes only for an error this file's own tagging somehow missed.
+ *
+ * @decision 24c0bdba (round 3, Code Review B-1) — a caller must never run a further mutating cleanup (a
+ * canonical `reset --hard` / a batch rollback) when this is true; that would race whatever might still be
+ * alive. Fail closed instead — report the failure loudly, quarantine the repo, and touch nothing else.
+ */
+const UNCONFIRMED_TREE_RE = /\(git child killed\): Abort signal received \(process tree not fully confirmed dead\)/;
+const GIVE_UP_RE = /, killed, but did not die within \d+ms — giving up \(hung git child\?\)$/;
+export function treeDeathUnconfirmed(e: unknown): boolean {
+  if (isMarkedUnconfirmedKill(e)) return true;
+  const msg = (e as Error)?.message ?? "";
+  return UNCONFIRMED_TREE_RE.test(msg) || GIVE_UP_RE.test(msg);
+}
+
+/**
+ * A MUTATING canonical-path git call must never abandon its child on a bare `withTimeout` race (see
+ * 8e75ee20); the shared dual-path kill-wired pattern {@link createWorktree}'s `boundedLockedRaw` and
+ * {@link attemptCodexAutoCommit} each hand-rolled independently. `gitFactory`, when supplied (the test
+ * seam), has no real child to kill, so it stays on a plain `withTimeout`; otherwise every call is a fresh
+ * {@link spawnCanonicalGitTree} + `AbortController`, tree-killed on timeout — never shared across calls,
+ * since killing one call's tree must never touch a DIFFERENT call already in flight. `async` (not a bare
+ * arrow returning a Promise) so a synchronous construct-time throw becomes a rejection like every other
+ * path here, rather than propagating as a thrown exception.
+ *
+ * `onTreeDeathSettled`, when supplied, is forwarded verbatim to {@link spawnCanonicalGitTree} — see that
+ * function's own doc. Never invoked at all on the `gitFactory` test-seam path (no real child exists there).
+ */
+export async function killableCanonicalRaw(
+  repoPath: string,
+  args: string[],
+  timeoutMs: number,
+  label: string,
+  gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">,
+  env?: Record<string, string | undefined>,
+  onTreeDeathSettled?: (confirmed: boolean) => void,
+): Promise<string> {
+  if (gitFactory) return withTimeout(gitFactory(repoPath, timeoutMs).raw(args), timeoutMs, label);
+  const controller = new AbortController();
+  return withTimeoutKillingChild(
+    canonicalRaw(spawnCanonicalGitTree(repoPath, env, controller.signal, timeoutMs, onTreeDeathSettled), args),
+    timeoutMs, label, controller,
+  );
 }
 
 /**
@@ -350,6 +556,24 @@ export async function canonicalRaw(git: Pick<SimpleGit, "raw">, args: string[], 
   return git.raw([...prefix, ...args]);
 }
 
+/**
+ * The env-prep `canonicalGit` itself applies before construction: strip ambient `GIT_CONFIG` (honoured
+ * ONLY by the `git config` builtin, never by `git merge` — left in place it blinds both driver reads to a
+ * file the real merge never reads; every OTHER config env var feeds the ONE config stack `merge` and
+ * `config` both read, so only this one needs stripping), then {@link scrubGitEnv}. Shared with {@link
+ * spawnCanonicalGitTree} (@decision 24c0bdba) so its raw spawn sees the IDENTICAL env `canonicalGit`
+ * itself would build — keep env-less callers env-less either way (`undefined` stays `undefined`), since
+ * simple-git's `blockUnsafeOperationsPlugin` only inspects an EXPLICIT env.
+ */
+function prepareCanonicalEnv(env?: Record<string, string | undefined>): Record<string, string | undefined> | undefined {
+  const base = env ?? process.env;
+  let cleanEnv = env;
+  // Presence check AND strip both go through the ONE case-aware helper (win32: `Git_Config` is `GIT_CONFIG` — card e93703d9); a bare `base.GIT_CONFIG` read would find
+  // it on process.env (Node's case-insensitive accessor) while a plain-object `delete` misses it.
+  if (envKeysNamed(base, ["GIT_CONFIG"]).some((k) => base[k] !== undefined)) { cleanEnv = { ...base }; deleteEnvKeys(cleanEnv, ["GIT_CONFIG"]); }
+  return cleanEnv ? scrubGitEnv(cleanEnv) : undefined;
+}
+
 export function canonicalGit(
   repoPath: string,
   blockTimeoutMs: number,
@@ -357,19 +581,9 @@ export function canonicalGit(
   abortSignal?: AbortSignal,
   extraUnsafe?: SimpleGitOptions["unsafe"],
 ): SimpleGit {
-  // Ambient `GIT_CONFIG` is honoured ONLY by the `git config` builtin (like `--file`), never by `git merge`: left in place it blinds both driver reads to a
-  // file the real merge never reads. Always strip it — from a scrubbed COPY of process.env when the caller gave none. (Every other config env var —
-  // GIT_CONFIG_GLOBAL/SYSTEM/NOSYSTEM/COUNT/KEY_n/VALUE_n/PARAMETERS, GIT_DIR, HOME/XDG_CONFIG_HOME — feeds the ONE config stack `merge` and `config` both read.)
-  // Keep env-less callers env-less: simple-git's blockUnsafeOperationsPlugin only inspects an EXPLICIT env, so an always-explicit env would make ambient
-  // GIT_ASKPASS/SSH_ASKPASS/GIT_SSH(_COMMAND)/GIT_PROXY_COMMAND/GIT_TEMPLATE_DIR/GIT_CONFIG_COUNT throw "unsafe" on EVERY canonical call. Build the stripped copy only when
-  // GIT_CONFIG is really present; otherwise pass the caller's env through unchanged (undefined stays undefined).
-  const base = env ?? process.env;
-  let cleanEnv = env;
-  // Presence check AND strip both go through the ONE case-aware helper (win32: `Git_Config` is `GIT_CONFIG` — card e93703d9); a bare `base.GIT_CONFIG` read would find
-  // it on process.env (Node's case-insensitive accessor) while a plain-object `delete` misses it.
-  if (envKeysNamed(base, ["GIT_CONFIG"]).some((k) => base[k] !== undefined)) { cleanEnv = { ...base }; deleteEnvKeys(cleanEnv, ["GIT_CONFIG"]); }
   // `allowUnsafeMergeDriver` is required for simple-git to pass OUR `-c merge.<x>.driver=` (a blanking, never a set).
-  const git = boundedSimpleGit(repoPath, blockTimeoutMs, cleanEnv, abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
+  // `boundedSimpleGit` re-applies `scrubGitEnv` to whatever `prepareCanonicalEnv` already scrubbed — idempotent, kept for its own unconditional-at-construction guarantee (f7a80d76).
+  const git = boundedSimpleGit(repoPath, blockTimeoutMs, prepareCanonicalEnv(env), abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
   const raw = async (...callArgs: unknown[]): Promise<string> => {
     const args = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
     return canonicalRaw(git, args);

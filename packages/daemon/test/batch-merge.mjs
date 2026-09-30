@@ -203,7 +203,7 @@ try {
 
     const baseMainSha = git(repo, "rev-parse HEAD");
     const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-conflict-${sfx}`);
-    const assembled = await assembleBatchBranches(batchWt, [a, b, c]);
+    const assembled = await assembleBatchBranches(repo, batchWt, [a, b, c]);
 
     check("(3) 2 landed (a, b)", assembled.landed.length === 2);
     check("(3) 1 dropped (c, conflicting with b)", assembled.dropped.length === 1);
@@ -329,7 +329,7 @@ try {
 
     const baseMainSha = git(repo, "rev-parse HEAD");
     const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-mc-${sfx}`);
-    const assembled = await assembleBatchBranches(batchWt, [m, other]);
+    const assembled = await assembleBatchBranches(repo, batchWt, [m, other]);
 
     check("(6) the pure-main-forward merge-commit branch LANDS, not dropped", assembled.landed.some((l) => l.branch === brM) && !assembled.dropped.some((d) => d.branch === brM));
     check("(6) no merge commit lands on the batch", git(batchWt, `log --merges ${baseMainSha}..HEAD --format=%H`) === "");

@@ -279,18 +279,21 @@ export class GitWriter {
    */
   async checkout(branch: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!branch?.trim()) return { ok: false, error: "branch name required" };
-    return this.withVaultPauseLease(() =>
-      withCanonicalIndexLock(this.repoPath, async () => {
-        try {
+    // @decision 24c0bdba (round 6) — the try/catch wraps the WHOLE withCanonicalIndexLock(...) call, not
+    // just the callback passed to it: a quarantine refusal (RepoQuarantinedError) is thrown by the lock
+    // itself BEFORE that callback ever runs, so a try/catch nested inside it would never see it.
+    try {
+      return await this.withVaultPauseLease(() =>
+        withCanonicalIndexLock(this.repoPath, async () => {
           const git = this.git(this.localMs);
           await withTimeout(git.checkout(branch.trim()), this.localMs, "git checkout");
           const current = (await withTimeout(git.branchLocal(), this.localMs, "git branch")).current;
           return { ok: true, branch: current };
-        } catch (e) {
-          return { ok: false, error: gitError(e) };
-        }
-      }),
-    );
+        }),
+      );
+    } catch (e) {
+      return { ok: false, error: gitError(e) };
+    }
   }
 
   /**
@@ -309,17 +312,19 @@ export class GitWriter {
    */
   async createBranch(name: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!name?.trim()) return { ok: false, error: "branch name required" };
-    return this.withVaultPauseLease(() =>
-      withCanonicalIndexLock(this.repoPath, async () => {
-        try {
+    // @decision 24c0bdba (round 6) — see checkout()'s identical comment above: the try/catch must wrap
+    // the WHOLE withCanonicalIndexLock(...) call, not just its callback.
+    try {
+      return await this.withVaultPauseLease(() =>
+        withCanonicalIndexLock(this.repoPath, async () => {
           const git = this.git(this.localMs);
           await withTimeout(git.checkoutLocalBranch(name.trim()), this.localMs, "git checkout -b");
           return { ok: true, branch: name.trim() };
-        } catch (e) {
-          return { ok: false, error: gitError(e) };
-        }
-      }),
-    );
+        }),
+      );
+    } catch (e) {
+      return { ok: false, error: gitError(e) };
+    }
   }
 
   /**
@@ -359,9 +364,11 @@ export class GitWriter {
     // "commit message required" — same shape as the original guard, just evaluated on what will actually
     // be committed.
     if (!cleanedMessage.trim()) return { ok: false, error: "commit message required" };
-    return this.withVaultPauseLease(() =>
-      withCanonicalIndexLock(this.repoPath, async () => {
-        try {
+    // @decision 24c0bdba (round 6) — see checkout()'s identical comment above: the try/catch must wrap
+    // the WHOLE withCanonicalIndexLock(...) call, not just its callback.
+    try {
+      return await this.withVaultPauseLease(() =>
+        withCanonicalIndexLock(this.repoPath, async () => {
           const git = this.git(this.localMs);
           // Nothing staged AND nothing to stage → don't even attempt the commit (git would exit 1).
           const status = await withTimeout(git.status(), this.localMs, "git status");
@@ -378,11 +385,11 @@ export class GitWriter {
             : undefined;
           const warning = [oversizedWarning, strippedWarning].filter((w): w is string => !!w).join(" ") || undefined;
           return warning ? { ok: true, hash, warning } : { ok: true, hash };
-        } catch (e) {
-          return { ok: false, error: gitError(e) };
-        }
-      }),
-    );
+        }),
+      );
+    } catch (e) {
+      return { ok: false, error: gitError(e) };
+    }
   }
 
   /** A human-readable warning naming any staged (non-deletion) file over `maxFileBytes`, or `undefined`

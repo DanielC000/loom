@@ -63,7 +63,8 @@ import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { getWorkerDiffCached, resolveWorkerBranchInfo } from "../git/worktrees.js";
 import { checkRepoRebind, checkLiveWorktreeSessions, checkTaskRepoKeyRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
-import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
+import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
+import { activeMergeQuarantineFor, clearMergeQuarantine } from "../git/merge-quarantine.js";
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
 import { validateRepoRegistry, resolveRepoKeyOrError, diffRepoRegistry, composeRepoRegistryChangeNote, type RepoRegistryDiff } from "../projects/repos.js";
@@ -654,11 +655,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // inbound chat socket — gating the whole upgrade (not per-message) so reaching the handler at all
       // already proves the loopback secret, exactly like /ws/term.
       const isCompanionSocket = routePattern === "/ws/companion/:sessionId";
-      // @decision 93249b52 — never leave /internal/shutdown or /internal/update gated by loopback-IP
-      // alone; both must also pass this bearer guard — stopping the daemon / installing+restarting code
-      // is too large a blast radius. POST /internal/hook stays EXCLUDED (no credential, every session start).
+      // Never leave /internal/shutdown or /internal/update gated by loopback-IP alone; both must also
+      // pass this bearer guard — stopping the daemon / installing+restarting code is too large a blast
+      // radius. POST /internal/hook stays EXCLUDED (no credential, every session start).
+      //
+      // @decision 93249b52 — /internal/merge-quarantine/clear (round 4) joins the same bearer-guarded
+      // set: re-exposing a quarantined repo to further canonical-mutating writes is a comparable blast
+      // radius, not an ordinary /api/* write.
       const isGuardedInternalWrite = req.method === "POST" &&
-        (routePattern === "/internal/shutdown" || routePattern === "/internal/update");
+        (routePattern === "/internal/shutdown" || routePattern === "/internal/update" || routePattern === "/internal/merge-quarantine/clear");
       if (!isGuardedApiWrite && !isTermSocket && !isCompanionSocket && !isGuardedInternalWrite) return;
       // This check is what scopes the hook to loopback, not a defensive no-op: a non-loopback caller
       // reaching here either already passed/failed the trust-tier wall above, or has no non-loopback bind
@@ -2869,6 +2874,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     setTimeout(() => deps.beginSelfUpdate?.(), 50);
     return reply.code(202).send({ ok: true, updating: true });
+  });
+
+  // --- Merge-quarantine HUMAN clear (round 4, Code Review b2ebf41f, ruling 2b) — the ONLY way to lift a
+  // quarantine that survived a restart (see merge-quarantine.ts's own doc: a RESTORED quarantine's
+  // in-process auto-clear listener is gone, by construction, so this route is not a convenience, it is
+  // the one remaining path). No MCP tool exposes this — same trust-boundary posture as the git/vault
+  // writers and gateCommand (CLAUDE.md). `repoKey` (optional, `null`/absent = primary) is resolved
+  // server-side via the project's own registry, never a raw client-supplied path.
+  app.post("/internal/merge-quarantine/clear", async (req, reply) => {
+    if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
+    const body = (req.body ?? {}) as { projectId?: string; repoKey?: string | null };
+    if (!body.projectId) return reply.code(400).send({ error: "projectId required" });
+    const project = deps.db.getProject(body.projectId);
+    if (!project) return reply.code(404).send({ error: "project not found" });
+    let repo;
+    try {
+      repo = resolveRepoByKey(project, body.repoKey ?? null);
+    } catch (e) {
+      if (!(e instanceof UnknownRepoKeyError)) throw e;
+      return reply.code(400).send({ error: `unknown repoKey: ${e.repoKey}` });
+    }
+    const wasQuarantined = !!activeMergeQuarantineFor(repo.path);
+    clearMergeQuarantine(repo.path);
+    return { ok: true, wasQuarantined, repoPath: repo.path };
   });
 
   // @decision 32fd6f4c — /internal/test/seed: direct deps.db/file writes for e2e-only data (usage

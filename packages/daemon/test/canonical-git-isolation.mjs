@@ -280,20 +280,20 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
   const failingReset = (p, ms) => { const g = canonicalGit(p, ms); return { raw: (a) => (a[0] === "reset" ? Promise.reject(new Error("reset boom")) : g.raw(a)) }; };
   {
     const W = await rbWorld("ctl");
-    const r = await assembleBatchBranches(W.batchWt, [W.cand]);
+    const r = await assembleBatchBranches(W.repo, W.batchWt, [W.cand]);
     const d = r.dropped[0];
     check("(rollback) CONTROL: a real conflict drops the candidate with the ordinary reason and NO rollback alarm", !!d && /conflict cherry-picking/.test(d.reason) && !/ROLLBACK FAILED/.test(d.reason));
   }
   {
     const W = await rbWorld("fail");
-    const r = await assembleBatchBranches(W.batchWt, [W.cand], { gitFactory: failingReset });
+    const r = await assembleBatchBranches(W.repo, W.batchWt, [W.cand], { gitFactory: failingReset });
     const d = r.dropped[0];
     check("(rollback) a FAILED rollback over a dirty batch worktree is surfaced in the drop reason (ROLLBACK FAILED … reset boom), not swallowed", !!d && /ROLLBACK FAILED/.test(d.reason) && /reset boom/.test(d.reason));
   }
   {
     const W = await rbWorld("refuse");
     plantDriver(W.repo, W.batchWt, "rawbyte", driverFor("rb-refuse").cmd, "rb-refuse");
-    const r = await assembleBatchBranches(W.batchWt, [W.cand]);
+    const r = await assembleBatchBranches(W.repo, W.batchWt, [W.cand]);
     const d = r.dropped[0];
     check("(rollback) a canonicalGit refusal that changed nothing reads as a plain refusal — no ROLLBACK FAILED alarm — and names the refusal", !!d && /refusing/.test(d.reason) && !/ROLLBACK FAILED/.test(d.reason));
     console.log(`      refuse reason: ${String(d?.reason).slice(0, 200)}`);

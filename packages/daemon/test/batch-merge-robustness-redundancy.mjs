@@ -160,7 +160,7 @@ try {
     // via its ORIGINAL (pre-land) branch ref. B's content is already present in the tree A was cut from,
     // so B's cherry-pick applies cleanly with an EMPTY diff — the exact precondition for the defect.
     const { worktreePath: batchWt2 } = await createWorktree(repo, projId, `bm-batch-ec2-${sfx}`);
-    const assembled = await assembleBatchBranches(batchWt2, [a, b]);
+    const assembled = await assembleBatchBranches(repo, batchWt2, [a, b]);
 
     // THE DISCRIMINATING ASSERTIONS — these FAIL against pre-fix code, which reports B as landed (ok:true,
     // noop:undefined, a fabricated sha/subject) and silently corrupts A's commit in the process.
@@ -231,7 +231,7 @@ try {
     const fresh = await cutBranch(repo, "mc-fresh", "mc-fresh.txt", "fresh\n");
 
     const { worktreePath: batchWt2 } = await createWorktree(repo, projId, `bm-batch-mixed2-${sfx}`);
-    const assembled = await assembleBatchBranches(batchWt2, [fresh, mixed]);
+    const assembled = await assembleBatchBranches(repo, batchWt2, [fresh, mixed]);
 
     check("(11) fresh lands normally", assembled.landed.length === 1 && assembled.landed[0]?.branch === fresh.branch);
     check("(11) mixed is DROPPED WHOLESALE (DoD-2 decision (b) — not a partial landing of its first commit)",
@@ -313,7 +313,7 @@ try {
       };
     }
 
-    const assembled = await assembleBatchBranches(batchWt2, [fresh, mixed], { gitFactory: forcedRejectGitFactory });
+    const assembled = await assembleBatchBranches(repo, batchWt2, [fresh, mixed], { gitFactory: forcedRejectGitFactory });
 
     check("(11b) fresh lands normally", assembled.landed.length === 1 && assembled.landed[0]?.branch === fresh.branch);
     check("(11b) mixed is DROPPED", assembled.dropped.length === 1 && assembled.dropped[0]?.branch === mixed.branch);
@@ -351,7 +351,7 @@ try {
 
     // Passed in as [C, A, B] — the reverse of chronological, and not alphabetical either.
     const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-sort-${sfx}`);
-    const assembled = await assembleBatchBranches(batchWt, [sortC, sortA, sortB]);
+    const assembled = await assembleBatchBranches(repo, batchWt, [sortC, sortA, sortB]);
     check("(12) all 3 landed", assembled.landed.length === 3 && assembled.dropped.length === 0);
     check("(12) landing order is B, A, C (earliest-author-date-first) — NOT the passed-in [C, A, B] order",
       assembled.landed[0]?.branch === sortB.branch &&

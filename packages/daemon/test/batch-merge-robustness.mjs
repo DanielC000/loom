@@ -402,7 +402,7 @@ try {
       git(repo, `rev-parse ${solo.branch}`) === baseMainSha && baseMainSha !== landedSha);
 
     const { worktreePath: batchWt2 } = await createWorktree(repo, projId, `bm-batch-stamp-noop-b-${sfx}`);
-    const { landed, dropped } = await assembleBatchBranches(batchWt2, [solo]);
+    const { landed, dropped } = await assembleBatchBranches(repo, batchWt2, [solo]);
     check("(9b) re-submitting the (now-ancestor) branch is classified a noop, not dropped",
       dropped.length === 0 && landed.length === 1 && landed[0].noop === true);
     check("(9b) the noop's sha is the SAME already-landed commit (reused, not re-created)",

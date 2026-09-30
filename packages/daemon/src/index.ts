@@ -70,6 +70,7 @@ import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
 import { readAndClearMergeDangerLatches, describeMergeDangerLatchAtBoot } from "./git/merge-danger-latch.js";
+import { reenterMergeQuarantinesAtBoot } from "./git/merge-quarantine.js";
 import { runGracefulTeardown } from "./graceful-teardown.js";
 
 async function main(): Promise<void> {
@@ -936,6 +937,31 @@ async function main(): Promise<void> {
   // (bin/loom.mjs) re-reads this same file on every invocation to embed it in the browser-open URL, and a
   // fresh browser tab that never saw that URL has no other way to obtain it.
   const loopbackSecret = getOrCreateLoopbackSecret();
+  // @decision b272d215 — this list must name EVERY canonical repo a merge can land on, not just each
+  // project's primary repoPath; must stay in sync with sessions/service.ts's branch-ref sweep.
+  //
+  // Computed HERE (round 6, item #8 — moved up from after `startGatewayListeners` below) so it's ready for
+  // the quarantine re-entry immediately below, which itself must run before ANY request can be served.
+  const canonicalRepoPaths = new Set<string>();
+  for (const project of db.listProjects()) {
+    for (const repoPath of [project.repoPath, ...project.repos.map((r) => r.path)]) {
+      if (repoPath) canonicalRepoPaths.add(repoPath);
+    }
+  }
+  // QUARANTINE RE-ENTRY (round 4, Code Review b2ebf41f, ruling 2a; MOVED HERE in round 6, Code Review
+  // item #8) — unlike the crash-recovery latch (read further below), a quarantine latch is NOT
+  // consumed-then-discarded: it RE-ARMS the same refusal this process would have applied had it never
+  // restarted (see merge-quarantine.ts's own doc for why a plain restart-lifts-it design was itself a
+  // latch bypass). MUST run before `buildServer`/`startGatewayListeners` below — the old position (after
+  // `startGatewayListeners`) left a real window where the gateway was already accepting REST/MCP requests
+  // (an agent could call `worker_merge_confirm`/`merge_batch` through it) before a restart-surviving
+  // quarantine was re-armed to refuse them. Deliberately its own, distinct boot message — never routed
+  // through describeMergeDangerLatchAtBoot below, which must never say "no action needed" for a quarantine
+  // (that function only ever describes the UNRELATED crash-recovery latch).
+  for (const q of reenterMergeQuarantinesAtBoot([...canonicalRepoPaths])) {
+    const opText = q.opId ? `, op ${q.opId}` : "";
+    console.warn(`[boot] canonical repo ${q.repoPath} is QUARANTINED (branch '${q.branch}'${opText}, entered ${q.enteredAt}): ${q.reason} — re-armed after this restart; merges/batches/worktree-creates against it will refuse until a human clears it: POST /internal/merge-quarantine/clear`);
+  }
   const app = await buildServer({
     db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, operatorMcp, runMcp, control, usageStatus,
     schedulerEnabled,
@@ -1037,15 +1063,9 @@ async function main(): Promise<void> {
   // normal steady state for a repo with submodules, not residue) had no way to guess what was being
   // asked of them.)
   //
-  // @decision b272d215 — this list must name EVERY canonical repo a merge can land on, not just each project's
-  // primary repoPath (also secondary `project.repos`, multi-repo epic 49136451) — else describeMergeDangerLatchAtBoot
-  // can print a false all-clear. Must stay in sync with sessions/service.ts's branch-ref sweep.
-  const canonicalRepoPaths = new Set<string>();
-  for (const project of db.listProjects()) {
-    for (const repoPath of [project.repoPath, ...project.repos.map((r) => r.path)]) {
-      if (repoPath) canonicalRepoPaths.add(repoPath);
-    }
-  }
+  // `canonicalRepoPaths` (used below) is now computed EARLIER, before `buildServer` — see that computation's
+  // own comment (round 6, item #8) for why. Reused here unchanged.
+  //
   // Merge-danger LATCH read+clear (card 7efc2bff item 3, decoupling a prior coupling smell): read and
   // consume UNCONDITIONALLY, here — independent of the residue scan below, not nested inside its `.then()`.
   // The nested shape made this read's own execution depend on that unrelated scan's promise settling via

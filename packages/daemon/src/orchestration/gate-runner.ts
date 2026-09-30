@@ -729,17 +729,20 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
 });
 
 /**
- * Force-kill a gate step's process TREE, not just the shell `spawn` returned as `child` — `shell:true`
- * makes `child` a `cmd.exe`/`sh`/`bash` whose DESCENDANTS (e.g. `pnpm` → `vitest` → forked test workers) a
- * plain `child.kill()` never reaches. win32: `taskkill /pid <child.pid> /T /F` kills the whole subtree.
- * posix: spawned `detached:true` above so `child.pid` is the process GROUP id — `process.kill(-pid,
- * "SIGKILL")` signals the whole group; a plain `process.kill(pid, ...)` would leak on posix too.
- * Resolves once the kill has been ISSUED; best-effort — an already-exited pid is a silent no-op.
+ * Force-kill a process TREE, not just the shell/`spawn`-returned `child` — `shell:true` (this file's own
+ * gate steps) makes `child` a `cmd.exe`/`sh`/`bash` whose DESCENDANTS (e.g. `pnpm` → `vitest` → forked
+ * test workers) a plain `child.kill()` never reaches; a raw-spawned child (e.g. {@link
+ * killableCanonicalRaw}'s tree-kill path, `git/bounded.ts`, card `24c0bdba`) has the identical problem for
+ * a hook's own `sh`/`node` descendants. win32: `taskkill /pid <child.pid> /T /F` kills the whole subtree.
+ * posix: the caller must have spawned with `detached:true` so `child.pid` is the process GROUP id —
+ * `process.kill(-pid, "SIGKILL")` signals the whole group; a plain `process.kill(pid, ...)` would leak on
+ * posix too. Resolves once the kill has been ISSUED; best-effort — an already-exited pid is a silent
+ * no-op. Exported (card 24c0bdba) so `git/bounded.ts` reuses this ONE tree-killer rather than a second one.
  * @decision 3564fd1e — never kill only the shell (descendants survive and accumulate, eventually saturating the
  * host); on posix this must be `process.kill(-pid, "SIGKILL")` against the process GROUP id, never a plain pid
  * signal.
  */
-function killGateProcessTree(child: ChildProcess): Promise<void> {
+export function killGateProcessTree(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
     if (child.pid == null) { resolve(); return; }
     if (process.platform === "win32") {

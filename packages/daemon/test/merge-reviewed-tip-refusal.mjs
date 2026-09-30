@@ -236,7 +236,7 @@ for (const mode of ["lt2", "gate-off"]) {
   lateCommit(W.w.a.worktreePath); // the branch moves AFTER the tip was verified
   const batch = await createWorktree(W.repo, W.projId, `mrt-batch-pin-${sfx}`);
   registerForCleanup(batch.worktreePath);
-  const res = await assembleBatchBranches(batch.worktreePath, [{ workerSessionId: W.w.a.sid, taskId: W.w.a.taskId, branch: W.w.a.branch, taskTitle: "feat(test): a", tip: verified }]);
+  const res = await assembleBatchBranches(W.repo, batch.worktreePath, [{ workerSessionId: W.w.a.sid, taskId: W.w.a.taskId, branch: W.w.a.branch, taskTitle: "feat(test): a", tip: verified }]);
   check("(pin) the candidate landed", res.landed.length === 1 && res.dropped.length === 0);
   check("(pin) assembledTip is the VERIFIED tip, not the moved ref", res.landed[0]?.assembledTip === verified);
   check("(pin) the post-verification commit is NOT in the batch tree", fs.existsSync(path.join(batch.worktreePath, "feature-a.txt")) && !fs.existsSync(path.join(batch.worktreePath, "late-commit.txt")));

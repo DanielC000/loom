@@ -7,9 +7,10 @@ import { pathToFileURL } from "node:url";
 import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
-import { withTimeout, withTimeoutKillingChild, canonicalGit, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure } from "./bounded.js";
-import { withCanonicalIndexLock } from "./repo-lock.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure } from "./bounded.js";
+import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
+import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken } from "./merge-quarantine.js";
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
 import { isCodexDoctrinePath } from "../pty/codex-doctrine.js";
 import { checkTitleHtmlEntities, CONVENTIONAL_TYPES } from "../tasks/title-guard.js";
@@ -852,6 +853,15 @@ export async function createWorktree(
    */
   gitDeps: BoundedGitDeps = {},
 ): Promise<WorktreeInfo> {
+  // QUARANTINE CHECK — kept here (round 6: not deleted as a "copy-pasted assert the lock now covers")
+  // because the REUSE path below (`recutStaleReusedBranch`/`resolveStaleBase` when `worktreePath` already
+  // exists) never calls `withCanonicalIndexLock` at all — it mutates the WORKTREE's own index via `git
+  // reset --hard`/`mergeMainIntoWorktree`, not the canonical repo's, so the lock-level check the fresh-cut
+  // path below now ALSO gets (via its own `withCanonicalIndexLock` call) would never fire for a reuse. This
+  // function has no `{ok:false}` refusal shape (every existing caller treats it as throw-or-succeed), so a
+  // quarantined repo refuses the same way every other failure here already does.
+  const quarantineCheck = assertRepoNotQuarantined(repoPath);
+  if (!quarantineCheck.ok) throw new Error(quarantineCheck.reason);
   const key = taskKey(taskId);
   const branch = `loom/${key}`;
   const worktreePath = repoKey && repoKey !== "primary"
@@ -910,11 +920,8 @@ export async function createWorktree(
   //
   // Release the lock only once the child is confirmed dead — never on a
   // bare withTimeout race.
-  const boundedLockedRaw = (args: string[], label: string): Promise<string> => {
-    if (gitDeps.gitFactory) return withTimeout(gitDeps.gitFactory(repoPath, timeoutMs).raw(args), timeoutMs, label);
-    const controller = new AbortController();
-    return withTimeoutKillingChild(canonicalGit(repoPath, timeoutMs, undefined, controller.signal).raw(args), timeoutMs, label, controller);
-  };
+  const boundedLockedRaw = (args: string[], label: string): Promise<string> =>
+    killableCanonicalRaw(repoPath, args, timeoutMs, label, gitDeps.gitFactory);
   const branchExists = await withCanonicalIndexLock(repoPath, async () => {
     await boundedLockedRaw(["worktree", "prune"], "git worktree prune"); // drop any stale admin record for a since-deleted dir
     const exists = (await boundedLockedRaw(["branch", "--list", branch], "git branch --list")).trim() !== "";
@@ -1007,6 +1014,12 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
    *  read it (a worker's late commit) makes git refuse, and the branch is RETAINED. Omitted ⇒ unchanged `branch -D`. */
   expectedTip?: string;
 } = {}): Promise<boolean> {
+  // QUARANTINE CHECK — kept here (round 6: this path CANNOT take `withCanonicalIndexLock`, so the lock-
+  // level check doesn't cover it) — `git branch -D`/`update-ref -d` never routes through that lock (ref
+  // deletion doesn't touch the index the lock protects), so this is its own convergence point. Fail closed
+  // rather than silently no-op, so a caller (finalizeMerge, boot-reconcile) sees this as a real refusal
+  // (`false`, matching the CAS-moved/retained shape below), never a false "already gone".
+  if (!assertRepoNotQuarantined(repoPath).ok) return false;
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
     if (deps.expectedTip) {
@@ -1073,6 +1086,11 @@ const DELETE_BRANCHES_CHUNK_SIZE = 200;
  *  fall back to verified per-branch deletes only within a FAILED chunk, never abandon the whole chunk —
  *  git exits non-zero if any one branch failed, so a naive all-or-nothing read would undercount `deleted`. */
 export async function deleteBranches(repoPath: string, branches: string[], deps: BoundedGitDeps = {}): Promise<{ deleted: string[] }> {
+  // QUARANTINE CHECK — kept here (round 6: this path CANNOT take `withCanonicalIndexLock` either, same
+  // reasoning as `deleteBranch`'s own check above). The BATCHED primary path below is also a SEPARATE git
+  // call from `deleteBranch`'s own check (which only covers this function's per-branch FALLBACK), so this
+  // needs its own. Refuse the whole call rather than a silent no-op.
+  if (!assertRepoNotQuarantined(repoPath).ok) return { deleted: [] };
   const deleted: string[] = [];
   for (let i = 0; i < branches.length; i += DELETE_BRANCHES_CHUNK_SIZE) {
     const chunk = branches.slice(i, i + DELETE_BRANCHES_CHUNK_SIZE);
@@ -2028,26 +2046,16 @@ export async function attemptCodexAutoCommit(
   }
 
   // Code Review "B1 residual": `commit` is the ONE call here that MUTATES the ref, so it is the one
-  // that must never be abandoned mid-flight by a bare `withTimeout` race — that helper settles
-  // INDEPENDENT of the underlying child (see its own doc), so a "failure" it reports can still be
-  // followed by the real git child finishing the commit moments later, unobserved. `withTimeoutKillingChild`
-  // only settles once the child is CONFIRMED dead, closing that window structurally — mirroring
-  // `createWorktree`'s own `boundedLockedRaw` pattern (grepped, not hand-rolled): the test seam
-  // (`deps.gitFactory`) stays a plain `withTimeout`, since an injected fake doesn't need real killing.
+  // that must never be abandoned mid-flight by a bare `withTimeout` race — a "failure" it reports could
+  // otherwise still be followed by the real git child finishing the commit moments later, unobserved.
+  // @decision 24c0bdba — `killableCanonicalRaw` (git/bounded.ts) only settles once the child is CONFIRMED
+  // dead, closing that window structurally; the test seam (`deps.gitFactory`) stays a plain `withTimeout`.
   const messageArgs = body ? ["-m", subject, "-m", body] : ["-m", subject];
   const commitArgs = [...cfg, "commit", "--no-verify", ...messageArgs];
   const commitLabel = "codex-auto-commit commit";
   let commitThrew: unknown;
   try {
-    if (deps.gitFactory) {
-      await withTimeout(deps.gitFactory(worktreePath, timeoutMs).raw(commitArgs), timeoutMs, commitLabel);
-    } else {
-      const controller = new AbortController();
-      await withTimeoutKillingChild(
-        canonicalGit(worktreePath, timeoutMs, nonInteractiveEnv(), controller.signal, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }).raw(commitArgs),
-        timeoutMs, commitLabel, controller,
-      );
-    }
+    await killableCanonicalRaw(worktreePath, commitArgs, timeoutMs, commitLabel, deps.gitFactory, nonInteractiveEnv());
   } catch (e) {
     commitThrew = e;
   }
@@ -5759,7 +5767,16 @@ export async function mergeBranch(
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
   // GitWriter.commit/checkout/createBranch against the same repo, can never interleave with this one. See
   // the lock's own doc (git/repo-lock.ts) for the exact corruption this closes.
-  return withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip));
+  //
+  // @decision 24c0bdba (round 6) — the lock itself now refuses (RepoQuarantinedError) a quarantined repo
+  // BEFORE mergeBranchLocked ever runs; catch it here and translate to this function's own {ok:false,
+  // reason} shape rather than letting it escape as an unhandled rejection.
+  try {
+    return await withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip));
+  } catch (e) {
+    if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message };
+    throw e;
+  }
 }
 
 // `opId` (board card 5a7692a4): purely for attribution on the in-memory danger-window tracker (see
@@ -5769,6 +5786,12 @@ async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string,
 ): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string }> {
+  // QUARANTINE CHECK moved to the TRUE convergence point, `withCanonicalIndexLock` (git/repo-lock.ts) —
+  // this function only ever runs INSIDE that lock (see `mergeBranch` above), so a check re-derived here
+  // would be unreachable dead code: a quarantined repo now never gets this far.
+  //
+  // @decision 24c0bdba (round 6)
+  //
   // BOUNDED + NON-INTERACTIVE (board card 44c28799): this is the repo's highest-consequence git write
   // (see boundedMergeGit's own doc), so it gets the same block-timeout + withTimeout race as every other
   // bounded op in this file, plus nonInteractiveEnv() to match git/reader.ts + git/writer.ts. Before this
@@ -5817,6 +5840,22 @@ async function mergeBranchLocked(
       };
     }
   }
+  // Auto-clear hook: once a kill's real confirmation eventually settles — regardless of whether the outer
+  // `killableCanonicalRaw` call already gave up first — lift a quarantine THIS invocation may have
+  // entered. A no-op when nothing was ever entered. In-process only — see merge-quarantine.ts's own doc
+  // for why a RESTORED (post-restart) quarantine can never auto-clear this way.
+  //
+  // `raisedToken` (round 6, Code Review #5) — COMPARE-AND-CLEAR: this invocation can raise at most one
+  // quarantine (every raise site below returns immediately after), so a single mutable slot captures the
+  // token `enterMergeQuarantine` returns; the auto-clear below presents that SAME token back, so it can
+  // never clear a DIFFERENT op's (still-active, differently-tokened) quarantine on this repo.
+  //
+  // @decision 24c0bdba (round 4) — the auto-clear half of the quarantine mechanism.
+  let raisedToken: string | undefined;
+  const onTreeDeathSettled = (confirmed: boolean): void => {
+    if (confirmed && raisedToken) clearMergeQuarantineByToken(repoPath, raisedToken);
+  };
+
   // @decision 2eddf573 — clear any AFFIRMATIVE in-progress-merge residue (stale MERGE_HEAD/unmerged) via
   // `reset --merge`, never `--hard` — an affirmative merge signal licenses clearing only that state, never
   // unrelated unstaged work elsewhere in the tree. Two independent probes, each in its own try/catch.
@@ -5828,8 +5867,15 @@ async function mergeBranchLocked(
     } catch { /* no MERGE_HEAD ⇒ that signal is simply false */ }
     if (inProgressMerge || unmerged) {
       try {
-        await withTimeout(git.raw(["reset", "--merge", "HEAD"]), timeoutMs, "git reset --merge (canonical, residue clear)");
+        // @decision 24c0bdba — kill-confirmed (not a bare withTimeout race): this mutates the canonical
+        // index/tree while withCanonicalIndexLock is held, so an orphaned child must never outlive release.
+        await killableCanonicalRaw(repoPath, ["reset", "--merge", "HEAD"], timeoutMs, "git reset --merge (canonical, residue clear)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
       } catch (e) {
+        // @decision 24c0bdba (round 4) — fail CLOSED + QUARANTINE on an unconfirmed tree-kill here too.
+        if (treeDeathUnconfirmed(e)) {
+          raisedToken = enterMergeQuarantine(repoPath, branch, "in-progress-merge residue clear could not be confirmed dead after a kill", opId);
+          return { ok: false, reason: `in-progress-merge residue clear's process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${(e as Error).message}` };
+        }
         // Surfaced explicitly rather than falling into the outer catch below, whose "no residue to clear"
         // reasoning does not apply here: we already know there IS residue (the signal above was affirmative)
         // and failed to clear it, so silence here would let a genuinely dirty canonical repo look untouched.
@@ -5873,9 +5919,17 @@ async function mergeBranchLocked(
       return `skipped automatic cleanup (${context}) because the canonical repo already had unstaged tracked changes before this merge attempt — resetting would risk discarding them; a human must resolve the canonical checkout by hand, and the next merge attempt will refuse loudly on any staged residue this left behind`;
     }
     try {
-      await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, `git reset --hard (canonical, ${context})`);
+      // @decision 24c0bdba — kill-confirmed: this cleanup mutates the same canonical index/tree a later
+      // op (or another merge, once the lock releases) will touch — never abandon it on a bare timeout.
+      await killableCanonicalRaw(repoPath, ["reset", "--hard", "HEAD"], timeoutMs, `git reset --hard (canonical, ${context})`, deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
       return null;
     } catch (e) {
+      // @decision 24c0bdba (round 4) — this IS itself a mutating canonical call; an unconfirmed kill of
+      // ITS OWN child quarantines the repo too, the same as every other mutating call on this path.
+      if (treeDeathUnconfirmed(e)) {
+        raisedToken = enterMergeQuarantine(repoPath, branch, `reset --hard (${context}) could not be confirmed dead after a kill`, opId);
+        return `reset --hard (${context})'s process tree could not be confirmed dead after a kill — quarantining the repo; canonical repo may need manual inspection: ${(e as Error).message}`;
+      }
       return `reset --hard (${context}) failed — canonical repo may have residue: ${(e as Error).message}`;
     }
   }
@@ -5892,9 +5946,12 @@ async function mergeBranchLocked(
   try {
     let rawError = false;
     let rawErrorMessage: string | undefined;
+    let rawErrorObject: unknown;
     let squashRefusal: string | undefined;
     try {
-      await withTimeout(git.raw(["merge", "--squash", squashTarget]), timeoutMs, "git merge --squash (canonical)");
+      // @decision 24c0bdba — kill-confirmed: stages into the same canonical index the commit below lands
+      // from; an orphaned squash child must never survive past the lock releasing.
+      await killableCanonicalRaw(repoPath, ["merge", "--squash", squashTarget], timeoutMs, "git merge --squash (canonical)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
     } catch (e) {
       rawError = true; // a conflict OR a real failure — the explicit checks below decide
       // Card 4b7ff996: captured (not just flagged) so the rawError branch below can tell git's own
@@ -5903,6 +5960,9 @@ async function mergeBranchLocked(
       // failed" for a class of failure that actually has a specific, diagnosable cause and a specific,
       // different remedy (see that branch's own doc).
       rawErrorMessage = (e as Error).message;
+      // Round 3 (Code Review B-1): the REAL error object, not just its message — `treeDeathUnconfirmed`
+      // checks a typed marker on it first, which a `{ message }` reconstruction below would lose.
+      rawErrorObject = e;
       squashRefusal = e instanceof CanonicalGitRefusal ? describeGitFailure(e).text : undefined;
     }
     // A canonicalGit refusal is thrown BEFORE any git process runs: the squash never started, so the canonical repo is exactly as it entered. Say so — and do NOT
@@ -5943,6 +6003,15 @@ async function mergeBranchLocked(
     // is the primary fix (no concurrent op can leave leftover stage here anymore); this is the backstop for
     // anything outside it.
     if (rawError) {
+      // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill: resetOrSkip's own
+      // reset --hard would race whatever might still be alive, never touch the repo further in that case.
+      if (treeDeathUnconfirmed(rawErrorObject)) {
+        raisedToken = enterMergeQuarantine(repoPath, branch, "git merge --squash could not be confirmed dead after a kill", opId);
+        return {
+          ok: false,
+          reason: `git merge --squash's process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${rawErrorMessage}`,
+        };
+      }
       const cleanupIssue = await resetOrSkip("rawError cleanup");
       // @decision 4b7ff996 — squash-time backstop for the race window between this admission preflight and
       // this squash: classify a matching rawError as dirtyOverlap:true, never a generic failure — and always
@@ -6024,29 +6093,73 @@ async function mergeBranchLocked(
     // @decision c862f14c — stamps the path-set trailers from the STAGED index, never a follow-up amend
     // (caused an orphan window + doubled hooks). LOAD-BEARING ADJACENCY: no git call may land between this
     // capture and the commit below, or it breaks the tree-identity the byte-identical-digest proof rests on.
+    //
+    // Scoped outside the try (best-effort, same as the trailers) so it survives to the catch below too.
+    let preCommitHead: string | undefined;
     try {
-      const base = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, pathset base)")).trim();
+      preCommitHead = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, pathset base)")).trim();
       const digest = await stagedPathSetDigest(git, timeoutMs);
-      message = `${message.replace(/\s+$/, "")}\nLoom-Worker-Base: ${base}\nLoom-Worker-PathSet: ${digest}\n`;
+      message = `${message.replace(/\s+$/, "")}\nLoom-Worker-Base: ${preCommitHead}\nLoom-Worker-PathSet: ${digest}\n`;
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn(`[git] mergeBranchLocked: Loom-Worker-Base/PathSet capture failed for ${branch} — commit lands ` +
         `without either trailer: ${(e as Error).message}`);
     }
+    // @decision 24c0bdba — kill-confirmed: a "failure" here can still mean the commit landed anyway (a
+    // post-commit hook outliving the timeout) — re-verify via HEAD and report truthfully, never assume.
     try {
-      await withTimeout(git.raw(["commit", "-m", message]), timeoutMs, "git commit (canonical, squash-merge)");
+      await killableCanonicalRaw(repoPath, ["commit", "-m", message], timeoutMs, "git commit (canonical, squash-merge)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
     } catch (e) {
+      // Code Review (card 24c0bdba, finding B1 residual): the tree-kill's OWN confirmation can itself come
+      // back unconfirmed (a descendant not reaped within grace) — fail CLOSED + QUARANTINE, never touch
+      // the repo further, since resetOrSkip's `reset --hard` would race whatever might still be alive.
+      if (treeDeathUnconfirmed(e)) {
+        raisedToken = enterMergeQuarantine(repoPath, branch, "squash commit could not be confirmed dead after a kill", opId);
+        return {
+          ok: false,
+          reason: `squash commit's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${(e as Error).message}`,
+        };
+      }
+      // m1 (Code Review): a bare "HEAD moved" is not enough to trust as OUR commit — verify it is
+      // EXACTLY the commit this attempt would have made (its parent is the pre-commit HEAD we captured,
+      // and its own trailer names THIS branch) before claiming ok:true; otherwise report the ambiguity
+      // by name rather than silently discarding or silently trusting an unverified movement.
+      if (preCommitHead !== undefined) {
+        let headAfterFailure: string | undefined;
+        let recoveredAsOwnCommit = false;
+        try {
+          headAfterFailure = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit-failure verify)")).trim();
+          if (headAfterFailure !== preCommitHead) {
+            const parent = (await withTimeout(git.raw(["rev-parse", `${headAfterFailure}^`]), timeoutMs, "git rev-parse HEAD^ (canonical, post-commit-failure verify)")).trim();
+            const body = await withTimeout(git.raw(["log", "-1", "--format=%B", headAfterFailure]), timeoutMs, "git log -1 (canonical, post-commit-failure verify)");
+            recoveredAsOwnCommit = parent === preCommitHead && parseLoomTrailerBlock(body)?.branch === branch;
+          }
+        } catch { /* unknown — fall through to the ordinary failure/cleanup path below */ }
+        if (headAfterFailure !== undefined && headAfterFailure !== preCommitHead) {
+          if (recoveredAsOwnCommit) {
+            // HEAD moved despite the reported failure — the commit landed (and its real git child is now
+            // CONFIRMED dead, so nothing can land AFTER this point), verified as OUR commit specifically.
+            // Recover it truthfully rather than reporting a false failure.
+            return { ok: true, sha: headAfterFailure, subject, landedTip: resolvedBranchHead };
+          }
+          return {
+            ok: false,
+            reason: `squash commit failed (${(e as Error).message}), but HEAD moved to ${headAfterFailure} afterwards in a way this merge cannot verify as its own (expected parent ${preCommitHead}, branch trailer ${branch}) — canonical repo needs manual inspection`,
+          };
+        }
+      }
       const cleanupIssue = await resetOrSkip("commit-failure cleanup");
       return { ok: false, reason: cleanupIssue ? `squash commit failed: ${(e as Error).message} (${cleanupIssue})` : `squash commit failed: ${(e as Error).message}` };
     }
-    // Re-read HEAD UNCONDITIONALLY rather than trusting a value captured before this call (mirrors the
-    // reasoning that used to guard the old follow-up amend, card 756a2cd8's Code Review follow-up):
-    // `withTimeout` (git/bounded.ts) settles independent of the git child it wraps — on expiry it rejects
-    // and walks away while the child is left alone, still mutating — so this commit could land ON DISK
-    // while its own `withTimeout` call times out and control falls through to the catch below. Mirrors
-    // {@link landBranchCommitsIndividually}'s own post-loop read (`git/batch-merge.ts`): read once,
-    // unconditionally, and fail LOUD (`ok:false`) if that read itself fails, rather than returning a value
-    // that might no longer be what HEAD actually points at.
+    // Re-read HEAD after a successful commit. NOT "unconditionally reached from both branches": a failure
+    // now returns straight out of the catch above, having already re-verified truthfully via its own HEAD
+    // re-read (the commit call is kill-confirmed, so the git child is confirmed dead before either branch
+    // is taken — `withTimeout`'s old settle-independent-of-the-child risk no longer applies here).
+    //
+    // This read is a plain confirm-what-landed step, guarding against THIS read itself failing, mirroring
+    // {@link landBranchCommitsIndividually}'s own post-loop read (`git/batch-merge.ts`): read once, and
+    // fail LOUD (`ok:false`) if that read itself fails, rather than returning a value that might no longer
+    // be what HEAD actually points at.
     try {
       const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
       return { ok: true, sha, subject, landedTip: resolvedBranchHead };
@@ -6055,6 +6168,10 @@ async function mergeBranchLocked(
     }
 
   } finally {
+    // Round 4: unconditional again — the in-flight/crash-recovery window (5a7692a4) and the QUARANTINE
+    // (merge-quarantine.ts) are now separate mechanisms with separate lifetimes. This window always
+    // clears here; a quarantine entered above stays latched independently, via its own store, until
+    // `onTreeDeathSettled` auto-clears it or a human clears it through the loopback REST route.
     exitMergeDangerWindow(repoPath);
   }
 }

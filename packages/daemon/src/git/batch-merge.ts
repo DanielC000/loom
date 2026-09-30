@@ -1,6 +1,8 @@
 import type { SimpleGit } from "simple-git";
-import { withTimeout, canonicalGit, describeGitFailure } from "./bounded.js";
-import { findLandedSquashCommit, changedPathSetDigest, type MergeEmptyKind } from "./worktrees.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure } from "./bounded.js";
+import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken } from "./merge-quarantine.js";
+import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
+import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, type MergeEmptyKind } from "./worktrees.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 import { mergeCommitBlocksLinearization, MAX_MERGE_COMMITS_CHECKED } from "./merge-linearization.js";
 import { isMergeGateRed } from "../orchestration/gate-semaphore.js";
@@ -138,6 +140,12 @@ export interface BatchDroppedBranch extends BatchCandidate {
 export interface BatchAssembleResult {
   landed: BatchLandedBranch[];
   dropped: BatchDroppedBranch[];
+  /** TYPED (round 4, Code Review b2ebf41f) — true iff assembly STOPPED EARLY because a candidate's own
+   *  landing quarantined the canonical repo (an unconfirmed tree-kill). `landed`/`dropped` reflect only
+   *  what was processed before the stop; any REMAINING candidate was never attempted at all. The caller
+   *  (`runBatchedMerge`) must treat this as an abort of the WHOLE batch — no gate, no fast-forward, no
+   *  worktree removal — never a per-candidate drop it can shrug off and continue past. */
+  quarantined?: boolean;
 }
 
 /** K = min(ready, maxWorkers) — FIXED, never adaptive. The owner ruled out an adaptive-K policy: batch
@@ -166,6 +174,13 @@ interface LandResult {
   pathSetStamped?: boolean;
   /** The branch tip this landing was assembled from (resolved once, at the top of the land). */
   branchTip?: string;
+  /** TYPED signal (round 4, Code Review b2ebf41f) — true iff `ok:false` because the CANONICAL repo is
+   *  quarantined (already, or as of THIS call's own unconfirmed tree-kill), never inferred by parsing
+   *  `reason` text. {@link assembleBatchBranches} checks this to ABORT THE WHOLE BATCH rather than drop
+   *  one candidate and continue — a quarantined repo means an earlier commit in this SAME candidate's own
+   *  range (or an earlier candidate's) may still be unconfirmed-alive, so nothing already landed in this
+   *  batch worktree can be trusted to gate/fast-forward safely. */
+  quarantined?: boolean;
 }
 
 /**
@@ -200,8 +215,15 @@ interface LandResult {
  * `reset --hard` is safe without the canonical path's own dirty-tree preconditions.
  */
 async function landBranchCommitsIndividually(
-  batchWorktreePath: string, branch: string, deps: BatchGitDeps, pinnedTip?: string,
+  repoPath: string, batchWorktreePath: string, branch: string, deps: BatchGitDeps, pinnedTip?: string,
 ): Promise<LandResult> {
+  // QUARANTINE CHECK — must run before any git call, ALWAYS against the CANONICAL repo (never the
+  // ephemeral batch worktree path — see merge-quarantine.ts's own doc for why). A batch's own candidates
+  // land SEQUENTIALLY onto the SAME `batchWorktreePath` (assembleBatchBranches' loop), so an active
+  // quarantine found here can be a leftover an EARLIER candidate in THIS SAME batch raised, or one already
+  // in effect from an entirely separate solo/batch attempt against this repo.
+  const quarantineCheck = assertRepoNotQuarantined(repoPath);
+  if (!quarantineCheck.ok) return { ok: false, quarantined: true, reason: `${branch}: ${quarantineCheck.reason}` };
   const { git, timeoutMs } = boundedMergeGit(batchWorktreePath, deps);
 
   let branchTip: string;
@@ -292,9 +314,42 @@ async function landBranchCommitsIndividually(
   // result's reason by `fail`, so a batch worktree left holding residue reads as such instead of as a clean refusal. (`cherry-pick --abort` erroring is
   // expected when no cherry-pick is in progress, so only the `reset --hard` outcome counts.)
   let rollbackIssue = "";
+  // Set true the moment rollback's OWN mutating calls hit an unconfirmed tree-kill — folded into `fail`'s
+  // returned LandResult below so a caller sees the TYPED flag, never just reason text.
+  let quarantinedByRollback = false;
+  // Auto-clear hook: once a kill's real confirmation eventually settles — regardless of whether the outer
+  // `killableCanonicalRaw` call already gave up first — lift a quarantine THIS invocation may have
+  // entered, against the CANONICAL repo (never the batch worktree path).
+  //
+  // `raisedToken` (round 6, Code Review #5) — COMPARE-AND-CLEAR: this invocation raises at most one
+  // quarantine (every raise site below returns immediately), so a single mutable slot holds the token
+  // {@link enterMergeQuarantine} returns; the auto-clear presents that SAME token back, so it can never
+  // clear a DIFFERENT op's (still-active, differently-tokened) quarantine on this repo.
+  let raisedToken: string | undefined;
+  const onTreeDeathSettled = (confirmed: boolean): void => {
+    if (confirmed && raisedToken) clearMergeQuarantineByToken(repoPath, raisedToken);
+  };
+  // @decision 24c0bdba — kill-confirmed: this rollback mutates the same batch worktree a LATER cherry-
+  // pick/commit in this loop will touch — an orphaned child here must never survive to corrupt that.
   const rollback = async (): Promise<void> => {
-    try { await withTimeout(git.raw(["cherry-pick", "--abort"]), timeoutMs, "git cherry-pick --abort (batch land)"); } catch { /* best-effort */ }
-    try { await withTimeout(git.raw(["reset", "--hard", batchHeadBefore]), timeoutMs, "git reset --hard (batch land rollback)"); } catch (e) {
+    try {
+      await killableCanonicalRaw(batchWorktreePath, ["cherry-pick", "--abort"], timeoutMs, "git cherry-pick --abort (batch land)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
+    } catch (e) {
+      // Round 4: even this best-effort abort quarantines the CANONICAL repo on an unconfirmed kill — an
+      // orphaned abort could still be mutating the SAME worktree a later candidate is about to touch.
+      if (treeDeathUnconfirmed(e)) {
+        raisedToken = enterMergeQuarantine(repoPath, branch, "batch rollback (cherry-pick --abort) could not be confirmed dead after a kill");
+        quarantinedByRollback = true; rollbackIssue = describeGitFailure(e).text; return;
+      }
+      /* otherwise best-effort, as before: expected when no cherry-pick is in progress */
+    }
+    try {
+      await killableCanonicalRaw(batchWorktreePath, ["reset", "--hard", batchHeadBefore], timeoutMs, "git reset --hard (batch land rollback)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
+    } catch (e) {
+      if (treeDeathUnconfirmed(e)) {
+        raisedToken = enterMergeQuarantine(repoPath, branch, "batch rollback (reset --hard) could not be confirmed dead after a kill");
+        quarantinedByRollback = true; rollbackIssue = describeGitFailure(e).text; return;
+      }
       // The failed reset only matters if there was something to roll back: a canonicalGit refusal thrown at the FIRST git call of a candidate changed nothing.
       // Both probes are pure reads (never refused), so this stays truthful either way.
       try {
@@ -307,7 +362,10 @@ async function landBranchCommitsIndividually(
       rollbackIssue = describeGitFailure(e).text;
     }
   };
-  const fail = <T extends { reason?: string }>(r: T): T => rollbackIssue ? { ...r, reason: `${r.reason} (ROLLBACK FAILED — the batch worktree may hold residue: ${rollbackIssue})` } : r;
+  const fail = <T extends { reason?: string }>(r: T): T & { quarantined?: boolean } => {
+    const withReason = rollbackIssue ? { ...r, reason: `${r.reason} (ROLLBACK FAILED — the batch worktree may hold residue: ${rollbackIssue})` } : r;
+    return quarantinedByRollback ? { ...withReason, quarantined: true } : withReason;
+  };
 
   let strippedTrailerCount = 0;
   let pathSetStamped = true;
@@ -325,11 +383,19 @@ async function landBranchCommitsIndividually(
     // `stripClaudeSessionTrailer` before the one manual `git commit` that lands it — see this function's
     // own doc for why that can't be limited to just the tip.
     try {
-      await withTimeout(
-        git.raw([...identityArgs, "cherry-pick", "--no-commit", sha]),
-        timeoutMs, "git cherry-pick (batch land)",
+      // @decision 24c0bdba — kill-confirmed: mutates the same worktree index the commit below (and any
+      // later candidate in this loop) will also touch.
+      await killableCanonicalRaw(
+        batchWorktreePath, [...identityArgs, "cherry-pick", "--no-commit", sha],
+        timeoutMs, "git cherry-pick (batch land)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled,
       );
     } catch (e) {
+      // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill: rollback()'s own reset
+      // --hard would race whatever might still be alive, never touch the worktree further in that case.
+      if (treeDeathUnconfirmed(e)) {
+        raisedToken = enterMergeQuarantine(repoPath, branch, `cherry-pick of ${sha.slice(0, 7)} could not be confirmed dead after a kill`);
+        return { ok: false, quarantined: true, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)}'s git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; the batch worktree may need manual inspection: ${(e as Error).message}` };
+      }
       let conflicted = false;
       try {
         conflicted = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (batch land)")).trim() !== "";
@@ -379,11 +445,19 @@ async function landBranchCommitsIndividually(
     if (stripped) strippedTrailerCount++;
     const finalMessage = isLast ? `${cleanedMessage}\n\nLoom-Worker-Branch: ${branch}\n` : `${cleanedMessage}\n`;
     try {
-      await withTimeout(
-        git.raw([...identityArgs, "commit", "--author", `${authorName} <${authorEmail}>`, "--date", authorDate, "-m", finalMessage]),
-        timeoutMs, "git commit (batch land)",
+      // @decision 24c0bdba — kill-confirmed: an orphaned child here must never later land onto whatever
+      // this SAME worktree happens to be staging by the time it resumes (rollback, or the next candidate).
+      await killableCanonicalRaw(
+        batchWorktreePath, [...identityArgs, "commit", "--author", `${authorName} <${authorEmail}>`, "--date", authorDate, "-m", finalMessage],
+        timeoutMs, "git commit (batch land)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled,
       );
     } catch (e) {
+      // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill, same reasoning as the
+      // cherry-pick catch above.
+      if (treeDeathUnconfirmed(e)) {
+        raisedToken = enterMergeQuarantine(repoPath, branch, `commit landing ${sha.slice(0, 7)} could not be confirmed dead after a kill`);
+        return { ok: false, quarantined: true, reason: `${branch}: commit failed landing ${sha.slice(0, 7)} — its git process tree could not be confirmed dead after a kill; refusing further cleanup to avoid racing it, the batch worktree may need manual inspection: ${(e as Error).message}` };
+      }
       await rollback();
       return fail({ ok: false, reason: `${branch}: commit failed while landing commit ${sha.slice(0, 7)}: ${(e as Error).message}` });
     }
@@ -427,15 +501,43 @@ async function landBranchCommitsIndividually(
       // `currentHead` was just verified (above) to be this commit's own real sha — no need to re-query.
       const digest = await changedPathSetDigest(git, batchHeadBefore, currentHead, timeoutMs);
       const amendedMessage = `${finalMessage.replace(/\s+$/, "")}\nLoom-Worker-Base: ${batchHeadBefore}\nLoom-Worker-PathSet: ${digest}\n`;
-      await withTimeout(
-        git.raw([...identityArgs, "commit", "--amend", "-m", amendedMessage]),
-        timeoutMs, "git commit --amend (batch land, pathset)",
+      // @decision 24c0bdba — kill-confirmed, same reasoning as the plain commit above.
+      await killableCanonicalRaw(
+        batchWorktreePath, [...identityArgs, "commit", "--amend", "-m", amendedMessage],
+        timeoutMs, "git commit --amend (batch land, pathset)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled,
       );
     } catch (e) {
-      pathSetStamped = false;
-      // eslint-disable-next-line no-console
-      console.warn(`[git] landBranchCommitsIndividually: Loom-Worker-Base/PathSet capture failed for ${branch} — ` +
-        `commit lands without either trailer: ${(e as Error).message}`);
+      // An unverified amend can still be alive, able to rewrite HEAD again later — never warn-and-continue
+      // with an unverified sha, and never let the NEXT candidate's cherry-pick race it. Checked BEFORE the
+      // HEAD-based recovery read below, which assumes the child is done mutating.
+      //
+      // @decision 24c0bdba (round 4, m-a) — fail CLOSED + QUARANTINE, same as every other mutating call.
+      if (treeDeathUnconfirmed(e)) {
+        raisedToken = enterMergeQuarantine(repoPath, branch, `Loom-Worker-Base/PathSet amend for ${sha.slice(0, 7)} could not be confirmed dead after a kill`);
+        return { ok: false, quarantined: true, reason: `${branch}: Loom-Worker-Base/PathSet amend for ${sha.slice(0, 7)}'s git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; the batch worktree may need manual inspection: ${(e as Error).message}` };
+      }
+      // m2 (Code Review, card 24c0bdba): a hung post-commit hook can outlive this amend's own timeout
+      // AFTER the ref already moved (mirroring mergeBranchLocked's own solo-path recovery) — re-verify
+      // via HEAD rather than assuming a reported failure means the trailers never landed.
+      let amendLanded = false;
+      try {
+        const headAfterAmendFailure = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, post-amend-failure verify)")).trim();
+        if (headAfterAmendFailure !== currentHead) {
+          const [expectedParent, actualParent, body] = await Promise.all([
+            withTimeout(git.raw(["rev-parse", `${currentHead}^`]), timeoutMs, "git rev-parse (batch land, post-amend-failure verify parent)"),
+            withTimeout(git.raw(["rev-parse", `${headAfterAmendFailure}^`]), timeoutMs, "git rev-parse (batch land, post-amend-failure verify parent)"),
+            withTimeout(git.raw(["log", "-1", "--format=%B", headAfterAmendFailure]), timeoutMs, "git log -1 (batch land, post-amend-failure verify)"),
+          ]);
+          amendLanded = expectedParent.trim() === actualParent.trim() && parseLoomTrailerBlock(body)?.branch === branch;
+          if (amendLanded) currentHead = headAfterAmendFailure;
+        }
+      } catch { /* unknown — treat as not landed, same as before */ }
+      if (!amendLanded) {
+        pathSetStamped = false;
+        // eslint-disable-next-line no-console
+        console.warn(`[git] landBranchCommitsIndividually: Loom-Worker-Base/PathSet capture failed for ${branch} — ` +
+          `commit lands without either trailer: ${(e as Error).message}`);
+      }
     }
   }
 
@@ -545,7 +647,7 @@ async function sortCandidatesByEarliestAuthorDate(
  * file's own header doc).
  */
 export async function assembleBatchBranches(
-  batchWorktreePath: string, candidates: BatchCandidate[], deps: BatchGitDeps = {},
+  repoPath: string, batchWorktreePath: string, candidates: BatchCandidate[], deps: BatchGitDeps = {},
 ): Promise<BatchAssembleResult> {
   const landed: BatchLandedBranch[] = [];
   const dropped: BatchDroppedBranch[] = [];
@@ -563,9 +665,16 @@ export async function assembleBatchBranches(
     : candidates;
   for (const cWithTip of orderedCandidates) {
     const { tip: pinnedTip, ...c } = cWithTip;
-    const r = await landBranchCommitsIndividually(batchWorktreePath, c.branch, deps, pinnedTip);
+    const r = await landBranchCommitsIndividually(repoPath, batchWorktreePath, c.branch, deps, pinnedTip);
     if (!r.ok) {
       dropped.push({ ...c, reason: r.reason ?? "batch land failed", conflict: !!r.conflict });
+      // A quarantining candidate STOPS assembly outright, never just a per-candidate drop: an unconfirmed
+      // tree-kill means the canonical repo itself may still be under mutation, so nothing already landed
+      // in this batch worktree can be trusted to gate/ff safely, and no FURTHER candidate should be
+      // attempted against it either.
+      //
+      // @decision 24c0bdba (round 4)
+      if (r.quarantined) return { landed, dropped, quarantined: true };
       continue;
     }
     if (r.noop) {
@@ -596,6 +705,11 @@ export interface FastForwardResult {
   forfeited?: boolean;
   reason?: string;
   currentMainSha?: string;
+  /** TYPED (round 4) — true iff refused because the canonical repo is QUARANTINED. Distinct from every
+   *  other refusal here: the caller must NOT treat this as an ordinary "fall back to per-branch re-gate"
+   *  outcome (that would be a further canonical-mutating attempt against a quarantined repo) — abort and
+   *  leave the batch worktree for a human, exactly like an assembly-time quarantine. */
+  quarantined?: boolean;
 }
 
 /**
@@ -605,34 +719,48 @@ export interface FastForwardResult {
  * so this refuses rather than fast-forwarding past unverified state. Canonical repo is left COMPLETELY
  * untouched on every refusal path — the caller falls back to gating every originally-batched branch
  * individually (today's behavior), exactly as if batching had never been attempted.
+ *
+ * The forfeit-check read + the `--ff-only` merge both run INSIDE `withCanonicalIndexLock` (round 6,
+ * BLOCKER 1 — this call used to take no lock at all): a genuinely independent entry point from
+ * `runBatchedMerge`'s own quarantine check — the gate this function's caller runs between assembly and
+ * this call can take many minutes, long enough for a quarantine to be raised by an entirely separate op in
+ * the meantime — and the lock's own quarantine check now covers that case for free, so this function no
+ * longer re-derives its own copy.
  */
 export async function fastForwardCanonicalMain(
   repoPath: string, expectedBaseSha: string, targetSha: string, deps: BatchGitDeps = {},
 ): Promise<FastForwardResult> {
-  const { git, timeoutMs } = boundedGit(repoPath, deps);
-  let currentMainSha: string;
   try {
-    currentMainSha = (await withTimeout(
-      git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, batch fast-forward check)",
-    )).trim();
+    return await withCanonicalIndexLock(repoPath, async () => {
+      const { git, timeoutMs } = boundedGit(repoPath, deps);
+      let currentMainSha: string;
+      try {
+        currentMainSha = (await withTimeout(
+          git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, batch fast-forward check)",
+        )).trim();
+      } catch (e) {
+        return { ok: false, reason: `failed to read canonical HEAD: ${(e as Error).message}` };
+      }
+      if (currentMainSha !== expectedBaseSha) {
+        return {
+          ok: false, forfeited: true, currentMainSha,
+          reason: `canonical main advanced (now ${currentMainSha}) since this batch was cut from ${expectedBaseSha} — this batch's gate never validated main's current tree; falling back to a per-branch re-gate`,
+        };
+      }
+      if (targetSha === expectedBaseSha) return { ok: true }; // nothing landed on top — no-op fast-forward
+      try {
+        await withTimeout(
+          git.raw(["merge", "--ff-only", targetSha]), timeoutMs, "git merge --ff-only (canonical, batch fast-forward)",
+        );
+      } catch (e) {
+        return { ok: false, reason: `fast-forward failed: ${(e as Error).message}` };
+      }
+      return { ok: true };
+    });
   } catch (e) {
-    return { ok: false, reason: `failed to read canonical HEAD: ${(e as Error).message}` };
+    if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
+    throw e;
   }
-  if (currentMainSha !== expectedBaseSha) {
-    return {
-      ok: false, forfeited: true, currentMainSha,
-      reason: `canonical main advanced (now ${currentMainSha}) since this batch was cut from ${expectedBaseSha} — this batch's gate never validated main's current tree; falling back to a per-branch re-gate`,
-    };
-  }
-  if (targetSha === expectedBaseSha) return { ok: true }; // nothing landed on top — no-op fast-forward
-  try {
-    await withTimeout(
-      git.raw(["merge", "--ff-only", targetSha]), timeoutMs, "git merge --ff-only (canonical, batch fast-forward)",
-    );
-  } catch (e) {
-    return { ok: false, reason: `fast-forward failed: ${(e as Error).message}` };
-  }
-  return { ok: true };
 }
 
 /** What the caller's gate callback reports back for the ONE batch gate run — the batching orchestrator
@@ -710,6 +838,12 @@ export interface RunBatchedMergeResult {
    *  merge itself — both happen inside the ONE `fastForwardCanonicalMain` call this times, so there is no
    *  finer split between "checking" and "advancing" to report. */
   fastForwardMs?: number;
+  /** TYPED (round 4, Code Review b2ebf41f) — true iff this result is a QUARANTINE abort: the canonical
+   *  repo was already quarantined at entry, a candidate's own landing quarantined it mid-assembly, or
+   *  `fastForwardCanonicalMain` found it quarantined. The caller (`mergeBatchTracked`, sessions/service.ts)
+   *  MUST treat this as distinct from every other failure: no per-candidate fallback confirm, and no
+   *  batch-worktree removal — leave it for a human. Never inferred from `reason` text. */
+  quarantined?: boolean;
 }
 
 /**
@@ -734,9 +868,20 @@ export async function runBatchedMerge(
   runGate: (worktreePath: string, baseMainSha: string, landedCount: number, assemblyMs: number) => Promise<BatchGateResult>,
   deps: BatchGitDeps = {},
 ): Promise<RunBatchedMergeResult> {
+  // QUARANTINE CHECK (round 4, convergence point) — before assembly even starts, so a repo already
+  // quarantined by an unrelated op never burns worktree/assembly work, let alone a shared gate slot.
+  const quarantineCheck = assertRepoNotQuarantined(repoPath);
+  if (!quarantineCheck.ok) {
+    return { ok: false, landed: [], dropped: [], baseMainSha, quarantined: true, reason: quarantineCheck.reason };
+  }
   const assembleStartMs = Date.now();
-  const { landed, dropped } = await assembleBatchBranches(batchWorktreePath, candidates, deps);
+  const { landed, dropped, quarantined } = await assembleBatchBranches(repoPath, batchWorktreePath, candidates, deps);
   const assemblyMs = Date.now() - assembleStartMs;
+  // A candidate quarantining the repo mid-assembly ABORTS THE WHOLE BATCH (round 4, ruling 1c): no gate,
+  // no fast-forward, no per-candidate fallback — the caller must also skip worktree removal on this flag.
+  if (quarantined) {
+    return { ok: false, landed, dropped, baseMainSha, assemblyMs, quarantined: true, reason: "a candidate's own unconfirmed tree-kill quarantined the canonical repo mid-assembly — aborting the whole batch" };
+  }
   if (landed.length === 0) {
     return { ok: false, landed, dropped, baseMainSha, assemblyMs, reason: "nothing landed cleanly into the batch — every candidate was dropped" };
   }
@@ -759,7 +904,7 @@ export async function runBatchedMerge(
   if (!ff.ok) {
     return {
       ok: false, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate,
-      forfeited: !!ff.forfeited, reason: ff.reason, currentMainSha: ff.currentMainSha,
+      forfeited: !!ff.forfeited, reason: ff.reason, currentMainSha: ff.currentMainSha, ...(ff.quarantined ? { quarantined: true } : {}),
     };
   }
   return { ok: true, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate };

@@ -62,6 +62,7 @@ import { computeWakeImpact } from "../orchestration/wake-impact.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
 import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
+import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey } from "../git/repo-lock.js";
 import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
 import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
@@ -532,7 +533,13 @@ type ReviewedTipVerdict = { state: "never-reviewed" | "unmoved"; tip: string | n
 type BranchAdvancedDuringGate = { assembledTip: string | null; liveTip: string | null; phase: "pre-stop" | "at-finalize" | "ref-kept-after-finalize" };
 /** One line naming what happened to a batch candidate whose tip moved. An UNREADABLE live tip is a different fact from a
  *  moved one (nothing was proven about a commit), so it is worded as a failed verification. */
-function describeBranchRetained(branch: string, assembledTip: string | null, liveTip: string | null, phase: BranchAdvancedDuringGate["phase"]): string {
+function describeBranchRetained(branch: string, assembledTip: string | null, liveTip: string | null, phase: BranchAdvancedDuringGate["phase"], reason?: "quarantined"): string {
+  // Round 6, item #10: a QUARANTINED finalize is a DIFFERENT cause from a moved/unreadable tip — say so
+  // plainly rather than falling through to the tip-comparison wording below, which reads as a git-read
+  // failure and gives no hint that a human REST clear is what's actually needed.
+  if (reason === "quarantined") {
+    return `${branch}: the canonical repo is QUARANTINED — NOT finalized; branch and worktree kept, worker kept (${phase === "pre-stop" ? "live" : "stopped"}). A human must clear it: POST /internal/merge-quarantine/clear`;
+  }
   const what = liveTip && assembledTip
     ? `${branch} advanced after the batch assembled it (assembled ${assembledTip.slice(0, 8)}, now ${liveTip.slice(0, 8)})`
     : `${branch}: could not verify the branch tip (assembled ${assembledTip?.slice(0, 8) ?? "unknown"}, now ${liveTip?.slice(0, 8) ?? "unreadable"})`;
@@ -545,7 +552,12 @@ function describeBranchRetained(branch: string, assembledTip: string | null, liv
  * existing compare-and-swap (the same one the batch uses). A missing tip fails CLOSED: the sentinel below never equals a real ref, so finalize retains.
  */
 const SOLO_TIP_UNVERIFIABLE = "unverifiable-landed-tip";
-function describeSoloRetained(branch: string, landedTip: string | undefined, liveTip: string | null, phase: BranchAdvancedDuringGate["phase"]): string {
+function describeSoloRetained(branch: string, landedTip: string | undefined, liveTip: string | null, phase: BranchAdvancedDuringGate["phase"], reason?: "quarantined"): string {
+  // Round 6, item #10: same reasoning as describeBranchRetained's identical branch — a QUARANTINED
+  // finalize is a distinct, actionable cause; don't bury it under generic tip-comparison wording.
+  if (reason === "quarantined") {
+    return `${branch}: the canonical repo is QUARANTINED — NOT finalized: branch and worktree kept, no task move, no merge_done. A human must clear it: POST /internal/merge-quarantine/clear`;
+  }
   const what = liveTip && landedTip
     ? `${branch} advanced after this merge landed (landed ${landedTip.slice(0, 8)}, now ${liveTip.slice(0, 8)}); the later commit(s) are NOT on main and were never gated or reviewed by this merge`
     : `${branch}: could not verify the branch tip against the landed one (landed ${landedTip?.slice(0, 8) ?? "unknown"}, now ${liveTip?.slice(0, 8) ?? "unreadable"})`;
@@ -574,6 +586,11 @@ type MergeBatchResult = {
   /** @decision 13571c71 — a step AFTER a passing gate threw: the outcome is UNKNOWN (main may have moved), every candidate is reported `started:false`
    *  through `runFallback`'s no-start mode, and `classifyOutcome` reads THIS field (`"post-gate-error"`, never cached — a re-call re-mints). Absent otherwise. */
   postGateThrow?: boolean;
+  /** Round 4 (Code Review b2ebf41f, ruling 1c) — the canonical repo (or the batch worktree itself) was
+   *  QUARANTINED: no per-candidate fallback was started (`fallback` lists each as `started:false`, same
+   *  no-start shape as `cancelled`), and the batch worktree was left on disk for a human, never removed.
+   *  Absent on every other outcome. */
+  quarantined?: boolean;
   /** Card 6cc803b2 — phase instrumentation: the two phases (of the five this card measures) that are
    *  only ever known inside {@link SessionService.mergeBatchTracked}'s own `run` closure, once
    *  {@link runBatchedMerge} has resolved — the batch-worktree cut (before any gate is even considered)
@@ -1344,7 +1361,7 @@ function gateOpIdEnvOverride(opId: string, batchSize: number, base?: NodeJS.Proc
 /** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
  *  alongside `outcome: "nested-repo-blocked"` — see that outcome's doc on gcWorktreeDir. */
 type GcOutcomeResult = {
-  outcome: "removed" | "wedged" | "left-on-disk" | "needs-human-skip" | "nested-repo-blocked" | "dirty-retained" | "path-refused";
+  outcome: "removed" | "wedged" | "left-on-disk" | "needs-human-skip" | "nested-repo-blocked" | "dirty-retained" | "path-refused" | "quarantined";
   nestedRepoPaths?: string[];
   scanTruncated?: boolean;
   /** Only with `outcome: "dirty-retained"` (card 6796c9ea): the uncommitted paths, or `unverified:true` when the status read failed (fail closed). */
@@ -1380,7 +1397,7 @@ function nestedRepoBlockWarning(block: { paths: string[]; truncated: boolean }):
  *  polling `worker_merge_confirm` would ever see. Shared by the Green path and the ALREADY_MERGED path
  *  ({@link SessionService.finishAlreadyMerged}) so the two can't drift. In every case the MERGE itself
  *  already landed successfully — this is purely additive cleanup reporting, never a failure. */
-function worktreeGcWarning(outcome: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused", worktreePath: string): string {
+function worktreeGcWarning(outcome: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused" | "quarantined", worktreePath: string): string {
   switch (outcome) {
     case "path-refused":
       return `worktree ${worktreePath} was NOT removed — it is not strictly under the worktrees root or it is/contains a registered repo checkout, so Loom refuses to delete it (card e21cfd5f). Non-blocking: the merge itself landed successfully. Check why the session row points at that path; nothing was touched.`;
@@ -1390,6 +1407,12 @@ function worktreeGcWarning(outcome: "wedged" | "left-on-disk" | "needs-human-ski
       return `worktree ${worktreePath} could not be removed — a transient handle-lag outlasted a few short in-call retries (not tracked as wedged). Non-blocking: the merge itself landed successfully. It is NOT retried by the background sweep, but the NEXT daemon restart's boot-reconcile pass will retry it. To clear it sooner: try worker_reap first (harmless if there's nothing to kill), then delete ${worktreePath} yourself — safe, the merge already landed.`;
     case "needs-human-skip":
       return `worktree ${worktreePath} has been wedged across many attempts and Loom has GIVEN UP automatic retry. Non-blocking: the merge itself landed successfully. This one needs a HUMAN: reboot (or otherwise force-release the stuck handle), then delete ${worktreePath} manually.`;
+    case "quarantined":
+      // Round 4: an extremely narrow race (the repo was quarantined AFTER finalizeMerge's own top-level
+      // check passed but BEFORE this removal call ran) — finalizeMerge's own check normally catches this
+      // far earlier and never reaches gcWorktreeDir at all; this case exists for completeness, not as the
+      // common path. "The merge itself landed successfully" is NOT asserted here — it may not have.
+      return `worktree ${worktreePath} was NOT removed — the canonical repo became QUARANTINED (an earlier merge's git process tree could not be confirmed dead) in the brief window around this operation. Nothing here was touched further. Once the quarantine is cleared (auto-clears, or POST /internal/merge-quarantine/clear), re-run worker_merge_confirm to finish cleanup.`;
   }
 }
 
@@ -13759,6 +13782,19 @@ export class SessionService {
       return { suppressed, sha };
     };
 
+    // QUARANTINE BACKSTOP (round 4, Code Review b2ebf41f) — checked BEFORE gate admission specifically
+    // (not just before the eventual squash, which mergeBranchLocked's own entry check already refuses):
+    // a quarantined repo's merge is going to be refused regardless, and gate admission alone can occupy a
+    // shared gate lane for many MINUTES — refusing this early means a quarantined repo never burns one.
+    {
+      const quarantineCheck = assertRepoNotQuarantined(repoPath);
+      if (!quarantineCheck.ok) {
+        const { suppressed, sha } = await rejectNotify("quarantined", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${quarantineCheck.reason}`);
+        evt("merge_rejected", { reason: "quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: quarantineCheck.reason, notified: !suppressed, opId: thisOpId, gateRan: false };
+      }
+    }
+
     // REVIEWED-TIP REFUSAL (card bbccf470): the branch must still be the tip the manager reviewed (plus Loom's own union-merge advances — see `reviewedTipVerdict`).
     // Checked at TWO points, both via the one resolver: here (BEFORE everything that touches the branch or a gate lane — in particular before the union-merge below) and
     // again right before the squash, against the PINNED landing tip, so a commit made while this op waited in the gate queue cannot land either. Skipped for a branch that
@@ -16192,14 +16228,14 @@ export class SessionService {
    * guidance instead of finalizing, so the late commit is never deleted.
    */
   private soloFinalizeTipGuard(a: { opId: string; managerSessionId: string; workerSessionId: string; taskId: string | null; branch: string; landedTip: string | undefined; landedSha: string | null; branchGone?: boolean; repoKey: string | null }): {
-    expectedBranchTip: string | undefined; onBranchRetained: (liveTip: string | null, phase: BranchAdvancedDuringGate["phase"]) => void; warning: () => string | undefined;
+    expectedBranchTip: string | undefined; onBranchRetained: (liveTip: string | null, phase: BranchAdvancedDuringGate["phase"], reason?: "quarantined") => void; warning: () => string | undefined;
   } {
     let note: string | undefined;
     return {
       // A branch that is already gone has nothing to protect (no CAS); an unreadable/unstable tip fails CLOSED via the sentinel.
       expectedBranchTip: a.branchGone ? undefined : (a.landedTip ?? SOLO_TIP_UNVERIFIABLE),
-      onBranchRetained: (liveTip, phase) => {
-        note = describeSoloRetained(a.branch, a.landedTip, liveTip, phase);
+      onBranchRetained: (liveTip, phase, reason) => {
+        note = describeSoloRetained(a.branch, a.landedTip, liveTip, phase, reason);
         // eslint-disable-next-line no-console
         console.warn(`[worker_merge_confirm] op ${a.opId} ${note}`);
         try {
@@ -16228,7 +16264,11 @@ export class SessionService {
     /** See the `@decision c35b60c4` anchor in this method's doc above. */
     suppressNotify?: boolean;
     /** Forwarded verbatim into {@link finalizeMerge} (card 42daa283) — see its own doc. */
-    expectedBranchTip?: string; onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize") => void;
+    expectedBranchTip?: string;
+    /** `reason` (round 6, item #10): set to `"quarantined"` ONLY by `finalizeMerge`'s quarantine-refusal
+     *  branch — every other retain cause (held branch, moved tip) omits it, unchanged. Lets a caller's own
+     *  human-facing text name the ACTUAL cause instead of a generic tip-comparison message. */
+    onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize", reason?: "quarantined") => void;
     /** Forwarded verbatim into {@link finalizeMerge} (card 6796c9ea). */
     onWorktreeRetainedDirty?: (info: DirtyWorktreeRetained) => void;
     /** Card cc9bce38: the solo tip guard's retained-branch text (`soloFinalizeTipGuard().warning`), read AFTER finalize — folded into the result, and it rewords the `[loom:already-merged]` push. */
@@ -16673,6 +16713,10 @@ export class SessionService {
         });
         const baseMainSha = (await resolveGitRef(finalRepoPath, "HEAD", { timeoutMs: this.gitOpMs })) ?? "";
         let batchWorktreePath: string | undefined;
+        // Round 4, Code Review b2ebf41f (ruling 1c): set from `result.quarantined` once `runBatchedMerge`
+        // returns — read by the outer `finally` below, which must NOT remove a quarantined batch worktree
+        // (leave it for a human to inspect, exactly like the canonical repo itself stays untouched).
+        let batchQuarantined = false;
         const batchTaskId = `batch-${opId}`;
         // Card dd961cf9: mirrors confirmWorkerMerge's own `gateRan` — true iff `runGate` was actually
         // invoked (i.e. `runBatchedMerge` didn't short-circuit on a `landed.length === 0` batch, see
@@ -16984,7 +17028,9 @@ export class SessionService {
           let result: Awaited<ReturnType<typeof runBatchedMerge>>;
           try {
             result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
-            if (!batchGateRan && result.landed.length === 0) batchAllDropped = true; // @decision 92eeb319 — see `onSettle`
+            batchQuarantined = !!result.quarantined; // round 4: read by the outer `finally`'s worktree-removal guard
+            // @decision 92eeb319 — see `onSettle`
+            if (!batchGateRan && result.landed.length === 0) batchAllDropped = true;
             batchFastForwarded = result.ok;
             if (result.ok && result.landed.length > 0) await this.advanceMainlineWatermarkForBatch(finalProjectId, batchRepoKey, finalRepoPath, batchCheckedTip, baseMainSha, result.batchHeadSha); // card 59d2577a
             // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (the `finally` below) — ONCE, with
@@ -17064,6 +17110,20 @@ export class SessionService {
             ], opId, undefined, true);
             return { ok: false, opId, landed: [], fallback: notStarted, cancelled: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
+          if (result.quarantined) {
+            // Round 4 (Code Review b2ebf41f, ruling 1c) — a QUARANTINED repo means no per-candidate fallback
+            // either: `confirmWorkerMergeTracked`'s own quarantine check (added the same round) would just
+            // refuse each one right back before gate admission — starting them anyway would only burn shared
+            // gate slots on a foregone conclusion. Every candidate is reported through `runFallback`'s
+            // no-start mode, same shape as `cancelled` above; the batch worktree itself is left for a human
+            // (the outer `finally`'s removal check reads `batchQuarantined`, not this local `result`).
+            const notStarted = await runFallback([
+              ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "the canonical repo is quarantined" })),
+              ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+              ...strandedFallback,
+            ], opId, undefined, true);
+            return { ok: false, opId, landed: [], fallback: notStarted, quarantined: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
+          }
           if (!result.ok) {
             const fallback = await runFallback([
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "batch failed" })),
@@ -17129,10 +17189,10 @@ export class SessionService {
             let liveTip: string | null = null;
             try { liveTip = (await resolveGitRef(finalRepoPath, lb.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
             // Records the retain durably (Q5: daemon-authored decisions get audited) + in the log; the landed row carries the flag.
-            const noteRetained = (phase: BranchAdvancedDuringGate["phase"], live: string | null): BranchAdvancedDuringGate => {
+            const noteRetained = (phase: BranchAdvancedDuringGate["phase"], live: string | null, reason?: "quarantined"): BranchAdvancedDuringGate => {
               const flag: BranchAdvancedDuringGate = { assembledTip: lb.assembledTip ?? null, liveTip: live, phase };
               // eslint-disable-next-line no-console
-              console.warn(`[mergeBatch] op ${opId} ${describeBranchRetained(lb.branch, flag.assembledTip, flag.liveTip, phase)}`);
+              console.warn(`[mergeBatch] op ${opId} ${describeBranchRetained(lb.branch, flag.assembledTip, flag.liveTip, phase, reason)}`);
               try {
                 this.db.appendEvent({
                   id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "batch_merge_branch_retained",
@@ -17160,7 +17220,7 @@ export class SessionService {
               projectId: finalProjectId, opId: randomUUID(), mergedSha: lb.sha, repoKey: c?.repoKey ?? null,
               mergedVerification, suppressNotify: true,
               expectedBranchTip: lb.assembledTip,
-              onBranchRetained: (live, phase) => { lateRetained = noteRetained(phase, live); },
+              onBranchRetained: (live, phase, reason) => { lateRetained = noteRetained(phase, live, reason); },
               onWorktreeRetainedDirty: (info) => {
                 dirtyRetained = info;
                 // eslint-disable-next-line no-console
@@ -17228,7 +17288,10 @@ export class SessionService {
             return { ok: false, opId, landed: [], fallback, postGateThrow: true, reason: why };
           } catch (secondary) { console.warn(`[merge-batch] op ${opId} post-gate-throw handler failed (${secondary instanceof Error ? secondary.message : String(secondary)}); rethrowing the original error`); throw err; }
         } finally {
-          if (batchWorktreePath) await removeWorktree(finalRepoPath, batchWorktreePath, { timeoutMs: this.gitOpMs }).catch(() => {});
+          // Round 4 (Code Review b2ebf41f, ruling 1c): a QUARANTINED batch worktree is left for a human to
+          // inspect, never removed — an unconfirmed tree-kill mid-batch means something may still be alive
+          // in there, and `--force` removal would race whatever that is.
+          if (batchWorktreePath && !batchQuarantined) await removeWorktree(finalRepoPath, batchWorktreePath, { timeoutMs: this.gitOpMs }).catch(() => {});
         }
       },
       // @decision f944d4e4 — this async settle nudge fires ONLY for a caller that observed
@@ -19132,6 +19195,14 @@ export class SessionService {
       retainIfUncommitted?: boolean;
     },
   ): Promise<GcOutcomeResult> {
+    // QUARANTINE CHECK — the SAME convergence-point discipline `dea6728e`/`b6d41db1` already established
+    // for the nested-repo guard below applies here too: this is the ONE removal chokepoint every caller
+    // shares (`finalizeMerge`, the wedge-retry sweep, both boot-reconcile Pass B sites), so a guard placed
+    // only in `finalizeMerge` would leave the other three force-removing past a quarantined repo with no
+    // check at all — exactly the shape that decision's own history warns against. A quarantined-worktree
+    // caller (the wedge sweep, boot-reconcile) simply retries later; nothing here needs to change on their
+    // end, since "quarantined" already falls through their existing unhandled-outcome cases safely.
+    if (!assertRepoNotQuarantined(repoPath).ok) return { outcome: "quarantined" };
     // @decision e21cfd5f — checked FIRST, before the reap/scan/any git call, and never overridable (forceRemoveWorktree included): a
     //  worktreePath that is not strictly under the worktrees root, or that equals/contains ANY project's registered repo, is never removed.
     const refusal = worktreeRemovalRefusal(worktreePath, [repoPath, ...this.allRegisteredRepoPaths()]);
@@ -19347,7 +19418,11 @@ export class SessionService {
      * `onBranchRetained` and returns. The ref delete below is then a compare-and-swap on this same tip, so a commit
      * landing in the remaining window is also kept. A late commit is never landed, so it must never be deleted.
      */
-    expectedBranchTip?: string; onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize") => void;
+    expectedBranchTip?: string;
+    /** `reason` (round 6, item #10): set to `"quarantined"` ONLY by `finalizeMerge`'s quarantine-refusal
+     *  branch — every other retain cause (held branch, moved tip) omits it, unchanged. Lets a caller's own
+     *  human-facing text name the ACTUAL cause instead of a generic tip-comparison message. */
+    onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize", reason?: "quarantined") => void;
     /**
      * Card 42daa283 — set ONLY by `confirmWorkerMerge`'s Green path: a real, just-created squash of the branch's LIVE tip is the one deliberate
      * way a HELD branch (see {@link isBranchHeld}) is landed, so its finalize may proceed and its `merge_done` releases the hold. Every other
@@ -19363,8 +19438,21 @@ export class SessionService {
     /** Task 035fb673: the non-"removed"/non-"nested-repo-blocked" gcWorktreeDir outcome, when one
      *  occurred — surfaced by the caller via {@link worktreeGcWarning}. `undefined` on a clean removal,
      *  byte-identical to before this field existed. */
-    worktreeGcOutcome?: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused";
+    worktreeGcOutcome?: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused" | "quarantined";
   }> {
+    // QUARANTINE CHECK (round 4, convergence point) — covers every caller of this shared finalize
+    // chokepoint (the solo Green path, batch's own `finishAlreadyMerged`, boot-reconcile): the ref/
+    // worktree mutations below (gcWorktreeDir, deleteBranch) must never run against a quarantined repo,
+    // even when the merge that got us here already landed successfully — an unrelated concurrent op may
+    // have quarantined it in the meantime.
+    if (!assertRepoNotQuarantined(args.repoPath).ok) {
+      // eslint-disable-next-line no-console
+      console.warn(`[finalizeMerge] canonical repo ${args.repoPath} is QUARANTINED — NOT finalizing (no worktree removal, no branch delete, no task move, no merge_done)`);
+      // "quarantined" (round 6, item #10) — lets the caller's own retained-branch text name the real cause
+      // instead of the generic "could not verify the branch tip" wording every other retain reason shares.
+      args.onBranchRetained?.(null, "at-finalize", "quarantined");
+      return {};
+    }
     if (!args.releaseHold && await this.isBranchHeld(args.branch, args.repoPath, args.repoKey)) {
       // eslint-disable-next-line no-console
       console.warn(`[finalizeMerge] branch ${args.branch} is HELD by a merge retain (batch or solo) — NOT finalizing (no worktree removal, no branch delete, no task move, no merge_done)`);
@@ -19387,7 +19475,7 @@ export class SessionService {
     await this.retireSiblingSessionsForTask(args.taskId, args.workerSessionId);
     let nestedRepoBlock: { paths: string[]; truncated: boolean } | undefined;
     let dirtyWorktreeRetained: DirtyWorktreeRetained | undefined;
-    let worktreeGcOutcome: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused" | undefined;
+    let worktreeGcOutcome: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused" | "quarantined" | undefined;
     let worktreeRemoved = false;
     try {
       // The nested-git-repo guard (card b6d41db1) lives IN gcWorktreeDir — the single removal
