@@ -30,58 +30,27 @@ Several existing hermetic fixtures (`platform-scope.mjs`, `orch-scope.mjs`, `mcp
 
 ### The asymmetry
 
-claude's delivery is FILE-based (`--mcp-config <path>`, via `writeSessionMcpConfig` — see "Delivery: claude"
-above) — the token sits on disk only for the spawn→ready window this card already analyzed. codex's delivery
-is ENV-based instead (`env[CODEX_MCP_TOKEN_ENV_VAR] = mcpToken` in `createCodexPty`, `pty/codex-host.ts`) —
-the token stays in the live `codex` PROCESS's own environment block for the session's ENTIRE lifetime, not
-just until ready. Any same-user process can read another process's environment on both platforms this repo
-targets (`/proc/<pid>/environ` on POSIX; the Windows PEB via standard process-introspection APIs) — so a
-co-resident worker (or any other same-OS-user process) can lift a live codex session's `LOOM_MCP_TOKEN` for
-as long as that codex process is alive, a strictly wider window than claude's.
+claude's delivery is FILE-based (`--mcp-config <path>`, via `writeSessionMcpConfig` — see "Delivery: claude" above) — the token sits on disk only for the spawn→ready window this card already analyzed.
+
+codex's delivery is ENV-based instead — `createCodexPty` (`packages/daemon/src/pty/host.ts`, ~line 4960) sets `env[CODEX_MCP_TOKEN_ENV_VAR] = mcpToken` at ~line 4988; `pty/codex-host.ts` only DEFINES the `CODEX_MCP_TOKEN_ENV_VAR` constant and emits the `-c mcp_servers.<id>.bearer_token_env_var=` pointer, it never itself assigns the env value.
+
+The token stays in the live `codex` PROCESS's own environment block for the session's ENTIRE lifetime, not just until ready. Any same-user process can read another process's environment on every supported OS (Linux `/proc/<pid>/environ`, the Windows PEB, macOS) — so a co-resident worker (or any other same-OS-user process) can lift a live codex session's `LOOM_MCP_TOKEN` for as long as that codex process is alive, a strictly wider window than claude's.
 
 ### Loom does not configure `shell_environment_policy`
 
-`packages/daemon/src/pty/codex-host.ts` and `pty/host.ts` emit zero `-c shell_environment_policy...`
-overrides anywhere in the codex `-c` argv Loom builds (confirmed: `shell_environment_policy` does not
-appear as a literal in either file) — codex runs under whatever its OWN built-in default is; Loom neither
-widens nor narrows it.
+`packages/daemon/src/pty/codex-host.ts` and `pty/host.ts` emit zero `-c shell_environment_policy...` overrides anywhere in the codex `-c` argv Loom builds (confirmed: `shell_environment_policy` does not appear as a literal in either file) — codex runs under whatever its OWN built-in default is; Loom neither widens nor narrows it.
 
 ### What is established about codex's own default, and how (string search of the installed binary, no real spawn)
 
-Per this card's `9a8bc38f` DoD, no real codex spawn was used — this is read off the locally-installed
-`@openai/codex` npm package's real Windows binary
-(`node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe`) via a raw ASCII
-string scan, the same "grep the real installed binary" method this card's own "Delivery: codex" section
-above already used to confirm the `bearer_token` rejection string.
+Per this card's `9a8bc38f` DoD, no real codex spawn was used — this is read off the locally-installed `@openai/codex` npm package's real Windows binary, relative to the global npm root (`npm root -g`): `@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe`, via a raw ASCII string scan — the same "grep the real installed binary" method this card's own "Delivery: codex" section above already used to confirm the `bearer_token` rejection string.
 
-- CONFIRMED: the binary embeds a `ShellEnvironmentPolicyTomlRaw` struct with exactly 7 fields — `inherit`,
-  `ignore_default_excludes`, `exclude`, `set`, `include_only`, `filters`, `experimental_use_profile` — and
-  a documented example `-c shell_environment_policy.inherit=all`, so `shell_environment_policy.inherit` is
-  a real, user-settable config key (codex's own CLI help text cites it as an example of `-c key=value`).
-- CONFIRMED (structural, not decompiled): three glob-pattern string literals — `*KEY*`, `*SECRET*`,
-  `*TOKEN*` — sit immediately adjacent to each other in the binary's string table, positioned right next
-  to the `ignore_default_excludes` struct's own debug info in multiple separate occurrences. This is
-  consistent with being codex's built-in DEFAULT exclude-pattern set for `shell_environment_policy` (a
-  field literally named `ignore_default_excludes` implies a default exclude set exists to ignore). If so,
-  `LOOM_MCP_TOKEN` matches `*TOKEN*` case-sensitively-as-substring, so a codex-spawned shell CHILD process
-  (the agent's own shell/exec tool calls) would not inherit it by default.
-- **UNVERIFIED — do not treat as established:** whether `inherit`'s actual default value is something
-  other than `"all"` (which would apply excludes) or literally `"all"` with default excludes still layered
-  on top, and whether `ignore_default_excludes` itself defaults to `false` (excludes applied) vs `true`
-  (excludes skipped). None of this was resolved from string search alone, and per this card's explicit
-  instruction, no real codex spawn was used to observe the actual behavior. Do not cite the `*KEY*/
-  *SECRET*/*TOKEN*` finding above as proof that `LOOM_MCP_TOKEN` is actually excluded from codex's own
-  shell children in practice — only that the pattern exists in the binary in a position consistent with
-  that role.
+- CONFIRMED: the binary embeds a `ShellEnvironmentPolicyTomlRaw` struct with exactly 7 fields — `inherit`, `ignore_default_excludes`, `exclude`, `set`, `include_only`, `filters`, `experimental_use_profile` — and a documented example `-c shell_environment_policy.inherit=all`, so `shell_environment_policy.inherit` is a real, user-settable config key (codex's own CLI help text cites it as an example of `-c key=value`).
+- CONFIRMED (structural, not decompiled): three glob-pattern string literals — `*KEY*`, `*SECRET*`, `*TOKEN*` — sit immediately adjacent to each other in the binary's string table, positioned right next to the `ignore_default_excludes` struct's own debug info in multiple separate occurrences. This is consistent with being codex's built-in DEFAULT exclude-pattern set for `shell_environment_policy` (a field literally named `ignore_default_excludes` implies a default exclude set exists to ignore). If so, `LOOM_MCP_TOKEN` matches `*TOKEN*` as a substring, so a codex-spawned shell CHILD process (the agent's own shell/exec tool calls) would not inherit it by default.
+- **UNVERIFIED — do not treat as established:** whether `inherit`'s actual default value is something other than `"all"` (which would apply excludes) or literally `"all"` with default excludes still layered on top, and whether `ignore_default_excludes` itself defaults to `false` (excludes applied) vs `true` (excludes skipped). None of this was resolved from string search alone, and per this card's explicit instruction, no real codex spawn was used to observe the actual behavior. Do not cite the `*KEY*/*SECRET*/*TOKEN*` finding above as proof that `LOOM_MCP_TOKEN` is actually excluded from codex's own shell children in practice — only that the pattern exists in the binary in a position consistent with that role.
 
 ### Why this doesn't close the exposure window either way
 
-Even a confirmed-exclude-by-default `shell_environment_policy` would only stop `LOOM_MCP_TOKEN` from
-propagating into a shell command CODEX ITSELF spawns (an in-session `env`/`printenv` call, or a child
-process' own environment) — it says nothing about a SEPARATE, co-resident OS process reading the live
-`codex` process's own environment block directly (`/proc/<pid>/environ`, the Windows PEB), which is an
-OS-level capability entirely outside codex's own config surface. That is the actual exposure this section
-documents, and it is NOT mitigated by `shell_environment_policy` however that default resolves.
+Even a confirmed-exclude-by-default `shell_environment_policy` would only stop `LOOM_MCP_TOKEN` from propagating into a shell command CODEX ITSELF spawns (an in-session `env`/`printenv` call, or a child process' own environment) — it says nothing about a SEPARATE, co-resident OS process reading the live `codex` process's own environment block directly (`/proc/<pid>/environ`, the Windows PEB, or the macOS equivalent), which is an OS-level capability entirely outside codex's own config surface. That is the actual exposure this section documents, and it is NOT mitigated by `shell_environment_policy` however that default resolves.
 
 ## Do not
 
