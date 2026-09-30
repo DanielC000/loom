@@ -22,6 +22,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { mcpAuthStub, mcpAuthRequestInit } from "./_mcp-auth.mjs";
 
 const TMP = mkdtempManaged("loom-repeatcall-");
 process.env.LOOM_HOME = TMP;
@@ -59,6 +60,8 @@ db.insertSession({
 const tracker = new RepeatedCallTracker();
 const fired = [];
 const stub = {};
+const ptyAuth = mcpAuthStub();
+const tokenM = ptyAuth.registerTestMcpSession("M");
 const app = await buildServer({
   db,
   pty: {
@@ -67,6 +70,7 @@ const app = await buildServer({
       const r = tracker.record(sessionId, tool, argsHash);
       if (r.firedAtThreshold) fired.push({ sessionId, tool, argsHash, count: r.count });
     },
+    ...ptyAuth,
   },
   sessions: stub,
   mcp: new TaskMcpRouter(db, {}),
@@ -79,7 +83,7 @@ const { port } = app.server.address();
 const BASE = `http://127.0.0.1:${port}`;
 
 const client = new Client({ name: "repeated-call-mcp-test", version: "0" });
-await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/M`)));
+await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/M`), mcpAuthRequestInit(tokenM)));
 
 // --- RED-FIRST at the integration level: N-1 identical calls must fire NOTHING ----------------------
 for (let i = 1; i < N; i++) {

@@ -320,13 +320,15 @@ export function sessionMcpConfigPath(sessionId: string): string {
  * Write the per-session `--mcp-config` FILE (agent-tooling P4 credential-tie hardening). Used ONLY when
  * the assembled mcpServers map carries a capability secret (see `mcpConfigHasSecret` in host.ts) —
  * diverting to a 0600 file keeps the secret off the `claude` process's OWN argv, which is otherwise
- * world-readable (`/proc/PID/cmdline`, `ps`, Windows WMI CommandLine). Every secret-FREE spawn (every
- * session today, incl. the whole self-hosting orchestration fleet) keeps the DEFAULT inline
- * `--mcp-config <json>` form byte-identical — this file is written ONLY on that one, rare, secret-bearing
- * path (see buildSpawnArgs' `mcpConfigPath` branch). Same per-session lifecycle + atomic tmp+rename as
- * writeSessionSettings above — rewritten on every respawn since createPty rebuilds the map fresh each time.
- * 0600 at create (`{mode}`) + a best-effort chmodSync belt-and-suspenders (mirrors keys/envelope.ts;
- * a no-op on win32, where POSIX modes don't apply — NTFS ACLs are out of scope for this fix).
+ * world-readable (`/proc/PID/cmdline`, `ps`, Windows WMI CommandLine). Card 280b1e44: `mcpConfigHasSecret`
+ * now ALSO counts the per-session mcpToken's Authorization header as a secret, so this is no longer the
+ * rare path it was — it's the EFFECTIVE default for every real spawn today (incl. the self-hosting
+ * orchestration fleet); the inline `--mcp-config <json>` form now survives only for a test-only createPty
+ * override that doesn't thread an mcpToken (see buildSpawnArgs' `mcpConfigPath` doc). Same per-session
+ * lifecycle + atomic tmp+rename as writeSessionSettings above — rewritten on every respawn since createPty
+ * rebuilds the map fresh each time. 0600 at create (`{mode}`) + a best-effort chmodSync belt-and-suspenders
+ * (mirrors keys/envelope.ts; a no-op on win32, where POSIX modes don't apply — NTFS ACLs are out of scope
+ * for this fix).
  */
 export function writeSessionMcpConfig(sessionId: string, mcpServers: Record<string, unknown>): string {
   const file = sessionMcpConfigPath(sessionId);
@@ -339,16 +341,19 @@ export function writeSessionMcpConfig(sessionId: string, mcpServers: Record<stri
 
 /**
  * Best-effort unlink of a session's `--mcp-config` secret file (see `sessionMcpConfigPath`). Safe to call
- * even when no such file exists for this session (the common case — most spawns carry no capability
- * secret). Called from createPty (stale-file cleanup on a secret-free spawn), `markReady` (host.ts,
- * earliest safe deletion point for the current spawn's own file), and the pty `onExit` handler (backstop
- * for a session that crashes before ready); a hard daemon crash that skips all three is caught by the
- * boot sweep in `pty/mcp-config-gc.ts`.
+ * even when no such file exists for this session — that no-such-file case used to be the common one
+ * (most spawns carried no capability secret); card 280b1e44 made the per-session mcpToken header count as
+ * a secret too, so today a real spawn's own file genuinely exists and gets deleted at each call site below
+ * far more often than not. Called from createPty (stale-file cleanup on a secret-free spawn — now mostly
+ * reachable only via a test-only createPty override, see writeSessionMcpConfig's doc), `markReady`
+ * (host.ts, earliest safe deletion point for the current spawn's own file), and the pty `onExit` handler
+ * (backstop for a session that crashes before ready); a hard daemon crash that skips all three is caught
+ * by the boot sweep in `pty/mcp-config-gc.ts`.
  *
  * @decision ed0757d6 — see record for why nothing unlinked this file before, and why three call sites.
  */
 export function unlinkSessionMcpConfig(sessionId: string): void {
-  try { fs.unlinkSync(sessionMcpConfigPath(sessionId)); } catch { /* common case: no such file */ }
+  try { fs.unlinkSync(sessionMcpConfigPath(sessionId)); } catch { /* no such file (e.g. a codex spawn, which never writes one) */ }
 }
 
 /**

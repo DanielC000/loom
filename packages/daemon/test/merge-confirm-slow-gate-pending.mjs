@@ -26,6 +26,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createWorktree } from "../dist/git/worktrees.js";
 
+import { mintTestMcpToken, mcpAuthRequestInit } from "./_mcp-auth.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
@@ -41,7 +42,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function connect(sessionId) {
   const client = new Client({ name: "merge-confirm-slow-gate-test", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/${sessionId}`)));
+  const token = await mintTestMcpToken(BASE, sessionId);
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/${sessionId}`), mcpAuthRequestInit(token)));
   return client;
 }
 const parse = (res) => JSON.parse(res.content[0].text);

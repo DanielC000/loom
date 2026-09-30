@@ -700,6 +700,38 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     });
   }
 
+  // @decision 280b1e44 — never gate this hook on remote-bind config or role: it authenticates every
+  // first-party `/mcp*` route by a per-session token + liveness ONLY, unconditionally, because the URL
+  // session id alone (this hook's whole reason to exist) is a PUBLIC, listable credential.
+  //
+  // Prefix-matched (`/mcp*`, not an 8-item allowlist) so a future 9th first-party route is covered for
+  // free. Credential: `Authorization: Bearer <per-session mcpToken>` — a2407ed4's per-session-token
+  // shape (agent caller, high-frequency), never 9ccedbee's shared loopback secret (human caller). Verified
+  // via `deps.pty.verifyMcpToken` (token) AND `deps.pty.isMcpReachable` (liveness — a token match alone
+  // is NOT enough; a Live/CodexLive entry survives exit with `alive:false`, so an exited-but-unarchived
+  // session's stale token would otherwise still verify). Role gates (isLoomDev for /mcp-platform, role
+  // checks for the rest) stay in each router's OWN resolveRole — this hook is identity + liveness only.
+  // Returns 401 strictly BEFORE any route handler's `reply.hijack()` runs (onRequest always precedes the
+  // handler). Logs a refusal's session id + matched pattern only — never the presented/expected token.
+  // `?.` on both PtyHost calls (mirrors `markMcpSeen`/`consumeToolAttribution?.` elsewhere in this file):
+  // an absent method on a test's minimal `pty` stub reads `undefined`, failing closed (401), never open.
+  app.addHook("onRequest", async (req, reply) => {
+    const routePattern = req.routeOptions.url;
+    if (routePattern === undefined || !routePattern.startsWith("/mcp")) return;
+    const { sessionId } = (req.params ?? {}) as { sessionId?: unknown };
+    if (typeof sessionId !== "string" || !sessionId) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const auth = req.headers.authorization;
+    const token = typeof auth === "string" ? /^Bearer\s+(.+)$/i.exec(auth)?.[1] : undefined;
+    const ok = !!deps.pty.verifyMcpToken?.(sessionId, token) && !!deps.pty.isMcpReachable?.(sessionId);
+    if (!ok) {
+      // eslint-disable-next-line no-console
+      console.warn(`[mcp-auth] refused sessionId=${sessionId} pattern=${routePattern}`);
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+  });
+
   // C2 of the WS delta-push umbrella (1efde4ba) — see GatewayDeps.fleetHub's doc above for why this is
   // test-injectable rather than always-fresh.
   const fleetHub = deps.fleetHub ?? new FleetHub();
@@ -3453,6 +3485,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const project = deps.db.getProject(id);
       if (!project) return reply.code(404).send({ error: "project not found" });
       return reply.send({ config: project.config });
+    });
+
+    // Card 280b1e44: mints a valid /mcp* credential for a session row a test fixture seeded DIRECTLY into
+    // the DB (no real pty — see PtyHost.registerTestMcpSession's own doc for why a full fake Live is
+    // deliberately NOT constructed here). Same trust posture as every other /internal/test/* route: gated
+    // on BOTH inTestMode() AND loopback, structurally absent from a real end-user daemon's route table.
+    // Refuses (404) when the underlying seam itself refuses (a REAL Live/CodexLive already exists for this
+    // id — never let a test shadow a genuine spawn's own token).
+    app.post("/internal/test/mcp-session/:sessionId", async (req, reply) => {
+      if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
+      const { sessionId } = req.params as { sessionId: string };
+      const mcpToken = deps.pty.registerTestMcpSession?.(sessionId);
+      if (!mcpToken) return reply.code(404).send({ error: "could not register a test mcp session (real session already live, or not in test mode)" });
+      return reply.send({ mcpToken });
     });
   }
 

@@ -22,6 +22,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { mcpAuthStub, mcpAuthRequestInit } from "./_mcp-auth.mjs";
 
 const TMP = mkdtempManaged("loom-mcplog-");
 process.env.LOOM_HOME = TMP;
@@ -64,8 +65,11 @@ db.insertSession({
 });
 
 const stub = {};
+const ptyAuth = mcpAuthStub();
+const tokenS = ptyAuth.registerTestMcpSession("S");
+const tokenM = ptyAuth.registerTestMcpSession("M");
 const app = await buildServer({
-  db, pty: { markMcpSeen: () => {} }, sessions: stub,
+  db, pty: { markMcpSeen: () => {}, ...ptyAuth }, sessions: stub,
   mcp: new TaskMcpRouter(db, {}), // wakes stub — untouched by tasks_list, the only tool this test calls on it
   orchMcp: new OrchestrationMcpRouter(db, {}),
   platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, operatorMcp: stub, runMcp: stub,
@@ -78,7 +82,7 @@ const BASE = `http://127.0.0.1:${port}`;
 // ============================ (1) /mcp/:sessionId (loom-tasks, TaskMcpRouter) ============================
 {
   const client = new Client({ name: "mcp-log-test-task", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/S`)));
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/S`), mcpAuthRequestInit(tokenS)));
   // Capture starts AFTER the initialize handshake — connect() itself sends its own initialize +
   // notifications/initialized requests, each producing their own [mcp] line (see test (3) below), which
   // would otherwise pollute an "exactly one line" assertion scoped to the tools/call below.
@@ -111,7 +115,7 @@ const BASE = `http://127.0.0.1:${port}`;
 // ============================ (2) /mcp-orch/:sessionId (loom-orchestration, OrchestrationMcpRouter) ============================
 {
   const client = new Client({ name: "mcp-log-test-orch", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/M`)));
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/M`), mcpAuthRequestInit(tokenM)));
   const cap = captureLogs(); // see (1) — capture only the tools/call, not the initialize handshake
   const result = await client.callTool({ name: "my_context", arguments: {} });
   check("(2) the real tool call itself still succeeds (my_context responds)", Array.isArray(result.content));
@@ -133,7 +137,7 @@ const BASE = `http://127.0.0.1:${port}`;
 {
   const cap = captureLogs();
   const client = new Client({ name: "mcp-log-test-list", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/S`)));
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/S`), mcpAuthRequestInit(tokenS)));
   await client.listTools();
   await client.close();
   await new Promise((r) => setTimeout(r, 30));

@@ -19,6 +19,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { mcpAuthStub, mcpAuthRequestInit } from "./_mcp-auth.mjs";
 
 const TMP = mkdtempManaged("loom-subagent-enforce-");
 process.env.LOOM_HOME = TMP;
@@ -52,7 +53,9 @@ db.insertSession({
 // watched-tool call, regardless of (sessionId, toolName) — each test case sets it immediately before
 // making its one client call, so there is never ambiguity about which case a result belongs to.
 let nextAttribution;
-const pty = { markMcpSeen: () => {}, consumeToolAttribution: () => nextAttribution };
+const ptyAuth = mcpAuthStub();
+const tokenS = ptyAuth.registerTestMcpSession("S");
+const pty = { markMcpSeen: () => {}, consumeToolAttribution: () => nextAttribution, ...ptyAuth };
 
 // Captures whatever OrchestrationMcpRouter's worker_report handler actually passed through to
 // sessions.workerReport — the thing under test for the attribute-and-allow path (never the refusal path;
@@ -79,7 +82,7 @@ const BASE = `http://127.0.0.1:${port}`;
 
 async function callMemoryWrite(key, text) {
   const client = new Client({ name: "subagent-enforce-test", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/S`)));
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/S`), mcpAuthRequestInit(tokenS)));
   const result = await client.callTool({ name: "memory_write", arguments: { key, text } });
   await client.close();
   return result;
@@ -87,7 +90,7 @@ async function callMemoryWrite(key, text) {
 
 async function callWorkerReport(summary) {
   const client = new Client({ name: "subagent-enforce-test", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/S`)));
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/S`), mcpAuthRequestInit(tokenS)));
   const result = await client.callTool({ name: "worker_report", arguments: { status: "progress", summary } });
   await client.close();
   return result;
@@ -99,7 +102,7 @@ function toolJson(result) {
 
 async function memoryKeyExists(key) {
   const client = new Client({ name: "subagent-enforce-test-read", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/S`)));
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/S`), mcpAuthRequestInit(tokenS)));
   const result = await client.callTool({ name: "memory_read", arguments: { key } });
   await client.close();
   const parsed = toolJson(result);

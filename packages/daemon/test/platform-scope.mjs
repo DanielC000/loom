@@ -21,6 +21,7 @@ import { requireHermeticEnv } from "./_guard.mjs";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { mintTestMcpToken, mcpAuthRequestInit } from "./_mcp-auth.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
@@ -34,8 +35,11 @@ const get = async (u) => (await fetch(BASE + u)).json();
 const now = new Date().toISOString();
 
 // --- boot the isolated daemon (dist/index.js) ---
+// Card 280b1e44: the loom-platform MCP router is now ALSO gated on isLoomDev() (mcp/platform.ts's
+// resolveRole) — this test's whole purpose is proving the platform surface's shape, so it must boot with
+// LOOM_DEV=1 regardless of the ambient gate-runner env, mirroring how a real self-hosting daemon opts in.
 const daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
-  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0" },
+  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0", LOOM_DEV: "1" },
   stdio: "ignore",
 });
 async function waitReady(timeoutMs = 20000) {
@@ -75,7 +79,8 @@ db.close();
 
 async function connect(sessionId) {
   const client = new Client({ name: "platform-scope-test", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-platform/${sessionId}`)));
+  const token = await mintTestMcpToken(BASE, sessionId);
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-platform/${sessionId}`), mcpAuthRequestInit(token)));
   return client;
 }
 const parse = (res) => JSON.parse(res.content[0].text);

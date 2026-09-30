@@ -16,7 +16,7 @@ import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, pullQuestionsForAgent, canc
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
-import { expandTilde, PORT } from "../paths.js";
+import { expandTilde, PORT, isLoomDev } from "../paths.js";
 import { isForbiddenAllowedHost, canonicalHost, canonicalTrustedProxyOrigin } from "../gateway/trust-tier.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
@@ -1085,9 +1085,12 @@ export class PlatformMcpRouter {
     private pty?: PtyHost,
   ) {}
 
-  /** Role gate: only a platform-lead gets this surface. */
+  /** Role gate: only a platform-lead gets this surface. Card 280b1e44: ALSO requires isLoomDev() — this
+   *  whole router is a LOOM_DEV-only surface (the Platform layer never ships enabled to end users), and
+   *  the per-session-token gateway hook does not know about that gate (it checks identity/liveness only),
+   *  so a leftover `role:"platform"` row from a project that later flips LOOM_DEV off must still 404 here. */
   resolveRole(sessionId: string): { id: string } | null {
-    return this.db.getSession(sessionId)?.role === "platform" ? { id: sessionId } : null;
+    return isLoomDev() && this.db.getSession(sessionId)?.role === "platform" ? { id: sessionId } : null;
   }
 
   private buildServer(callerSessionId?: string): McpServer {

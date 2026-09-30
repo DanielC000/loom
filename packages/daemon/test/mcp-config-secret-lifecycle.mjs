@@ -120,6 +120,20 @@ if (process.platform !== "win32") {
     getCapabilityCatalog: () => [CRED_DEF],
     resolveConnectionSecret: (id) => (id === "conn1" ? "super-secret-value" : undefined),
   });
+  // Card 280b1e44: a plain `host.spawn()` with no capability grant is NO LONGER a genuinely secret-free
+  // spawn — buildMcpServers now adds an Authorization header carrying the per-session mcpToken to every
+  // real spawn, so `capabilitySecrets` (collectMcpEnvSecrets, which sweeps `headers` too) is non-empty for
+  // EVERY real production spawn today. DoD-1 below needs a TRUE no-token spawn to exercise createPty's
+  // stale-file-cleanup branch (now only reachable this way — see buildSpawnArgs' mcpConfigPath doc) — this
+  // subclass drops the mcpToken arg before delegating, exactly the "test-only createPty override" that doc
+  // describes.
+  class NoMcpTokenPtyHost extends PtyHost {
+    createPty(opts, hookToken) { return super.createPty(opts, hookToken); }
+  }
+  const noTokenHost = new NoMcpTokenPtyHost(events, {
+    getCapabilityCatalog: () => [CRED_DEF],
+    resolveConnectionSecret: (id) => (id === "conn1" ? "super-secret-value" : undefined),
+  });
 
   const readWrittenDeny = (sessionId) => {
     const file = path.join(SETTINGS_DIR, `${sessionId}.json`);
@@ -143,6 +157,16 @@ if (process.platform !== "win32") {
     });
     spawned.push(sessionId);
   };
+  // Card 280b1e44: DoD-1 needs a TRUE no-mcpToken spawn (see noTokenHost's own doc above) — tracked in its
+  // own list so the finally block below stops it on the RIGHT host instance.
+  const noTokenSpawned = [];
+  const spawnNoToken = (sessionId, role = "worker") => {
+    noTokenHost.spawn({
+      sessionId, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role,
+    });
+    noTokenSpawned.push(sessionId);
+  };
 
   try {
     // --- DoD-1: a SECRET-FREE spawn unlinks a STALE file left behind for that same sessionId ---
@@ -151,7 +175,7 @@ if (process.platform !== "win32") {
       const staleFile = sessionMcpConfigPath(sid);
       writeSessionMcpConfig(sid, { fake: { type: "stdio", command: "x", args: [], env: { FAKE_TOKEN: "old-leaked-secret" } } });
       check("(DoD-1 setup) a stale mcp-config file exists BEFORE the secret-free spawn", fs.existsSync(staleFile));
-      spawnNoSecret(sid);
+      spawnNoToken(sid);
       check("(DoD-1) a spawn WITHOUT secrets unlinks the STALE file for that sessionId — SYNCHRONOUSLY, inside createPty", !fs.existsSync(staleFile));
     }
 
@@ -216,7 +240,14 @@ if (process.platform !== "win32") {
         deny.includes(SETTINGS_DIR_READ_DENY_RULE));
     }
   } finally {
-    for (const sid of spawned) { try { host.stop(sid, "hard"); } catch { /* best-effort cleanup — may already be stopped */ } }
+    // Card 280b1e44: a REAL child process's exit is genuinely async (see DoD-2/exit's own note above) —
+    // and now that every spawned session here carries a real mcp-config file (not just the DoD-2/exit
+    // one), PART 3's boot-sweep counts below would flake/inflate if this returned before each onExit
+    // handler's own unlink actually ran. Wait for each to go non-alive, not just fire stop().
+    for (const sid of spawned) { try { host.stop(sid, "hard"); } catch { /* best-effort — may already be stopped */ } }
+    for (const sid of noTokenSpawned) { try { noTokenHost.stop(sid, "hard"); } catch { /* best-effort — may already be stopped */ } }
+    for (const sid of spawned) { try { await waitUntil(() => !host.isAlive(sid), { label: `${sid} pty exit (cleanup)`, timeoutMs: 15000 }); } catch { /* best-effort */ } }
+    for (const sid of noTokenSpawned) { try { await waitUntil(() => !noTokenHost.isAlive(sid), { label: `${sid} pty exit (cleanup)`, timeoutMs: 15000 }); } catch { /* best-effort */ } }
   }
 }
 

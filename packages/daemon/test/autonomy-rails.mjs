@@ -20,6 +20,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { removeWorktree } from "../dist/git/worktrees.js";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
+import { mintTestMcpToken, mcpAuthRequestInit } from "./_mcp-auth.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
 import { commitAll } from "./_git-commit.mjs";
@@ -47,7 +48,8 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 async function connect(sessionId) {
   const client = new Client({ name: "autonomy-rails-test", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/${sessionId}`)));
+  const token = await mintTestMcpToken(BASE, sessionId);
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/${sessionId}`), mcpAuthRequestInit(token)));
   return client;
 }
 

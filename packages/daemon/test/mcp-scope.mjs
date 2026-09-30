@@ -1,11 +1,14 @@
 // End-to-end MCP auto-scoping test (§6). Seeds two projects + sessions, then drives the
 // REAL MCP client through the daemon and asserts each session sees ONLY its project's tasks.
-// Run: 1) start the daemon (node dist/index.js), 2) node test/mcp-scope.mjs
+// Run: 1) start the daemon with LOOM_TEST=1 set (node dist/index.js — card 280b1e44: the /mcp* auth
+//      guard needs the /internal/test/mcp-session test seam, which itself needs inTestMode()),
+//      2) node test/mcp-scope.mjs
 import Database from "better-sqlite3";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { mintTestMcpToken, mcpAuthRequestInit } from "./_mcp-auth.mjs";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
@@ -31,7 +34,8 @@ db.close();
 
 async function connect(sessionId) {
   const client = new Client({ name: "scope-test", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/${sessionId}`)));
+  const token = await mintTestMcpToken(BASE, sessionId);
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/${sessionId}`), mcpAuthRequestInit(token)));
   return client;
 }
 // tasks_list returns NEWLINE-DELIMITED JSON (one task per line, card dc647ae2) — not a JSON array.

@@ -17,6 +17,7 @@ import { removeWorktree } from "../dist/git/worktrees.js";
 import { readTranscript } from "../dist/sessions/transcript.js";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
+import { mintTestMcpToken, mcpAuthRequestInit } from "./_mcp-auth.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
@@ -63,7 +64,8 @@ const trustKeyOf = (p) => path.resolve(p).replace(/\\/g, "/");
 
 async function connect(sessionId) {
   const client = new Client({ name: "recycle-test", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/${sessionId}`)));
+  const token = await mintTestMcpToken(BASE, sessionId);
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/${sessionId}`), mcpAuthRequestInit(token)));
   return client;
 }
 

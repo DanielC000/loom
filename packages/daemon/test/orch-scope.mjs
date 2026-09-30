@@ -2,7 +2,9 @@
 // DB directly, drives a REAL MCP client over StreamableHTTP, no claude. Proves a manager sees ONLY
 // its own workers (manager derived from the URL path, server-side — no managerId param) and that
 // non-managers (workers / plain sessions) get no orchestration surface at all (role gate -> 404).
-// Run: 1) start the daemon (node dist/index.js), 2) node test/orch-scope.mjs
+// Run: 1) start the daemon with LOOM_TEST=1 set (node dist/index.js — card 280b1e44: the /mcp* auth
+//      guard needs the /internal/test/mcp-session test seam, which itself needs inTestMode()),
+//      2) node test/orch-scope.mjs
 //
 // Card 4f18bca2: this file is NOT_HERMETIC (needs the live daemon above) and so is excluded from
 // the automated gate (see scripts/test-daemon.mjs's NOT_HERMETIC set) — its own literal expected-
@@ -22,6 +24,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ORCH_MANAGER_TOOLS, ORCH_WORKER_TOOLS } from "../dist/agents/promptLint.js";
+import { mintTestMcpToken, mcpAuthRequestInit } from "./_mcp-auth.mjs";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
@@ -63,7 +66,8 @@ db.close();
 
 async function connect(sessionId) {
   const client = new Client({ name: "orch-scope-test", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/${sessionId}`)));
+  const token = await mintTestMcpToken(BASE, sessionId);
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/${sessionId}`), mcpAuthRequestInit(token)));
   return client;
 }
 const parse = (res) => JSON.parse(res.content[0].text);

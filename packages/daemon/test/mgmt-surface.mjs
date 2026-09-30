@@ -21,6 +21,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { requireHermeticEnv } from "./_guard.mjs";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { mintTestMcpToken, mcpAuthRequestInit } from "./_mcp-auth.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
@@ -34,8 +35,10 @@ const now = new Date().toISOString();
 const get = async (u) => (await fetch(BASE + u)).json();
 
 // --- boot the isolated daemon (dist/index.js) ---
+// Card 280b1e44: LOOM_DEV=1 — this test's own item 8 drives /mcp-platform (a LOOM_DEV-only surface since
+// mcp/platform.ts's resolveRole gate), mirroring platform-scope.mjs's own identical fix.
 const daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
-  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0" },
+  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0", LOOM_DEV: "1" },
   stdio: "ignore",
 });
 async function waitReady(timeoutMs = 20000) {
@@ -85,7 +88,8 @@ db.close();
 
 async function connect(base, sessionId) {
   const client = new Client({ name: "mgmt-surface-test", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/${base}/${sessionId}`)));
+  const token = await mintTestMcpToken(BASE, sessionId);
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/${base}/${sessionId}`), mcpAuthRequestInit(token)));
   return client;
 }
 const parse = (res) => JSON.parse(res.content[0].text);

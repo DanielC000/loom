@@ -136,6 +136,17 @@ export function isCodexModelLoaded(screen: string): boolean {
 }
 
 /**
+ * Card 280b1e44: the SHARED env-var NAME codex reads its per-session MCP bearer token's VALUE from.
+ * ONE name for every first-party mount (not one per server id) because every mount on a given codex
+ * spawn shares the SAME per-session `mcpToken` — codex's config loader REJECTS a literal `bearer_token`
+ * value at load time ("uses unsupported `bearer_token`; set `bearer_token_env_var`", confirmed against
+ * the real installed codex CLI's own rejection string), so the token's VALUE must ride the process's own
+ * env instead of its `-c`/TOML config — `createCodexPty` sets `env[CODEX_MCP_TOKEN_ENV_VAR] = mcpToken`,
+ * this module only ever emits the pointer (the env var's NAME), never the value.
+ */
+export const CODEX_MCP_TOKEN_ENV_VAR = "LOOM_MCP_TOKEN";
+
+/**
  * Translate an already-built `mcpServers` map (the SAME shape `pty/host.ts#buildMcpServers` returns for
  * claude's `--mcp-config`) into codex's per-invocation `-c mcp_servers.<id>.url=<url>` argv pairs. Only
  * `{type:"http", url}` entries are translated (codex has no stdio-server concept here).
@@ -147,13 +158,17 @@ export function isCodexModelLoaded(screen: string): boolean {
  * @decision 702f2197 — `opts.autoApproveServerIds` emits `-c mcp_servers.<id>.default_tools_approval_mode=approve`,
  * bypassing the `-a never` blanket MCP tool-call deny for that server ONLY (never `-a`/`-s` themselves).
  * Pass ONLY first-party Loom server ids — never a capability-catalog server, which can be third-party.
+ *
+ * Card 280b1e44: an entry carrying `headers.Authorization` matching `/^Bearer /i` ALSO emits `-c
+ * mcp_servers.<id>.bearer_token_env_var=LOOM_MCP_TOKEN` — the pointer only; see {@link
+ * CODEX_MCP_TOKEN_ENV_VAR}'s own doc for why the value itself never appears here or on any argv.
  */
 export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>, opts?: { autoApproveServerIds?: ReadonlySet<string> }): string[] {
   const args: string[] = [];
   const autoApprove = opts?.autoApproveServerIds;
   for (const [id, entry] of Object.entries(mcpServers)) {
     if (!entry || typeof entry !== "object") continue;
-    const { type, url } = entry as { type?: unknown; url?: unknown };
+    const { type, url, headers } = entry as { type?: unknown; url?: unknown; headers?: Record<string, unknown> };
     if (type !== "http" || typeof url !== "string" || !url) {
       // eslint-disable-next-line no-console
       console.warn(`[pty] codex mcp translate: server "${id}" (type=${typeof type === "string" ? type : String(type)}) has no codex equivalent — codex only mounts {type:"http"} servers. Spawning WITHOUT this MCP server.`);
@@ -162,6 +177,10 @@ export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>, opts?
     args.push("-c", `mcp_servers.${id}.url=${url}`);
     if (autoApprove?.has(id)) {
       args.push("-c", `mcp_servers.${id}.default_tools_approval_mode=approve`);
+    }
+    const auth = headers?.Authorization;
+    if (typeof auth === "string" && /^Bearer\s+\S/i.test(auth)) {
+      args.push("-c", `mcp_servers.${id}.bearer_token_env_var=${CODEX_MCP_TOKEN_ENV_VAR}`);
     }
   }
   return args;

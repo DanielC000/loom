@@ -34,6 +34,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { mcpAuthRequestInit } from "./_mcp-auth.mjs";
 
 const TMP = mkdtempManaged("loom-attr-join-");
 process.env.LOOM_HOME = TMP;
@@ -56,12 +57,16 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // Captures the REAL per-session hook token spawn() mints — needed to present a valid token to the REAL
-// /internal/hook route (mirrors hook-cross-session-forge.mjs's own seam).
+// /internal/hook route (mirrors hook-cross-session-forge.mjs's own seam). Card 280b1e44: ALSO captures the
+// REAL per-session mcpToken spawn() mints (the SAME chokepoint, a sibling value) — needed to present a
+// valid Authorization header to the REAL /mcp/:sessionId route, now that it's authenticated too.
 const tokensBySessionId = new Map();
+const mcpTokensBySessionId = new Map();
 class TestPtyHost extends createSeamHost(PtyHost) {
-  createPty(opts, hookToken) {
+  createPty(opts, hookToken, mcpToken) {
     tokensBySessionId.set(opts.sessionId, hookToken);
-    return super.createPty(opts, hookToken);
+    mcpTokensBySessionId.set(opts.sessionId, mcpToken);
+    return super.createPty(opts, hookToken, mcpToken);
   }
 }
 
@@ -88,6 +93,7 @@ try {
   const tokenPos = tokensBySessionId.get(SID_POS);
   const tokenNeg = tokensBySessionId.get(SID_NEG);
   check("setup: both sessions minted real hook tokens", !!tokenPos && !!tokenNeg);
+  check("setup: both sessions minted real mcp tokens", !!mcpTokensBySessionId.get(SID_POS) && !!mcpTokensBySessionId.get(SID_NEG));
 
   const stub = {};
   app = await buildServer({
@@ -107,7 +113,8 @@ try {
 
   async function callMemoryWrite(sessionId, key) {
     const client = new Client({ name: "attr-join-test", version: "0" });
-    await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/${sessionId}`)));
+    const mcpToken = mcpTokensBySessionId.get(sessionId);
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/${sessionId}`), mcpAuthRequestInit(mcpToken)));
     const result = await client.callTool({ name: "memory_write", arguments: { key, text: "hello" } });
     await client.close();
     return JSON.parse(result.content?.[0]?.text ?? "{}");

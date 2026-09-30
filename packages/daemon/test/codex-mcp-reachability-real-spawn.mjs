@@ -29,6 +29,7 @@ import { promisify } from "node:util";
 import pty from "node-pty";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
+import { mcpAuthStub } from "./_mcp-auth.mjs";
 
 const execFileAsync = promisify(execFile);
 let failures = 0;
@@ -43,7 +44,7 @@ const codexBin = resolveExecutable(process.env.LOOM_CODEX_BIN || "codex");
 // real space, strips other CSI/OSC sequences) before matching — see codex-doctrine.ts#normalizeCodexScreenText
 // for the general (not hardcoded-to-one-variant) normalization and codex-host-decisions.mjs for its own
 // unit coverage against a real captured specimen.
-const { isTrustDialogPrompt, trustDialogAnswer } = await import("../dist/pty/codex-host.js");
+const { isTrustDialogPrompt, trustDialogAnswer, CODEX_MCP_TOKEN_ENV_VAR } = await import("../dist/pty/codex-host.js");
 
 // --- Graceful skip: this test needs a REAL, authenticated codex install; no fixture can stand in for a
 // real MCP client's wire behavior. ------------------------------------------------------------------
@@ -76,8 +77,12 @@ db.insertSession({
 
 const inboundLog = [];
 const stub = {};
+// Card 280b1e44: /mcp* now requires a per-session Bearer token — this file drives codex INDEPENDENTLY of
+// PtyHost (see the file's own header), so it needs the same test-only seam other DB-only fixtures use.
+const ptyAuth = mcpAuthStub();
+const mcpToken = ptyAuth.registerTestMcpSession("codex-reach-probe");
 const app = await buildServer({
-  db, pty: { markMcpSeen: () => {}, recordToolCallArgsHash: () => {} }, sessions: stub,
+  db, pty: { markMcpSeen: () => {}, recordToolCallArgsHash: () => {}, ...ptyAuth }, sessions: stub,
   mcp: new TaskMcpRouter(db, {}),
   orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, operatorMcp: stub, runMcp: stub,
   control: stub, usageStatus: stub, requestShutdown: () => {},
@@ -115,8 +120,14 @@ const scratchCwd = fs.mkdtempSync(path.join(os.tmpdir(), "loom-codex-mcp-reach-c
 const runStartedAt = Date.now();
 const p = pty.spawn(
   codexBin,
-  ["-a", "never", "-s", "workspace-write", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", `mcp_servers.loom_reach_probe.url="${url}"`],
-  { name: "xterm-256color", cols: 120, rows: 40, cwd: scratchCwd, env: process.env },
+  [
+    "-a", "never", "-s", "workspace-write", "--no-alt-screen", "-c", "check_for_update_on_startup=false",
+    "-c", `mcp_servers.loom_reach_probe.url="${url}"`,
+    // Card 280b1e44: codex's config loader REJECTS a literal `bearer_token` value — only the pointer to an
+    // env var it reads at runtime (see CODEX_MCP_TOKEN_ENV_VAR's own doc, codex-host.ts).
+    "-c", `mcp_servers.loom_reach_probe.bearer_token_env_var="${CODEX_MCP_TOKEN_ENV_VAR}"`,
+  ],
+  { name: "xterm-256color", cols: 120, rows: 40, cwd: scratchCwd, env: { ...process.env, [CODEX_MCP_TOKEN_ENV_VAR]: mcpToken } },
 );
 
 let buf = "";
