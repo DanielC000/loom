@@ -4349,8 +4349,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // explicit "" (UNBIND — card 9fe578b3, completing cdc3792d's vault-optional story) that would strand a
     // VAULT-ONLY project, and refuse a rebind that ALIASES repoPath or a registered repo — identical
     // across every project_update-shaped write surface, mirroring checkRepoRebind's role for repoPath.
-    // `vaultPath` omitted (undefined) leaves the stored value untouched below.
-    const vaultCheck = await checkVaultPathUpdate({ ...p, repoPath: repoPath ?? p.repoPath }, b.vaultPath as string | undefined);
+    // `vaultPath` omitted (undefined) leaves the stored value untouched below. `p` is passed UNCHANGED
+    // (its PRE-patch repoPath/vaultPath) — checkVaultPathUpdate's vault-only/legacy-pairing exemption
+    // keys off that pre-patch relationship; `effectiveRepoPath` is what the alias check itself compares
+    // the candidate against, so a same-call repoPath rebind is judged against where it's HEADED.
+    const vaultCheck = await checkVaultPathUpdate(p, b.vaultPath as string | undefined, { effectiveRepoPath: repoPath ?? p.repoPath });
     if (!vaultCheck.ok) return reply.code(400).send({ error: vaultCheck.error });
     const vaultPath = vaultCheck.value;
     // referenceRepos (reference-repos epic Phase 2, card f4888775): HUMAN-only on this REST PATCH path —

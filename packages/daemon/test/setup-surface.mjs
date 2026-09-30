@@ -245,9 +245,15 @@ try {
   check("(c) project_configure: resolveConfig reflects the override",
     resolveConfig(db.getProject(created.id).config).kanbanColumns.length === 2);
 
-  // project_update: name + vaultPath + config (all via the AGENT validator).
-  const updated = await call("project_update", { projectId: created.id, name: "Renamed", vaultPath: repo, config: { docLint: true } });
+  // project_update: name + vaultPath + config (all via the AGENT validator). vaultPath is a DISTINCT dir
+  // from created's repoPath (never `repo` itself — that would alias repoPath, which checkVaultPathUpdate
+  // now correctly refuses, card 6a48b759; this call isn't testing alias semantics, just that name/
+  // vaultPath/config all land together). mkdtempSync (not Date.now()-pid): OS-atomic unique dir, not a
+  // clock-derived path (clock-path-regression-guard.mjs).
+  const updateVault = fs.mkdtempSync(path.join(os.tmpdir(), "loom-setup-update-vault-"));
+  const updated = await call("project_update", { projectId: created.id, name: "Renamed", vaultPath: updateVault, config: { docLint: true } });
   check("(c) project_update: name applied", updated.name === "Renamed" && !updated.error);
+  check("(c) project_update: vaultPath applied", updated.vaultPath === updateVault);
   check("(c) project_update: config applied (docLint)", resolveConfig(db.getProject(created.id).config).docLint === true);
 
   // agent_create under the new project.

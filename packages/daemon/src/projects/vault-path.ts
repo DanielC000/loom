@@ -54,12 +54,24 @@ export type VaultPathUpdateCheck =
  * `expandTilde`-expanded, run through {@link validateVaultPath} (absolute path required), then checked
  * for ALIASING `project.repoPath` or any `project.repos` registry entry — the same normalization + the
  * same {@link validateRepoRegistry} call REST/platform already run for this, not a second alias rule.
- * `project.repoPath === project.vaultPath` is legitimate ONLY for a genuine vault-only project (`isGitRepo`
- * tells that apart from a legacy repo-bound project that merely happens to share its path with its vault).
+ *
+ * `project` is the PRE-PATCH row — `opts.effectiveRepoPath` (default `project.repoPath`) is what the
+ * alias check compares the candidate against, so a REST/platform caller that rebinds `repoPath` in the
+ * SAME call can pass the NEW value: the check then asks "does this alias where repoPath is HEADED", not
+ * where it used to be. The vault-only/legacy-pairing exemption below, in contrast, deliberately keys off
+ * `project`'s PRE-PATCH repoPath/vaultPath, never the effective one — it is about whether THIS patch
+ * introduces a new pairing, not about the post-patch destination.
+ *
+ * `project.repoPath === project.vaultPath` (an ALREADY-paired project — vault-only by design, or a
+ * legacy repo-bound project whose vaultPath defaulted to repoPath before cdc3792d) is exempt from the
+ * direct-repoPath alias check: rebinding both to a new SHARED location relocates an EXISTING pairing, it
+ * doesn't introduce a new one. Everything else — a candidate that newly aliases `effectiveRepoPath`, or
+ * either exemption case's candidate against the `repos` registry — is still checked.
  */
 export async function checkVaultPathUpdate(
   project: { repoPath: string; vaultPath: string; repos: RepoRegistryEntry[] },
   raw: string | undefined,
+  opts: { effectiveRepoPath?: string } = {},
 ): Promise<VaultPathUpdateCheck> {
   if (raw === undefined) return { ok: true, value: undefined };
   const trimmed = raw.trim();
@@ -72,13 +84,14 @@ export async function checkVaultPathUpdate(
   const absCheck = validateVaultPath(expandTilde(trimmed));
   if (!absCheck.ok) return absCheck;
   const candidate = absCheck.value;
-  if (await isGitRepo(project.repoPath)) {
-    if (comparisonKey(canonicalizeExistingPath(candidate)) === comparisonKey(canonicalizeExistingPath(project.repoPath))) {
-      return { ok: false, error: `vaultPath aliases the project's repoPath (${project.repoPath}) — the vault auto-committer would commit into the code repo` };
+  const effectiveRepoPath = opts.effectiveRepoPath ?? project.repoPath;
+  if (project.repoPath !== project.vaultPath && await isGitRepo(effectiveRepoPath)) {
+    if (comparisonKey(canonicalizeExistingPath(candidate)) === comparisonKey(canonicalizeExistingPath(effectiveRepoPath))) {
+      return { ok: false, error: `vaultPath aliases the project's repoPath (${effectiveRepoPath}) — the vault auto-committer would commit into the code repo` };
     }
   }
   if (project.repos.length > 0) {
-    const registryCheck = await validateRepoRegistry(project.repos, { repoPath: project.repoPath, vaultPath: candidate });
+    const registryCheck = await validateRepoRegistry(project.repos, { repoPath: effectiveRepoPath, vaultPath: candidate });
     if (!registryCheck.ok) return { ok: false, error: `vaultPath conflicts with the existing repos registry: ${registryCheck.error}` };
   }
   return { ok: true, value: candidate };
