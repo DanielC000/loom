@@ -39,7 +39,15 @@ import "./Terminal.css";
  * prop or store: the socket opens with a one-off `readOnly` control frame (card 5c14fa6b) and the pane
  * then behaves exactly like `readOnly`, plus a note saying so. Nothing about that is enforcement — the
  * daemon drops a remote peer's stdin either way; this is purely so the viewer stops typing into the void.
+ *
+ * The socket RECONNECTS on close with capped exponential backoff (card 019d2e7a), the same discipline
+ * FleetSocketProvider/CompanionChat already use — see `connect()` below. The xterm instance is built
+ * ONCE per mount and outlives every attempt: only the socket is rebuilt, so a reconnect costs no
+ * remount, no scrollback teardown, and no font re-derivation.
  */
+/** Reconnect backoff bounds — same ladder as FleetSocketProvider (1s, doubling, capped at 10s). */
+const RECONNECT_MIN_MS = 1000;
+const RECONNECT_MAX_MS = 10000;
 export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyProp = false, heightBudget }: { sessionId: string; resizable?: boolean; readOnly?: boolean; heightBudget?: number }) {
   // COMPANION GUARD (card 5c87f4b6) — the structural half of the "a companion is driven ONLY through its
   // chat surface" invariant, placed HERE because this is the real transport chokepoint: `disableStdin`
@@ -56,6 +64,11 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
   // would tear the socket down and rebuild it the instant the frame lands (re-attaching forever). The
   // effect keeps its own closure copy for the hot stdin path; this state exists only to render the note.
   const [remoteReadOnly, setRemoteReadOnly] = useState(false);
+  // Card 019d2e7a — true from the moment a socket closes until the next one opens, so the pane can SAY
+  // it is detached instead of looking like a live terminal that has simply gone quiet. Purely a render
+  // signal: what actually suppresses stdin is `socket.readyState` on the hot path below, which is true
+  // whether or not React has re-rendered yet.
+  const [reconnecting, setReconnecting] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   // Kept in a ref so a budget change is picked up on the next resize WITHOUT re-running the effect
   // (which would tear down + re-attach the websocket). It's constant per page in practice.
@@ -209,6 +222,19 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     applyFontSizeRef.current = applyFontSize;
 
     const decoder = new TextDecoder();
+    // Card 019d2e7a — the CURRENT attempt's socket, or null while disconnected. Everything that used to
+    // close over one fixed `ws` (the stdin path, fitAndReport, the attach repaint) reads this instead, so
+    // a reconnect swaps the transport underneath them without touching the xterm they also close over.
+    let socket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let backoff = RECONNECT_MIN_MS;
+    let disposed = false;
+    // STICKY across attempts, deliberately: both credential classifiers below read it as "has this pane
+    // ever had a working socket", and one successful attach permanently rules a missing credential out.
+    let everOpened = false;
+    // One "[connection lost]" line per DISCONNECTION EPISODE, not per retry — a pane that spends a minute
+    // behind a restarting daemon would otherwise paint a wall of identical notices.
+    let noticeWritten = false;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     // Card 9ccedbee (v2, Code Review Critical): /ws/term now requires the loopback guard secret — it
     // carries `{type:"stdin"}` writes into the pty, the exact "human authority" surface the review found
@@ -216,14 +242,6 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     // fallback the remote-access tier already established (gateway/trust-tier.ts) rather than a new
     // mechanism. No token captured yet (guard inert, or the user hasn't visited a tokenized URL) → the
     // bare URL, unchanged from before — the server-side guard is itself optional-dep-gated the same way.
-    const loopbackToken = getLoopbackToken();
-    // Card 4cbbc343: behind a trusted reverse proxy the credential is the GATEWAY token, carried in the
-    // double-subprotocol (never the URL); on loopback this is byte-identical (`?token=` + no protocols).
-    const auth = socketAuth("term", loopbackToken);
-    const wsUrl = `${proto}//${location.host}/ws/term/${sessionId}${auth.query}`;
-    const ws = auth.protocols ? new WebSocket(wsUrl, auth.protocols) : new WebSocket(wsUrl);
-    ws.binaryType = "arraybuffer";
-
     /**
      * Shell mode: fit the grid to the pane, then tell the daemon to resize the pty to match so the
      * shell wraps to the visible width. No-op until the ws is open and the element has a size.
@@ -231,29 +249,65 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     const fitAndReport = () => {
       if (!fit || el.clientWidth <= 0 || el.clientHeight <= 0) return;
       try { fit.fit(); } catch { return; }
-      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
     };
+
+    const handleOpen = () => {
+      if (disposed) return;
+      backoff = RECONNECT_MIN_MS;
+      setReconnecting(false);
+      // A RE-attach replays the daemon's bounded ring from the top (PtyHost.subscribe), so without this
+      // the replay would stack underneath whatever the dead socket left on screen — the same screen
+      // twice, with a "[connection lost]" seam through the middle. Reset first and let the replay, which
+      // lands immediately after this handler, repaint the pane. Skipped on the FIRST open (nothing to
+      // clear, and resetting a fresh xterm would discard nothing but costs a needless repaint).
+      if (everOpened) term.reset();
+      everOpened = true;
+      noticeWritten = false;
+      if (resizable) fitAndReport();
+    };
+
+    const scheduleReconnect = () => {
+      reconnectTimer = setTimeout(connect, backoff);
+      backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
+    };
+
     // Card 093981dd: a rejected upgrade used to render as a permanently blank pane — this file carried no
     // onerror/onclose at all. A browser cannot read the handshake's HTTP status, so a guard 401 and a dead
     // daemon look identical here; isCredentialSocketFailure decides from what we DO hold (never opened +
     // no token at all), and the banner's socket wording stays conditional about it.
-    let everOpened = false;
-    ws.onopen = () => { everOpened = true; if (resizable) fitAndReport(); };
-    ws.onclose = () => {
-      if (everOpened) { term.write("\r\n\x1b[2m[connection closed]\x1b[0m\r\n"); return; }
+    //
+    // Card 019d2e7a: a close is now RETRIED rather than being the pane's terminal state — except for the
+    // two credential verdicts, which are not transient and whose own recovery path is the unlock nonce
+    // above. Retrying those would spin a pointless 401 loop behind an unread banner.
+    const handleClose = () => {
+      if (disposed) return;
+      socket = null;
+      setReconnecting(true);
+      if (everOpened) {
+        if (!noticeWritten) { term.write("\r\n\x1b[2m[connection lost — reconnecting]\x1b[0m\r\n"); noticeWritten = true; }
+        scheduleReconnect();
+        return;
+      }
       if (noteRemoteSocketRefusal(everOpened)) {
+        setReconnecting(false);
         term.write("\r\n\x1b[31m[no gateway token — live terminals are disabled]\x1b[0m\r\n"
           + "\x1b[2m[see the banner at the top of the page]\x1b[0m\r\n");
       } else if (isCredentialSocketFailure(everOpened, getLoopbackToken())) {
+        setReconnecting(false);
         noteCredentialLock("socket");
         term.write("\r\n\x1b[31m[no local access credential — live terminals are disabled]\x1b[0m\r\n"
           + "\x1b[2m[see the banner at the top of the page]\x1b[0m\r\n");
       } else {
-        term.write("\r\n\x1b[31m[could not connect to this session]\x1b[0m\r\n");
+        // Never opened, but we DO hold a credential — a daemon that is down or restarting, which a page
+        // loaded mid-restart hits. Keep retrying so the pane heals itself rather than needing a reload.
+        if (!noticeWritten) { term.write("\r\n\x1b[31m[could not connect to this session — retrying]\x1b[0m\r\n"); noticeWritten = true; }
+        scheduleReconnect();
       }
     };
 
-    ws.onmessage = (e) => {
+    const handleMessage = (e: MessageEvent) => {
+      if (disposed) return;
       if (typeof e.data === "string") {
         let msg: TerminalControl;
         try { msg = JSON.parse(e.data); } catch { term.write(e.data); return; }
@@ -287,7 +341,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
             // used during streaming — so a busy/mid-turn session redraws cleanly rather than garbling.
             clearTimeout(repaintTimer);
             repaintTimer = setTimeout(() => {
-              if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "repaint" }));
+              if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "repaint" }));
             }, 80);
           }
         }
@@ -296,16 +350,53 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
         term.write(decoder.decode(new Uint8Array(e.data as ArrayBuffer), { stream: true }));
       }
     };
+    /**
+     * Opens ONE attempt. Every attempt re-reads the credential rather than closing over the one captured
+     * at mount: a pane can outlive an unlock, and a reconnect after a token change must carry the token
+     * the page holds NOW, not a stale one.
+     */
+    function connect() {
+      if (disposed) return;
+      // Card 9ccedbee (v2, Code Review Critical): /ws/term now requires the loopback guard secret — it
+      // carries `{type:"stdin"}` writes into the pty, the exact "human authority" surface the review found
+      // still open. A WebSocket handshake can't carry a custom header, so this uses the SAME `?token=`
+      // fallback the remote-access tier already established (gateway/trust-tier.ts) rather than a new
+      // mechanism. No token captured yet (guard inert, or the user hasn't visited a tokenized URL) → the
+      // bare URL, unchanged from before — the server-side guard is itself optional-dep-gated the same way.
+      //
+      // Card 4cbbc343: behind a trusted reverse proxy the credential is the GATEWAY token, carried in the
+      // double-subprotocol (never the URL); on loopback this is byte-identical (`?token=` + no protocols).
+      const auth = socketAuth("term", getLoopbackToken());
+      const wsUrl = `${proto}//${location.host}/ws/term/${sessionId}${auth.query}`;
+      const next = auth.protocols ? new WebSocket(wsUrl, auth.protocols) : new WebSocket(wsUrl);
+      next.binaryType = "arraybuffer";
+      socket = next;
+      next.onopen = handleOpen;
+      next.onclose = handleClose;
+      next.onmessage = handleMessage;
+      // onerror is always followed by onclose; let onclose own the retry so we never double-schedule.
+    }
+
     const onData = term.onData((d) => {
       if (readOnly || serverReadOnly) return; // watch-only attach — never write to the session
-      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "stdin", data: d }));
+      // Card 019d2e7a: a keystroke typed while the socket is down is DROPPED, never buffered for replay.
+      // The pty has a real input stream a queued burst would land in at an unpredictable point — after a
+      // respawn, quite possibly into a different process's composer — so silently replaying it later is
+      // worse than losing it. The strip tells the viewer the pane is detached.
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "stdin", data: d }));
     });
 
     // On a tile resize: shells re-fit (and tell the pty); Claude re-scales the font (never the grid).
     const ro = new ResizeObserver(() => { if (resizable) fitAndReport(); else applyFontSize(); });
     ro.observe(el);
 
+    connect();
+
     return () => {
+      // Set FIRST: every handler bails on it, so a frame or a close landing inside this teardown can no
+      // longer schedule a retry against a disposed terminal.
+      disposed = true;
+      clearTimeout(reconnectTimer);
       applyFontSizeRef.current = null;
       onData.dispose();
       ro.disconnect();
@@ -317,11 +408,15 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       // re-render churn (effect cleanup before the open completes). Detach handlers so no late frame
       // writes to the disposed terminal, then close once the socket actually opens (or immediately if
       // it already has).
-      ws.onmessage = null;
-      ws.onopen = null;
-      ws.onclose = null; // a pane abandoned mid-handshake must not report a credential lock
-      if (ws.readyState === ws.CONNECTING) ws.onopen = () => ws.close();
-      else ws.close();
+      const ws = socket;
+      socket = null;
+      if (ws) {
+        ws.onmessage = null;
+        ws.onopen = null;
+        ws.onclose = null; // a pane abandoned mid-handshake must not report a credential lock
+        if (ws.readyState === WebSocket.CONNECTING) ws.onopen = () => ws.close();
+        else ws.close();
+      }
       term.dispose();
     };
   }, [sessionId, resizable, readOnly, reattachNonce]);
@@ -368,6 +463,31 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
           <Dot tone="amber" style={{ flexShrink: 0 }} />
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
             View-only from a remote device. Steer via the composer.
+          </span>
+        </div>
+      )}
+      {/* Card 019d2e7a — the detached state, said out loud. Pinned to the BOTTOM rather than the top:
+          the remote-readonly strip already owns the top edge and the two can coincide (a remote viewer
+          during a daemon restart), and a bottom strip leaves the TUI's own header visible. Same hairline
+          chrome, same `pointer-events:none` so selection underneath still works; amber, because nothing
+          is broken and the pane is already fixing itself. The `data-` hook is what an e2e asserts on —
+          this is the pane's only externally observable disconnected state. */}
+      {reconnecting && (
+        <div
+          role="status"
+          data-terminal-state="reconnecting"
+          style={{
+            position: "absolute", bottom: 0, left: 0, right: 0, pointerEvents: "none",
+            display: "flex", alignItems: "center", gap: space(2),
+            padding: `${space(1)} ${space(2)}`,
+            background: color.panel2, borderTop: `1px solid ${color.border}`,
+            fontFamily: font.mono, fontSize: 11, lineHeight: 1.5, color: color.textDim,
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+          }}
+        >
+          <Dot tone="amber" style={{ flexShrink: 0 }} />
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+            Reconnecting to this session. Keystrokes are not being sent.
           </span>
         </div>
       )}

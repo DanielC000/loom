@@ -2917,6 +2917,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // sub-panel render (it draws nothing when empty). DB-backed (insertWake), so it round-trips
         // through listWakesForSession / GET /api/sessions/:id/wakes with no live pty.
         wakes?: { sessionId: string; wakeAt?: string; note?: string }[];
+        // (card 019d2e7a) RE-register a canned pty entry (PtyHost.seedCanned) under an EXISTING seeded
+        // session id, replacing the one already there. This is the only way a hermetic e2e can drive the
+        // same-id RESPAWN path — the thing a real Stop→Resume does — from a browser: a genuine respawn
+        // needs a genuine spawn, which this fixture's no-spawn guard forbids by design. The subscriber
+        // migration under test is the SAME `adoptSubscribers` chokepoint `spawn()` uses, not a test-only
+        // copy of it, so what a spec proves here is the production path. No DB write: the session row
+        // already exists and is untouched.
+        respawnPty?: { sessionId: string; ptyGeometry?: { cols: number; rows: number }; ptyBytes?: string }[];
         // Enqueue a message straight onto a LIVE session's pty FIFO with a chosen source+kind — the ONLY
         // way an e2e spec can seed a Loom `kind:"warning"` operational nudge (e.g. [loom:worker-idle]) into
         // a session's queue, since the human REST path (POST /input) only ever produces source:"human" +
@@ -3242,6 +3250,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         const r = deps.pty.enqueueStdin(e.sessionId, e.text, e.source ?? "system", undefined, undefined, e.kind ?? "warning");
         enqueued.push({ sessionId: e.sessionId, delivered: r.delivered, position: r.position });
       }
+      // (card 019d2e7a) Same-id canned respawn — see this key's own declaration above. Resolved against
+      // the session's OWN project so the geometry fallback matches what the original seed used.
+      const respawnedSessionIds: string[] = [];
+      for (const r of b.respawnPty ?? []) {
+        if (typeof r.sessionId !== "string") {
+          return reply.code(400).send({ error: "respawnPty[].sessionId is required" });
+        }
+        const session = deps.db.getSession(r.sessionId);
+        if (!session) return reply.code(404).send({ error: `respawnPty[]: session ${r.sessionId} not found` });
+        const project = deps.db.getProject(session.projectId);
+        if (!project) return reply.code(404).send({ error: `respawnPty[]: project ${session.projectId} not found` });
+        deps.pty.seedCanned({
+          id: r.sessionId, cwd: project.repoPath,
+          geometry: r.ptyGeometry ?? resolveConfig(project.config).pty,
+          bytes: Buffer.from(r.ptyBytes ?? "", "utf8"),
+        });
+        respawnedSessionIds.push(r.sessionId);
+      }
       // Cleanup: archive the named sessions (idempotent; a missing row is a no-op). Also drop any
       // `seedCanned` pty entry (card a53e6bc9) — the e2e worker daemon is SHARED across spec files, so a
       // lingering canned entry would otherwise outlive its spec; a session with none is a harmless no-op.
@@ -3364,7 +3390,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         ok: true, usageSampleIds, runIds,
         companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds, companionTurnsRun,
         companionMessageIds,
-        liveSessionIds, wakeIds, enqueued, archivedSessionIds, orchestrationEventIds, questionIds,
+        liveSessionIds, wakeIds, enqueued, respawnedSessionIds, archivedSessionIds, orchestrationEventIds, questionIds,
         projectMemoryIds, scheduleDeferralIds, rawProjectConfigIds,
       });
     });

@@ -4470,6 +4470,9 @@ export class PtyHost {
     // to close, since the handle now exists on Live. Clear it before the overwrite.
     const outgoing = this.live.get(opts.sessionId);
     if (outgoing?.readyFallbackTimer) clearTimeout(outgoing.readyFallbackTimer);
+    // Card 019d2e7a — the entry whose viewers `adoptSubscribers` (below, after the map write) moves into
+    // the successor. Captured HERE, before the overwrite, and across BOTH live maps.
+    const previousLive = this.findAnyLive(opts.sessionId);
     // Card f9b1ea00 — Code Review (HIGH, confirmed): the SAME race as the readyFallbackTimer clear just
     // above, for `checkPromptMismatchUnresolved`'s own scheduled follow-up timers (see
     // `Live.pendingMismatchUnresolvedTimers`' own doc for the full mechanism) — a stale timer from THIS
@@ -4578,6 +4581,12 @@ export class PtyHost {
       role: opts.role ?? null,
     };
     this.live.set(opts.sessionId, live);
+    // Card 019d2e7a — carry any attached viewer across the respawn. `findAnyLive` rather than `outgoing`
+    // above: that one is deliberately `this.live`-only (it exists to clear claude-specific timers), while
+    // a viewer can equally be sitting in a codex entry this session is respawning away from. Done after
+    // the map write and before `pty.onData` below, so the successor's own first byte already has the
+    // migrated set to broadcast to.
+    this.adoptSubscribers(previousLive, live);
     attachLogErrorGuard(opts.sessionId, live);
 
     pty.onData((d) => {
@@ -5012,6 +5021,10 @@ export class PtyHost {
     // own tracking card id) it does not close.
     const isCodexResumeSpawn = buildCodexResumeArgs(opts).length > 0;
     const excludeEngineSessionIds = isCodexResumeSpawn ? null : snapshotExistingConversationIdsForSpawn(opts.cwd);
+    // Card 019d2e7a — same viewer-migration as spawn()'s claude path: captured before the map overwrite,
+    // across BOTH live maps. A codex session's tile is the same `/ws/term` subscriber, so a codex respawn
+    // strands it identically.
+    const previousLive = this.findAnyLive(opts.sessionId);
     const pty = this.createCodexPty(opts);
     const live: CodexLive = {
       kind: "codex", pty, pid: pty.pid, cwd: opts.cwd, geometry: opts.geometry,
@@ -5044,6 +5057,7 @@ export class PtyHost {
       submitOutstanding: false, // set true by submitCodex, cleared by CASE 2 — see the field's own doc
     };
     this.liveCodex.set(opts.sessionId, live);
+    this.adoptSubscribers(previousLive, live); // card 019d2e7a — see spawn()'s own call site
     attachLogErrorGuard(opts.sessionId, live);
 
     // Card 448f1b4a: fail-loud ceiling on the ONE-TIME `live.bootReady` latch — mirrors
@@ -5896,7 +5910,14 @@ export class PtyHost {
       resumeModeTarget: null,
     };
     if (opts.bytes.length) this.appendRing(live, opts.bytes);
+    const previousLive = this.findAnyLive(opts.id);
     this.live.set(opts.id, live);
+    // Card 019d2e7a — re-seeding an id that is ALREADY registered is a same-id respawn in every way that
+    // matters to a viewer, so it goes through the same migration as `spawn()`. That is what lets a
+    // browser-level e2e drive the respawn path end to end (`POST /internal/test/seed` › `respawnPty`)
+    // without a real, metered claude spawn. The ring is already loaded above, so a migrated viewer gets
+    // the SUCCESSOR's bytes replayed, exactly as a fresh `subscribe()` would serve them.
+    this.adoptSubscribers(previousLive, live);
     attachLogErrorGuard(opts.id, live);
   }
 
@@ -10551,7 +10572,14 @@ export class PtyHost {
     sub.onControl({ type: "geometry", cols: live.geometry.cols, rows: live.geometry.rows });
     if (!live.alive) sub.onControl({ type: "exit", code: null });
     live.subscribers.add(sub);
-    return () => { live.subscribers.delete(sub); };
+    // @decision 019d2e7a — detach from the live entry that CURRENTLY holds this sessionId as well as the
+    // captured one: `adoptSubscribers` moves a viewer across a respawn, so closing over `live` alone
+    // would leak the subscriber into the successor forever and keep pushing at a dead socket.
+    return () => {
+      live.subscribers.delete(sub);
+      const current = this.findAnyLive(sessionId);
+      if (current && current !== live) current.subscribers.delete(sub);
+    };
   }
 
   writeStdin(sessionId: string, data: string): void {
@@ -11259,5 +11287,36 @@ export class PtyHost {
 
   private broadcastControl(live: Live | CodexLive, e: TerminalControl): void {
     for (const s of live.subscribers) { try { s.onControl(e); } catch { /* ignore */ } }
+  }
+
+  /**
+   * Carries an outgoing `Live`'s viewers into its successor at the (re)spawn chokepoint, re-running
+   * `subscribe()`'s own "make this viewer coherent" sequence against the successor — `reset` first (the
+   * successor is a DIFFERENT process; whatever the viewer has on screen belongs to the dead one), then
+   * ring replay → `sessionId` → `geometry`, in `subscribe()`'s order, so a migrated viewer and a
+   * freshly-attached one converge on the same state. The ring is empty at a real spawn's chokepoint, so
+   * that replay is a no-op there and only earns its keep for an entry seeded with bytes (`seedCanned`).
+   *
+   * @decision 019d2e7a — never leave an attached subscriber in a discarded `Live` (it goes silent while
+   * stdin still reaches the new pty), and never leave the outgoing set populated (the dying pty's async
+   * `onExit` would push a stale `{type:"exit"}` at a viewer now watching a healthy process).
+   *
+   * Not called from `spawnShell`: a shell id is a fresh `randomUUID()` per spawn and its entry is deleted
+   * on exit, so a shell has no same-id respawn to migrate across.
+   */
+  private adoptSubscribers(previous: Live | CodexLive | undefined, next: Live | CodexLive): void {
+    if (!previous || previous === next || previous.subscribers.size === 0) return;
+    const moved = [...previous.subscribers];
+    previous.subscribers.clear();
+    const replay = next.ring.chunks.length ? Buffer.concat(next.ring.chunks) : null;
+    for (const sub of moved) {
+      next.subscribers.add(sub);
+      try {
+        sub.onControl({ type: "reset" });
+        if (replay?.length) sub.onData(replay);
+        if (next.engineSessionId) sub.onControl({ type: "sessionId", id: next.engineSessionId });
+        sub.onControl({ type: "geometry", cols: next.geometry.cols, rows: next.geometry.rows });
+      } catch { /* a viewer that throws must not break the respawn or the other viewers */ }
+    }
   }
 }

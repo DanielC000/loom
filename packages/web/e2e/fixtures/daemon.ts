@@ -356,6 +356,20 @@ export interface LoomDaemon {
    * entry — seed a `seedLiveSession({ ptyGeometry, ptyBytes })` canned session first, then arm busy with a
    * leading (delivered) entry so a trailing warning is HELD. Returns the enqueue outcome per entry.
    */
+  /**
+   * Card 019d2e7a — RESPAWN a seeded session's canned pty in place: drop the entry currently registered
+   * under this session id and register a fresh one, exactly as a real Stop→Resume replaces a session's
+   * `Live`. The session's DB row is untouched. This is how a spec drives the daemon's subscriber-migration
+   * chokepoint (`PtyHost.adoptSubscribers`) from a real browser over a real `/ws/term` — a genuine respawn
+   * would need a genuine spawn, which this fixture's no-spawn guard forbids by design, and the migration
+   * runs through the SAME production code either way. Requires a session already seeded with
+   * `ptyGeometry`/`ptyBytes`; the new bytes are what the surviving viewer must end up showing.
+   */
+  respawnSeededPty: (opts: {
+    sessionId: string;
+    ptyGeometry?: { cols: number; rows: number };
+    ptyBytes?: string;
+  }) => Promise<void>;
   enqueueMessage: (opts: {
     sessionId: string; text: string; source?: "human" | "system"; kind?: "warning" | "agent";
   }) => Promise<{ delivered: boolean; position?: number }>;
@@ -717,6 +731,10 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       };
     };
 
+    const respawnSeededPty: LoomDaemon["respawnSeededPty"] = async (opts) => {
+      await apiPost<{ respawnedSessionIds: string[] }>(baseURL, "/internal/test/seed", { respawnPty: [opts] });
+    };
+
     const enqueueMessage: LoomDaemon["enqueueMessage"] = async (opts) => {
       const res = await apiPost<{ enqueued: { delivered: boolean; position?: number }[] }>(baseURL, "/internal/test/seed", {
         enqueue: [{ sessionId: opts.sessionId, text: opts.text, source: opts.source, kind: opts.kind }],
@@ -799,7 +817,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
+    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionConversations, seedLiveSession, respawnSeededPty, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.
