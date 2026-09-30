@@ -12785,11 +12785,23 @@ export class SessionService {
     this.requireOwnProject(managerSessionId, projectId, "project_update");
     const project = this.db.getProject(projectId);
     if (!project) throw new Error("project not found");
-    // config FIRST, entirely synchronous (no await anywhere in this branch) — so it still reads/writes
-    // `project.config` with zero concurrent-write window, exactly as it did before this method carried
-    // any `await` at all. Moved ahead of the vaultPath guard below on purpose: that guard is this
-    // method's ONLY await (a real git subprocess call), and running the config merge after it would
-    // expose `project.config` (read before the await) to a write that landed DURING the await.
+    // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, refuse an
+    // explicit "" that would strand a VAULT-ONLY project, and refuse a rebind that ALIASES repoPath or a
+    // registered repo — the same guard the human REST PATCH path, platform's project_update, and setup's
+    // project_update all now share. This surface previously wrote patch.vaultPath raw with no validation
+    // at all. Runs FIRST, before any write (code review on 87e21134): this is this method's ONLY await
+    // (isGitRepo, a real git subprocess call) — running it before the config write below means a
+    // rejected vaultPath can never leave a PARTIAL apply (config committed, then the whole call still
+    // reports an error) the way it would if the config write ran first and this rejected afterward.
+    const vaultCheck = await checkVaultPathUpdate(project, patch.vaultPath);
+    if (!vaultCheck.ok) throw new Error(vaultCheck.error);
+    const vaultPath = vaultCheck.value;
+    // Re-read AFTER the await, and do every write below off THIS row with NO further await in between —
+    // so nothing can land between reading and writing. (The vaultPath validation above still ran against
+    // the PRE-await snapshot — a narrower, single-await residual, not something this re-read closes; see
+    // checkVaultPathUpdate's own doc for what it checks and when.)
+    const fresh = this.db.getProject(projectId);
+    if (!fresh) throw new Error("project not found");
     if (patch.config !== undefined) {
       const v = validateAgentProjectConfigOverride(patch.config);
       if (!v.ok) throw new Error(`invalid config: ${v.error}`);
@@ -12803,7 +12815,7 @@ export class SessionService {
       // additiveOnlyRotationGuard (card 1069c8e1): this is an AGENT-facing config-write call site, so a
       // manager's own patch can GROW its rotationMarkers/rotationLiveCommitmentsFloor but never shrink
       // them — see MergeConfigOverrideOptions' own doc for why.
-      const merged = mergeConfigOverride(project.config, v.value, { additiveOnlyRotationGuard: true });
+      const merged = mergeConfigOverride(fresh.config, v.value, { additiveOnlyRotationGuard: true });
       // SAFE writer (not a blind setProjectConfig): a kanbanColumns key-set change re-keys orphaned cards
       // to the landing lane instead of orphaning them on a non-existent column; a non-column patch stays
       // byte-identical to the blind path. (tasks/columns.ts — mirrors the platform/REST config-PATCH path,
@@ -12812,30 +12824,6 @@ export class SessionService {
       // hardcoding "human" would be a false attribution, so the caller's own session id is threaded through.
       const wrote = setProjectConfigSafe(this.db, projectId, merged, `manager:${managerSessionId}`);
       if (!wrote.ok) throw new Error(wrote.error);
-    }
-    // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, refuse an
-    // explicit "" that would strand a VAULT-ONLY project, and refuse a rebind that ALIASES repoPath or a
-    // registered repo — the same guard the human REST PATCH path, platform's project_update, and setup's
-    // project_update all now share. This surface previously wrote patch.vaultPath raw with no validation
-    // at all.
-    const vaultCheck = await checkVaultPathUpdate(project, patch.vaultPath);
-    if (!vaultCheck.ok) throw new Error(vaultCheck.error);
-    let vaultPath = vaultCheck.value;
-    // RE-CHECK against a FRESH read, immediately before the write: the call above is this method's ONLY
-    // await (isGitRepo — a real git subprocess call), a window in which a concurrent write elsewhere
-    // (another session, REST, platform) could change THIS project's repoPath/vaultPath/repos — exactly
-    // what that guard just validated against. `updateProject()` itself only ever SETs the columns THIS
-    // patch names (a true partial SQL UPDATE, never a read-modify-write of the whole row — see its own
-    // doc in db.ts), so a concurrent write to any OTHER field is never clobbered regardless of this
-    // re-check; this exists solely to keep the vaultPath VALIDATION honest against CURRENT state rather
-    // than the pre-await snapshot (otherwise a validated-stale rebind could land against a repo the
-    // project was concurrently rebound to, exactly the alias hazard the guard above exists to prevent).
-    if (vaultPath !== undefined) {
-      const fresh = this.db.getProject(projectId);
-      if (!fresh) throw new Error("project not found");
-      const recheck = await checkVaultPathUpdate(fresh, patch.vaultPath);
-      if (!recheck.ok) throw new Error(recheck.error);
-      vaultPath = recheck.value;
     }
     this.db.updateProject(projectId, { name: patch.name, vaultPath });
     this.auditManage(managerSessionId, "project_update", {

@@ -365,6 +365,22 @@ export class SetupMcpRouter {
       async ({ projectId, name, vaultPath, config }) => {
         const project = db.getProject(projectId);
         if (!project) return ok({ error: "project not found" });
+        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, refuse an
+        // explicit "" that would strand a VAULT-ONLY project, and refuse a rebind that ALIASES repoPath
+        // or a registered repo — the same guard the human REST PATCH path, the manager's project_update,
+        // and platform's project_update all now share. Runs FIRST, before any write (code review on
+        // 87e21134): this is this handler's ONLY await depending on project state (isGitRepo, a real git
+        // subprocess call) — running it before the config write below means a rejected vaultPath can
+        // never leave a PARTIAL apply (config committed, then the whole call still reports an error).
+        const vaultCheck = await checkVaultPathUpdate(project, vaultPath);
+        if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
+        vaultPath = vaultCheck.value;
+        // Re-read AFTER the await, and do every write below off THIS row with NO further await in
+        // between — so nothing can land between reading and writing. (The vaultPath validation above
+        // still ran against the PRE-await snapshot — a narrower, single-await residual, not something
+        // this re-read closes; see checkVaultPathUpdate's own doc for what it checks and when.)
+        const fresh = db.getProject(projectId);
+        if (!fresh) return ok({ error: "project not found" });
         if (config !== undefined) {
           const v = validateAgentProjectConfigOverride(config);
           if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
@@ -376,30 +392,10 @@ export class SetupMcpRouter {
           // unchanged: a human-only key is a rejected unknown above and never reaches the merge; the merged
           // whole isn't re-validated (a preserved pre-existing human key would falsely fail the agent validator).
           // additiveOnlyRotationGuard (card 1069c8e1): same reasoning as project_configure above.
-          const merged = mergeConfigOverride(project.config, v.value, { additiveOnlyRotationGuard: true });
+          const merged = mergeConfigOverride(fresh.config, v.value, { additiveOnlyRotationGuard: true });
           // actor (card a0cafef2): agent-facing surface, same reasoning as project_configure above.
           const wrote = setProjectConfigSafe(db, projectId, merged, callerSessionId ? `setup:${callerSessionId}` : "setup");
           if (!wrote.ok) return ok({ error: wrote.error });
-        }
-        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, refuse an
-        // explicit "" that would strand a VAULT-ONLY project, and refuse a rebind that ALIASES repoPath
-        // or a registered repo — the same guard the human REST PATCH path, the manager's project_update,
-        // and platform's project_update all now share.
-        const vaultCheck = await checkVaultPathUpdate(project, vaultPath);
-        if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
-        vaultPath = vaultCheck.value;
-        // RE-CHECK against a FRESH read, immediately before the write: the call above is this handler's
-        // ONLY await depending on project state (isGitRepo — a real git subprocess call), a window in
-        // which a concurrent write elsewhere could change this project's repoPath/vaultPath/repos —
-        // exactly what that guard just validated against. See sessions/service.ts's updateProjectStructural
-        // for the full reasoning (db.updateProject only SETs the columns this patch names, so this
-        // re-check is solely about keeping the vaultPath VALIDATION honest, not about a lost write).
-        if (vaultPath !== undefined) {
-          const fresh = db.getProject(projectId);
-          if (!fresh) return ok({ error: "project not found" });
-          const recheck = await checkVaultPathUpdate(fresh, vaultPath);
-          if (!recheck.ok) return ok({ error: recheck.error });
-          vaultPath = recheck.value;
         }
         if (name !== undefined || vaultPath !== undefined) db.updateProject(projectId, { name, vaultPath });
         return ok(projectFields(db.getProject(projectId)));

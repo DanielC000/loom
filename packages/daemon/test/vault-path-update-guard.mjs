@@ -404,6 +404,64 @@ try {
       db.close();
     }
   }
+
+  // =====================================================================================================
+  // PART I — PARTIAL-WRITE REGRESSION (code review on 87e21134): a call carrying BOTH a config patch and
+  // an invalid vaultPath must not half-apply — the config write must not land while the overall call
+  // still reports an error. Both manager and setup run the vaultPath guard (their only await) BEFORE any
+  // write now, so this must hold for both.
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "partial-write-manager.db"));
+    const svc = new SessionService(db, pty, new OrchestrationControl());
+    const seededConfig = { docLint: true };
+    const repoBoundMgr = mkRepo("partial-mgr");
+    cleanupDirs.push(repoBoundMgr);
+    db.insertProject({ id: "pPartialMgr", name: "PartialMgr", repoPath: repoBoundMgr, vaultPath: path.join(tmpHome, "partial-mgr-vault"), config: seededConfig, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+    db.insertAgent({ id: "aPartialMgr", projectId: "pPartialMgr", name: "Mgr", startupPrompt: "", position: 0, profileId: null });
+    db.insertSession({
+      id: "MP1", projectId: "pPartialMgr", agentId: "aPartialMgr", engineSessionId: null, title: null, cwd: tmpHome,
+      processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+      lastError: null, role: "manager", parentSessionId: null,
+    });
+
+    // (I1) a SINGLE call carrying a valid config change AND an invalid (relative) vaultPath → the WHOLE
+    // call errors, and the config change must NOT have landed.
+    let i1Err = null;
+    try { await svc.updateProjectStructural("MP1", "pPartialMgr", { config: { docLint: false }, vaultPath: "Projects/Bad" }); }
+    catch (e) { i1Err = e instanceof Error ? e.message : String(e); }
+    check("(I1) manager project_update {config, invalid vaultPath} → the call errors", typeof i1Err === "string" && /absolute path/.test(i1Err));
+    check("(I1) ★ the config half did NOT land (no partial apply)", db.getProject("pPartialMgr").config.docLint === true);
+
+    db.close();
+  }
+  {
+    const db = new Db(path.join(tmpHome, "partial-write-setup.db"));
+    const seededConfig = { docLint: true };
+    const repoBound = mkRepo("partial-setup");
+    cleanupDirs.push(repoBound);
+    db.insertProject({ id: "pPartialSetup", name: "PartialSetup", repoPath: repoBound, vaultPath: path.join(tmpHome, "partial-setup-vault"), config: seededConfig, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+
+    class SeamHost extends createSeamHost(PtyHost) { stop() {} }
+    const events = { onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); }, onBusy(id, busy) { db.setBusy(id, busy); }, onContextStats() {}, onRateLimited() {}, onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); } };
+    const host = new SeamHost(events);
+    const svc = new SessionService(db, host, new OrchestrationControl());
+    const router = new SetupMcpRouter(db, svc);
+    const server = router.buildServer();
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const client = new Client({ name: "vaultpath-upd-partial-setup-test", version: "0" });
+    await client.connect(clientT);
+    const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+    // (I2) same shape on setup's project_update.
+    const i2 = await call("project_update", { projectId: "pPartialSetup", config: { docLint: false }, vaultPath: "Projects/Bad" });
+    check("(I2) setup project_update {config, invalid vaultPath} → the call errors", typeof i2.error === "string" && /absolute path/.test(i2.error));
+    check("(I2) ★ the config half did NOT land (no partial apply)", db.getProject("pPartialSetup").config.docLint === true);
+
+    await client.close();
+    db.close();
+  }
 } finally {
   for (const d of cleanupDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
