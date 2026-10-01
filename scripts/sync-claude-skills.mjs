@@ -21,8 +21,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isSafeManifestEntry } from "../packages/daemon/dist/skills/inject.js";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// Overridable via LOOM_SYNC_SKILLS_REPO_ROOT so a hermetic test can point srcDir/destDir at a throwaway
+// dir without touching this real checkout's own .claude/skills — same shim shape as store.ts's
+// LOOM_ASSET_SKILLS. The `isSafeManifestEntry` import above stays relative to THIS script's real file
+// location regardless, so the override never affects which compiled module gets loaded.
+const repoRoot = process.env.LOOM_SYNC_SKILLS_REPO_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const srcDir = path.join(repoRoot, "packages", "daemon", "assets", "skills");
 const destDir = path.join(repoRoot, ".claude", "skills");
 const managedManifestPath = path.join(destDir, ".loom-managed-skills.json");
@@ -70,10 +75,24 @@ function syncDir(src, dest) {
   }
 }
 
+// Entries are trusted straight into an `rmSync(path.join(destDir, entry))` below — the manifest is
+// gitignored but still disk-resident, so validate every entry with the SAME predicate
+// packages/daemon/src/skills/inject.ts uses for its own (committable) manifest, rather than re-deriving
+// the shape here (card 5c3d0518, sibling of 97e6a1c6's isSafeManifestEntry fix).
 function readManagedManifest() {
   let raw;
   try { raw = JSON.parse(fs.readFileSync(managedManifestPath, "utf8")); } catch { return []; }
-  return Array.isArray(raw) ? raw.filter((n) => typeof n === "string") : [];
+  if (!Array.isArray(raw)) return [];
+  const safe = [];
+  const dropped = [];
+  for (const n of raw) {
+    if (isSafeManifestEntry(n)) safe.push(n);
+    else dropped.push(typeof n === "string" ? n.slice(0, 80) : `<${typeof n}>`);
+  }
+  if (dropped.length) {
+    console.log(`[sync-claude-skills] dropped ${dropped.length} invalid managed-manifest entr${dropped.length === 1 ? "y" : "ies"}: ${dropped.slice(0, 5).join(", ")}${dropped.length > 5 ? ", …" : ""}`);
+  }
+  return safe;
 }
 
 const canonical = dirNames(srcDir);

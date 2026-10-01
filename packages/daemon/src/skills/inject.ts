@@ -38,8 +38,32 @@ type Manifest = Record<string, string[]>;
  *  committable, so it's untrusted input: an entry like `"../../../victim"` or `""`/`"."` must never reach
  *  that path.join unvalidated. Require the SAME kebab-slug shape the skill store itself enforces (also a
  *  basename — no separators — and never `.`/`..`, though those are already excluded by the shape). */
-function isSafeManifestEntry(n: unknown): n is string {
+export function isSafeManifestEntry(n: unknown): n is string {
   return typeof n === "string" && isValidSkillName(n) && path.basename(n) === n;
+}
+
+/**
+ * Whether any of `candidates` (ancestor dirs of the injection target, outermost first) is a symlink or
+ * junction that resolves OUTSIDE `cwd` — e.g. a committed git symlink, or a Windows junction a user
+ * created by hand. Must run BEFORE any mkdir/write: `fs.mkdirSync(dir, { recursive: true })` happily
+ * traverses an EXISTING symlink/junction ancestor and creates directories on the far side, so checking
+ * only after the fact is already too late. Only an ancestor that already EXISTS can redirect anywhere —
+ * a missing one is about to be freshly created by mkdirSync, under the real `cwd`, so `fs.realpathSync`
+ * failing (ENOENT) on a candidate just means "nothing to escape through yet," not an error worth
+ * surfacing. Returns the first escaping candidate (its real target, for the log line), or null if none
+ * escape — including when `cwd` itself can't be resolved, in which case the caller's own mkdir is left
+ * to surface whatever is actually wrong with `cwd`.
+ */
+function escapedAncestor(cwd: string, candidates: string[]): { path: string; real: string } | null {
+  let cwdReal: string;
+  try { cwdReal = fs.realpathSync(cwd); } catch { return null; }
+  for (const candidate of candidates) {
+    let real: string;
+    try { real = fs.realpathSync(candidate); } catch { continue; } // doesn't exist yet — safe, mkdirSync will create it fresh
+    const rel = path.relative(cwdReal, real);
+    if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) return { path: candidate, real };
+  }
+  return null;
 }
 
 /** Filter a raw manifest entry list (one session's record) down to safe names. A non-array value (e.g. a
@@ -207,6 +231,18 @@ export function injectSkills(cwd: string, sessionId: string, subset?: string[] |
     storeNames = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).filter(isValidSkillName);
   } catch { return; } // no store yet
   const targetDir = claudeSkillsDir(cwd);
+  const claudeDir = path.dirname(targetDir);
+  // Refuse BEFORE any write if `.claude` or `.claude/skills` is a symlink/junction redirecting outside
+  // this session's own cwd (card 5c3d0518, from the review of 97e6a1c6) — otherwise every injection write
+  // below (mkdir, the skill copies, the manifest) lands on whatever that link points at instead of this
+  // repo. Logged loudly and skipped for this session, never thrown into the spawn: the session still
+  // boots, just without its injected skills, exactly like the existing "no store yet" early-return above
+  // and the non-fatal catch around this call at its one call site (pty/host.ts).
+  const escaped = escapedAncestor(cwd, [claudeDir, targetDir]);
+  if (escaped) {
+    console.log(`[skills] refusing injection: ${escaped.path} resolves to ${escaped.real}, outside this session's working directory (${cwd}) — skill injection skipped for this session`);
+    return;
+  }
   fs.mkdirSync(targetDir, { recursive: true });
 
   // What THIS session should have present: a non-empty subset ∩ the store, else ALL store skills.
