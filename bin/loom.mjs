@@ -25,6 +25,7 @@ import http from "node:http";
 import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { CHANNELS, isValidChannel, installSpecFor, readChannel, writeChannel } from "./update-config.mjs";
+import { commandLineOf, matchesRecordedEntry } from "./lib/cmdline-identity.mjs";
 
 // UV_THREADPOOL_SIZE (task dea6728e, defense-in-depth): the default libuv pool is only 4 threads, so a
 // small handful of wedged fs ops could starve fs/dns/crypto process-wide. `startDetached`/`loom service`
@@ -301,65 +302,30 @@ function classifyPortResponse(port, timeoutMs = 1500) {
   });
 }
 
-// Best-effort live command line for `pid`, or null if it can't be determined (dead, permission denied, no
-// tool available). Used ONLY to CONFIRM identity before a signal is sent — never to locate a pid to act on
-// by name (that stays forbidden). A null result means "can't confirm", which the caller below treats as a
-// REFUSAL, never as "assume it's ours." Mirrors scripts/daemon-supervisor-stop.mjs's own `commandLineOf` —
-// that script can't be imported here (it's a dev-only self-hosting tool, not part of the packaged CLI), so
-// this is a deliberate, small duplication of the same shape (card 279c0208).
-function commandLineOf(pid) {
-  try {
-    if (process.platform === "win32") {
-      // The modern equivalent of `wmic process get commandline` (wmic is deprecated/absent on recent
-      // Windows). -NoProfile/-NonInteractive: no PSReadLine, no prompts.
-      const r = spawnSync("powershell", [
-        "-NoProfile", "-NonInteractive", "-Command",
-        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
-      ], { encoding: "utf8", timeout: 5000 });
-      if (r.status !== 0) return null;
-      return (r.stdout || "").trim() || null;
-    }
-    const r = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", timeout: 5000 });
-    if (r.status !== 0) return null;
-    return (r.stdout || "").trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-// @decision 279c0208 — never un-anchor either alternative here: a bare `dist[\/]index\.js|loom(\.mjs)?`
-// matched a foreign app's own `dist/index.js`, and a bare `[\/]loom(?:["'\s]|$)` matched
-// `vim /home/u/src/loom` / `git -C /home/u/loom status` — both reproduced by code review as false positives.
-// Exported (only for a hermetic regex-level test — see cli-stop-pid-identity.mjs) so a false-positive
-// string doesn't need a full real-process spawn to prove/disprove; this is never how `isOurDaemon` itself
-// decides anything, which always reads a REAL pid's REAL live command line.
+// @decision 279c0208 — never un-anchor either alternative: a bare `dist[\/]index\.js|loom(\.mjs)?` and a
+// bare `[\/]loom(?:["'\s]|$)` were both reproduced as false positives (a foreign app, an unrelated `vim`).
 export const LEGACY_DAEMON_CMDLINE_RE = /loomctl[\\/](?:dist[\\/]index\.js|bin[\\/]loom\.mjs)|[\\/]bin[\\/]loom(?:["'\s]|$)/i;
-
-function normalizeCmdlinePath(s) {
-  // Windows paths are case-insensitive and a wrapper/shim can reformat separators; POSIX paths are
-  // case-sensitive, so only fold case there on win32 (card 279c0208 review).
-  const withSlashes = s.replace(/\\/g, "/");
-  return process.platform === "win32" ? withSlashes.toLowerCase() : withSlashes;
-}
 
 // Confirms a pid's live command line actually names a LOOM process before `stop()` signals it (card
 // 279c0208). Two tiers:
 //   1. PREFERRED: `rec.entry` — the exact absolute path THIS pid was spawned/invoked with, recorded at
-//      pid-record-write time (`writeForegroundPidRecord`/`startDetached` — see either's own comment) —
-//      confirmed by checking it's a verbatim substring of the pid's own live command line. This is an
-//      EXACT match against what we ourselves launched, not a generic shape, so it cannot mistake a
-//      foreign process for the daemon merely because their paths share a common bundler output name.
+//      pid-record-write time — confirmed via `matchesRecordedEntry` (`./lib/cmdline-identity.mjs`, shared
+//      with `scripts/daemon-supervisor-stop.mjs`).
 //   2. FALLBACK (a pid record predating this field): `LEGACY_DAEMON_CMDLINE_RE` — `loomctl/dist/index.js`
 //      or `loomctl/bin/loom.mjs` (this package's own name), or `…/bin/loom` (the POSIX global-symlink
 //      shape, anchored on the `bin` DIRECTORY since `loomctl` isn't in that path either — never a bare
 //      `loom`-named path component, which matched `vim …/loom` / `git -C …/loom status` before).
 // Returns false — REFUSE, never guess — when the command line can't be read at all, or matches neither
 // tier: a stale pid record recycled into an unrelated process must never be signalled.
+//
+// @decision 03cc6cae — tier 1 is an exact argv match when available (win32/Linux), else a whole-argument
+// boundary match on the raw string (POSIX `ps`, never quotes) — never a bare substring or naive split.
+// Not position-anchored to "the entry script handed to node" — see this record's round-4 section.
 function isOurDaemon(rec) {
-  const cmd = commandLineOf(rec.pid);
-  if (!cmd) return false;
-  if (rec.entry) return normalizeCmdlinePath(cmd).includes(normalizeCmdlinePath(rec.entry));
-  return LEGACY_DAEMON_CMDLINE_RE.test(cmd);
+  const info = commandLineOf(rec.pid);
+  if (!info.raw) return false;
+  if (rec.entry) return matchesRecordedEntry(info, rec.entry);
+  return LEGACY_DAEMON_CMDLINE_RE.test(info.raw);
 }
 
 // POST /internal/shutdown (the daemon's graceful control hook) → { status } or { error }.
@@ -550,9 +516,8 @@ It may still be starting — check 'loom status'${logPath ? ` or the log at ${lo
 // `taskkill /T /F`, which kills that process's WHOLE tree) can hit an innocent bystander. Resolved into
 // one of several outcomes just below — see that block's own comment for which is which.
 //
-// @decision 279c0208 — do not widen the command-line identity check (`isOurDaemon`, below) beyond the
-// port-probe's "timeout" outcome to the hook.status-defined paths (404/401): that re-breaks
-// cli-stop-auth.mjs's guarded-401 scenario, a bare non-loom-shaped stand-in this check would then refuse.
+// @decision 03cc6cae — `isOurDaemon` runs on EVERY branch that can fall through to the signal ladder, never
+// just the port-probe "timeout" outcome; a stand-in daemon must present a recorded-entry command line.
 //
 // RESIDUAL WINDOW (not closed by the above, card a2f821bf): identity is confirmed BEFORE the signal is
 // chosen, not AT the instant it is issued. Between a passing check (the hook responding, the port-probe
@@ -577,7 +542,13 @@ async function stop() {
   // (1) graceful control hook
   const hook = await postShutdown(port);
   if (hook.status === 202 || hook.status === 200) {
-    if (await waitForDown(port, 12000)) graceful = true;
+    // TEST SEAM (card 03cc6cae): under LOOM_TEST=1 ONLY, LOOM_TEST_STOP_WAIT_FOR_DOWN_MS shortens this wait
+    // so a hermetic test can exercise the "202/200 whose waitForDown timed out" identity-check branch
+    // without a real 12s wait. Unset, or outside LOOM_TEST, this is byte-identical to the original.
+    const waitMs = process.env.LOOM_TEST === "1" && process.env.LOOM_TEST_STOP_WAIT_FOR_DOWN_MS
+      ? Number(process.env.LOOM_TEST_STOP_WAIT_FOR_DOWN_MS)
+      : 12000;
+    if (await waitForDown(port, waitMs)) graceful = true;
   } else if (hook.status === 404) {
     console.error("loom: this daemon predates the graceful-shutdown hook — falling back to a signal.");
   } else if (hook.status === 401) {
@@ -588,36 +559,45 @@ async function stop() {
     console.error(`loom: the daemon rejected our stop credential (401) — falling back to a signal.${process.platform === "win32" ? " On Windows this means a HARD kill (no graceful teardown)." : ""}`);
   }
 
-  // Identity check before EITHER signal step below (card 279c0208's decision note above `stop()` states
-  // the scoping rule). The hook already confirms identity when it got any HTTP response (hook.status
-  // defined, incl. 404/401). Otherwise, probe the port directly — THREE outcomes:
+  // Identity check before EITHER signal step below — on EVERY path that can still reach the signal ladder
+  // here (card 03cc6cae's decision note above `stop()` states the current scoping; supersedes 279c0208,
+  // which confirmed identity only on the no-HTTP-response path). An HTTP response on the recorded port
+  // (hook.status defined — 200/202 whose waitForDown timed out, 404, or 401) proves SOMETHING is listening
+  // there, never that it's the pid WE recorded — a pid recycled into an unrelated process that happens to
+  // also run an HTTP server on this port would previously have been signalled unverified. When there was no
+  // HTTP response at all (hook.status undefined), probe the port directly first — THREE outcomes:
   //   - REFUSED (nothing listening at all): treat it like any other stale PID file (clean it, never
   //     signal) — a running Loom daemon always holds its port, so a pid alive without holding it is
   //     almost certainly a reused one.
-  //   - TIMEOUT (the port IS held but not responding): consistent with a genuinely wedged real daemon, so
-  //     falls through to the signal ladder — but only once `isOurDaemon(rec)` confirms the live COMMAND
-  //     LINE actually matches what WE recorded launching this pid with (see `isOurDaemon`'s own comment);
-  //     refuses, rather than guessing, when it can't. A real wedged daemon passes this trivially (its
-  //     command line is readable regardless of HTTP responsiveness), so a truly wedged daemon never
-  //     becomes harder to stop — only a pid recycled into an unrelated process does.
+  //   - TIMEOUT or ANSWERED (the port IS held, responding or not): consistent with a genuinely wedged real
+  //     daemon, or an un-signalled one that just didn't answer this specific probe in time — falls through
+  //     to the identity check below either way.
   //   - anything else (an unclassified connection error): genuinely UNDECIDABLE — refuse to guess and hand
   //     the human the exact pid and command so they can finish the job themselves if it really is stuck.
-  if (!graceful && hook.status === undefined) {
-    const probe = await classifyPortResponse(port);
-    if (probe === "refused") {
-      console.error(`loom: PID ${rec.pid} is alive, but nothing is listening on ${urlFor(port)}. Treating the PID file as stale — a running Loom daemon always holds its port, so this PID is almost certainly a reused one belonging to another process.`);
-      removePidFile();
-      console.log(`loom: not running (stale PID ${rec.pid} cleaned). The process still holding that PID was NOT signalled.`);
-      return 0;
+  if (!graceful) {
+    if (hook.status === undefined) {
+      const probe = await classifyPortResponse(port);
+      if (probe === "refused") {
+        console.error(`loom: PID ${rec.pid} is alive, but nothing is listening on ${urlFor(port)}. Treating the PID file as stale — a running Loom daemon always holds its port, so this PID is almost certainly a reused one belonging to another process.`);
+        removePidFile();
+        console.log(`loom: not running (stale PID ${rec.pid} cleaned). The process still holding that PID was NOT signalled.`);
+        return 0;
+      }
+      if (probe === "other-error") {
+        console.error(`loom: could not confirm whether PID ${rec.pid} is still the Loom daemon (no answer on ${urlFor(port)}).`);
+        console.error(`loom: refusing to signal an unidentified process. If you're sure PID ${rec.pid} is the stuck daemon, stop it yourself: ${process.platform === "win32" ? `taskkill /PID ${rec.pid} /T /F` : `kill -9 ${rec.pid}`}`);
+        return 1;
+      }
+      // probe === "timeout" or "answered": the port IS held. Confirm the command line below before
+      // falling through to the signal ladder.
     }
-    if (probe === "other-error") {
-      console.error(`loom: could not confirm whether PID ${rec.pid} is still the Loom daemon (no answer on ${urlFor(port)}).`);
-      console.error(`loom: refusing to signal an unidentified process. If you're sure PID ${rec.pid} is the stuck daemon, stop it yourself: ${process.platform === "win32" ? `taskkill /PID ${rec.pid} /T /F` : `kill -9 ${rec.pid}`}`);
-      return 1;
-    }
-    // probe === "timeout": the port IS held but unresponsive. Confirm the command line before falling
-    // through to the signal ladder — see the block comment above for why this, specifically, is the case
-    // the port probe alone can't resolve.
+    // Confirm the live COMMAND LINE actually matches what WE recorded launching this pid with (see
+    // `isOurDaemon`'s own comment) before falling through to the signal ladder — refuses, rather than
+    // guessing, when it can't. A real wedged/unresponsive daemon's command line is readable regardless of
+    // HTTP responsiveness, so a truly wedged daemon never becomes harder to stop than a pid recycled into
+    // an unrelated process — but this is NOT automatically trivial: a Windows npm cmd-shim's own invocation
+    // shape can genuinely differ from the Node-normalized recorded `entry` (card 03cc6cae review; see
+    // `cmdlineHasEntryArgument`'s own normalization), which is why that normalization step matters here.
     if (!isOurDaemon(rec)) {
       console.error(`loom: PID ${rec.pid} is alive and holds ${urlFor(port)}, but its live command line does not confirm it as the loom daemon — it may have been reused by an unrelated process since the PID file was written.`);
       console.error(`loom: refusing to signal an unverified process. If you're sure PID ${rec.pid} is the stuck daemon, stop it yourself: ${process.platform === "win32" ? `taskkill /PID ${rec.pid} /T /F` : `kill -9 ${rec.pid}`}`);

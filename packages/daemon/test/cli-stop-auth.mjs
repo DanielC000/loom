@@ -12,6 +12,12 @@ import "./_guard.mjs"; // suite consistency (sets LOOM_TEST=1); this test touche
 // correctly-authenticated shutdown POST (mirroring the real daemon's own graceful-exit contract). Mirrors
 // cli-stop-pid-identity.mjs's own real-subprocess conventions.
 //
+// Card 03cc6cae: `isOurDaemon` now gates EVERY signalling branch, including the 404/401 paths this test
+// exercises — so the stand-in is spawned from a real temp FILE (never `node -e <inline>`, which has no
+// path for `isOurDaemon` to match) and the hand-written `daemon.pid` record below sets `entry:
+// <that file's path>`, exactly mirroring what `writeForegroundPidRecord`/`startDetached` record for a real
+// daemon. Without it, `loom stop` would now refuse to signal this stand-in at all in case (b).
+//
 //   (a) POSITIVE: the secret file holds the real value → `loom stop` presents it as
 //       `Authorization: Bearer <secret>` (logged by the stand-in daemon), the stand-in accepts + exits
 //       (as a real daemon's graceful shutdown would), and `loom stop` reports a GRACEFUL stop (exit 0).
@@ -84,8 +90,12 @@ const server = http.createServer((req, res) => {
 server.listen(0, "127.0.0.1", () => console.log("PORT=" + server.address().port));
 `;
 
+// `standInScriptPath` is assigned once `home` exists (below) — see that assignment's own comment for why
+// the script is written to a real file at all (card 03cc6cae).
+let standInScriptPath;
+
 function spawnStandInDaemon(secret) {
-  const child = spawn(process.execPath, ["-e", STANDIN_DAEMON_SCRIPT], {
+  const child = spawn(process.execPath, [standInScriptPath], {
     env: { ...process.env, STANDIN_SECRET: secret },
     stdio: ["ignore", "pipe", "ignore"],
   });
@@ -111,6 +121,13 @@ const home = useOwnLoomHome("loom-stop-auth-");
 const SECRET = "test-cli-stop-secret-0123456789abcdef";
 const secretPath = path.join(home, "gateway-loopback.key");
 
+// Card 03cc6cae: written to a real file (never `node -e <inline>`) so the stand-in's own live command line
+// carries a stable path `isOurDaemon` can match against a recorded `entry` — see this file's own header.
+// `.cjs` (not `.mjs`): the script uses `require("node:http")`, and `.cjs` forces CommonJS regardless of any
+// ambient package.json `"type"` field under `home` (a temp dir outside the monorepo, which may have none).
+standInScriptPath = path.join(home, "cli-stop-auth-standin.cjs");
+fs.writeFileSync(standInScriptPath, STANDIN_DAEMON_SCRIPT);
+
 let standInA, standInB;
 try {
   // ===================== (a) POSITIVE: correct secret on file, stand-in requires it =====================
@@ -118,7 +135,7 @@ try {
   standInA = await spawnStandInDaemon(SECRET);
   fs.writeFileSync(
     path.join(home, "daemon.pid"),
-    JSON.stringify({ pid: standInA.child.pid, port: standInA.port, url: `http://127.0.0.1:${standInA.port}`, version: "0.0.0", startedAt: new Date().toISOString() }, null, 2) + "\n",
+    JSON.stringify({ pid: standInA.child.pid, port: standInA.port, url: `http://127.0.0.1:${standInA.port}`, entry: standInScriptPath, version: "0.0.0", startedAt: new Date().toISOString() }, null, 2) + "\n",
   );
 
   const envA = { ...process.env, LOOM_HOME: home, LOOM_TEST: "1" };
@@ -138,7 +155,7 @@ try {
   standInB = await spawnStandInDaemon(SECRET); // same contract: anything but the exact bearer → 401, stays up
   fs.writeFileSync(
     path.join(home, "daemon.pid"),
-    JSON.stringify({ pid: standInB.child.pid, port: standInB.port, url: `http://127.0.0.1:${standInB.port}`, version: "0.0.0", startedAt: new Date().toISOString() }, null, 2) + "\n",
+    JSON.stringify({ pid: standInB.child.pid, port: standInB.port, url: `http://127.0.0.1:${standInB.port}`, entry: standInScriptPath, version: "0.0.0", startedAt: new Date().toISOString() }, null, 2) + "\n",
   );
 
   check("(b) stand-in daemon process is alive before stop()", isAliveHere(standInB.child.pid));

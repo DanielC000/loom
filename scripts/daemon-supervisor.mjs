@@ -141,7 +141,11 @@ if (wantsDetach && !isDetachedChild) {
   // (`processStartedAt` / `runningCodeBuiltAt` / `commitsBehind`, packages/daemon/src/deploy-staleness.ts)
   // instead — that is computed fresh per call and is the authoritative deploy-currency signal, not this file.
   try {
-    fs.writeFileSync(SUPERVISOR_PID_PATH, JSON.stringify({ pid: child.pid, port: PORT, supervisorStartedAt: new Date().toISOString() }, null, 2) + "\n");
+    // `entry: thisFile` (card 03cc6cae, mirroring bin/loom.mjs's own `isOurDaemon` identity record) — the
+    // exact absolute path THIS child was spawned with, so daemon-supervisor-stop.mjs's `isOurSupervisor`
+    // can confirm identity by exact match instead of a loose filename-only substring. GUARANTEED to appear
+    // verbatim in the child's own live command line (it's literally what we spawned it with, above).
+    fs.writeFileSync(SUPERVISOR_PID_PATH, JSON.stringify({ pid: child.pid, port: PORT, entry: thisFile, supervisorStartedAt: new Date().toISOString() }, null, 2) + "\n");
   } catch (err) {
     console.error(`[supervisor] failed to write the PID file (${err.message}) — killing the just-spawned detached child so it can't become an untracked orphan.`);
     try { process.kill(child.pid, "SIGKILL"); } catch { /* best-effort */ }

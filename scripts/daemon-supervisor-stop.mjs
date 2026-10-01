@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawnSync } from "node:child_process";
+import { commandLineOf, matchesRecordedEntry } from "../bin/lib/cmdline-identity.mjs";
 
 const DEFAULT_PORT = 4317;
 const loomHome = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
@@ -41,45 +42,23 @@ function isAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e && e.code === "EPERM"; }
 }
 
-/**
- * Best-effort live command line for `pid`, or null if it can't be determined (dead, permission denied, no
- * tool available). Used ONLY to CONFIRM identity before a hard kill — never to locate a pid to act on by
- * name (that stays forbidden; see CLAUDE.md's process-cleanup rule). A null result means "can't confirm",
- * which the caller treats as a REFUSAL, never as "assume it's ours."
- */
-function commandLineOf(pid) {
-  try {
-    if (process.platform === "win32") {
-      // The modern equivalent of `wmic process get commandline` (wmic is deprecated/absent on recent
-      // Windows). -NoProfile/-NonInteractive: no PSReadLine, no prompts — this process must never itself
-      // depend on an interactive line editor, the exact failure mode card 2f146782 is about.
-      const r = spawnSync("powershell", [
-        "-NoProfile", "-NonInteractive", "-Command",
-        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
-      ], { encoding: "utf8", timeout: 5000 });
-      if (r.status !== 0) return null;
-      return (r.stdout || "").trim() || null;
-    }
-    const r = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", timeout: 5000 });
-    if (r.status !== 0) return null;
-    return (r.stdout || "").trim() || null;
-  } catch {
-    return null;
-  }
-}
+// FALLBACK ONLY (a pid record predating card 03cc6cae's `entry` field): anchored on the `scripts/` DIRECTORY
+// this script actually lives in, not a bare filename — a bare `daemon-supervisor\.mjs` previously matched
+// any unrelated path merely containing that filename.
+const LEGACY_SUPERVISOR_CMDLINE_RE = /[\\/]scripts[\\/]daemon-supervisor\.mjs(?:["'\s]|$)/i;
 
 /**
- * Code Review finding #1 (Critical): `pid` alone proves only that SOMEONE holds that OS pid — pids get
- * reused, and this script's own pid FILE has no exit-time cleanup on every path (best-effort now added in
- * daemon-supervisor.mjs, but a build-failure exit / an older record / a killed-then-reused pid can all
- * still leave a stale file), so a live pid there is not proof it's still OUR supervisor. Confirms via the
- * process's own live command line rather than any weaker signal (a port probe can't help here — the pid
- * in this file is the SUPERVISOR, not the daemon that actually binds the port). Returns false — REFUSE,
- * never guess — on anything we can't positively confirm.
+ * Code Review finding #1 (Critical): `pid` alone proves only that SOMEONE holds that OS pid — a live pid
+ * there is not proof it's still OUR supervisor. Mirrors bin/loom.mjs's `isOurDaemon` (card 03cc6cae): tier
+ * 1 is the recorded `entry` via the shared `matchesRecordedEntry` (`../bin/lib/cmdline-identity.mjs`);
+ * tier 2 (a pre-`entry` pid record) is `LEGACY_SUPERVISOR_CMDLINE_RE`. Returns false — REFUSE, never guess
+ * — on anything we can't positively confirm, including when the command line can't be read at all.
  */
-function isOurSupervisor(pid) {
-  const cmd = commandLineOf(pid);
-  return !!cmd && /daemon-supervisor\.mjs/i.test(cmd);
+function isOurSupervisor(rec) {
+  const info = commandLineOf(rec.pid);
+  if (!info.raw) return false;
+  if (rec.entry) return matchesRecordedEntry(info, rec.entry);
+  return LEGACY_SUPERVISOR_CMDLINE_RE.test(info.raw);
 }
 
 function readLoopbackSecret() {
@@ -173,7 +152,7 @@ async function main() {
   // confirmation time and signalled through it directly; a POSIX pidfd) — neither of which Node exposes
   // cross-platform today. Not reducible with the APIs available to us here, not structurally impossible.
   if (isAlive(rec.pid)) {
-    if (!isOurSupervisor(rec.pid)) {
+    if (!isOurSupervisor(rec)) {
       console.error(`daemon-supervisor: PID ${rec.pid} from the pid file is alive, but its command line does not confirm it as our supervisor (daemon-supervisor.mjs) — the pid may have been reused by an unrelated process since the file was written. Refusing to kill an unverified process. If you're sure it's the stuck supervisor, stop it yourself: ${process.platform === "win32" ? `taskkill /PID ${rec.pid} /T /F` : `kill -9 ${rec.pid}`}`);
       return 1;
     }

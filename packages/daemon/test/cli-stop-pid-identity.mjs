@@ -22,6 +22,16 @@ import "./_guard.mjs"; // suite consistency (sets LOOM_TEST=1); this test touche
 //   port-holder's path IS anchored under a `loomctl` directory (`.../loomctl/dist/index.js` — the real
 //   detached-daemon shape a pre-279c0208 CLI would have produced) — still killed, proving the tightened
 //   legacy fallback still recognizes a genuinely loom-shaped path, just no longer an unanchored one.
+//   SCENARIO 4 (card 03cc6cae, hook.status===404 branch): a REAL HTTP stand-in that 404s
+//   `/internal/shutdown` (a daemon predating the hook) but has a non-loom command line and no recorded
+//   `entry` is now REFUSED, never signalled — before 03cc6cae this branch had NO identity check at all and
+//   any 404 response was treated as identity-confirmed.
+//   SCENARIO 5 (card 03cc6cae, hook.status===401 branch): same shape, but the stand-in 401s
+//   `/internal/shutdown` unconditionally (a rejected credential) — also now refused rather than killed.
+//   SCENARIO 6 (card 03cc6cae, hook.status 202 but waitForDown TIMES OUT): the stand-in ACKs the shutdown
+//   POST with 202 but never actually exits (an un-signalled process that merely answered once) — `graceful`
+//   stays false, and the now-widened identity check still gates the fall-through even though `hook.status`
+//   is DEFINED (202), not `undefined`. Uses LOOM_TEST_STOP_WAIT_FOR_DOWN_MS to keep this fast.
 //
 // REAL subprocesses, deliberately, per memory real-spawn-smoke-for-subprocess-features (a mocked exec
 // impl never exercises the real cross-platform spawn/signal path — a Windows-only no-op would otherwise
@@ -107,6 +117,47 @@ function spawnPortHolder(scriptPath) {
     });
     child.once("error", reject);
     child.once("exit", (code) => { if (!buf.includes('"port"')) reject(new Error(`port-holder exited early (code ${code})`)); });
+  });
+}
+
+// A real HTTP stand-in (card 03cc6cae scenarios 4-6) that answers GET /api/version 200 always, and
+// POST /internal/shutdown according to `mode`: "404" (no hook at all), "401" (rejects every credential), or
+// "ack-no-exit" (202-acks but never actually exits — simulates a process that answered once but is not
+// really the daemon shutting down). Always plain CommonJS (mirrors PORT_HOLDER_SCRIPT's own reasoning).
+function standInScriptFor(mode) {
+  return (
+    "const http=require('node:http');" +
+    "const srv=http.createServer((req,res)=>{" +
+    "if(req.method==='GET'&&req.url==='/api/version'){res.writeHead(200,{'content-type':'application/json'});res.end('{}');return;}" +
+    "if(req.method==='POST'&&req.url==='/internal/shutdown'){" +
+    (mode === "404"
+      ? "res.writeHead(404).end();"
+      : mode === "401"
+        ? "res.writeHead(401,{'content-type':'application/json'});res.end('{}');"
+        : "res.writeHead(202,{'content-type':'application/json'});res.end('{}');") +
+    "return;}" +
+    "res.writeHead(404).end();});" +
+    "srv.on('error',(e)=>{console.error(e);process.exit(1);});" +
+    "srv.listen(0,'127.0.0.1',()=>{console.log(JSON.stringify({port:srv.address().port}));});"
+  );
+}
+function spawnHttpStandIn(scriptPath, mode) {
+  if (scriptPath) {
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, standInScriptFor(mode));
+  }
+  const script = standInScriptFor(mode);
+  const child = spawn(process.execPath, scriptPath ? [scriptPath] : ["-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+  return new Promise((resolve, reject) => {
+    let buf = "";
+    child.stdout.on("data", (c) => {
+      if (buf.includes('"port"')) return;
+      buf += c;
+      const m = buf.match(/\{"port":\d+\}/);
+      if (m) resolve({ child, port: JSON.parse(m[0]).port });
+    });
+    child.once("error", reject);
+    child.once("exit", (code) => { if (!buf.includes('"port"')) reject(new Error(`http stand-in exited early (code ${code})`)); });
   });
 }
 
@@ -245,6 +296,86 @@ const env = { ...process.env, LOOM_HOME: home, LOOM_TEST: "1" };
   }
 }
 
+// === SCENARIO 4 (card 03cc6cae): hook.status===404 (daemon predates the hook), legacy record (no entry), =
+// === non-loom command line → refused, never signalled. Before 03cc6cae this branch had NO identity check =
+// === at all; any 404 response was treated as identity-confirmed and the pid was signalled unverified. =====
+{
+  const tmpDir = mkdtempManaged("loom-stop-identity-404-");
+  const scriptPath = path.join(tmpDir, "some-other-node-app", "server.js");
+  const { child: holder, port } = await spawnHttpStandIn(scriptPath, "404");
+  try {
+    writeRecordFor(holder, port, null); // legacy shape: no `entry`
+
+    check("[S4] 404 stand-in process is alive before stop()", isAliveHere(holder.pid));
+
+    const result = await runCli(["stop"], env);
+
+    // THE POSITIVE CONTROL: against pre-03cc6cae bin/loom.mjs this assertion FAILS — the old code treats
+    // ANY HTTP response (incl. 404) on the recorded port as identity-confirmed and falls straight through
+    // to the signal ladder, hard-killing this foreign process.
+    check("[S4] 404 stand-in process is STILL ALIVE after stop() (never signalled)", isAliveHere(holder.pid));
+    check("[S4] stop() reports the predates-the-hook message before refusing", /predates the graceful-shutdown hook/i.test(result.stderr));
+    check("[S4] stop() exits 1 (refuses rather than guessing)", result.code === 1);
+    check("[S4] stop() explains the command line does not confirm the loom daemon", /does not confirm it as the loom daemon/i.test(result.stderr) && result.stderr.includes(String(holder.pid)));
+    check("[S4] the PID file is left untouched (this is a refusal, not a resolved stale record)", fs.existsSync(path.join(home, "daemon.pid")));
+  } finally {
+    try { holder.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+}
+
+// === SCENARIO 5 (card 03cc6cae): hook.status===401 (rejected credential), legacy record (no entry), =======
+// === non-loom command line → refused, never signalled. Before 03cc6cae this branch had NO identity check =
+// === at all either; any 401 response was treated as identity-confirmed. ====================================
+{
+  const tmpDir = mkdtempManaged("loom-stop-identity-401-");
+  const scriptPath = path.join(tmpDir, "some-other-node-app", "server.js");
+  const { child: holder, port } = await spawnHttpStandIn(scriptPath, "401");
+  try {
+    writeRecordFor(holder, port, null); // legacy shape: no `entry`
+
+    check("[S5] 401 stand-in process is alive before stop()", isAliveHere(holder.pid));
+
+    const result = await runCli(["stop"], env);
+
+    // THE POSITIVE CONTROL: against pre-03cc6cae bin/loom.mjs this assertion FAILS — the old code falls
+    // straight through to the signal ladder on a 401 with no command-line check, hard-killing this process.
+    check("[S5] 401 stand-in process is STILL ALIVE after stop() (never signalled)", isAliveHere(holder.pid));
+    check("[S5] stop() reports the rejected-credential message before refusing", /rejected our stop credential \(401\)/i.test(result.stderr));
+    check("[S5] stop() exits 1 (refuses rather than guessing)", result.code === 1);
+    check("[S5] stop() explains the command line does not confirm the loom daemon", /does not confirm it as the loom daemon/i.test(result.stderr) && result.stderr.includes(String(holder.pid)));
+    check("[S5] the PID file is left untouched (this is a refusal, not a resolved stale record)", fs.existsSync(path.join(home, "daemon.pid")));
+  } finally {
+    try { holder.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+}
+
+// === SCENARIO 6 (card 03cc6cae): hook.status===202 (ACKed) but the process never actually exits, so =======
+// === waitForDown TIMES OUT and `graceful` stays false — legacy record (no entry), non-loom command line ===
+// === → refused, never signalled, even though hook.status is DEFINED (not `undefined`). =====================
+{
+  const tmpDir = mkdtempManaged("loom-stop-identity-202-timeout-");
+  const scriptPath = path.join(tmpDir, "some-other-node-app", "server.js");
+  const { child: holder, port } = await spawnHttpStandIn(scriptPath, "ack-no-exit");
+  const envFastWait = { ...env, LOOM_TEST_STOP_WAIT_FOR_DOWN_MS: "300" }; // test seam — see bin/loom.mjs
+  try {
+    writeRecordFor(holder, port, null); // legacy shape: no `entry`
+
+    check("[S6] 202-ack-no-exit stand-in process is alive before stop()", isAliveHere(holder.pid));
+
+    const result = await runCli(["stop"], envFastWait);
+
+    // THE POSITIVE CONTROL: against pre-03cc6cae bin/loom.mjs this assertion FAILS — the old code never
+    // checked identity on the hook.status-defined paths at all, so a 202 ack with a timed-out waitForDown
+    // fell straight through to the signal ladder and hard-killed this foreign process.
+    check("[S6] 202-ack-no-exit stand-in process is STILL ALIVE after stop() (never signalled)", isAliveHere(holder.pid));
+    check("[S6] stop() exits 1 (refuses rather than guessing)", result.code === 1);
+    check("[S6] stop() explains the command line does not confirm the loom daemon", /does not confirm it as the loom daemon/i.test(result.stderr) && result.stderr.includes(String(holder.pid)));
+    check("[S6] the PID file is left untouched (this is a refusal, not a resolved stale record)", fs.existsSync(path.join(home, "daemon.pid")));
+  } finally {
+    try { holder.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+}
+
 // === REGEX-LEVEL TABLE TEST (card 279c0208 review): the LEGACY fallback in isolation — the reviewer's ===
 // === two named false positives (a `loom`-named path with no `bin` ancestor, nothing to do with the CLI) ==
 // === are refused WITHOUT a full real-process spawn per string, alongside positive/negative controls =====
@@ -269,6 +400,6 @@ const env = { ...process.env, LOOM_HOME: home, LOOM_TEST: "1" };
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — `loom stop` never signals a pid unless the port-based check AND a command-line identity check (the recorded exact `entry` path, or a narrow package-anchored fallback for a legacy record) confirm it's actually the loom daemon — never a foreign process whose path merely resembles one — and a genuinely wedged real daemon stays killable."
+  ? "\n✅ ALL PASS — `loom stop` never signals a pid unless the port-based check AND a command-line identity check (the recorded exact `entry` path, or a narrow package-anchored fallback for a legacy record) confirm it's actually the loom daemon — never a foreign process whose path merely resembles one, on ANY signalling branch (hook.status undefined, 404, 401, or a 202/200 whose waitForDown timed out) — and a genuinely wedged real daemon stays killable."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

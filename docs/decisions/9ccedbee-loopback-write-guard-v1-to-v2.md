@@ -18,6 +18,25 @@ The v2 guard's secret reaches the browser via a `?token=` URL param that `loom o
 
 **KNOWN GAP (dev workflow, Major 2 in Code Review):** `api.ts` runs on whatever origin serves it. In single-process/packaged mode that's the daemon's own origin (127.0.0.1:PORT) — token capture and the write it authorizes are same-origin, no issue. Under `pnpm web`'s dev proxy the SPA is served from a DIFFERENT origin (127.0.0.1:5317) with its OWN localStorage — a token captured while visiting the daemon's own origin directly is invisible here. The daemon's boot banner prints a 5317 hint too (dev builds only) for exactly this reason; there is no code-level fix on this side beyond visiting the right URL once.
 
+## `loopback-secret.ts`: plaintext-recoverable, and boot-captured, not live-rotated (card `03cc6cae`)
+
+`getOrCreateLoopbackSecret` stores this bearer secret in PLAINTEXT at rest (0600, best-effort chmod) —
+unlike the hashed-at-rest `gateway_tokens` store, which is right for a human-minted REMOTE credential the
+human copies once into a client they control. This secret must stay recoverable: `bin/loom.mjs`'s `loom
+open`/`loom start`/`loom stop` re-reads the file fresh on every CLI invocation (to embed it in a
+freshly-opened browser URL, or to present it on the shutdown POST), and a fresh browser tab that never saw
+a tokenized URL has no other way to obtain it. Hashing it at rest would make that recovery impossible.
+
+**Corrected 2026-10-01 (card `03cc6cae`): deleting + regenerating the secret file is NOT picked up by a
+live daemon.** An earlier revision of the inline comment on `getOrCreateLoopbackSecret` claimed a rotated
+file "is picked up without a restart" — true only of the bare read function in isolation (it has no
+module-level cache), but FALSE of actual daemon behavior: `index.ts`'s `main()` is the function's only
+daemon-side call site, and it invokes it exactly ONCE at boot, holding the result in `loopbackSecret` for
+the gateway's whole lifetime (`server.ts`'s guard reads it from `deps`, never re-fetched per request).
+Rotating the on-disk file therefore only takes effect on the daemon's NEXT boot/restart, same as any other
+boot-captured config value — `bin/loom.mjs`'s own CLI-side re-reads are the one place "fresh each call" is
+actually true, since a one-shot CLI invocation has no boot-captured value to go stale.
+
 ## Do not
 
 - Do not gate this hook by `routeTier`/Tier classification again — that is the exact v1 defect: Tier 1 means "safe for an authenticated remote human," not "safe from a co-resident agent," and conflating the two reopens a gap a real agent already exploited.

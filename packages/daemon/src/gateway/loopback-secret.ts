@@ -4,19 +4,8 @@ import path from "node:path";
 import { LOOPBACK_SECRET_PATH } from "../paths.js";
 
 /**
- * Card 9ccedbee — the loopback human-only-write guard secret. Mirrors `keys/envelope.ts`'s
- * `loadOrCreateKey` (same `wx`-exclusive lazy-create + best-effort 0600 chmod, same race-safe re-read
- * on EEXIST), but this is a plain bearer SECRET presented over the wire on every guarded request — not
- * an encryption key a decrypt path re-derives from stored ciphertext. Unlike the `gateway_tokens` store
- * (hashed at rest, plaintext shown once — right for a human-minted REMOTE credential the human copies
- * once into a client they control), THIS secret must stay recoverable in plaintext indefinitely: `loom
- * open`/`loom start` (bin/loom.mjs) re-reads it on every invocation to embed in the browser-open URL, and
- * a fresh browser tab that never saw that URL has no other way to obtain it. Hashing it at rest would
- * make that recovery impossible.
- *
- * Read fresh each call (no long-lived module cache) — mirrors envelope.ts's own reasoning: a rotated
- * (deleted + regenerated) file is picked up without a restart, and this only runs on the small subset of
- * `/api/*` write requests this guard actually covers, never a hot path.
+ * @decision 9ccedbee — never hash this at rest (must stay plaintext-recoverable); the daemon's one call
+ * site reads it ONCE at boot, so an on-disk rotation only takes effect on the next boot/restart, not live.
  */
 export function getOrCreateLoopbackSecret(secretPath: string = LOOPBACK_SECRET_PATH): string {
   const existing = readSecretIfPresent(secretPath);

@@ -19,9 +19,12 @@ kills that stranger's WHOLE process tree.
 with, before falling through to the signal ladder. Two tiers: (1) PREFERRED — `rec.entry`, the exact
 absolute path recorded in the pid file at spawn time (`writeForegroundPidRecord`/`startDetached`), checked
 as a verbatim substring of the live command line; (2) a narrower, package-anchored regex fallback for a
-pid record written by a CLI predating this field. A real wedged daemon passes tier 1 trivially (a live
-pid's command line is readable regardless of HTTP responsiveness, and every pid record this CLI now
-writes carries `entry`), so the "must stay killable" guarantee is preserved.
+pid record written by a CLI predating this field. A real wedged daemon's command line is readable
+regardless of HTTP responsiveness, and every pid record this CLI now writes carries `entry`, so the "must
+stay killable" guarantee is preserved — **but tier 1's own match is NOT automatically trivial, see
+`03cc6cae`'s correction**: a verbatim-substring comparison can genuinely fail even for a real daemon when a
+launcher (e.g. a Windows npm cmd-shim) produces a live command line that differs structurally from the
+Node-normalized recorded `entry`.
 
 **Deliberately scoped to the `timeout` branch only, not every signal.** The `hook.status` defined cases
 (200/202 that timed out on `waitForDown`, 404, 401) already treat ANY HTTP response on the recorded port as
@@ -123,12 +126,21 @@ live-verified on the Windows host this fix was written on:
   `isServiceRegistered`'s registered/not-registered branches using the SAME structural-only posture
   `cli-service.mjs` already documents for the mac/linux paths.
 
+## Superseded by `03cc6cae` (2026-10-01)
+
+The "do not widen" item directly below is **no longer in force** — `03cc6cae` deliberately reverses it:
+`isOurDaemon` now runs on every branch that can reach the signal ladder, not just the `timeout` outcome of
+the `hook.status === undefined` case. See `docs/decisions/03cc6cae-loom-stop-identity-check-widened-to-every-branch.md`
+for why, and for how `cli-stop-auth.mjs`'s stand-in was fixed (given a recorded `entry`) rather than the
+check being loosened. The rest of this record (point 2, the review follow-ups, the regex-anchoring "Do
+not"s) is untouched and still in force.
+
 ## Do not
 
-- Do not widen the `isOurDaemon` command-line check to run before the `hook.status`-defined signal paths
+- ~~Do not widen the `isOurDaemon` command-line check to run before the `hook.status`-defined signal paths
   (the ones with an actual HTTP response, incl. 404/401) — that re-breaks `cli-stop-auth.mjs`'s guarded-401
   scenario, which is deliberately a bare, non-loom-shaped stand-in process. Keep it scoped to the `timeout`
-  branch of the `hook.status === undefined` case.
+  branch of the `hook.status === undefined` case.~~ **SUPERSEDED by `03cc6cae` — see above.**
 - Do not revert `isOurDaemon`/`LEGACY_DAEMON_CMDLINE_RE` to the original unanchored
   `dist[\/]index\.js|loom(\.mjs)?` shape, and do not un-anchor the symlink alternative back to a bare
   `[\/]loom(?:["'\s]|$)` — code review reproduced BOTH as false positives (a foreign app's own
