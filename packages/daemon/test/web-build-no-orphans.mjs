@@ -65,12 +65,17 @@ if (gitStatus) {
 }
 
 const original = fs.readFileSync(MAIN_TSX, "utf8");
-const ALERT_LINE = /window\.alert\(`Action failed: \$\{err instanceof Error \? err\.message : String\(err\)\}`\)/;
-if (!ALERT_LINE.test(original)) {
-  console.error(`🛑 refusing to run — the expected marker anchor line was not found in ${MAIN_TSX} (file may have changed shape; update this test's anchor).`);
+// Card db36d7a4: this used to anchor on the mutation-failure alert's own error-message expression, which
+// silently went stale (exit 99, refusing to run) the moment that unrelated code was refactored (commit
+// 53b81688, 2026-09-24) — invisible for over a week because this file is NOT_HERMETIC and nothing else
+// ever runs it. Anchoring on a dedicated, test-owned marker (see its matching comment in main.tsx) instead
+// of real app logic means a future refactor of the error-handling code can no longer break this test.
+const ANCHOR_LINE = /__loomBuildVerify = "[^"]*"/;
+if (!ANCHOR_LINE.test(original)) {
+  console.error(`🛑 refusing to run — the expected __loomBuildVerify anchor was not found in ${MAIN_TSX} (file may have changed shape; update this test's anchor and its twin in web-build-no-orphans-anchor-guard.mjs).`);
   process.exit(99);
 }
-const withMarker = (tag) => original.replace(ALERT_LINE, `window.alert(\`Action failed ${tag}: \${err instanceof Error ? err.message : String(err)}\`)`);
+const withMarker = (tag) => original.replace(ANCHOR_LINE, `__loomBuildVerify = "anchor-${tag}"`);
 
 try {
   fs.rmSync(path.join(WEB_DIR, "dist"), { recursive: true, force: true });

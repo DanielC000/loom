@@ -32,6 +32,16 @@ const queryClient = new QueryClient({
   }),
 });
 
+// Anchor for packages/daemon/test/web-build-no-orphans.mjs (card db36d7a4): that test mutates ONLY the
+// string literal below to produce two real builds with distinct, verifiable content hashes while it
+// exercises turbo's build cache. It used to anchor on the mutation-failure alert's own error-message
+// expression above, which broke (commit 53b81688) the first time that unrelated code was refactored.
+// Keeping this anchor on its own line, decoupled from real app logic, is what makes it refactor-proof —
+// don't fold it into the handler above, and don't remove the assignment: it's a deliberate side effect so
+// bundlers never tree-shake it out of the production bundle (a dropped assignment would make two
+// "different" builds byte-identical, silently defeating the test's whole purpose).
+(window as unknown as { __loomBuildVerify?: string }).__loomBuildVerify = "anchor-base";
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
