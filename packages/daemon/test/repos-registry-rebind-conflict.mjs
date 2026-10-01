@@ -73,6 +73,10 @@ const svcACaseFlipped = svcA.charAt(0) === svcA.charAt(0).toUpperCase()
   ? svcA.charAt(0).toLowerCase() + svcA.slice(1)
   : svcA.charAt(0).toUpperCase() + svcA.slice(1);
 const svcATrailingSlash = svcA + path.sep;
+// A vault dir DISTINCT from every code repo above — card 5ba4412d now refuses vaultPath===repoPath for a
+// CODE project at CREATE time, so every fixture below (previously paired repoPath with an identical
+// vaultPath) needs a real, separate vault target that isn't itself part of what each case is testing.
+const vaultDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-rebind-vault-"));
 
 try {
   // =====================================================================================================
@@ -85,7 +89,7 @@ try {
     try {
       const created = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "RebindTest", repoPath: primary, vaultPath: primary, repos: [{ key: "api", path: svcA }] },
+        payload: { name: "RebindTest", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "api", path: svcA }] },
       });
       const projectId = created.json().id;
       check("(A0) setup: project created with a registry entry pointing at svcA", created.json().repos?.length === 1);
@@ -109,7 +113,7 @@ try {
       // (A3) the SAME conflict via a vaultPath rebind (not just repoPath) is caught too.
       const created2 = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "RebindTest2", repoPath: primary, vaultPath: primary, repos: [{ key: "api", path: svcA }] },
+        payload: { name: "RebindTest2", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "api", path: svcA }] },
       });
       const projectId2 = created2.json().id;
       const badVaultRebind = await app.inject({ method: "PATCH", url: `/api/projects/${projectId2}`, payload: { vaultPath: svcA } });
@@ -170,7 +174,7 @@ try {
       // form — must still be caught as an alias despite the different spelling.
       const c1 = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "SpellFwdSlash", repoPath: svcA, vaultPath: svcA, repos: [{ key: "same", path: svcAForwardSlash }] },
+        payload: { name: "SpellFwdSlash", repoPath: svcA, vaultPath: vaultDir, repos: [{ key: "same", path: svcAForwardSlash }] },
       });
       check("(C1) forward-slash spelling of repoPath as a registry entry -> 400 (still caught as an alias)", c1.statusCode === 400);
 
@@ -178,7 +182,7 @@ try {
       if (svcACaseFlipped !== svcA) {
         const c2 = await app.inject({
           method: "POST", url: "/api/projects",
-          payload: { name: "SpellCaseFlip", repoPath: svcA, vaultPath: svcA, repos: [{ key: "same", path: svcACaseFlipped }] },
+          payload: { name: "SpellCaseFlip", repoPath: svcA, vaultPath: vaultDir, repos: [{ key: "same", path: svcACaseFlipped }] },
         });
         check("(C2) case-flipped spelling of repoPath as a registry entry -> 400 (still caught as an alias)", c2.statusCode === 400);
       } else {
@@ -188,7 +192,7 @@ try {
       // (C3) a trailing separator on an otherwise-identical path.
       const c3 = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "SpellTrailingSlash", repoPath: svcA, vaultPath: svcA, repos: [{ key: "same", path: svcATrailingSlash }] },
+        payload: { name: "SpellTrailingSlash", repoPath: svcA, vaultPath: vaultDir, repos: [{ key: "same", path: svcATrailingSlash }] },
       });
       check("(C3) trailing-separator spelling of repoPath as a registry entry -> 400 (still caught as an alias)", c3.statusCode === 400);
 
@@ -196,7 +200,7 @@ try {
       // seenPaths dedup must ALSO canonicalize, not just the repoPath/vaultPath alias checks.
       const c4 = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "SpellDedup", repoPath: primary, vaultPath: primary, repos: [{ key: "one", path: svcA }, { key: "two", path: svcAForwardSlash }] },
+        payload: { name: "SpellDedup", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "one", path: svcA }, { key: "two", path: svcAForwardSlash }] },
       });
       check("(C4) two differently-spelled registry entries for the SAME real dir -> 400 (dedup catches it)", c4.statusCode === 400);
       check("(C4) error names the duplicate-path rule", /duplicat/i.test(c4.json().error ?? ""));
@@ -205,7 +209,7 @@ try {
       // — proves the canonicalization isn't over-matching every forward-slash path to repoPath/vaultPath.
       const c5 = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "SpellControl", repoPath: primary, vaultPath: primary, repos: [{ key: "distinct", path: newPrimary.replace(/\\/g, "/") }] },
+        payload: { name: "SpellControl", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "distinct", path: newPrimary.replace(/\\/g, "/") }] },
       });
       check("(C5) control: a distinct repo (forward-slash spelling) is accepted -> 201", c5.statusCode === 201);
       check("(C5) control: stored path is canonicalized (native realpath form)", c5.json().repos?.[0]?.path === newPrimary || c5.json().repos?.[0]?.path?.toLowerCase() === newPrimary.toLowerCase());
@@ -228,7 +232,7 @@ try {
     try {
       const created = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "RegistryEditLiveTest", repoPath: primary, vaultPath: primary, repos: [{ key: "api", path: svcA }] },
+        payload: { name: "RegistryEditLiveTest", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "api", path: svcA }] },
       });
       const projectId = created.json().id;
       const now = new Date().toISOString();

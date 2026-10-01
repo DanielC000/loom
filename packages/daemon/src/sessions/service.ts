@@ -30,7 +30,7 @@ import { boundedSimpleGit } from "../git/bounded.js";
 import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, parseMainlineWatermark, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
-import { checkVaultPathUpdate } from "../projects/vault-path.js";
+import { checkVaultPathUpdate, checkVaultRepoTripleContainment, canonicallyPaired } from "../projects/vault-path.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import type { RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
@@ -12844,17 +12844,26 @@ export class SessionService {
     this.requireOwnProject(managerSessionId, projectId, "project_update");
     const project = this.db.getProject(projectId);
     if (!project) throw new Error("project not found");
-    // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, refuse an
-    // explicit "" that would strand a VAULT-ONLY project, and refuse a rebind that ALIASES repoPath or a
-    // registered repo — the same guard the human REST PATCH path, platform's project_update, and setup's
-    // project_update all now share. This surface previously wrote patch.vaultPath raw with no validation
-    // at all. Runs FIRST, before any write (code review on 87e21134): this is this method's ONLY await
-    // (isGitRepo, a real git subprocess call) — running it before the config write below means a
-    // rejected vaultPath can never leave a PARTIAL apply (config committed, then the whole call still
-    // reports an error) the way it would if the config write ran first and this rejected afterward.
+    // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and refuse an
+    // explicit "" that would strand a VAULT-ONLY project — the same guard the human REST PATCH path,
+    // platform's project_update, and setup's project_update all now share. This surface previously wrote
+    // patch.vaultPath raw with no validation at all. Runs FIRST, before any write (code review on
+    // 87e21134): together with the containment check just below, these are this method's ONLY awaits
+    // (isGitRepo, a real git subprocess call) — running both before the config write means a rejected
+    // vaultPath can never leave a PARTIAL apply (config committed, then the whole call still reports an
+    // error) the way it would if the config write ran first and either rejected afterward.
     const vaultCheck = await checkVaultPathUpdate(project, patch.vaultPath);
     if (!vaultCheck.ok) throw new Error(vaultCheck.error);
     const vaultPath = vaultCheck.value;
+    // Card 5ba4412d review follow-up: the SHARED containment check on the full effective triple — this
+    // surface can never touch repoPath/repos itself, so the only field that can trigger it is vaultPath.
+    if (vaultPath !== undefined) {
+      const tripleCheck = await checkVaultRepoTripleContainment(
+        { repoPath: project.repoPath, vaultPath, repos: project.repos },
+        { pairingIsIntentional: canonicallyPaired(project.repoPath, project.vaultPath) },
+      );
+      if (!tripleCheck.ok) throw new Error(tripleCheck.error);
+    }
     // Re-read AFTER the await, and do every write below off THIS row with NO further await in between —
     // so nothing can land between reading and writing. (The vaultPath validation above still ran against
     // the PRE-await snapshot — a narrower, single-await residual, not something this re-read closes; see

@@ -70,6 +70,10 @@ const svcA = mkRepo("svcA");
 const svcB = mkRepo("svcB");
 const nonRepo = path.join(os.tmpdir(), `loom-repos-nonrepo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(nonRepo, { recursive: true }); // a real dir, but NOT a git repo
+// A vault dir DISTINCT from `primary` — card 5ba4412d now refuses vaultPath===repoPath for a CODE
+// project at CREATE time, so every fixture below (previously paired `primary` with itself) needs a real,
+// separate vault target that isn't itself part of what each case is actually testing.
+const vaultDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-repos-vault-"));
 
 const now = new Date().toISOString();
 
@@ -85,7 +89,7 @@ try {
       // (A1) create with a valid repos entry round-trips it, including gateCommand.
       const created = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "P", repoPath: primary, vaultPath: primary, repos: [{ key: "svc-a", path: svcA, gateCommand: "npm test" }] },
+        payload: { name: "P", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "svc-a", path: svcA, gateCommand: "npm test" }] },
       });
       check("(A1) POST /api/projects with a valid repos entry -> 201", created.statusCode === 201);
       const p1 = created.json();
@@ -93,13 +97,13 @@ try {
       check("(A1) persisted to the Db", JSON.stringify(db.getProject(p1.id)?.repos) === JSON.stringify([{ key: "svc-a", path: svcA, gateCommand: "npm test" }]));
 
       // (A2) create omitting repos defaults to [].
-      const created2 = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "P2", repoPath: primary, vaultPath: primary } });
+      const created2 = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "P2", repoPath: primary, vaultPath: vaultDir } });
       check("(A2) POST /api/projects omitting repos -> [] default", Array.isArray(created2.json().repos) && created2.json().repos.length === 0);
 
       // (A3) an entry with NO gateCommand round-trips with the key simply absent.
       const created3 = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "P3", repoPath: primary, vaultPath: primary, repos: [{ key: "svc-b", path: svcB }] },
+        payload: { name: "P3", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "svc-b", path: svcB }] },
       });
       check("(A3) an entry with no gateCommand round-trips with gateCommand absent/undefined", created3.json().repos[0].gateCommand === undefined);
 
@@ -107,7 +111,7 @@ try {
       // round-trips with the key simply absent (mirrors gateCommand's own A3 shape).
       const created3b = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "P3b", repoPath: primary, vaultPath: primary, repos: [{ key: "svc-a", path: svcA, noGateByDesign: true }, { key: "svc-b", path: svcB }] },
+        payload: { name: "P3b", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "svc-a", path: svcA, noGateByDesign: true }, { key: "svc-b", path: svcB }] },
       });
       check("(A3b) POST with a per-entry noGateByDesign:true -> 201", created3b.statusCode === 201);
       check("(A3b) response round-trips noGateByDesign:true on the flagged entry", created3b.json().repos[0].noGateByDesign === true);
@@ -118,7 +122,7 @@ try {
       // (repos.ts's validateRepoRegistry), previously never exercised by any test.
       const badNoGate = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "BadNoGate", repoPath: primary, vaultPath: primary, repos: [{ key: "svc-a", path: svcA, noGateByDesign: "yes" }] },
+        payload: { name: "BadNoGate", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "svc-a", path: svcA, noGateByDesign: "yes" }] },
       });
       check("(A3c) POST with a non-boolean per-entry noGateByDesign -> 400", badNoGate.statusCode === 400);
       check("(A3c) error names the noGateByDesign boolean rule", /noGateByDesign must be a boolean/.test(badNoGate.json().error ?? ""));
@@ -127,7 +131,7 @@ try {
       const beforeCount = db.listAllProjects().length;
       const badCreate = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "Bad", repoPath: primary, vaultPath: primary, repos: [{ key: "bad", path: nonRepo }] },
+        payload: { name: "Bad", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "bad", path: nonRepo }] },
       });
       check("(A4) POST with a non-repo repos entry path -> 400", badCreate.statusCode === 400);
       check("(A4) error names the offending entry", /not an existing git repository/.test(badCreate.json().error ?? ""));
@@ -136,7 +140,7 @@ try {
       // (A5) a RELATIVE entry path is REJECTED (400) — absolute paths only.
       const badRelative = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "BadRel", repoPath: primary, vaultPath: primary, repos: [{ key: "rel", path: "../some-relative-repo" }] },
+        payload: { name: "BadRel", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "rel", path: "../some-relative-repo" }] },
       });
       check("(A5) POST with a relative repos entry path -> 400", badRelative.statusCode === 400);
       check("(A5) error names the absolute-path requirement", /absolute/.test(badRelative.json().error ?? ""));
@@ -144,7 +148,7 @@ try {
       // (A6) the reserved key "primary" is REJECTED.
       const badPrimary = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "BadPrimary", repoPath: primary, vaultPath: primary, repos: [{ key: "primary", path: svcA }] },
+        payload: { name: "BadPrimary", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "primary", path: svcA }] },
       });
       check("(A6) POST with the reserved key \"primary\" -> 400", badPrimary.statusCode === 400);
       check("(A6) error names the reserved-key rule", /reserved/.test(badPrimary.json().error ?? ""));
@@ -155,14 +159,14 @@ try {
       // escaped path. A key containing `/`, `\`, or other special characters is REJECTED.
       const badSlash = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "BadSlash", repoPath: primary, vaultPath: primary, repos: [{ key: "svc/a", path: svcA }] },
+        payload: { name: "BadSlash", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "svc/a", path: svcA }] },
       });
       check("(A6b) POST with a repos key containing '/' -> 400", badSlash.statusCode === 400);
       check("(A6b) error names the charset rule", /\[A-Za-z0-9._-\]/.test(badSlash.json().error ?? ""));
 
       const badBackslash = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "BadBackslash", repoPath: primary, vaultPath: primary, repos: [{ key: "svc\\a", path: svcA }] },
+        payload: { name: "BadBackslash", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "svc\\a", path: svcA }] },
       });
       check("(A6c) POST with a repos key containing '\\' -> 400", badBackslash.statusCode === 400);
 
@@ -170,14 +174,14 @@ try {
       // charset regex on their own, so they need their own dedicated rejection.
       const badDotDot = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "BadDotDot", repoPath: primary, vaultPath: primary, repos: [{ key: "..", path: svcA }] },
+        payload: { name: "BadDotDot", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "..", path: svcA }] },
       });
       check("(A6d) POST with a repos key of '..' -> 400", badDotDot.statusCode === 400);
       check("(A6d) error names the reserved traversal rule", /reserved/.test(badDotDot.json().error ?? ""));
 
       const badDot = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "BadDot", repoPath: primary, vaultPath: primary, repos: [{ key: ".", path: svcA }] },
+        payload: { name: "BadDot", repoPath: primary, vaultPath: vaultDir, repos: [{ key: ".", path: svcA }] },
       });
       check("(A6e) POST with a repos key of '.' -> 400", badDot.statusCode === 400);
 
@@ -185,7 +189,7 @@ try {
       // accepted normally — the charset guard isn't over-matching legitimate keys.
       const goodCharset = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "GoodCharset", repoPath: primary, vaultPath: primary, repos: [{ key: "svc-a.v2_beta", path: svcA }] },
+        payload: { name: "GoodCharset", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "svc-a.v2_beta", path: svcA }] },
       });
       check("(A6f) control: a repos key using the full allowed charset -> 201", goodCharset.statusCode === 201);
       check("(A6f) control: key round-trips verbatim", goodCharset.json().repos?.[0]?.key === "svc-a.v2_beta");
@@ -193,7 +197,7 @@ try {
       // (A7) a DUPLICATE key across two entries is REJECTED.
       const badDup = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "BadDup", repoPath: primary, vaultPath: primary, repos: [{ key: "svc-a", path: svcA }, { key: "svc-a", path: svcB }] },
+        payload: { name: "BadDup", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "svc-a", path: svcA }, { key: "svc-a", path: svcB }] },
       });
       check("(A7) POST with a duplicate registry key -> 400", badDup.statusCode === 400);
       check("(A7) error names the duplicate key", /duplicat/.test(badDup.json().error ?? ""));
@@ -201,7 +205,7 @@ try {
       // (A8) an entry path ALIASING the project's own repoPath is REJECTED.
       const badAliasRepo = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "BadAliasRepo", repoPath: primary, vaultPath: primary, repos: [{ key: "alias", path: primary }] },
+        payload: { name: "BadAliasRepo", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "alias", path: primary }] },
       });
       check("(A8) POST with a repos entry aliasing repoPath -> 400", badAliasRepo.statusCode === 400);
       check("(A8) error names the aliasing rule", /alias/.test(badAliasRepo.json().error ?? ""));
@@ -219,7 +223,7 @@ try {
       // (A10) two entries aliasing EACH OTHER'S path is REJECTED.
       const badAliasEachOther = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "BadAliasEach", repoPath: primary, vaultPath: primary, repos: [{ key: "one", path: svcA }, { key: "two", path: svcA }] },
+        payload: { name: "BadAliasEach", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "one", path: svcA }, { key: "two", path: svcA }] },
       });
       check("(A10) POST with two repos entries aliasing the same path -> 400", badAliasEachOther.statusCode === 400);
 
@@ -292,8 +296,8 @@ try {
   // =====================================================================================================
   {
     const db = new Db(path.join(tmpHome, "agent.db"));
-    db.insertProject({ id: "pHome", name: "Loom Platform", repoPath: primary, vaultPath: primary, config: {}, createdAt: now, archivedAt: null, reserved: true });
-    db.insertProject({ id: "pExisting", name: "Existing", repoPath: primary, vaultPath: primary, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+    db.insertProject({ id: "pHome", name: "Loom Platform", repoPath: primary, vaultPath: vaultDir, config: {}, createdAt: now, archivedAt: null, reserved: true });
+    db.insertProject({ id: "pExisting", name: "Existing", repoPath: primary, vaultPath: vaultDir, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
     db.insertAgent({ id: "agentLead", projectId: "pHome", name: "Lead", startupPrompt: "LEAD", position: 0, profileId: null });
     db.insertAgent({ id: "agentSetup", projectId: "pHome", name: "Setup", startupPrompt: "SETUP", position: 0, profileId: null });
 

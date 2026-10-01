@@ -43,6 +43,10 @@ fs.mkdirSync(createRepo, { recursive: true });
 fs.writeFileSync(path.join(createRepo, "README.md"), "# create-repo\n");
 execSync("git init -q", { cwd: createRepo });
 commitAll(createRepo, "init", "-c user.email=r@loom -c user.name=r");
+// A vault dir DISTINCT from createRepo — card 5ba4412d now refuses vaultPath===repoPath for a CODE
+// project at CREATE time.
+const createVault = path.join(TMP, "create-vault");
+fs.mkdirSync(createVault, { recursive: true });
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -71,7 +75,7 @@ try {
   // ===================== (5) POST /api/projects — create-time sessionEnv is masked on the response =====================
   const created = await app.inject({
     method: "POST", url: "/api/projects",
-    payload: { name: "Created", repoPath: createRepo, vaultPath: createRepo, config: { sessionEnv: { ALPHA: REAL_ALPHA, SHORT: REAL_SHORT } } },
+    payload: { name: "Created", repoPath: createRepo, vaultPath: createVault, config: { sessionEnv: { ALPHA: REAL_ALPHA, SHORT: REAL_SHORT } } },
   });
   check("(create) POST /api/projects → 201", created.statusCode === 201);
   const createdBody = created.json();

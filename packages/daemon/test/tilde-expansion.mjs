@@ -63,6 +63,12 @@ const mkRepo = (relDir) => {
 };
 const primary = mkRepo("projects/myrepo");
 const refRepo = mkRepo("projects/refrepo");
+// A vault dir DISTINCT from `primary` — card 5ba4412d now refuses vaultPath===repoPath for a CODE
+// project at CREATE time (the asymmetry that card fixed), so B1/D1 below can no longer pair a code
+// repoPath with an identical vaultPath the way they used to; they still need a REAL "~/…"-reachable dir
+// to prove tilde-expansion applies to vaultPath independently of repoPath.
+const vaultDir = path.join(sandboxHome, "projects", "myvault");
+fs.mkdirSync(vaultDir, { recursive: true });
 
 try {
   // =====================================================================================================
@@ -88,14 +94,14 @@ try {
     try {
       const created = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "TildeProject", repoPath: "~/projects/myrepo", vaultPath: "~/projects/myrepo", referenceRepos: ["~/projects/refrepo"] },
+        payload: { name: "TildeProject", repoPath: "~/projects/myrepo", vaultPath: "~/projects/myvault", referenceRepos: ["~/projects/refrepo"] },
       });
       check("(B1) POST with a '~/…' repoPath/vaultPath → 201 (not a 400 'not an existing git repository')", created.statusCode === 201);
       const p = created.json();
       check("(B1) stored repoPath is the EXPANDED absolute path", p.repoPath === primary);
-      check("(B1) stored vaultPath is the EXPANDED absolute path", p.vaultPath === primary);
+      check("(B1) stored vaultPath is the EXPANDED absolute path", p.vaultPath === vaultDir);
       check("(B1) stored referenceRepos entry is the EXPANDED absolute path", Array.isArray(p.referenceRepos) && p.referenceRepos[0] === refRepo);
-      check("(B1) persisted to the Db (not just the response)", db.getProject(p.id)?.repoPath === primary && db.getProject(p.id)?.vaultPath === primary);
+      check("(B1) persisted to the Db (not just the response)", db.getProject(p.id)?.repoPath === primary && db.getProject(p.id)?.vaultPath === vaultDir);
 
       // (B2) '~' alone (no rest) as repoPath resolves to the home dir itself — the home dir is a real
       // directory but NOT a git repo, so this should 400 on isGitRepo (proving expansion ran BEFORE the
@@ -175,10 +181,10 @@ try {
     await client.connect(clientT);
     const parse = (res) => JSON.parse(res.content[0].text);
 
-    const created = await parse(await client.callTool({ name: "project_create", arguments: { name: "SetupTilde", repoPath: "~/projects/myrepo", vaultPath: "~/projects/myrepo" } }));
+    const created = await parse(await client.callTool({ name: "project_create", arguments: { name: "SetupTilde", repoPath: "~/projects/myrepo", vaultPath: "~/projects/myvault" } }));
     check("(D1) setup project_create with a '~/…' repoPath resolves (no error)", !created.error);
     check("(D1) stored repoPath is the EXPANDED absolute path", created.repoPath === primary);
-    check("(D1) stored vaultPath is the EXPANDED absolute path", created.vaultPath === primary);
+    check("(D1) stored vaultPath is the EXPANDED absolute path", created.vaultPath === vaultDir);
     check("(D1) persisted to the Db", db.getProject(created.id)?.repoPath === primary);
 
     await client.close();

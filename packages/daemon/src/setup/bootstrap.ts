@@ -86,18 +86,19 @@ export function isExistingDir(p: string): boolean {
   }
 }
 
+/** Result of {@link resolveProjectInitTarget}. */
+export type ProjectInitTargetResult = { ok: true; target: string } | { ok: false; error: string };
+
 /**
- * Create a fresh project directory under the sanctioned base (and `git init` it when `git` is true).
- * `base`/`gitInit` are injectable test seams (default: {@link WORKSPACE_ROOT} + the real simple-git).
- * Returns the created absolute dir on success, or a structured error (nothing is created on rejection).
+ * Pure, side-effect-free (beyond the one `fs.existsSync` existence check) resolution of the directory
+ * {@link bootstrapProjectDir} would create: the leaf-name derivation, safety, confinement, and
+ * reserved-home checks, WITHOUT creating anything. Exported so a caller that must validate something
+ * ABOUT the target (card 5ba4412d review, round 3 finding 3 — the vaultPath/repos containment check) can
+ * do so BEFORE `bootstrapProjectDir` creates anything: a refused validation must never leave a stray
+ * directory behind. Deterministic given the same `(name, dirName, base)` — `bootstrapProjectDir` calls
+ * this SAME function internally, so there is no second leaf/confinement rule to drift out of sync.
  */
-export async function bootstrapProjectDir(opts: {
-  name: string;
-  dirName?: string;
-  git: boolean;
-  base?: string;
-  gitInit?: (dir: string) => Promise<void>;
-}): Promise<BootstrapResult> {
+export function resolveProjectInitTarget(opts: { name: string; dirName?: string; base?: string }): ProjectInitTargetResult {
   const base = path.resolve(opts.base ?? WORKSPACE_ROOT);
   const leaf = (opts.dirName ?? slugifyProjectDir(opts.name) ?? "").trim();
   if (!leaf) {
@@ -118,6 +119,24 @@ export async function bootstrapProjectDir(opts: {
   if (fs.existsSync(target)) {
     return { ok: false, error: `a directory already exists at ${target} — choose a different name` };
   }
+  return { ok: true, target };
+}
+
+/**
+ * Create a fresh project directory under the sanctioned base (and `git init` it when `git` is true).
+ * `base`/`gitInit` are injectable test seams (default: {@link WORKSPACE_ROOT} + the real simple-git).
+ * Returns the created absolute dir on success, or a structured error (nothing is created on rejection).
+ */
+export async function bootstrapProjectDir(opts: {
+  name: string;
+  dirName?: string;
+  git: boolean;
+  base?: string;
+  gitInit?: (dir: string) => Promise<void>;
+}): Promise<BootstrapResult> {
+  const resolved = resolveProjectInitTarget(opts);
+  if (!resolved.ok) return resolved;
+  const target = resolved.target;
   try {
     fs.mkdirSync(target, { recursive: true });
   } catch (e) {

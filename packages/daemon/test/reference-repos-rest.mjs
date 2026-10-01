@@ -70,6 +70,10 @@ const refA = mkRepo("refA");
 const refB = mkRepo("refB");
 const nonRepo = path.join(os.tmpdir(), `loom-refrepos-nonrepo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(nonRepo, { recursive: true }); // a real dir, but NOT a git repo
+// A vault dir DISTINCT from `primary` — card 5ba4412d now refuses vaultPath===repoPath for a CODE
+// project at CREATE time, so the PART A fixtures below (previously paired `primary` with itself) need a
+// real, separate vault target instead.
+const vaultDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-refrepos-vault-"));
 
 const now = new Date().toISOString();
 
@@ -97,7 +101,7 @@ try {
       // (A1) create with a valid referenceRepos round-trips it.
       const created = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "P", repoPath: primary, vaultPath: primary, referenceRepos: [refA] },
+        payload: { name: "P", repoPath: primary, vaultPath: vaultDir, referenceRepos: [refA] },
       });
       check("(A1) POST /api/projects with a valid referenceRepos → 201", created.statusCode === 201);
       const p1 = created.json();
@@ -105,14 +109,14 @@ try {
       check("(A1) persisted to the Db", JSON.stringify(db.getProject(p1.id)?.referenceRepos) === JSON.stringify([refA]));
 
       // (A2) create omitting referenceRepos defaults to [].
-      const created2 = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "P2", repoPath: primary, vaultPath: primary } });
+      const created2 = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "P2", repoPath: primary, vaultPath: vaultDir } });
       check("(A2) POST /api/projects omitting referenceRepos → [] default", Array.isArray(created2.json().referenceRepos) && created2.json().referenceRepos.length === 0);
 
       // (A3) create with a NON-REPO entry is REJECTED (400), no project row created.
       const beforeCount = db.listAllProjects().length;
       const badCreate = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "Bad", repoPath: primary, vaultPath: primary, referenceRepos: [nonRepo] },
+        payload: { name: "Bad", repoPath: primary, vaultPath: vaultDir, referenceRepos: [nonRepo] },
       });
       check("(A3) POST with a non-repo referenceRepos entry → 400", badCreate.statusCode === 400);
       check("(A3) error names the offending non-repo entry", /not an existing git repository/.test(badCreate.json().error ?? ""));
@@ -121,7 +125,7 @@ try {
       // (A4) create with a RELATIVE entry is REJECTED (400) — absolute paths only.
       const badRelative = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "BadRel", repoPath: primary, vaultPath: primary, referenceRepos: ["../some-relative-repo"] },
+        payload: { name: "BadRel", repoPath: primary, vaultPath: vaultDir, referenceRepos: ["../some-relative-repo"] },
       });
       check("(A4) POST with a relative referenceRepos entry → 400", badRelative.statusCode === 400);
       check("(A4) error names the absolute-path requirement", /absolute path/.test(badRelative.json().error ?? ""));

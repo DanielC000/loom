@@ -63,6 +63,10 @@ const repoA = mkRepo("A");
 const repoB = mkRepo("B");
 const nonRepo = path.join(os.tmpdir(), `loom-rebind-nonrepo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(nonRepo, { recursive: true }); // a real dir, but NOT a git repo
+// A vault dir DISTINCT from both repoA and repoB — card 5ba4412d's containment check now re-validates
+// vaultPath against a repoPath rebind even when vaultPath itself isn't part of that same call, so (1b)'s
+// vaultPath must not incidentally equal a repo this test later rebinds repoPath BACK to (3c).
+const vaultDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-rebind-vault-"));
 
 const now = new Date().toISOString();
 const db = new Db();
@@ -124,8 +128,8 @@ try {
   check("(2) the rejected rebind left repoPath UNCHANGED", db.getProject("pProj").repoPath === repoB);
 
   // structural fields still update alongside (and without) a repoPath edit.
-  const struct = await plat.call("project_update", { projectId: "pProj", name: "Renamed", vaultPath: repoB, repoPath: repoA });
-  check("(1b) name + vaultPath + repoPath update together", struct.name === "Renamed" && struct.vaultPath === repoB && struct.repoPath === repoA && !struct.error);
+  const struct = await plat.call("project_update", { projectId: "pProj", name: "Renamed", vaultPath: vaultDir, repoPath: repoA });
+  check("(1b) name + vaultPath + repoPath update together", struct.name === "Renamed" && struct.vaultPath === vaultDir && struct.repoPath === repoA && !struct.error);
   check("(1b) 404 on an unknown project", (await plat.call("project_update", { projectId: "ghost", repoPath: repoB })).error === "project not found");
 
   // (3) A LIVE worktree session BLOCKS the rebind — named, repoPath unchanged. (project currently bound to repoA.)
@@ -168,7 +172,7 @@ try {
   await setup.client.close();
 } finally {
   db.close();
-  for (const d of [tmpHome, repoA, repoB, nonRepo]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
+  for (const d of [tmpHome, repoA, repoB, nonRepo, vaultDir]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
 
 console.log(failures === 0

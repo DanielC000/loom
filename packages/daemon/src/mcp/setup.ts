@@ -14,7 +14,7 @@ import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, AGENT_CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
 import { ensureVaultRoot } from "../vault/writer.js";
-import { validateVaultPath, checkVaultPathUpdate } from "../projects/vault-path.js";
+import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, canonicallyPaired } from "../projects/vault-path.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
@@ -205,6 +205,10 @@ export class SetupMcpRouter {
           if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
           repo = repoPath;
           vault = vaultPath ?? "";
+          // Card 5ba4412d (+ review follow-up): the SHARED containment check on the full {repoPath,
+          // vaultPath, repos} triple — this surface never accepts `repos`, so it's always [] here.
+          const tripleCheck = await checkVaultRepoTripleContainment({ repoPath: repo, vaultPath: vault, repos: [] });
+          if (!tripleCheck.ok) return ok({ error: tripleCheck.error });
           // Scaffold the vault root so it's writable immediately (a vault_write against an uncreated
           // root otherwise looks like a path escape) — only when a real vaultPath was actually given.
           if (vault) ensureVaultRoot(vault);
@@ -365,16 +369,24 @@ export class SetupMcpRouter {
       async ({ projectId, name, vaultPath, config }) => {
         const project = db.getProject(projectId);
         if (!project) return ok({ error: "project not found" });
-        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, refuse an
-        // explicit "" that would strand a VAULT-ONLY project, and refuse a rebind that ALIASES repoPath
-        // or a registered repo — the same guard the human REST PATCH path, the manager's project_update,
-        // and platform's project_update all now share. Runs FIRST, before any write (code review on
-        // 87e21134): this is this handler's ONLY await depending on project state (isGitRepo, a real git
-        // subprocess call) — running it before the config write below means a rejected vaultPath can
-        // never leave a PARTIAL apply (config committed, then the whole call still reports an error).
+        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and refuse an
+        // explicit "" that would strand a VAULT-ONLY project — the same guard the human REST PATCH path,
+        // the manager's project_update, and platform's project_update all now share. Runs FIRST, before
+        // any write (code review on 87e21134): together with the containment check just below, these are
+        // this handler's ONLY awaits depending on project state (isGitRepo) — running both before the
+        // config write means a rejected vaultPath can never leave a PARTIAL apply.
         const vaultCheck = await checkVaultPathUpdate(project, vaultPath);
         if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
         vaultPath = vaultCheck.value;
+        // Card 5ba4412d review follow-up: the SHARED containment check on the full effective triple — this
+        // surface can never touch repoPath/repos itself, so the only field that can trigger it is vaultPath.
+        if (vaultPath !== undefined) {
+          const tripleCheck = await checkVaultRepoTripleContainment(
+            { repoPath: project.repoPath, vaultPath, repos: project.repos },
+            { pairingIsIntentional: canonicallyPaired(project.repoPath, project.vaultPath) },
+          );
+          if (!tripleCheck.ok) return ok({ error: tripleCheck.error });
+        }
         // Re-read AFTER the await, and do every write below off THIS row with NO further await in
         // between — so nothing can land between reading and writing. (The vaultPath validation above
         // still ran against the PRE-await snapshot — a narrower, single-await residual, not something

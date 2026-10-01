@@ -289,7 +289,7 @@ try {
     let e1Err = null;
     try { await svc.updateProjectStructural("MA1", "pAliasMgr", { vaultPath: codeRepo }); }
     catch (e) { e1Err = e instanceof Error ? e.message : String(e); }
-    check("(E1) manager project_update rebinding vaultPath to equal repoPath → rejected (alias)", typeof e1Err === "string" && /aliases the project's repoPath/.test(e1Err));
+    check("(E1) manager project_update rebinding vaultPath to equal repoPath → rejected (alias)", typeof e1Err === "string" && /equals\/aliases the code repo at/.test(e1Err));
     check("(E1) rejected alias rebind left vaultPath UNCHANGED", db.getProject("pAliasMgr").vaultPath === separateVault);
 
     // (E2) rebind vaultPath to a genuinely DISTINCT path → SUCCEEDS (regression: not every rebind aliases).
@@ -307,7 +307,7 @@ try {
     let e4Err = null;
     try { await svc.updateProjectStructural("MA3", "pAliasMgrRegistry", { vaultPath: secondaryRepo }); }
     catch (e) { e4Err = e instanceof Error ? e.message : String(e); }
-    check("(E4) manager project_update rebinding vaultPath to alias a REGISTERED repo → rejected", typeof e4Err === "string" && /conflicts with the existing repos registry/.test(e4Err));
+    check("(E4) manager project_update rebinding vaultPath to alias a REGISTERED repo → rejected", typeof e4Err === "string" && /equals\/aliases the code repo at/.test(e4Err));
     check("(E4) rejected registry-alias rebind left vaultPath UNCHANGED", db.getProject("pAliasMgrRegistry").vaultPath === separateVault);
 
     db.close();
@@ -340,7 +340,7 @@ try {
 
     // (F1) rebind vaultPath to equal repoPath (a real git repo) → REJECTED (alias).
     const f1 = await call("project_update", { projectId: "pAliasSetup", vaultPath: codeRepo });
-    check("(F1) setup project_update rebinding vaultPath to equal repoPath → rejected (alias)", typeof f1.error === "string" && /aliases the project's repoPath/.test(f1.error));
+    check("(F1) setup project_update rebinding vaultPath to equal repoPath → rejected (alias)", typeof f1.error === "string" && /equals\/aliases the code repo at/.test(f1.error));
     check("(F1) rejected alias rebind left vaultPath UNCHANGED", db.getProject("pAliasSetup").vaultPath === separateVault);
 
     // (F2) a VAULT-ONLY project re-asserting vaultPath == repoPath → SUCCEEDS (legitimate design).
@@ -375,7 +375,7 @@ try {
 
     // (G1) rebind vaultPath to equal repoPath (a real git repo) → REJECTED (alias).
     const g1 = await call("project_update", { projectId: "pAliasPlat", vaultPath: codeRepo });
-    check("(G1) platform project_update rebinding vaultPath to equal repoPath → rejected (alias)", typeof g1.error === "string" && /aliases the project's repoPath/.test(g1.error));
+    check("(G1) platform project_update rebinding vaultPath to equal repoPath → rejected (alias)", typeof g1.error === "string" && /equals\/aliases the code repo at/.test(g1.error));
     check("(G1) rejected alias rebind left vaultPath UNCHANGED", db.getProject("pAliasPlat").vaultPath === separateVault);
 
     await client.close();
@@ -398,7 +398,7 @@ try {
       // (H1) rebind vaultPath to equal repoPath (a real git repo) → REJECTED (alias).
       const h1 = await app.inject({ method: "PATCH", url: "/api/projects/pAliasRest", payload: { vaultPath: codeRepo } });
       check("(H1) REST PATCH rebinding vaultPath to equal repoPath → 400 (alias)", h1.statusCode === 400);
-      check("(H1) error names the alias refusal", /aliases the project's repoPath/.test(h1.json().error ?? ""));
+      check("(H1) error names the alias refusal", /equals\/aliases the code repo at/.test(h1.json().error ?? ""));
       check("(H1) rejected alias rebind left vaultPath UNCHANGED", db.getProject("pAliasRest").vaultPath === separateVault);
     } finally {
       db.close();

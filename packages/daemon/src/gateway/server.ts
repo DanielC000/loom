@@ -59,7 +59,7 @@ import { requestAnsweredTriggerNotice } from "../orchestration/deferred-trigger-
 import { clearClaudeRateLimit, readClaudeUsageState } from "../orchestration/usage-awareness.js";
 import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
 import { GitWriter, gitError } from "../git/writer.js";
-import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
+import { bootstrapProjectDir, resolveProjectInitTarget, isExistingDir } from "../setup/bootstrap.js";
 import { getWorkerDiffCached, resolveWorkerBranchInfo } from "../git/worktrees.js";
 import { checkRepoRebind, checkLiveWorktreeSessions, checkTaskRepoKeyRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
@@ -68,7 +68,7 @@ import { activeMergeQuarantineFor, clearMergeQuarantine } from "../git/merge-qua
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
 import { validateRepoRegistry, resolveRepoKeyOrError, diffRepoRegistry, composeRepoRegistryChangeNote, type RepoRegistryDiff } from "../projects/repos.js";
-import { validateVaultPath, checkVaultPathUpdate } from "../projects/vault-path.js";
+import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, canonicallyPaired } from "../projects/vault-path.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
 import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
@@ -3614,20 +3614,33 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       denyGlobs = check.value;
     }
     const isGit = (b.kind ?? "git") === "git";
-    const boot = await bootstrapProjectDir({ name: b.name, dirName: b.dirName, git: isGit });
-    if (!boot.ok) return reply.code(400).send({ error: boot.error });
+    // Card 5ba4412d review follow-up (round 3, finding 3): resolve the WOULD-BE target BEFORE bootstrapping
+    // (resolveProjectInitTarget — the SAME pure leaf/confinement logic bootstrapProjectDir uses internally,
+    // so there's nothing to drift out of sync), so repos/containment validation can run — and refuse —
+    // BEFORE anything is created on disk. A refused init must never leave a stray directory behind.
+    const targetCheck = resolveProjectInitTarget({ name: b.name, dirName: b.dirName });
+    if (!targetCheck.ok) return reply.code(400).send({ error: targetCheck.error });
+    const vaultPath = isGit ? "" : targetCheck.target;
     // repos (multi-repo epic 49136451): HUMAN-only on this REST create path, same trust class as above —
-    // validated AFTER bootstrapping since it needs the final repoPath/vaultPath to check path-aliasing.
+    // validated against the PREDICTED repoPath/vaultPath (not yet created) to check path-aliasing.
     let repos: RepoRegistryEntry[] = [];
     if (b.repos !== undefined) {
-      const check = await validateRepoRegistry(b.repos, { repoPath: boot.dir, vaultPath: isGit ? "" : boot.dir });
+      const check = await validateRepoRegistry(b.repos, { repoPath: targetCheck.target, vaultPath });
       if (!check.ok) return reply.code(400).send({ error: check.error });
       repos = check.value;
     }
+    // This route was the one CREATE surface accepting `repos` that never ran the shared containment
+    // check — validateRepoRegistry above only catches an EXACT alias, not containment. `pairingIsIntentional:
+    // !isGit` matches the vault-only CREATE branches elsewhere: kind "vault" makes the created dir BOTH
+    // repoPath and vaultPath by construction, never a user-supplied alias.
+    const tripleCheck = await checkVaultRepoTripleContainment({ repoPath: targetCheck.target, vaultPath, repos }, { pairingIsIntentional: !isGit });
+    if (!tripleCheck.ok) return reply.code(400).send({ error: tripleCheck.error });
+    const boot = await bootstrapProjectDir({ name: b.name, dirName: b.dirName, git: isGit });
+    if (!boot.ok) return reply.code(400).send({ error: boot.error });
     const project: Project = {
       // kind "git": no vault bound (never defaulted to the fresh code repo — that would make the vault
       // auto-committer watch + auto-commit it, card a247ab11). kind "vault": the created dir IS the vault.
-      id: randomUUID(), name: b.name, repoPath: boot.dir, vaultPath: isGit ? "" : boot.dir,
+      id: randomUUID(), name: b.name, repoPath: boot.dir, vaultPath,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a wizard-created project is never a reserved/system one (boot-seed only)
       referenceRepos,
@@ -4291,6 +4304,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!check.ok) return reply.code(400).send({ error: check.error });
       repos = check.value;
     }
+    // Card 5ba4412d (+ review follow-up): the SHARED containment check on the FULL {repoPath, vaultPath,
+    // repos} triple, run UNCONDITIONALLY for every create — including the vault-only branch, where
+    // `finalRepoPath === finalVaultPath` by construction (never a user-supplied alias, so it's the
+    // INTENTIONAL pairing — `!repoPath` is exactly "we're in the vault-only branch") but a `repos` entry
+    // could still be one that nests the vault or gets nested by it. See checkVaultRepoTripleContainment's
+    // own doc for why this can't be inferred from the triple's values alone.
+    const tripleCheck = await checkVaultRepoTripleContainment(
+      { repoPath: finalRepoPath, vaultPath: finalVaultPath, repos },
+      { pairingIsIntentional: !repoPath },
+    );
+    if (!tripleCheck.ok) return reply.code(400).send({ error: tripleCheck.error });
     const project: Project = {
       id: randomUUID(), name: b.name, repoPath: finalRepoPath, vaultPath: finalVaultPath,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
@@ -4347,15 +4371,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const check = await checkRepoRebind(deps.db, id, repoPath);
       if (!check.ok) return reply.code(400).send({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
     }
-    // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, refuse an
+    // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and refuse an
     // explicit "" (UNBIND — card 9fe578b3, completing cdc3792d's vault-optional story) that would strand a
-    // VAULT-ONLY project, and refuse a rebind that ALIASES repoPath or a registered repo — identical
-    // across every project_update-shaped write surface, mirroring checkRepoRebind's role for repoPath.
-    // `vaultPath` omitted (undefined) leaves the stored value untouched below. `p` is passed UNCHANGED
-    // (its PRE-patch repoPath/vaultPath) — checkVaultPathUpdate's vault-only/legacy-pairing exemption
-    // keys off that pre-patch relationship; `effectiveRepoPath` is what the alias check itself compares
-    // the candidate against, so a same-call repoPath rebind is judged against where it's HEADED.
-    const vaultCheck = await checkVaultPathUpdate(p, b.vaultPath as string | undefined, { effectiveRepoPath: repoPath ?? p.repoPath });
+    // VAULT-ONLY project — identical across every project_update-shaped write surface. Containment (does
+    // this vaultPath alias/nest into a code repo) is NOT this function's job any more — see the shared
+    // triple check below, which runs on the full effective {repoPath, vaultPath, repos} regardless of
+    // which of the three this PATCH actually touches (card 5ba4412d review follow-up).
+    const vaultCheck = await checkVaultPathUpdate(p, b.vaultPath as string | undefined);
     if (!vaultCheck.ok) return reply.code(400).send({ error: vaultCheck.error });
     const vaultPath = vaultCheck.value;
     // referenceRepos (reference-repos epic Phase 2, card f4888775): HUMAN-only on this REST PATCH path —
@@ -4422,6 +4444,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const check = await validateRepoRegistry(p.repos, { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath });
       if (!check.ok) return reply.code(400).send({ error: `repoPath/vaultPath rebind conflicts with the existing repos registry: ${check.error}` });
       repos = check.value;
+    }
+    // Card 5ba4412d review follow-up: the SHARED containment check on the FULL effective triple, run
+    // whenever ANY of repoPath/vaultPath/repos is part of THIS patch — a repoPath-only rebind or a
+    // repos-only edit can put an UNCHANGED vaultPath into the forbidden state just as easily as a vaultPath
+    // edit can, and the per-field checks above never catch that (they only fire on their OWN field).
+    if (repoPath !== undefined || vaultPath !== undefined || repos !== undefined) {
+      const tripleCheck = await checkVaultRepoTripleContainment(
+        { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath, repos: repos ?? p.repos },
+        { pairingIsIntentional: canonicallyPaired(p.repoPath, p.vaultPath) },
+      );
+      if (!tripleCheck.ok) return reply.code(400).send({ error: tripleCheck.error });
     }
     const namePatch = b.name === undefined ? undefined : (b.name as string).trim();
     deps.db.updateProject(id, {

@@ -20,7 +20,7 @@ import { expandTilde, PORT, isLoomDev } from "../paths.js";
 import { isForbiddenAllowedHost, canonicalHost, canonicalTrustedProxyOrigin } from "../gateway/trust-tier.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
-import { validateVaultPath, checkVaultPathUpdate } from "../projects/vault-path.js";
+import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, canonicallyPaired } from "../projects/vault-path.js";
 import { validateRepoRegistry } from "../projects/repos.js";
 import { resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { GitWriter } from "../git/writer.js";
@@ -1126,6 +1126,10 @@ export class PlatformMcpRouter {
           if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
           vault = vaultCheck.value;
         }
+        // Card 5ba4412d (+ review follow-up): the SHARED containment check on the full {repoPath,
+        // vaultPath, repos} triple — this surface never accepts `repos`, so it's always [] here.
+        const tripleCheck = await checkVaultRepoTripleContainment({ repoPath, vaultPath: vault, repos: [] });
+        if (!tripleCheck.ok) return ok({ error: tripleCheck.error });
         // Scaffold the vault root so it's writable immediately (a vault_write against an uncreated root
         // otherwise looks like a path escape) — only when a real vaultPath was actually given (mirrors
         // the setup.ts project_create fix, card a247ab11).
@@ -2428,14 +2432,11 @@ export class PlatformMcpRouter {
           const check = await checkRepoRebind(db, projectId, repoPath);
           if (!check.ok) return ok({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
         }
-        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, refuse an
-        // explicit "" that would strand a VAULT-ONLY project, and refuse a rebind that ALIASES repoPath
-        // or a registered repo — the same guard the human REST PATCH path, the manager's project_update,
-        // and setup's project_update all now share. `project` is passed UNCHANGED (its PRE-patch
-        // repoPath/vaultPath) — the vault-only/legacy-pairing exemption keys off that pre-patch
-        // relationship; `effectiveRepoPath` is what the alias check itself compares against, matching
-        // the registry re-check just below.
-        const vaultCheck = await checkVaultPathUpdate(project, vaultPath, { effectiveRepoPath: repoPath ?? project.repoPath });
+        // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and refuse an
+        // explicit "" that would strand a VAULT-ONLY project — the same guard the human REST PATCH path,
+        // the manager's project_update, and setup's project_update all now share. Containment is NOT this
+        // function's job any more — see the shared triple check below.
+        const vaultCheck = await checkVaultPathUpdate(project, vaultPath);
         if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
         vaultPath = vaultCheck.value;
         // repos re-check (code-review Major 1): this surface never accepts a `repos` value itself (see the
@@ -2450,6 +2451,16 @@ export class PlatformMcpRouter {
           const check = await validateRepoRegistry(project.repos, { repoPath: repoPath ?? project.repoPath, vaultPath: vaultPath ?? project.vaultPath });
           if (!check.ok) return ok({ error: `repoPath/vaultPath rebind conflicts with the existing repos registry: ${check.error}` });
           repos = check.value;
+        }
+        // Card 5ba4412d review follow-up: the SHARED containment check on the FULL effective triple, run
+        // whenever repoPath OR vaultPath is part of THIS call — a repoPath-only rebind can strand an
+        // UNCHANGED vaultPath inside/around the new repoPath just as easily as a vaultPath edit can.
+        if (repoPath !== undefined || vaultPath !== undefined) {
+          const tripleCheck = await checkVaultRepoTripleContainment(
+            { repoPath: repoPath ?? project.repoPath, vaultPath: vaultPath ?? project.vaultPath, repos: repos ?? project.repos },
+            { pairingIsIntentional: canonicallyPaired(project.repoPath, project.vaultPath) },
+          );
+          if (!tripleCheck.ok) return ok({ error: tripleCheck.error });
         }
         db.updateProject(projectId, { name, vaultPath, repoPath, repos });
         // STALE-PROMPT LINT (card 0597e092): `project` is the PRE-update row (fetched above, before the
