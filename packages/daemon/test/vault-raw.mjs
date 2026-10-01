@@ -9,6 +9,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) traversal rejected — `../`, absolute path, and an IN-VAULT symlink pointing OUTSIDE → 404;
 //   (5) 404 on a missing file, 400 on a missing ?path, 404 on a non-existent project;
 //   (6) the >cap file → 413 (a sparse file just over VAULT_RAW_MAX_BYTES; never streamed).
+//   (7) the SANDBOXING headers (card 68bef69c, docs/decisions/68bef69c-vault-raw-csp.md): vault bytes
+//       are UNTRUSTED and this is the daemon's OWN origin (where the web app keeps the loopback +
+//       gateway tokens in localStorage), so a navigated .svg must never become a scriptable document.
+//       `Content-Security-Policy: sandbox; default-src 'none'` on every served type EXCEPT
+//       application/pdf (sandbox disables the browser's native PDF viewer → blanks the Vault page's
+//       <object> embed), plus `Content-Disposition: attachment` for the active-document family only.
 // Run after build: node test/vault-raw.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -49,6 +55,12 @@ fs.writeFileSync(path.join(vault, "pic.png"), PNG_BYTES);
 const PDF_BYTES = Buffer.from("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n1 0 obj<<>>endobj\n%%EOF\n", "latin1");
 fs.writeFileSync(path.join(vault, "doc.pdf"), PDF_BYTES);
 fs.writeFileSync(path.join(vault, "note.md"), "# inside\nhello vault\n");
+// A HOSTILE SVG — the card's actual attack fixture. Served as image/svg+xml, this script runs if the
+// raw URL is NAVIGATED to, with the daemon origin's localStorage in reach.
+const EVIL_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">`
+  + `<script>document.title = "PWNED:" + JSON.stringify(localStorage);</script>`
+  + `<rect width="40" height="40" fill="#0f0"/></svg>`;
+fs.writeFileSync(path.join(vault, "evil.svg"), EVIL_SVG);
 fs.mkdirSync(path.join(vault, "sub"), { recursive: true });
 fs.writeFileSync(path.join(vault, "sub", "blob.bin"), Buffer.from([0, 1, 2, 3, 255, 254]));
 
@@ -117,12 +129,37 @@ try {
   const big = await raw("huge.png");
   check("(6) file over the 50 MB cap → 413", big.statusCode === 413);
   check("(6) over-cap response is NOT the file bytes", big.rawPayload.length < 1024);
+
+  // (7) sandboxing headers — the trust boundary (card 68bef69c)
+  const CSP = "sandbox; default-src 'none'";
+  const svg = await raw("evil.svg");
+  check("(7) .svg → 200 image/svg+xml (still served, not blocked)",
+    svg.statusCode === 200 && svg.headers["content-type"] === "image/svg+xml");
+  check("(7) .svg body is served byte-exact (the guard is headers, not rewriting)",
+    svg.rawPayload.toString("utf8") === EVIL_SVG);
+  check(`(7) .svg → Content-Security-Policy: ${CSP}`, svg.headers["content-security-policy"] === CSP);
+  check("(7) .svg → Content-Disposition: attachment", svg.headers["content-disposition"] === "attachment");
+  check("(7) .svg → nosniff", svg.headers["x-content-type-options"] === "nosniff");
+  // Every inert type gets the CSP too — the guard is not keyed to an extension allow-list.
+  check(`(7) .png → ${CSP}`, png.headers["content-security-policy"] === CSP);
+  check(`(7) .md → ${CSP}`, md.headers["content-security-policy"] === CSP);
+  check(`(7) .bin (octet-stream) → ${CSP}`, bin.headers["content-security-policy"] === CSP);
+  // …but only the ACTIVE-document family is forced to download. An <img>/download consumer ignores
+  // Content-Disposition, so adding it to images would be inert — adding it is still not what we mean.
+  check("(7) .png → NO Content-Disposition", png.headers["content-disposition"] === undefined);
+  check("(7) .md → NO Content-Disposition", md.headers["content-disposition"] === undefined);
+  // The application/pdf carve-out: CSP sandbox disables the browser's native PDF viewer, which would
+  // blank the Vault page's <object> embed. If this flips, that embed is broken — see the record.
+  check("(7) .pdf → NO Content-Security-Policy (native-viewer carve-out)",
+    pdf.headers["content-security-policy"] === undefined);
+  check("(7) .pdf → NO Content-Disposition", pdf.headers["content-disposition"] === undefined);
+  check("(7) .pdf still → nosniff", pdf.headers["x-content-type-options"] === "nosniff");
 } finally {
   try { await app.close(); } catch { /* ignore */ }
   db.close();
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — /vault/raw serves binaries byte-exact with the right Content-Type + nosniff, streams under a 50 MB cap (413 over), and rejects ../ / absolute / symlink-escape with 404."
+  ? "\n✅ ALL PASS — /vault/raw serves binaries byte-exact with the right Content-Type + nosniff, sandboxes every non-PDF response (CSP sandbox; default-src 'none', plus Content-Disposition: attachment for svg/html/xml), streams under a 50 MB cap (413 over), and rejects ../ / absolute / symlink-escape with 404."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

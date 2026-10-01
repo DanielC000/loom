@@ -77,6 +77,19 @@ function treeRow(page: Page, name: string) {
   return page.locator("button.loom-tree-row").filter({ hasText: name });
 }
 
+// A real 1x1 transparent PNG — a byte-exact binary fixture for the raw-serving tests below.
+const PNG_1X1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+  "base64",
+);
+
+// The attack fixture for card 68bef69c: a vault SVG that, if the browser ever renders it as a DOCUMENT
+// on the daemon's own origin, reads the loopback token out of localStorage and copies it somewhere an
+// exfiltration would. Declared 64x64 so a successful <img> render is distinguishable from a blank box.
+const HOSTILE_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">'
+  + "<script>try{localStorage.setItem('loom.PWNED','STOLEN:'+localStorage.getItem('loom.loopbackToken'));}catch(e){}</script>"
+  + '<rect width="64" height="64" fill="#33ff99"/></svg>';
+
 test("lists a seeded root note and RENDERS its markdown (not raw source)", async ({ page, loomDaemon }) => {
   const heading = uniq("Welcome-Heading");
   const boldWord = uniq("emphatic");
@@ -153,4 +166,77 @@ test("the file filter narrows the tree to a matching note", async ({ page, loomD
   // Clearing the filter restores the full tree.
   await page.getByPlaceholder("Filter files…").fill("");
   await expect(treeRow(page, `${bravo}.md`)).toBeVisible();
+});
+
+// ── Raw vault bytes are sandboxed (card 68bef69c, docs/decisions/68bef69c-vault-raw-csp.md) ─────────
+// Vault files are UNTRUSTED (an agent's vault_write, a research import) and `/vault/raw` serves them on
+// the DAEMON'S OWN origin — the origin whose localStorage holds the loopback + gateway tokens. Before
+// the fix, NAVIGATING to a vault `.svg`'s raw URL ran its <script> with those tokens in reach. These two
+// tests pin both halves of the fix AND the thing it must not break:
+//   (a) the response headers (RED on pre-fix code: no CSP, no Content-Disposition), and
+//   (b) that the <img> consumer the Vault page actually uses still renders the same SVG — an <img> never
+//       applies a document CSP and ignores Content-Disposition, which is WHY those headers are safe here.
+// The behavioural half (a navigation downloads instead of executing) is asserted via the download event
+// rather than a page-state read, because an `attachment` response aborts the navigation by design.
+test("serves raw vault bytes with sandboxing headers, and PDFs with the native-viewer carve-out", async ({ page, loomDaemon }) => {
+  const { id, vaultDir } = await seedVaultProject(loomDaemon.baseURL, { "note.md": "# plain\n" });
+  writeFileSync(path.join(vaultDir, "pic.png"), PNG_1X1);
+  writeFileSync(path.join(vaultDir, "doc.pdf"), "%PDF-1.4\n%%EOF\n", "latin1");
+
+  const raw = (rel: string) => `${loomDaemon.baseURL}/api/projects/${id}/vault/raw?path=${encodeURIComponent(rel)}`;
+  const CSP = "sandbox; default-src 'none'";
+
+  // An active document type: sandboxed AND forced to download.
+  writeFileSync(path.join(vaultDir, "art.svg"), HOSTILE_SVG, "utf8");
+  const svg = await page.request.get(raw("art.svg"));
+  expect(svg.status()).toBe(200);
+  expect(svg.headers()["content-type"]).toBe("image/svg+xml");
+  expect(svg.headers()["content-security-policy"]).toBe(CSP);
+  expect(svg.headers()["content-disposition"]).toBe("attachment");
+  expect(svg.headers()["x-content-type-options"]).toBe("nosniff");
+
+  // Inert types are sandboxed too (the guard is not an extension allow-list) but NOT forced to download.
+  for (const rel of ["pic.png", "note.md"]) {
+    const r = await page.request.get(raw(rel));
+    expect(r.status(), rel).toBe(200);
+    expect(r.headers()["content-security-policy"], rel).toBe(CSP);
+    expect(r.headers()["content-disposition"], rel).toBeUndefined();
+  }
+
+  // The carve-out: a CSP sandbox disables the browser's native PDF viewer, which would blank the Vault
+  // page's <object> embed — so a PDF response is byte-identical to pre-fix. If this flips, that breaks.
+  const pdf = await page.request.get(raw("doc.pdf"));
+  expect(pdf.headers()["content-type"]).toBe("application/pdf");
+  expect(pdf.headers()["content-security-policy"]).toBeUndefined();
+  expect(pdf.headers()["content-disposition"]).toBeUndefined();
+  expect(pdf.headers()["x-content-type-options"]).toBe("nosniff");
+});
+
+test("a hostile vault SVG downloads instead of scripting the daemon origin, and still renders in the viewer", async ({ page, loomDaemon }) => {
+  const { id, vaultDir } = await seedVaultProject(loomDaemon.baseURL, { "note.md": "# plain\n" });
+  writeFileSync(path.join(vaultDir, "art.svg"), HOSTILE_SVG, "utf8");
+  await pinActiveProject(page, id);
+  // Seed a decoy token under the SAME key the real app uses, so a successful script would prove it could
+  // read a real credential — not merely that it ran.
+  await page.addInitScript(() => localStorage.setItem("loom.loopbackToken", "SENTINEL-68bef69c"));
+
+  await page.goto(`${loomDaemon.baseURL}/vault`);
+
+  // (1) The Vault page's own <img> consumer still renders it — at the SVG's real intrinsic size, so this
+  //     fails on a broken/blocked image rather than passing on an empty box.
+  await treeRow(page, "art.svg").click();
+  const img = page.locator('main img[src*="vault/raw"]').first();
+  await expect(img).toBeVisible();
+  await expect.poll(() => img.evaluate((e: HTMLImageElement) => e.naturalWidth)).toBe(64);
+
+  // (2) Navigating to the raw URL yields a DOWNLOAD, not a document — so the <script> never runs.
+  const rawUrl = `${loomDaemon.baseURL}/api/projects/${id}/vault/raw?path=art.svg`;
+  const download = page.waitForEvent("download");
+  await page.goto(rawUrl).catch(() => { /* an `attachment` response aborts the navigation by design */ });
+  expect((await download).suggestedFilename()).toMatch(/\.svg$/);
+
+  // (3) …and the decoy token was never copied out. A pre-fix daemon writes `loom.PWNED` here.
+  await page.goto(`${loomDaemon.baseURL}/vault`);
+  expect(await page.evaluate(() => localStorage.getItem("loom.PWNED"))).toBeNull();
+  expect(await page.evaluate(() => localStorage.getItem("loom.loopbackToken"))).toBe("SENTINEL-68bef69c");
 });

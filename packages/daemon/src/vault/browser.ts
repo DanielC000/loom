@@ -70,9 +70,12 @@ export function statVaultFile(vaultPath: string, relPath: string): VaultFileStat
 
 /**
  * Content-Type for a vault file by extension — a conservative allow-list backing the raw serving
- * route. Images map to `image/*` (rendered by `<img>`; SVG as `image/svg+xml` is NOT executed by an
- * `<img>` tag), PDFs to `application/pdf`, common text formats to UTF-8 text, everything else to
- * `application/octet-stream`. Never returns a type the browser would execute inline as a document.
+ * route. Images map to `image/*`, PDFs to `application/pdf`, common text formats to UTF-8 text,
+ * everything else to `application/octet-stream`.
+ *
+ * ⛔ It DOES return one type a browser executes as a document: `image/svg+xml`. An `<img>` tag never
+ * runs an SVG's script, but NAVIGATING to the raw URL does — so the route itself must neutralise that
+ * (see `isActiveDocumentContentType` below and the route's own CSP in gateway/server.ts).
  */
 const VAULT_CONTENT_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -98,4 +101,18 @@ const VAULT_CONTENT_TYPES: Record<string, string> = {
 
 export function vaultFileContentType(relPath: string): string {
   return VAULT_CONTENT_TYPES[path.extname(relPath).toLowerCase()] ?? "application/octet-stream";
+}
+
+/**
+ * Would a browser render this Content-Type as an ACTIVE (scriptable) DOCUMENT if the raw URL were
+ * navigated to directly — a new tab, a middle-click, a pasted link? Keyed on the RESOLVED type, not
+ * the extension, so it can never drift from `VAULT_CONTENT_TYPES` above: add an active type there and
+ * this returns true for it without a second edit. `application/pdf` is deliberately NOT in this set —
+ * it is a document, but PDF script runs in the viewer's own restricted engine with no DOM or
+ * `localStorage` access, and it needs the carve-out the route documents.
+ */
+export function isActiveDocumentContentType(contentType: string): boolean {
+  const t = (contentType.split(";")[0] ?? "").trim().toLowerCase();
+  // `+xml` covers image/svg+xml and application/xhtml+xml without naming each one.
+  return t === "text/html" || t === "text/xml" || t === "application/xml" || t.endsWith("+xml");
 }

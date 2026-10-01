@@ -71,7 +71,7 @@ import { validateDenyGlobs } from "../projects/deny-globs.js";
 import { validateRepoRegistry, resolveRepoKeyOrError, diffRepoRegistry, composeRepoRegistryChangeNote, type RepoRegistryDiff } from "../projects/repos.js";
 import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
-import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
+import { isActiveDocumentContentType, listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile } from "../skills/store.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
@@ -4089,6 +4089,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // MCP tool. Guard is shared with readVaultFile (statVaultFile → traversal + symlink-escape check).
   // STREAMS via fs.createReadStream (never buffers); refuses files > VAULT_RAW_MAX_BYTES with 413 so
   // an enormous file can't blow up memory. nosniff so the browser honours our declared Content-Type.
+  // @decision 68bef69c — the CSP/Content-Disposition headers below are a trust boundary, not polish:
+  // never serve these bytes without them, and never drop the application/pdf carve-out.
   app.get("/api/projects/:id/vault/raw", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
@@ -4098,10 +4100,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const stat = statVaultFile(p.vaultPath, rel); // null on traversal/symlink-escape/missing/non-file
     if (!stat) return reply.code(404).send({ error: "file not found" });
     if (stat.size > VAULT_RAW_MAX_BYTES) return reply.code(413).send({ error: "file too large" });
+    const ctype = vaultFileContentType(rel);
     reply
-      .header("Content-Type", vaultFileContentType(rel))
+      .header("Content-Type", ctype)
       .header("Content-Length", stat.size)
       .header("X-Content-Type-Options", "nosniff");
+    // Vault bytes are UNTRUSTED (an agent's vault_write, a research import), and this is the DAEMON's
+    // own origin — where the web app keeps the loopback + gateway tokens in localStorage. `sandbox`
+    // with NO tokens puts the response in an opaque origin with scripting off, so navigating to a
+    // scripted .svg can neither run it nor reach this origin's storage; `default-src 'none'` stops the
+    // document fetching anything. The web UI is unaffected: CSP applies to DOCUMENTS, and every
+    // consumer is an <img>/<object>/download, which ignores it.
+    // The application/pdf carve-out is load-bearing — CSP sandbox disables the browser's native PDF
+    // viewer, so it would blank the Vault page's <object> embed (Vault.tsx notes the same of the
+    // iframe `sandbox` attribute). A PDF's own script engine has no DOM/localStorage reach, so the
+    // exfiltration path this guards does not exist for it.
+    if (ctype !== "application/pdf") reply.header("Content-Security-Policy", "sandbox; default-src 'none'");
+    // Belt and braces for the one family a browser really executes: make it a download, not a
+    // document, so the CSP is not the only thing between an untrusted .svg and this origin.
+    if (isActiveDocumentContentType(ctype)) reply.header("Content-Disposition", "attachment");
     return reply.send(fs.createReadStream(stat.real));
   });
 

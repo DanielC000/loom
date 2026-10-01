@@ -614,6 +614,10 @@ export const api = {
   // Raw bytes of a vault file, served with a content-type by extension + X-Content-Type-Options: nosniff
   // (daemon `vault/raw`). Returns the URL string — used directly as an `<img>`/`<iframe>`/`<object>`/
   // download `src`/`href` (the vite dev proxy forwards /api to the live daemon); the browser fetches it.
+  // The daemon also sends `Content-Security-Policy: sandbox; default-src 'none'` (and `Content-Disposition:
+  // attachment` for svg/html/xml) so an untrusted vault file can never script this origin — see
+  // docs/decisions/68bef69c-vault-raw-csp.md. That is invisible to every consumer here (CSP applies to
+  // documents, not <img> subresources), but it DOES mean these bytes can't be rendered as a document.
   vaultRawUrl: (projectId: string, path: string) =>
     `/api/projects/${projectId}/vault/raw?path=${encodeURIComponent(path)}`,
   // HEAD the raw endpoint for a binary file's size/content-type without downloading the bytes — for the
