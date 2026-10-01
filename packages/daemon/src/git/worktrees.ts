@@ -4152,6 +4152,386 @@ export interface EmitCompareGateResult {
   notApplicableKind?: EmitCompareNotApplicableKind;
 }
 
+/** Shell-safe allowlist for a `test/*.mjs` repo-relative path that will be interpolated into
+ *  {@link buildReducedGateCommand}'s shell-executed command string — shared by the classification loop's
+ *  own check (a CHANGED path) and {@link foldInTestImporters} (an UNCHANGED path discovered only via the
+ *  import-graph scan) so the two checks can never hand-copy apart. See the classification loop's own
+ *  comment (Code Review, card 2154b6ad) for the full interpolation-hazard reasoning. */
+const TEST_PATH_SHELL_SAFE_RE = /^[A-Za-z0-9_.\-/]+$/;
+
+/** Minimal `typescript` surface {@link foldInTestImporters} needs to find the REAL import/re-export/
+ *  dynamic-import edges between `packages/daemon/test/**\/*.mjs` files — via a genuine parse
+ *  (`createSourceFile` + `forEachChild`), never a hand-rolled regex/`ts.createScanner` loop.
+ *  @decision 2154b6ad already forbids `ts.createScanner` for the transpile-comparison case because it
+ *  desyncs on template-literal interpolation; a plain regex scan has the SAME failure mode here PLUS a
+ *  second one, measured directly on this repo's own corpus (card 72769424):
+ *  `test/codex-real-spawn-lock-membership-guard.mjs` embeds the literal text
+ *  `'import { thing } from "./thing.mjs";'` as a synthetic-fixture object-literal VALUE, never a real
+ *  import — a regex over raw source text cannot tell that apart from a genuine import declaration; a real
+ *  AST only ever matches an actual ImportDeclaration/ExportDeclaration/dynamic-`import()` node. Deliberately
+ *  a SEPARATE, wider interface from {@link TypeScriptModuleLike} (emit-compare-soundness.ts) rather than
+ *  widening that shared one — `deploy-staleness.ts`, the other consumer of that interface, has no need for
+ *  AST access, and widening a shared type for one caller's need is exactly the kind of divergence this
+ *  file's other decisions warn against. */
+interface TestImportTsModuleLike {
+  createSourceFile(fileName: string, sourceText: string, languageVersion: number, setParentNodes?: boolean, scriptKind?: number): unknown;
+  forEachChild(node: unknown, cbNode: (node: unknown) => void): void;
+  isImportDeclaration(node: unknown): boolean;
+  isExportDeclaration(node: unknown): boolean;
+  isCallExpression(node: unknown): boolean;
+  isStringLiteralLike(node: unknown): boolean;
+  SyntaxKind: Record<string, number>;
+  ScriptTarget: Record<string, number>;
+  ScriptKind: Record<string, number>;
+}
+
+interface TsNodeLike { kind: number }
+interface TsModuleSpecifierNodeLike extends TsNodeLike { moduleSpecifier?: TsNodeLike & { text?: string } }
+interface TsImportCallNodeLike extends TsNodeLike { expression?: TsNodeLike; arguments?: (TsNodeLike & { text?: string })[] }
+/** A string literal longer than this can never be a filename/CLI-selector argument — excluded from
+ *  {@link extractModuleSpecifiers}'s `spawnEdgeLiterals` purely to bound cost (a fixture embedding a large
+ *  text blob as a string literal shouldn't pay the per-corpus-basename `includes` scan below); never a
+ *  correctness boundary, since a real spawn target name is always short. */
+const SPAWN_EDGE_MAX_LITERAL_LEN = 300;
+
+/** One file's extracted module-specifier edges — every literal relative specifier found via a static
+ *  import, a re-export (`export ... from`), or a dynamic `import()` call, PLUS whether this file contains
+ *  a dynamic `import()` call whose argument is NOT a plain string literal — a computed/templated specifier
+ *  this scan can never resolve, which could point anywhere, including at a changed test file — PLUS every
+ *  OTHER string literal in the file (bounded by {@link SPAWN_EDGE_MAX_LITERAL_LEN}), for the conservative
+ *  textual SPAWN edge {@link findSpawnTargetEdges} builds from it (round 4, card 72769424): a file that
+ *  `spawn()`s another corpus file as a child process never `import`s it, so it has no edge of its own kind
+ *  here — see that function's own doc.
+ *
+ *  @decision 72769424 — this is an UNCONDITIONAL hazard, never classified away by an AST walk again: a
+ *  classifier here previously produced two more false-SAFE bugs on review (a shadowed identifier, a
+ *  case-sensitive segment check) on top of the ones it was built to fix.
+ *
+ *  Deliberately OUT OF SCOPE (round 4, see the decision record's "KNOWN RESIDUAL"): `eval(...)`/`new
+ *  Function(...)`-constructed source, and a `require(...)`/`createRequire(...)` resolution — neither is an
+ *  AST-visible literal naming another corpus file the way a plain string literal is.
+ *
+ *  See {@link foldInTestImporters}'s own doc for how a hazard is handled (folded in as a wildcard importer,
+ *  never a kill switch). An import declaration's own module specifier is ALWAYS a string literal per ES
+ *  module grammar (the parser itself enforces this) — only the dynamic `import()` arm can ever set
+ *  `hasUnresolvedDynamicImport`. */
+function extractModuleSpecifiers(
+  ts: TestImportTsModuleLike, fileName: string, content: string,
+): { specifiers: string[]; hasUnresolvedDynamicImport: boolean; spawnEdgeLiterals: string[] } {
+  const specifiers: string[] = [];
+  let hasUnresolvedDynamicImport = false;
+  const spawnEdgeLiterals: string[] = [];
+  // @decision 18bfe989 — narrow explicitly rather than cast: `noUncheckedIndexedAccess` types this lookup
+  // `number | undefined`, and a missing Latest/JS must fail this file closed (hasUnresolvedDynamicImport),
+  // never reach `createSourceFile` with an undefined languageVersion/scriptKind.
+  const languageVersion = ts.ScriptTarget.Latest;
+  const scriptKind = ts.ScriptKind.JS;
+  if (languageVersion === undefined || scriptKind === undefined) return { specifiers: [], hasUnresolvedDynamicImport: true, spawnEdgeLiterals: [] };
+  let sourceFile: unknown;
+  try {
+    sourceFile = ts.createSourceFile(fileName, content, languageVersion, false, scriptKind);
+  } catch {
+    // Not expected — createSourceFile tolerates malformed syntax by producing error nodes rather than
+    // throwing — but a genuine exception is the same "can't resolve" shape as a non-literal dynamic
+    // import: we cannot know what this file imports, so the caller must fail closed.
+    return { specifiers: [], hasUnresolvedDynamicImport: true, spawnEdgeLiterals: [] };
+  }
+  const visit = (node: unknown) => {
+    // Unconditional — independent of the import/export/dynamic-import branches below, so a literal in ANY
+    // syntactic position (an object property value, an array element, a bare call argument) is still
+    // collected; a real AST node, never a raw-text regex match (same soundness reasoning as the rest of
+    // this scan — see this file's own `codex-real-spawn-lock-membership-guard.mjs` false-positive case).
+    if (ts.isStringLiteralLike(node)) {
+      const text = (node as { text?: string }).text;
+      if (typeof text === "string" && text.length <= SPAWN_EDGE_MAX_LITERAL_LEN) spawnEdgeLiterals.push(text);
+    }
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      const spec = (node as TsModuleSpecifierNodeLike).moduleSpecifier;
+      // An `export { x }` with no moduleSpecifier is a LOCAL re-export, not a cross-file edge — nothing to
+      // record for it.
+      if (spec && ts.isStringLiteralLike(spec) && typeof spec.text === "string") specifiers.push(spec.text);
+    } else if (ts.isCallExpression(node)) {
+      const call = node as TsImportCallNodeLike;
+      if (call.expression && call.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        const arg = call.arguments?.[0];
+        if (arg && ts.isStringLiteralLike(arg) && typeof arg.text === "string") specifiers.push(arg.text);
+        else hasUnresolvedDynamicImport = true;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return { specifiers, hasUnresolvedDynamicImport, spawnEdgeLiterals };
+}
+
+/** @decision 72769424 — a conservative, over-inclusive textual edge for the subprocess-spawn dependency
+ *  form the import-graph scan can't otherwise see. Never narrow the basename/`--only=` match below to
+ *  "literal must sit in a call-argument position" — a spawn target name can appear in any string literal. */
+function findSpawnTargetEdges(
+  literals: readonly string[], basenameToRelPaths: ReadonlyMap<string, readonly string[]>, stemToRelPaths: ReadonlyMap<string, readonly string[]>,
+): Set<string> {
+  const targets = new Set<string>();
+  for (const literal of literals) {
+    if (literal.startsWith("--only=")) {
+      for (const token of literal.slice("--only=".length).split(",")) {
+        for (const relPath of stemToRelPaths.get(token) ?? []) targets.add(relPath);
+      }
+    }
+    for (const [basename, relPaths] of basenameToRelPaths) {
+      if (literal.includes(basename)) for (const relPath of relPaths) targets.add(relPath);
+    }
+  }
+  return targets;
+}
+
+/** Recursively lists every `packages/daemon/test/**\/*.mjs` file under `testDirAbs`, as POSIX-style paths
+ *  RELATIVE TO THAT DIRECTORY (e.g. `"fixed-wait-witness-guard.mjs"`, `"census/lib.mjs"`) — built with `/`
+ *  directly (never via `path.join` for the RETURNED string), since every repo-relative path elsewhere in
+ *  this file is `/`-separated like git's own output, and a Windows backslash here would break every
+ *  comparison against one. Reads the WORKTREE's own disk content, not `git show ref:path` per file —
+ *  sound because `ref` IS this worktree's own HEAD (@decision fe848bfc), the same precedent
+ *  {@link loadHarnessSetExport} already establishes for reading real worktree files directly rather than
+ *  paying for one `git show` subprocess per file; unlike that loader, this is a pure parse of static text
+ *  (never an `import()`/execution of worktree code), so it needs no child-process/timeout isolation. */
+function listAllTestMjsFilesRelative(testDirAbs: string, relBase = ""): string[] {
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(testDirAbs, { withFileTypes: true })) {
+    const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) out.push(...listAllTestMjsFilesRelative(path.join(testDirAbs, entry.name), rel));
+    else if (entry.isFile() && entry.name.endsWith(".mjs")) out.push(rel);
+  }
+  return out;
+}
+
+/** {@link foldInTestImporters}'s verdict — a discriminated union so a caller can route a mechanism failure
+ *  through `notApplicableHere` and a real "can't safely reduce" finding through `notReducible`, the same
+ *  split {@link computeEmitCompareGate}'s own `notReducible`/`notApplicableHere` constructors already
+ *  enforce (@decision 2db8a3dd) for every other verdict in that function. */
+type TestImporterFoldInResult =
+  | { ok: true; addChangedTestFiles: string[]; addNotHermeticExcluded: string[] }
+  | { ok: false; notApplicable: true; notApplicableKind: EmitCompareNotApplicableKind; reason: string }
+  | { ok: false; notApplicable: false; reason: string };
+
+/** {@link scanTestImporterClosure}'s verdict — the RAW discovered-importer closure (before NOT_HERMETIC/
+ *  EXCLUDED_DIR_NAMES classification, which {@link foldInTestImporters} does itself, in-process, over the
+ *  small `visited` list this returns). `kind` mirrors the two mechanism-failure {@link
+ *  EmitCompareNotApplicableKind} values {@link foldInTestImporters} already used before this was split out. */
+type TestImporterClosureScanResult =
+  | { ok: true; visited: string[] }
+  | { ok: false; kind: "typescript-unresolvable" | "harness-config-unavailable"; reason: string };
+
+/** @decision 72769424 — never call this from the host's own event loop; it froze every project's
+ *  HTTP/WS/MCP/PTY traffic for its whole duration. Exported only so a child process can `import()` and
+ *  call it — see {@link scanTestImporterClosureInChildProcess} immediately below. */
+export async function scanTestImporterClosure(
+  testDirAbs: string, roots: readonly string[],
+): Promise<TestImporterClosureScanResult> {
+  let tsModule: TestImportTsModuleLike;
+  try {
+    const imported = (await import("typescript")) as unknown as { default?: TestImportTsModuleLike } & TestImportTsModuleLike;
+    tsModule = imported.default ?? imported;
+  } catch {
+    return { ok: false, kind: "typescript-unresolvable", reason: "typescript module not resolvable while scanning test-file importers (expected on a shipped end-user install)" };
+  }
+
+  let relFiles: string[];
+  try {
+    relFiles = listAllTestMjsFilesRelative(testDirAbs);
+  } catch {
+    return { ok: false, kind: "harness-config-unavailable", reason: "could not list packages/daemon/test/**/*.mjs while scanning test-file importers" };
+  }
+
+  // Basename/stem -> repo-relative path(s) — built once from the file LISTING alone (cheap, no I/O), so
+  // every file's content scan below (including the spawn-edge literal match) can look a name up in O(1)
+  // instead of re-deriving it. More than one file can share a basename/stem across subdirectories.
+  const basenameToRelPaths = new Map<string, string[]>();
+  const stemToRelPaths = new Map<string, string[]>();
+  for (const rel of relFiles) {
+    const repoRelPath = `${EMIT_COMPARE_TEST_PREFIX}${rel}`;
+    const basename = path.posix.basename(rel);
+    const stem = basename.slice(0, -".mjs".length);
+    (basenameToRelPaths.get(basename) ?? basenameToRelPaths.set(basename, []).get(basename) as string[]).push(repoRelPath);
+    (stemToRelPaths.get(stem) ?? stemToRelPaths.set(stem, []).get(stem) as string[]).push(repoRelPath);
+  }
+
+  // importer repo-relative path -> Set of imported repo-relative test/*.mjs paths it resolves to.
+  const edges = new Map<string, Set<string>>();
+  // Files with a non-literal dynamic import() argument — treated as importing EVERYTHING (see
+  // foldInTestImporters's own doc above), never as a reason to abort the whole scan.
+  const wildcardImporters: string[] = [];
+  for (const rel of relFiles) {
+    const repoRelPath = `${EMIT_COMPARE_TEST_PREFIX}${rel}`;
+    let content: string;
+    try {
+      content = fs.readFileSync(path.join(testDirAbs, rel), "utf8");
+    } catch {
+      return { ok: false, kind: "harness-config-unavailable", reason: `could not read ${repoRelPath} while scanning test-file importers` };
+    }
+    const { specifiers, hasUnresolvedDynamicImport, spawnEdgeLiterals } = extractModuleSpecifiers(tsModule, repoRelPath, content);
+    if (hasUnresolvedDynamicImport) wildcardImporters.push(repoRelPath);
+    const targets = new Set<string>();
+    for (const spec of specifiers) {
+      if (!spec.startsWith("./") && !spec.startsWith("../")) continue; // bare/absolute specifier — can never resolve into test/
+      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(repoRelPath), spec));
+      if (resolved.startsWith(EMIT_COMPARE_TEST_PREFIX) && resolved.endsWith(".mjs")) targets.add(resolved);
+    }
+    for (const spawnTarget of findSpawnTargetEdges(spawnEdgeLiterals, basenameToRelPaths, stemToRelPaths)) targets.add(spawnTarget);
+    if (targets.size > 0) edges.set(repoRelPath, targets);
+  }
+
+  // Reverse edges: imported path -> Set of importer paths — so a BFS can walk OUTWARD from the changed
+  // files to find who imports them, transitively. A `visited` set (not a depth counter) bounds the walk,
+  // so a real import cycle terminates cleanly rather than looping — it's simply never a special case here.
+  const reverse = new Map<string, Set<string>>();
+  for (const [importer, targets] of edges) {
+    for (const target of targets) {
+      let importers = reverse.get(target);
+      if (!importers) { importers = new Set(); reverse.set(target, importers); }
+      importers.add(importer);
+    }
+  }
+
+  const rootSet = new Set<string>(roots);
+  const visited = new Set<string>();
+  const queue: string[] = [...rootSet];
+  // Wildcard importers are NOT roots (roots bypass classification in foldInTestImporters) — seed them
+  // into visited/queue directly so each one still goes through the NOT_HERMETIC/EXCLUDED_DIR_NAMES/
+  // helper/shell-safe gate, exactly like a textually-discovered importer.
+  for (const w of wildcardImporters) {
+    if (rootSet.has(w) || visited.has(w)) continue;
+    visited.add(w);
+    queue.push(w);
+  }
+  while (queue.length > 0) {
+    const current = queue.shift() as string;
+    for (const importer of reverse.get(current) ?? []) {
+      if (rootSet.has(importer) || visited.has(importer)) continue;
+      visited.add(importer);
+      queue.push(importer);
+    }
+  }
+  return { ok: true, visited: [...visited] };
+}
+
+/** Bound on running {@link scanTestImporterClosure} in a child process (see {@link
+ *  scanTestImporterClosureInChildProcess}) — generous relative to the ~9.4s measured on this repo's real
+ *  1324-file corpus; exists only so a hung/looping scan can never wedge a merge. A timeout fails the whole
+ *  diff closed, same as every other mechanism failure this scan can hit. */
+export const TEST_IMPORTER_SCAN_TIMEOUT_MS = 120_000;
+
+/** Evaluated by the child (`node --input-type=module -e`). `url` is THIS SAME compiled module's own
+ *  `import.meta.url` — never a worktree's copy; the scan LOGIC must stay the host's trusted code, only the
+ *  DATA it reads (`testDirAbs`) points into the worktree under test. Prints one JSON line and force-exits
+ *  so a stray handle can't keep the child alive. */
+const TEST_IMPORTER_SCAN_PROBE_SOURCE =
+  "const [url,testDirAbs,rootsJson]=process.argv.slice(1);" +
+  "import(url).then(" +
+  "(m)=>m.scanTestImporterClosure(testDirAbs,JSON.parse(rootsJson))" +
+  ".then((r)=>{process.stdout.write(JSON.stringify(r));process.exit(0)})" +
+  ".catch(()=>process.exit(4))," +
+  "()=>process.exit(2));";
+
+/** @decision 72769424 — same killable-child-process isolation {@link loadHarnessSetExport} already
+ *  established (card fca110cf): async spawn only, never `spawnSync`. Any mechanism failure here fails
+ *  closed to `"harness-config-unavailable"`, same as {@link scanTestImporterClosure}'s own internal ones. */
+function scanTestImporterClosureInChildProcess(
+  testDirAbs: string, roots: readonly string[], timeoutMs: number,
+): Promise<TestImporterClosureScanResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let out = "";
+    let child: ChildProcess;
+    const done = (r: TestImporterClosureScanResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      killRemoveChild(child);
+      done({ ok: false, kind: "harness-config-unavailable", reason: "test-importer-scan child process timed out" });
+    }, timeoutMs);
+    try {
+      child = spawn(process.execPath, ["--input-type=module", "-e", TEST_IMPORTER_SCAN_PROBE_SOURCE, import.meta.url, testDirAbs, JSON.stringify(roots)], {
+        stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+      });
+    } catch {
+      done({ ok: false, kind: "harness-config-unavailable", reason: "could not spawn test-importer-scan child process" });
+      return;
+    }
+    child.stdout?.on("data", (d) => { if (out.length < 1_000_000) out += d; });
+    child.on("error", () => done({ ok: false, kind: "harness-config-unavailable", reason: "test-importer-scan child process errored" }));
+    child.on("close", (code) => {
+      if (code !== 0) { done({ ok: false, kind: "harness-config-unavailable", reason: `test-importer-scan child process exited with code ${code}` }); return; }
+      try {
+        done(JSON.parse(out.trim()) as TestImporterClosureScanResult);
+      } catch {
+        done({ ok: false, kind: "harness-config-unavailable", reason: "could not parse test-importer-scan child process output" });
+      }
+    });
+  });
+}
+
+/** @decision 72769424 — a file whose dynamic import(s) can't be resolved to a plain string literal (see
+ *  {@link extractModuleSpecifiers}'s own doc) is UNCONDITIONALLY a hazard, never classified away.
+ *
+ *  It's folded in as a WILDCARD IMPORTER: seeded into the BFS as if it were ALREADY FOUND to import
+ *  something in `roots`, since by construction we cannot rule that out either. This keeps the fail-closed
+ *  INTENT (such a file, and everything that transitively depends on it, still gets pulled into the run set)
+ *  without the fail-closed BLAST RADIUS this function exists to avoid (aborting the ENTIRE diff's reduction
+ *  over a file nothing else in the diff actually reaches). A wildcard importer still goes through the SAME
+ *  NOT_HERMETIC/EXCLUDED_DIR_NAMES classification as any other discovered importer below — it is seeded
+ *  into `visited`, never into `roots` (which bypasses that classification for paths already known-clean
+ *  from the caller).
+ *
+ *  Never fold a discovered importer (wildcard or textual) into `changedTestFiles` without first classifying
+ *  it against NOT_HERMETIC/EXCLUDED_DIR_NAMES, same as a directly-changed path. */
+async function foldInTestImporters(
+  worktreePath: string,
+  changedTestFiles: readonly string[],
+  notHermeticExcluded: readonly string[],
+  deletedTestFiles: readonly string[],
+  getExcludedDirNames: () => Promise<Set<string> | null>,
+  getNotHermeticNames: () => Promise<Set<string> | null>,
+): Promise<TestImporterFoldInResult> {
+  const testDirAbs = path.join(worktreePath, "packages", "daemon", "test");
+  // Card 72769424 fix round: `deletedTestFiles` are graph SEEDS only, same shape as changedTestFiles/
+  // notHermeticExcluded for the purpose of "who imports this", but they can never be run (they no longer
+  // exist) so they never reach `addChangedTestFiles`/`addNotHermeticExcluded` — a real edge is purely
+  // textual (an importer's own `import "./foo.mjs"` line doesn't care whether foo.mjs still exists on
+  // disk), so a deleted-but-still-imported file's importers must still be found.
+  const roots = [...changedTestFiles, ...notHermeticExcluded, ...deletedTestFiles];
+  const scan = await scanTestImporterClosureInChildProcess(testDirAbs, roots, TEST_IMPORTER_SCAN_TIMEOUT_MS);
+  if (!scan.ok) return { ok: false, notApplicable: true, notApplicableKind: scan.kind, reason: scan.reason };
+  if (scan.visited.length === 0) return { ok: true, addChangedTestFiles: [], addNotHermeticExcluded: [] };
+
+  let excludedDirNames: Set<string> | null | undefined;
+  let notHermeticNames: Set<string> | null | undefined;
+  const addChangedTestFiles: string[] = [];
+  const addNotHermeticExcluded: string[] = [];
+  for (const p of scan.visited) {
+    const relToTestDir = p.slice(EMIT_COMPARE_TEST_PREFIX.length);
+    const dirSegments = relToTestDir.split("/").slice(0, -1);
+    if (dirSegments.length > 0) {
+      if (excludedDirNames === undefined) excludedDirNames = await getExcludedDirNames();
+      if (excludedDirNames === null) return { ok: false, notApplicable: true, notApplicableKind: "harness-config-unavailable", reason: `could not load EXCLUDED_DIR_NAMES while classifying discovered importer ${p}` };
+      if (dirSegments.some((seg) => (excludedDirNames as Set<string>).has(seg))) continue; // fixtures/census pass-through node — never a run target, same as a directly-changed one
+    }
+    if (relToTestDir.split("/").some((seg) => seg.startsWith("_"))) continue; // helper pass-through node — never a run target
+    if (!TEST_PATH_SHELL_SAFE_RE.test(p)) return { ok: false, notApplicable: false, reason: `discovered importer path contains a character outside the shell-safe allowlist: ${p}` };
+    if (dirSegments.length === 0) {
+      // NOT_HERMETIC only ever names test/'s TOP-LEVEL files (mirrors the classification loop's own
+      // comment above) — a nested importer can never match it.
+      const harnessName = p.slice(EMIT_COMPARE_TEST_PREFIX.length, -".mjs".length);
+      if (notHermeticNames === undefined) notHermeticNames = await getNotHermeticNames();
+      if (notHermeticNames === null) return { ok: false, notApplicable: true, notApplicableKind: "harness-config-unavailable", reason: `could not load NOT_HERMETIC while classifying discovered importer ${p}` };
+      if (notHermeticNames.has(harnessName)) { addNotHermeticExcluded.push(p); continue; }
+    }
+    addChangedTestFiles.push(p);
+  }
+  return { ok: true, addChangedTestFiles, addNotHermeticExcluded };
+}
+
 /** @decision 2154b6ad — skips the ~668-test RUNTIME SUITE only (never the whole gate): proven via isolated
  *  transpile-comparison per changed file — never a hand-rolled scanner (desyncs on template literals), never
  *  "comments-only" (a real comment can flip a static guard).
@@ -4213,6 +4593,11 @@ export async function computeEmitCompareGate(
   // Card 17cd1f30: paths classified as NOT_HERMETIC (see EmitCompareGateResult.notHermeticExcluded's own
   // doc) — filtered OUT of changedTestFiles rather than blocking eligibility.
   const notHermeticExcluded: string[] = [];
+  // Card 72769424 fix round: a DELETED test/*.mjs path — never a run target (nothing left to run), but
+  // still a valid graph SEED for foldInTestImporters's reverse-BFS (an unrelated, unchanged test file can
+  // still textually `import` a path that this diff just deleted — the edge is purely textual and doesn't
+  // care whether the target still exists on disk). See foldInTestImporters's own doc for how this is used.
+  const deletedTestFiles: string[] = [];
   // Card 8ee4f11e: paths short-circuited by the `isInertMergePath(p)` skip just below — see
   // EmitCompareGateResult.inertPathsSkipped's own doc for why this must be surfaced, not just dropped.
   const inertPathsSkipped: string[] = [];
@@ -4283,7 +4668,7 @@ export async function computeEmitCompareGate(
       // reach the shell string at all. Mirrors sibling card 344ce950's `identifyRetriableTestFile`, which
       // guards the analogous interpolation with an explicit allowlist before building its own command
       // string — same subsystem, same posture.
-      if (!/^[A-Za-z0-9_.\-/]+$/.test(p)) return notReducible(`test file path contains a character outside the shell-safe allowlist: ${p}`);
+      if (!TEST_PATH_SHELL_SAFE_RE.test(p)) return notReducible(`test file path contains a character outside the shell-safe allowlist: ${p}`);
       if (status === "A" || status === "M") {
         // Card 17cd1f30: classify against the harness's own NOT_HERMETIC set BEFORE pushing into
         // changedTestFiles — a NOT_HERMETIC file is a real, maintained test (not a fixture/helper, both of
@@ -4301,8 +4686,11 @@ export async function computeEmitCompareGate(
         } else {
           changedTestFiles.push(p);
         }
+      } else if (status === "D") {
+        // Card 72769424 fix round: nothing left to run directly, but an unrelated, unchanged test file may
+        // still textually import this now-gone path — see deletedTestFiles's own doc above.
+        deletedTestFiles.push(p);
       }
-      // status "D" (deleted): nothing left to run directly; the guards below still cover its blast radius.
       continue;
     }
     // Card 3fbd95e0: a changed packages/daemon/assets/** path never blocks eligibility on its own — unlike
@@ -4393,6 +4781,25 @@ export async function computeEmitCompareGate(
   // NOT a refusal: the FULL gate never runs a NOT_HERMETIC file either (test:daemon with no --only resolves
   // to the discovered hermetic set, which already excludes it), so the reduced gate's coverage here is
   // exactly the full gate's own coverage — zero — not a regression the reduction introduced.
+
+  // Card 72769424: widen changedTestFiles/notHermeticExcluded to the TRANSITIVE IMPORTERS of every already-
+  // classified changed test file (see foldInTestImporters's own doc + docs/decisions/72769424-test-importer-
+  // fold-in.md) — the fix for the fixed-wait-witness-guard-selftest.mjs gap: a diff touching only the guard
+  // file used to reduce to `--only=fixed-wait-witness-guard` alone and never run the selftest that imports
+  // from it. Only worth running when at least one test-shaped path (changed OR deleted — fix round, see
+  // deletedTestFiles's own doc above) was actually classified above.
+  if (changedTestFiles.length > 0 || notHermeticExcluded.length > 0 || deletedTestFiles.length > 0) {
+    const folded = await foldInTestImporters(
+      worktreePath, changedTestFiles, notHermeticExcluded, deletedTestFiles,
+      async () => { if (excludedDirNames === undefined) excludedDirNames = await loadExcludedTestDirNames(worktreePath); return excludedDirNames; },
+      async () => { if (notHermeticNames === undefined) notHermeticNames = await loadNotHermeticNames(worktreePath); return notHermeticNames; },
+    );
+    if (!folded.ok) {
+      return folded.notApplicable ? notApplicableHere(folded.reason, folded.notApplicableKind) : notReducible(folded.reason);
+    }
+    changedTestFiles.push(...folded.addChangedTestFiles);
+    notHermeticExcluded.push(...folded.addNotHermeticExcluded);
+  }
 
   if (changedTsFiles.length > 0) {
     // TS-ONLY precondition (emitDecoratorMetadata / const enum) — N/A to changedScriptFiles below, which
