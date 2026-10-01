@@ -98,6 +98,24 @@ export function deriveCrashOrphanedWorkers(db: Db, recovered: Session[]): CrashO
 }
 
 /**
+ * Shared successor-exclusion predicate (card `6859f9e7`): a session with a recycle successor is never a
+ * valid automatic resume target — `resume()` refuses it unconditionally without a human
+ * `allowSuperseded` override (sessions/service.ts). Used by both `deriveCrashOrphanedManagers` below
+ * (the crash-path manager derivation) and `SessionService.liveFleetResumeSet` (the RestartIntent capture
+ * snapshot for an ordinary `daemon_restart`) so the two resume-candidate derivations can't drift apart
+ * again: a `daemon_restart` taken mid-`recycleManager` used to capture BOTH the predecessor and its
+ * already-live successor, since the predecessor is deliberately kept live awaiting ownership-transfer
+ * settle. On boot, `resume(predecessor)` threw "a successor exists" and that throw was counted as a
+ * genuine `fleet_resume_failed`, even though the predecessor was never meant to resume.
+ *
+ * @decision f1969787 — the halted-recycle predecessor this guards against is deliberately left live with
+ *  a successor already present; see that record for why it must still never be auto-resumed.
+ */
+export function isSupersededByRecycle(db: Db, sessionId: string): boolean {
+  return db.hasSuccessor(sessionId);
+}
+
+/**
  * @decision sha:a9c9a342 — a manager crash-orphaned in its own right, with no surviving worker to
  *  ride along on, used to never get a resume attempt at all; every manager/platform row in `recovered`
  *  not covered by `orphanedWorkers` now gets ONE independent attempt via this list (`soloManagerIds`).
@@ -124,7 +142,7 @@ export function deriveCrashOrphanedManagers(db: Db, recovered: Session[], orphan
     if (covered.has(s.id)) continue;
     if (!s.engineSessionId) continue; // never captured an engine id — structurally never resumable
     if (s.archivedAt) continue; // already archived pre-crash — not this crash's doing
-    if (db.hasSuccessor(s.id)) continue; // recycled/superseded — its successor owns the work
+    if (isSupersededByRecycle(db, s.id)) continue; // recycled/superseded — its successor owns the work
     out.push(s.id);
   }
   return out;

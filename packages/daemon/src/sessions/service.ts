@@ -67,7 +67,7 @@ import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_D
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey } from "../git/repo-lock.js";
 import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
-import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
+import { isSupersededByRecycle, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN, normalizeResumeOneResult, type ResumeOneResult } from "../orchestration/resume-nudge.js";
@@ -5089,7 +5089,15 @@ export class SessionService {
    * live ones (a parked/rate-limited session is still `live` — its pty isn't killed on a cap — so it is
    * captured and recovered too). Each entry carries the identity boot needs to re-spawn it unchanged:
    * its role (re-passed so the MCP surface returns) and, for a worker, its manager (parentSessionId).
-   * Recycled/exited prior generations are not `live`, so a superseded session is naturally excluded.
+   * An ordinary recycled/exited prior generation is not `live`, so it's naturally excluded — but a
+   * manager mid-`recycleManager` is a deliberate exception: its predecessor stays genuinely `live`
+   * awaiting ownership-transfer settle even though a successor already exists, so it is excluded
+   * explicitly below via `isSupersededByRecycle` — the SAME predicate `deriveCrashOrphanedManagers`
+   * (orchestration/crash-orphaned-workers.ts) uses for the equivalent crash-path derivation, so the two
+   * resume-candidate derivations can't drift apart again.
+   *
+   * @decision f1969787 — the halted-recycle predecessor this excludes is deliberately left live with a
+   *  successor already present; see that record for why it must still never be auto-resumed.
    */
   liveFleetResumeSet(): RestartResumeEntry[] {
     return this.db
@@ -5098,7 +5106,9 @@ export class SessionService {
       // in-flight run clean (reconcileRunsOnBoot), so a run must never be captured into the resume set.
       // Belt-and-suspenders for the ghost-resume guard in resume(): also skip a session whose worktree/cwd
       // is already gone at capture time, so a dead-worktree row never even enters the restart intent.
-      .filter((s) => s.processState === "live" && s.role !== "run" && fs.existsSync(s.cwd))
+      // Also skip a session with a recycle successor (see this method's own doc above) — resume()
+      // refuses it unconditionally, so capturing it here only manufactures a false fleet_resume_failed.
+      .filter((s) => s.processState === "live" && s.role !== "run" && fs.existsSync(s.cwd) && !isSupersededByRecycle(this.db, s.id))
       // `busy` snapshots whether the session was mid-turn/mid-run at capture — used by resumeFleetOnBoot to
       // gate the standing-reviewer resume nudge (card b5664b5b, Problem B). `hadUnsentDraft` snapshots
       // whether its raw-terminal composer held an unsent human draft (PtyHost.isComposerDirty) — that

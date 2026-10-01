@@ -34,11 +34,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the in-process watch could ever see it (the successor never captured an engine id at all). The
 //       REAL boot sequence (runBootRecoveryPrefix + finishReconcilingHaltedRecycleSuccessors) reclaims the
 //       transferred fleet, exactly like (A) but driven by the boot-time pair instead of the live watch.
-//   (C) resume() REFUSES A STILL-SPLIT HALTED PREDECESSOR ACROSS A RESTART, same as main — the successor
-//       DOES durably survive the restart (real engine id + transcript), but `resumeFleetOnBoot` still
-//       refuses the predecessor (hasSuccessor stays true, no carve-out): it lands in `failed`, while the
-//       surviving successor resumes normally. A human resume is required to bring the predecessor back —
-//       this is a known, accepted gap (follow-up card), not a regression.
+//   (C) A STILL-SPLIT HALTED PREDECESSOR IS EXCLUDED FROM CAPTURE, never attempted — card 6859f9e7 (fix
+//       round, follow-up to this card). The successor DOES durably survive the restart (real engine id +
+//       transcript); the predecessor is itself still genuinely `live` (never stopped) WITH a successor, so
+//       `liveFleetResumeSet` now excludes it from the capture (the SAME `isSupersededByRecycle` predicate
+//       `deriveCrashOrphanedManagers` uses) instead of capturing it and letting `resume()` throw — it ends
+//       up in neither `resumed` nor `failed`, and files no `fleet_resume_failed` event, while the surviving
+//       successor resumes normally. `resume()` itself still refuses it directly if called (unchanged). A
+//       human resume is required to bring the predecessor back — this is a known, accepted gap (follow-up
+//       card 386e4eb5), not a regression.
 //   (D) NEGATIVE CONTROL — an ORDINARY (non-halted) recycled predecessor is STILL refused by resume(),
 //       proving (C)'s refusal isn't special-cased either way — halted and ordinary predecessors are
 //       refused identically.
@@ -311,7 +315,7 @@ try {
     check("(B) M1 is not in the failed list", !failed.includes(m1.id));
   }
 
-  // ==================== (C) resume() REFUSES a still-split halted predecessor, same as main ====================
+  // ==================== (C) a still-split halted predecessor is EXCLUDED FROM CAPTURE, never attempted ====================
   {
     const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
     const P = "rmhsd-c";
@@ -329,7 +333,12 @@ try {
     writeFakeTranscript(m2.cwd, "eng-m2-c");
     check("(C pre) M2 IS durably resumable", db1.getSession(m2.id)?.engineSessionId === "eng-m2-c");
 
+    // Card 6859f9e7 (RED on main before that fix): M1 is still genuinely `live` at capture time (never
+    // stopped — the halt branch keeps it live forever), so a naive capture would have included it right
+    // alongside M2. `liveFleetResumeSet` must exclude it instead.
     const preRestartFleet = sessions1.liveFleetResumeSet();
+    check("(C) FIX 6859f9e7: liveFleetResumeSet EXCLUDES the still-live halted predecessor from capture", !preRestartFleet.some((e) => e.sessionId === m1.id));
+    check("(C) the surviving successor M2 IS captured", preRestartFleet.some((e) => e.sessionId === m2.id));
     db1.close();
     const { db: db2, host: host2 } = makeBoot();
     const { sessions: sessions2, haltedFinish } = runRealBootSequenceUpToResume(db2, host2);
@@ -338,14 +347,21 @@ try {
 
     let thrown;
     try { sessions2.resume(m1.id); } catch (e) { thrown = e; }
-    check("(C) ROUND 3: resume() REFUSES the halted predecessor directly, same as an ordinary recycled one",
+    check("(C) resume() still REFUSES the halted predecessor directly if called by hand, same as an ordinary recycled one",
       !!thrown && /recycled.*successor exists/.test(thrown.message));
 
-    const restartIntent = { reason: "test", managerSessionId: m1.id, resume: preRestartFleet };
+    // Card 6859f9e7's own test (DoD): the restart is requested by M2 (the surviving successor,
+    // post-handoff) — NOT by M1 — so M1 is exercised purely through the ORDINARY entries loop
+    // (liveFleetResumeSet's capture), never through resumeFleetOnBoot's separate "requester" branch,
+    // which unconditionally attempts `intent.managerSessionId` regardless of capture and would otherwise
+    // mask what this scenario is actually proving.
+    const restartIntent = { reason: "test", managerSessionId: m2.id, resume: preRestartFleet };
     const { resumed, failed } = sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS });
-    check("(C) ROUND 3: M1 (the halted predecessor) is NOT resumed — lands in `failed`, no carve-out", !resumed.includes(m1.id) && failed.includes(m1.id));
-    check("(C) the surviving successor M2 is STILL resumed normally — its own resumability is unaffected", resumed.includes(m2.id));
+    check("(C) FIX 6859f9e7: M1 (the halted predecessor) is NEVER ATTEMPTED — absent from BOTH `resumed` and `failed`, not merely absent from `resumed`", !resumed.includes(m1.id) && !failed.includes(m1.id));
+    check("(C) the surviving successor M2 (the restart requester here) is STILL resumed normally — its own resumability is unaffected", resumed.includes(m2.id));
     check("(C) hasSuccessor(M1) is STILL true after the attempt — nothing wrongly unlinked it", db2.hasSuccessor(m1.id) === true);
+    check("(C) FIX 6859f9e7: no fleet_resume_failed event was fabricated for this restart (M1 was never a resume failure — it was never attempted)",
+      !hasEvent(db2, m1.id, "fleet_resume_failed") && !hasEvent(db2, m2.id, "fleet_resume_failed") && failed.length === 0);
   }
 
   // ==================== (D) NEGATIVE CONTROL — an ORDINARY recycled predecessor stays refused ====================
