@@ -147,7 +147,7 @@ try {
     const r = await gw.deliverMedia(sess, "/tmp/whatever.png");
     check("6a: deliverMedia refuses a route with no live binding", r.delivered === false && r.reason === "route-unbound" && tg.sent.length === 0);
 
-    const r2 = await gw.sendToChannel("telegram", "600600600", "mirrored turn");
+    const r2 = await gw.sendToChannel(sess, "telegram", "600600600", "mirrored turn");
     check("6b: sendToChannel refuses a route with no live binding", r2.delivered === false && r2.reason === "route-unbound" && tg.sent.length === 0);
   }
 } finally {

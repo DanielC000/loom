@@ -780,8 +780,9 @@ function ChannelRow({ sessionId, binding, onChanged }: { sessionId: string; bind
       {binding.flaggedNonPrivate && (
         <span style={errStyle}>
           This chat may be a group (negative Telegram id, or an unconfirmed inbound) — everyone in it could
-          see the companion's replies. Outbound delivery here is suppressed. Re-bind with the correct scope,
-          or remove this channel.
+          see the companion's replies. Outbound delivery here is suppressed. Re-submitting the same chat/scope
+          will NOT clear this — either set the scope to "group" (if this genuinely is a shared chat), or
+          remove this channel and re-add it (this also drops any home or reminder pinned to this route).
         </span>
       )}
       {remove.error && <span style={errStyle}>{errorText(remove.error)}</span>}

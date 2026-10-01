@@ -105,6 +105,12 @@ export class ChatGateway {
    *  refusal (card 1b0df437) — see `warnUnboundRouteRefused` below. */
   private readonly warnedUnboundRoutes = new Set<string>();
 
+  /** (session, channel) keys already warned for a `route-foreign-session` delivery refusal (card c7d7b43a)
+   *  — see `warnForeignSessionRouteRefused` below. Keyed WITHOUT the chatId (disclosure-safe, like the
+   *  warning itself) — this should never fire under correct operation, so dedup is a courtesy against log
+   *  spam, not a correctness requirement the way the other two warned-sets are. */
+  private readonly warnedForeignSessionRoutes = new Set<string>();
+
   /**
    * @param submitTurn  the injected pty turn-submit primitive (kept db-free — see SubmitTurn).
    * @param bindings    the initial session↔chat bindings (loaded from the db by the factory).
@@ -763,7 +769,7 @@ export class ChatGateway {
     if (!target) return { delivered: false, reason: "no-target" };
     // OUTBOUND SUPPRESSION (card 7578dea2 / d3f9b4d2): covers chat_reply AND every heartbeat/reminder/
     // attention-push reply — all resolve through this same method (see deliveryBlockReason's doc).
-    const blockReason = this.deliveryBlockReason(target.channel, target.chatId);
+    const blockReason = this.deliveryBlockReason(target.channel, target.chatId, sessionId);
     if (blockReason) {
       // Zero-reply detector (card 48e8d289) hardening: this IS a genuine chat_reply ATTEMPT — the agent
       // called it, and the reason it can't land is a PERMANENT, already-surfaced-elsewhere condition (the
@@ -775,6 +781,7 @@ export class ChatGateway {
       // both fire for the same root cause would misdirect a human toward "the agent is stuck" instead of
       // "re-bind the channel" / "fix the home".
       if (blockReason === "route-unbound") this.warnUnboundRouteRefused(sessionId, target.channel, target.chatId);
+      if (blockReason === "route-foreign-session") this.warnForeignSessionRouteRefused(sessionId, target.channel); // card c7d7b43a
       this.onReplyDelivered?.(sessionId);
       return { delivered: false, reason: blockReason };
     }
@@ -796,7 +803,7 @@ export class ChatGateway {
         return voiceResult;
       }
     }
-    const result = await this.sendVia(target.channel, target.chatId, text, { proactive });
+    const result = await this.sendVia(sessionId, target.channel, target.chatId, text, { proactive });
     if (!result.delivered) {
       // PARTIAL SEND (CR#2 L1): a chunked reply that stopped on chunk k>1 (a send failure, OR — card
       // 7578dea2 — a mid-flight flag flip) has already reached the chat with chunks 1..k-1 — recording
@@ -807,12 +814,13 @@ export class ChatGateway {
         this.recordOutboundSafely(sessionId, target.channel, target.chatId, result.sentText, proactive);
       }
       if (result.reason === "no-adapter") return { delivered: false, reason: "no-adapter" };
-      if (result.reason === "route-flagged-non-private" || result.reason === "route-unbound") {
+      if (result.reason === "route-flagged-non-private" || result.reason === "route-unbound" || result.reason === "route-foreign-session") {
         // Zero-reply detector (card 48e8d289) hardening, card 7578dea2 / d3f9b4d2: a MID-FLIGHT suppression
         // is still a genuine chat_reply attempt, exactly like the up-front deliveryBlockReason gate above —
         // see that gate's own comment on why this resets the streak instead of letting it accumulate
         // toward a misfire.
         if (result.reason === "route-unbound") this.warnUnboundRouteRefused(sessionId, target.channel, target.chatId); // card 1b0df437
+        if (result.reason === "route-foreign-session") this.warnForeignSessionRouteRefused(sessionId, target.channel); // card c7d7b43a
         this.onReplyDelivered?.(sessionId);
         return { delivered: false, reason: result.reason };
       }
@@ -873,7 +881,7 @@ export class ChatGateway {
       // through to the plain-text sendVia path below, whose OWN per-chunk mayDeliverTo check (see sendVia)
       // then correctly reports route-flagged-non-private rather than sending voice to a route that just
       // got flagged mid-synth.
-      if (!this.mayDeliverTo(target.channel, target.chatId)) return null;
+      if (!this.mayDeliverTo(target.channel, target.chatId, sessionId)) return null;
       try {
         await adapter.sendVoice(target.chatId, audio.filePath, text, proactive);
         return { delivered: true, chunks: 1 };
@@ -901,9 +909,10 @@ export class ChatGateway {
   async deliverMedia(sessionId: string, filePath: string): Promise<{ delivered: boolean; reason?: string }> {
     const target = this.replyTarget(sessionId);
     if (!target) return { delivered: false, reason: "no-target" };
-    const blockReason = this.deliveryBlockReason(target.channel, target.chatId); // card 7578dea2 / d3f9b4d2
+    const blockReason = this.deliveryBlockReason(target.channel, target.chatId, sessionId); // card 7578dea2 / d3f9b4d2
     if (blockReason) {
       if (blockReason === "route-unbound") this.warnUnboundRouteRefused(sessionId, target.channel, target.chatId); // card 1b0df437
+      if (blockReason === "route-foreign-session") this.warnForeignSessionRouteRefused(sessionId, target.channel); // card c7d7b43a
       return { delivered: false, reason: blockReason };
     }
     const adapter = this.adapters.get(target.channel);
@@ -921,23 +930,28 @@ export class ChatGateway {
   /**
    * OUTBOUND MIRROR primitive: send a plain, non-reply message to an EXPLICIT (channel, chatId) — never
    * resolved from a turn's origin (unlike deliverReply/replyTarget). Callers pass a route already known to
-   * be one of a session's bound channels (see bindingsForSession) and this method does not care WHICH
-   * session the route belongs to — the ONLY binding lookup it does is the `mayDeliverTo` suppression check
-   * (card 7578dea2) below, a read-only routing-map lookup, never inbound routing. It NEVER calls submitTurn
-   * and never touches bindingForInbound/handleInbound's INBOUND path, so it structurally cannot form a turn
-   * or loop a mirrored message back in. Used to echo a web-chat turn out to the session's other bound
-   * channels (e.g. Telegram) with a disclaimer — the caller composes that text; this just sends it.
+   * be one of `sessionId`'s own bound channels (see bindingsForSession) — the ONLY binding lookup this does
+   * is the `mayDeliverTo` suppression check (card 7578dea2) below, a read-only routing-map lookup, never
+   * inbound routing. It NEVER calls submitTurn and never touches bindingForInbound/handleInbound's INBOUND
+   * path, so it structurally cannot form a turn or loop a mirrored message back in. Used to echo a web-chat
+   * turn out to the session's other bound channels (e.g. Telegram) with a disclaimer — the caller composes
+   * that text; this just sends it. `sessionId` (card c7d7b43a) is threaded to `deliveryBlockReason` as the
+   * requesting session — every real caller already resolves `channel`/`chatId` from THIS session's own
+   * `bindingsForSession`, so the ownership check is a no-op in practice, same as every other scoped caller.
    */
-  async sendToChannel(channel: string, chatId: string, text: string): Promise<DeliverResult> {
-    const blockReason = this.deliveryBlockReason(channel, chatId); // card 7578dea2 / d3f9b4d2
-    if (blockReason) return { delivered: false, reason: blockReason };
-    const result = await this.sendVia(channel, chatId, text);
+  async sendToChannel(sessionId: string, channel: string, chatId: string, text: string): Promise<DeliverResult> {
+    const blockReason = this.deliveryBlockReason(channel, chatId, sessionId); // card 7578dea2 / d3f9b4d2
+    if (blockReason) {
+      if (blockReason === "route-foreign-session") this.warnForeignSessionRouteRefused(sessionId, channel); // card c7d7b43a
+      return { delivered: false, reason: blockReason };
+    }
+    const result = await this.sendVia(sessionId, channel, chatId, text);
     if (!result.delivered) {
       if (result.reason === "no-adapter") return { delivered: false, reason: "no-adapter" };
       // card 7578dea2 / d3f9b4d2 hardening: sendVia's own per-chunk recheck caught a mid-flight flag flip
       // or unbind. Not a chat_reply, so no onReplyDelivered here — the zero-reply detector only tracks
       // chat_reply/deliverReply.
-      if (result.reason === "route-flagged-non-private" || result.reason === "route-unbound") return { delivered: false, reason: result.reason };
+      if (result.reason === "route-flagged-non-private" || result.reason === "route-unbound" || result.reason === "route-foreign-session") return { delivered: false, reason: result.reason };
       return { delivered: false, reason: "send-failed" };
     }
     return { delivered: true, chunks: result.chunks };
@@ -949,11 +963,12 @@ export class ChatGateway {
    *  live binding, mid-flight". On a mid-stream stop, `sentChunks`/`sentText` report exactly what already
    *  reached the chat (chunks 1..k-1) — see deliverReply's partial-send record (CR#2 L1). `opts.proactive`
    *  (proactive event-line producer) is forwarded to the adapter's `send` verbatim — `sendToChannel`'s
-   *  mirror-echo caller omits it (never proactive), only `deliverReply` passes it. */
-  private async sendVia(channel: string, chatId: string, text: string, opts?: { proactive?: boolean }): Promise<
+   *  mirror-echo caller omits it (never proactive), only `deliverReply` passes it. `sessionId` (card
+   *  c7d7b43a) is the REQUESTING session, threaded to every per-chunk `deliveryBlockReason` recheck below. */
+  private async sendVia(sessionId: string, channel: string, chatId: string, text: string, opts?: { proactive?: boolean }): Promise<
     | { delivered: true; chunks: number }
     | { delivered: false; reason: "no-adapter" }
-    | { delivered: false; reason: "send-failed" | "route-flagged-non-private" | "route-unbound"; sentChunks: number; sentText: string }
+    | { delivered: false; reason: "send-failed" | "route-flagged-non-private" | "route-unbound" | "route-foreign-session"; sentChunks: number; sentText: string }
   > {
     const adapter = this.adapters.get(channel);
     if (!adapter) return { delivered: false, reason: "no-adapter" };
@@ -965,7 +980,7 @@ export class ChatGateway {
         // before calling sendVia — this re-checks on EVERY chunk, so a concurrent inbound flipping the flag
         // (or an unbind) mid-flight (between two chunks of a long reply) stops the REST of the reply
         // instead of finishing a send that started before the route went bad.
-        const blockReason = this.deliveryBlockReason(channel, chatId);
+        const blockReason = this.deliveryBlockReason(channel, chatId, sessionId);
         if (blockReason) {
           return { delivered: false, reason: blockReason, sentChunks: sent, sentText: parts.slice(0, sent).join("") };
         }
@@ -1090,6 +1105,29 @@ export class ChatGateway {
     }
   }
 
+  /**
+   * SECURITY (card c7d7b43a, defense in depth): `deliveryBlockReason` returned `route-foreign-session` — the
+   * route `sessionId` is attempting to deliver to is backed by a binding belonging to a DIFFERENT session.
+   * This should never happen via today's REST surface (every binding-mutating route scopes writes to one
+   * session, and `replyTarget` is pinned per-turn from that SAME session's own origin resolver) — if it ever
+   * fires, it signals a bug elsewhere, not a benign config issue, so unlike `warnUnboundRouteRefused` this
+   * is logged ALWAYS ON (not behind `LOOM_COMPANION_DEBUG`). Deduped per (session, channel) PER DAEMON
+   * PROCESS (resets on restart). Disclosure-safe: session id + channel only, never the chatId (same posture
+   * as `warnUnboundRouteRefused`/`warnUnconfirmedDirectInbound`).
+   */
+  private warnForeignSessionRouteRefused(sessionId: string, channel: string): void {
+    const key = `${sessionId}:${channel}`;
+    if (this.warnedForeignSessionRoutes.has(key)) return;
+    this.warnedForeignSessionRoutes.add(key);
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[companion] SECURITY: session ${sessionId} attempted chat_reply/media delivery on channel=${channel} ` +
+        `to a route backed by ANOTHER session's binding — refused (card c7d7b43a). This should never happen ` +
+        `via normal use; if seen, investigate how this session's reply target came to name another ` +
+        `session's route.`,
+    );
+  }
+
   // @decision 7578dea2 — outbound suppression to a flagged route is SILENT; never send even a re-bind
   // notice to it (that would itself be a disclosure to an unauthorized chat). See the full record.
   //
@@ -1098,19 +1136,21 @@ export class ChatGateway {
   // reminder route surviving past its binding's unbind). The one true "may this chat receive" predicate
   // every outbound producer (deliverReply/deliverMedia/sendToChannel/sendVia's per-chunk recheck) gates
   // through — see `deliveryBlockReason` for the discriminated reason each of them actually reports.
-  private mayDeliverTo(channel: string, chatId: string): boolean {
-    return this.deliveryBlockReason(channel, chatId) === undefined;
+  private mayDeliverTo(channel: string, chatId: string, sessionId: string): boolean {
+    return this.deliveryBlockReason(channel, chatId, sessionId) === undefined;
   }
 
-  /** The discriminated reason `channel`/`chatId` may NOT currently receive outbound, or undefined when it
-   *  may — `mayDeliverTo`'s own boolean collapses this; every real call site needs the actual reason to
-   *  report on its DeliverResult, so this is the one implementation both read from. The actual decision is
-   *  `companionRouteBlockReason` (reconcile.ts) — shared with `warnStaleStoredHomes`, the reply status's
-   *  `homeRouteRefused`, and `validateHomeTarget` (card ddf08614) — this method's own job is just resolving
-   *  the GLOBAL binding (`bindingForInbound`) that predicate needs; see its doc for why that scope is right
-   *  here but wrong for those other, per-session callers. */
-  private deliveryBlockReason(channel: string, chatId: string): CompanionRouteBlockReason | undefined {
-    return companionRouteBlockReason({ channel, chatId }, this.bindingForInbound(channel, chatId));
+  /** The discriminated reason `channel`/`chatId` may NOT currently receive outbound FROM `sessionId`, or
+   *  undefined when it may — `mayDeliverTo`'s own boolean collapses this; every real call site needs the
+   *  actual reason to report on its DeliverResult, so this is the one implementation both read from. The
+   *  actual decision is `companionRouteBlockReason` (reconcile.ts) — shared with `warnStaleStoredHomes`,
+   *  the reply status's `homeRouteRefused`, and `validateHomeTarget` (card ddf08614) — this method's own
+   *  job is just resolving the binding (`bindingForInbound`, scoped to THIS gateway instance's own routing
+   *  map) that predicate needs. `sessionId` is passed through as `requestingSessionId` (card c7d7b43a) —
+   *  see that predicate's own doc for why the real cross-session vector it guards is the shared in-app
+   *  adapter, not a global binding lookup (every gateway instance is built per-session in production). */
+  private deliveryBlockReason(channel: string, chatId: string, sessionId: string): CompanionRouteBlockReason | undefined {
+    return companionRouteBlockReason({ channel, chatId }, this.bindingForInbound(channel, chatId), sessionId);
   }
 }
 

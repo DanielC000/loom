@@ -207,7 +207,7 @@ try {
     const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
-    const r = await gw.sendToChannel("telegram", "111", "mirrored web-chat turn");
+    const r = await gw.sendToChannel("sess-A", "telegram", "111", "mirrored web-chat turn");
     check("9: sendToChannel delivers as plain text", r.delivered === true && tg.sent.length === 1 && tg.sent[0].text === "mirrored web-chat turn");
     check("9: sendToChannel NEVER attempts synth/voice (mirror stays text-only by construction)", synth.calls.length === 0 && tg.voiceSent.length === 0);
   }

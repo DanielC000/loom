@@ -120,7 +120,10 @@ function warnStaleStoredHomes(db: CompanionConfigStore): void {
     const home = db.getCompanionHome(row.sessionId);
     if (!home) continue;
     const binding = db.getCompanionBindingsForSession(row.sessionId).find((b) => b.channel === home.channel && b.chatId === home.chatId);
-    if (companionRouteBlockReason(home, binding) === undefined) continue;
+    // card c7d7b43a: this caller HAS its own sessionId (row.sessionId) — pass it so an in-app home whose
+    // chatId doesn't actually match this session (corrupt state, or a future bug) is caught here too, not
+    // just at the delivery chokepoint.
+    if (companionRouteBlockReason(home, binding, row.sessionId) === undefined) continue;
     const badShape = isNonNumericTelegramChatId(home.channel, home.chatId) || isLikelyGroupTelegramChatId(home.channel, home.chatId);
     // card 1b0df437 item 3: disclosure-safe — never the chatId itself (identifying), only the channel and
     // which of the two distinct problems applies (bad shape vs. a shape that's fine but unbound).

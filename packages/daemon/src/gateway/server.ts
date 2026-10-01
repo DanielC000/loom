@@ -1443,10 +1443,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(409).send({ error: `that (channel, chatId) route is already bound to another session: ${(e as Error).message}` });
     }
     // Keep the live routing map in sync so the new/edited binding takes effect with no restart. Carries
-    // flaggedNonPrivate through — computed FRESH by upsertCompanionBinding via isLikelyGroupTelegramChatId
-    // (card 61e33b99; docs/decisions/61e33b99-boot-time-preflag-group-dm-bindings.md), so a re-bind with a
-    // genuine fix clears outbound suppression LIVE, and a re-bind that doesn't fix it stays suppressed —
-    // either way with no restart needed.
+    // flaggedNonPrivate through — computed by upsertCompanionBinding (card 61e33b99 via
+    // isLikelyGroupTelegramChatId, card c7d7b43a for the same-route-preserves rule): a route whose chatId
+    // or scope actually CHANGED here gets the flag fresh from shape, live, no restart needed; a same-route
+    // re-bind (identical chatId + scope) instead PRESERVES whatever the row already held, so a bare
+    // resubmission can never launder a runtime-observed flag — see db.ts's own doc on that method.
     deps.companion?.bind({ sessionId: binding.sessionId, channel: binding.channel, chatId: binding.chatId, scope: binding.scope, flaggedNonPrivate: binding.flaggedNonPrivate });
     // card d3f9b4d2 Minor 1: ON CONFLICT this upsert REPLACES the chat_id for (sessionId, channel) — a
     // re-bind to a different chat can orphan the home/a reminder still naming the OLD chat for this
@@ -1522,9 +1523,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   const validateHomeTarget = (channel: string, chatId: string, sessionId: string): string | null => {
     const route = { channel, chatId };
     const binding = deps.db.getCompanionBindingsForSession(sessionId).find((b) => b.channel === channel && b.chatId === chatId);
-    const blockReason = companionRouteBlockReason(route, binding);
+    // card c7d7b43a: this caller HAS its own sessionId — pass it so an in-app home naming a DIFFERENT
+    // session's chatId is refused here too, not just at the delivery chokepoint.
+    const blockReason = companionRouteBlockReason(route, binding, sessionId);
     if (blockReason === "route-flagged-non-private") {
-      return `(channel=${channel}, chatId=${chatId}) on session ${sessionId.slice(0, 8)} is flagged non-private — delivery to it is refused; re-bind it with scope "group", or pick a different route`;
+      // card c7d7b43a: re-submitting this SAME (channel, chatId, scope) will NOT clear the flag — only an
+      // actual scope change (to "group", if it genuinely is a shared chat), binding a different chat, or
+      // removing and re-adding this exact channel (which also drops any home/reminder pinned to it) does.
+      return `(channel=${channel}, chatId=${chatId}) on session ${sessionId.slice(0, 8)} is flagged non-private — delivery to it is refused; if this is genuinely a shared chat, re-bind it with scope "group" (re-submitting the same scope will not clear the flag); otherwise remove and re-add this channel (this also clears any home/reminder pinned to it) or pick a different route`;
     }
     if (blockReason === "route-unbound") {
       if (isNonNumericTelegramChatId(channel, chatId) || isLikelyGroupTelegramChatId(channel, chatId)) {
@@ -1739,7 +1745,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   const replyStatusOf = (row: import("../db.js").CompanionConfigRow) => {
     const home = deps.db.getCompanionHome(row.sessionId);
     const homeBinding = home ? deps.db.getCompanionBindingsForSession(row.sessionId).find((b) => b.channel === home.channel && b.chatId === home.chatId) : undefined;
-    const homeRouteRefused = !!home && companionRouteBlockReason(home, homeBinding) !== undefined;
+    // card c7d7b43a: this caller HAS its own sessionId (row.sessionId) — pass it through.
+    const homeRouteRefused = !!home && companionRouteBlockReason(home, homeBinding, row.sessionId) !== undefined;
     return buildCompanionReplyStatus(row, deps.db.getSession(row.sessionId)?.turnSeq ?? 0, undefined, homeRouteRefused);
   };
   app.get("/api/companion/status", async () => deps.db.listCompanionConfigs().map(replyStatusOf));
@@ -1945,10 +1952,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!isNonBlankStr(h.channel) || !isNonBlankStr(h.chatId)) return reply.code(400).send({ error: "home must be { channel, chatId } non-empty strings" });
       const homeChannel = h.channel.trim();
       const homeChatId = h.chatId.trim();
+      // card c7d7b43a: a home targeting the IN-APP channel can NEVER be valid here — its chatId must equal
+      // the owning session's own id by construction, and that id isn't minted until the spawn below, so no
+      // caller can legitimately supply it in advance. Refuse outright rather than falling through to
+      // companionRouteBlockReason with no requestingSessionId to check against — that would silently admit
+      // a home naming an EXISTING, different session's own in-app route (the shared-InAppChannel
+      // cross-session vector this card closes at the delivery chokepoint too).
+      if (homeChannel === IN_APP_CHANNEL) {
+        return reply.code(400).send({ error: "home cannot target the in-app channel before the session exists — its in-app route is bound automatically to the new session's own id once it's created" });
+      }
       const plannedTelegramBinding = botToken && allowedChatId && homeChannel === channel && homeChatId === allowedChatId
         ? { scope: "dm" as const, flaggedNonPrivate: isLikelyGroupTelegramChatId(channel, allowedChatId) }
         : undefined;
-      const blockReason = companionRouteBlockReason({ channel: homeChannel, chatId: homeChatId }, plannedTelegramBinding);
+      // No real sessionId exists yet to pass as requestingSessionId (the session is minted below) — the
+      // in-app guard just above is what covers the in-app vector for this pre-spawn call; every other
+      // channel's ownership check is a no-op against a plannedTelegramBinding anyway (it carries no
+      // sessionId to compare).
+      const blockReason = companionRouteBlockReason({ channel: homeChannel, chatId: homeChatId }, plannedTelegramBinding, undefined);
       if (blockReason === "route-flagged-non-private") {
         return reply.code(400).send({ error: `home (channel=${homeChannel}, chatId=${homeChatId}) would be flagged non-private — delivery to it is refused; give it its own, confirmed-private route` });
       }

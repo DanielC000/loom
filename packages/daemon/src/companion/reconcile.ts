@@ -49,10 +49,14 @@ export function hasLiveCompanionBinding(store: CompanionBindingLivenessStore, se
 
 /** Minimal binding-row shape {@link companionRouteBlockReason} needs — just enough of SessionBinding (the
  *  gateway's own live routing-map objects) / CompanionBinding (a db row) for either to satisfy this
- *  structurally without widening to its full shape. */
-export type CompanionRouteBindingLike = Pick<SessionBinding, "scope"> & { flaggedNonPrivate?: boolean };
+ *  structurally without widening to its full shape. `sessionId` is OPTIONAL (card c7d7b43a): a caller
+ *  resolving `binding` scoped to one session's own rows (store.ts's narrower
+ *  `CompanionConfigStore.getCompanionBindingsForSession` surface, the provision endpoint's pre-spawn
+ *  SYNTHETIC planned binding) has no reason to carry it — the non-in-app ownership check below is a no-op
+ *  whenever either side of that comparison is absent. */
+export type CompanionRouteBindingLike = Pick<SessionBinding, "scope"> & { flaggedNonPrivate?: boolean; sessionId?: string };
 
-export type CompanionRouteBlockReason = "route-unbound" | "route-flagged-non-private";
+export type CompanionRouteBlockReason = "route-unbound" | "route-flagged-non-private" | "route-foreign-session";
 
 /**
  * THE one pure per-route delivery decision (card ddf08614) — extracted from `ChatGateway`'s own private
@@ -66,20 +70,52 @@ export type CompanionRouteBlockReason = "route-unbound" | "route-flagged-non-pri
  * proactive turn silently burned itself refusing to deliver.
  *
  * `binding` is the ONE binding row (if any) that currently backs `route` — resolved however the caller's
- * own scope demands: `ChatGateway.deliveryBlockReason` resolves it via its existing GLOBAL per-
- * (channel,chatId) lookup (`bindingForInbound`, unchanged by this extraction — a route is unique across
- * every session's bindings, so that global scope is deliberate there, not a bug); a caller scoped to one
- * session's own rows (`warnStaleStoredHomes`, `validateHomeTarget`, the reply status's `homeRouteRefused`)
- * resolves it by scanning THAT session's own `getCompanionBindingsForSession` rows for a channel+chatId
- * match instead — this predicate is agnostic to which scope handed it the binding.
+ * own scope demands: `ChatGateway.deliveryBlockReason` resolves it via `bindingForInbound`, a lookup over
+ * THIS `ChatGateway` INSTANCE's own `bindingsBySession` map — scoped to ONE session in practice today
+ * (every gateway is built per-session, via `createCompanionGateway`'s `cfg.sessionId`-filtered load; see
+ * that file's own doc), not a true cross-session global lookup; a caller scoped to one session's own rows
+ * (`warnStaleStoredHomes`, `validateHomeTarget`, the reply status's `homeRouteRefused`) resolves it by
+ * scanning THAT session's own `getCompanionBindingsForSession` rows for a channel+chatId match instead —
+ * this predicate is agnostic to which scope handed it the binding.
+ *
+ * `requestingSessionId` (card c7d7b43a — defense in depth, and REQUIRED at every call site so the compiler
+ * forces a decision rather than a silent, easy-to-forget omission; pass `undefined` explicitly when the
+ * caller genuinely doesn't have one yet — e.g. a pre-spawn provision check with no session minted). Given a
+ * value: for the IN-APP channel, `route.chatId` IS the owning session's id by construction (in-app.ts's own
+ * addressing convention) — there is no binding row to consult (in-app has no "unbound" state), so this
+ * compares `route.chatId` to `requestingSessionId` DIRECTLY and refuses with `route-foreign-session` on a
+ * mismatch. This is the ONLY real cross-session vector in production: every `ChatGateway` instance registers
+ * the SAME shared `InAppChannel` adapter (one instance built once at boot, handed to every per-session
+ * gateway — see factory.ts/index.ts), so a forged in-app route naming another session's chatId would
+ * otherwise reach that OTHER session's attached web client, even though the two sessions' own binding-backed
+ * routing maps never overlap. For every OTHER channel, the binding itself already carries `sessionId` (when
+ * the caller resolved one), and this refuses when it names a DIFFERENT session — true defense in depth
+ * given the per-gateway scoping above, not today's reachable vector, but cheap insurance against a future
+ * refactor that shares one gateway instance across sessions. Either branch is checked BEFORE every other
+ * reason below — a foreign session's own flagged or group-scope binding must still refuse as "foreign"
+ * first, never fall through to a lower-priority reason (or, for a foreign group binding, to no refusal at
+ * all).
  *
  * @decision ddf08614 — never approximate this with a binding-row-exists check alone (reintroducing the
  * exact gap above); every "would this route's delivery be refused" question routes through this function.
+ * @decision c7d7b43a — never run the ownership check after the group-scope exemption, and never exempt
+ * in-app from it; see the full record for why in-app needs a chatId compare, not a binding lookup.
  */
 export function companionRouteBlockReason(
   route: CompanionRoute,
   binding: CompanionRouteBindingLike | undefined,
+  requestingSessionId: string | undefined,
 ): CompanionRouteBlockReason | undefined {
+  if (requestingSessionId !== undefined) {
+    if (route.channel === IN_APP_CHANNEL) {
+      // card c7d7b43a: in-app has no binding row to consult (it's always "live" below) — its chatId IS the
+      // owning session's id by construction, so THIS is the ownership check for in-app, not an exemption
+      // from one.
+      if (route.chatId !== requestingSessionId) return "route-foreign-session";
+    } else if (binding?.sessionId !== undefined && binding.sessionId !== requestingSessionId) {
+      return "route-foreign-session"; // card c7d7b43a
+    }
+  }
   if (binding?.flaggedNonPrivate === true) return "route-flagged-non-private"; // card 7578dea2
   if (binding?.scope === "group") return undefined; // an explicit group binding legitimately owns a @handle/negative id
   // @decision 94754bbe — a dm-shape chatId that could never carry a legitimate (non-group) binding is

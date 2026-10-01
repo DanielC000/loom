@@ -494,7 +494,7 @@ export class CompanionController implements CompanionControl {
     const text = `${body}\n\n— via web chat`;
     for (const b of others) {
       void gateway
-        .sendToChannel(b.channel, b.chatId, text)
+        .sendToChannel(sessionId, b.channel, b.chatId, text)
         .then((result) => {
           if (!result.delivered) {
             // eslint-disable-next-line no-console

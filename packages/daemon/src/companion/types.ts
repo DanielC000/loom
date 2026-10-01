@@ -358,7 +358,14 @@ export type DeliverResult =
   // the daemon's own log/events: ChatGateway.warnUnboundRouteRefused logs + records a
   // `companion_unbound_route_refused` event once per (session, route) — only the CHAT ITSELF still hears
   // nothing, by design (card 7578dea2's decision record, near ChatGateway.mayDeliverTo, is why).
-  | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" | "no-target" | "route-flagged-non-private" | "route-unbound" };
+  // `route-foreign-session` (card c7d7b43a): for the in-app channel, the route's chatId names a DIFFERENT
+  // session than the one attempting delivery (in-app has no binding to consult — its chatId IS the session
+  // id by construction, and every gateway shares the SAME InAppChannel adapter, so this is the one real
+  // cross-session vector in production); for every other channel it's a binding-ownership mismatch, true
+  // defense in depth given each ChatGateway instance is built per-session. See reconcile.ts's
+  // companionRouteBlockReason doc for why this is checked before every other reason. Not reachable via
+  // today's REST surface alone.
+  | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" | "no-target" | "route-flagged-non-private" | "route-unbound" | "route-foreign-session" };
 
 /** The result of routing one inbound message. */
 export type InboundResult =

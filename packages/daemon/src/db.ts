@@ -107,11 +107,15 @@ import { resolveIdPrefix, type IdPrefixResult } from "./id-prefix.js";
  */
 export type PairingRedeemResult =
   | { outcome: "rejected" }
-  // `flaggedNonPrivate` is NOT always false here (card 7578dea2, superseded by 61e33b99): the binding was
-  // just (re)created by upsertCompanionBinding, which computes this field FRESH via isLikelyGroupTelegramChatId
-  // on every write — a dm-bind redemption whose chatId is a negative Telegram id is flagged in THIS result,
-  // not reset to false. Carried through so a caller never has to reason about whether an omitted field here
-  // means "false" or "not yet known". See docs/decisions/61e33b99-boot-time-preflag-group-dm-bindings.md.
+  // `flaggedNonPrivate` is NOT always false here (card 7578dea2, superseded by 61e33b99, refined by
+  // c7d7b43a): the binding was just (re)created by upsertCompanionBinding, which computes this field FRESH
+  // via isLikelyGroupTelegramChatId for a genuinely NEW route — a dm-bind redemption whose chatId is a
+  // negative Telegram id is flagged in THIS result, not reset to false. For an idempotent SAME-ROUTE
+  // re-pair (the same chatId + scope this session was already bound to), it instead PRESERVES whatever the
+  // existing row held, same as any other same-route re-bind. Carried through so a caller never has to
+  // reason about whether an omitted field here means "false" or "not yet known". See
+  // docs/decisions/61e33b99-boot-time-preflag-group-dm-bindings.md and
+  // docs/decisions/c7d7b43a-companion-binding-ownership-and-runtime-flag-persistence.md.
   | ({ outcome: "bound"; sessionId: string; scope: "dm" | "group"; flaggedNonPrivate: boolean } & CompanionRoute)
   | { outcome: "sender-added"; sessionId: string };
 
@@ -3699,16 +3703,17 @@ export class Db {
    * (the caller/REST surfaces this as a 409). Stamps created_at on first insert; keeps it on update
    * (ON CONFLICT touches only chat_id/scope — channel is part of the conflict key). Returns the stored row.
    *
-   * `flagged_non_private` is computed FRESH on EVERY write (both the insert and the ON CONFLICT update) via
-   * the SAME shared predicate `isLikelyGroupTelegramChatId` (card 61e33b99, companion/types.ts) the
-   * boot-time check (`preFlagLikelyGroupDmBindings`, factory.ts) applies — a `dm`-scope binding whose
-   * Telegram chatId is a negative integer is flagged in THIS write, not left to the reactive
-   * `warnUnconfirmedDirectInbound` path or the next boot. This is THE write chokepoint for every binding
-   * write in the daemon (REST bind, pairing-code dm-bind redemption, the env bootstrap seed, the provision
-   * endpoint all call this one method) — fixing it here fixes all of them. A re-bind with a genuine fix
-   * (scope "group", or a real positive chatId) still clears the flag in the SAME write — the owner's
-   * existing remedy is unchanged; what's gone is the WINDOW where a re-bind that does NOT fix the
-   * misconfiguration could clear the flag and leave outbound open until the next boot.
+   * `flagged_non_private` is computed via the SAME shared predicate `isLikelyGroupTelegramChatId` (card
+   * 61e33b99, companion/types.ts) the boot-time check (`preFlagLikelyGroupDmBindings`, factory.ts) applies
+   * — a `dm`-scope binding whose Telegram chatId is a negative integer is flagged in THIS write, not left
+   * to the reactive `warnUnconfirmedDirectInbound` path or the next boot. This is THE write chokepoint for
+   * every binding write in the daemon (REST bind, pairing-code dm-bind redemption, the env bootstrap seed,
+   * the provision endpoint all call this one method) — fixing it here fixes all of them. A re-bind with a
+   * genuine fix (scope "group", or a real positive chatId) — i.e. the chatId or scope actually CHANGES —
+   * still computes the flag fresh from shape in the SAME write, same as before; what's DIFFERENT (card
+   * c7d7b43a, below) is a SAME-ROUTE re-bind (chatId AND scope both unchanged, including a bare
+   * resubmission of the same values): that no longer recomputes from shape at all, so it can never
+   * silently clear a flag `flagCompanionBindingNonPrivate` set at runtime.
    *
    * @decision 61e33b99 — never compute this write's flag from a different predicate than the boot-time
    * check uses; never let a re-bind clear the flag without re-deriving it from the SAME predicate.
@@ -3724,6 +3729,10 @@ export class Db {
    * @decision 3d19ecc7 — the SAME write also marks `companion_config.bindings_seeded` for `input.sessionId`,
    * in the SAME transaction; never mark it from an individual CALLER instead (factory.ts/provision used to,
    * independently — the exact two-path asymmetry this closed), and never mark a refused (throw) write.
+   *
+   * @decision c7d7b43a — a SAME-ROUTE re-bind (chat_id AND scope both unchanged) must never clear a flag set
+   * at RUNTIME by `flagCompanionBindingNonPrivate`; only an actual chatId/scope change may reset it. See the
+   * decision record for the laundering this closes.
    */
   upsertCompanionBinding(input: { sessionId: string; scope?: "dm" | "group" } & CompanionRoute): CompanionBinding {
     const scope = input.scope ?? "dm";
@@ -3732,9 +3741,14 @@ export class Db {
         `a dm-scope ${input.channel} binding's chatId must be numeric (Telegram's private-chat id scheme) — got ${JSON.stringify(input.chatId)}; bind it with scope "group" instead, or supply the chat's real numeric id`,
       );
     }
-    const existing = this.db.prepare("SELECT created_at FROM companion_bindings WHERE session_id = ? AND channel = ?").get(input.sessionId, input.channel) as Row | undefined;
+    const existing = this.db.prepare("SELECT created_at, chat_id, scope, flagged_non_private FROM companion_bindings WHERE session_id = ? AND channel = ?").get(input.sessionId, input.channel) as Row | undefined;
     const createdAt = (existing?.created_at as string) ?? new Date().toISOString();
-    const flaggedNonPrivate = scope === "dm" && isLikelyGroupTelegramChatId(input.channel, input.chatId);
+    const shapeFlagged = scope === "dm" && isLikelyGroupTelegramChatId(input.channel, input.chatId);
+    // card c7d7b43a: same chatId AND same scope as the existing row ⇒ nothing about the route actually
+    // changed, so a runtime-set flag (independent of shape) must survive; anything else recomputes fresh.
+    const isSameRoute = existing !== undefined && existing.chat_id === input.chatId && ((existing.scope as string | null) ?? "dm") === scope;
+    const existingFlagged = isSameRoute && Number(existing?.flagged_non_private ?? 0) !== 0;
+    const flaggedNonPrivate = shapeFlagged || existingFlagged;
     const b: CompanionBinding = { sessionId: input.sessionId, channel: input.channel, chatId: input.chatId, scope, createdAt, flaggedNonPrivate };
     this.db.transaction(() => {
       this.db.prepare(

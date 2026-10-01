@@ -2549,10 +2549,13 @@ export interface CompanionBinding {
    * refuses to admit an inbound on such a route; this flag additionally suppresses OUTBOUND delivery to
    * it, so the companion's replies, heartbeat/reminder/attention-push pushes, and the in-app→other-channel
    * mirror never reach a chat whose members were never authorized to read them. Surfaced on the binding
-   * list (this REST read + the web Manage UI) so the owner can re-bind or delete it; re-binding the route
-   * RE-DERIVES this flag from the same rule — it is NOT unconditionally cleared to `false`, so a re-bind
-   * that doesn't actually fix the misconfiguration (same scope, same or another non-private-looking
-   * chatId) stays flagged; only a genuine fix (scope `"group"`, or a real private chatId) clears it. A
+   * list (this REST read + the web Manage UI) so the owner can re-bind or delete it. Re-binding the EXACT
+   * SAME ROUTE (identical chatId AND scope — including a bare resubmission of the same values) PRESERVES
+   * whatever this flag already held (card c7d7b43a) — it is never recomputed from shape on a no-op
+   * re-bind, so a runtime-observed flag can't be silently laundered away. Only an ACTUAL chatId or scope
+   * change re-derives it fresh from shape; a genuine fix (scope `"group"`, or binding a real private
+   * chatId) clears it that way, and so does deleting the binding and re-adding it (which also drops any
+   * home/reminder pinned to that route — see `validateHomeTarget`'s advice text). A
    * `dm`-scope Telegram chatId that isn't numeric AT ALL (e.g. `"@somechannel"`) is REFUSED outright at
    * bind time, never merely flagged — see `docs/decisions/61e33b99-boot-time-preflag-group-dm-bindings.md`
    * and `docs/decisions/94754bbe-refuse-non-numeric-telegram-dm-chatid.md`. Always `false` for a `group`
