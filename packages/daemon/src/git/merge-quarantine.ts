@@ -226,7 +226,7 @@ export function assertRepoNotQuarantined(repoPath: string): { ok: true } | { ok:
   if (!q) return { ok: true };
   return {
     ok: false,
-    reason: `canonical repo is QUARANTINED after an earlier merge's git process tree could not be confirmed dead ` +
+    reason: `canonical repo is QUARANTINED after an earlier operation's git process tree could not be confirmed dead ` +
       `(branch '${q.branch}'${q.opId ? `, op ${q.opId}` : ""}, entered ${new Date(q.enteredAt).toISOString()}): ${q.reason} — ` +
       `refusing further canonical-repo mutations here until that kill is confirmed dead (auto-clears, same process only) ` +
       `or a human clears it: POST /internal/merge-quarantine/clear`,

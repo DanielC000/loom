@@ -783,7 +783,9 @@ export async function fastForwardCanonicalMain(
         if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: `fast-forward refused — canonical repo is quarantined: ${e.message}` };
         if (treeDeathUnconfirmed(e)) {
           raisedToken = enterMergeQuarantine(repoPath, "(batch fast-forward)", "fast-forward merge could not be confirmed dead after a kill");
-          return { ok: false, quarantined: true, reason: `fast-forward merge's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${(e as Error).message}` };
+          // @decision d8bb2074 — no HEAD re-read here (an unconfirmed kill means "touch nothing else");
+          // name the already-known target sha so a reader knows main may already be there, not just stalled.
+          return { ok: false, quarantined: true, reason: `fast-forward merge's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it (canonical main may already be at ${targetSha} if the merge itself landed before the kill); canonical repo may need manual inspection: ${(e as Error).message}` };
         }
         // A hung post-merge hook can outlive the timeout AFTER HEAD already moved — re-verify before
         // reporting a false failure (mirrors mergeBranchLocked's own post-commit-failure HEAD re-read).

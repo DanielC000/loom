@@ -950,6 +950,10 @@ export async function createWorktree(
       //
       // ⛔ A cleanup failure here must NEVER throw past createWorktree or mask the ORIGINAL add error —
       // swallow it and rethrow addErr unchanged either way.
+      // @decision d8bb2074 — a RepoQuarantinedError means `add` itself never spawned anything (the
+      // per-call re-check refused it first) — nothing to clean up, and the cleanup call below would be
+      // refused the SAME way, logging a spurious "cleanup also failed" warning for an intended refusal.
+      if (addErr instanceof RepoQuarantinedError) throw addErr;
       const isPath2GiveUp = /giving up \(hung git child\?\)/.test((addErr as Error).message ?? "");
       if (!isPath2GiveUp) {
         await boundedLockedRaw(["worktree", "remove", worktreePath, "-f", "-f"], "git worktree remove -f -f (add-failure cleanup)")
@@ -1022,6 +1026,9 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
   if (!assertRepoNotQuarantined(repoPath).ok) return false;
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
+    // @decision d8bb2074 — deliberately NOT kill-confirmed (killableCanonicalRaw): `update-ref -d`/
+    // `branch -D` are single, hook-free ref writes with no shared index to leave staged residue in — the
+    // entry quarantine check above is the whole story for this path.
     if (deps.expectedTip) {
       await withTimeout(git.raw(["update-ref", "-d", `refs/heads/${branch}`, deps.expectedTip]), timeoutMs, "git update-ref -d (compare-and-swap)");
     } else {
@@ -1325,6 +1332,10 @@ export async function removeWorktree(
   if (removed) {
     // The dir is gone, so `prune` alone would leave a LOCKED record (a killed-mid-checkout marker) behind: unlock first, best-effort
     // (a not-locked worktree makes this exit non-zero, which is fine). Never `worktree remove` here — it recurses through junctions.
+    //
+    // @decision d8bb2074 — `unlock`/`prune` deliberately NOT kill-confirmed: admin-metadata-only, no
+    // hooks, no shared index; this function itself relies on its CALLER's own quarantine check
+    // (gcWorktreeDir's entry check — round 6's writer coverage table) rather than re-checking here.
     try {
       await withTimeout(git.raw(["worktree", "unlock", worktreePath]), timeoutMs, "git worktree unlock");
     } catch { /* not locked, or already unregistered */ }

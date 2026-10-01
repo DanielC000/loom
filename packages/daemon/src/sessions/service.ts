@@ -4046,6 +4046,14 @@ export class SessionService {
       return { deployed: false, reason: "no deployCommand configured for this project — ask the owner to set orchestration.deployCommand" };
     }
 
+    // @decision d8bb2074 — refuse BEFORE gate admission on a QUARANTINED canonical repo, mirroring
+    // buildDaemon's own refusal (bde5d1fe item 4) — never burn a shared gate slot on a foregone
+    // conclusion, and never build/deploy over a tree an unconfirmed kill may still be rewriting.
+    const quarantineCheck = assertRepoNotQuarantined(project.repoPath);
+    if (!quarantineCheck.ok) {
+      return { deployed: false, reason: quarantineCheck.reason };
+    }
+
     if (!checkDeployRateLimit(managerSessionId, Date.now())) {
       return {
         deployed: false,
@@ -4086,12 +4094,23 @@ export class SessionService {
     // extended doc comment (~9603) for what each field means and why `concurrentGates` stays unchanged.
     let deployConcurrentAtStart = 0;
     let getDeployConcurrentGatesMax: (() => number) | undefined;
+    // @decision d8bb2074 (code review of a8dbb159) — set ONLY by the admitted-time re-check below, so the
+    // final return (below) can distinguish "quarantined at admission" from a genuine command failure.
+    let quarantinedAtAdmission: string | undefined;
     const result = await this.gateSemaphore.runExclusive(
       orchestration.maxConcurrentGates, deployDescriptor,
       (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
         deployStartedAt = startedAt;
         deployConcurrentAtStart = this.gateSemaphore.snapshot().active;
         getDeployConcurrentGatesMax = getMaxConcurrentGates;
+        // @decision d8bb2074 — RE-CHECK now that we're actually ADMITTED: a quarantine raised while this
+        // op sat queued behind another gate (cap defaults to 1) is invisible to the entry check above,
+        // mirroring fastForwardCanonicalMain's own independent re-check (24c0bdba round 4 item 2).
+        const admittedQuarantineCheck = assertRepoNotQuarantined(project.repoPath);
+        if (!admittedQuarantineCheck.ok) {
+          quarantinedAtAdmission = admittedQuarantineCheck.reason;
+          return Promise.resolve({ passed: false, failedStatus: null, failedSignal: null, failedTimedOut: false, steps: [] });
+        }
         return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0), undefined, undefined, hooks, gateSpillPath(opId));
       },
       "high",
@@ -4116,7 +4135,7 @@ export class SessionService {
     });
     return result.passed
       ? { deployed: true, opId }
-      : { deployed: false, reason: "deploy command failed", exitCode: result.failedStatus ?? null, outputTail: result.outputTail, opId };
+      : { deployed: false, reason: quarantinedAtAdmission ?? "deploy command failed", exitCode: result.failedStatus ?? null, outputTail: result.outputTail, opId };
   }
 
   /**

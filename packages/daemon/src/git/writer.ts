@@ -9,7 +9,8 @@ import {
   humanBytes,
 } from "../vault/versioner.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
-import { withTimeout, boundedSimpleGit, scrubGitEnv } from "./bounded.js";
+import { withTimeout, boundedSimpleGit, scrubGitEnv, killableCanonicalRaw, treeDeathUnconfirmed } from "./bounded.js";
+import { enterMergeQuarantine, clearMergeQuarantineByToken } from "./merge-quarantine.js";
 
 // The WRITE side of the project git view — sibling to reader.ts (which stays read-only introspection).
 // Like the vault writer (vault/writer.ts) and gateCommand, git writes are a TRUST-BOUNDARY surface:
@@ -232,6 +233,11 @@ export class GitWriter {
   private readonly localMs: number;
   private readonly pushMs: number;
   private readonly gitFactory: NonNullable<GitWriterDeps["gitFactory"]>;
+  /** The RAW injected test seam (undefined on every real/production caller) — kept separate from
+   *  {@link gitFactory} (always defined, defaulting to a real `boundedSimpleGit`) so {@link
+   *  killableGitFactory} can tell "a test injected a fake git" apart from "this is the real production
+   *  path", which must go through `killableCanonicalRaw`'s own real tree-kill, never a fake's `.raw()`. */
+  private readonly testGitFactory: GitWriterDeps["gitFactory"];
   /**
    * `opts` (the gateway passes the resolved `platform.timeouts.gitLocalMs`/`gitPushMs`) override the
    * module-const defaults; absent → the consts (today's behavior, e.g. the 1-arg test constructor).
@@ -242,12 +248,23 @@ export class GitWriter {
     this.repoPath = repoPath;
     this.localMs = Math.max(GIT_TIMEOUT_FLOOR_MS, opts?.gitLocalMs ?? GIT_LOCAL_TIMEOUT_MS);
     this.pushMs = Math.max(GIT_TIMEOUT_FLOOR_MS, opts?.gitPushMs ?? GIT_PUSH_TIMEOUT_MS);
+    this.testGitFactory = opts?.gitFactory;
     this.gitFactory = opts?.gitFactory ?? ((p, ms, env) => boundedSimpleGit(p, ms, env));
   }
 
   /** A simpleGit bound to this repo with a kill-the-hung-child block timeout + the non-interactive env. */
   private git(blockMs: number): WriterGit {
     return this.gitFactory(this.repoPath, blockMs, nonInteractiveEnv());
+  }
+
+  /** Adapts {@link testGitFactory} (if a test injected one) to the narrower shape
+   *  `killableCanonicalRaw` itself expects. Returns `undefined` on the real production path, so
+   *  `killableCanonicalRaw` spawns a REAL, tree-killable child instead of reusing a test fake that has
+   *  nothing real to kill. */
+  private killableGitFactory(): ((repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">) | undefined {
+    const tf = this.testGitFactory;
+    if (!tf) return undefined;
+    return (repoPath, blockMs) => tf(repoPath, blockMs, nonInteractiveEnv());
   }
 
   /**
@@ -279,6 +296,7 @@ export class GitWriter {
    */
   async checkout(branch: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!branch?.trim()) return { ok: false, error: "branch name required" };
+    const target = branch.trim();
     // @decision 24c0bdba (round 6) — the try/catch wraps the WHOLE withCanonicalIndexLock(...) call, not
     // just the callback passed to it: a quarantine refusal (RepoQuarantinedError) is thrown by the lock
     // itself BEFORE that callback ever runs, so a try/catch nested inside it would never see it.
@@ -286,7 +304,21 @@ export class GitWriter {
       return await this.withVaultPauseLease(() =>
         withCanonicalIndexLock(this.repoPath, async () => {
           const git = this.git(this.localMs);
-          await withTimeout(git.checkout(branch.trim()), this.localMs, "git checkout");
+          // @decision d8bb2074 — kill-confirmed (killableCanonicalRaw), not a bare withTimeout race: an
+          // orphaned checkout child must never survive past the lock releasing, and the repo is re-checked
+          // for quarantine immediately before spawning.
+          let raisedToken: string | undefined;
+          const onTreeDeathSettled = (confirmed: boolean): void => {
+            if (confirmed && raisedToken) clearMergeQuarantineByToken(this.repoPath, raisedToken);
+          };
+          try {
+            await killableCanonicalRaw(this.repoPath, ["checkout", target], this.localMs, "git checkout", this.killableGitFactory(), nonInteractiveEnv(), onTreeDeathSettled);
+          } catch (e) {
+            if (treeDeathUnconfirmed(e)) {
+              raisedToken = enterMergeQuarantine(this.repoPath, target, `git checkout could not be confirmed dead after a kill: ${(e as Error).message}`);
+            }
+            throw e;
+          }
           const current = (await withTimeout(git.branchLocal(), this.localMs, "git branch")).current;
           return { ok: true, branch: current };
         }),
@@ -312,14 +344,26 @@ export class GitWriter {
    */
   async createBranch(name: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!name?.trim()) return { ok: false, error: "branch name required" };
+    const target = name.trim();
     // @decision 24c0bdba (round 6) — see checkout()'s identical comment above: the try/catch must wrap
     // the WHOLE withCanonicalIndexLock(...) call, not just its callback.
     try {
       return await this.withVaultPauseLease(() =>
         withCanonicalIndexLock(this.repoPath, async () => {
-          const git = this.git(this.localMs);
-          await withTimeout(git.checkoutLocalBranch(name.trim()), this.localMs, "git checkout -b");
-          return { ok: true, branch: name.trim() };
+          // @decision d8bb2074 — same kill-confirm + per-call re-check treatment as checkout() above.
+          let raisedToken: string | undefined;
+          const onTreeDeathSettled = (confirmed: boolean): void => {
+            if (confirmed && raisedToken) clearMergeQuarantineByToken(this.repoPath, raisedToken);
+          };
+          try {
+            await killableCanonicalRaw(this.repoPath, ["checkout", "-b", target], this.localMs, "git checkout -b", this.killableGitFactory(), nonInteractiveEnv(), onTreeDeathSettled);
+          } catch (e) {
+            if (treeDeathUnconfirmed(e)) {
+              raisedToken = enterMergeQuarantine(this.repoPath, target, `git checkout -b could not be confirmed dead after a kill: ${(e as Error).message}`);
+            }
+            throw e;
+          }
+          return { ok: true, branch: target };
         }),
       );
     } catch (e) {
@@ -373,13 +417,38 @@ export class GitWriter {
           // Nothing staged AND nothing to stage → don't even attempt the commit (git would exit 1).
           const status = await withTimeout(git.status(), this.localMs, "git status");
           if (status.isClean()) return { ok: false, error: "nothing to commit (working tree clean)" };
-          await withTimeout(git.raw(paths ? ["add", "-A", "--", ...paths] : ["add", "-A"]), this.localMs, "git add -A");
+          // @decision d8bb2074 — `add -A` and `commit` both kill-confirmed (killableCanonicalRaw), each
+          // re-checking quarantine immediately before it spawns: an UNLOCKED batch assembly elsewhere can
+          // quarantine this repo between the two calls even though this whole sequence holds the lock.
+          let raisedToken: string | undefined;
+          const onTreeDeathSettled = (confirmed: boolean): void => {
+            if (confirmed && raisedToken) clearMergeQuarantineByToken(this.repoPath, raisedToken);
+          };
+          const quarantineOnUnconfirmedKill = (e: unknown, label: string): void => {
+            if (treeDeathUnconfirmed(e)) {
+              raisedToken = enterMergeQuarantine(this.repoPath, "(GitWriter commit)", `${label} could not be confirmed dead after a kill: ${(e as Error).message}`);
+            }
+          };
+          try {
+            await killableCanonicalRaw(this.repoPath, paths ? ["add", "-A", "--", ...paths] : ["add", "-A"], this.localMs, "git add -A", this.killableGitFactory(), nonInteractiveEnv(), onTreeDeathSettled);
+          } catch (e) {
+            quarantineOnUnconfirmedKill(e, "git add -A");
+            throw e;
+          }
           const staged = await withTimeout(git.status(), this.localMs, "git status (post-add)");
           const oversizedWarning = this.oversizedStagedWarning(staged.files, maxFileBytes);
-          // With `paths`, `git commit -- <paths>` (--only) commits just those paths even if something else
-          // was already staged; without, the whole index as before.
-          const res = await withTimeout(paths ? git.commit(cleanedMessage.trim(), paths) : git.commit(cleanedMessage.trim()), this.localMs, "git commit");
-          const hash = res.commit || (await withTimeout(git.revparse(["HEAD"]), this.localMs, "git rev-parse HEAD")).trim();
+          // With `paths`, `git commit -m <message> -- <paths>` (no simple-git parser involved any more —
+          // the hash below is always read back via `rev-parse HEAD`) commits just those paths even if
+          // something else was already staged; without, the whole index as before. `--` matches `add`'s
+          // own pathspec separator above (code review of a8dbb159: paths are already validated against a
+          // leading `-`, so this is defense-in-depth, not a correctness fix).
+          try {
+            await killableCanonicalRaw(this.repoPath, ["commit", "-m", cleanedMessage.trim(), ...(paths ? ["--", ...paths] : [])], this.localMs, "git commit", this.killableGitFactory(), nonInteractiveEnv(), onTreeDeathSettled);
+          } catch (e) {
+            quarantineOnUnconfirmedKill(e, "git commit");
+            throw e;
+          }
+          const hash = (await withTimeout(git.revparse(["HEAD"]), this.localMs, "git rev-parse HEAD")).trim();
           const strippedWarning = stripped
             ? "Removed a Claude-Session: trailer from the commit message — this project's mainline commits don't carry harness attribution."
             : undefined;

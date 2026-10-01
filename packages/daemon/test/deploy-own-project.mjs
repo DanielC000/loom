@@ -19,6 +19,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       manager session (a different sliding window) is unaffected.
 //   (e) deploy is a MANAGER-ONLY surface (defense in depth, mirrors requireManager elsewhere) — a worker
 //       session is rejected outright.
+//   (f) card d8bb2074 — deploy REFUSES, before gate admission, on a QUARANTINED canonical repo (mirroring
+//       buildDaemon's own refusal, bde5d1fe item 4): no host exec, no audit event; succeeds again once cleared.
+//   (g) card d8bb2074 (code review of a8dbb159) — a quarantine raised WHILE QUEUED (after the pre-admission
+//       check in (f) already passed cleanly) is caught by a SECOND check once actually admitted, before the
+//       real deploy command ever runs — the gap (f) alone cannot exercise (a cap-1 queue needs a genuine
+//       second in-flight gate to queue behind).
 // Run: 1) build (turbo builds shared first), 2) node test/deploy-own-project.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -39,6 +45,7 @@ process.env.HOME = sandboxHome;
 import { requireHermeticEnv } from "./_guard.mjs";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
+import { pollUntil } from "./_timing-guard.mjs";
 requireHermeticEnv();
 
 const { validateProjectConfigOverride, validateAgentProjectConfigOverride } = await import("../dist/mcp/platform.js");
@@ -46,6 +53,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { DEPLOY_RATE_LIMIT_MAX, __resetDeployRateLimitState } = await import("../dist/orchestration/deploy.js");
+const { enterMergeQuarantine, clearMergeQuarantine } = await import("../dist/git/merge-quarantine.js");
 
 const now = new Date().toISOString();
 const eventsOfKind = (db, id, kind) => db.listEvents(id).filter((e) => e.kind === kind);
@@ -81,8 +89,14 @@ try {
   // envOverride (card 720bb7ad DoD-3) — deploy previously had NO correlating id at all.
   const calls = [];
   let nextResult = { passed: true };
+  // (g) card d8bb2074 (code review) — lets ONE call (keyed by its own cwd) block until released, so a
+  // test can force a SECOND call to genuinely QUEUE behind it on the shared gateSemaphore (default
+  // maxConcurrentGates: 1). Empty by default — every existing call site stays byte-identical.
+  const blockedCwds = new Map();
   const fakeRunGate = async (gate, cwd, timeoutMs, _runStep, envOverride) => {
     calls.push({ gate, cwd, timeoutMs, envOverride });
+    const block = blockedCwds.get(cwd);
+    if (block) await block.promise;
     return nextResult;
   };
   const svc = new SessionService(db, pty, new OrchestrationControl(), { runGate: fakeRunGate });
@@ -185,6 +199,73 @@ try {
   check("(e) a WORKER session is REJECTED (deploy is manager-only)", workerMsg !== null && /manager-only/.test(workerMsg));
   check("(e) the rejected worker attempt never reached runGate (no host exec)", calls.length === callsBeforeWorkerAttempt);
 
+  // ══════════════════════════ (f) card d8bb2074 — refuses on a QUARANTINED canonical repo ══════════════════════════
+  // Own project + own repoPath, so this never touches mDeploy's rate-limit window or `calls` counting above.
+  const repoQuarantined = path.join(reposRoot, "quarantined");
+  fs.mkdirSync(repoQuarantined, { recursive: true });
+  db.insertProject({ id: "pQuarant", name: "Quarantined", repoPath: repoQuarantined, vaultPath: repoQuarantined, config: { orchestration: { deployCommand: "echo deploying" } }, createdAt: now, archivedAt: null, reserved: false });
+  db.insertAgent({ id: "aQuarant", projectId: "pQuarant", name: "Dev", startupPrompt: "", position: 0, profileId: null });
+  db.insertSession({ id: "mQuarant", projectId: "pQuarant", agentId: "aQuarant", engineSessionId: null, title: null, cwd: repoQuarantined, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", parentSessionId: null });
+
+  enterMergeQuarantine(repoQuarantined, "(test)", "test: simulated unconfirmed kill");
+  const callsBeforeQuarantined = calls.length;
+  const quarantined = await svc.deployOwnProject("mQuarant", "ship it anyway");
+  check("(f) deploy REFUSES on a quarantined canonical repo", quarantined.deployed === false);
+  check("(f) the refusal names the quarantine", /QUARANTINED/.test(quarantined.reason ?? ""));
+  check("(f) runGate was NEVER invoked (refused before gate admission, no host exec)", calls.length === callsBeforeQuarantined);
+  check("(f) no 'deploy' audit event was recorded for the quarantined attempt", eventsOfKind(db, "mQuarant", "deploy").length === 0);
+
+  clearMergeQuarantine(repoQuarantined);
+  const afterClear = await svc.deployOwnProject("mQuarant", "ship it for real");
+  check("(f) once cleared, deploy succeeds normally", afterClear.deployed === true);
+
+  // ══════════════════════════ (g) quarantine raised WHILE QUEUED, caught at ADMISSION ══════════════════════════
+  // Default maxConcurrentGates is 1 (packages/shared/src/config.ts), so a SECOND concurrent deploy
+  // genuinely queues behind a first one holding the only slot.
+  {
+    const repoHolder = path.join(reposRoot, "holder");
+    fs.mkdirSync(repoHolder, { recursive: true });
+    db.insertProject({ id: "pHolder", name: "Holder", repoPath: repoHolder, vaultPath: repoHolder, config: { orchestration: { deployCommand: "echo holder" } }, createdAt: now, archivedAt: null, reserved: false });
+    db.insertAgent({ id: "aHolder", projectId: "pHolder", name: "Dev", startupPrompt: "", position: 0, profileId: null });
+    db.insertSession({ id: "mHolder", projectId: "pHolder", agentId: "aHolder", engineSessionId: null, title: null, cwd: repoHolder, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", parentSessionId: null });
+
+    const repoQueued = path.join(reposRoot, "queued-quarantine");
+    fs.mkdirSync(repoQueued, { recursive: true });
+    db.insertProject({ id: "pQueued", name: "QueuedQuarantine", repoPath: repoQueued, vaultPath: repoQueued, config: { orchestration: { deployCommand: "echo queued" } }, createdAt: now, archivedAt: null, reserved: false });
+    db.insertAgent({ id: "aQueued", projectId: "pQueued", name: "Dev", startupPrompt: "", position: 0, profileId: null });
+    db.insertSession({ id: "mQueued", projectId: "pQueued", agentId: "aQueued", engineSessionId: null, title: null, cwd: repoQueued, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", parentSessionId: null });
+
+    let releaseHolder;
+    blockedCwds.set(repoHolder, { promise: new Promise((resolve) => { releaseHolder = resolve; }) });
+    nextResult = { passed: true };
+
+    const holderPromise = svc.deployOwnProject("mHolder", "holding the one gate slot");
+    const holderAdmitted = await pollUntil(() => svc.snapshotGates().activeCount === 1, { timeoutMs: 5000, intervalMs: 20 });
+    check("(g) precondition: the HOLDER is genuinely ADMITTED (holding the only gate slot)", holderAdmitted);
+
+    const queuedPromise = svc.deployOwnProject("mQueued", "should queue behind the holder, then get quarantined");
+    const queuedWaiting = await pollUntil(() => svc.snapshotGates().queuedCount === 1, { timeoutMs: 5000, intervalMs: 20 });
+    check("(g) precondition: the QUEUED deploy is genuinely QUEUED (not yet admitted) — its own pre-admission quarantine check already passed cleanly", queuedWaiting);
+
+    // Quarantine raised NOW — strictly AFTER (g)'s own pre-admission check already ran clean, while it
+    // sits queued behind the holder. The pre-admission check (section (f)'s own mechanism) cannot see
+    // this; only the NEW admitted-time re-check can.
+    enterMergeQuarantine(repoQueued, "(test)", "test: quarantine raised while queued behind another gate");
+    const callsBeforeRelease = calls.length;
+    releaseHolder();
+
+    const holderResult = await holderPromise;
+    const queuedResult = await queuedPromise;
+    check("(g) the HOLDER (already admitted before the quarantine was raised) still succeeds normally", holderResult.deployed === true);
+    check("(g) the QUEUED deploy is refused once ADMITTED, despite having passed pre-admission cleanly", queuedResult.deployed === false);
+    check("(g) the admission-time refusal names the quarantine", /QUARANTINED/.test(queuedResult.reason ?? ""));
+    check("(g) the admission-time refusal never ran the real deploy command for pQueued", !calls.slice(callsBeforeRelease).some((c) => c.cwd === repoQueued));
+    const queuedDeployEvents = eventsOfKind(db, "mQueued", "deploy");
+    check("(g) a 'deploy' audit event is STILL recorded for the admission-time refusal (the tombstone was already minted)", queuedDeployEvents.length === 1 && queuedDeployEvents[0].detail?.ok === false);
+
+    clearMergeQuarantine(repoQueued);
+  }
+
   db.close();
 } finally {
   __resetDeployRateLimitState();
@@ -192,6 +273,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — deployCommand/deployCommandTimeoutMs are HUMAN-only on the agent validator; the `deploy` tool refuses with no host exec when unconfigured, runs the project's OWN deployCommand in its OWN repoPath + emits a `deploy` audit event on both success and failure, is capped by a per-manager-session sliding-window rate limit (unaffected by an unrelated manager's own window), and is a manager-only surface."
+  ? "\n✅ ALL PASS — deployCommand/deployCommandTimeoutMs are HUMAN-only on the agent validator; the `deploy` tool refuses with no host exec when unconfigured, runs the project's OWN deployCommand in its OWN repoPath + emits a `deploy` audit event on both success and failure, is capped by a per-manager-session sliding-window rate limit (unaffected by an unrelated manager's own window), is a manager-only surface, refuses with no host exec on a quarantined canonical repo at pre-admission, and ALSO refuses a quarantine raised while genuinely queued, once admitted."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
