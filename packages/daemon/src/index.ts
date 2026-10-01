@@ -971,6 +971,12 @@ async function main(): Promise<void> {
     // gateway_tokens store — fail-closed (any non-"ok" reason, incl. malformed/unknown/bad-secret/
     // paused/revoked, is a plain false; the trust-tier hook never distinguishes why).
     verifyGatewayToken: (token) => db.authenticateGatewayToken(token).ok,
+    // Card 3c205fb5: resolves a verified token's stable id so the gateway can register/close the WS
+    // sockets it opened on a later revoke/pause/rotate/delete — see GatewayDeps' own doc.
+    identifyGatewayToken: (token) => {
+      const r = db.authenticateGatewayToken(token);
+      return r.ok ? r.token.id : undefined;
+    },
     remoteEndpoint,
     loopbackSecret,
   });

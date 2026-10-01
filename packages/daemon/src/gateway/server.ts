@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
 import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
+import { GatewayTokenSocketRegistry } from "./token-sockets.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import { buildServedStatus } from "../served-status.js";
@@ -240,6 +241,24 @@ export interface GatewayDeps {
    * is LIVE (remoteAccess.enabled + a non-loopback bindHost) — inert otherwise.
    */
   verifyGatewayToken?: (token: string | undefined) => boolean;
+  /**
+   * Card 3c205fb5 — resolves a presented token's STABLE id, used ONLY to populate
+   * `gatewayTokenSockets` (below) so a later status change can find and close the sockets it opened.
+   * Kept separate from `verifyGatewayToken` (which stays a pure boolean predicate every existing stub
+   * already implements) rather than widening that one's return shape. Wired by index.ts to
+   * `(token) => { const r = db.authenticateGatewayToken(token); return r.ok ? r.token.id : undefined; }`.
+   * Optional ⇒ absent means a token-authenticated WS socket is simply never registered (verification
+   * itself is unaffected — only socket tracking degrades), which is also what every pre-existing
+   * `verifyGatewayToken`-only test stub gets for free.
+   */
+  identifyGatewayToken?: (token: string) => string | undefined;
+  /**
+   * Card 3c205fb5 — the registry of open WS sockets keyed by the gateway token id that authenticated
+   * them (see gateway/token-sockets.ts). Test-injectable, mirroring `fleetHub` below, so a test can hold
+   * a reference and assert registry state directly; a real caller (index.ts) omits it and buildServer
+   * creates its own.
+   */
+  gatewayTokenSockets?: GatewayTokenSocketRegistry;
   /**
    * Card 23496950 — the REMOTE listener's live endpoint (scheme + port), filled by the boot code once
    * `openRemoteListener` (gateway/remote-listener.ts) is really listening, and read PER REQUEST here to
@@ -513,6 +532,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
   });
 
+  // Card 3c205fb5 — the registry of open WS sockets keyed by the gateway token id that authenticated
+  // them (gateway/token-sockets.ts), plus the per-request scratch map the trust-tier hook below uses to
+  // hand that id to the WS route handler reached right after it. Declared here (ahead of the hook) so
+  // both are in scope for it; also read/written much further down, by the three WS route handlers and
+  // the gateway-token REST admin routes.
+  const gatewayTokenSockets = deps.gatewayTokenSockets ?? new GatewayTokenSocketRegistry();
+  const wsGatewayTokenId = new WeakMap<FastifyRequest, string>();
+
   // --- Trust-tier wall (access-story Phase A, card 766f8b50; see gateway/trust-tier.ts). Registered
   // right after the CSRF hook above (same inheritance reasoning — Fastify only inherits a parent hook
   // into children registered AFTER it) so coverage is uniform once live. SHIPS INERT: `remoteAccessConfig`
@@ -579,7 +606,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // every other Tier-1 rejection respects. Instead it's folded into the SAME rate-limited 401 path as
       // an unverified token, below.
       let wsProtocolRejected = false;
-      if (!token && (routePattern === "/ws/term/:sessionId" || routePattern === "/ws/companion/:sessionId" || routePattern === "/ws/fleet")) {
+      // Card 3c205fb5: also used below to stash the resolved token id for the WS handler to register.
+      const isWsRoute = routePattern === "/ws/term/:sessionId" || routePattern === "/ws/companion/:sessionId" || routePattern === "/ws/fleet";
+      if (!token && isWsRoute) {
         const proto = req.headers["sec-websocket-protocol"];
         const resolved = resolveWsSubprotocolToken(typeof proto === "string" ? proto : undefined);
         if (resolved.outcome === "rejected") {
@@ -599,6 +628,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         const at = Date.now();
         if (!wsProtocolRejected && verifyGatewayToken(token)) {
           if (!rateLimiter.allowToken(token as string, at)) return reply.code(429).send({ error: "rate limit exceeded" });
+          // Card 3c205fb5: stash the authenticating token's id on THIS request so the WS route handler
+          // (same request object, reached right after this hook returns) can register the real socket in
+          // gatewayTokenSockets — the registry a later revoke/pause/rotate/delete uses to close it.
+          if (isWsRoute && token) {
+            const tokenId = deps.identifyGatewayToken?.(token);
+            if (tokenId) wsGatewayTokenId.set(req, tokenId);
+          }
           return;
         }
         if (!opts.preAuth(at)) return reply.code(429).send({ error: "rate limit exceeded" });
@@ -4902,6 +4938,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       patch.status = b.status as GatewayTokenStatus;
     }
     deps.db.updateGatewayToken(tokenId, patch);
+    // Card 3c205fb5: a token moving to paused/revoked must stop authorizing EVERY socket it already
+    // opened, not just future requests — close them in the same request as the status write. Activating
+    // (or an unrelated name-only edit) closes nothing: there is nothing stale to cut off.
+    if (patch.status === "paused" || patch.status === "revoked") {
+      gatewayTokenSockets.closeAll(tokenId, 1008, `gateway token ${patch.status}`);
+    }
     return deps.db.getGatewayToken(tokenId);
   });
   // Rotate a token's secret — invalidates the old plaintext, returns the new plaintext ONCE.
@@ -4909,6 +4951,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const tokenId = (req.params as { tokenId: string }).tokenId;
     const rotated = deps.db.rotateGatewayToken(tokenId);
     if (!rotated) return reply.code(404).send({ error: "gateway token not found" });
+    // Card 3c205fb5: the OLD secret is dead the instant rotation happens (Db.rotateGatewayToken's own
+    // doc) — a socket opened under it must go too, not just a future request presenting it.
+    gatewayTokenSockets.closeAll(tokenId, 1008, "gateway token rotated");
     return reply.send(rotated); // { token, plaintext }
   });
   // Hard-delete a token (permanent). A soft revoke is POST /api/gateway-tokens/:id {status:'revoked'}.
@@ -4916,6 +4961,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const tokenId = (req.params as { tokenId: string }).tokenId;
     if (!deps.db.getGatewayToken(tokenId)) return reply.code(404).send({ error: "gateway token not found" });
     deps.db.deleteGatewayToken(tokenId);
+    // Card 3c205fb5: the row (and every authority it granted) is gone — close whatever it still had open.
+    gatewayTokenSockets.closeAll(tokenId, 1008, "gateway token deleted");
     return { ok: true };
   });
 
@@ -5996,6 +6043,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Shared by Claude sessions AND shell terminals (same `live` map): the transport is pty-generic.
   app.get("/ws/term/:sessionId", { websocket: true }, (socket: WebSocket, req) => {
     const { sessionId } = req.params as { sessionId: string };
+    // Card 3c205fb5: a remote socket authenticated with a gateway token registers under that token's
+    // id, so a later revoke/pause/rotate/delete of THIS token can close it — see gatewayTokenSockets' doc.
+    const gatewayTokenId = wsGatewayTokenId.get(req);
+    if (gatewayTokenId) gatewayTokenSockets.register(gatewayTokenId, socket);
     // @decision 710a34fa — a non-loopback peer (a Tier-1 gateway token holder) gets a view of an
     // agent session with no input except a repaint (Ctrl-L), and NO access at all to a host shell: never accept raw stdin from it, never attach it to
     // a shell pty. An empty/undeterminable peer address counts as non-loopback (fail closed).
@@ -6057,7 +6108,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         deps.pty.resize(sessionId, msg.cols, msg.rows);
       }
     }));
-    socket.on("close", unsub); // detach does NOT kill the pty — sessions/shells outlive viewers
+    socket.on("close", () => {
+      unsub(); // detach does NOT kill the pty — sessions/shells outlive viewers
+      if (gatewayTokenId) gatewayTokenSockets.unregister(gatewayTokenId, socket);
+    });
   });
 
   // --- Fleet delta-push transport (C2 of umbrella 1efde4ba): ONE socket per client/tab, NOT per session
@@ -6071,7 +6125,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // yet). The socket handler itself just registers the socket, sends the hello handshake, and
   // records/clears the caller's per-manager event subscriptions on the hub for that later card to read.
   // See gateway/fleet-hub.ts.
-  app.get("/ws/fleet", { websocket: true }, (socket: WebSocket) => {
+  app.get("/ws/fleet", { websocket: true }, (socket: WebSocket, req) => {
+    // Card 3c205fb5: see the matching comment on /ws/term above — same registration, same reason.
+    const gatewayTokenId = wsGatewayTokenId.get(req);
+    if (gatewayTokenId) gatewayTokenSockets.register(gatewayTokenId, socket);
     fleetHub.add(socket);
     socket.send(JSON.stringify({ t: "hello", v: 1 } satisfies ServerFleetMessage));
     socket.on("message", guardWsMessage("/ws/fleet", (raw: Buffer) => {
@@ -6088,7 +6145,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         if (typeof msg.managerId === "string") fleetHub.unsubscribeEvents(socket, msg.managerId);
       }
     }));
-    socket.on("close", () => fleetHub.remove(socket));
+    socket.on("close", () => {
+      fleetHub.remove(socket);
+      if (gatewayTokenId) gatewayTokenSockets.unregister(gatewayTokenId, socket);
+    });
   });
 
   // --- Live IN-APP companion chat: attach/detach (JSON chat + audio frames only) ---
@@ -6109,6 +6169,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // no in-app binding, no transcriber injected) — a harmless no-op unlink if the inner path already removed it.
   app.get("/ws/companion/:sessionId", { websocket: true }, (socket: WebSocket, req) => {
     const { sessionId } = req.params as { sessionId: string };
+    // Card 3c205fb5: see the matching comment on /ws/term above — same registration, same reason.
+    const gatewayTokenId = wsGatewayTokenId.get(req);
+    if (gatewayTokenId) gatewayTokenSockets.register(gatewayTokenId, socket);
     // Attach this web client to the in-app chat (chatId == sessionId — the loopback self-address) so the
     // adapter's send pushes companion replies here. No-op when the in-app hub isn't wired.
     const unsub = deps.inApp?.attach(sessionId, {
@@ -6147,7 +6210,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       }
       // Any other frame (control/garbage) is ignored — never the terminal stream.
     }));
-    socket.on("close", () => { unsub?.(); }); // detach never affects the session — it outlives viewers
+    socket.on("close", () => {
+      unsub?.(); // detach never affects the session — it outlives viewers
+      if (gatewayTokenId) gatewayTokenSockets.unregister(gatewayTokenId, socket);
+    });
   });
 
   return app;

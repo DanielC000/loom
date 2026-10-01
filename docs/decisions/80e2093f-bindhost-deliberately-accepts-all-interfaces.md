@@ -25,6 +25,8 @@ Inline comment in `packages/daemon/src/mcp/platform.ts` (the block preceding `re
 
 Rotating a gateway token (`Db.rotateGatewayToken`) is an IMMEDIATE cutover — the old token's salt+hash is overwritten in place, so it stops verifying the instant rotation happens, breaking any remote client still presenting it until it picks up the new one. This is INTENTIONAL, not a bug — the store deliberately does not do a dual-accept grace TTL, keeping the auth surface simple (exactly one valid secret per token row at a time).
 
+**Correction (card `3c205fb5`):** "stops verifying immediately" was only ever true of REST — a WS socket (`/ws/term`, `/ws/fleet`, `/ws/companion`) opened under the old secret was checked once at upgrade and then kept streaming, unaffected by a later rotate/revoke/pause/delete, until it happened to drop on its own. `gateway/server.ts`'s gateway-token REST writers now also close every socket the token has open (`gatewayTokenSockets.closeAll`) right after the DB write, so the claim is now true of sockets too — see `docs/decisions/3c205fb5-gateway-token-revoke-closes-open-sockets.md` for the mechanism.
+
 If a live remote client needs to switch tokens without a connectivity gap, the store's existing multi-token support is the manual grace procedure instead: mint a SECOND gateway token, distribute it to every remote client, confirm they've all switched over, THEN revoke/delete the OLD token (rather than rotating it) — every other token stays valid throughout. See `Db.rotateGatewayToken`'s own doc comment.
 
 ### Do not

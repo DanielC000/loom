@@ -4600,6 +4600,9 @@ export class Db {
 
   /** Rotate a token's SECRET: mint a fresh secret for the SAME row id, overwrite salt+hash, stamp
    *  rotated_at. The old plaintext stops verifying immediately; the new plaintext is returned ONCE.
+   *  This method only touches the row — it does not close any socket already open under the old secret.
+   *
+   *  @decision 3c205fb5 — gateway/server.ts's rotate route closes those sockets right after calling this.
    *
    *  Immediate cutover is INTENTIONAL (P5b hardening follow-up, card 80e2093f, item 1) — this in-place
    *  overwrite means ANY remote client still holding the old token breaks the moment rotation happens, until
