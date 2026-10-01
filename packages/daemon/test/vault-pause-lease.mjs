@@ -17,6 +17,49 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const root = fs.realpathSync(mkdtempManaged("loom-vault-pause-lease-"));
 const git = (...args) => execFileSync("git", args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] }).toString();
 
+// 0. Card 40dd6b62: pauseVaultAutoCommit's lease write against a path that is NOT a git repo must be a
+// safe no-op — it must NEVER mkdirSync a nested `.git` there, which would make the folder look like a
+// real repo to isGitRepo-style checks and worktree cleanup ("nested git repo found and NOT removed").
+{
+  const nonRepoDir = fs.realpathSync(mkdtempManaged("loom-vault-pause-nonrepo-"));
+  const token = pauseVaultAutoCommit(nonRepoDir, 60_000);
+  check("non-repo dir: pauseVaultAutoCommit does NOT create a nested .git", !fs.existsSync(path.join(nonRepoDir, ".git")));
+  resumeVaultAutoCommit(nonRepoDir, token); // must not throw, and must not create anything either
+  check("non-repo dir: resumeVaultAutoCommit on a never-paused non-repo dir is a harmless no-op (still no .git)", !fs.existsSync(path.join(nonRepoDir, ".git")));
+}
+
+// 0b. A linked WORKTREE's `.git` is a FILE (a `gitdir: <path>` pointer), not a directory — pre-fix,
+// `mkdirSync(path.dirname(leasePath), {recursive:true})` throws EEXIST against that file (verified: the
+// throw is swallowed by the function's own best-effort try/catch, so the pointer file survives untouched
+// but the lease is NEVER actually written — pausing against a worktree was a SILENT no-op). Post-fix, the
+// lease must resolve to the real private gitdir and actually land there.
+{
+  const wtRoot = fs.realpathSync(mkdtempManaged("loom-vault-pause-wt-"));
+  const mainRepo = path.join(wtRoot, "main");
+  fs.mkdirSync(mainRepo);
+  const gitMain = (...args) => execFileSync("git", args, { cwd: mainRepo, stdio: ["ignore", "pipe", "pipe"] }).toString();
+  gitMain("init", "-q");
+  gitMain("config", "user.email", "loom-test@example.com");
+  gitMain("config", "user.name", "loom-test");
+  gitMain("commit", "-q", "--allow-empty", "-m", "init");
+  const wtPath = path.join(wtRoot, "wt");
+  gitMain("worktree", "add", "-q", wtPath, "-b", "wt-branch");
+  const wtGitFile = path.join(wtPath, ".git");
+  check("worktree fixture: .git is a FILE (pointer), not a directory", fs.statSync(wtGitFile).isFile());
+
+  // Resolve the real private gitdir ourselves (independent of the fix's own internals) so the assertion
+  // below proves the lease landed in the REAL location, not merely that nothing crashed.
+  const pointerMatch = fs.readFileSync(wtGitFile, "utf8").match(/^gitdir:\s*(.+?)\s*$/m);
+  const realGitDir = path.resolve(wtPath, pointerMatch[1]);
+  const realLeasePath = path.join(realGitDir, "loom-vault-pause.json");
+
+  const wtToken = pauseVaultAutoCommit(wtPath, 60_000);
+  check("worktree: .git pointer file is untouched (still a file)", fs.statSync(wtGitFile).isFile());
+  check("worktree: the lease ACTUALLY lands in the real private gitdir (not silently dropped)", fs.existsSync(realLeasePath));
+  resumeVaultAutoCommit(wtPath, wtToken);
+  check("worktree: resume removes the lease from the real private gitdir", !fs.existsSync(realLeasePath));
+}
+
 {
   git("init");
   git("config", "user.email", "loom-test@example.com");

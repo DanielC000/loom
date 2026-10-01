@@ -626,11 +626,36 @@ const MAX_VAULT_PAUSE_MS = 30 * 60_000;
 
 const PAUSE_LEASE_FILENAME = "loom-vault-pause.json";
 
-/** Lease path for a governing repo root — inside `.git/`, so (a) chokidar's own ignore pattern
- *  (`(^|[/\\])\.git([/\\]|$)`, see `start()` below) means writing/removing it never itself triggers a
- *  spurious auto-commit cycle, and (b) it is never git-tracked (can't land in vault history). */
-function pauseLeasePath(commitPath: string): string {
-  return path.join(commitPath, ".git", PAUSE_LEASE_FILENAME);
+/**
+ * Resolve the REAL git dir for `commitPath` — `.git` itself when it's a plain directory (the ordinary
+ * case), or the private gitdir a linked WORKTREE's `.git` FILE points at (`gitdir: <path>`). Returns
+ * `null` when `commitPath` isn't a git repo at all (no `.git` of either shape): there is no lease to
+ * write or read, so the caller must skip it rather than create a nested `.git` directory that would
+ * make a non-repo path look like a repo to `isGitRepo`-style checks and worktree cleanup (card 40dd6b62).
+ * Never creates anything — pure resolution, same shape as `skills/inject.ts`'s `resolveGitCommonDir`.
+ */
+function resolveLeaseGitDir(commitPath: string): string | null {
+  const gitPath = path.join(commitPath, ".git");
+  let stat: fs.Stats;
+  try { stat = fs.statSync(gitPath); } catch { return null; } // no .git at all — not a repo, nothing to pause
+  if (stat.isDirectory()) return gitPath;
+  // Linked worktree: .git is a FILE containing `gitdir: <path>` — resolve to that real private gitdir
+  // rather than mkdirSync-ing over the file itself (which would throw).
+  let pointer: string;
+  try { pointer = fs.readFileSync(gitPath, "utf8"); } catch { return null; }
+  const m = pointer.match(/^gitdir:\s*(.+?)\s*$/m);
+  if (!m || !m[1]) return null; // not the worktree .git file shape we expect
+  const privateDir = path.resolve(commitPath, m[1]);
+  return fs.existsSync(privateDir) ? privateDir : null;
+}
+
+/** Lease path for an already-resolved real git dir — inside `.git/` (or a linked worktree's private
+ *  gitdir), so (a) chokidar's own ignore pattern (`(^|[/\\])\.git([/\\]|$)`, see `start()` below) means
+ *  writing/removing it never itself triggers a spurious auto-commit cycle, and (b) it is never
+ *  git-tracked (can't land in vault history). Takes the resolved git dir, never `commitPath` directly —
+ *  see {@link resolveLeaseGitDir}. */
+function pauseLeasePath(gitDir: string): string {
+  return path.join(gitDir, PAUSE_LEASE_FILENAME);
 }
 
 /** Opaque per-op handle returned by {@link pauseVaultAutoCommit} — pass it back to
@@ -646,9 +671,9 @@ export function pauseVaultAutoCommit(commitPath: string, durationMs = DEFAULT_VA
   const clamped = Math.max(0, Math.min(durationMs, MAX_VAULT_PAUSE_MS));
   const token = randomUUID();
   try {
-    const p = pauseLeasePath(commitPath);
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify({ until: Date.now() + clamped, token }));
+    const gitDir = resolveLeaseGitDir(commitPath);
+    // No git dir at all → nothing to pause; never create one just to hold the lease (card 40dd6b62).
+    if (gitDir) fs.writeFileSync(pauseLeasePath(gitDir), JSON.stringify({ until: Date.now() + clamped, token }));
   } catch { /* best-effort — never throws into the caller's git-surgery flow */ }
   return token;
 }
@@ -665,8 +690,10 @@ export function pauseVaultAutoCommit(commitPath: string, durationMs = DEFAULT_VA
  * way — best-effort: never throws.
  */
 export function resumeVaultAutoCommit(commitPath: string, token?: VaultPauseToken): void {
-  const p = pauseLeasePath(commitPath);
   try {
+    const gitDir = resolveLeaseGitDir(commitPath);
+    if (!gitDir) return; // no git dir — nothing was ever paused here
+    const p = pauseLeasePath(gitDir);
     if (token !== undefined) {
       const current = JSON.parse(fs.readFileSync(p, "utf8")) as { token?: string };
       if (current?.token !== token) return; // a newer op's lease — not mine to remove
@@ -680,7 +707,9 @@ export function resumeVaultAutoCommit(commitPath: string, token?: VaultPauseToke
  *  forever on a corrupt lease file. */
 function isVaultAutoCommitPaused(commitPath: string): boolean {
   try {
-    const raw = JSON.parse(fs.readFileSync(pauseLeasePath(commitPath), "utf8"));
+    const gitDir = resolveLeaseGitDir(commitPath);
+    if (!gitDir) return false;
+    const raw = JSON.parse(fs.readFileSync(pauseLeasePath(gitDir), "utf8"));
     return typeof raw?.until === "number" && Date.now() < raw.until;
   } catch { return false; }
 }
