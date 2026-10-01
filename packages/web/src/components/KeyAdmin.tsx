@@ -6,6 +6,7 @@ import { Panel, Button, SectionLabel, StatusPill, Chip, Input, Select } from "./
 import { color, font, radius, type Tone } from "../theme";
 import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 import { errorText } from "../lib/loopbackCredential";
+import { ALLOWLIST_NOT_READY, planEndpointAllowlist } from "../lib/endpointAllowlist";
 
 // Agent Runs key & endpoint admin — the per-project trust-boundary WRITE surface, the second view of the
 // Runs page ("Keys & Endpoints", beside the read-only "Runs" observability). Wires the human/loopback key
@@ -37,7 +38,15 @@ export function KeyAdmin({ projectId }: { projectId: string }) {
   const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
   const keys = useQuery({ queryKey: ["keys", projectId], queryFn: () => api.keys(projectId), enabled: !!projectId });
 
-  const endpointAgents = useMemo(() => (agents.data ?? []).filter((a) => a.endpoint), [agents.data]);
+  // NULL until the agents query has loaded SUCCESSFULLY at least once — never `[]`. `agents.data` is
+  // undefined on a first load and on an outright failure, and collapsing that to an empty array makes
+  // "we have not fetched the list" indistinguishable from "this project has no endpoint agents" — which
+  // is what let a key's whole allowlist be stripped by a save that only touched its name. A background
+  // refetch keeps the previous data, so this stays non-null across one.
+  const endpointAgents = useMemo(
+    () => (agents.isSuccess && agents.data ? agents.data.filter((a) => a.endpoint) : null),
+    [agents.isSuccess, agents.data],
+  );
   const agentName = useMemo(() => {
     const m = new Map<string, string>();
     for (const a of agents.data ?? []) m.set(a.id, a.name);
@@ -113,7 +122,7 @@ export function KeyAdmin({ projectId }: { projectId: string }) {
         {creating && (
           <Panel style={{ padding: 12, marginBottom: 10 }}>
             <SectionLabel style={{ margin: "0 0 8px" }}>New key</SectionLabel>
-            <KeyForm endpointAgents={endpointAgents} submitLabel="Create key"
+            <KeyForm endpointAgents={endpointAgents} agentName={agentName} submitLabel="Create key"
               pending={create.isPending} error={create.error ? errorText(create.error) : null}
               onSubmit={(p) => create.mutate(p)} onCancel={() => { setCreating(false); create.reset(); }} />
           </Panel>
@@ -129,7 +138,7 @@ export function KeyAdmin({ projectId }: { projectId: string }) {
             editId === k.id ? (
               <Panel key={k.id} style={{ padding: 12 }}>
                 <SectionLabel style={{ margin: "0 0 8px" }}>Edit · {k.name || k.id.slice(0, 8)}</SectionLabel>
-                <KeyForm endpointAgents={endpointAgents} initial={k} showStatus submitLabel="Save"
+                <KeyForm endpointAgents={endpointAgents} agentName={agentName} initial={k} showStatus submitLabel="Save"
                   pending={update.isPending} error={update.error ? errorText(update.error) : null}
                   onSubmit={(p) => update.mutate({ keyId: k.id, patch: p })}
                   onCancel={() => { setEditId(null); update.reset(); }} />
@@ -237,8 +246,13 @@ function KeyRow({ k, agentName, onEdit, onRotate, onKill, onDelete, onRevoke, on
 
 // Shared create/edit form. `showStatus` adds the status select (edit only). Caps are validated client-side
 // (blank = uncapped) before submit; server errors come back via `error`.
-function KeyForm({ endpointAgents, initial, showStatus, submitLabel, pending, error, onSubmit, onCancel }: {
-  endpointAgents: Agent[];
+function KeyForm({ endpointAgents, agentName, initial, showStatus, submitLabel, pending, error, onSubmit, onCancel }: {
+  /** The allowlist-eligible agents, or NULL when that list has not loaded successfully — see the caller's
+   *  own note for why an unloaded list must not arrive here as `[]`. */
+  endpointAgents: Agent[] | null;
+  /** Resolves an agent id to its name (falling back to a short id) — same helper KeyRow takes, so a
+   *  no-longer-eligible grant can still be NAMED in the disclosure below rather than shown as a raw id. */
+  agentName: (id: string) => string;
   initial?: ApiKey;
   showStatus?: boolean;
   submitLabel: string;
@@ -248,7 +262,18 @@ function KeyForm({ endpointAgents, initial, showStatus, submitLabel, pending, er
   onCancel: () => void;
 }) {
   const [name, setName] = useState(initial?.name ?? "");
+  // The staged allowlist holds the STORED ids VERBATIM — deliberately NOT pre-filtered in this
+  // initializer. An initializer reads the eligible set exactly once, at mount, so filtering here drops
+  // every grant whenever the agents query has not resolved yet. Eligibility is applied by
+  // planEndpointAllowlist at RENDER instead (see lib/endpointAllowlist.ts for all three bugs this shape
+  // closes), which also keeps what we SEND and what we DISCLOSE derived from one set at one moment.
   const [allow, setAllow] = useState<Set<string>>(new Set(initial?.endpointAgentIds ?? []));
+  const eligibleIds = useMemo(
+    () => (endpointAgents ? new Set(endpointAgents.map((a) => a.id)) : null),
+    [endpointAgents],
+  );
+  const plan = planEndpointAllowlist(allow, eligibleIds);
+  const staleAllow = plan.ready ? plan.dropped : [];
   const [maxConcurrentRuns, setMax] = useState(capStr(initial?.caps.maxConcurrentRuns));
   const [dailyTokenCap, setTok] = useState(capStr(initial?.caps.dailyTokenCap));
   const [dailySpendCap, setSpend] = useState(capStr(initial?.caps.dailySpendCap));
@@ -259,12 +284,15 @@ function KeyForm({ endpointAgents, initial, showStatus, submitLabel, pending, er
 
   const submit = () => {
     setLocalErr(null);
+    // Fail CLOSED on an unknown eligible set. The button is already disabled in this state; this is the
+    // second, non-visual gate, so a programmatic/keyboard submit can't strip the key's grants either.
+    if (!plan.ready) { setLocalErr(plan.reason); return; }
     if (!name.trim()) { setLocalErr("Name is required."); return; }
     const c = { max: parseCap(maxConcurrentRuns), tok: parseCap(dailyTokenCap), spend: parseCap(dailySpendCap) };
     if (!c.max.ok || !c.tok.ok || !c.spend.ok) { setLocalErr("Caps must be a non-negative number, or left blank for uncapped."); return; }
     onSubmit({
       name: name.trim(),
-      endpointAgentIds: [...allow],
+      endpointAgentIds: plan.send,
       caps: { maxConcurrentRuns: c.max.value, dailyTokenCap: c.tok.value, dailySpendCap: c.spend.value },
       ...(showStatus ? { status } : null),
     });
@@ -277,7 +305,12 @@ function KeyForm({ endpointAgents, initial, showStatus, submitLabel, pending, er
       </Labeled>
 
       <Labeled label="Allowlist — endpoint agents this key may invoke">
-        {endpointAgents.length === 0
+        {/* Three states, deliberately distinct: not loaded (saving blocked below), loaded-and-empty, and
+            loaded-with-rows. The first used to render as the second, which read as a settled fact about
+            the project while actually being "we have not fetched this yet". */}
+        {endpointAgents === null
+          ? <span style={{ fontSize: 12, color: color.amber }}>{ALLOWLIST_NOT_READY}</span>
+          : endpointAgents.length === 0
           ? <span style={{ fontSize: 12, color: color.textMuted }}>No endpoint agents yet — flag one above first.</span>
           : (
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -289,6 +322,15 @@ function KeyForm({ endpointAgents, initial, showStatus, submitLabel, pending, er
               ))}
             </div>
           )}
+        {/* Disclose the grants being dropped (see the `staleAllow` note above) — these ids have no row to
+            untick because their agent is no longer an endpoint agent, and re-sending one 400s the save. */}
+        {staleAllow.length > 0 && (
+          <span style={{ fontSize: 12, color: color.amber, marginTop: 6, display: "block" }}>
+            {staleAllow.length === 1 ? "1 stored grant is" : `${staleAllow.length} stored grants are`} no longer
+            an endpoint agent ({staleAllow.map((id) => agentName(id)).join(", ")}) and will be dropped on
+            save. Re-flag the agent as an endpoint first if you meant to keep it.
+          </span>
+        )}
       </Labeled>
 
       <Labeled label="Caps — blank = uncapped">
@@ -312,7 +354,13 @@ function KeyForm({ endpointAgents, initial, showStatus, submitLabel, pending, er
       {(localErr || error) && <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}
 
       <div style={{ display: "flex", gap: 8 }}>
-        <Button variant="primary" onClick={submit} disabled={pending}>{pending ? "Saving…" : submitLabel}</Button>
+        {/* Saving is blocked while the eligible set is unknown: submitting then would either strip every
+            grant (filtered against an empty set) or 400 (sent verbatim). `title` carries the reason, since
+            a disabled button otherwise explains nothing. Cancel stays live — backing out is always safe. */}
+        <Button variant="primary" onClick={submit} disabled={pending || !plan.ready}
+          title={plan.ready ? undefined : plan.reason}>
+          {pending ? "Saving…" : submitLabel}
+        </Button>
         <Button variant="ghost" onClick={onCancel} disabled={pending}>Cancel</Button>
       </div>
     </div>

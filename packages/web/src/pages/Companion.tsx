@@ -336,7 +336,12 @@ function VoiceProvisioningSection() {
   const qc = useQueryClient();
   const { data, isLoading, isError, error } = useQuery({ queryKey: ["platformConfig"], queryFn: api.getPlatformConfig });
   const save = useMutation({
-    mutationFn: (enabled: boolean) => api.updatePlatformConfig({ ...(data?.override ?? {}), companionVoiceEnabled: enabled }),
+    // Send ONLY this key (card 654869e2) — never the whole cached override spread back. The platform
+    // PATCH leaves an omitted top-level key alone and SHALLOW-replaces a submitted one, so re-sending a
+    // cached snapshot reverts every top-level scalar (schedulerEnabled / operatorEnabled /
+    // coalesceAgentMessages / maxConcurrentGates / …) to whatever this page happened to load — silently
+    // undoing a change made from Settings since. A one-key delta cannot.
+    mutationFn: (enabled: boolean) => api.updatePlatformConfig({ companionVoiceEnabled: enabled }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["platformConfig"] }),
   });
 

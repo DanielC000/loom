@@ -1,0 +1,40 @@
+# 654869e2 — settings forms send config DELTAS, never an echo of a whole server object
+
+A web form that rebuilds a whole server object from its own state and PUT/PATCHes it back silently destroys every field the form does not model. Four distinct instances of one root cause, found in the lane-6 web review (`edc931d8`).
+
+## Do not
+
+- **Do not enumerate the known fields of a column when projecting the board-column layout to PUT.** `PUT /api/projects/:id/columns` REPLACES the whole array, and the daemon's planner (`tasks/columns.ts`) keeps a `KanbanColumn` field only when the request actually carried it. Carry the UNMODELLED remainder through verbatim (`lib/columnDesired.ts`'s `carriedColumnFields`), so a field added to `KanbanColumn` later is preserved with no edit in the web package.
+- **Do not re-list `KanbanColumn`'s fields in web's `DesiredColumn`.** Derive it (`extends KanbanColumn`), or the two drift and a server-owned field becomes unexpressible.
+- **Do not spread a cached config override back into a PATCH to change one key.** `PATCH /api/platform/config` leaves an omitted top-level key alone and SHALLOW-replaces a submitted one, so an echoed snapshot reverts every top-level scalar to whatever that page happened to load. Send the one key.
+- **Do not submit an allowlist containing stored ids the form cannot render a control for.** An id with no control is unclearable by construction, and a server-side eligibility check then rejects every subsequent save of that record. Reconcile against what is currently eligible, and DISCLOSE what was dropped.
+- **Do not apply that reconciliation in a `useState` initializer, and never collapse "not loaded" into "empty".** An initializer reads the eligible set once, at mount; if the list has not resolved, the seed silently drops every grant the human holds and the next save — even a rename — strips them all. Reconcile at RENDER, from a set that is `null` while unloaded, and refuse to submit at all in that state. Narrowing a privilege is the right instinct, but not a narrowing derived from data the UI merely had not fetched.
+
+## The four instances
+
+**1. `excludeFromIdleWatchdog` wiped by renaming any column (verified before the fix).** `ColumnManager.tsx`'s `toDesired` copied only `key/label/role/accentColor/wipLimit/prevKey`. `excludeFromIdleWatchdog` is set only by the manager-side `board_column_*` MCP tools — there were zero references to it anywhere in `packages/web/src`, so the web UI could neither show it nor send it. Any human edit in the column manager therefore stripped it from every column, re-arming the idle watcher (`orchestration/idle-watcher.ts`), the pending-request gate and wake-impact on a lane deliberately marked a dead end: parked cards started counting as actionable again. Nothing surfaced the loss — the save succeeded and the board looked right.
+
+Fixed by round-tripping the remainder rather than enumerating fields. `CarriedColumnFields = Omit<KanbanColumn, …EDITED_COLUMN_FIELDS>` widens automatically, and a field that ever becomes REQUIRED on `KanbanColumn` fails the typecheck here instead of being quietly dropped.
+
+**2. The companion voice toggle echoed the whole cached platform override.** `VoiceProvisioningSection` sent `{ ...(data?.override ?? {}), companionVoiceEnabled }`. The platform PATCH handler (`gateway/server.ts`) shallow-merges top-level keys, so every cached top-level scalar — `schedulerEnabled`, `operatorEnabled`, `coalesceAgentMessages`, `maxConcurrentGates` — was re-asserted at whatever value this page last loaded, undoing a change made from Settings since. The three `DEEP_MERGE_GROUPS` keys were already safe (card `ba9ccd75` made them field-by-field), which is why this read as harmless. Fixed to a one-key delta.
+
+**3. `KeyAdmin`'s key editor became permanently unsavable after un-flagging an endpoint agent.** `KeyForm` seeded its allowlist from `initial.endpointAgentIds` verbatim but rendered one checkbox per CURRENT endpoint agent. Un-flag an agent — via the "Endpoint" toggle in that same component, one click away — and its id stays in the submitted allowlist with no control to clear it; `db.validateEndpointAllowlist` rejects any non-endpoint/unknown id, so every save of that key 400s from then on and its name, caps and status all become unreachable. Fixed by reconciling against the eligible set and surfacing the dropped ids.
+
+The FIRST fix did that intersection in the `useState` initializer, and review caught that this traded one data-loss bug for a worse one: an initializer samples the eligible set once, at mount, so with the agents query unresolved (first load, or an outright failure) it dropped **every** grant — and a save that only renamed the key then stripped them all. Measured directly against that build: `expect(blocked.endpointAgentIds).toEqual([agent.id])` returned `Array []`. "Narrow rather than widen" is correct for a privilege, but this was a narrowing the human never chose, derived from data the UI had not fetched.
+
+The shipped shape, `lib/endpointAllowlist.ts`:
+- the staging state holds the stored ids **verbatim** — nothing is lost before reconciliation runs;
+- eligibility arrives as `ReadonlySet<string> | null`, where `null` means *not loaded successfully* and an empty Set means *this project genuinely has no endpoint agents* (for which dropping everything is correct and intended). The two must never collapse;
+- `planEndpointAllowlist` returns a discriminated `{ready:false, reason}` — which exposes no `send` field at all, so there is nothing to submit by accident — or `{ready:true, send, dropped}`, so what is SENT and what is DISCLOSED come from one set at one moment. Deriving them at different times was its own bug: un-flagging an agent while the form was open grew the disclosure but left the stale id staged, so the save 400'd while the UI claimed the id had been dropped;
+- the component gates Save on `plan.ready` **and** re-checks it inside the submit handler, so a forced/keyboard submit cannot bypass the visual gate.
+
+⚠️ The unit test over the planner stayed GREEN against the defective build — the planner was never wrong, the WIRING was. Only the e2e with the agents request aborted (`page.route(… route.abort())`) caught it. A pure-function test cannot see which moment its caller samples state at.
+
+**4. `permission.startupModeCycles` — latent, deliberately NOT fixed here.** `Settings.tsx`'s `buildOverride` starts from `structuredClone(ov)` to preserve keys it does not model. That also re-sends a key the validator rejects: `startupModeCycles` is declared on the shared `PermissionConfig` type but absent from `permissionOverride`'s `.strict()` shape (`mcp/platform.ts`), so a stored config carrying it would 400 every save from this panel.
+
+Not reproducible through any supported path: a repo-wide search found zero writers in `packages/web` (the only hit is a comment) and zero in `packages/daemon/src`; only daemon tests reach it, via the blind unvalidated `db.setProjectConfig`. Both the human and the agent validator reject it, so no validated write path can store it. Widening the schema is a trust-boundary decision rather than a UI fix — `startupModeCycles` drives the startup permission-mode climb (`pty/host.ts`'s `computeBootMode`), so making it writable from a config surface an agent can also reach is a privilege question, not a bug.
+
+## Known-related, out of scope for this record
+
+- `maskCompanionConfig` returns `heartbeatPrompt: row.heartbeatPrompt || DEFAULT_HEARTBEAT_PROMPT`, so the edit form seeds the resolved DEFAULT text and the next save PINS it as a literal custom override — a companion that was inheriting the default stops tracking future changes to it. The stored-vs-default distinction is destroyed server-side, so this cannot be fixed in the web package alone.
+- `Settings.tsx`, `ProfileEditor` and `AgentEditor` seed their field state ONCE at mount, so a human Save reverts any concurrent agent write to a modeled field. Same root cause, but the remedy (re-sync on refetch, or per-field dirty tracking) is a design change across three forms.

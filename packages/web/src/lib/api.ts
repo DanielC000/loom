@@ -1,4 +1,4 @@
-import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionReplyStatus, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, ProjectMemoryEntryWithBacklinks, GatesActive, GateHistoryPage, StalePromptWarning } from "@loom/shared";
+import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionReplyStatus, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, ProjectMemoryEntryWithBacklinks, GatesActive, GateHistoryPage, StalePromptWarning } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -42,10 +42,15 @@ export type ProfileFieldResolution = "mine" | "shipped";
 
 // One desired column in the atomic board-column layout PUT (card B). `prevKey` (when set) marks a KEY
 // RENAME — the server re-keys that column's cards old→new. A column omitted from the array is REMOVED;
-// its cards auto-move to the defaultLanding column server-side. `accentColor`/`wipLimit` are carried
-// through so an editor that rebuilds the whole layout (the board-header editor, card 5d) never strips
-// the per-column accent / soft WIP limit it didn't touch — the PUT replaces the entire array.
-export interface DesiredColumn { key: string; label: string; role?: ColumnRole; prevKey?: string; accentColor?: string; wipLimit?: number; }
+// its cards auto-move to the defaultLanding column server-side.
+//
+// EXTENDS `KanbanColumn` rather than re-listing its fields (card 654869e2): the PUT replaces the entire
+// array, so EVERY stored column field has to be sendable or an editor that rebuilds the whole layout
+// silently strips the ones it didn't touch. A hand-copied field list drifted from KanbanColumn exactly
+// that way once (`excludeFromIdleWatchdog` was never added here, so it wasn't even expressible); deriving
+// the shape means a new column field is sendable the moment it exists. See lib/columnDesired.ts for the
+// round-tripping that actually carries the unmodelled ones.
+export interface DesiredColumn extends KanbanColumn { prevKey?: string; }
 
 // MIRRORS the daemon's own TranscriptTurn (packages/daemon/src/pty/adapter.ts) — a hand-copy across the
 // package boundary, not an import, so this union must be updated by hand whenever that one changes

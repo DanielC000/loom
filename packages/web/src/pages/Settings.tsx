@@ -315,15 +315,19 @@ function ConfigEditor({ project }: { project: Project }) {
   // 546034fa: the PATCH now MERGES onto the stored override by default, so omitting a key from `override`
   // means "leave it alone", not "clear it" — the OLD whole-object-replace behavior this UI relied on to
   // express a delete). We still start from a clone of the stored override and apply only the fields this
-  // UI models — preserving keys it does NOT model (pty, permission.mode/deny/startupModeCycles)
-  // instead of silently wiping them; those keys need no `unset` entry since the merge already leaves
-  // them untouched. `sessionEnv` is the ONE exception on both counts: it IS modeled (see its own block
+  // UI models — preserving keys it does NOT model (pty, permission.mode/deny) instead of silently
+  // wiping them; those keys need no `unset` entry since the merge already leaves them untouched. `sessionEnv` is the ONE exception on both counts: it IS modeled (see its own block
   // at the end of this function), it is deliberately DELETED from the clone rather than preserved, and
   // it is the only key whose deletions travel as explicit `unset` dot-paths. A modeled field set to
   // blank/inherit is DELETED locally AND its
   // dot-path recorded on `unset`, so it actually falls back to the platform default server-side too.
   // Numbers parse with Number() so a non-numeric entry sends NaN→null and the strict-zod PATCH 400s
   // with a readable "Expected number" — the demonstrable error path.
+  //
+  // @decision 654869e2 — this clone-and-echo also re-sends a stored key the REST validator REJECTS
+  // (`permission.startupModeCycles`), which would 400 every save here; latent today, and widening the
+  // validator is a trust-boundary call, not a UI fix.
+  //
   function buildOverride(): { override: ProjectConfigOverride; unset: string[] } {
     const o: ProjectConfigOverride = structuredClone(ov);
     const unset: string[] = [];
