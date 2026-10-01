@@ -1,19 +1,19 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 293d418e — a branch whose content is PROVEN already on main finishes as ALREADY_MERGED WITHOUT running the merge gate.
 // REAL git on temp repos + an INJECTED `runGate` counter (the batch-post-gate-throw-outcome.mjs POST fixture: FF lands, then finishAlreadyMerged throws once; a same-ids re-call drops both to the solo fallback).
-//   (A) re-call: gate calls == 0, merge_done carries gateSkipped+landedSha, no build_gate event, later re-call replays harmlessly.
-//   (D) interval mode: zero gates + gateSkipped, counter untouched.
+//   (E) pins the documented revert-to-fork-point residual (cc9bce38).
+//   (F) pins the intended change: main later modified a landed path -> finishes merged:true.
+//   (G) ATTRIBUTION (card cd92e609): landedSha/warning name the commit that introduced the content even when a later main commit reuses the branch's trailer.
 //
-// SPLIT (card 45d6e631): this file ran 82-120s solo-in-suite (per-file timing history: maxPass ~107,008ms
-// vs the 120,000ms blanket ceiling, 1.12x margin, 2/11 observed SIGTERM kills — see project memory
-// `batch-fallback-already-landed-skips-gate-rides-the-120s-ceiling`). This file keeps the two CORE
-// mechanism scenarios (A)/(D); (B1)/(B2)/(C) moved verbatim to
-// batch-fallback-already-landed-skips-gate-negatives.mjs, (E)/(F)/(G) moved verbatim to
-// batch-fallback-already-landed-skips-gate-semantics.mjs. Profiled (Date.now() timers around each
-// scenario, instrumented copy never committed; 4 runs, one under a concurrent sibling test lane): (A)+(D)
-// solo/loaded max 42,162ms — ~35% of the 120s ceiling, well under the ~50% split target.
+// SPLIT OFF batch-fallback-already-landed-skips-gate.mjs (card 45d6e631): that file ran 82-120s solo-in-suite
+// (per-file timing history: maxPass ~107,008ms vs the 120,000ms blanket ceiling, 1.12x margin, 2/11
+// observed SIGTERM kills — see project memory `batch-fallback-already-landed-skips-gate-rides-the-120s-ceiling`).
+// These three SEMANTICS/ATTRIBUTION scenarios moved here verbatim; (A)/(D) stay in the sibling file,
+// (B1)/(B2)/(C) moved to batch-fallback-already-landed-skips-gate-negatives.mjs. Profiled (Date.now()
+// timers around each scenario, instrumented copy never committed; 4 runs, one under a concurrent sibling
+// test lane): (E)+(F)+(G) solo/loaded max 34,940ms — ~29% of the 120s ceiling, well under the ~50% split target.
 //
-// Decision record: docs/decisions/293d418e-*.md.  Run: pnpm build, then LOOM_CODEX_BIN=<nonexistent> node test/batch-fallback-already-landed-skips-gate.mjs
+// Decision record: docs/decisions/293d418e-*.md.  Run: pnpm build, then LOOM_CODEX_BIN=<nonexistent> node test/batch-fallback-already-landed-skips-gate-semantics.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -22,7 +22,7 @@ import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_GATE_RETRY_SETTLE_MS = "20";
-useOwnLoomHome("loom-bgrot-core-");
+useOwnLoomHome("loom-bgrot-sem-");
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -100,45 +100,54 @@ async function landedFixture(label, orchExtra = {}) {
 }
 
 try {
-  // (A) the batch re-call: both branches are proven landed → ZERO gate calls, both finalize ALREADY_MERGED without a gate.
+  // (E) KNOWN, DOCUMENTED RESIDUAL (decision 293d418e / cc9bce38): a late commit that reverts a changed path to its FORK-POINT content drops that path from mergeBase..branch,
+  //  so the content proof is vacuous and the skip finishes it — exactly as the old squash-to-nothing did. Pinned so the behaviour cannot change silently.
   {
-    const { P, db, a, b, ctx, svc } = await landedFixture("al");
+    const { P, db, a, ctx, svc } = await landedFixture("rv");
+    execSync("git rm -q src/rva.ts", { cwd: a.worktreePath });
+    commitAll(a.worktreePath, "feat(x): late revert to fork-point content", GIT_ID);
     const before = ctx.calls;
-    const r2 = await settle(svc.mergeBatchTracked(P.mgrId, [a.workerId, b.workerId]));
-    const extra = ctx.calls - before;
-    check(`(A) the same-ids re-call gates ZERO times for already-landed branches (extra gate calls = ${extra})`, extra === 0);
-    const fb = r2.value?.value?.fallback ?? [];
-    check("(A) both candidates were routed to the fallback and started", fb.length === 2 && fb.every((f) => f.started === true));
-    for (const c of [a, b]) {
-      const done = eventsOf(db, "merge_done", c.workerId);
-      const d = done.find((e) => e.detail?.gateSkipped === "already-landed");
-      check(`(A) ${c.branch}: merge_done carries gateSkipped:"already-landed" + the landed commit sha`, !!d && /^[0-9a-f]{40}$/.test(String(d.detail.landedSha)));
-      check(`(A) ${c.branch}: no build_gate event (nothing was gated or recorded as a pass)`, eventsOf(db, "build_gate", c.workerId).length === 0);
-      const t = db.getTask(c.taskId);
-      check(`(A) ${c.branch}: the task reached a terminal lane`, !!t && t.columnKey !== "in_progress");
-    }
-    const main = execSync("git log --format=%s", { cwd: P.repo }).toString();
-    check("(A) main carries each branch's commit exactly once (nothing re-landed)", (main.match(/feat\(x\): change ala/g) ?? []).length === 1 && (main.match(/feat\(x\): change alb/g) ?? []).length === 1);
-    // a later genuine re-call of a finished worker replays the terminal ALREADY_MERGED (no gate) — caching it is harmless
-    const r3 = await settle(svc.confirmWorkerMergeTracked(P.mgrId, a.workerId));
-    check("(A) a later re-call of the finished worker still gates ZERO times", ctx.calls - before === 0 && r3.value?.ok !== false);
+    const r = await settle(svc.confirmWorkerMergeTracked(P.mgrId, a.workerId));
+    const v = r.value?.ok ? r.value.value : undefined;
+    check("(E) the revert-to-fork-point residual finishes as a gate-skipped ALREADY_MERGED (documented residual, not a regression)", v?.merged === true && v?.gateSkipped === "already-landed" && ctx.calls === before);
   }
 
-  // (D) interval mode: the skip is not a gated landing — the counter state is byte-identical before/after AND the discriminating facts hold (zero gate calls + gateSkipped on every finish).
+  // (F) BEHAVIOUR CHANGE (intended, decision 293d418e): main LATER modified a path the branch changed. The old path's squash conflicted (merged:false); the skip compares against the
+  //  LANDED commit, so it finishes ALREADY_MERGED (merged:true) — the branch's content did land.
   {
-    const { P, db, a, b, ctx, svc } = await landedFixture("iv", { mergeGateInterval: 3 });
-    const st0 = JSON.stringify(db.getMergeGateState(P.projId, "primary"));
+    const { P, db, a, ctx, svc } = await landedFixture("mm");
+    fs.writeFileSync(path.join(P.repo, "src", "mma.ts"), "export const mma = 'main moved on';\n");
+    commitAll(P.repo, "chore(x): main modifies a landed path", GIT_ID);
     const before = ctx.calls;
-    await settle(svc.mergeBatchTracked(P.mgrId, [a.workerId, b.workerId]));
-    const skipped = [a, b].every((c) => eventsOf(db, "merge_done", c.workerId).some((e) => e.detail?.gateSkipped === "already-landed"));
-    check("(D) interval mode: the re-call gates ZERO times AND both branches finished as gateSkipped (only the new path produces both)", ctx.calls - before === 0 && skipped);
-    check("(D) interval mode: the merge-gate counter state is unchanged (the skip is not counted as a gated or ungated landing)", JSON.stringify(db.getMergeGateState(P.projId, "primary")) === st0);
+    const r = await settle(svc.confirmWorkerMergeTracked(P.mgrId, a.workerId));
+    const v = r.value?.ok ? r.value.value : undefined;
+    check("(F) main modified a path the branch changed after it landed: finishes merged:true, gateSkipped, ZERO gates", v?.merged === true && v?.gateSkipped === "already-landed" && ctx.calls === before);
+  }
+
+  // (G) ATTRIBUTION (card cd92e609): a LATER main commit re-uses the branch's trailer (recycled branch name) over an unrelated path. merge_done.landedSha and the text name the commit that
+  //  INTRODUCED the content; the persisted task.mergedSha (ship-state, verified/backfilled elsewhere) stays on findLandedSquashCommit's sha (the newest) — attribution only, never gating/pinning.
+  {
+    const { P, db, a, ctx, svc } = await landedFixture("at");
+    const grep = () => execSync(`git log --format=%H --grep="Loom-Worker-Branch: ${a.branch}" -F`, { cwd: P.repo }).toString().trim().split(/\s+/).filter(Boolean);
+    const introducer = grep()[0];
+    fs.writeFileSync(path.join(P.repo, "src", "unrelated-at.ts"), "export const unrelated = 1;\n");
+    execSync(`git add -A && git ${GIT_ID} commit -q -m "feat(x): a later task re-using the branch name" -m "Loom-Worker-Branch: ${a.branch}"`, { cwd: P.repo });
+    const newest = execSync("git rev-parse HEAD", { cwd: P.repo }).toString().trim();
+    check("(G/setup) two same-branch trailer commits on main, newest != introducer", newest !== introducer && grep().length === 2);
+    const before = ctx.calls;
+    const r = await settle(svc.confirmWorkerMergeTracked(P.mgrId, a.workerId));
+    const v = r.value?.ok ? r.value.value : undefined;
+    const d = eventsOf(db, "merge_done", a.workerId).find((e) => e.detail?.gateSkipped === "already-landed");
+    check("(G) finishes gate-skipped with ZERO gates (verdict unchanged by the attribution)", v?.merged === true && v?.gateSkipped === "already-landed" && ctx.calls === before);
+    check("(G) merge_done.landedSha is the commit that INTRODUCED the content, not the newer trailer commit", d?.detail?.landedSha === introducer);
+    check("(G) the result warning names the introducing commit", typeof v?.warning === "string" && v.warning.includes(introducer.slice(0, 8)) && !v.warning.includes(newest.slice(0, 8)));
+    check("(G) the persisted task.mergedSha is UNCHANGED (still the lookup's newest sha; not attribution)", db.getTask(a.taskId)?.mergedSha === newest.slice(0, 7));
   }
 } finally {
   for (const d of dbs) { try { d.close(); } catch { /* ignore */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — an already-landed branch finishes as ALREADY_MERGED without a gate (core re-call + interval-mode scenarios; see -negatives.mjs / -semantics.mjs for the rest)."
+  ? "\n✅ ALL PASS — the documented revert-to-fork-point residual, the main-moved-on behaviour change, and branch-trailer-reuse attribution all finish correctly (see batch-fallback-already-landed-skips-gate.mjs for the core re-call / interval-mode scenarios)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

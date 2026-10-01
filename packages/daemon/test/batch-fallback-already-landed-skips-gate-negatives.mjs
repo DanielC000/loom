@@ -1,19 +1,19 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 293d418e — a branch whose content is PROVEN already on main finishes as ALREADY_MERGED WITHOUT running the merge gate.
 // REAL git on temp repos + an INJECTED `runGate` counter (the batch-post-gate-throw-outcome.mjs POST fixture: FF lands, then finishAlreadyMerged throws once; a same-ids re-call drops both to the solo fallback).
-//   (A) re-call: gate calls == 0, merge_done carries gateSkipped+landedSha, no build_gate event, later re-call replays harmlessly.
-//   (D) interval mode: zero gates + gateSkipped, counter untouched.
+//   (B1) NEGATIVE: a late commit adding a NEW path never takes the skip — the ordinary path runs for real.
+//   (B2) NEGATIVE: a late commit on an ALREADY-CHANGED path never takes the skip (the content proof is non-empty).
+//   (C) NEGATIVE: a dirty worktree is never finished by the skip.
 //
-// SPLIT (card 45d6e631): this file ran 82-120s solo-in-suite (per-file timing history: maxPass ~107,008ms
-// vs the 120,000ms blanket ceiling, 1.12x margin, 2/11 observed SIGTERM kills — see project memory
-// `batch-fallback-already-landed-skips-gate-rides-the-120s-ceiling`). This file keeps the two CORE
-// mechanism scenarios (A)/(D); (B1)/(B2)/(C) moved verbatim to
-// batch-fallback-already-landed-skips-gate-negatives.mjs, (E)/(F)/(G) moved verbatim to
-// batch-fallback-already-landed-skips-gate-semantics.mjs. Profiled (Date.now() timers around each
-// scenario, instrumented copy never committed; 4 runs, one under a concurrent sibling test lane): (A)+(D)
-// solo/loaded max 42,162ms — ~35% of the 120s ceiling, well under the ~50% split target.
+// SPLIT OFF batch-fallback-already-landed-skips-gate.mjs (card 45d6e631): that file ran 82-120s solo-in-suite
+// (per-file timing history: maxPass ~107,008ms vs the 120,000ms blanket ceiling, 1.12x margin, 2/11
+// observed SIGTERM kills — see project memory `batch-fallback-already-landed-skips-gate-rides-the-120s-ceiling`).
+// These three NEGATIVE scenarios moved here verbatim; (A)/(D) stay in the sibling file, (E)/(F)/(G) moved
+// to batch-fallback-already-landed-skips-gate-semantics.mjs. Profiled (Date.now() timers around each
+// scenario, instrumented copy never committed; 4 runs, one under a concurrent sibling test lane):
+// (B1)+(B2)+(C) solo/loaded max 42,228ms — ~35% of the 120s ceiling, well under the ~50% split target.
 //
-// Decision record: docs/decisions/293d418e-*.md.  Run: pnpm build, then LOOM_CODEX_BIN=<nonexistent> node test/batch-fallback-already-landed-skips-gate.mjs
+// Decision record: docs/decisions/293d418e-*.md.  Run: pnpm build, then LOOM_CODEX_BIN=<nonexistent> node test/batch-fallback-already-landed-skips-gate-negatives.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -22,7 +22,7 @@ import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_GATE_RETRY_SETTLE_MS = "20";
-useOwnLoomHome("loom-bgrot-core-");
+useOwnLoomHome("loom-bgrot-neg-");
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -100,45 +100,44 @@ async function landedFixture(label, orchExtra = {}) {
 }
 
 try {
-  // (A) the batch re-call: both branches are proven landed → ZERO gate calls, both finalize ALREADY_MERGED without a gate.
+  // (B1) NEGATIVE: a late commit adding a NEW path (branch ahead of its landed commit): the ordinary path runs — the gate runs and the late commit lands for real.
   {
-    const { P, db, a, b, ctx, svc } = await landedFixture("al");
+    const { P, db, a, ctx, svc } = await landedFixture("dl");
+    fs.writeFileSync(path.join(a.worktreePath, "src", "dla-late.ts"), "export const dlaLate = 999;\n");
+    commitAll(a.worktreePath, "feat(x): late change dla", GIT_ID);
     const before = ctx.calls;
-    const r2 = await settle(svc.mergeBatchTracked(P.mgrId, [a.workerId, b.workerId]));
-    const extra = ctx.calls - before;
-    check(`(A) the same-ids re-call gates ZERO times for already-landed branches (extra gate calls = ${extra})`, extra === 0);
-    const fb = r2.value?.value?.fallback ?? [];
-    check("(A) both candidates were routed to the fallback and started", fb.length === 2 && fb.every((f) => f.started === true));
-    for (const c of [a, b]) {
-      const done = eventsOf(db, "merge_done", c.workerId);
-      const d = done.find((e) => e.detail?.gateSkipped === "already-landed");
-      check(`(A) ${c.branch}: merge_done carries gateSkipped:"already-landed" + the landed commit sha`, !!d && /^[0-9a-f]{40}$/.test(String(d.detail.landedSha)));
-      check(`(A) ${c.branch}: no build_gate event (nothing was gated or recorded as a pass)`, eventsOf(db, "build_gate", c.workerId).length === 0);
-      const t = db.getTask(c.taskId);
-      check(`(A) ${c.branch}: the task reached a terminal lane`, !!t && t.columnKey !== "in_progress");
-    }
-    const main = execSync("git log --format=%s", { cwd: P.repo }).toString();
-    check("(A) main carries each branch's commit exactly once (nothing re-landed)", (main.match(/feat\(x\): change ala/g) ?? []).length === 1 && (main.match(/feat\(x\): change alb/g) ?? []).length === 1);
-    // a later genuine re-call of a finished worker replays the terminal ALREADY_MERGED (no gate) — caching it is harmless
-    const r3 = await settle(svc.confirmWorkerMergeTracked(P.mgrId, a.workerId));
-    check("(A) a later re-call of the finished worker still gates ZERO times", ctx.calls - before === 0 && r3.value?.ok !== false);
+    const r = await settle(svc.confirmWorkerMergeTracked(P.mgrId, a.workerId));
+    const v = r.value?.ok ? r.value.value : undefined;
+    check(`(B1) a late commit adding a new path STILL gates (gate calls +${ctx.calls - before})`, ctx.calls - before >= 1);
+    check("(B1) …and is never reported as a gate-skipped finish", v?.gateSkipped === undefined && eventsOf(db, "merge_done", a.workerId).every((e) => e.detail?.gateSkipped === undefined));
+  }
+  // (B2) a late commit on an ALREADY-CHANGED path (the landed file gets new content): the content check is non-empty, so the skip is NOT taken — nothing finishes, nothing is deleted.
+  {
+    const { P, db, a, ctx, svc } = await landedFixture("dc");
+    fs.writeFileSync(path.join(a.worktreePath, "src", "dca.ts"), "export const dca = 12345;\n");
+    commitAll(a.worktreePath, "feat(x): late edit of an already-landed path", GIT_ID);
+    const before = ctx.calls;
+    const r = await settle(svc.confirmWorkerMergeTracked(P.mgrId, a.workerId));
+    const v = r.value?.ok ? r.value.value : undefined;
+    check("(B2) a late commit on an already-changed path does NOT take the gate-skip path", v?.gateSkipped === undefined && v?.merged !== true && eventsOf(db, "merge_done", a.workerId).length === 0);
+    check("(B2) …and the branch and worktree are untouched", fs.existsSync(a.worktreePath) && execSync(`git branch --list ${a.branch}`, { cwd: P.repo }).toString().trim() !== "");
+    void before;
   }
 
-  // (D) interval mode: the skip is not a gated landing — the counter state is byte-identical before/after AND the discriminating facts hold (zero gate calls + gateSkipped on every finish).
+  // (C) NEGATIVE: a dirty worktree is never finished by the skip.
   {
-    const { P, db, a, b, ctx, svc } = await landedFixture("iv", { mergeGateInterval: 3 });
-    const st0 = JSON.stringify(db.getMergeGateState(P.projId, "primary"));
-    const before = ctx.calls;
-    await settle(svc.mergeBatchTracked(P.mgrId, [a.workerId, b.workerId]));
-    const skipped = [a, b].every((c) => eventsOf(db, "merge_done", c.workerId).some((e) => e.detail?.gateSkipped === "already-landed"));
-    check("(D) interval mode: the re-call gates ZERO times AND both branches finished as gateSkipped (only the new path produces both)", ctx.calls - before === 0 && skipped);
-    check("(D) interval mode: the merge-gate counter state is unchanged (the skip is not counted as a gated or ungated landing)", JSON.stringify(db.getMergeGateState(P.projId, "primary")) === st0);
+    const { P, db, a, ctx, svc } = await landedFixture("dt");
+    fs.writeFileSync(path.join(a.worktreePath, "src", "uncommitted.ts"), "export const x = 1;\n");
+    const r = await settle(svc.confirmWorkerMergeTracked(P.mgrId, a.workerId));
+    const v = r.value?.ok ? r.value.value : undefined;
+    check("(C) a dirty worktree does NOT take the gate-skip path", v?.gateSkipped === undefined && eventsOf(db, "merge_done", a.workerId).every((e) => e.detail?.gateSkipped === undefined));
+    check("(C) …and the confirm is refused (merged:false) with the untouched dirty file still on disk", v?.merged === false && fs.existsSync(path.join(a.worktreePath, "src", "uncommitted.ts")));
   }
 } finally {
   for (const d of dbs) { try { d.close(); } catch { /* ignore */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — an already-landed branch finishes as ALREADY_MERGED without a gate (core re-call + interval-mode scenarios; see -negatives.mjs / -semantics.mjs for the rest)."
+  ? "\n✅ ALL PASS — any unlanded delta (new path / already-changed path) or a dirty worktree never takes the already-landed gate-skip path (see batch-fallback-already-landed-skips-gate.mjs for the positive-path scenarios)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
