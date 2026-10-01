@@ -159,14 +159,15 @@ export interface CompanionConfigRow {
    */
   zeroReplyAlertTurnSeq: number | null;
   /**
-   * Card a8480338 (card 3d19ecc7: now set at the `upsertCompanionBinding` write CHOKEPOINT, not by each
-   * caller individually): TRUE ⇒ this session has genuinely held a binding at least once — env-bootstrap's
-   * first zero-bindings seed, a REST bind, pairing-code redemption, or the provision endpoint's own direct
-   * write all flip it the moment their binding write actually lands, since every one of them calls that
-   * one `upsertCompanionBinding` method. Gates `factory.ts`'s re-seed-on-empty-bindings path so a
-   * deliberate owner revoke (deleting every binding) is never undone by the next gateway build, REGARDLESS
-   * of which writer bound it in the first place. Backfills to TRUE for a pre-existing (legacy) row — see
-   * `narrowBindingsSeededBackfillForRefusedRows` for the one precise exception.
+   * TRUE ⇒ this session has genuinely held a binding at least once. Gates `factory.ts`'s
+   * re-seed-on-empty-bindings path so a deliberate owner revoke (deleting every binding) is never undone by
+   * the next gateway build. Set at the `upsertCompanionBinding` write chokepoint for every writer (env
+   * bootstrap, REST bind, pairing redemption, provision); for the one case that write can't reach (no
+   * `companion_config` row exists yet), derived from `EXISTS(a binding for this session)` at
+   * `upsertCompanionConfig`'s own first-INSERT instead.
+   *
+   * @decision 3d19ecc7 — the chokepoint (or, at a genuine first INSERT, the EXISTS-derived default) is the
+   * ONLY place this is ever set; never reintroduce a second caller-side mark.
    */
   bindingsSeeded: boolean;
 }
@@ -2826,12 +2827,19 @@ export class Db {
    * write already set correctly), narrowing exactly that refused-seed population back to 0 so the next
    * gateway build treats it as a genuine first provisioning. See
    * docs/decisions/a8480338-bootstrap-seed-must-not-reseed-a-revoked-binding.md.
+   *
+   * @decision 3d19ecc7 — (card 012d0089) also require `NOT EXISTS(a binding for that session)`: a legacy
+   * row can LOOK refused by its stale `allowed_chat_id` while its session already holds a real binding —
+   * narrowing it to 0 would be wrong, since it WAS genuinely seeded.
    */
   private narrowBindingsSeededBackfillForRefusedRows(): void {
     const rows = this.db.prepare(
       "SELECT session_id, channel, allowed_chat_id, chat_scope FROM companion_config WHERE bindings_seeded = 1",
     ).all() as { session_id: string; channel: string; allowed_chat_id: string; chat_scope: string }[];
-    const refused = rows.filter((r) => r.chat_scope === "dm" && isNonNumericTelegramChatId(r.channel, r.allowed_chat_id));
+    const hasBinding = this.db.prepare("SELECT 1 FROM companion_bindings WHERE session_id = ?");
+    const refused = rows.filter((r) =>
+      r.chat_scope === "dm" && isNonNumericTelegramChatId(r.channel, r.allowed_chat_id) && hasBinding.get(r.session_id) === undefined,
+    );
     if (refused.length === 0) return;
     const stmt = this.db.prepare("UPDATE companion_config SET bindings_seeded = 0 WHERE session_id = ?");
     for (const r of refused) stmt.run(r.session_id);
@@ -4123,10 +4131,11 @@ export class Db {
      *  defaulting to "" (unnamed) on first insert. */
     name?: string;
     /** Card a8480338/3d19ecc7: see CompanionConfigRow.bindingsSeeded. OMITTED ⇒ PRESERVE the stored value
-     *  on an update (the env-bootstrap re-upsert on every boot must NEVER reset this back to false),
-     *  defaulting to false on first insert. There is no longer a reason for a caller to pass `true`
-     *  explicitly here — `upsertCompanionBinding` is now the one chokepoint that flips it, the moment a
-     *  session's binding write actually lands, regardless of which writer produced it. */
+     *  on an update (the env-bootstrap re-upsert on every boot must NEVER reset this back to false); on a
+     *  genuine first INSERT, defaults to EXISTS(a binding for this session) instead — card 012d0089 — not
+     *  a bare false. There is no longer a reason for a caller to pass `true` explicitly here —
+     *  `upsertCompanionBinding` is the one chokepoint that flips it, the moment a session's binding write
+     *  actually lands, regardless of which writer produced it. */
     bindingsSeeded?: boolean;
   }): CompanionConfigRow {
     const existing = this.db.prepare(
@@ -4142,8 +4151,17 @@ export class Db {
       provisioned: input.provisioned ?? (existing?.provisioned as number | undefined) === 1,
       // Same preserve-on-omit pattern as provisioned: a config write that doesn't mention name never clears it.
       name: input.name ?? (existing?.name as string | undefined) ?? "",
-      // Same preserve-on-omit pattern as provisioned/name — see the param doc above.
-      bindingsSeeded: input.bindingsSeeded ?? (existing?.bindings_seeded as number | undefined) === 1,
+      // Same preserve-on-omit pattern as provisioned/name — see the param doc above. On a genuine first
+      // INSERT (no existing row) there is nothing stored to preserve, so default to EXISTS(a binding for
+      // this session) instead of a bare false: a binding CAN be written before its session's first config
+      // row (e.g. a REST bind on an unprovisioned session), and the write chokepoint's own mark is then a
+      // no-op UPDATE against a row that doesn't exist yet.
+      // @decision 3d19ecc7 (card 012d0089): this default, not a caller-passed true, is how that gap closes.
+      bindingsSeeded: input.bindingsSeeded ?? (
+        existing
+          ? (existing.bindings_seeded as number | undefined) === 1
+          : this.db.prepare("SELECT 1 FROM companion_bindings WHERE session_id = ?").get(input.sessionId) !== undefined
+      ),
       createdAt: (existing?.created_at as string) ?? now, updatedAt: now,
       // Zero-reply detector (card 48e8d289): NOT part of the SQL INSERT/UPDATE below (this method never
       // touches them — they're driven exclusively by recordCompanionChatReply/markCompanionZeroReplyAlert),

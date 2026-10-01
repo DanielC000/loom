@@ -41,6 +41,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      binding; the next restart must NOT re-seed the chat the owner just revoked. (RED on the pre-fix
 //      code: db.upsertCompanionBinding never marked bindings_seeded, only factory.ts's own bootstrap-seed
 //      call site and the provision route did — see the worker report for the revert/rebuild proof.)
+//   H. THE TWO-PATH ASYMMETRY, ENTRY POINT 2 (card 012d0089, 4th round): a binding written BEFORE its
+//      session's first companion_config row exists at all (the REST bind route checks only the agent's
+//      role, not config existence) — db.upsertCompanionBinding's own chokepoint mark is then a no-op
+//      UPDATE (0 rows). The later config INSERT (bindingsSeeded omitted) must derive TRUE from
+//      EXISTS(a binding for this session), not its own omitted-param default of false; a revoke afterward
+//      must still not be re-seeded on the next restart. (RED on the pre-fix code: the INSERT path
+//      defaulted to a bare false, discarding the binding that already existed.)
+//   I. MIGRATION NARROWING PRECISION, ROUND 2 (card 012d0089): a legacy row that LOOKS refused
+//      (non-numeric, dm-scope allowed_chat_id) but whose session ALREADY HOLDS a real binding (bound
+//      through some other, valid route) must stay bindingsSeeded:TRUE, not be narrowed to false — it WAS
+//      genuinely seeded. (RED on the pre-fix code: the narrowing predicate didn't check binding existence.)
 // Run: 1) build (turbo builds shared first), 2) node test/companion-bootstrap-no-reseed-after-revoke.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -346,12 +357,93 @@ try {
   check("(G restart) the env-bootstrap re-upsert does not reset bindingsSeeded back to false", cfg4Resolved?.bindingsSeeded === true);
   createCompanionGateway(cfg4Resolved, () => ({ delivered: true }), db);
   check("(G) THE FIX: the restart after a REST-bind-then-revoke does NOT re-seed the chat the owner just revoked", db.listCompanionBindings().filter((b) => b.sessionId === SID4).length === 0);
+
+  // ============ H. THE TWO-PATH ASYMMETRY, ENTRY POINT 2 (card 012d0089): a binding written BEFORE its
+  // session's first companion_config row exists at all. The REST bind route checks only the agent's role,
+  // not config existence (gateway/server.ts ~1420-1437), so an UNPROVISIONED session can take a bind
+  // before any config row is written. db.upsertCompanionBinding's own chokepoint mark is an UPDATE keyed
+  // on session_id — a harmless no-op (0 rows) against a config row that doesn't exist yet. The later
+  // config INSERT (POST /api/companion/config) must still start bindingsSeeded TRUE, derived from
+  // EXISTS(a binding for this session), not its own omitted-param default of false.
+  const SID5 = "sess-bind-before-config";
+  seedSession(db, SID5);
+  check("(H setup) no companion_config row exists yet for this session", db.getCompanionConfig(SID5) === undefined);
+
+  // Owner binds DIRECTLY, before any config row exists.
+  db.upsertCompanionBinding({ sessionId: SID5, channel: TELEGRAM_CHANNEL, chatId: "933933933", scope: "dm" });
+  check("(H setup) the binding lands even with no config row to mark (the chokepoint's own UPDATE is a harmless no-op)", db.listCompanionBindings().some((b) => b.sessionId === SID5 && b.chatId === "933933933"));
+  check("(H setup) still no companion_config row after the binding write", db.getCompanionConfig(SID5) === undefined);
+
+  // Owner THEN provisions the config (mirrors POST /api/companion/config — a fresh INSERT, bindingsSeeded
+  // omitted).
+  db.upsertCompanionConfig({
+    sessionId: SID5, botTokenBlob: "", channel: TELEGRAM_CHANNEL, allowedChatId: "933933933",
+    chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true,
+  });
+  check("(H) THE FIX: the config INSERT derives bindingsSeeded TRUE from the binding that already exists, not a bare false", db.getCompanionConfig(SID5)?.bindingsSeeded === true);
+
+  // Owner revokes everything.
+  db.deleteCompanionBinding(SID5);
+  check("(H revoke) zero bindings remain after the revoke", db.listCompanionBindings().filter((b) => b.sessionId === SID5).length === 0);
+
+  // Next restart: rebuild the gateway from the stored (now TRUE) config — must NOT re-seed the revoked chat.
+  const cfg5 = {
+    botToken: "fake-token-h", allowedChatId: "933933933", sessionId: SID5, chatScope: "dm",
+    homeChannel: TELEGRAM_CHANNEL, homeChatId: "933933933", heartbeatIntervalMinutes: 0, heartbeatPrompt: "",
+    bindingsSeeded: db.getCompanionConfig(SID5)?.bindingsSeeded,
+  };
+  createCompanionGateway(cfg5, () => ({ delivered: true }), db);
+  check("(H) THE FIX: the restart after a bind-before-config-then-revoke does NOT re-seed the chat the owner just revoked", db.listCompanionBindings().filter((b) => b.sessionId === SID5).length === 0);
+
+  // ============ I. MIGRATION NARROWING PRECISION, ROUND 2 (card 012d0089): a legacy row that LOOKS refused
+  // (non-numeric, dm-scope allowed_chat_id) but whose session ALREADY HOLDS a real binding (bound through
+  // some other, valid route — its companion_config.allowed_chat_id went stale/drifted) must stay
+  // bindingsSeeded:TRUE — it WAS genuinely seeded. Narrowing it to 0 would be wrong.
+  const legacyPath3 = path.join(tmpHome, "legacy-bindings-seeded-already-bound.db");
+  const raw3 = new Database(legacyPath3);
+  raw3.exec(`
+    CREATE TABLE companion_config (
+      session_id TEXT PRIMARY KEY,
+      bot_token_blob TEXT NOT NULL,
+      channel TEXT NOT NULL DEFAULT 'telegram',
+      allowed_chat_id TEXT NOT NULL,
+      chat_scope TEXT NOT NULL DEFAULT 'dm',
+      heartbeat_interval_minutes INTEGER NOT NULL DEFAULT 0,
+      heartbeat_prompt TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      provisioned INTEGER NOT NULL DEFAULT 0,
+      name TEXT NOT NULL DEFAULT '',
+      created_at TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE companion_bindings (
+      session_id TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'dm',
+      created_at TEXT,
+      flagged_non_private INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  raw3.prepare(
+    "INSERT INTO companion_config (session_id, bot_token_blob, channel, allowed_chat_id, chat_scope, heartbeat_interval_minutes, heartbeat_prompt, enabled, provisioned, name, created_at, updated_at) VALUES (?, '', 'telegram', '@not-a-number', 'dm', 0, NULL, 1, 0, '', ?, ?)",
+  ).run("sess-legacy-refused-but-bound", now0, now0);
+  // A real binding for the SAME session, on a VALID numeric chatId — simulates the config's own
+  // allowed_chat_id having drifted/gone stale while the session's real binding stayed healthy.
+  raw3.prepare(
+    "INSERT INTO companion_bindings (session_id, channel, chat_id, scope, created_at) VALUES (?, 'telegram', '944944944', 'dm', ?)",
+  ).run("sess-legacy-refused-but-bound", now0);
+  raw3.close();
+
+  const legacyDb3 = new Db(legacyPath3); // opening runs the idempotent additive migration + narrowing
+  check("(I) THE FIX: a legacy row that LOOKS refused but whose session already HOLDS a binding stays bindingsSeeded:TRUE, not narrowed to false", legacyDb3.getCompanionConfig("sess-legacy-refused-but-bound")?.bindingsSeeded === true);
+  legacyDb3.close();
 } finally {
   db.close();
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — db.upsertCompanionBinding marks bindings_seeded at its own write chokepoint, so EVERY writer (the env bootstrap seed, a REST bind, pairing redemption, provision) enforces it, not just the two call sites that used to set it independently: a brand-new session still gets seeded on its first gateway build, but once seeded (fresh, via a REST bind, or a migrated legacy row) an owner's full binding revoke is never undone by a later gateway build (restart), the env-bootstrap re-upsert that runs on every boot never resets the flag back to false, the migration's precise backfill correctly narrows a REFUSED (non-numeric, dm-scope-only) legacy row to bindingsSeeded:false rather than true while leaving a group-scope row alone (so fixing the chat id genuinely re-seeds it, whether via migration or on a fresh row), and a stranded companion (zero bindings, bindingsSeeded:true) always logs a disclosure-safe SETUP line rather than staying silent."
+  ? "\n✅ ALL PASS — db.upsertCompanionBinding marks bindings_seeded at its own write chokepoint, so EVERY writer (the env bootstrap seed, a REST bind, pairing redemption, provision) enforces it, not just the two call sites that used to set it independently: a brand-new session still gets seeded on its first gateway build, but once seeded (fresh, via a REST bind, or a migrated legacy row) an owner's full binding revoke is never undone by a later gateway build (restart), the env-bootstrap re-upsert that runs on every boot never resets the flag back to false, the migration's precise backfill correctly narrows a REFUSED (non-numeric, dm-scope-only) legacy row to bindingsSeeded:false rather than true while leaving a group-scope row alone (so fixing the chat id genuinely re-seeds it, whether via migration or on a fresh row), a stranded companion (zero bindings, bindingsSeeded:true) always logs a disclosure-safe SETUP line rather than staying silent, upsertCompanionConfig's own first-INSERT derives bindingsSeeded from EXISTS(a binding) rather than a bare false when a binding was written before its session's first config row existed, and the migration narrowing's own NOT EXISTS(binding) exception leaves a legacy row that looks refused but whose session already holds a real binding at bindingsSeeded:true."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
