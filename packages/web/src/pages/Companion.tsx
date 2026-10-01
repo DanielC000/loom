@@ -753,6 +753,7 @@ function ChannelRow({ sessionId, binding, onChanged }: { sessionId: string; bind
           {channelDisplayName(binding.channel)}
         </strong>
         <StatusPill tone={binding.scope === "group" ? "amber" : inApp ? "phosphor" : "cyan"} label={inApp ? "default" : binding.scope} />
+        {binding.flaggedNonPrivate && <StatusPill tone="red" label="not private — outbound suppressed" glow />}
         {!inApp && <Chip label="chat" value={binding.chatId} />}
         <span style={{ flex: 1 }} />
         {confirm ? (
@@ -766,6 +767,13 @@ function ChannelRow({ sessionId, binding, onChanged }: { sessionId: string; bind
         )}
       </div>
       {inApp && <span style={hint}>The cockpit chat panel — always this companion's own loopback route.</span>}
+      {binding.flaggedNonPrivate && (
+        <span style={errStyle}>
+          This chat did not confirm as a private 1:1 — it may actually be a group, and everyone in it could
+          see the companion's replies. Outbound delivery here is suppressed. Re-bind with the correct scope,
+          or remove this channel.
+        </span>
+      )}
       {remove.error && <span style={errStyle}>{errorText(remove.error)}</span>}
       {binding.scope === "group" && <AllowedSenders sessionId={sessionId} channel={binding.channel} />}
     </div>

@@ -130,7 +130,10 @@ export function createDbCompanionPairing(db: PairingStore, policy: PairingPolicy
         maxAttempts, windowMs, lockoutMs,
       }, now());
       if (res.outcome === "bound") {
-        return { outcome: "bound", binding: { sessionId: res.sessionId, channel: res.channel, chatId: res.chatId, scope: res.scope } };
+        // flaggedNonPrivate threaded through (card 7578dea2) — always false here (upsertCompanionBinding
+        // just reset it), carried explicitly so the live routing map never has to reason about an omitted
+        // field vs. a known-false one.
+        return { outcome: "bound", binding: { sessionId: res.sessionId, channel: res.channel, chatId: res.chatId, scope: res.scope, flaggedNonPrivate: res.flaggedNonPrivate } };
       }
       if (res.outcome === "sender-added") return { outcome: "sender-added", sessionId: res.sessionId };
       return { outcome: "rejected" };

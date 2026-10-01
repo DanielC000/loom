@@ -317,7 +317,10 @@ export interface CompanionLivePush {
  *  inbound / proactive-home submit) ⇒ chat_reply delivers NOWHERE (never broadcasts, never guesses). */
 export type DeliverResult =
   | { delivered: true; chunks: number }
-  | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" | "no-target" };
+  // `route-flagged-non-private` (card 7578dea2): the target route's binding was observed receiving an
+  // inbound the channel did NOT confirm as private — outbound suppressed (ChatGateway.mayDeliverTo), by
+  // design silently (no notice sent to the route itself; see mayDeliverTo's own doc for why).
+  | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" | "no-target" | "route-flagged-non-private" };
 
 /** The result of routing one inbound message. */
 export type InboundResult =
@@ -375,4 +378,13 @@ export interface SessionBinding {
    *               field; a binding minted without it defaults to the safe single-owner "dm".
    */
   readonly scope: "dm" | "group";
+  /**
+   * True once this `dm`-scope binding has been observed receiving an inbound the channel did NOT confirm
+   * as private (card 7578dea2 — see CompanionBinding.flaggedNonPrivate's doc in shared/types.ts for the
+   * full rationale). NOT `readonly`, unlike the identity fields above: `warnUnconfirmedDirectInbound`
+   * flips it in place on the SAME object stored in the gateway's live routing map, so outbound suppression
+   * (`mayDeliverTo`) sees it take effect immediately, with no re-bind/restart needed. Undefined/false for
+   * an unobserved or `group`-scope binding.
+   */
+  flaggedNonPrivate?: boolean;
 }

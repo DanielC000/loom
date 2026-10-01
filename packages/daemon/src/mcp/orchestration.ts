@@ -1749,7 +1749,11 @@ export class OrchestrationMcpRouter {
           "for that turn too, so there is nothing to wait for: if something in a proactive turn is worth " +
           "surfacing, call chat_reply with it directly instead of holding it back for the user to message " +
           "first. A `{delivered:false}` result (e.g. `no-target`) means there genuinely is no channel to " +
-          "reach right now — that's the only case to hold back and wait. Mirrors " +
+          "reach right now — that's the only case to hold back and wait. A `route-flagged-non-private` " +
+          "reason is DIFFERENT and PERMANENT: this route was flagged because it does not confirm as a " +
+          "private chat, and Loom will deliberately withhold every reply to it until a human re-binds it — " +
+          "retrying chat_reply here will never succeed, so if you're bound to another channel, tell the " +
+          "user there instead; otherwise there is nothing more to do this turn. Mirrors " +
           "worker_report: emit one clean, final reply. Optional `voice:true` asks to SPEAK this reply " +
           "instead of texting it — it only has effect when the user's voice-reply setting is 'auto' (their " +
           "own on/off choice always wins otherwise); omit it (or pass false) to send plain text.",

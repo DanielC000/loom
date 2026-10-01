@@ -1401,8 +1401,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // The UNIQUE (channel, chat_id) route index rejected a 2nd session claiming a bound route.
       return reply.code(409).send({ error: `that (channel, chatId) route is already bound to another session: ${(e as Error).message}` });
     }
-    // Keep the live routing map in sync so the new/edited binding takes effect with no restart.
-    deps.companion?.bind({ sessionId: binding.sessionId, channel: binding.channel, chatId: binding.chatId, scope: binding.scope });
+    // Keep the live routing map in sync so the new/edited binding takes effect with no restart. Carries
+    // flaggedNonPrivate through (always false here — upsertCompanionBinding just reset it, card 7578dea2)
+    // so a re-bind clears outbound suppression LIVE, with no restart needed.
+    deps.companion?.bind({ sessionId: binding.sessionId, channel: binding.channel, chatId: binding.chatId, scope: binding.scope, flaggedNonPrivate: binding.flaggedNonPrivate });
     return reply.code(201).send(binding);
   });
   app.delete("/api/companion/bindings/:sessionId", async (req, reply) => {

@@ -43,11 +43,17 @@ export interface CompanionBindingStore extends AllowlistReader, PairingStore, Vo
   /** Zero-reply detector (card 48e8d289): record that a `chat_reply` was just successfully delivered for
    *  `sessionId`, resetting its zero-reply streak. Threaded to the gateway's `onReplyDelivered` hook. */
   recordChatReplyDelivered(sessionId: string): void;
+  /** Outbound-suppression flag persistence (card 7578dea2): threaded to the gateway's `flagNonPrivateBinding`
+   *  hook, so a binding `warnUnconfirmedDirectInbound` observes as non-private stays flagged across a restart. */
+  flagCompanionBindingNonPrivate(sessionId: string, channel: string): void;
 }
 
-/** Drop the db-only createdAt — the gateway's routing map wants just the SessionBinding shape. */
+/** Drop the db-only createdAt — the gateway's routing map wants just the SessionBinding shape. Carries
+ *  `flaggedNonPrivate` through (card 7578dea2) so a binding persisted-flagged by a PRIOR process still
+ *  suppresses outbound delivery from the moment this session's gateway is built, with no fresh inbound
+ *  needed to re-observe it. */
 function toSessionBinding(b: CompanionBinding): SessionBinding {
-  return { sessionId: b.sessionId, channel: b.channel, chatId: b.chatId, scope: b.scope };
+  return { sessionId: b.sessionId, channel: b.channel, chatId: b.chatId, scope: b.scope, flaggedNonPrivate: b.flaggedNonPrivate };
 }
 
 /**
@@ -168,7 +174,9 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // Zero-reply detector (card 48e8d289): reset THIS companion's zero-reply streak on every genuine
   // successful chat_reply delivery — see ChatGateway's onReplyDelivered doc.
   const onReplyDelivered = (sessionId: string) => db.recordChatReplyDelivered(sessionId);
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow, onReplyDelivered);
+  // Outbound-suppression persistence (card 7578dea2): see ChatGateway's flagNonPrivateBinding doc.
+  const flagNonPrivateBinding = (b: SessionBinding) => db.flagCompanionBindingNonPrivate(b.sessionId, b.channel);
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow, onReplyDelivered, flagNonPrivateBinding);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

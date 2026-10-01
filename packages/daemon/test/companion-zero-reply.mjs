@@ -20,6 +20,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       check takes the lazy-baseline path (no instant alert) rather than reading NULL as a huge streak.
 //   (7) ChatGateway wiring: `onReplyDelivered` fires on a genuine successful deliverReply, and does NOT
 //       fire on a no-target/no-adapter failure.
+//   (8) card 7578dea2: `onReplyDelivered` ALSO fires on a `route-flagged-non-private` suppression (a
+//       genuine chat_reply ATTEMPT, not silence) — and end-to-end, a companion that keeps trying every
+//       turn but is structurally suppressed NEVER trips `companion_zero_reply_detected`, even driven well
+//       past the threshold. Without this, the zero-reply alarm would misfire for a companion that is
+//       actively working, misdirecting a human toward "the agent is stuck" instead of "re-bind the channel"
+//       (the binding-flag log/UI is the correct, already-surfaced diagnosis for this cause).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-zero-reply.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -249,7 +255,51 @@ function driveTurns(db, sessId, n) {
   check("wiring: onReplyDelivered does NOT fire on a no-target failure", noTarget.delivered === false && delivered.length === 1);
 }
 
+// --- 8. card 7578dea2: a suppressed (route-flagged-non-private) reply is a GENUINE ATTEMPT — it must
+//     reset the zero-reply streak, not let it accumulate toward a misfire ---
+{
+  // 8a. UNIT: onReplyDelivered ALSO fires on route-flagged-non-private, not just a genuine successful send.
+  const delivered2 = [];
+  const onReplyDelivered2 = (sid) => delivered2.push(sid);
+  const flaggedGw = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: "flagged-sess", channel: "telegram", chatId: "grp-1", scope: "dm", flaggedNonPrivate: true }],
+    undefined, undefined,
+    (sid) => (sid === "flagged-sess" ? { channel: "telegram", chatId: "grp-1" } : null), // originResolver
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    onReplyDelivered2,
+  );
+  const flaggedSent = [];
+  flaggedGw.registerAdapter({ name: "telegram", maxMessageLength: 4096, start() {}, async stop() {}, async send(chatId, text) { flaggedSent.push({ chatId, text }); } });
+  const r = await flaggedGw.deliverReply("flagged-sess", "should be suppressed but still counted as attempted");
+  check("(8a) onReplyDelivered ALSO fires on route-flagged-non-private (a genuine attempt, not silence)", r.delivered === false && r.reason === "route-flagged-non-private" && delivered2.length === 1 && delivered2[0] === "flagged-sess");
+  check("(8a) NOTHING was actually sent despite onReplyDelivered firing", flaggedSent.length === 0);
+
+  // 8b. END-TO-END: wire a REAL ChatGateway exactly like factory.ts does (onReplyDelivered →
+  // db.recordChatReplyDelivered) against a binding flagged EXACTLY the way warnUnconfirmedDirectInbound
+  // flags one in production, then drive well past the threshold while calling deliverReply EVERY round
+  // (mirrors test 2's negative-control shape, but the "reply" is always structurally suppressed, never a
+  // genuine send) — the detector must NEVER fire, because the companion IS trying every turn.
+  const e = makeEnv();
+  const gw = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: e.sessId, channel: "telegram", chatId: "grp-1", scope: "dm", flaggedNonPrivate: true }],
+    undefined, undefined,
+    (sid) => (sid === e.sessId ? { channel: "telegram", chatId: "grp-1" } : null),
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    (sid) => e.db.recordChatReplyDelivered(sid), // the REAL production wiring (factory.ts)
+  );
+  const sent = [];
+  gw.registerAdapter({ name: "telegram", maxMessageLength: 4096, start() {}, async stop() {}, async send(chatId, text) { sent.push({ chatId, text }); } });
+  for (let round = 0; round < 6; round++) {
+    driveTurns(e.db, e.sessId, 5);
+    const rr = await gw.deliverReply(e.sessId, "trying every turn, always suppressed");
+    check(`(8b) round ${round}: deliverReply is suppressed every time (still trying, never landing)`, rr.delivered === false && rr.reason === "route-flagged-non-private");
+  }
+  check("(8b) a companion that keeps TRYING every turn but is suppressed NEVER trips companion_zero_reply_detected", events(e, "companion_zero_reply_detected").length === 0);
+  check("(8b) NOTHING was ever actually sent to the flagged route across the whole run", sent.length === 0);
+  cleanupEnv(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the companion zero-reply detector fires exactly once per genuine silent streak past the threshold, never fires on a periodically-replying (negative-control) or freshly-observed session, is gated to enabled companion sessions only, survives an ADD-COLUMN migration from the pre-card schema without a false alarm, and its ChatGateway hook fires only on a genuine delivered reply."
+  ? "\n✅ ALL PASS — the companion zero-reply detector fires exactly once per genuine silent streak past the threshold, never fires on a periodically-replying (negative-control) or freshly-observed session, is gated to enabled companion sessions only, survives an ADD-COLUMN migration from the pre-card schema without a false alarm, its ChatGateway hook fires only on a genuine delivered reply OR a route-flagged-non-private suppression (both are attempts, never silence), and a companion suppressed by a flagged binding never misfires the alarm even when driven well past the threshold."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

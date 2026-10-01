@@ -2487,6 +2487,19 @@ export interface CompanionBinding {
   /** The authorization scope selecting the rule applied to inbound messages on this binding. */
   scope: "dm" | "group";
   createdAt: string;
+  /**
+   * True once this `dm`-scope binding has been OBSERVED receiving an inbound the channel did NOT confirm
+   * as a private chat (card 7578dea2, closing the OUTBOUND half of card b4f124d8's finding) — i.e. its
+   * chatId may in fact name a shared/group chat that predates the write-side fix (db49891d) or was
+   * hand-bound by a human. `auth.ts` already refuses to AUTHORIZE such an inbound; this flag additionally
+   * suppresses OUTBOUND delivery to the route (ChatGateway's `mayDeliverTo`), so the companion's replies,
+   * heartbeat/reminder/attention-push pushes, and the in-app→other-channel mirror never reach a chat whose
+   * members were never authorized to read them. Surfaced on the binding list (this REST read + the web
+   * Manage UI) so the owner can re-bind or delete it; re-binding the route (`upsertCompanionBinding`)
+   * clears it back to `false` — a fresh bind is a fresh, unobserved decision. Always `false` for a `group`
+   * binding (group scope never claims single-owner trust, so this flag is meaningless there).
+   */
+  flaggedNonPrivate: boolean;
 }
 
 /**

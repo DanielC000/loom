@@ -105,7 +105,10 @@ import { resolveIdPrefix, type IdPrefixResult } from "./id-prefix.js";
  */
 export type PairingRedeemResult =
   | { outcome: "rejected" }
-  | ({ outcome: "bound"; sessionId: string; scope: "dm" | "group" } & CompanionRoute)
+  // `flaggedNonPrivate` is ALWAYS false here (card 7578dea2) — the binding was just (re)created by
+  // upsertCompanionBinding, which always resets it — carried through so a caller never has to reason
+  // about whether an omitted field here means "false" or "not yet known".
+  | ({ outcome: "bound"; sessionId: string; scope: "dm" | "group"; flaggedNonPrivate: boolean } & CompanionRoute)
   | { outcome: "sender-added"; sessionId: string };
 
 /**
@@ -894,7 +897,10 @@ CREATE TABLE IF NOT EXISTS companion_bindings (
   channel TEXT NOT NULL,
   chat_id TEXT NOT NULL,
   scope TEXT NOT NULL DEFAULT 'dm',
-  created_at TEXT
+  created_at TEXT,
+  -- Outbound-suppression flag (card 7578dea2) — see CompanionBinding.flaggedNonPrivate's own doc (shared
+  -- types.ts) for the full rationale. Added to an existing DB by migrateCompanionBindingFlags() below.
+  flagged_non_private INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_bindings_route ON companion_bindings(channel, chat_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_bindings_session_channel ON companion_bindings(session_id, channel);
@@ -2010,6 +2016,16 @@ const COMPANION_MESSAGES_ADDED_COLUMNS: Record<string, string> = {
   proactive: "INTEGER NOT NULL DEFAULT 0",
 };
 
+/** Columns added to `companion_bindings` after its initial ship (outbound-suppression flag, card
+ *  7578dea2 — see CompanionBinding.flaggedNonPrivate's doc in shared/types.ts for the full rationale);
+ *  applied to existing DBs by migrateCompanionBindingFlags() (fresh installs already have it via CREATE
+ *  TABLE). NOT NULL + constant DEFAULT 0 backfills every legacy row to unflagged — correct, since no
+ *  binding predating this column could have been observed and recorded as non-private by code that didn't
+ *  exist yet. */
+const COMPANION_BINDINGS_ADDED_COLUMNS: Record<string, string> = {
+  flagged_non_private: "INTEGER NOT NULL DEFAULT 0",
+};
+
 /** Columns added to `questions` by the Requests-object generalization (card 695ebab0); applied to
  *  existing DBs by migrateQuestions() (fresh installs already have them via CREATE TABLE). NOT NULL +
  *  constant DEFAULT 'decision' backfills every legacy row to today's exact type, in place; every other
@@ -2440,6 +2456,7 @@ export class Db {
     this.migrateCompanionConfig();
     this.migrateCompanionHomeToPerSession();
     this.migrateCompanionBindings();
+    this.migrateCompanionBindingFlags();
     this.migrateWakes();
     this.migratePendingGateOps();
     this.migrateCompanionMessages();
@@ -2952,6 +2969,22 @@ export class Db {
       this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_bindings_route ON companion_bindings(channel, chat_id)");
       this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_bindings_session_channel ON companion_bindings(session_id, channel)");
     })();
+  }
+
+  /**
+   * Idempotent additive migration for `companion_bindings` — ADD COLUMN any column in
+   * COMPANION_BINDINGS_ADDED_COLUMNS missing from an existing DB (fresh installs already have it via
+   * CREATE TABLE). Mirrors migrateCompanionConfig/migrateCompanionMessages. Runs AFTER
+   * migrateCompanionBindings() above — that one-shot rebuild's own `CREATE TABLE companion_bindings_new`
+   * predates this column, so a legacy DB still needs this pass even right after rebuilding.
+   */
+  private migrateCompanionBindingFlags(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(companion_bindings)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(COMPANION_BINDINGS_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE companion_bindings ADD COLUMN ${name} ${type}`);
+    }
   }
 
   /** Release the SQLite handle (used by hermetic tests to free the file before cleanup). */
@@ -3524,20 +3557,35 @@ export class Db {
    * UNIQUE route index and THROWS (a SqliteError) — still at most one session per route, by construction
    * (the caller/REST surfaces this as a 409). Stamps created_at on first insert; keeps it on update
    * (ON CONFLICT touches only chat_id/scope — channel is part of the conflict key). Returns the stored row.
+   * ALWAYS resets `flagged_non_private` to 0, on both the insert and the ON CONFLICT update — a (re)bind is
+   * a fresh, unobserved routing decision (card 7578dea2): a re-bind is the DoD's own stated remedy for a
+   * flagged route, so it must clear the flag rather than carry a stale one forward onto what may now be a
+   * genuinely different chat.
    */
   upsertCompanionBinding(input: { sessionId: string; scope?: "dm" | "group" } & CompanionRoute): CompanionBinding {
     const existing = this.db.prepare("SELECT created_at FROM companion_bindings WHERE session_id = ? AND channel = ?").get(input.sessionId, input.channel) as Row | undefined;
     const createdAt = (existing?.created_at as string) ?? new Date().toISOString();
     const b: CompanionBinding = {
       sessionId: input.sessionId, channel: input.channel, chatId: input.chatId,
-      scope: input.scope ?? "dm", createdAt,
+      scope: input.scope ?? "dm", createdAt, flaggedNonPrivate: false,
     };
     this.db.prepare(
-      `INSERT INTO companion_bindings (session_id, channel, chat_id, scope, created_at)
-       VALUES (@sessionId, @channel, @chatId, @scope, @createdAt)
-       ON CONFLICT(session_id, channel) DO UPDATE SET chat_id = @chatId, scope = @scope`,
+      `INSERT INTO companion_bindings (session_id, channel, chat_id, scope, created_at, flagged_non_private)
+       VALUES (@sessionId, @channel, @chatId, @scope, @createdAt, 0)
+       ON CONFLICT(session_id, channel) DO UPDATE SET chat_id = @chatId, scope = @scope, flagged_non_private = 0`,
     ).run(b);
     return b;
+  }
+  /**
+   * Persist that `sessionId`'s `dm`-scope binding on `channel` has been observed receiving an inbound the
+   * channel did NOT confirm as private (card 7578dea2) — the durable half of chat-gateway.ts's
+   * `warnUnconfirmedDirectInbound` once-per-route log, so the flag (a) survives a restart and (b) can gate
+   * outbound delivery + surface on the binding list without depending on that in-memory warned-set alone.
+   * Idempotent (a repeat call on an already-flagged binding is a no-op); a no-op if the binding no longer
+   * exists (already unbound or re-bound to a different route since the inbound that triggered this call).
+   */
+  flagCompanionBindingNonPrivate(sessionId: string, channel: string): void {
+    this.db.prepare("UPDATE companion_bindings SET flagged_non_private = 1 WHERE session_id = ? AND channel = ?").run(sessionId, channel);
   }
   /**
    * Delete a binding by session id, or (when `channel` is given) only that session's binding on that ONE
@@ -3684,7 +3732,7 @@ export class Db {
         }
         consume();
         this.clearPairingAttempts(input.channel, input.senderId);
-        return { outcome: "bound", sessionId: binding.sessionId, channel: binding.channel, chatId: binding.chatId, scope: binding.scope };
+        return { outcome: "bound", sessionId: binding.sessionId, channel: binding.channel, chatId: binding.chatId, scope: binding.scope, flaggedNonPrivate: binding.flaggedNonPrivate };
       }
       try {
         this.addAllowedSender({ sessionId, channel: input.channel, senderId: input.senderId });
@@ -9433,6 +9481,7 @@ function toCompanionBinding(r0: unknown): CompanionBinding {
     sessionId: r.session_id as string, channel: r.channel as string, chatId: r.chat_id as string,
     scope: (r.scope as CompanionBinding["scope"]) ?? "dm",
     createdAt: (r.created_at as string) ?? "",
+    flaggedNonPrivate: Number(r.flagged_non_private ?? 0) !== 0,
   };
 }
 function toCompanionAllowedSender(r0: unknown): CompanionAllowedSender {

@@ -194,9 +194,20 @@ export class ChatGateway {
     private readonly closeTrustWindow: ((sessionId: string) => void) | undefined = undefined,
     /** Zero-reply detector (card 48e8d289): fired on a GENUINE successful `deliverReply` (never on
      *  `no-target`/`no-adapter`/`send-failed`) so the detector's baseline resets on every real chat_reply,
-     *  not just proactive ones. Default undefined ⇒ every existing/test construction stays byte-identical
-     *  (no-op). The daemon injects `(sid) => db.recordChatReplyDelivered(sid)` (companion/factory.ts). */
+     *  not just proactive ones. ALSO fires on `route-flagged-non-private` (card 7578dea2) — see
+     *  deliverReply's own comment at that check: a suppressed reply is still a genuine ATTEMPT, and its
+     *  cause is a different, already-surfaced problem the zero-reply alarm must not also fire for. Default
+     *  undefined ⇒ every existing/test construction stays byte-identical (no-op). The daemon injects
+     *  `(sid) => db.recordChatReplyDelivered(sid)` (companion/factory.ts). */
     private readonly onReplyDelivered: ((sessionId: string) => void) | undefined = undefined,
+    /** Outbound-suppression persistence hook (card 7578dea2): called when `warnUnconfirmedDirectInbound`
+     *  (below) first observes `binding` as non-private, so the flag survives a restart — see
+     *  CompanionBinding.flaggedNonPrivate's doc (shared/types.ts). Default undefined ⇒ every existing/test
+     *  construction stays byte-identical (the in-memory `binding.flaggedNonPrivate` flip and the
+     *  process-lifetime `warnedUnconfirmedDirectBindings` dedup both still happen regardless — this hook
+     *  only adds durability). The daemon injects `(b) => db.flagCompanionBindingNonPrivate(b.sessionId,
+     *  b.channel)` (factory.ts). Never allowed to throw out of the inbound path — the call site wraps it. */
+    private readonly flagNonPrivateBinding: ((binding: SessionBinding) => void) | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -694,6 +705,20 @@ export class ChatGateway {
     // what makes cross-delivery impossible by construction: the reply can only go where the turn came from.
     const target = this.replyTarget(sessionId);
     if (!target) return { delivered: false, reason: "no-target" };
+    // OUTBOUND SUPPRESSION (card 7578dea2): covers chat_reply AND every heartbeat/reminder/attention-push
+    // reply — all resolve through this same method (see mayDeliverTo's doc).
+    if (!this.mayDeliverTo(target.channel, target.chatId)) {
+      // Zero-reply detector (card 48e8d289) hardening: this IS a genuine chat_reply ATTEMPT — the agent
+      // called it, and the reason it can't land is a PERMANENT, already-surfaced-elsewhere condition (the
+      // binding-flag UI/log), not the agent going silent/stuck. Firing onReplyDelivered here resets that
+      // detector's "turns since last reply" baseline so it can never misfire `companion_zero_reply_detected`
+      // for a companion that is actively trying every turn — that alarm exists to catch an UNDIAGNOSED
+      // silence, and this cause is already fully diagnosed and surfaced through a different channel; letting
+      // both fire for the same root cause would misdirect a human toward "the agent is stuck" instead of
+      // "re-bind the channel".
+      this.onReplyDelivered?.(sessionId);
+      return { delivered: false, reason: "route-flagged-non-private" };
+    }
     // Loom Companion (proactive event-line producer): resolve ONCE whether the turn this reply answers was
     // a daemon-driven heartbeat/reminder/attention-push submit — read via the SAME per-turn mechanism as
     // `target` above (the pty pins it when the turn is formed), so it can never drift from the turn this
@@ -714,14 +739,23 @@ export class ChatGateway {
     }
     const result = await this.sendVia(target.channel, target.chatId, text, { proactive });
     if (!result.delivered) {
-      // PARTIAL SEND (CR#2 L1): a chunked reply that fails on chunk k>1 has already reached the chat with
-      // chunks 1..k-1 — recording NOTHING here would leave Loom history/the web panel with zero trace of a
-      // reply the user actually received. Record exactly the prefix that was actually sent (chunkText's
-      // splits are byte-lossless, so joining the sent chunks reconstructs that prefix exactly).
-      if (result.reason === "send-failed" && result.sentChunks > 0) {
+      // PARTIAL SEND (CR#2 L1): a chunked reply that stopped on chunk k>1 (a send failure, OR — card
+      // 7578dea2 — a mid-flight flag flip) has already reached the chat with chunks 1..k-1 — recording
+      // NOTHING here would leave Loom history/the web panel with zero trace of a reply the user actually
+      // received. Record exactly the prefix that was actually sent (chunkText's splits are byte-lossless,
+      // so joining the sent chunks reconstructs that prefix exactly).
+      if (result.reason !== "no-adapter" && result.sentChunks > 0) {
         this.recordOutboundSafely(sessionId, target.channel, target.chatId, result.sentText, proactive);
       }
-      return result.reason === "no-adapter" ? { delivered: false, reason: "no-adapter" } : { delivered: false, reason: "send-failed" };
+      if (result.reason === "no-adapter") return { delivered: false, reason: "no-adapter" };
+      if (result.reason === "route-flagged-non-private") {
+        // Zero-reply detector (card 48e8d289) hardening, card 7578dea2: a MID-FLIGHT suppression is still
+        // a genuine chat_reply attempt, exactly like the up-front mayDeliverTo gate above — see that gate's
+        // own comment on why this resets the streak instead of letting it accumulate toward a misfire.
+        this.onReplyDelivered?.(sessionId);
+        return { delivered: false, reason: "route-flagged-non-private" };
+      }
+      return { delivered: false, reason: "send-failed" };
     }
     // CHAT HISTORY record (unified cross-channel chat, card 7d63e200): recorded ONCE per logical reply,
     // AFTER every chunk has succeeded — a long Telegram reply may take several `adapter.send` calls under
@@ -772,6 +806,13 @@ export class ChatGateway {
       if (!this.synthesize.isReady()) return null;
       const audio = await this.synthesize.synthesize({ text, lang: pref.ttsLang, voice: pref.ttsVoice });
       if (!audio) return null;
+      // Cheap hardening (card 7578dea2): re-check right before the actual send, not just once at
+      // deliverReply's own entry — synth (above) is async and can take real time, during which a
+      // concurrent inbound could flip this route to flagged. Returning null (not a DeliverResult) falls
+      // through to the plain-text sendVia path below, whose OWN per-chunk mayDeliverTo check (see sendVia)
+      // then correctly reports route-flagged-non-private rather than sending voice to a route that just
+      // got flagged mid-synth.
+      if (!this.mayDeliverTo(target.channel, target.chatId)) return null;
       try {
         await adapter.sendVoice(target.chatId, audio.filePath, text, proactive);
         return { delivered: true, chunks: 1 };
@@ -799,6 +840,7 @@ export class ChatGateway {
   async deliverMedia(sessionId: string, filePath: string): Promise<{ delivered: boolean; reason?: string }> {
     const target = this.replyTarget(sessionId);
     if (!target) return { delivered: false, reason: "no-target" };
+    if (!this.mayDeliverTo(target.channel, target.chatId)) return { delivered: false, reason: "route-flagged-non-private" }; // card 7578dea2
     const adapter = this.adapters.get(target.channel);
     if (!adapter) return { delivered: false, reason: "no-adapter" };
     if (!adapter.sendMedia) return { delivered: false, reason: "unsupported-channel" };
@@ -814,29 +856,38 @@ export class ChatGateway {
   /**
    * OUTBOUND MIRROR primitive: send a plain, non-reply message to an EXPLICIT (channel, chatId) — never
    * resolved from a turn's origin (unlike deliverReply/replyTarget). Callers pass a route already known to
-   * be one of a session's bound channels (see bindingsForSession) — this method does no binding lookup of
-   * its own and does not care WHICH session the route belongs to. It NEVER calls submitTurn and never
-   * touches inbound routing (bindingForInbound/handleInbound), so it structurally cannot form a turn or
-   * loop a mirrored message back in. Used to echo a web-chat turn out to the session's other bound
+   * be one of a session's bound channels (see bindingsForSession) and this method does not care WHICH
+   * session the route belongs to — the ONLY binding lookup it does is the `mayDeliverTo` suppression check
+   * (card 7578dea2) below, a read-only routing-map lookup, never inbound routing. It NEVER calls submitTurn
+   * and never touches bindingForInbound/handleInbound's INBOUND path, so it structurally cannot form a turn
+   * or loop a mirrored message back in. Used to echo a web-chat turn out to the session's other bound
    * channels (e.g. Telegram) with a disclaimer — the caller composes that text; this just sends it.
    */
   async sendToChannel(channel: string, chatId: string, text: string): Promise<DeliverResult> {
+    if (!this.mayDeliverTo(channel, chatId)) return { delivered: false, reason: "route-flagged-non-private" };
     const result = await this.sendVia(channel, chatId, text);
-    if (!result.delivered) return result.reason === "no-adapter" ? { delivered: false, reason: "no-adapter" } : { delivered: false, reason: "send-failed" };
+    if (!result.delivered) {
+      if (result.reason === "no-adapter") return { delivered: false, reason: "no-adapter" };
+      // card 7578dea2 hardening: sendVia's own per-chunk recheck caught a mid-flight flag flip. Not a
+      // chat_reply, so no onReplyDelivered here — the zero-reply detector only tracks chat_reply/deliverReply.
+      if (result.reason === "route-flagged-non-private") return { delivered: false, reason: "route-flagged-non-private" };
+      return { delivered: false, reason: "send-failed" };
+    }
     return { delivered: true, chunks: result.chunks };
   }
 
   /** Shared outbound send: chunk to the adapter's max length and send every part, in order. Contains a
-   *  throw (never propagates) — the only failure modes are "no adapter registered for this channel" and
-   *  "the adapter's send threw". Pure outbound: never calls submitTurn, never consults inbound routing.
-   *  On a mid-stream send failure, `sentChunks`/`sentText` report exactly what already reached the chat
-   *  (chunks 1..k-1) — see deliverReply's partial-send record (CR#2 L1). `opts.proactive` (proactive
-   *  event-line producer) is forwarded to the adapter's `send` verbatim — `sendToChannel`'s mirror-echo
-   *  caller omits it (never proactive), only `deliverReply` passes it. */
+   *  throw (never propagates) — the only failure modes are "no adapter registered for this channel", "the
+   *  adapter's send threw", and (card 7578dea2) "the route got flagged non-private mid-flight". On a
+   *  mid-stream stop, `sentChunks`/`sentText` report exactly what already reached the chat (chunks 1..k-1)
+   *  — see deliverReply's partial-send record (CR#2 L1). `opts.proactive` (proactive event-line producer)
+   *  is forwarded to the adapter's `send` verbatim — `sendToChannel`'s mirror-echo caller omits it (never
+   *  proactive), only `deliverReply` passes it. */
   private async sendVia(channel: string, chatId: string, text: string, opts?: { proactive?: boolean }): Promise<
     | { delivered: true; chunks: number }
     | { delivered: false; reason: "no-adapter" }
     | { delivered: false; reason: "send-failed"; sentChunks: number; sentText: string }
+    | { delivered: false; reason: "route-flagged-non-private"; sentChunks: number; sentText: string }
   > {
     const adapter = this.adapters.get(channel);
     if (!adapter) return { delivered: false, reason: "no-adapter" };
@@ -844,6 +895,13 @@ export class ChatGateway {
     let sent = 0;
     try {
       for (const part of parts) {
+        // Cheap hardening (card 7578dea2): every caller already checked mayDeliverTo ONCE before calling
+        // sendVia — this re-checks on EVERY chunk, so a concurrent inbound flipping the flag mid-flight
+        // (between two chunks of a long reply) stops the REST of the reply instead of finishing a send
+        // that started before the route was flagged.
+        if (!this.mayDeliverTo(channel, chatId)) {
+          return { delivered: false, reason: "route-flagged-non-private", sentChunks: sent, sentText: parts.slice(0, sent).join("") };
+        }
         await adapter.send(chatId, part, opts);
         sent++;
       }
@@ -903,6 +961,19 @@ export class ChatGateway {
    * which are either identifying or untrusted, attacker-influenced content.
    */
   private warnUnconfirmedDirectInbound(binding: SessionBinding, chatIsDirect: boolean | undefined): void {
+    // OUTBOUND SUPPRESSION (card 7578dea2): flip the flag on the SAME object stored in the live routing map
+    // — mayDeliverTo reads it straight off `bindingForInbound`'s return, so this takes effect immediately,
+    // no re-bind/restart needed. Done UNCONDITIONALLY (before the once-per-route log dedup below), since a
+    // binding restored from the db already flagged (persisted by a PRIOR process) still needs this in-memory
+    // flip on THIS process's fresh warnedUnconfirmedDirectBindings Set — the log line is once-per-process,
+    // the flag is not.
+    binding.flaggedNonPrivate = true;
+    try {
+      this.flagNonPrivateBinding?.(binding);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[companion] persisting non-private binding flag failed: ${describeError(err)}`);
+    }
     const key = `${binding.channel}:${binding.chatId}`;
     if (this.warnedUnconfirmedDirectBindings.has(key)) return;
     this.warnedUnconfirmedDirectBindings.add(key);
@@ -910,9 +981,16 @@ export class ChatGateway {
     // eslint-disable-next-line no-console
     console.warn(
       `[companion] SECURITY: dm-scope binding (session=${binding.sessionId} channel=${binding.channel}) ` +
-        `rejected an inbound whose chat was NOT confirmed private (chatIsDirect=${confirmedState}). This ` +
-        `binding may name a group/supergroup chat — re-bind it with scope "group" if so.`,
+        `rejected an inbound whose chat was NOT confirmed private (chatIsDirect=${confirmedState}). Outbound ` +
+        `delivery to this route is now suppressed (card 7578dea2). This binding may name a group/supergroup ` +
+        `chat — re-bind it with scope "group", or delete it, if so.`,
     );
+  }
+
+  // @decision 7578dea2 — outbound suppression to a flagged route is SILENT; never send even a re-bind
+  // notice to it (that would itself be a disclosure to an unauthorized chat). See the full record.
+  private mayDeliverTo(channel: string, chatId: string): boolean {
+    return this.bindingForInbound(channel, chatId)?.flaggedNonPrivate !== true;
   }
 }
 
