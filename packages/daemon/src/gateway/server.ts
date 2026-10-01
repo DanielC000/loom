@@ -3760,14 +3760,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const b = (req.body ?? {}) as { name?: string; content?: string };
     if (!b.name || !isValidSkillName(b.name)) return reply.code(400).send({ error: "invalid skill name (kebab-case: a-z, 0-9, -)" });
     if (readSkill(b.name)) return reply.code(409).send({ error: "skill already exists" });
-    writeSkill(b.name, b.content ?? skillTemplate(b.name));
+    // card 509176c8: stamp "human" — this REST route is the Skills UI's own write path, never agent-
+    // reachable (an agent's only skill-write surface is the MCP tools, which stamp "agent" instead), so
+    // skills/inject.ts can keep delivering a human-authored user skill to a locked role under the
+    // deliver-all default.
+    writeSkill(b.name, b.content ?? skillTemplate(b.name), "human");
     return reply.code(201).send({ name: b.name });
   });
   app.put("/api/skills/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
     const b = (req.body ?? {}) as { content?: string };
     if (typeof b.content !== "string") return reply.code(400).send({ error: "content required" });
-    if (!writeSkill(name, b.content)) return reply.code(400).send({ error: "invalid skill name" });
+    if (!writeSkill(name, b.content, "human")) return reply.code(400).send({ error: "invalid skill name" });
     return { ok: true };
   });
   app.delete("/api/skills/:name", async (req, reply) => {

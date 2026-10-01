@@ -84,6 +84,10 @@ export default function Skills() {
   // show an empty diff and offer to discard the very edit the daemon's per-file protection preserves.
   const mdCustomized = !!selectedSkill?.mdCustomized;
   const mdUpdateAvailable = !!selectedSkill?.mdUpdateAvailable;
+  // User (non-bundled) skills only — card 509176c8: a locked role's deliver-all default withholds any
+  // user skill that isn't stamped "human", so an agent-written or unstamped one silently never reaches a
+  // Companion/Setup/etc. session. `provenance` is undefined for a bundled skill (not applicable there).
+  const provenance = selectedSkill?.provenance ?? null;
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>
@@ -102,7 +106,8 @@ export default function Skills() {
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {s.name}<span style={{ color: color.textMuted }}>{s.bundled ? "  ·  bundled" : "  ·  local"}</span>
               </span>
-              <StatusDots customized={!!s.customized} updateAvailable={!!s.updateAvailable} />
+              <StatusDots customized={!!s.customized} updateAvailable={!!s.updateAvailable}
+                notTrusted={!s.bundled && s.provenance !== "human"} />
             </Button>
           ))}
           {skills.data?.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No skills yet.</span>}
@@ -117,7 +122,7 @@ export default function Skills() {
         {selected && current.data ? (
           <SkillEditor key={`${selected}:${reloadNonce}`} name={selected} content={current.data.content}
             bundled={bundled} customized={customized} updateAvailable={updateAvailable}
-            mdCustomized={mdCustomized} mdUpdateAvailable={mdUpdateAvailable} canPublish={isDev}
+            mdCustomized={mdCustomized} mdUpdateAvailable={mdUpdateAvailable} provenance={provenance} canPublish={isDev}
             onSave={(content) => save.mutate({ name: selected, content })} saving={save.isPending}
             onDelete={() => remove.mutate(selected)} deleting={remove.isPending}
             onReset={() => reset.mutate(selected)} resetting={reset.isPending}
@@ -131,12 +136,13 @@ export default function Skills() {
 
 // Compact sidebar status: a cyan dot for "customized", an amber dot for "update available". Restrained —
 // the full-text badges live in the editor header; here it's a glanceable signal with a hover title.
-function StatusDots({ customized, updateAvailable }: { customized: boolean; updateAvailable: boolean }) {
-  if (!customized && !updateAvailable) return null;
+function StatusDots({ customized, updateAvailable, notTrusted }: { customized: boolean; updateAvailable: boolean; notTrusted: boolean }) {
+  if (!customized && !updateAvailable && !notTrusted) return null;
   return (
     <span style={{ display: "inline-flex", gap: 4, flexShrink: 0 }}>
       {customized && <Dot tone="cyan" title="Customized — you edited this skill" />}
       {updateAvailable && <Dot tone="amber" title="Update available — Loom shipped a newer version" />}
+      {notTrusted && <Dot tone="amber" title="Not delivered to locked roles (Companion, Setup…) — save it here to trust it" />}
     </span>
   );
 }
@@ -148,11 +154,11 @@ function Dot({ tone, title }: { tone: Tone; title: string }) {
 // Remounted per skill (key=name:nonce) so the textarea resets on switch / reset / adopt; after Save the
 // query refetches and `dirty` clears against the new content. Mirrors the agent-preset / task editors.
 function SkillEditor({
-  name, content, bundled, customized, updateAvailable, mdCustomized, mdUpdateAvailable, canPublish,
+  name, content, bundled, customized, updateAvailable, mdCustomized, mdUpdateAvailable, provenance, canPublish,
   onSave, saving, onDelete, deleting, onReset, resetting, onAdopt, adopting, adoptError, onPublish, publishing,
 }: {
   name: string; content: string; bundled: boolean; customized: boolean; updateAvailable: boolean;
-  mdCustomized: boolean; mdUpdateAvailable: boolean; canPublish: boolean;
+  mdCustomized: boolean; mdUpdateAvailable: boolean; provenance: "agent" | "human" | null; canPublish: boolean;
   onSave: (c: string) => void; saving: boolean; onDelete: () => void; deleting: boolean;
   onReset: () => void; resetting: boolean; onAdopt: (content?: string) => void; adopting: boolean; adoptError: Error | null;
   onPublish: () => void; publishing: boolean;
@@ -163,6 +169,10 @@ function SkillEditor({
   const [confirmPublish, setConfirmPublish] = useState(false);
   const [resolver, setResolver] = useState<(SkillMergePreview & { clean: false }) | null>(null);
   const dirty = text !== content;
+  // card 509176c8: a user skill not stamped "human" is withheld from every locked-role session (Companion,
+  // Setup, …) under their deliver-all default — surface it, and give a way to re-stamp it WITHOUT
+  // requiring an edit (the ordinary Save button is disabled with nothing dirty to save).
+  const notTrusted = !bundled && provenance !== "human";
 
   // Adopt step 1 — dry-run the merge. Clean → one-click adopt (empty body). Conflict → open the resolver.
   const preview = useMutation({
@@ -179,6 +189,11 @@ function SkillEditor({
         {bundled && <Badge tone="muted">bundled</Badge>}
         {customized && <Badge tone="cyan">customized</Badge>}
         {updateAvailable && <Badge tone="amber">update available</Badge>}
+        {notTrusted && (
+          <span title="Not delivered to locked roles (Companion, Setup, Elevated Operator, Workspace Auditor…) under their deliver-all default — save it here to trust it.">
+            <Badge tone="amber">not delivered to locked roles</Badge>
+          </span>
+        )}
         <span style={{ color: color.textMuted, fontSize: 12 }}>· SKILL.md</span>
         <span style={{ flex: 1 }} />
         {confirmDel ? (
@@ -230,6 +245,14 @@ function SkillEditor({
         {dirty
           ? <Button onClick={() => setText(content)}>Discard changes</Button>
           : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+        {/* Re-save WITHOUT an edit, purely to re-stamp "human" — the ordinary Save button above is
+            disabled with nothing dirty, so without this a skill with no pending edit has no way to earn
+            the "human" stamp it needs to reach a locked role. Hidden while dirty: Save already covers it. */}
+        {notTrusted && !dirty && (
+          <Button disabled={saving} onClick={() => onSave(content)} title='Re-save this skill as-is to stamp it "human" and let it reach locked-role sessions'>
+            {saving ? "Saving…" : "Save to trust"}
+          </Button>
+        )}
         <span style={{ flex: 1 }} />
         {bundled && canPublish && (confirmPublish ? (
           <>

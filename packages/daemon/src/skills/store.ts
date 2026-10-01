@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { diff3Merge } from "node-diff3";
 import type { SkillSummary } from "@loom/shared";
-import { SKILLS_DIR, SKILL_BASE_DIR } from "../paths.js";
+import { SKILLS_DIR, SKILL_BASE_DIR, SKILL_PROVENANCE_FILE } from "../paths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // dist/skills -> daemon root -> assets/skills. Overridable via LOOM_ASSET_SKILLS so hermetic tests can
@@ -348,6 +348,12 @@ export function listSkills(): SkillSummary[] {
       description: descriptionOf(content),
       bundled: isBundled,
       ...state,
+      // User (non-bundled) skills only — surfaces WHO authored the current content so the UI can flag an
+      // agent-written/unstamped one as not delivered to locked roles under the deliver-all default.
+      //
+      // @decision 509176c8 — omitted for a bundled skill: trust there turns on `isBundledSkill` alone,
+      // not this flat stamp, so echoing it would invite exactly the wrong read.
+      ...(isBundled ? {} : { provenance: skillProvenance(e.name) }),
     });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
@@ -808,17 +814,120 @@ export function readSkill(name: string): { name: string; content: string } | nul
   try { return { name, content: fs.readFileSync(skillMd(name), "utf8") }; } catch { return null; }
 }
 
-/** Create or overwrite a skill's SKILL.md. Returns false on an invalid name. */
-export function writeSkill(name: string, content: string): boolean {
+export type SkillProvenance = "agent" | "human";
+
+/** A fresh, empty provenance map — Object.create(null) deliberately, NOT `{}`: a plain object literal
+ *  inherits Object.prototype, so a bracket read/write for a skill name that happens to collide with a
+ *  prototype property name ("constructor", "toString", "hasOwnProperty", …) — all valid per `NAME_RE` —
+ *  silently resolves through the prototype chain instead of reading/writing an own entry. `skillProvenance`
+ *  pairs this with an explicit `Object.hasOwn` check below so an absent own entry always reads `null`. */
+function emptyProvenanceMap(): Record<string, SkillProvenance> {
+  return Object.create(null) as Record<string, SkillProvenance>;
+}
+
+/** Parse provenance-map JSON text. Returns `null` for anything that isn't a plain object (unparsable, or
+ *  valid JSON that's an array/primitive) — the single shared notion of "corrupt" used by both the read
+ *  path (to decide whether to rename the file aside) and the write path (to refuse overwriting it). */
+function parseProvenanceMap(text: string): Record<string, SkillProvenance> | null {
+  try {
+    const raw = JSON.parse(text);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const out = emptyProvenanceMap();
+    for (const [n, v] of Object.entries(raw as Record<string, unknown>)) if (v === "agent" || v === "human") out[n] = v;
+    return out;
+  } catch { return null; }
+}
+
+/** Read the whole provenance map. A missing file is the normal case (nothing stamped yet, or a store
+ *  that predates this tracking) ⇒ empty map, never an error.
+ *
+ *  A CORRUPT file (unparsable JSON, or valid JSON that isn't an object) is never silently swallowed into
+ *  an in-memory {} and left on disk: the very next write through `writeProvenanceMap` would persist that
+ *  near-empty map OVER the corrupt file, destroying whatever real stamps it held with no way back. Instead
+ *  the corrupt file is renamed aside to a timestamped sibling (`<file>.corrupt-<ms>`) BEFORE returning {} —
+ *  so a later write creates a brand-new file rather than overwriting evidence, and the corrupt bytes stay
+ *  recoverable for inspection. Every name then reads as unknown provenance (fail-closed via
+ *  `skillProvenance`'s own null default) until a human re-saves the skill through the UI and re-stamps it.
+ *
+ *  @decision 509176c8 — if the rename-aside ITSELF fails (e.g. EPERM), `writeProvenanceMap` independently
+ *  re-checks the file for corruption and refuses to write rather than trusting this function alone to have
+ *  cleared the path — see that function's own doc comment. */
+function readProvenanceMap(): Record<string, SkillProvenance> {
+  let text: string;
+  try { text = fs.readFileSync(SKILL_PROVENANCE_FILE, "utf8"); } catch { return emptyProvenanceMap(); }
+  const parsed = parseProvenanceMap(text);
+  if (parsed) return parsed;
+  const backupPath = `${SKILL_PROVENANCE_FILE}.corrupt-${Date.now()}`;
+  try { fs.renameSync(SKILL_PROVENANCE_FILE, backupPath); }
+  catch { /* best-effort — writeProvenanceMap refuses to overwrite a still-corrupt file regardless */ }
+  console.log(`[skills] provenance map at ${SKILL_PROVENANCE_FILE} is corrupt — moved aside to ${backupPath}; every stamp reads unknown (fail closed) until a human re-saves`);
+  return emptyProvenanceMap();
+}
+
+/** Who wrote `name`'s CURRENT content — "agent" (loom-setup/loom-platform skill_write/skill_edit),
+ *  "human" (the Skills UI / REST), or null when unstamped (predates this tracking, or a write path that
+ *  never passed a `provenance`). `null` here is UNKNOWN, not "human" — callers deciding whether to trust
+ *  a skill for a locked-role session must treat null as agent-written (fail closed); this function itself
+ *  stays a neutral 3-way read so it can't silently make that policy call on a caller's behalf. An explicit
+ *  `Object.hasOwn` check (not a bracket read + `??`) so a name shaped like a prototype property
+ *  ("constructor" and friends — all valid per `NAME_RE`) with no real stamp reads `null`, never an
+ *  inherited `Object.prototype` value. */
+export function skillProvenance(name: string): SkillProvenance | null {
+  const map = readProvenanceMap();
+  return Object.hasOwn(map, name) ? map[name]! : null;
+}
+
+/** Atomic write of the provenance map (tmp+rename), mirroring the store's other durability idioms.
+ *  @decision 509176c8 — return whether it landed; `writeSkill`'s "agent" branch must abort on a false,
+ *  never swallow it — a swallowed failure here is how stale/wrong provenance used to survive a write that
+ *  should have been blocked.
+ *
+ *  @decision 509176c8 — also refuses to write when the file on disk is STILL corrupt (the rename-aside
+ *  above is best-effort and can itself fail) — overwriting it here would destroy the corrupt evidence.
+ *  Both callers already treat `false` as fail-closed. */
+function writeProvenanceMap(map: Record<string, SkillProvenance>): boolean {
+  let existing: string | undefined;
+  try { existing = fs.readFileSync(SKILL_PROVENANCE_FILE, "utf8"); } catch { /* missing — fine to write */ }
+  if (existing !== undefined && parseProvenanceMap(existing) === null) {
+    console.log(`[skills] refusing to write provenance map: ${SKILL_PROVENANCE_FILE} is still corrupt on disk (an earlier rename-aside must have failed) — leaving it untouched`);
+    return false;
+  }
+  try { atomicWriteFile(SKILL_PROVENANCE_FILE, JSON.stringify(map)); return true; }
+  catch (e) { console.log(`[skills] failed to write provenance map ${SKILL_PROVENANCE_FILE}: ${(e as Error).message}`); return false; }
+}
+
+/** Create or overwrite a skill's SKILL.md. Returns false on an invalid name — or, for an "agent" write,
+ *  when the provenance downgrade below fails. `provenance`, when passed, stamps WHO authored this write
+ *  ("agent" for the loom-setup/loom-platform MCP surfaces, "human" for the Skills UI/REST routes — see
+ *  `SKILL_PROVENANCE_FILE`'s own doc comment in paths.ts). Omit it (as every pre-existing internal caller,
+ *  e.g. `adoptSkillUpdate`'s bundled-only path, does) to leave provenance untouched — bundled-skill writes
+ *  never need it, since locked-role filtering checks `isBundledSkill` before ever consulting provenance.
+ *
+ *  @decision 509176c8 — the "agent" branch downgrades the stamp FIRST and aborts the whole write if that
+ *  fails, so agent content can never land while the stamp still reads "human". The "human" branch stamps
+ *  only AFTER the content write succeeds, best-effort (failing closed, never open). */
+export function writeSkill(name: string, content: string, provenance?: SkillProvenance): boolean {
   if (!isValidSkillName(name)) return false;
+  if (provenance === "agent") {
+    const map = readProvenanceMap();
+    map[name] = "agent";
+    if (!writeProvenanceMap(map)) return false; // never swallowed: abort before any content lands
+  }
   fs.mkdirSync(path.join(SKILLS_DIR, name), { recursive: true });
   atomicWriteFile(skillMd(name), content);
+  if (provenance === "human") {
+    const map = readProvenanceMap();
+    map[name] = "human";
+    writeProvenanceMap(map); // best-effort — see doc above: content already landed, failure fails closed
+  }
   return true;
 }
 
 export function deleteSkill(name: string): boolean {
   if (!isValidSkillName(name)) return false;
   fs.rmSync(path.join(SKILLS_DIR, name), { recursive: true, force: true });
+  const map = readProvenanceMap();
+  if (Object.hasOwn(map, name)) { delete map[name]; writeProvenanceMap(map); }
   return true;
 }
 

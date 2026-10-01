@@ -3494,6 +3494,12 @@ export interface SkillSummary {
   /** Bundled skills only: SKILL.md ITSELF (not the OR'd aggregate above) has a shipped update pending —
    *  the SKILL.md-only counterpart to mdCustomized, same reasoning. */
   mdUpdateAvailable?: boolean;
+  /** User (non-bundled) skills only: who authored the CURRENT content — "agent" (an MCP skill_write/
+   *  skill_edit call), "human" (the Skills UI / REST), or null when unstamped (predates this tracking).
+   *  Omitted for a bundled skill, where trust is `isBundledSkill` alone, not this flat stamp. Drives
+   *  the "not delivered to locked roles" note: a locked role's deliver-all default withholds anything
+   *  that isn't `"human"` (card 509176c8). */
+  provenance?: "agent" | "human" | null;
 }
 
 // --- Context-window sizing -------------------------------------------------------------------

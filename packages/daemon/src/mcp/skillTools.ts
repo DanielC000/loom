@@ -110,8 +110,14 @@ export function skillWriteData(
     if (!publishSkillToBundled(name)) return { error: `failed to publish "${name}" to its bundled asset` };
     return { ok: true, name, bundled: true, target: "asset", skill: listSkills().find((s) => s.name === name) ?? null };
   }
-  // USER skill (both surfaces): write the user store only.
-  if (!writeSkill(name, content)) return { error: "invalid skill name" };
+  // USER skill (both surfaces): write the user store only. ALWAYS an agent-authored write (card
+  // 509176c8) — this function is reachable only from an MCP tool call, never the human Skills UI/REST
+  // (gateway/server.ts calls writeSkill directly, with provenance:"human"); stamped so skills/inject.ts
+  // can withhold it from a locked role's session under the deliver-all default.
+  // A false here is the name check above (already excluded) or the provenance-downgrade write failing.
+  //
+  // @decision 509176c8 — writeSkill aborts the WHOLE write when the downgrade fails, so nothing landed.
+  if (!writeSkill(name, content, "agent")) return { error: `failed to write "${name}" — could not record its provenance stamp, so nothing was written; try again` };
   return { ok: true, name, bundled: false, skill: listSkills().find((s) => s.name === name) ?? null };
 }
 

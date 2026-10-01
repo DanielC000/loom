@@ -3,7 +3,8 @@ import path from "node:path";
 import type { SessionRole } from "@loom/shared";
 import { SKILLS_DIR, OBSIDIAN_PREFLIGHT_FRAGMENT } from "../paths.js";
 import { claudeSkillsDir, doctrineGitExcludeEntries } from "../pty/claude-doctrine.js";
-import { isValidSkillName } from "./store.js";
+import { isValidSkillName, isBundledSkill, skillProvenance } from "./store.js";
+import { LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 
 const MANIFEST = ".loom-skills.json"; // records which skill names EACH session injected into the doctrine dir's skills subtree
 
@@ -187,13 +188,18 @@ function appendObsidianFragment(skillDir: string, fragment: string): void {
  * and never fires, with no config lever to reverse it — so Loom's own skill names must never collide.
  *
  * `subset` (profile-pinned, per session): when a non-empty list, deliver ONLY those skills; null/empty ⇒
- * ALL store skills (today's behavior — the regression-guarded default). A subset name not in the store is
- * dropped (a stale profile can't ask for a missing skill).
+ * ALL store skills (today's behavior — the regression-guarded default) — EXCEPT for a LOCKED role (see
+ * below), where the default additionally withholds any AGENT-authored user-store skill.
  *
  * `role` (the session's resolved role): its operating-doctrine skill (worker→"worker", manager→
  * "orchestrate", …) is FORCE-INCLUDED regardless of the subset — a profile whose subset omits its own
  * role doctrine would otherwise ship a doctrine-less session. Only added if the doctrine skill is in the
- * store (a missing one is still dropped, like any subset name). null/run/plain ⇒ no doctrine skill.
+ * store (a missing one is still dropped, like any subset name). null/run/plain ⇒ no doctrine skill. A
+ * doctrine skill is always bundled, so it is never affected by the locked-role filter below.
+ *
+ * @decision 509176c8 — a LOCKED role's deliver-all default must withhold an AGENT-written (or
+ * unstamped — fail closed) user-store skill; a human-written one, or an explicit non-empty `subset`
+ * (human-only to set), still flows. See the full record for why.
  *
  * Shared-cwd safety (the load-bearing invariant): managers/platform/plain sessions SHARE project.repoPath
  * as cwd, so two sessions with DIFFERENT subsets write the SAME `.claude/skills`. The manifest is therefore
@@ -245,8 +251,19 @@ export function injectSkills(cwd: string, sessionId: string, subset?: string[] |
   }
   fs.mkdirSync(targetDir, { recursive: true });
 
-  // What THIS session should have present: a non-empty subset ∩ the store, else ALL store skills.
-  const want = subset && subset.length ? storeNames.filter((n) => subset.includes(n)) : storeNames;
+  // What THIS session should have present: a non-empty subset ∩ the store, else ALL store skills — EXCEPT
+  // for a locked role, where "all" excludes an agent-written (or unstamped — fail closed) user skill
+  // (card 509176c8; see this function's own doc comment + the decision record for why).
+  //
+  // @decision 509176c8 — round 2's `isTrustedBundledContent` check was CUT (round 3): it withheld
+  // legitimate bundled skills (a pre-provenance customization, or a pristine copy ahead of reseed).
+  // The bundled-name collision it can't catch is tracked separately on card 9a3dea30.
+  const isLockedRole = role != null && LOCKED_PROFILE_ROLES.has(role);
+  const want = subset && subset.length
+    ? storeNames.filter((n) => subset.includes(n))
+    : isLockedRole
+      ? storeNames.filter((n) => isBundledSkill(n) || skillProvenance(n) === "human")
+      : storeNames;
   // FORCE-INCLUDE the role's operating-doctrine skill regardless of the subset (a profile whose subset
   // omits "worker"/"orchestrate"/… must still ship its role doctrine). Only when present in the store and
   // not already wanted; a no-subset session already has every store skill, so this only bites under a subset.

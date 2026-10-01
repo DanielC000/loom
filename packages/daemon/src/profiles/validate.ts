@@ -35,6 +35,19 @@ export const HARNESS_ID_SCHEMA = z.enum(["claude", "codex"]);
 export const PROFILE_ROLE_SCHEMA = z.enum(["manager", "worker", "platform", "setup", "assistant", "operator", "auditor", "workspace-auditor"]);
 
 /**
+ * Every profile role except manager/worker — "locked" in the 4d70cc06 sense: an elevated or
+ * untrusted-input-driven rig. Two consumers share this ONE set (never hand-copy it):
+ *  - `mcp/setup.ts`'s `SETUP_LOCKED_ROLES` — roles the ungated setup surface may never rebind/clear/
+ *    rewrite once assigned (card 4d70cc06).
+ *  - `skills/inject.ts` — roles whose session must never ambiently receive an AGENT-authored user-store
+ *    skill under the deliver-all default (card 509176c8); a human-authored one, or an explicit
+ *    human-set profile subset, still flows.
+ * Derived from `PROFILE_ROLE_SCHEMA.options` so a role added to the enum later is locked here
+ * automatically, never silently left touchable/open until someone remembers to add it by hand.
+ */
+export const LOCKED_PROFILE_ROLES = new Set<string>(PROFILE_ROLE_SCHEMA.options.filter((r) => r !== "manager" && r !== "worker"));
+
+/**
  * Strict zod validator for a Profile's WRITABLE shape (everything but the server-assigned id),
  * mirroring validateProjectConfigOverride (mcp/platform.ts): `.strict()` rejects unknown keys (typo
  * guard) and types are checked. ONE validator the future write paths (P3 REST + platform-MCP) share.

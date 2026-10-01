@@ -142,6 +142,21 @@ export const SKILLS_DIR = path.join(LOOM_HOME, "skills");
 export const SKILL_BASE_DIR = path.join(LOOM_HOME, "skill-base");
 
 /**
+ * Per-USER-skill provenance map — `{ "<name>": "agent" | "human" }` — a flat JSON file (card 509176c8),
+ * DELIBERATELY OUTSIDE SKILLS_DIR for the same reason SKILL_BASE_DIR is: session injection
+ * (skills/inject.ts) mirrors the whole skill DIRECTORY into `<cwd>/.claude/skills/<name>`, so a sidecar
+ * file living INSIDE a skill's own dir would get copied into every session's ambient skills too. Written
+ * whenever `writeSkill` is called with a `provenance` argument: the agent-facing MCP surfaces
+ * (`loom-setup`/`loom-platform` `skill_write`/`skill_edit`) stamp `"agent"`; the human-only Skills UI/REST
+ * routes (`gateway/server.ts`) stamp `"human"`. A name absent from this map (never stamped — e.g. a
+ * user skill that predates this file, or a future write path that forgets to pass `provenance`) reads as
+ * UNKNOWN, and `skillProvenance`'s callers treat unknown as agent-written — fail closed, never the
+ * permissive default. Bundled skill names are never meaningfully looked up here (locked-role filtering
+ * checks `isBundledSkill` first), so this map only ever matters for genuinely user-created names.
+ */
+export const SKILL_PROVENANCE_FILE = path.join(LOOM_HOME, "skill-provenance.json");
+
+/**
  * The Loom Companion's SELF-AUTHORED skill store (epic Phase 2) — ISOLATED per companion session and kept
  * strictly SEPARATE from the global SKILLS_DIR. Each bound companion gets its OWN base dir
  * `<LOOM_HOME>/companion-skills/<companionSessionId>/<name>/SKILL.md`. These skills are authored/refined by

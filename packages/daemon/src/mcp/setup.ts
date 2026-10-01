@@ -9,7 +9,7 @@ import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { expandTilde } from "../paths.js";
-import { validateProfile, agentProfileKeyError, PROFILE_ROLE_SCHEMA } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, AGENT_CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
@@ -56,15 +56,16 @@ export function setupRoleError(role: string | null | undefined): string | null {
 /**
  * Roles this ungated surface may never rebind AWAY FROM, clear, rename, or silently rewrite ONCE
  * ASSIGNED — the target's CURRENT role, never the incoming one (that's `setupRoleError`'s job, above).
- * Derived from `PROFILE_ROLE_SCHEMA` (profiles/validate.ts) as "every role except manager/worker" —
- * fail-closed: a role added to that enum later is locked here automatically, never silently left
- * touchable until someone remembers to add it by hand.
  *
  * @decision 4d70cc06 — do not let this surface rebind/clear/rename an agent, or edit a profile, whose
  * role is anything but manager/worker/null — however the caller reached it (a fresh bind, a rename, a
  * prompt append).
+ *
+ * Alias of the shared `LOCKED_PROFILE_ROLES` (profiles/validate.ts, card 509176c8) — kept under this
+ * file's own established name since its doc comments + the 4d70cc06 decision record already reference it
+ * that way. `skills/inject.ts` shares the SAME underlying set for a sibling lock.
  */
-const SETUP_LOCKED_ROLES = new Set<string>(PROFILE_ROLE_SCHEMA.options.filter((r) => r !== "manager" && r !== "worker"));
+const SETUP_LOCKED_ROLES = LOCKED_PROFILE_ROLES;
 
 /** Bare role-lock check against `SETUP_LOCKED_ROLES`, shared by `setupMayTouchAgentError` below and
  *  `profile_update`'s own guard. `subject` names what's being checked, for the error text only. */

@@ -69,3 +69,9 @@ of the checks above), but raised three further findings that shaped the CURRENT 
 `setupLockedRoleError`, `setupMayTouchAgentError`, and their call sites in `profile_assign`,
 `agent_update`, `agent_create`, `template_apply`, and `profile_update`. `PROFILE_ROLE_SCHEMA`
 (`packages/daemon/src/profiles/validate.ts`) is the shared enum `SETUP_LOCKED_ROLES` derives from.
+
+Card `509176c8` (a sibling lock: a setup-written user-store skill reaching a locked role's ambient
+skill-injection) relocated the derived SET itself into `profiles/validate.ts` as `LOCKED_PROFILE_ROLES`,
+so `skills/inject.ts` could share it too — `SETUP_LOCKED_ROLES` is now an alias of that shared const,
+same membership, same derivation. The "do not hand-list" rule above is unaffected; it now applies to
+`LOCKED_PROFILE_ROLES` as the one real derivation site.
