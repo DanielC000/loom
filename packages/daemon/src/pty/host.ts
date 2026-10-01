@@ -6273,14 +6273,18 @@ export class PtyHost {
     // Card 37310431: LOOM_HOME write-deny (Edit() covers Edit/Write/NotebookEdit/MultiEdit, plus the
     // engine's own Bash write-path classifier — see loom-home-deny.ts's own doc). Its MAIN registry
     // (secrets/DB/skills/etc.) is unconditional for every role, with no carve-out — a note/working path
-    // is simply never in it. Its INSTRUCTION registry (CLAUDE.md/.claude/PLATFORM-LEAD-RESUME*.md) IS
-    // role-conditional, PER ENTRY — today every entry exempts `platform` only (own home IS LOOM_HOME;
-    // `setup` is NOT exempt, deliberately — see paths.ts's own doc) — plus `role===null` (plain, human-
-    // driven) exempt from the whole registry — see loom-home-deny.ts's `loomHomeWriteDenyRules`. Card
-    // 00a999e8: `platformHomePaths` is read LIVE per-spawn from the injected `getPlatformHomePaths`
-    // callback (never cached) so the instruction registry also covers a REBOUND Platform home, at EACH
-    // entry's own real root (repoPath for CLAUDE.md/.claude/**, vaultPath for the resume doc — they can
-    // differ from each other, not just from LOOM_HOME), not just LOOM_HOME itself.
+    // is simply never in it. Its INSTRUCTION registry (every file a more-privileged future session reads
+    // as instructions at its EXACT cwd/vaultPath — read paths.ts#LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY
+    // for the current member list, not restated here) IS role-conditional, PER ENTRY — today every entry
+    // exempts `platform` only (own home IS LOOM_HOME; `setup` is NOT exempt, deliberately — see paths.ts's
+    // own doc) — plus `role===null` (plain, human-driven) exempt from the whole registry — see
+    // loom-home-deny.ts's `loomHomeWriteDenyRules`. Card 00a999e8: `platformHomePaths` is read LIVE
+    // per-spawn from the injected `getPlatformHomePaths` callback (never cached) so the instruction
+    // registry also covers a REBOUND Platform home, at EACH entry's own real root (repoPath for the
+    // cwd-read entries, vaultPath for the resume doc — they can differ from each other, not just from
+    // LOOM_HOME), not just LOOM_HOME itself. Card d332c969 does NOT cover the harness's ancestor-directory
+    // walk above cwd, nor the fixed `~/.claude/CLAUDE.md`/`~/.claude/rules/**` user-level files — see the
+    // 37310431 record's "Not closed here" section; that's an owner decision, not built here.
     const permission = withLoomHomeWriteDenyForSpawn(
       withSettingsDirDenyForSpawn(withTranscriptRootDenyForSpawn(permissionWithAllow, opts.role, workerProjectDenyRules)),
       { role: opts.role, sessionId: opts.sessionId, platformHomePaths: this.getPlatformHomePaths() },

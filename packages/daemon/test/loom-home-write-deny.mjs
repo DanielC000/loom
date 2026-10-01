@@ -104,6 +104,17 @@ check("LOOM_HOME_WRITE_DENY_REGISTRY literally lists loom.db-wal as a sensitive 
 check("LOOM_HOME_WRITE_DENY_REGISTRY literally lists loom.db-shm as a sensitive file",
   LOOM_HOME_WRITE_DENY_REGISTRY.some((e) => e.relPath === "loom.db-shm" && e.kind === "file"));
 
+// Card d332c969 — the harness also reads these at the EXACT cwd level (same reader/root as CLAUDE.md),
+// just not yet denied before this card. Pin each literally, same style as the main-registry pins above.
+check("LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY literally lists CLAUDE.local.md",
+  LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY.some((e) => e.relPath === "CLAUDE.local.md" && e.kind === "file" && e.exemptRoles.includes("platform") && e.platformRoot === "repoPath"));
+check("LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY literally lists .claude/rules as a dir",
+  LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY.some((e) => e.relPath === path.join(".claude", "rules") && e.kind === "dir" && e.exemptRoles.includes("platform") && e.platformRoot === "repoPath"));
+check("LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY literally lists AGENTS.md",
+  LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY.some((e) => e.relPath === "AGENTS.md" && e.kind === "file" && e.exemptRoles.includes("platform") && e.platformRoot === "repoPath"));
+check("LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY literally lists .claude/AGENTS.md",
+  LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY.some((e) => e.relPath === path.join(".claude", "AGENTS.md") && e.kind === "file" && e.exemptRoles.includes("platform") && e.platformRoot === "repoPath"));
+
 ensureDirs(); // same production boot sequence loom-home-write-deny-real-spawn.mjs relies on
 
 check("LOOM_HOME_WRITE_DENY_REGISTRY never lists SCRATCH_ROOT_DIR's own basename as a bare top-level relPath",
@@ -210,6 +221,34 @@ const ruleForEntries = (entries) => new Set(entries.map((e) => {
   }
 }
 
+// --- Card d332c969: the SAME per-entry exemption applies to the harness's OTHER exact-cwd instruction
+// files — CLAUDE.local.md, .claude/rules/**, AGENTS.md, .claude/AGENTS.md — added to the registry
+// alongside CLAUDE.md/.claude/** above. Deliberately NOT the ancestor-directory walk the harness ALSO
+// does above cwd (e.g. ~/CLAUDE.md), nor the fixed ~/.claude/CLAUDE.md/~/.claude/rules/** user-level
+// files — both are a separate, controversial, owner-gated question (see the 37310431 record's
+// "known, disclosed gaps" section, updated by this card). ---
+{
+  const NON_EXEMPT = ["worker", "manager", "setup", "auditor", "workspace-auditor", "assistant", "operator", "run"];
+  const EXEMPT = ["platform", null];
+  for (const role of NON_EXEMPT) {
+    const rules = loomHomeWriteDenyRules({ role, sessionId: "s1" });
+    check(`[${String(role)}] CLAUDE.local.md IS denied`, rules.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/CLAUDE.local.md)`));
+    check(`[${String(role)}] .claude/rules/** IS denied`, rules.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/.claude/rules/**)`));
+    check(`[${String(role)}] AGENTS.md IS denied`, rules.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/AGENTS.md)`));
+    check(`[${String(role)}] .claude/AGENTS.md IS denied`, rules.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/.claude/AGENTS.md)`));
+  }
+  for (const role of EXEMPT) {
+    const rules = loomHomeWriteDenyRules({ role, sessionId: "s1" });
+    // exact-string checks (not substring .includes-on-rules) — "/.claude/AGENTS.md" ends with the
+    // substring "/AGENTS.md" too, so a fuzzy substring check on the bare-AGENTS.md path would also match
+    // the .claude/AGENTS.md rule and could hide a regression in the bare-file entry specifically.
+    check(`[${String(role)}] CLAUDE.local.md is NOT denied (exempt)`, !rules.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/CLAUDE.local.md)`));
+    check(`[${String(role)}] .claude/rules/** is NOT denied (exempt)`, !rules.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/.claude/rules/**)`));
+    check(`[${String(role)}] AGENTS.md is NOT denied (exempt)`, !rules.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/AGENTS.md)`));
+    check(`[${String(role)}] .claude/AGENTS.md is NOT denied (exempt)`, !rules.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/.claude/AGENTS.md)`));
+  }
+}
+
 // --- Card 00a999e8: a REBOUND Platform home also gets the instruction registry denied, for every
 // non-exempt role — not just LOOM_HOME's own copy — and stays exempt for platform everywhere. PER-ENTRY,
 // not a single shared root: `PLATFORM-LEAD-RESUME*.md` follows `resolvePlatformLeadResumeDocPath`, which
@@ -239,6 +278,16 @@ const ruleForEntries = (entries) => new Set(entries.map((e) => {
     workerRules.includes(`Edit(${reboundGlob}/PLATFORM-LEAD-RESUME*.md)`));
   check("[worker] a REBOUND Platform home's .claude/** is ALSO denied",
     workerRules.includes(`Edit(${reboundGlob}/.claude/**)`));
+  // Card d332c969 — the four new exact-cwd entries follow the SAME platformRoot:"repoPath" rebind path
+  // as CLAUDE.md/.claude/** above (they share the one `repoPaths`-rooted loop in loomHomeWriteDenyRules).
+  check("[worker] a REBOUND Platform home's CLAUDE.local.md is ALSO denied",
+    workerRules.includes(`Edit(${reboundGlob}/CLAUDE.local.md)`));
+  check("[worker] a REBOUND Platform home's .claude/rules/** is ALSO denied",
+    workerRules.includes(`Edit(${reboundGlob}/.claude/rules/**)`));
+  check("[worker] a REBOUND Platform home's AGENTS.md is ALSO denied",
+    workerRules.includes(`Edit(${reboundGlob}/AGENTS.md)`));
+  check("[worker] a REBOUND Platform home's .claude/AGENTS.md is ALSO denied",
+    workerRules.includes(`Edit(${reboundGlob}/.claude/AGENTS.md)`));
   check("[worker] the ORIGINAL LOOM_HOME instruction rules are STILL present too (both locations denied)",
     workerRules.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/CLAUDE.md)`));
 
@@ -262,6 +311,23 @@ const ruleForEntries = (entries) => new Set(entries.map((e) => {
     splitRules.includes(`Edit(${reboundRepoGlob}/CLAUDE.md)`));
   check("[worker, SPLIT rebind] .claude/** is denied at repoPath",
     splitRules.includes(`Edit(${reboundRepoGlob}/.claude/**)`));
+  // Card d332c969 — same platformRoot:"repoPath" split-rebind behavior for the four new entries.
+  check("[worker, SPLIT rebind] CLAUDE.local.md is denied at repoPath",
+    splitRules.includes(`Edit(${reboundRepoGlob}/CLAUDE.local.md)`));
+  check("[worker, SPLIT rebind] CLAUDE.local.md is NOT ALSO denied at vaultPath (it has no reader there)",
+    !splitRules.includes(`Edit(${reboundVaultGlob}/CLAUDE.local.md)`));
+  check("[worker, SPLIT rebind] .claude/rules/** is denied at repoPath",
+    splitRules.includes(`Edit(${reboundRepoGlob}/.claude/rules/**)`));
+  check("[worker, SPLIT rebind] .claude/rules/** is NOT ALSO denied at vaultPath (it has no reader there)",
+    !splitRules.includes(`Edit(${reboundVaultGlob}/.claude/rules/**)`));
+  check("[worker, SPLIT rebind] AGENTS.md is denied at repoPath",
+    splitRules.includes(`Edit(${reboundRepoGlob}/AGENTS.md)`));
+  check("[worker, SPLIT rebind] AGENTS.md is NOT ALSO denied at vaultPath (it has no reader there)",
+    !splitRules.includes(`Edit(${reboundVaultGlob}/AGENTS.md)`));
+  check("[worker, SPLIT rebind] .claude/AGENTS.md is denied at repoPath",
+    splitRules.includes(`Edit(${reboundRepoGlob}/.claude/AGENTS.md)`));
+  check("[worker, SPLIT rebind] .claude/AGENTS.md is NOT ALSO denied at vaultPath (it has no reader there)",
+    !splitRules.includes(`Edit(${reboundVaultGlob}/.claude/AGENTS.md)`));
   check("[worker, SPLIT rebind] CLAUDE.md is NOT ALSO denied at vaultPath (it has no reader there)",
     !splitRules.includes(`Edit(${reboundVaultGlob}/CLAUDE.md)`));
   check("[worker, SPLIT rebind] the resume doc is denied at vaultPath (resolvePlatformLeadResumeDocPath's own root)",
@@ -442,6 +508,14 @@ if (process.platform !== "win32") {
     check("(real) WRITTEN settings.json permissions.deny does NOT deny scratch/ or workspaces/", !written.some((r) => r.includes("/tmp/scratch") || r.includes("/workspaces")));
     check("(real) WRITTEN settings.json permissions.deny ALSO includes the instruction registry's CLAUDE.md rule (worker is non-exempt)",
       written.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/CLAUDE.md)`));
+    check("(real) WRITTEN settings.json permissions.deny ALSO includes CLAUDE.local.md (card d332c969)",
+      written.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/CLAUDE.local.md)`));
+    check("(real) WRITTEN settings.json permissions.deny ALSO includes .claude/rules/** (card d332c969)",
+      written.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/.claude/rules/**)`));
+    check("(real) WRITTEN settings.json permissions.deny ALSO includes AGENTS.md (card d332c969)",
+      written.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/AGENTS.md)`));
+    check("(real) WRITTEN settings.json permissions.deny ALSO includes .claude/AGENTS.md (card d332c969)",
+      written.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/.claude/AGENTS.md)`));
   } finally {
     try { host.stop(sid, "hard"); } catch { /* best-effort cleanup */ }
   }

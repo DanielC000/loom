@@ -580,6 +580,15 @@ export const LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY: readonly LoomHomeInstruc
   { relPath: "PLATFORM-LEAD-RESUME*.md", kind: "file", exemptRoles: ["platform"], platformRoot: "vaultPath" }, // resolvePlatformLeadResumeDocPath is passed project.vaultPath explicitly (sessions/service.ts)
   { relPath: "CLAUDE.md", kind: "file", exemptRoles: ["platform"], platformRoot: "repoPath" }, // the harness reads CLAUDE.md relative to session.cwd, pinned to project.repoPath at spawn (startPlatformLead) — setup's own doctrine only ever seeds a CLAUDE.md for a USER project outside LOOM_HOME, never its own LOOM_HOME-rooted one, so no exemption needed
   { relPath: CLAUDE_DOCTRINE_DIR, kind: "dir", exemptRoles: ["platform"], platformRoot: "repoPath" }, // `pty/claude-dirname.ts`'s own constant, not a hand-written literal — see harness-adapter-claude-literal-guard.mjs's own allowlist discipline (card 2b099e48); same cwd-rooted reasoning as CLAUDE.md above
+  // Card d332c969 — the harness also reads these at the EXACT cwd level (same reader/root as CLAUDE.md
+  // above), just not yet denied. Deliberately NOT the ancestor-directory walk the harness ALSO does above
+  // cwd (e.g. `~/CLAUDE.md`), nor the fixed `~/.claude/CLAUDE.md`/`~/.claude/rules/**` user-level files —
+  // both are a controversial, unbounded blast-radius question left for the owner (see that card's
+  // discussion and the 37310431 record's "known, disclosed gaps" section).
+  { relPath: "CLAUDE.local.md", kind: "file", exemptRoles: ["platform"], platformRoot: "repoPath" },
+  { relPath: path.join(CLAUDE_DOCTRINE_DIR, "rules"), kind: "dir", exemptRoles: ["platform"], platformRoot: "repoPath" },
+  { relPath: "AGENTS.md", kind: "file", exemptRoles: ["platform"], platformRoot: "repoPath" },
+  { relPath: path.join(CLAUDE_DOCTRINE_DIR, "AGENTS.md"), kind: "file", exemptRoles: ["platform"], platformRoot: "repoPath" },
 ];
 
 /**

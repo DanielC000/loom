@@ -183,6 +183,17 @@ session's boot). Before this, ANY role could overwrite these and inject instruct
 more-privileged session's prompt — a cross-role prompt-injection vector the main registry's data/secrets
 framing never covered.
 
+**Card `d332c969` added four more entries, at the SAME exact-cwd roots (`platformRoot: "repoPath"`, same
+mechanism as `CLAUDE.md`/`.claude/**` above): `CLAUDE.local.md` (file), `.claude/rules` (dir), `AGENTS.md`
+(file), and `.claude/AGENTS.md` (file).** The CLI's own docs (code.claude.com/docs/en/memory) confirm the
+harness reads all four at the exact session cwd — `CLAUDE.local.md` alongside `CLAUDE.md`, `.claude/rules/
+**` either unconditionally (no `paths:` frontmatter) or lazily on a matching file read, and `AGENTS.md`/
+`.claude/AGENTS.md` as the project-instructions file Claude reads INSTEAD of CLAUDE.md when no CLAUDE.md/
+CLAUDE.local.md exists anywhere at or above cwd. Zero new candidate-resolution logic: each new entry reuses
+the identical `repoPaths`-rooted rebind loop the CLAUDE.md/`.claude/**` entries already use, so the
+same-root/split-rebind/platform-exemption behavior is identical, entry-for-entry. See "Not closed here"
+below for what this did NOT close.
+
 **Denied PER ENTRY, not via one shared exempt-role set (fix round 2, item 1 — Code Review
 CHANGES-NEEDED).** The original shape exempted `platform`+`setup` from the WHOLE registry. Code Review
 caught that this broke the registry's own purpose: `setup` is a LOWER-privilege operator with native
@@ -313,13 +324,39 @@ another `loomHome()`-parameter instance of the blind spot above) is DELIBERATELY
 artifact is rewritten immediately before `schtasks`/`launchctl` consumes it, so there's no persistent
 window where a planted file there could matter. See the guard test's own GAPS header for the same note.
 
-**NOT closed here — a separate card (filed by the manager during this round's review): the instruction
-registry only covers CLAUDE.md/`.claude/**`/the resume doc AT the cwd/vaultPath it knows about, but the
-harness itself reads MORE than that.** Claude Code also loads `CLAUDE.md` from every ANCESTOR directory of
-the session's cwd (not just cwd itself), plus `CLAUDE.local.md` and `.claude/rules` at each of those
-levels. None of that extra surface is denied by this card's registry — only the exact cwd-rooted
-`CLAUDE.md`/`.claude/**` pair. An ancestor `CLAUDE.md` a Lead's cwd would pick up, or a `CLAUDE.local.md`/
-`.claude/rules` file anywhere in the chain, stays writable by every non-platform role today.
+**Partially closed by card `d332c969` — investigated first, confirmed against the real CLI (2.1.287) and
+its own docs. The registry now covers every instruction file the harness reads at the EXACT cwd/vaultPath
+it knows about** (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `.claude/**` — which includes `.claude/
+rules/**` and `.claude/AGENTS.md` — plus the resume doc), **but two surfaces the harness ALSO reads remain
+OPEN, deliberately NOT built here, pending an owner decision (`d332c969` question, routed via
+`question_ask`):**
+
+1. **The ancestor-directory walk.** Claude Code loads `CLAUDE.md`/`CLAUDE.local.md`/`AGENTS.md` from
+   EVERY directory above the session's cwd, all the way to the filesystem root (no git/home-directory
+   boundary — confirmed in the CLI's own docs, "every directory above it"). With the default LOOM_HOME
+   (`~/.loom`), that means `~/CLAUDE.md` (and higher, e.g. a Windows drive root) is a Platform Lead
+   instruction source no role is denied — the registry above only covers the pinned root itself, never
+   its ancestors. Two designs are on the table: enumerate every ancestor between the pinned root and the
+   filesystem root and deny each one (write-side, symmetric with the registry above, but genuinely
+   unbounded in where it stops); or set `claudeMdExcludes` in the Lead's/Setup's OWN per-session
+   `--settings` file (written by `writeSessionSettings`, `pty/claude-settings.ts`) to exclude every path
+   above the pinned root from what THAT session loads (read-side, bounded, but silently drops any
+   legitimate ancestor content). The manager's recommendation to the owner is the read-side
+   `claudeMdExcludes` option.
+2. **The fixed, always-loaded user-level files `~/.claude/CLAUDE.md` and `~/.claude/rules/**`.** These are
+   NOT part of the ancestor walk — they load once per session regardless of cwd, documented as "personal
+   preferences for all projects"/"apply to every project on your machine." Denying non-platform-role
+   writes here would stop EVERY role from ever editing the owner's own global Claude Code memory/rules,
+   for every project, forever — plausibly a deliberate owner workflow (see `loom-skills-architecture`
+   project memory on the personal-vs-project `.claude/skills` split), so this is an owner call, not an
+   agent one.
+
+Not Loom's to close without that decision: the managed-policy `CLAUDE.md`
+(`/Library/Application Support/ClaudeCode/CLAUDE.md`, `/etc/claude-code/CLAUDE.md`,
+`C:\Program Files\ClaudeCode\CLAUDE.md`) requires OS-admin/root to write, which no Loom agent role runs
+with — low real risk, not tracked as a gap here. The external-`@import`-approval-dialog interaction with
+an unattended Loom-driven spawn (fail-closed vs. hang) is unmeasured — tracked as a follow-up card, not a
+registry gap.
 
 ### Bash coverage caveat — re-measure on CLI upgrade
 
@@ -443,3 +480,12 @@ Tests: `packages/daemon/test/loom-home-write-deny.mjs` (hermetic — pure rule-b
 Rulings A and D plus the item-3 printed-array and item-4 case-variant delta-review additions),
 `packages/daemon/test/loom-home-write-deny-registry-guard.mjs` (the registry/allowlist coverage guard,
 widened to `bin/`/`scripts/` by the delta review; in `STATIC_GUARD_REPO_PATHS`).
+
+Card `d332c969` (investigate-first, this revision): the four new instruction-registry entries
+(`CLAUDE.local.md`, `.claude/rules`, `AGENTS.md`, `.claude/AGENTS.md`) and their tests (same-root,
+split-rebind, platform-exemption, literal-registry-entry, and real-spawn-written-settings checks, all
+mirroring the existing `CLAUDE.md`/`.claude/**` entries in `loom-home-write-deny.mjs`) — plus the
+"Not closed here" section above for the two surfaces still open, pending the owner's decision.
+Investigation: the worker's `worker_report` for card `d332c969`, cross-checked against the installed
+`claude` CLI's own bundled doctrine text (its `prompt-audit` skill strings and `InstructionsLoaded`-hook
+schema) and the live docs at code.claude.com/docs/en/memory.
