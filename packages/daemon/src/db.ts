@@ -1369,6 +1369,20 @@ CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_s
 -- DISTINCT projection index-only (no row lookups against the table itself).
 CREATE INDEX IF NOT EXISTS idx_orch_events_worker ON orchestration_events(worker_session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_orch_events_kind ON orchestration_events(kind, worker_session_id);
+-- Card db316c89: a partial expression index scoped to the one kind every msgId delivery-lookup filters
+-- on — isQueuedMessageDelivered, listUndeliveredQueuedMessages, listUnresolvedQueuedMessagesForWorker and
+-- getQueuedMessageDeliveredAt all narrow to kind = 'session_message_delivered' before extracting
+-- detail_json's msgId, so this is the one partial predicate that serves every msgId json_extract they all
+-- run (measured: a 39-54ms synchronous json_extract scan over every delivered row, growing linearly with
+-- orchestration_events — on every drain, done report, resume, and all 4 recycle carries). kind and
+-- detail_json are both ORIGINAL columns (present since this table's very first CREATE TABLE), so — like
+-- idx_orch_events_worker/idx_orch_events_kind above — this is a plain CREATE INDEX IF NOT EXISTS applied
+-- unconditionally on every boot; no ALTER TABLE / migrateXxx() step is needed. A query must repeat the
+-- exact kind = 'session_message_delivered' predicate for sqlite to prove it can use this partial index —
+-- see each call site's own EXPLAIN QUERY PLAN.
+CREATE INDEX IF NOT EXISTS idx_orch_events_delivered_msgid
+  ON orchestration_events(json_extract(detail_json, '$.msgId'))
+  WHERE kind = 'session_message_delivered';
 -- Shared project memory (card 2fd9abf9): a project-scoped durable knowledge store any worker/manager can
 -- write to (memory_write), retrieved by FTS5 and injected into every kickoff (pinned always + top-K
 -- related-on-match), so fleet-shared decisions/facts survive across sessions instead of living only in
@@ -6632,6 +6646,12 @@ export class Db {
    * to re-enqueue onto a resumed recipient / surface to a resumed sender. Chronological (FIFO) so replay
    * preserves send order. The anti-join is on the JSON-extracted msgId; a queued event missing a msgId
    * (shouldn't happen — the helpers always mint one) coalesces to "" and is treated as its own key.
+   * Card db316c89: the inner subquery's `INDEXED BY idx_orch_events_delivered_msgid` is load-bearing, not
+   * decorative — measured on a real 83k-row backup, sqlite's planner picks the non-covering
+   * idx_orch_events_kind(kind, worker_session_id) for this subquery by default (same selectivity, no
+   * stats to break the tie) and still pays a per-row detail_json table lookup; forcing the partial index
+   * turned a ~54ms scan into ~4ms by making it a covering scan. Both anti-join sites share this exact
+   * subquery text — keep them in sync.
    */
   listUndeliveredQueuedMessages(): OrchestrationEvent[] {
     return (this.db.prepare(
@@ -6639,13 +6659,17 @@ export class Db {
          WHERE kind = 'session_message_queued'
            AND COALESCE(json_extract(detail_json, '$.msgId'), '') NOT IN (
              SELECT COALESCE(json_extract(detail_json, '$.msgId'), '')
-               FROM orchestration_events WHERE kind = 'session_message_delivered'
+               FROM orchestration_events INDEXED BY idx_orch_events_delivered_msgid
+               WHERE kind = 'session_message_delivered'
            )
        ORDER BY ts, rowid`,
     ).all() as Row[]).map(toOrchestrationEvent);
   }
   /** True once a `session_message_delivered` marker exists for this msgId — the idempotency guard the
-   *  delivery callback uses so a queued message resolves EXACTLY once (a re-fired onDeliver is a no-op). */
+   *  delivery callback uses so a queued message resolves EXACTLY once (a re-fired onDeliver is a no-op).
+   *  Card db316c89: sqlite's planner already picks idx_orch_events_delivered_msgid unassisted for this
+   *  exact-match form (no INDEXED BY hint needed here — only the anti-join subquery form above needed one;
+   *  verify with EXPLAIN QUERY PLAN before removing the hint on either, or re-adding one here). */
   isQueuedMessageDelivered(msgId: string): boolean {
     return !!this.db.prepare(
       "SELECT 1 FROM orchestration_events WHERE kind = 'session_message_delivered' AND json_extract(detail_json, '$.msgId') = ? LIMIT 1",
@@ -6657,7 +6681,8 @@ export class Db {
    * direction that was HELD and never handed to it. The worker-done guard (workerReport) reads this to
    * REFUSE a done-report while manager direction is still pending, then narrows by origin (detail.sender ===
    * the worker's manager) so platform/cross-tree sends don't gate. Same msgId anti-join + FIFO order as the
-   * unscoped scan. CR follow-up (card ccb407eb, finding [B1-2] — the twin of service.ts's own [9] fix): a
+   * unscoped scan (see its own `INDEXED BY` note above — this site needs the identical hint). CR follow-up
+   * (card ccb407eb, finding [B1-2] — the twin of service.ts's own [9] fix): a
    * `[loom:*]` settle nudge held mid-turn DOES appear here now (it goes through the same durable enqueue as
    * any other message, sender:"system") — origin-accuracy comes from the CALLER's `detail.sender ===
    * managerSessionId` filter (service.ts), not from this query excluding system-sourced rows itself.
@@ -6669,7 +6694,8 @@ export class Db {
            AND worker_session_id = ?
            AND COALESCE(json_extract(detail_json, '$.msgId'), '') NOT IN (
              SELECT COALESCE(json_extract(detail_json, '$.msgId'), '')
-               FROM orchestration_events WHERE kind = 'session_message_delivered'
+               FROM orchestration_events INDEXED BY idx_orch_events_delivered_msgid
+               WHERE kind = 'session_message_delivered'
            )
        ORDER BY ts, rowid`,
     ).all(workerSessionId) as Row[]).map(toOrchestrationEvent);
