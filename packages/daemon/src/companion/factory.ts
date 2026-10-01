@@ -26,11 +26,10 @@ import type { CompanionBinding, CompanionMessage } from "@loom/shared";
  *  chat-history store (the "/new"/"/reset" command's history-clear half). */
 export interface CompanionBindingStore extends AllowlistReader, PairingStore, VoicePrefStore {
   listCompanionBindings(): CompanionBinding[];
+  // card 3d19ecc7: upsertCompanionBinding itself now marks companion_config.bindings_seeded the moment a
+  // write lands (see db.ts's own doc on that method) — there is no separate mark call on this surface
+  // anymore; see CompanionConfig.bindingsSeeded's own doc for the full rationale.
   upsertCompanionBinding(input: { sessionId: string; scope?: "dm" | "group" } & CompanionRoute): CompanionBinding;
-  /** Card a8480338: flip `bindings_seeded` to 1 for `sessionId` — called ONLY right after the bootstrap-seed
-   *  below actually writes that session's first binding, so no LATER build ever re-seeds it again (see
-   *  CompanionConfig.bindingsSeeded's own doc for the full rationale). */
-  markCompanionBindingsSeeded(sessionId: string): void;
   /** The proactive HOME channel target (card 9488951e), PER SESSION — carried explicitly on the
    *  heartbeat's submitted turn (as its per-turn route), not consulted by deliverReply. */
   getCompanionHome(sessionId: string): CompanionRoute | null;
@@ -147,9 +146,10 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   let bindings = db.listCompanionBindings().filter((b) => b.sessionId === cfg.sessionId);
   if (bindings.length === 0 && cfg.botToken && !cfg.bindingsSeeded) {
     try {
+      // card 3d19ecc7: db.upsertCompanionBinding marks bindings_seeded itself, in the SAME write, so there
+      // is no separate mark call here anymore (see that method's own doc in db.ts).
       db.upsertCompanionBinding({ sessionId: cfg.sessionId, channel: TELEGRAM_CHANNEL, chatId: cfg.allowedChatId, scope: cfg.chatScope });
       bindings = db.listCompanionBindings().filter((b) => b.sessionId === cfg.sessionId);
-      db.markCompanionBindingsSeeded(cfg.sessionId);
     } catch (err) {
       // card 94754bbe: never let this refusal die silently inside the generic "hot-lifecycle reconcile
       // failed" catch (controller.ts's enqueue()) — that log names neither the companion nor the fix. An
@@ -169,9 +169,9 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
       );
     }
   } else if (bindings.length === 0 && cfg.botToken && cfg.bindingsSeeded) {
-    // @decision a8480338 — never let this branch stay silent: a token companion with zero bindings but
-    // bindingsSeeded:true covers TWO stranded shapes (a deliberate owner revoke, or a prior refused seed
-    // now backfilled true), and silence here is indistinguishable from a companion that's just broken.
+    // @decision a8480338 — never let this branch stay silent: zero bindings + bindingsSeeded:true covers
+    // TWO stranded shapes (a deliberate owner revoke, or an interrupted env-bootstrap row — see that
+    // record's "Known, accepted limitations"), and silence is indistinguishable from a broken companion.
     console.warn(
       `[companion] SETUP: session ${cfg.sessionId.slice(0, 8)} has no Telegram binding (revoked, or a first ` +
         `bind never landed); rebind via POST /api/companion/bindings.`,

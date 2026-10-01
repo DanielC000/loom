@@ -16,13 +16,10 @@ survives the revoke untouched, and the next restart/reconcile re-seeds the exact
 A new durable fact, `companion_config.bindings_seeded` (`CompanionConfigRow.bindingsSeeded`), records "this
 session's binding has genuinely been seeded once before" — independent of whether a binding currently
 exists. `factory.ts`'s bootstrap-seed condition becomes `bindings.length === 0 && cfg.botToken &&
-!cfg.bindingsSeeded`; on a successful seed it immediately calls `db.markCompanionBindingsSeeded(sessionId)`.
-Once set, the bootstrap never fires again for that session, however many bindings it holds later.
-
-The REST provision endpoint (`POST /api/companion/provision`) is itself a genuine first-provisioning
-event — it writes the session's binding(s) directly, never through this bootstrap path — so it passes
-`bindingsSeeded: true` on its own `upsertCompanionConfig` call, closing the same hole for a provisioned
-(not env-bootstrapped) companion.
+!cfg.bindingsSeeded`. **Updated by 3d19ecc7**: the mark is now set by `db.upsertCompanionBinding` itself,
+at its own write chokepoint, the instant ANY writer's binding write lands — not by each caller
+individually (the original shape here: factory's own mark + the provision endpoint's explicit flag) — see
+that record for the two-path asymmetry this closed and why.
 
 The env-bootstrap re-upsert in `store.ts`'s `resolveAllCompanionConfigs` (runs on EVERY boot for an
 env-configured companion) deliberately omits `bindingsSeeded` on its `upsertCompanionConfig` call —
@@ -74,5 +71,6 @@ chat on every pre-existing row, unrecoverable by an owner who'd never know. Do n
   question from "has this session's binding ever been seeded." An env-bootstrapped companion is
   `provisioned:false` forever by design, yet still needs its own one-time seed guarded.
 - Do not duplicate the "is this chat id refused" predicate — the migration's
-  `narrowBindingsSeededBackfillForRefusedRows` and `factory.ts`'s bootstrap-seed must both call the SAME
-  `isNonNumericTelegramChatId` (companion/types.ts).
+  `narrowBindingsSeededBackfillForRefusedRows` and `db.upsertCompanionBinding`'s write-chokepoint throw
+  (94754bbe) must both call the SAME `isNonNumericTelegramChatId`. `factory.ts` never evaluates it itself —
+  only catches the throw — and the MAJOR 1b stranded-row warn also requires `cfg.botToken` (see 3d19ecc7).

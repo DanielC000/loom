@@ -1979,9 +1979,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         enabled,
         name,
         provisioned: true, // origin marker — delete-companion retires THIS session (teardown symmetry)
-        // card a8480338: this handler writes the session's own binding(s) directly below — a genuine first
-        // provisioning — so factory.ts's env-bootstrap re-seed must never fire for this session later.
-        bindingsSeeded: true,
+        // card 3d19ecc7: no explicit bindingsSeeded here anymore — the binding write(s) right below
+        // (db.upsertCompanionBinding, always at least the in-app route) mark it themselves, at the SAME
+        // write chokepoint every other binding writer goes through.
       });
       // (c) the session's authoritative binding(s). companion_bindings is now MULTI-CHANNEL (one binding per
       // session PER channel), so a Telegram companion is reachable over Telegram AND the in-app cockpit panel

@@ -159,10 +159,14 @@ export interface CompanionConfigRow {
    */
   zeroReplyAlertTurnSeq: number | null;
   /**
-   * Card a8480338: TRUE ⇒ this session's bootstrap Telegram binding has genuinely been seeded once
-   * (env-bootstrap's first zero-bindings observation, or the provision endpoint's own direct write) —
-   * gates `factory.ts`'s re-seed-on-empty-bindings path so a deliberate owner revoke (deleting every
-   * binding) is never undone by the next gateway build. Backfills to TRUE for a pre-existing (legacy) row.
+   * Card a8480338 (card 3d19ecc7: now set at the `upsertCompanionBinding` write CHOKEPOINT, not by each
+   * caller individually): TRUE ⇒ this session has genuinely held a binding at least once — env-bootstrap's
+   * first zero-bindings seed, a REST bind, pairing-code redemption, or the provision endpoint's own direct
+   * write all flip it the moment their binding write actually lands, since every one of them calls that
+   * one `upsertCompanionBinding` method. Gates `factory.ts`'s re-seed-on-empty-bindings path so a
+   * deliberate owner revoke (deleting every binding) is never undone by the next gateway build, REGARDLESS
+   * of which writer bound it in the first place. Backfills to TRUE for a pre-existing (legacy) row — see
+   * `narrowBindingsSeededBackfillForRefusedRows` for the one precise exception.
    */
   bindingsSeeded: boolean;
 }
@@ -2791,16 +2795,22 @@ export class Db {
    * initial ship missing from an existing DB (fresh installs already have them via CREATE TABLE). Mirrors
    * migrateSchedules; the NOT NULL + constant DEFAULT 0 backfills every legacy config row to
    * provisioned=0 (env/human-bound — a delete never retires its session) in place.
+   *
+   * @decision 3d19ecc7 — the ADD COLUMN(s) and the `bindings_seeded` narrowing below must stay inside ONE
+   * `this.db.transaction`; a crash between them could strand a refused row at the blanket backfill's 1
+   * permanently (the next boot sees the column already present and never retries the narrowing).
    */
   private migrateCompanionConfig(): void {
     const have = new Set(
       (this.db.prepare("PRAGMA table_info(companion_config)").all() as { name: string }[]).map((c) => c.name),
     );
     const bindingsSeededJustAdded = !have.has("bindings_seeded");
-    for (const [name, type] of Object.entries(COMPANION_CONFIG_ADDED_COLUMNS)) {
-      if (!have.has(name)) this.db.exec(`ALTER TABLE companion_config ADD COLUMN ${name} ${type}`);
-    }
-    if (bindingsSeededJustAdded) this.narrowBindingsSeededBackfillForRefusedRows();
+    this.db.transaction(() => {
+      for (const [name, type] of Object.entries(COMPANION_CONFIG_ADDED_COLUMNS)) {
+        if (!have.has(name)) this.db.exec(`ALTER TABLE companion_config ADD COLUMN ${name} ${type}`);
+      }
+      if (bindingsSeededJustAdded) this.narrowBindingsSeededBackfillForRefusedRows();
+    })();
   }
 
   /**
@@ -3702,6 +3712,10 @@ export class Db {
    *
    * @decision 94754bbe — never let a dm-scope Telegram chatId that fails `isNonNumericTelegramChatId`
    * reach the INSERT — refuse it at this same chokepoint, never widen the refusal past "dm" scope.
+   *
+   * @decision 3d19ecc7 — the SAME write also marks `companion_config.bindings_seeded` for `input.sessionId`,
+   * in the SAME transaction; never mark it from an individual CALLER instead (factory.ts/provision used to,
+   * independently — the exact two-path asymmetry this closed), and never mark a refused (throw) write.
    */
   upsertCompanionBinding(input: { sessionId: string; scope?: "dm" | "group" } & CompanionRoute): CompanionBinding {
     const scope = input.scope ?? "dm";
@@ -3714,11 +3728,17 @@ export class Db {
     const createdAt = (existing?.created_at as string) ?? new Date().toISOString();
     const flaggedNonPrivate = scope === "dm" && isLikelyGroupTelegramChatId(input.channel, input.chatId);
     const b: CompanionBinding = { sessionId: input.sessionId, channel: input.channel, chatId: input.chatId, scope, createdAt, flaggedNonPrivate };
-    this.db.prepare(
-      `INSERT INTO companion_bindings (session_id, channel, chat_id, scope, created_at, flagged_non_private)
-       VALUES (@sessionId, @channel, @chatId, @scope, @createdAt, @flaggedNonPrivate)
-       ON CONFLICT(session_id, channel) DO UPDATE SET chat_id = @chatId, scope = @scope, flagged_non_private = @flaggedNonPrivate`,
-    ).run({ sessionId: b.sessionId, channel: b.channel, chatId: b.chatId, scope: b.scope, createdAt: b.createdAt, flaggedNonPrivate: flaggedNonPrivate ? 1 : 0 });
+    this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO companion_bindings (session_id, channel, chat_id, scope, created_at, flagged_non_private)
+         VALUES (@sessionId, @channel, @chatId, @scope, @createdAt, @flaggedNonPrivate)
+         ON CONFLICT(session_id, channel) DO UPDATE SET chat_id = @chatId, scope = @scope, flagged_non_private = @flaggedNonPrivate`,
+      ).run({ sessionId: b.sessionId, channel: b.channel, chatId: b.chatId, scope: b.scope, createdAt: b.createdAt, flaggedNonPrivate: flaggedNonPrivate ? 1 : 0 });
+      // card 3d19ecc7: no-op (0 rows) when there's no companion_config row yet for this session, or it's
+      // already marked — see this method's own doc above for why this is the one place that marks it.
+      this.db.prepare("UPDATE companion_config SET bindings_seeded = 1, updated_at = ? WHERE session_id = ? AND bindings_seeded = 0")
+        .run(new Date().toISOString(), input.sessionId);
+    })();
     return b;
   }
   /**
@@ -4102,11 +4122,11 @@ export class Db {
     /** The companion's given name. OMITTED ⇒ PRESERVE the stored value on an update (mirrors `provisioned`),
      *  defaulting to "" (unnamed) on first insert. */
     name?: string;
-    /** Card a8480338: see CompanionConfigRow.bindingsSeeded. OMITTED ⇒ PRESERVE the stored value on an
-     *  update (the env-bootstrap re-upsert on every boot must NEVER reset this back to false), defaulting
-     *  to false on first insert. Pass `true` ONLY at a genuine first-provisioning write (the provision
-     *  endpoint); `markCompanionBindingsSeeded` is the one-way flip for the env-bootstrap path's OWN
-     *  one-time seed. */
+    /** Card a8480338/3d19ecc7: see CompanionConfigRow.bindingsSeeded. OMITTED ⇒ PRESERVE the stored value
+     *  on an update (the env-bootstrap re-upsert on every boot must NEVER reset this back to false),
+     *  defaulting to false on first insert. There is no longer a reason for a caller to pass `true`
+     *  explicitly here — `upsertCompanionBinding` is now the one chokepoint that flips it, the moment a
+     *  session's binding write actually lands, regardless of which writer produced it. */
     bindingsSeeded?: boolean;
   }): CompanionConfigRow {
     const existing = this.db.prepare(
@@ -4141,15 +4161,11 @@ export class Db {
     ).run({ ...row, enabledInt: row.enabled ? 1 : 0, provisionedInt: row.provisioned ? 1 : 0, bindingsSeededInt: row.bindingsSeeded ? 1 : 0 });
     return row;
   }
-  /**
-   * Card a8480338: flip `bindings_seeded` to 1 for `sessionId` — the one-way mark factory.ts's env-bootstrap
-   * path sets right after it genuinely seeds that session's FIRST Telegram binding (the "zero bindings yet"
-   * observation), so no LATER gateway build ever re-seeds it again, even after every binding is deleted.
-   * Idempotent (a missing/already-set row is a harmless no-op) — never throws.
-   */
-  markCompanionBindingsSeeded(sessionId: string): void {
-    this.db.prepare("UPDATE companion_config SET bindings_seeded = 1, updated_at = ? WHERE session_id = ?").run(new Date().toISOString(), sessionId);
-  }
+  // card 3d19ecc7: the former standalone markCompanionBindingsSeeded(sessionId) is REMOVED — it had exactly
+  // one caller (factory.ts's bootstrap-seed) and was the asymmetry card a8480338's review flagged: a mark
+  // applied by an individual caller only ever covers the paths someone remembered to call it from. The mark
+  // now lives INSIDE upsertCompanionBinding itself (see that method's own doc), so every writer gets it for
+  // free. Do not reintroduce a caller-side mark — it is exactly the shape that regresses this fix.
   /**
    * Delete a run-config by session id (idempotent — a missing id matches nothing), CASCADE-cleaning its
    * routing/authz rows in ONE transaction so no stale binding/allowlist/pairing row survives a torn-down
