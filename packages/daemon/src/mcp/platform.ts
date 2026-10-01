@@ -108,7 +108,23 @@ const permissionOverride = z.object({
   allow: z.array(z.string()).optional(),
   deny: z.array(z.string()).optional(),
 }).strict();
-const ptyOverride = z.object({ cols: z.number().optional(), rows: z.number().optional() }).strict();
+// @decision f021e26d — agent-facing `permission.mode` excludes "bypassPermissions": an agent must never
+// set a PROJECT's own stored boot-time permission mode to bypassPermissions, which would spawn EVERY
+// session that project ever boots with no permission gate at all, not just one worker's live mode.
+const agentPermissionOverride = z.object({
+  // Derived from permissionOverride.shape.mode (never hand-copied) so the two enums can't drift apart.
+  mode: permissionOverride.shape.mode.unwrap().exclude(["bypassPermissions"]).optional(),
+  allow: z.array(z.string()).optional(),
+  deny: z.array(z.string()).optional(),
+}).strict();
+// @decision f021e26d — pty cols/rows must be bounded positive integers: this STORED config value reaches
+// node-pty's own spawn(...) call directly, so an unbounded value (e.g. {cols:0,rows:-5}) must never be
+// allowed to persist and break a future spawn.
+const PTY_GEOMETRY_DIMENSION_MAX = 2000;
+const ptyOverride = z.object({
+  cols: z.number().int().min(1).max(PTY_GEOMETRY_DIMENSION_MAX).optional(),
+  rows: z.number().int().min(1).max(PTY_GEOMETRY_DIMENSION_MAX).optional(),
+}).strict();
 // Outbound alert webhook (external delivery). `url` must be a real URL; `events` is the kind
 // subset to deliver on. Validated as strings here (the OrchestrationEventKind union is type-only —
 // the emitter just `.includes()`-matches, so an unrecognized kind harmlessly never fires).
@@ -425,9 +441,16 @@ const agentPythonOverride = pythonOverride.omit({ interpreterPath: true }).stric
 // re-open exactly the host-exec/exfil capability those field rejections close (NODE_OPTIONS=--require,
 // PATH, etc.). Agents have no business setting raw session env; the human/REST path keeps it.
 // `harness` (card 66b1b40d) is HUMAN-only too and dropped here, so `.strict()` REJECTS an agent's `harness`.
+// `permission` is narrowed (not dropped) to `agentPermissionOverride` (see its own doc above) — the
+// top-level key stays agent-settable; only `mode:"bypassPermissions"` is rejected.
 const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
-  .omit({ sessionEnv: true, harness: true })
-  .extend({ orchestration: agentOrchestrationOverride.optional(), obsidian: agentObsidianOverride.optional(), python: agentPythonOverride.optional() })
+  .omit({ sessionEnv: true, harness: true, permission: true })
+  .extend({
+    orchestration: agentOrchestrationOverride.optional(),
+    obsidian: agentObsidianOverride.optional(),
+    python: agentPythonOverride.optional(),
+    permission: agentPermissionOverride.optional(),
+  })
   .strict();
 
 function formatZodIssues(error: z.ZodError): string {
@@ -535,7 +558,9 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * project_configure on both the platform (full-validator) and setup (agent-validator) surfaces.
  * Plain-object values RECURSE (patching ONE `obsidian`/`orchestration`/`permission` key preserves its
  * siblings); arrays/scalars REPLACE (patching `kanbanColumns` swaps the whole array; `permission.allow`/
- * `deny` likewise). TRUST BOUNDARY: the caller validates the PATCH with its OWN surface validator BEFORE
+ * `deny` likewise) UNLESS the caller passes `additiveOnlyRotationGuard`/`additiveOnlyPermissionDenyGuard`
+ * (below), which re-shape the rotation/deny arrays post-merge into a union instead of a replace — see
+ * their own doc. TRUST BOUNDARY: the caller validates the PATCH with its OWN surface validator BEFORE
  * this runs, so an agent's patch can never introduce a human-only key, and we deliberately do NOT
  * re-validate the merged whole — re-running the AGENT validator would FALSELY reject a result carrying a
  * pre-existing human-only key (e.g. a Lead-set gateCommand) the agent's patch never touched.
@@ -561,6 +586,12 @@ export interface MergeConfigOverrideOptions {
    * legitimate human-initiated retirement.
    */
   additiveOnlyRotationGuard?: boolean;
+  /**
+   * @decision f021e26d — when true, `permission.deny` merges ADDITIVE-ONLY (never REMOVED by a patch,
+   * only added to); `permission.allow` is unaffected. Same posture as `additiveOnlyRotationGuard`: set on
+   * every AGENT-facing call site, unset on the human-equivalent Lead + REST PATCH paths.
+   */
+  additiveOnlyPermissionDenyGuard?: boolean;
 }
 
 /**
@@ -628,6 +659,20 @@ function applyAdditiveOnlyRotationGuard(
   return { ...merged, orchestration: mergedOrch };
 }
 
+/** @decision f021e26d — `permission.deny` UNION, never shrink: every existing deny entry survives the
+ *  merge unconditionally; a patch entry already present is a no-op, a new one is appended. Returns
+ *  `merged` unchanged when the patch's `permission` is absent or never touches `deny` at all. */
+function applyAdditiveOnlyPermissionDenyGuard(
+  existing: ProjectConfigOverride, patch: ProjectConfigOverride, merged: Record<string, unknown>,
+): Record<string, unknown> {
+  const patchPermission = patch?.permission as Record<string, unknown> | undefined;
+  if (!patchPermission || patchPermission.deny === undefined) return merged;
+  const existingDeny = (existing?.permission?.deny as string[] | undefined) ?? [];
+  const patchDeny = patchPermission.deny as string[];
+  const union = [...existingDeny, ...patchDeny.filter((d) => !existingDeny.includes(d))];
+  return { ...merged, permission: { ...(merged.permission as Record<string, unknown> | undefined), deny: union } };
+}
+
 export function mergeConfigOverride(
   existing: ProjectConfigOverride, patch: ProjectConfigOverride, options?: MergeConfigOverrideOptions,
 ): ProjectConfigOverride {
@@ -635,7 +680,8 @@ export function mergeConfigOverride(
     (existing ?? {}) as Record<string, unknown>,
     (patch ?? {}) as Record<string, unknown>,
   );
-  const guarded = options?.additiveOnlyRotationGuard ? applyAdditiveOnlyRotationGuard(existing, patch, merged) : merged;
+  let guarded = options?.additiveOnlyRotationGuard ? applyAdditiveOnlyRotationGuard(existing, patch, merged) : merged;
+  guarded = options?.additiveOnlyPermissionDenyGuard ? applyAdditiveOnlyPermissionDenyGuard(existing, patch, guarded) : guarded;
   return guarded as ProjectConfigOverride;
 }
 
@@ -1428,6 +1474,12 @@ export class PlatformMcpRouter {
           if (stored && replace && !isNonBlankString(written)) {
             return ok({ error: `invalid config: replace:true would drop the stored ${k} — include a non-empty ${k} in the replacement, or use a merge write (${human})` });
           }
+        }
+        // @decision f021e26d — permission.mode:"bypassPermissions" is never settable via an agent MCP
+        // tool, even on this elevated route (the full human-equivalent validator below would otherwise
+        // accept it): it disables the acceptEdits+allowlist sandbox for EVERY session the project spawns.
+        if (nestedValue(config, "permission.mode") === "bypassPermissions") {
+          return ok({ error: `invalid config: permission.mode may not be set to "bypassPermissions" via an agent MCP tool — it disables the acceptEdits+allowlist sandbox every session in this project boots into (human-only, via the REST config PATCH / Settings UI)` });
         }
         const v = validateProjectConfigOverride(config ?? {});
         // List the valid top-level keys on rejection so a fat-fingered key (e.g. "columns" instead of

@@ -329,7 +329,9 @@ export class SetupMcpRouter {
         // mergeConfigOverride) — re-running the agent validator over a preserved human key would falsely reject.
         // additiveOnlyRotationGuard (card 1069c8e1): agent-facing surface — rotationMarkers/
         // rotationLiveCommitmentsFloor may only grow through this path, never shrink.
-        const merged = mergeConfigOverride(project.config, v.value, { additiveOnlyRotationGuard: true });
+        // additiveOnlyPermissionDenyGuard (card f021e26d): same reasoning — an agent patch can never wipe
+        // a human-set permission.deny list.
+        const merged = mergeConfigOverride(project.config, v.value, { additiveOnlyRotationGuard: true, additiveOnlyPermissionDenyGuard: true });
         // Route through the SAFE writer (not a blind setProjectConfig): a kanbanColumns change that drops/
         // renames a column re-keys the affected cards to the landing lane instead of ORPHANING them on a
         // non-existent column. A non-column / same-key-set patch stays byte-identical to the blind path.
@@ -411,8 +413,9 @@ export class SetupMcpRouter {
           // column-set change, it does NOT merge), so the merge must happen here. The trust boundary is
           // unchanged: a human-only key is a rejected unknown above and never reaches the merge; the merged
           // whole isn't re-validated (a preserved pre-existing human key would falsely fail the agent validator).
-          // additiveOnlyRotationGuard (card 1069c8e1): same reasoning as project_configure above.
-          const merged = mergeConfigOverride(fresh.config, v.value, { additiveOnlyRotationGuard: true });
+          // additiveOnlyRotationGuard (card 1069c8e1) + additiveOnlyPermissionDenyGuard (card f021e26d):
+          // same reasoning as project_configure above.
+          const merged = mergeConfigOverride(fresh.config, v.value, { additiveOnlyRotationGuard: true, additiveOnlyPermissionDenyGuard: true });
           // actor (card a0cafef2): agent-facing surface, same reasoning as project_configure above.
           const wrote = setProjectConfigSafe(db, projectId, merged, callerSessionId ? `setup:${callerSessionId}` : "setup");
           if (!wrote.ok) return ok({ error: wrote.error });
