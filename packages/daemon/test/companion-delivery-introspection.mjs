@@ -107,7 +107,7 @@ const { InAppChannel } = await import("../dist/companion/in-app.js");
 
   // TEXT reply (no synthesize dep at all — mirrors companion-voice-tts.mjs case 1) → recorded viaVoice:false.
   {
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, inMemoryVoicePrefs(), undefined, undefined, undefined, fakeRecorder);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, inMemoryVoicePrefs(), undefined, undefined, undefined, fakeRecorder);
     gw.registerAdapter(tgAdapter);
     await gw.deliverReply("sess-A", "typed reply");
     const row = recorded.find((r) => r.text === "typed reply");
@@ -120,7 +120,7 @@ const { InAppChannel } = await import("../dist/companion/in-app.js");
     const prefs = inMemoryVoicePrefs();
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
     const synth = { isReady: () => true, synthesize: async () => ({ filePath: "/tmp/reply.ogg", cleanup: async () => {} }) };
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth, undefined, fakeRecorder);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth, undefined, fakeRecorder);
     gw.registerAdapter(tgAdapter);
     await gw.deliverReply("sess-A", "spoken reply");
     const row = recorded.find((r) => r.text === "spoken reply");

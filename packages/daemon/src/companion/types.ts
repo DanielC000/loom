@@ -349,7 +349,10 @@ export type DeliverResult =
   // `route-flagged-non-private` (card 7578dea2): the target route's binding was observed receiving an
   // inbound the channel did NOT confirm as private — outbound suppressed (ChatGateway.mayDeliverTo), by
   // design silently (no notice sent to the route itself; see mayDeliverTo's own doc for why).
-  | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" | "no-target" | "route-flagged-non-private" };
+  // `route-unbound` (card d3f9b4d2): the target route has NO live binding at all (never bound, or its
+  // binding was revoked since the turn carrying this route was formed) — same chokepoint, same silent
+  // suppression; see ChatGateway.hasLiveBinding's doc for the one channel this never applies to.
+  | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" | "no-target" | "route-flagged-non-private" | "route-unbound" };
 
 /** The result of routing one inbound message. */
 export type InboundResult =

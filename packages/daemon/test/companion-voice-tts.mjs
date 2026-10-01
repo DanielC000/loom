@@ -86,7 +86,7 @@ try {
     const tg = makeAdapter("telegram");
     const prefs = inMemoryVoicePrefs();
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on"); // ON — still must not matter with no dep
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs); // no 8th arg
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs); // no 8th arg
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "hello there");
@@ -99,7 +99,7 @@ try {
     const tg = makeAdapter("telegram");
     const synth = makeSynthesizer({ ready: true });
     const prefs = inMemoryVoicePrefs(); // default: voiceReplies false
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "hello there");
@@ -115,7 +115,7 @@ try {
     const prefs = inMemoryVoicePrefs();
     prefs.setLang({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "es");
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "hola");
@@ -132,7 +132,7 @@ try {
     const synth = makeSynthesizer({ ready: false });
     const prefs = inMemoryVoicePrefs();
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "hello there");
@@ -147,7 +147,7 @@ try {
     const synth = makeSynthesizer({ ready: true, result: () => null });
     const prefs = inMemoryVoicePrefs();
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "hello there");
@@ -161,7 +161,7 @@ try {
     const synth = makeSynthesizer({ ready: true, result: () => ({ filePath: "/tmp/voice-reply.ogg" }) });
     const prefs = inMemoryVoicePrefs();
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "hello there");
@@ -175,7 +175,7 @@ try {
     const synth = makeSynthesizer({ ready: true });
     const prefs = inMemoryVoicePrefs();
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "hello there");
@@ -191,7 +191,7 @@ try {
     // Set the pref via the EXACT route an inbound voicePrefRoute() would produce for a DM binding
     // (scope:"dm" ⇒ senderId always null) — proves deliverReply's outbound resolve reaches the SAME row.
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "dm reply");
@@ -204,7 +204,7 @@ try {
     const synth = makeSynthesizer({ ready: true });
     const prefs = inMemoryVoicePrefs();
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.sendToChannel("telegram", "111", "mirrored web-chat turn");
@@ -221,7 +221,7 @@ try {
     // A group member turns voice replies ON via /voice on — stored PER-SENDER (mirrors voicePrefRoute's
     // group-scope rule: senderId = the authenticated sender who ran the command).
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: "member-42" }, "on");
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "reply to the group");
@@ -236,7 +236,7 @@ try {
     const tg = makeAdapter("telegram");
     const synth = makeSynthesizer({ ready: true });
     const prefs = inMemoryVoicePrefs(); // default: voiceReplies "off"
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "hello there", true);
@@ -250,7 +250,7 @@ try {
     const synth = makeSynthesizer({ ready: true, result: () => ({ filePath: "/tmp/voice-reply.ogg" }) });
     const prefs = inMemoryVoicePrefs();
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "hello there", false); // agent said false — must not matter
@@ -263,7 +263,7 @@ try {
     const synth = makeSynthesizer({ ready: true, result: () => ({ filePath: "/tmp/voice-reply.ogg" }) });
     const prefs = inMemoryVoicePrefs();
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "auto");
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const r = await gw.deliverReply("sess-A", "hello there", true);
@@ -276,7 +276,7 @@ try {
     const synth = makeSynthesizer({ ready: true });
     const prefs = inMemoryVoicePrefs();
     prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "auto");
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
     gw.registerAdapter(tg.adapter);
 
     const rFalse = await gw.deliverReply("sess-A", "hello there", false);

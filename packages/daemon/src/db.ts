@@ -8661,6 +8661,13 @@ export class Db {
   setCompanionReminderEnabled(id: string, enabled: boolean): void {
     this.db.prepare("UPDATE companion_reminders SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, id);
   }
+  /** Clear ONE reminder's pinned route back to NULL (card d3f9b4d2) — used when the binding its route
+   *  named gets unbound, so the next fire falls back to the session's own always-live in-app route
+   *  (`fire`'s `reminder.route ?? inAppHomeRoute(...)`, reminders.ts) instead of continuing to target a
+   *  chat this session can no longer reach. */
+  clearCompanionReminderRoute(id: string): void {
+    this.db.prepare("UPDATE companion_reminders SET route = NULL WHERE id = ?").run(id);
+  }
 
   // --- companion voice preferences (Companion Voice epic, VOICE-P1 — the per-route pref store) ---
   /** One route's stored pref, or undefined when none has ever been set (the resolver's default applies). */

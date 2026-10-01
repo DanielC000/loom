@@ -241,8 +241,10 @@ function driveTurns(db, sessId, n) {
   const delivered = [];
   const onReplyDelivered = (sid) => delivered.push(sid);
   const gw = new ChatGateway(
-    noopSubmit, [], undefined, undefined,
-    (sid) => (sid === "wired-sess" ? { channel: "telegram", chatId: "444555666" } : null), // originResolver (numeric: a real Telegram chat id)
+    // card d3f9b4d2: a live binding must be seeded or the route is "route-unbound" regardless of shape;
+    // card 94754bbe: the chatId must be numeric (a real Telegram chat id) or the shape check blocks it too.
+    noopSubmit, [{ sessionId: "wired-sess", channel: "telegram", chatId: "444555666", scope: "dm" }], undefined, undefined,
+    (sid) => (sid === "wired-sess" ? { channel: "telegram", chatId: "444555666" } : null), // originResolver
     undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
     onReplyDelivered,
   );

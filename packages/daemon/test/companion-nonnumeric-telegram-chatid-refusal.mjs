@@ -45,9 +45,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      actual bug: companion HOME (heartbeats/reminders/attention-pushes) is an app_meta value, never a
 //      `companion_bindings` row, so the OLD `bindingForInbound(...)?.flaggedNonPrivate !== true` check read
 //      an unbound route as "may deliver" with zero regard for the chatId's own shape.
-//      H1. a non-numeric unbound target ("@chan") is refused — RED on the pre-fix mayDeliverTo.
-//      H2. a negative-integer unbound target is ALSO refused (the 61e33b99 class, now for unbound routes).
-//      H3. NEGATIVE CONTROL — an ordinary positive-chatId unbound target (a normal home) still delivers.
+//      H1. a non-numeric target ("@chan") BACKED BY A LIVE DM BINDING is refused — RED on the pre-fix
+//          mayDeliverTo. Deliberately BOUND (not unbound): an unbound target is already refused by H3's own
+//          live-binding check regardless of shape, so leaving these unbound made the shape check's own RED
+//          test indistinguishable from H3's — a reviewer could (and did) replace the shape check with
+//          `if (false)` and this would still pass, for the wrong reason (Code Review finding, card d3f9b4d2
+//          round 2). Binding it live isolates the shape check as the ONLY thing that can block it.
+//      H2. a negative-integer target (the 61e33b99 class) BACKED BY A LIVE DM BINDING is ALSO refused, same
+//          isolation rationale as H1.
+//      H3. card d3f9b4d2: an ordinary positive-chatId UNBOUND target (a normal home with NO live binding —
+//          deliberately left unbound, unlike H1/H2 above) is refused — route-unbound, not a chatId-shape
+//          block — since an unbound route may never receive outbound regardless of shape.
 //      H4. NEGATIVE CONTROL — a non-numeric/negative target backed by an EXPLICIT group-scope binding is
 //          NOT refused — the scope exemption holds even for a route mayDeliverTo resolves structurally.
 //   I. WRITE-TIME GUARDS (convenience 400s, never the real guarantee — H is): `PUT /api/companion/home`,
@@ -302,6 +310,14 @@ try {
   // the outbound chokepoint itself now refuses it: a REAL ChatGateway, a REAL fake Telegram adapter, and a
   // deliverReply whose target resolves to the SAME non-numeric chatId the binding refused — this is RED on
   // the pre-mayDeliverTo-fix tip (confirmed via the revert/rebuild cycle in the worker report).
+  //
+  // card d3f9b4d2 round 2, Finding 1: the bootstrap-seed refusal above means gwBoot has ZERO bindings for
+  // sessBoot — so, exactly like H1/H2 before their own fix, deliveryBlockReason's live-binding check (step
+  // 4) would ALSO refuse this target regardless of the chatId-SHAPE check (step 3), making this RED test
+  // indistinguishable from testing live-binding alone. Bind it directly on the gateway's in-memory routing
+  // map (bypassing the write chokepoint, which would itself throw for this non-numeric chatId) so the SHAPE
+  // check is the only thing that can still block the deliverReply below.
+  gwBoot.bind({ sessionId: sessBoot, channel: TELEGRAM_CHANNEL, chatId: "@me", scope: "dm", flaggedNonPrivate: false });
   const tgBoot = fakeAdapter(TELEGRAM_CHANNEL);
   gwBoot.registerAdapter(tgBoot);
   const rBoot = await gwBoot.deliverReply(sessBoot, "must never reach a channel the owner never confirmed as a private chat");
@@ -309,14 +325,18 @@ try {
   check("(G3) the fake adapter recorded NO send at all", tgBoot.sent.length === 0);
 
   // ============ H. mayDeliverTo COVERS A ROUTE WITH NO BINDING AT ALL (home, generalized) ==================
-  // A hand-built ChatGateway with ZERO bindings — no db involved — targeting the SAME sessionId with
-  // different chatId shapes, isolating mayDeliverTo's own behavior from any binding-chokepoint interaction.
-  for (const [label, chatId, expectDelivered] of [
-    ["(H1) non-numeric unbound target (\"@chan\")", "@chan", false],
-    ["(H2) negative-integer unbound target (the 61e33b99 class, now for an unbound route)", "-1005554443332", false],
-    ["(H3 control) ordinary positive-chatId unbound target (a normal home)", "500500500", true],
+  // A hand-built ChatGateway, targeting the SAME sessionId with different chatId shapes. H1/H2 are BOUND
+  // (a live dm-scope binding for the exact chatId under test) so the live-binding check (step 4 of
+  // deliveryBlockReason) can never be the thing that blocks them — isolating the chatId-SHAPE check (step 3)
+  // as the only possible cause of a refusal. H3 is deliberately left UNBOUND — it tests the live-binding
+  // check itself, not the shape check (see its own comment above).
+  for (const [label, chatId, expectDelivered, preBound] of [
+    ["(H1) non-numeric target (\"@chan\") backed by a LIVE dm binding", "@chan", false, true],
+    ["(H2) negative-integer target (the 61e33b99 class) backed by a LIVE dm binding", "-1005554443332", false, true],
+    ["(H3) ordinary positive-chatId UNBOUND target (a normal home, card d3f9b4d2: route-unbound)", "500500500", false, false],
   ]) {
-    const gwH = new ChatGateway(() => ({ delivered: true }), [], undefined, undefined, (sid) => (sid === "home-sess" ? { channel: TELEGRAM_CHANNEL, chatId } : null));
+    const initialBindings = preBound ? [{ sessionId: "home-sess", channel: TELEGRAM_CHANNEL, chatId, scope: "dm", flaggedNonPrivate: false }] : [];
+    const gwH = new ChatGateway(() => ({ delivered: true }), initialBindings, undefined, undefined, (sid) => (sid === "home-sess" ? { channel: TELEGRAM_CHANNEL, chatId } : null));
     const tgH = fakeAdapter(TELEGRAM_CHANNEL);
     gwH.registerAdapter(tgH);
     const rH = await gwH.deliverReply("home-sess", "proactive turn");
@@ -362,6 +382,9 @@ try {
     check("(I1) PUT /api/companion/home: a non-numeric telegram chatId → 400", badHome.statusCode === 400);
     check("(I1) 400's error names the problem", /numeric/i.test(JSON.parse(badHome.payload).error));
     check("(I1) no home was written", db.getCompanionHome("write-guard-sess") === null);
+    // card d3f9b4d2 Minor 1: PUT /home now also requires a LIVE binding for the target route — bind it
+    // first (this control's actual subject is the numeric-shape guard, not the live-binding one).
+    db.upsertCompanionBinding({ sessionId: "write-guard-sess", channel: "telegram", chatId: "600700800", scope: "dm" });
     const goodHome = await appI.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "write-guard-sess", channel: "telegram", chatId: "600700800" } });
     check("(I2 control) PUT /api/companion/home: a numeric telegram chatId still succeeds → 200", goodHome.statusCode === 200);
 

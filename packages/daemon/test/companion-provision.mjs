@@ -405,16 +405,23 @@ try {
     const db = new Db(path.join(tmpHome, "p5.db"));
     const inApp = new InAppChannel();
     const sid = "sess-factory";
-    // A tokenless in-app companion: an in-app binding + a stray telegram binding to probe adapter presence.
+    // A tokenless in-app companion: an in-app binding + a (card d3f9b4d2: SAME-session, so the factory's
+    // own cfg.sessionId-scoped load still picks it up) telegram binding to probe adapter presence.
     db.upsertCompanionBinding({ sessionId: sid, channel: IN_APP_CHANNEL, chatId: sid, scope: "dm" });
-    db.upsertCompanionBinding({ sessionId: "sess-tg", channel: TELEGRAM, chatId: "960960001", scope: "dm" });
+    // card 94754bbe: a dm-scope chatId must be numeric (a non-numeric one is refused at this write
+    // chokepoint), so this bound route uses a valid numeric chat id rather than a placeholder string.
+    db.upsertCompanionBinding({ sessionId: sid, channel: TELEGRAM, chatId: "960960001", scope: "dm" });
     const cfg = { botToken: null, allowedChatId: "", sessionId: sid, chatScope: "dm", homeChannel: IN_APP_CHANNEL, homeChatId: sid, heartbeatIntervalMinutes: 0, heartbeatPrompt: "x" };
-    // 5th arg = the per-turn origin resolver (stands in for pty.getActiveTurnOrigin): each session's turn came
-    // in on its own route, so deliverReply targets that channel — proving adapter PRESENCE (in-app yes, telegram no).
-    const originResolver = (s) => (s === sid ? { channel: IN_APP_CHANNEL, chatId: sid } : s === "sess-tg" ? { channel: TELEGRAM, chatId: "960960001" } : null);
+    // 5th arg = the per-turn origin resolver (stands in for pty.getActiveTurnOrigin): mutated between calls
+    // below so the SAME session's in-flight turn can be made to appear to originate on either of its two
+    // bound routes — proving adapter PRESENCE (in-app yes, telegram no), not binding liveness (both are
+    // live bindings of this one session either way).
+    let currentRoute = { channel: IN_APP_CHANNEL, chatId: sid };
+    const originResolver = (s) => (s === sid ? currentRoute : null);
     const gw = createCompanionGateway(cfg, () => ({ delivered: true }), db, inApp, originResolver);
     const inAppOut = await gw.deliverReply(sid, "hi"); // in-app adapter registered ⇒ delivered
-    const tgOut = await gw.deliverReply("sess-tg", "hi"); // NO telegram adapter ⇒ no-adapter
+    currentRoute = { channel: TELEGRAM, chatId: "960960001" };
+    const tgOut = await gw.deliverReply(sid, "hi"); // bound route, but NO telegram adapter (tokenless) ⇒ no-adapter
     check("factory: tokenless gateway registers the in-app adapter (reply delivered)", inAppOut.delivered === true);
     check("factory: tokenless gateway registers NO Telegram adapter (deliver → no-adapter)", tgOut.delivered === false && tgOut.reason === "no-adapter");
     db.close();

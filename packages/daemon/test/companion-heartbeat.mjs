@@ -234,7 +234,9 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
   //     the home route ⇒ delivered there. No route ⇒ no-target, nothing sent.
   {
     const sent = [];
-    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, (sid) => (sid === "hb-sess" ? home : null));
+    // card d3f9b4d2: deliverReply now also requires a LIVE binding for the route (never just a valid
+    // shape), so the seeded binding's chatId must match `home`'s numeric chat id, not a placeholder.
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "hb-sess", channel: "telegram", chatId: "900900001", scope: "dm" }], undefined, undefined, (sid) => (sid === "hb-sess" ? home : null));
     gw.registerAdapter(fakeAdapter("telegram", sent));
     const res = await gw.deliverReply("hb-sess", "proactive hello");
     check("per-turn-route: a proactive reply on the home-routed turn lands on the HOME chat", res.delivered === true && sent.length === 1 && sent[0].chatId === "900900001" && sent[0].text === "proactive hello");

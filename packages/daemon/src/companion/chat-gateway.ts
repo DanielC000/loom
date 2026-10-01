@@ -45,6 +45,7 @@ import { noPairing, type CompanionPairing } from "./pairing.js";
 import { inMemoryVoicePrefs, voicePrefRoute, type CompanionVoicePrefs } from "./voice-prefs.js";
 import { parseCommand, commandHandler } from "./commands.js";
 import { vendorProcessSlashCommand } from "../pty/claude-doctrine.js";
+import { IN_APP_CHANNEL } from "./in-app.js";
 
 /**
  * Split `text` into chunks no longer than `max` chars, preferring a newline then a whitespace boundary so
@@ -208,6 +209,12 @@ export class ChatGateway {
      *  only adds durability). The daemon injects `(b) => db.flagCompanionBindingNonPrivate(b.sessionId,
      *  b.channel)` (factory.ts). Never allowed to throw out of the inbound path — the call site wraps it. */
     private readonly flagNonPrivateBinding: ((binding: SessionBinding) => void) | undefined = undefined,
+    /** card d3f9b4d2 Minor 1: called with `sessionId` after a dm-bind pairing redemption re-binds a
+     *  channel to a NEW chatId — a re-pair can orphan the home/a reminder still naming the OLD chat for
+     *  that channel, same shape as an unbind or a REST re-bind. Default undefined ⇒ every existing/test
+     *  construction stays byte-identical (no-op). factory.ts injects the shared
+     *  companion/reconcile.ts helper, built from `db` (mirrors flagNonPrivateBinding's own pattern). */
+    private readonly reconcileBindingChange: ((sessionId: string) => void | Promise<void>) | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -266,6 +273,18 @@ export class ChatGateway {
     return undefined;
   }
 
+  /**
+   * Whether `channel`/`chatId` currently has a live binding — the "may this chat receive at all" half of
+   * `mayDeliverTo`'s predicate (card d3f9b4d2), exposed so a reconciliation caller (e.g. the bindings
+   * unbind REST route, deciding whether a proactive home/reminder route that named this chat is now dead)
+   * can ask the SAME question outbound delivery is gated on, rather than growing a second implementation.
+   * IN_APP_CHANNEL is always considered live — it has no "unbound" state to fall into (see in-app.ts's own
+   * doc: every gateway registers that adapter unconditionally, with no binding/provisioning required).
+   */
+  hasLiveBinding(channel: string, chatId: string): boolean {
+    return channel === IN_APP_CHANNEL || this.bindingForInbound(channel, chatId) !== undefined;
+  }
+
   /** Read-only: a session's current bindings (a COPY — never the live array), one per bound channel.
    *  Empty for a session with no bindings. Used by cross-channel MIRRORING (e.g. echoing a web-chat turn
    *  out to the session's other bound channels) to enumerate "the channels this session is ALREADY bound
@@ -301,6 +320,21 @@ export class ChatGateway {
         // Companion Trust Window close path (Framework Card 0): a fresh re-pair changes WHO may drive this
         // session — revoke any window a prior binding left behind rather than let it silently carry over.
         this.closeTrustWindow?.(red.binding.sessionId);
+        // card d3f9b4d2 Minor 1: reconcile after every binding mutation, not just REST writes — a home/
+        // reminder can still name a chat this channel previously pointed at. In practice this redemption
+        // path only ever reaches a FIRST bind for this session, or an idempotent re-pair to the SAME
+        // chatId: db.ts's upsertCompanionBinding dm-bind handler (SILENT-TAKEOVER REFUSAL) refuses any
+        // redemption that would repoint an ALREADY-bound session at a DIFFERENT chatId, so this call never
+        // actually sees a reroute to reconcile against — it's still here for defense in depth and to stay
+        // identical to every other binding-mutation call site. Wrapped in try/catch, like
+        // flagNonPrivateBinding's own call site above, so a reconcile failure can never drop the PAIRED ack
+        // that follows.
+        try {
+          await this.reconcileBindingChange?.(red.binding.sessionId);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error(`[companion] dm-bind pairing reconcile failed: ${describeError(err)}`);
+        }
         const acked = await this.tryAck(red.binding, PAIRED_ACK);
         this.debug(`inbound PAIRED (dm-bind): chat now bound (channel=${msg.channel} chat=${msg.chatId} session=${red.binding.sessionId})`);
         return { accepted: false, reason: "paired-dm", sessionId: red.binding.sessionId, acked };
@@ -705,19 +739,20 @@ export class ChatGateway {
     // what makes cross-delivery impossible by construction: the reply can only go where the turn came from.
     const target = this.replyTarget(sessionId);
     if (!target) return { delivered: false, reason: "no-target" };
-    // OUTBOUND SUPPRESSION (card 7578dea2): covers chat_reply AND every heartbeat/reminder/attention-push
-    // reply — all resolve through this same method (see mayDeliverTo's doc).
-    if (!this.mayDeliverTo(target.channel, target.chatId)) {
+    // OUTBOUND SUPPRESSION (card 7578dea2 / d3f9b4d2): covers chat_reply AND every heartbeat/reminder/
+    // attention-push reply — all resolve through this same method (see deliveryBlockReason's doc).
+    const blockReason = this.deliveryBlockReason(target.channel, target.chatId);
+    if (blockReason) {
       // Zero-reply detector (card 48e8d289) hardening: this IS a genuine chat_reply ATTEMPT — the agent
       // called it, and the reason it can't land is a PERMANENT, already-surfaced-elsewhere condition (the
-      // binding-flag UI/log), not the agent going silent/stuck. Firing onReplyDelivered here resets that
-      // detector's "turns since last reply" baseline so it can never misfire `companion_zero_reply_detected`
-      // for a companion that is actively trying every turn — that alarm exists to catch an UNDIAGNOSED
-      // silence, and this cause is already fully diagnosed and surfaced through a different channel; letting
-      // both fire for the same root cause would misdirect a human toward "the agent is stuck" instead of
-      // "re-bind the channel".
+      // binding-flag UI/log, or the route having been unbound), not the agent going silent/stuck. Firing
+      // onReplyDelivered here resets that detector's "turns since last reply" baseline so it can never
+      // misfire `companion_zero_reply_detected` for a companion that is actively trying every turn — that
+      // alarm exists to catch an UNDIAGNOSED silence, and this cause is already fully diagnosed and
+      // surfaced through a different channel; letting both fire for the same root cause would misdirect a
+      // human toward "the agent is stuck" instead of "re-bind the channel".
       this.onReplyDelivered?.(sessionId);
-      return { delivered: false, reason: "route-flagged-non-private" };
+      return { delivered: false, reason: blockReason };
     }
     // Loom Companion (proactive event-line producer): resolve ONCE whether the turn this reply answers was
     // a daemon-driven heartbeat/reminder/attention-push submit — read via the SAME per-turn mechanism as
@@ -748,12 +783,13 @@ export class ChatGateway {
         this.recordOutboundSafely(sessionId, target.channel, target.chatId, result.sentText, proactive);
       }
       if (result.reason === "no-adapter") return { delivered: false, reason: "no-adapter" };
-      if (result.reason === "route-flagged-non-private") {
-        // Zero-reply detector (card 48e8d289) hardening, card 7578dea2: a MID-FLIGHT suppression is still
-        // a genuine chat_reply attempt, exactly like the up-front mayDeliverTo gate above — see that gate's
-        // own comment on why this resets the streak instead of letting it accumulate toward a misfire.
+      if (result.reason === "route-flagged-non-private" || result.reason === "route-unbound") {
+        // Zero-reply detector (card 48e8d289) hardening, card 7578dea2 / d3f9b4d2: a MID-FLIGHT suppression
+        // is still a genuine chat_reply attempt, exactly like the up-front deliveryBlockReason gate above —
+        // see that gate's own comment on why this resets the streak instead of letting it accumulate
+        // toward a misfire.
         this.onReplyDelivered?.(sessionId);
-        return { delivered: false, reason: "route-flagged-non-private" };
+        return { delivered: false, reason: result.reason };
       }
       return { delivered: false, reason: "send-failed" };
     }
@@ -840,7 +876,8 @@ export class ChatGateway {
   async deliverMedia(sessionId: string, filePath: string): Promise<{ delivered: boolean; reason?: string }> {
     const target = this.replyTarget(sessionId);
     if (!target) return { delivered: false, reason: "no-target" };
-    if (!this.mayDeliverTo(target.channel, target.chatId)) return { delivered: false, reason: "route-flagged-non-private" }; // card 7578dea2
+    const blockReason = this.deliveryBlockReason(target.channel, target.chatId); // card 7578dea2 / d3f9b4d2
+    if (blockReason) return { delivered: false, reason: blockReason };
     const adapter = this.adapters.get(target.channel);
     if (!adapter) return { delivered: false, reason: "no-adapter" };
     if (!adapter.sendMedia) return { delivered: false, reason: "unsupported-channel" };
@@ -864,13 +901,15 @@ export class ChatGateway {
    * channels (e.g. Telegram) with a disclaimer — the caller composes that text; this just sends it.
    */
   async sendToChannel(channel: string, chatId: string, text: string): Promise<DeliverResult> {
-    if (!this.mayDeliverTo(channel, chatId)) return { delivered: false, reason: "route-flagged-non-private" };
+    const blockReason = this.deliveryBlockReason(channel, chatId); // card 7578dea2 / d3f9b4d2
+    if (blockReason) return { delivered: false, reason: blockReason };
     const result = await this.sendVia(channel, chatId, text);
     if (!result.delivered) {
       if (result.reason === "no-adapter") return { delivered: false, reason: "no-adapter" };
-      // card 7578dea2 hardening: sendVia's own per-chunk recheck caught a mid-flight flag flip. Not a
-      // chat_reply, so no onReplyDelivered here — the zero-reply detector only tracks chat_reply/deliverReply.
-      if (result.reason === "route-flagged-non-private") return { delivered: false, reason: "route-flagged-non-private" };
+      // card 7578dea2 / d3f9b4d2 hardening: sendVia's own per-chunk recheck caught a mid-flight flag flip
+      // or unbind. Not a chat_reply, so no onReplyDelivered here — the zero-reply detector only tracks
+      // chat_reply/deliverReply.
+      if (result.reason === "route-flagged-non-private" || result.reason === "route-unbound") return { delivered: false, reason: result.reason };
       return { delivered: false, reason: "send-failed" };
     }
     return { delivered: true, chunks: result.chunks };
@@ -878,16 +917,15 @@ export class ChatGateway {
 
   /** Shared outbound send: chunk to the adapter's max length and send every part, in order. Contains a
    *  throw (never propagates) — the only failure modes are "no adapter registered for this channel", "the
-   *  adapter's send threw", and (card 7578dea2) "the route got flagged non-private mid-flight". On a
-   *  mid-stream stop, `sentChunks`/`sentText` report exactly what already reached the chat (chunks 1..k-1)
-   *  — see deliverReply's partial-send record (CR#2 L1). `opts.proactive` (proactive event-line producer)
-   *  is forwarded to the adapter's `send` verbatim — `sendToChannel`'s mirror-echo caller omits it (never
-   *  proactive), only `deliverReply` passes it. */
+   *  adapter's send threw", and (card 7578dea2 / d3f9b4d2) "the route got flagged non-private, or lost its
+   *  live binding, mid-flight". On a mid-stream stop, `sentChunks`/`sentText` report exactly what already
+   *  reached the chat (chunks 1..k-1) — see deliverReply's partial-send record (CR#2 L1). `opts.proactive`
+   *  (proactive event-line producer) is forwarded to the adapter's `send` verbatim — `sendToChannel`'s
+   *  mirror-echo caller omits it (never proactive), only `deliverReply` passes it. */
   private async sendVia(channel: string, chatId: string, text: string, opts?: { proactive?: boolean }): Promise<
     | { delivered: true; chunks: number }
     | { delivered: false; reason: "no-adapter" }
-    | { delivered: false; reason: "send-failed"; sentChunks: number; sentText: string }
-    | { delivered: false; reason: "route-flagged-non-private"; sentChunks: number; sentText: string }
+    | { delivered: false; reason: "send-failed" | "route-flagged-non-private" | "route-unbound"; sentChunks: number; sentText: string }
   > {
     const adapter = this.adapters.get(channel);
     if (!adapter) return { delivered: false, reason: "no-adapter" };
@@ -895,12 +933,13 @@ export class ChatGateway {
     let sent = 0;
     try {
       for (const part of parts) {
-        // Cheap hardening (card 7578dea2): every caller already checked mayDeliverTo ONCE before calling
-        // sendVia — this re-checks on EVERY chunk, so a concurrent inbound flipping the flag mid-flight
-        // (between two chunks of a long reply) stops the REST of the reply instead of finishing a send
-        // that started before the route was flagged.
-        if (!this.mayDeliverTo(channel, chatId)) {
-          return { delivered: false, reason: "route-flagged-non-private", sentChunks: sent, sentText: parts.slice(0, sent).join("") };
+        // Cheap hardening (card 7578dea2 / d3f9b4d2): every caller already checked deliveryBlockReason ONCE
+        // before calling sendVia — this re-checks on EVERY chunk, so a concurrent inbound flipping the flag
+        // (or an unbind) mid-flight (between two chunks of a long reply) stops the REST of the reply
+        // instead of finishing a send that started before the route went bad.
+        const blockReason = this.deliveryBlockReason(channel, chatId);
+        if (blockReason) {
+          return { delivered: false, reason: blockReason, sentChunks: sent, sentText: parts.slice(0, sent).join("") };
         }
         await adapter.send(chatId, part, opts);
         sent++;
@@ -990,16 +1029,28 @@ export class ChatGateway {
   // @decision 7578dea2 — outbound suppression to a flagged route is SILENT; never send even a re-bind
   // notice to it (that would itself be a disclosure to an unauthorized chat). See the full record.
   //
-  // @decision 94754bbe — never let an UNBOUND route (e.g. companion HOME, an app_meta value with no
-  // `companion_bindings` row) skip this chatId-shape check just because `bindingForInbound` finds nothing —
-  // see the full record for the "@chan" home-leak this closes.
+  // card d3f9b4d2: the SAME silent-suppression posture now ALSO applies to a route with no live binding at
+  // all (never bound, or revoked since the turn carrying this route was formed — e.g. a proactive home or
+  // reminder route surviving past its binding's unbind). The one true "may this chat receive" predicate
+  // every outbound producer (deliverReply/deliverMedia/sendToChannel/sendVia's per-chunk recheck) gates
+  // through — see `deliveryBlockReason` for the discriminated reason each of them actually reports.
   private mayDeliverTo(channel: string, chatId: string): boolean {
+    return this.deliveryBlockReason(channel, chatId) === undefined;
+  }
+
+  /** The discriminated reason `channel`/`chatId` may NOT currently receive outbound, or undefined when it
+   *  may — `mayDeliverTo`'s own boolean collapses this; every real call site needs the actual reason to
+   *  report on its DeliverResult, so this is the one implementation both read from. */
+  private deliveryBlockReason(channel: string, chatId: string): "route-unbound" | "route-flagged-non-private" | undefined {
     const binding = this.bindingForInbound(channel, chatId);
-    if (binding?.flaggedNonPrivate === true) return false;
-    if (binding?.scope === "group") return true; // an explicit group binding legitimately owns a @handle/negative id
-    if (isNonNumericTelegramChatId(channel, chatId)) return false;
-    if (isLikelyGroupTelegramChatId(channel, chatId)) return false;
-    return true;
+    if (binding?.flaggedNonPrivate === true) return "route-flagged-non-private"; // card 7578dea2
+    if (binding?.scope === "group") return undefined; // an explicit group binding legitimately owns a @handle/negative id
+    // @decision 94754bbe — a dm-shape chatId that could never carry a legitimate (non-group) binding is
+    // blocked regardless of whether a binding exists at all; never re-gate this on a binding lookup
+    // succeeding (that's the "@chan"/negative-id companion-HOME leak the record closes).
+    if (isNonNumericTelegramChatId(channel, chatId) || isLikelyGroupTelegramChatId(channel, chatId)) return "route-unbound";
+    if (!this.hasLiveBinding(channel, chatId)) return "route-unbound"; // card d3f9b4d2
+    return undefined;
   }
 }
 

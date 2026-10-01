@@ -45,6 +45,7 @@ import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { isNonNumericTelegramChatId, InvalidTelegramChatIdError } from "../companion/types.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
+import { reconcileCompanionBindingRoutes, hasLiveCompanionBinding } from "../companion/reconcile.js";
 import { buildCompanionReplyStatus, checkCompanionReplyHealth } from "../companion/reply-watch.js";
 import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, GIT_PUSH_TARGETS, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
@@ -1447,6 +1448,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // genuine fix clears outbound suppression LIVE, and a re-bind that doesn't fix it stays suppressed —
     // either way with no restart needed.
     deps.companion?.bind({ sessionId: binding.sessionId, channel: binding.channel, chatId: binding.chatId, scope: binding.scope, flaggedNonPrivate: binding.flaggedNonPrivate });
+    // card d3f9b4d2 Minor 1: ON CONFLICT this upsert REPLACES the chat_id for (sessionId, channel) — a
+    // re-bind to a different chat can orphan the home/a reminder still naming the OLD chat for this
+    // channel, same shape as an unbind. Reconcile after every binding mutation, not just DELETE.
+    await reconcileCompanionBindingRoutes(deps.db, binding.sessionId, deps.companion);
     return reply.code(201).send(binding);
   });
   app.delete("/api/companion/bindings/:sessionId", async (req, reply) => {
@@ -1468,6 +1473,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // just `deps.orchMcp`): several existing gateway tests construct a minimal `orchMcp` stub that
     // predates this method — a throw here must not turn an unrelated bind change into a 500.
     deps.orchMcp.closeCompanionTrustWindow?.(sessionId);
+
+    // card d3f9b4d2: a revoked binding can leave the proactive HOME, or a RECURRING reminder's own pinned
+    // route, naming a chat with no live binding left — which would otherwise keep receiving heartbeat/
+    // reminder content (project names, decision titles) after the owner revoked it. The shared helper
+    // (Minor 1 of the fix round, companion/reconcile.ts) is called after EVERY binding mutation, not just
+    // this one — see the bindings POST / provision handlers below.
+    await reconcileCompanionBindingRoutes(deps.db, sessionId, deps.companion);
+
     return { ok: true };
   });
 
@@ -1496,6 +1509,29 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true };
   });
 
+  // The ONE guard every home writer shares (PUT /api/companion/home below, AND the config route's own
+  // `home` field via applyHomeIfPresent further down) — card d3f9b4d2 round 2: the config route used to
+  // duplicate only the numeric-shape half of this and skip the live-binding half entirely, so it could
+  // write a home the very next reconcile would immediately clear. One function means the two writers can
+  // never again diverge the way the outbound shape check already did once (see the H1/H2 test fix above).
+  const validateHomeTarget = (channel: string, chatId: string, sessionId: string): string | null => {
+    // card 94754bbe: a numeric-only check, same posture as GUARD 6 below — the real guarantee is
+    // ChatGateway.mayDeliverTo; this is immediate setup-time feedback.
+    if (isNonNumericTelegramChatId(channel, chatId)) {
+      return `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(chatId)}) — Telegram private chat ids are always numbers`;
+    }
+    // card d3f9b4d2 Minor 1: reject up front rather than writing a home the very next reconcile would
+    // immediately clear — the same live-binding predicate the outbound chokepoint (ChatGateway.mayDeliverTo)
+    // and every reconcile site share. in-app is exempt (it has no "unbound" state).
+    if (!hasLiveCompanionBinding(deps.db, sessionId, { channel, chatId })) {
+      // card d3f9b4d2 round 2, Finding 4: name the UI path a human actually uses, not the raw REST route —
+      // a companion owner pairs a chat (DM pairing) or binds it under the Companion page's Access tab; they
+      // never call POST /api/companion/bindings by hand.
+      return `no live binding for (channel=${channel}, chatId=${chatId}) on session ${sessionId.slice(0, 8)} — pair or bind this chat first (Companion → Access, or DM pairing)`;
+    }
+    return null;
+  };
+
   // The proactive HOME channel target (the proactive card 9488951e reads it), PER COMPANION SESSION
   // (multi-companion cross-delivery fix, task e849a487) — {channel, chatId}, keyed by ?sessionId=.
   app.get("/api/companion/home", async (req, reply) => {
@@ -1510,12 +1546,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!isNonBlankStr(b.chatId)) return reply.code(400).send({ error: "chatId must be a non-empty string" });
     const channel = b.channel.trim();
     const chatId = b.chatId.trim();
-    // card 94754bbe: a numeric-only check, same posture as GUARD 6 below — the real guarantee is
-    // ChatGateway.mayDeliverTo; this is immediate setup-time feedback.
-    if (isNonNumericTelegramChatId(channel, chatId)) {
-      return reply.code(400).send({ error: `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(chatId)}) — Telegram private chat ids are always numbers` });
-    }
     const sessionId = b.sessionId.trim();
+    const homeErr = validateHomeTarget(channel, chatId, sessionId);
+    if (homeErr) return reply.code(400).send({ error: homeErr });
     deps.db.setCompanionHome(sessionId, { channel, chatId });
     // Refresh the controller's live `cfgs` cache (homeChannel/homeChatId) so no cfgs.home reader goes
     // stale — scoped to this one session, same pattern as the config POST/PUT/DELETE routes above.
@@ -1673,16 +1706,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return `this Telegram bot token is already used by another enabled companion (session ${collidingSessionId.slice(0, 8)}) — Telegram allows only one getUpdates consumer per token; give this companion its own token or disable the other one first`;
   };
   // Optional home update carried on a config write — writes app_meta PER SESSION (never a value shared
-  // across companions), returns error|null.
+  // across companions), returns error|null. card d3f9b4d2 round 2: routed through the SAME
+  // validateHomeTarget guard PUT /api/companion/home uses, above — this used to only run the numeric-shape
+  // half and skip the live-binding half, so a config write could set a home the very next reconcile would
+  // immediately clear.
   const applyHomeIfPresent = (body: Record<string, unknown>, sessionId: string): string | null => {
     if (body.home === undefined || body.home === null) return null;
     const h = body.home as { channel?: unknown; chatId?: unknown };
     if (!isNonBlankStr(h.channel) || !isNonBlankStr(h.chatId)) return "home must be { channel, chatId } non-empty strings";
     const channel = h.channel.trim();
     const chatId = h.chatId.trim();
-    if (isNonNumericTelegramChatId(channel, chatId)) {
-      return `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(chatId)}) — Telegram private chat ids are always numbers`;
-    }
+    const homeErr = validateHomeTarget(channel, chatId, sessionId);
+    if (homeErr) return homeErr;
     deps.db.setCompanionHome(sessionId, { channel, chatId });
     return null;
   };
@@ -1950,6 +1985,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         deps.db.upsertCompanionBinding({ sessionId, channel, chatId: allowedChatId, scope: "dm" });
       }
       if (home) deps.db.setCompanionHome(sessionId, home);
+      // card d3f9b4d2 Minor 1: a caller-supplied `home` need not match the binding(s) just written above
+      // (e.g. a Telegram home on an in-app-only provision) — reconcile after every binding mutation, not
+      // just DELETE/POST, so an unbound home is cleared rather than silently persisted dead.
+      await reconcileCompanionBindingRoutes(deps.db, sessionId, deps.companion);
       // (d) arm the running companion — reconcile builds the gateway from the bindings above; the Telegram
       // adapter arms ONLY when a token exists (in-app-only ⇒ no external adapter). reconcile is best-effort
       // (never throws), so it never triggers rollback — only a durable write failure above does. Scoped to

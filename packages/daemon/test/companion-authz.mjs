@@ -293,8 +293,10 @@ try {
     check("REST home: GET is null before set", JSON.parse((await app.inject({ method: "GET", url: "/api/companion/home?sessionId=s1" })).payload ?? "null") === null);
     const putMissingSid = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { channel: "telegram", chatId: "900900009" } });
     check("REST home: PUT missing sessionId → 400", putMissingSid.statusCode === 400);
-    const putHome = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "s1", channel: "telegram", chatId: "900900009" } });
-    check("REST home: PUT sets + echoes", putHome.statusCode === 200 && JSON.parse(putHome.payload).chatId === "900900009");
+    // card d3f9b4d2 Minor 1: PUT /home now requires a live binding for a non-in-app route — "600700800" is
+    // the group binding s1 already has (bound above), so this exercises the cache-refresh, not the new guard.
+    const putHome = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "s1", channel: "telegram", chatId: "600700800" } });
+    check("REST home: PUT sets + echoes", putHome.statusCode === 200 && JSON.parse(putHome.payload).chatId === "600700800");
     // card af12f808: a home write must reconcile the controller LIVE (scoped to the ONE session that changed)
     // so its cfgs cache never goes stale — see companion-home-cache.mjs for the full cache-refresh proof.
     check("REST home: PUT reconciles the controller, scoped to s1", reconciled[reconciled.length - 1] === "s1");

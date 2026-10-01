@@ -408,7 +408,10 @@ try {
     const list0 = await inject({ method: "GET", url: "/api/companion/config" });
     check("REST GET: empty list before any create", list0.statusCode === 200 && JSON.parse(list0.payload).length === 0);
 
-    // CREATE.
+    // CREATE. card d3f9b4d2 round 2: the config route's own `home` field is now routed through the SAME
+    // live-binding guard PUT /api/companion/home uses, so the home's route needs a live binding first —
+    // same precondition companion-unbind-reconcile.mjs's own case 9 and 8's PUT /home control exercise.
+    db.upsertCompanionBinding({ sessionId: "sess-1", channel: "telegram", chatId: "700800002", scope: "dm" });
     const create = await inject({ method: "POST", url: "/api/companion/config", payload: {
       sessionId: "sess-1", botToken: PLAINTEXT, allowedChatId: "700800001", chatScope: "dm",
       heartbeatIntervalMinutes: 360, home: { channel: "telegram", chatId: "700800002" },

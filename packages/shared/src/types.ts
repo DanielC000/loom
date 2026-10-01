@@ -1453,6 +1453,17 @@ export type OrchestrationEventKind =
   // point). `detail.reason` is "rate-limited" or "pending". Emitted at most once per defer streak (bounded
   // log growth, mirroring the sibling watchers).
   | "companion_alert_deferred"
+  // ── Companion binding revocation reconciliation (card d3f9b4d2) ───────────────────────────────────
+  // A binding REST unbind left the proactive HOME naming a chat with no live binding left — the home is
+  // cleared (never silently rerouted to a different chat) so the owner sees "no home" rather than a
+  // revoked chat keeping receiving heartbeat/reminder/alert content. Filed under the companion session
+  // (managerSessionId = sessionId); `detail` carries { channel, chatId } — the cleared route.
+  | "companion_home_cleared"
+  // The twin for a RECURRING reminder (reminders.ts): its own pinned route named a chat with no live
+  // binding left after an unbind, so the route is cleared back to the session's always-live in-app
+  // fallback (never rerouted to a different chat) rather than continuing to target an unreachable one.
+  // Filed under the companion session; `detail` carries { reminderId, channel, chatId }.
+  | "companion_reminder_rerouted"
   // Scoped per-project DEPLOY (orchestration `deploy`, design [[Scoped Per-Project Deploy — Design]]
   // 13235b62): a manager ran its OWN project's HUMAN-configured `orchestration.deployCommand` (the
   // owner's opt-in-once trust decision — no per-deploy confirm). Filed under the CALLING MANAGER
@@ -1678,6 +1689,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   session_rate_limited: true, rate_limit_resumed: true, rate_limit_recovered: true,
   rate_limit_bailed: true, usage_latch_armed: true, usage_latch_cleared: true,
   worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,
+  companion_home_cleared: true, companion_reminder_rerouted: true,
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true,

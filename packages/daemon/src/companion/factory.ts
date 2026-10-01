@@ -18,6 +18,7 @@ import type { CompanionConfig } from "./config.js";
 import { createTelegramAdapter, TELEGRAM_CHANNEL } from "./telegram.js";
 import { IN_APP_CHANNEL, type InAppChannel } from "./in-app.js";
 import { isLikelyGroupTelegramChatId, isNonNumericTelegramChatId, InvalidTelegramChatIdError, type CompanionHistoryExport, type CompanionHistoryReset, type CompanionLivePush, type CompanionMessageRecorder, type CompanionRoute, type CompanionSynthesizer, type CompanionTranscriber, type SessionBinding, type SubmitTurn } from "./types.js";
+import { reconcileCompanionBindingRoutes } from "./reconcile.js";
 import type { CompanionBinding, CompanionMessage } from "@loom/shared";
 
 /** The narrow db surface the factory needs: the durable binding store + the allowlist reader (for authz)
@@ -46,6 +47,14 @@ export interface CompanionBindingStore extends AllowlistReader, PairingStore, Vo
   /** Outbound-suppression flag persistence (card 7578dea2): threaded to the gateway's `flagNonPrivateBinding`
    *  hook, so a binding `warnUnconfirmedDirectInbound` observes as non-private stays flagged across a restart. */
   flagCompanionBindingNonPrivate(sessionId: string, channel: string): void;
+  // card d3f9b4d2 Minor 1: the remaining surface companion/reconcile.ts's CompanionRouteReconcileStore
+  // needs (getCompanionHome is already declared above) — threaded to the gateway's `reconcileBindingChange`
+  // hook (dm-bind pairing redemption).
+  getCompanionBindingsForSession(sessionId: string): { channel: string; chatId: string }[];
+  clearCompanionHome(sessionId: string): void;
+  listCompanionRemindersForSession(sessionId: string): { id: string; route: CompanionRoute | null }[];
+  clearCompanionReminderRoute(reminderId: string): void;
+  appendEvent(evt: { id: string; ts: string; managerSessionId: string; kind: string; detail?: Record<string, unknown> }): void;
 }
 
 /** Drop the db-only createdAt — the gateway's routing map wants just the SessionBinding shape. Carries
@@ -205,7 +214,11 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   const onReplyDelivered = (sessionId: string) => db.recordChatReplyDelivered(sessionId);
   // Outbound-suppression persistence (card 7578dea2): see ChatGateway's flagNonPrivateBinding doc.
   const flagNonPrivateBinding = (b: SessionBinding) => db.flagCompanionBindingNonPrivate(b.sessionId, b.channel);
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow, onReplyDelivered, flagNonPrivateBinding);
+  // card d3f9b4d2 Minor 1: see ChatGateway's reconcileBindingChange call site for why this only ever
+  // reconciles a FIRST dm-bind pair (or an idempotent same-chat re-pair) — db.ts's own takeover check
+  // already refuses a redemption that would repoint an already-bound session at a different chatId.
+  const reconcileBindingChange = (sessionId: string) => reconcileCompanionBindingRoutes(db, sessionId);
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow, onReplyDelivered, flagNonPrivateBinding, reconcileBindingChange);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

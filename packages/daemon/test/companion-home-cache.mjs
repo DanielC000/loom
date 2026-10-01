@@ -87,6 +87,10 @@ try {
     check("precondition: session is live", rig.controller.liveSessionIds().includes("assist-1"));
     check("precondition: cache holds the OLD home", rig.controller.configFor("assist-1")?.homeChannel === "telegram" && rig.controller.configFor("assist-1")?.homeChatId === "chat-old");
 
+    // card d3f9b4d2 Minor 1: PUT /home now requires a live binding for a non-in-app route — bind the target
+    // FIRST (the test's actual subject is the cache refresh, not this new validation).
+    db.upsertCompanionBinding({ sessionId: "assist-1", channel: "discord", chatId: "chat-new", scope: "dm" });
+
     const stub = {};
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, companion: rig.controller, requestShutdown: () => {} });
 
@@ -134,7 +138,10 @@ try {
   {
     const db = new Db(dbFile("p3.db"));
     const rig = makeRig(db);
-    // No config row / no reconcile — "never-armed" has no live cfgs entry at all.
+    // No config row / no reconcile — "never-armed" has no live cfgs entry at all. Still needs a live BINDING
+    // (card d3f9b4d2 Minor 1's new PUT validation is independent of controller liveness — a durable binding
+    // row, not an armed session, is what it checks).
+    db.upsertCompanionBinding({ sessionId: "never-armed", channel: "telegram", chatId: "600600600", scope: "dm" });
     const stub = {};
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, companion: rig.controller, requestShutdown: () => {} });
 
