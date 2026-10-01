@@ -126,16 +126,16 @@ try {
     // (2a) env set, NO existing row → boot seeding creates the row (token encrypted) + lays app_meta home.
     const db = new Db(dbFile("p2a.db"));
     const env = {
-      LOOM_COMPANION_BOT_TOKEN: PLAINTEXT, LOOM_COMPANION_CHAT_ID: "chat-env", LOOM_COMPANION_SESSION_ID: "sess-env",
+      LOOM_COMPANION_BOT_TOKEN: PLAINTEXT, LOOM_COMPANION_CHAT_ID: "700800101", LOOM_COMPANION_SESSION_ID: "sess-env",
       LOOM_COMPANION_HEARTBEAT_INTERVAL_MINUTES: "120",
     };
     const resolved = resolveAllCompanionConfigs(db, env);
     check("env-bootstrap: resolves a live config", resolved.length === 1 && resolved[0].sessionId === "sess-env" && resolved[0].botToken === PLAINTEXT);
     check("env-bootstrap: cadence carried from env", resolved[0].heartbeatIntervalMinutes === 120);
     const seeded = db.getCompanionConfig("sess-env");
-    check("env-bootstrap: a DB row was seeded", !!seeded && seeded.allowedChatId === "chat-env");
+    check("env-bootstrap: a DB row was seeded", !!seeded && seeded.allowedChatId === "700800101");
     check("env-bootstrap: the seeded token is ENCRYPTED (blob decrypts to the token, not stored plaintext)", seeded.botTokenBlob !== PLAINTEXT && decryptSecret(seeded.botTokenBlob) === PLAINTEXT);
-    check("env-bootstrap: app_meta home laid from env, PER SESSION (defaults to allowedChatId)", JSON.stringify(db.getCompanionHome("sess-env")) === JSON.stringify({ channel: "telegram", chatId: "chat-env" }));
+    check("env-bootstrap: app_meta home laid from env, PER SESSION (defaults to allowedChatId)", JSON.stringify(db.getCompanionHome("sess-env")) === JSON.stringify({ channel: "telegram", chatId: "700800101" }));
     db.close();
 
     // (2b) BOTH env AND a pre-existing DB row (SAME session) → env OVERRIDES (env wins per the PL ruling).
@@ -410,12 +410,12 @@ try {
 
     // CREATE.
     const create = await inject({ method: "POST", url: "/api/companion/config", payload: {
-      sessionId: "sess-1", botToken: PLAINTEXT, allowedChatId: "chat-1", chatScope: "dm",
-      heartbeatIntervalMinutes: 360, home: { channel: "telegram", chatId: "home-1" },
+      sessionId: "sess-1", botToken: PLAINTEXT, allowedChatId: "700800001", chatScope: "dm",
+      heartbeatIntervalMinutes: 360, home: { channel: "telegram", chatId: "700800002" },
     } });
     const created = JSON.parse(create.payload);
     check("REST POST: create → 201 masked", create.statusCode === 201 && created.configured === true && created.tokenLast4 === LAST4);
-    check("REST POST: masked create carries home from the body", JSON.stringify(created.home) === JSON.stringify({ channel: "telegram", chatId: "home-1" }));
+    check("REST POST: masked create carries home from the body", JSON.stringify(created.home) === JSON.stringify({ channel: "telegram", chatId: "700800002" }));
     check("REST POST: envPinned false (no LOOM_COMPANION_* in process.env)", created.envPinned === false);
     check("REST POST: create body has NO plaintext token", !create.payload.includes(PLAINTEXT));
     // The STORED blob is ciphertext.
@@ -445,7 +445,7 @@ try {
     // catching it before the reconcile-time skip-and-warn safety net ever has to act. `sess-1` is currently
     // enabled on NEWTOKEN (from the PUT above).
     const collideCreate = await inject({ method: "POST", url: "/api/companion/config", payload: {
-      sessionId: "sess-2", botToken: NEWTOKEN, allowedChatId: "chat-2", chatScope: "dm",
+      sessionId: "sess-2", botToken: NEWTOKEN, allowedChatId: "700800003", chatScope: "dm",
     } });
     check("REST POST: creating a 2nd ENABLED companion on sess-1's token → 409", collideCreate.statusCode === 409 && /already used by another enabled companion/.test(JSON.parse(collideCreate.payload).error));
     check("REST POST: the rejected collision leaves NO 'sess-2' row", db.getCompanionConfig("sess-2") === undefined);
@@ -453,7 +453,7 @@ try {
 
     // A DISABLED create on the same token is unaffected (never armed, so never a collision).
     const disabledSameToken = await inject({ method: "POST", url: "/api/companion/config", payload: {
-      sessionId: "sess-2", botToken: NEWTOKEN, allowedChatId: "chat-2", chatScope: "dm", enabled: false,
+      sessionId: "sess-2", botToken: NEWTOKEN, allowedChatId: "700800003", chatScope: "dm", enabled: false,
     } });
     check("REST POST: a DISABLED create on the same token is NOT a collision → 201", disabledSameToken.statusCode === 201);
 
@@ -478,7 +478,7 @@ try {
     check("REST POST: create with NO token → 400", (await inject({ method: "POST", url: "/api/companion/config", payload: { sessionId: "fresh", allowedChatId: "c" } })).statusCode === 400);
     check("REST POST: create with NO allowedChatId → 400", (await inject({ method: "POST", url: "/api/companion/config", payload: { sessionId: "fresh", botToken: PLAINTEXT } })).statusCode === 400);
     check("REST POST: invalid chatScope → 400", (await inject({ method: "POST", url: "/api/companion/config", payload: { sessionId: "fresh", botToken: PLAINTEXT, allowedChatId: "c", chatScope: "public" } })).statusCode === 400);
-    check("REST POST: negative cadence → 400", (await inject({ method: "POST", url: "/api/companion/config", payload: { sessionId: "fresh", botToken: PLAINTEXT, allowedChatId: "c", heartbeatIntervalMinutes: -5 } })).statusCode === 400);
+    check("REST POST: negative cadence → 400", (await inject({ method: "POST", url: "/api/companion/config", payload: { sessionId: "fresh", botToken: PLAINTEXT, allowedChatId: "700800004", heartbeatIntervalMinutes: -5 } })).statusCode === 400);
     check("REST POST: a rejected create left no 'fresh' row", db.getCompanionConfig("fresh") === undefined);
 
     // ---- WRITE-ROUTE ROLE GATE (bug fix regression): POST /config, /bindings, /allowed-senders, /pairing
@@ -515,7 +515,7 @@ try {
 
     // An assistant-role sessionId still succeeds on every one of the four write routes (no regression).
     const okBinding = await inject({ method: "POST", url: "/api/companion/bindings", payload: {
-      sessionId: "sess-1", channel: "telegram", chatId: "chat-ok", scope: "dm",
+      sessionId: "sess-1", channel: "telegram", chatId: "920920001", scope: "dm",
     } });
     check("write-gate: POST /bindings on an assistant sessionId still succeeds → 201", okBinding.statusCode === 201);
     const okAllowedSender = await inject({ method: "POST", url: "/api/companion/allowed-senders", payload: {

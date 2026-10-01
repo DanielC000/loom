@@ -205,7 +205,7 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
 {
   const fakeAdapter = (name, sent) => ({ name, maxMessageLength: 4096, start() {}, async stop() {}, async send(chatId, text) { sent.push({ chatId, text }); } });
   const noopSubmit = () => ({ delivered: true });
-  const home = { channel: "telegram", chatId: "home-chat" };
+  const home = { channel: "telegram", chatId: "900900001" }; // numeric: a real Telegram private chat id (card 94754bbe's mayDeliverTo fix would refuse a non-numeric home target)
 
   // (a) With a configured HOME, a fired heartbeat carries it as the turn's ROUTE (so the turn's chat_reply
   //     later resolves to home via the pty's per-turn origin — no special-case in deliverReply).
@@ -237,7 +237,7 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
     const gw = new ChatGateway(noopSubmit, [], undefined, undefined, (sid) => (sid === "hb-sess" ? home : null));
     gw.registerAdapter(fakeAdapter("telegram", sent));
     const res = await gw.deliverReply("hb-sess", "proactive hello");
-    check("per-turn-route: a proactive reply on the home-routed turn lands on the HOME chat", res.delivered === true && sent.length === 1 && sent[0].chatId === "home-chat" && sent[0].text === "proactive hello");
+    check("per-turn-route: a proactive reply on the home-routed turn lands on the HOME chat", res.delivered === true && sent.length === 1 && sent[0].chatId === "900900001" && sent[0].text === "proactive hello");
     const none = await gw.deliverReply("no-route-sess", "x");
     check("per-turn-route: a turn with no route → no-target, nothing sent", none.delivered === false && none.reason === "no-target" && sent.length === 1);
   }

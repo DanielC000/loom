@@ -80,13 +80,13 @@ try {
     const db = new Db(dbFile("p1.db"));
     db.upsertCompanionBinding({ sessionId: "sess-G", channel: "telegram", chatId: "group-1", scope: "group" });
     db.addAllowedSender({ sessionId: "sess-G", channel: "telegram", senderId: "alice", label: "Alice" });
-    db.upsertCompanionBinding({ sessionId: "sess-D", channel: "telegram", chatId: "dm-1", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: "sess-D", channel: "telegram", chatId: "300400500", scope: "dm" });
 
     const submitted = [];
     const submit = (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; };
     const gw = new ChatGateway(submit, [
       { sessionId: "sess-G", channel: "telegram", chatId: "group-1", scope: "group" },
-      { sessionId: "sess-D", channel: "telegram", chatId: "dm-1", scope: "dm" },
+      { sessionId: "sess-D", channel: "telegram", chatId: "300400500", scope: "dm" },
     ], createDbCompanionAuth(db));
     gw.registerAdapter(fakeAdapter("telegram", []));
 
@@ -111,18 +111,18 @@ try {
     // (4b) DM binding with a matching chatId + a CONFIRMED-private chat → accept (single-owner path,
     // sender irrelevant). `chatIsDirect: true` mirrors what the real Telegram normalizer reports for a
     // genuine chat.type:"private" update (card b4f124d8 — dm-scope authorization now REQUIRES it).
-    const rDm = await gw.handleInbound({ channel: "telegram", chatId: "dm-1", body: "owner here", sender: { id: "owner" }, chatIsDirect: true });
+    const rDm = await gw.handleInbound({ channel: "telegram", chatId: "300400500", body: "owner here", sender: { id: "owner" }, chatIsDirect: true });
     check("dm: matching chatId + confirmed-private → accepted, submitted to sess-D", rDm.accepted === true && submitted.length === 2 && submitted[1].sid === "sess-D");
-    const rDmNoSender = await gw.handleInbound({ channel: "telegram", chatId: "dm-1", body: "still owner", chatIsDirect: true });
+    const rDmNoSender = await gw.handleInbound({ channel: "telegram", chatId: "300400500", body: "still owner", chatIsDirect: true });
     check("dm: matching chatId + confirmed-private, NO sender → still accepted (route IS the proof)", rDmNoSender.accepted === true && submitted.length === 3);
 
     // SECURITY (card b4f124d8): the SAME dm binding, but the inbound does NOT confirm a private chat —
     // rejected at AUTHORIZATION time, same silent reject as any unauthorized sender. Covers both the
     // explicit-false (a confirmed group/supergroup) and undefined (unknown/malformed) cases.
-    const rDmGroup = await gw.handleInbound({ channel: "telegram", chatId: "dm-1", body: "not actually a dm", sender: { id: "member" }, chatIsDirect: false });
+    const rDmGroup = await gw.handleInbound({ channel: "telegram", chatId: "300400500", body: "not actually a dm", sender: { id: "member" }, chatIsDirect: false });
     check("dm: chatIsDirect:false (confirmed NOT private) → sender-not-authorized", rDmGroup.accepted === false && rDmGroup.reason === "sender-not-authorized");
     check("dm: chatIsDirect:false was NOT submitted", submitted.length === 3);
-    const rDmUnknown = await gw.handleInbound({ channel: "telegram", chatId: "dm-1", body: "unclear", sender: { id: "member" } });
+    const rDmUnknown = await gw.handleInbound({ channel: "telegram", chatId: "300400500", body: "unclear", sender: { id: "member" } });
     check("dm: chatIsDirect omitted (unknown) → sender-not-authorized (fails closed)", rDmUnknown.accepted === false && rDmUnknown.reason === "sender-not-authorized");
     check("dm: chatIsDirect omitted was NOT submitted", submitted.length === 3);
 
@@ -137,7 +137,7 @@ try {
   // ============ Part 2 — durable round-trip + the UNIQUE route index (test 5) ============
   {
     const db1 = new Db(dbFile("p2.db"));
-    db1.upsertCompanionBinding({ sessionId: "sess-G", channel: "telegram", chatId: "group-1", scope: "group" });
+    db1.upsertCompanionBinding({ sessionId: "sess-G", channel: "telegram", chatId: "100200300", scope: "group" });
     db1.addAllowedSender({ sessionId: "sess-G", channel: "telegram", senderId: "alice" });
     db1.setCompanionHome("sess-G", { channel: "telegram", chatId: "home-1" });
     db1.close();
@@ -151,8 +151,10 @@ try {
     check("durable: a DIFFERENT session's home is untouched", db2.getCompanionHome("sess-D") === null);
 
     // The UNIQUE (channel, chat_id) route index: a 2nd, DIFFERENT session claiming the bound route is rejected.
+    // chatId MUST stay numeric here (matching the already-bound route above) — a non-numeric one would hit
+    // card 94754bbe's dm-scope refusal first, which would prove the WRONG thing (any throw, not THIS one).
     let threw = false;
-    try { db2.upsertCompanionBinding({ sessionId: "sess-OTHER", channel: "telegram", chatId: "group-1", scope: "dm" }); } catch { threw = true; }
+    try { db2.upsertCompanionBinding({ sessionId: "sess-OTHER", channel: "telegram", chatId: "100200300", scope: "dm" }); } catch { threw = true; }
     check("durable: UNIQUE route index rejects a 2nd session for the same (channel, chatId)", threw === true);
     check("durable: the rejected 2nd session left no row", db2.listCompanionBindings().length === 1);
     // Re-binding the SAME session to a NEW route is an in-place update (not a dup).
@@ -260,18 +262,18 @@ try {
     }
 
     // FIX [1]: scope is REQUIRED on the REST bind endpoint.
-    const noScope = await app.inject({ method: "POST", url: "/api/companion/bindings", payload: { sessionId: "s1", channel: "telegram", chatId: "c1" } });
+    const noScope = await app.inject({ method: "POST", url: "/api/companion/bindings", payload: { sessionId: "s1", channel: "telegram", chatId: "600700800" } });
     check("REST bind: MISSING scope → 400 (no silent 'dm' default)", noScope.statusCode === 400);
-    const badScope = await app.inject({ method: "POST", url: "/api/companion/bindings", payload: { sessionId: "s1", channel: "telegram", chatId: "c1", scope: "public" } });
+    const badScope = await app.inject({ method: "POST", url: "/api/companion/bindings", payload: { sessionId: "s1", channel: "telegram", chatId: "600700800", scope: "public" } });
     check("REST bind: invalid scope → 400", badScope.statusCode === 400);
     check("REST bind: neither 400 wrote a binding row", db.listCompanionBindings().length === 0);
 
-    const grp = await app.inject({ method: "POST", url: "/api/companion/bindings", payload: { sessionId: "s1", channel: "telegram", chatId: "c1", scope: "group" } });
+    const grp = await app.inject({ method: "POST", url: "/api/companion/bindings", payload: { sessionId: "s1", channel: "telegram", chatId: "600700800", scope: "group" } });
     check("REST bind: explicit scope:'group' → 201", grp.statusCode === 201 && JSON.parse(grp.payload).scope === "group");
     check("REST bind: POST poked the live gateway map (bind called)", bound.length === 1 && bound[0].sessionId === "s1" && bound[0].scope === "group");
 
     // A 2nd session on the same route → 409 (the unique route index).
-    const dup = await app.inject({ method: "POST", url: "/api/companion/bindings", payload: { sessionId: "s2", channel: "telegram", chatId: "c1", scope: "dm" } });
+    const dup = await app.inject({ method: "POST", url: "/api/companion/bindings", payload: { sessionId: "s2", channel: "telegram", chatId: "600700800", scope: "dm" } });
     check("REST bind: a 2nd session for the same route → 409", dup.statusCode === 409);
 
     // Allowed-senders round-trip: add → list (session-scoped) → the authz predicate sees it.
@@ -289,10 +291,10 @@ try {
     // sessionId, and a 2nd session's home is untouched by the 1st's write.
     check("REST home: GET without sessionId → 400", (await app.inject({ method: "GET", url: "/api/companion/home" })).statusCode === 400);
     check("REST home: GET is null before set", JSON.parse((await app.inject({ method: "GET", url: "/api/companion/home?sessionId=s1" })).payload ?? "null") === null);
-    const putMissingSid = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { channel: "telegram", chatId: "home-9" } });
+    const putMissingSid = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { channel: "telegram", chatId: "900900009" } });
     check("REST home: PUT missing sessionId → 400", putMissingSid.statusCode === 400);
-    const putHome = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "s1", channel: "telegram", chatId: "home-9" } });
-    check("REST home: PUT sets + echoes", putHome.statusCode === 200 && JSON.parse(putHome.payload).chatId === "home-9");
+    const putHome = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "s1", channel: "telegram", chatId: "900900009" } });
+    check("REST home: PUT sets + echoes", putHome.statusCode === 200 && JSON.parse(putHome.payload).chatId === "900900009");
     // card af12f808: a home write must reconcile the controller LIVE (scoped to the ONE session that changed)
     // so its cfgs cache never goes stale — see companion-home-cache.mjs for the full cache-refresh proof.
     check("REST home: PUT reconciles the controller, scoped to s1", reconciled[reconciled.length - 1] === "s1");
@@ -312,7 +314,7 @@ try {
     // .trim() → scoped db.deleteCompanionBinding/companion.unbind calls) — driven end-to-end via app.inject,
     // never bypassing the route wiring the connect-Telegram UI will actually call. ----
     db.upsertCompanionBinding({ sessionId: "s3", channel: IN_APP_CHANNEL, chatId: "s3", scope: "dm" });
-    db.upsertCompanionBinding({ sessionId: "s3", channel: "telegram", chatId: "tg-s3", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: "s3", channel: "telegram", chatId: "900900900", scope: "dm" });
     check("REST bind DELETE ?channel=: both channel bindings present before delete", db.listCompanionBindings().filter((b) => b.sessionId === "s3").length === 2);
 
     const delTelegram = await app.inject({ method: "DELETE", url: "/api/companion/bindings/s3?channel=telegram" });
@@ -344,18 +346,18 @@ try {
     const db = new Db(dbFile("p6.db"));
     // PRE-EXISTING dm binding on what is, in reality, a Telegram group chat id — exactly the shape the
     // review flagged (a dm binding minted before card db49891d, or hand-bound by a human).
-    db.upsertCompanionBinding({ sessionId: "sess-P6", channel: "telegram", chatId: "grp-was-dm", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: "sess-P6", channel: "telegram", chatId: "-1009990001", scope: "dm" });
 
     const submitted6 = [];
     const submit6 = (sid, text) => { submitted6.push({ sid, text }); return { delivered: true }; };
-    const gw6 = new ChatGateway(submit6, [{ sessionId: "sess-P6", channel: "telegram", chatId: "grp-was-dm", scope: "dm" }], createDbCompanionAuth(db));
+    const gw6 = new ChatGateway(submit6, [{ sessionId: "sess-P6", channel: "telegram", chatId: "-1009990001", scope: "dm" }], createDbCompanionAuth(db));
     gw6.registerAdapter(fakeAdapter("telegram", []));
 
     // A real Telegram "group" chat.type update, from an identified member, addressed at the pre-existing
     // dm-bound chatId — ON UNFIXED CODE this used to be submitted as a turn (route match alone authorized
     // any dm binding); AFTER the fix it is refused, same silent reject as an unauthorized group sender.
     const groupUpdate = normalizeTelegramMessage({
-      message: { chat: { id: "grp-was-dm", type: "group" }, text: "let me drive this companion", from: { id: "member-1" } },
+      message: { chat: { id: "-1009990001", type: "group" }, text: "let me drive this companion", from: { id: "member-1" } },
     });
     check("p6: normalizer reports chatIsDirect:false for the group update", groupUpdate?.chatIsDirect === false);
     const rGroup = await gw6.handleInbound(groupUpdate);
@@ -364,23 +366,23 @@ try {
 
     // Same for "supergroup".
     const supergroupUpdate = normalizeTelegramMessage({
-      message: { chat: { id: "grp-was-dm", type: "supergroup" }, text: "me too", from: { id: "member-2" } },
+      message: { chat: { id: "-1009990001", type: "supergroup" }, text: "me too", from: { id: "member-2" } },
     });
     const rSuper = await gw6.handleInbound(supergroupUpdate);
     check("p6: dm binding on a SUPERGROUP chat → REFUSED", rSuper.accepted === false && rSuper.reason === "sender-not-authorized");
     check("p6: the supergroup message was NOT submitted", submitted6.length === 0);
 
     // A channel update that can't report chat type (chatIsDirect omitted) fails CLOSED too.
-    const rUnknown = await gw6.handleInbound({ channel: "telegram", chatId: "grp-was-dm", body: "unclear", sender: { id: "member-3" } });
+    const rUnknown = await gw6.handleInbound({ channel: "telegram", chatId: "-1009990001", body: "unclear", sender: { id: "member-3" } });
     check("p6: chatIsDirect omitted (unknown) → REFUSED (fails closed)", rUnknown.accepted === false && rUnknown.reason === "sender-not-authorized");
     check("p6: the unknown-type message was NOT submitted", submitted6.length === 0);
 
     // A REAL private chat at a DIFFERENT chatId on the SAME binding-scope still works — the fix rejects an
     // unconfirmed chat, it does not break genuine dm routing.
-    db.upsertCompanionBinding({ sessionId: "sess-P6-real", channel: "telegram", chatId: "real-private", scope: "dm" });
-    const gw6b = new ChatGateway(submit6, [{ sessionId: "sess-P6-real", channel: "telegram", chatId: "real-private", scope: "dm" }], createDbCompanionAuth(db));
+    db.upsertCompanionBinding({ sessionId: "sess-P6-real", channel: "telegram", chatId: "555000111", scope: "dm" });
+    const gw6b = new ChatGateway(submit6, [{ sessionId: "sess-P6-real", channel: "telegram", chatId: "555000111", scope: "dm" }], createDbCompanionAuth(db));
     const privateUpdate = normalizeTelegramMessage({
-      message: { chat: { id: "real-private", type: "private" }, text: "hello", from: { id: "owner" } },
+      message: { chat: { id: "555000111", type: "private" }, text: "hello", from: { id: "owner" } },
     });
     check("p6: normalizer reports chatIsDirect:true for the private update", privateUpdate?.chatIsDirect === true);
     const rPrivate = await gw6b.handleInbound(privateUpdate);
@@ -399,7 +401,7 @@ try {
   // consults an allowlist). The owner sees a false "paired" ack and the code is gone for nothing.
   {
     const db = new Db(dbFile("p7.db"));
-    db.upsertCompanionBinding({ sessionId: "sess-P7", channel: "telegram", chatId: "grp-mis-scoped", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: "sess-P7", channel: "telegram", chatId: "-1009990002", scope: "dm" });
     // A genuinely valid group-sender code, minted for this SAME session — plausible if the binding was
     // dm-scoped by mistake AFTER a group-sender code had already been issued, or an admin mis-minted one.
     const clock = { t: 1_000_000 };
@@ -410,12 +412,12 @@ try {
     const submit7 = (sid, text) => { submitted7.push({ sid, text }); return { delivered: true }; };
     const sent7 = [];
     const pairing7 = createDbCompanionPairing(db, { now: () => clock.t });
-    const gw7 = new ChatGateway(submit7, [{ sessionId: "sess-P7", channel: "telegram", chatId: "grp-mis-scoped", scope: "dm" }], createDbCompanionAuth(db), pairing7);
+    const gw7 = new ChatGateway(submit7, [{ sessionId: "sess-P7", channel: "telegram", chatId: "-1009990002", scope: "dm" }], createDbCompanionAuth(db), pairing7);
     gw7.registerAdapter(fakeAdapter("telegram", sent7));
 
     // A group member sends the valid group-sender code's TEXT to the mis-scoped dm binding's chat.
     const groupUpdate = normalizeTelegramMessage({
-      message: { chat: { id: "grp-mis-scoped", type: "group" }, text: gcode, from: { id: "member-1" } },
+      message: { chat: { id: "-1009990002", type: "group" }, text: gcode, from: { id: "member-1" } },
     });
     const r7 = await gw7.handleInbound(groupUpdate);
     check("p7: a dm binding on a group chat REFUSES even a valid group-sender code (never attempts redemption)", r7.accepted === false && r7.reason === "sender-not-authorized");

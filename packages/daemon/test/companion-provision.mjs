@@ -181,7 +181,7 @@ try {
   // ============ Part 2 — provision WITH botToken + allowedChatId ⇒ Telegram ALSO wired ============
   {
     const rig = await makeRig("p2.db"); rigs.push(rig);
-    const res = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "chat-9", cadence: 360 } });
+    const res = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "970970001", cadence: 360 } });
     const body = JSON.parse(res.payload);
     check("telegram: → 201", res.statusCode === 201);
     const sid = rig.spawned[0];
@@ -198,7 +198,7 @@ try {
     check("telegram: the session has BOTH bindings (in-app + telegram)", binds.length === 2);
     const tgBind = binds.find((b) => b.channel === TELEGRAM);
     const inAppBind = binds.find((b) => b.channel === IN_APP_CHANNEL);
-    check("telegram: the Telegram dm binding is written { telegram, chat-9, dm }", !!tgBind && tgBind.chatId === "chat-9" && tgBind.scope === "dm");
+    check("telegram: the Telegram dm binding is written { telegram, 970970001, dm }", !!tgBind && tgBind.chatId === "970970001" && tgBind.scope === "dm");
     check("telegram: the in-app binding coexists (not clobbered) { in-app, chatId==sessionId, dm }", !!inAppBind && inAppBind.chatId === sid && inAppBind.scope === "dm");
 
     check("telegram: the Telegram adapter is ARMED (started)", rig.gw.built.length === 1 && rig.gw.built[0].telegram && rig.gw.built[0].telegram.started === 1);
@@ -335,11 +335,11 @@ try {
   {
     const rig = await makeRig("p6g2.db"); rigs.push(rig);
     const home = rig.db.getReservedProjectByName(SETUP_PROJECT_NAME);
-    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "chat-first" } });
+    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "970970002" } });
     check("noleak(6g-ii): first (default, telegram) provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
     const agentsBefore = rig.db.listAgents(home.id).length;
     // GUARD 4 (token collision) rejects a would-be-cloned 2nd companion — no agent leaked.
-    const g4 = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "chat-second" } });
+    const g4 = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "970970003" } });
     check("noleak(6g-ii): the auto-clone path still enforces GUARD 4 (409)", g4.statusCode === 409 && /already used by another enabled companion/.test(JSON.parse(g4.payload).error));
     check("noleak(6g-ii): NO agent leaked on the rejected attempt", rig.db.listAgents(home.id).length === agentsBefore);
     check("noleak(6g-ii): NO 2nd session spawned either", rig.spawned.length === 1);
@@ -386,15 +386,15 @@ try {
   // nothing to roll back). A DISTINCT token still provisions fine.
   {
     const rig = await makeRig("p6d.db"); rigs.push(rig);
-    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "chat-first" } });
+    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "970970002" } });
     check("guard(6d): first Telegram provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
-    const collide = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "chat-second" } });
+    const collide = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "970970003" } });
     check("guard(6d): a 2nd provision on the SAME token → 409", collide.statusCode === 409 && /already used by another enabled companion/.test(JSON.parse(collide.payload).error));
     check("guard(6d): NO session spawned for the rejected collision (nothing to roll back)", rig.spawned.length === 1);
     check("guard(6d): the collision error never leaks the plaintext token", !collide.payload.includes(TOKEN));
     // A DISTINCT token still provisions fine (the guard is token-scoped, not a single-companion 409).
     const TOKEN_OTHER = "8222222222:distinct-second-companion-token";
-    const distinct = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN_OTHER, allowedChatId: "chat-third" } });
+    const distinct = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN_OTHER, allowedChatId: "970970004" } });
     check("guard(6d): a DIFFERENT token still provisions (201) — distinct tokens are never a collision", distinct.statusCode === 201 && rig.spawned.length === 2);
   }
 
@@ -407,11 +407,11 @@ try {
     const sid = "sess-factory";
     // A tokenless in-app companion: an in-app binding + a stray telegram binding to probe adapter presence.
     db.upsertCompanionBinding({ sessionId: sid, channel: IN_APP_CHANNEL, chatId: sid, scope: "dm" });
-    db.upsertCompanionBinding({ sessionId: "sess-tg", channel: TELEGRAM, chatId: "chat-x", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: "sess-tg", channel: TELEGRAM, chatId: "960960001", scope: "dm" });
     const cfg = { botToken: null, allowedChatId: "", sessionId: sid, chatScope: "dm", homeChannel: IN_APP_CHANNEL, homeChatId: sid, heartbeatIntervalMinutes: 0, heartbeatPrompt: "x" };
     // 5th arg = the per-turn origin resolver (stands in for pty.getActiveTurnOrigin): each session's turn came
     // in on its own route, so deliverReply targets that channel — proving adapter PRESENCE (in-app yes, telegram no).
-    const originResolver = (s) => (s === sid ? { channel: IN_APP_CHANNEL, chatId: sid } : s === "sess-tg" ? { channel: TELEGRAM, chatId: "chat-x" } : null);
+    const originResolver = (s) => (s === sid ? { channel: IN_APP_CHANNEL, chatId: sid } : s === "sess-tg" ? { channel: TELEGRAM, chatId: "960960001" } : null);
     const gw = createCompanionGateway(cfg, () => ({ delivered: true }), db, inApp, originResolver);
     const inAppOut = await gw.deliverReply(sid, "hi"); // in-app adapter registered ⇒ delivered
     const tgOut = await gw.deliverReply("sess-tg", "hi"); // NO telegram adapter ⇒ no-adapter

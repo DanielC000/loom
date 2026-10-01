@@ -43,6 +43,7 @@ import type { CompanionControl } from "../companion/controller.js";
 import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
+import { isNonNumericTelegramChatId, InvalidTelegramChatIdError } from "../companion/types.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
 import { buildCompanionReplyStatus, checkCompanionReplyHealth } from "../companion/reply-watch.js";
 import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, GIT_PUSH_TARGETS, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
@@ -1434,12 +1435,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     try {
       binding = deps.db.upsertCompanionBinding({ sessionId: b.sessionId.trim(), channel: b.channel.trim(), chatId: b.chatId.trim(), scope });
     } catch (e) {
+      // card 94754bbe: a non-numeric dm-scope Telegram chatId (e.g. "@somechannel") is a client input
+      // error, not a route conflict — distinguish it from the UNIQUE-route-index throw below.
+      if (e instanceof InvalidTelegramChatIdError) return reply.code(400).send({ error: e.message });
       // The UNIQUE (channel, chat_id) route index rejected a 2nd session claiming a bound route.
       return reply.code(409).send({ error: `that (channel, chatId) route is already bound to another session: ${(e as Error).message}` });
     }
     // Keep the live routing map in sync so the new/edited binding takes effect with no restart. Carries
-    // flaggedNonPrivate through (always false here — upsertCompanionBinding just reset it, card 7578dea2)
-    // so a re-bind clears outbound suppression LIVE, with no restart needed.
+    // flaggedNonPrivate through — computed FRESH by upsertCompanionBinding via isLikelyGroupTelegramChatId
+    // (card 61e33b99; docs/decisions/61e33b99-boot-time-preflag-group-dm-bindings.md), so a re-bind with a
+    // genuine fix clears outbound suppression LIVE, and a re-bind that doesn't fix it stays suppressed —
+    // either way with no restart needed.
     deps.companion?.bind({ sessionId: binding.sessionId, channel: binding.channel, chatId: binding.chatId, scope: binding.scope, flaggedNonPrivate: binding.flaggedNonPrivate });
     return reply.code(201).send(binding);
   });
@@ -1502,8 +1508,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!isNonBlankStr(b.sessionId)) return reply.code(400).send({ error: "sessionId must be a non-empty string" });
     if (!isNonBlankStr(b.channel)) return reply.code(400).send({ error: "channel must be a non-empty string" });
     if (!isNonBlankStr(b.chatId)) return reply.code(400).send({ error: "chatId must be a non-empty string" });
+    const channel = b.channel.trim();
+    const chatId = b.chatId.trim();
+    // card 94754bbe: a numeric-only check, same posture as GUARD 6 below — the real guarantee is
+    // ChatGateway.mayDeliverTo; this is immediate setup-time feedback.
+    if (isNonNumericTelegramChatId(channel, chatId)) {
+      return reply.code(400).send({ error: `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(chatId)}) — Telegram private chat ids are always numbers` });
+    }
     const sessionId = b.sessionId.trim();
-    deps.db.setCompanionHome(sessionId, { channel: b.channel.trim(), chatId: b.chatId.trim() });
+    deps.db.setCompanionHome(sessionId, { channel, chatId });
     // Refresh the controller's live `cfgs` cache (homeChannel/homeChatId) so no cfgs.home reader goes
     // stale — scoped to this one session, same pattern as the config POST/PUT/DELETE routes above.
     await deps.companion?.reconcile(sessionId);
@@ -1603,6 +1616,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (body.chatScope === "dm" || body.chatScope === "group") chatScope = body.chatScope;
     else if (body.chatScope !== undefined) return { error: "chatScope must be 'dm' or 'group'" };
     else chatScope = existing?.chatScope ?? "dm";
+    // card 94754bbe: the config-write twin of the provision endpoint's GUARD 6 — a dm-scope Telegram
+    // allowedChatId must be numeric; a group-scope one may legitimately use "@handle" addressing.
+    if (chatScope === "dm" && isNonNumericTelegramChatId(channel, allowedChatId)) {
+      return { error: `allowedChatId must be a numeric Telegram chat id (got ${JSON.stringify(allowedChatId)}) — Telegram private chat ids are always numbers` };
+    }
     // heartbeatIntervalMinutes: optional non-negative integer (0 = off).
     let heartbeatIntervalMinutes: number;
     if (body.heartbeatIntervalMinutes !== undefined) {
@@ -1660,7 +1678,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (body.home === undefined || body.home === null) return null;
     const h = body.home as { channel?: unknown; chatId?: unknown };
     if (!isNonBlankStr(h.channel) || !isNonBlankStr(h.chatId)) return "home must be { channel, chatId } non-empty strings";
-    deps.db.setCompanionHome(sessionId, { channel: h.channel.trim(), chatId: h.chatId.trim() });
+    const channel = h.channel.trim();
+    const chatId = h.chatId.trim();
+    if (isNonNumericTelegramChatId(channel, chatId)) {
+      return `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(chatId)}) — Telegram private chat ids are always numbers`;
+    }
+    deps.db.setCompanionHome(sessionId, { channel, chatId });
     return null;
   };
 
@@ -1812,6 +1835,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     else if (b.channel !== undefined && b.channel !== null) {
       return reply.code(400).send({ error: "channel must be a non-empty string" });
     }
+    // GUARD 6 (dm-scope Telegram chatId must be numeric, card 94754bbe): this endpoint only ever writes a
+    // "dm"-scope Telegram binding for allowedChatId (below) — a Telegram private chat id is always a
+    // positive integer, so reject a non-numeric handle (e.g. "@somechannel") up front rather than spawning
+    // a session and rolling it back; db.upsertCompanionBinding's own refusal is the structural backstop.
+    if (allowedChatId && isNonNumericTelegramChatId(channel, allowedChatId)) {
+      return reply.code(400).send({ error: `allowedChatId must be a numeric Telegram chat id (got ${JSON.stringify(allowedChatId)}) — Telegram private chat ids are always numbers` });
+    }
     // cadence: optional proactive heartbeat interval in minutes (0 = off).
     let cadence = 0;
     if (b.cadence !== undefined && b.cadence !== null) {
@@ -1854,7 +1884,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (b.home !== undefined && b.home !== null) {
       const h = b.home as { channel?: unknown; chatId?: unknown };
       if (!isNonBlankStr(h.channel) || !isNonBlankStr(h.chatId)) return reply.code(400).send({ error: "home must be { channel, chatId } non-empty strings" });
-      home = { channel: h.channel.trim(), chatId: h.chatId.trim() };
+      const homeChannel = h.channel.trim();
+      const homeChatId = h.chatId.trim();
+      // card 94754bbe: same numeric-only guard as GUARD 6 above — a home target gets the same pre-spawn check.
+      if (isNonNumericTelegramChatId(homeChannel, homeChatId)) {
+        return reply.code(400).send({ error: `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(homeChatId)}) — Telegram private chat ids are always numbers` });
+      }
+      home = { channel: homeChannel, chatId: homeChatId };
     }
 
     // Mint the DEFERRED clone now — every pre-spawn guard above has passed, so this insert and the session

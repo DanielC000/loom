@@ -133,7 +133,7 @@ function makeDeadTrackingPty() {
   return { isAlive: (sid) => !dead.has(sid), enqueueStdin: () => ({ delivered: true }), getPending: () => [], kill: (sid) => dead.add(sid) };
 }
 
-function writeConfig(db, { sessionId, token = TOKEN_A, chatId = "chat-1", scope = "dm", cadence = 0, enabled = true }) {
+function writeConfig(db, { sessionId, token = TOKEN_A, chatId = "992992000", scope = "dm", cadence = 0, enabled = true }) {
   db.upsertCompanionConfig({
     sessionId, botTokenBlob: encryptSecret(token), channel: "telegram", allowedChatId: chatId,
     chatScope: scope, heartbeatIntervalMinutes: cadence, heartbeatPrompt: null, enabled,
@@ -181,12 +181,12 @@ try {
     const orch = new OrchestrationMcpRouter(db, {}, hooks);
     await controller.startInitial(null); // OFF at boot
 
-    writeConfig(db, { sessionId: "A", token: TOKEN_A, chatId: "chat-A", cadence: 360 });
+    writeConfig(db, { sessionId: "A", token: TOKEN_A, chatId: "992992001", cadence: 360 });
     await controller.reconcile();
     check("1a: config A alone arms exactly one gateway", gw.built.length === 1 && controller.liveSessionIds().join(",") === "A");
     check("1a: A's heartbeat armed (cadence>0)", hb.built.length === 1 && hb.built[0].cfg.sessionId === "A");
 
-    writeConfig(db, { sessionId: "B", token: TOKEN_B, chatId: "chat-B", cadence: 360 });
+    writeConfig(db, { sessionId: "B", token: TOKEN_B, chatId: "992992002", cadence: 360 });
     await controller.reconcile();
     check("1b: enabling B arms a SECOND, DISTINCT gateway — A's is untouched", gw.built.length === 2 && controller.liveSessionIds().sort().join(",") === "A,B");
     check("1b: A's adapter was NEVER restarted (still started once, stopped never)", gw.forSession("A")[0].adapter.started === 1 && gw.forSession("A")[0].adapter.stopped === 0);
@@ -211,29 +211,29 @@ try {
       pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getPending: () => [] },
       hooks, env: {}, buildGateway: gw.builder, buildHeartbeat: hb.builder,
     });
-    writeConfig(db, { sessionId: "A", token: TOKEN_A, chatId: "chat-A" });
-    writeConfig(db, { sessionId: "B", token: TOKEN_B, chatId: "chat-B" });
+    writeConfig(db, { sessionId: "A", token: TOKEN_A, chatId: "992992001" });
+    writeConfig(db, { sessionId: "B", token: TOKEN_B, chatId: "992992002" });
     await controller.startInitial(null);
     await controller.reconcile();
     check("2 setup: both A and B live", controller.liveSessionIds().sort().join(",") === "A,B");
     const adapterA0 = gw.forSession("A")[0].adapter;
 
     // (2a) DISABLE B → stops ONLY B; A's live adapter object is untouched (never stopped/rebuilt).
-    writeConfig(db, { sessionId: "B", token: TOKEN_B, chatId: "chat-B", enabled: false });
+    writeConfig(db, { sessionId: "B", token: TOKEN_B, chatId: "992992002", enabled: false });
     await controller.reconcile();
     check("2a: disabling B stops B only — A stays live", controller.liveSessionIds().join(",") === "A" && gw.forSession("B")[0].adapter.stopped === 1);
     check("2a: A's adapter was NEVER stopped by B's teardown", adapterA0.stopped === 0);
     check("2a: chat_reply dropped for B, still ON for A", hooks.companionSessionIds.has("A") && !hooks.companionSessionIds.has("B"));
 
     // (2b) RE-ENABLE B → starts a FRESH gateway for B; A still untouched.
-    writeConfig(db, { sessionId: "B", token: TOKEN_B, chatId: "chat-B", enabled: true });
+    writeConfig(db, { sessionId: "B", token: TOKEN_B, chatId: "992992002", enabled: true });
     await controller.reconcile();
     check("2b: re-enabling B builds a FRESH (2nd) gateway for B", gw.forSession("B").length === 2 && gw.forSession("B")[1].adapter.started === 1);
     check("2b: A's original adapter is STILL the same live one (no rebuild)", gw.forSession("A").length === 1 && adapterA0.started === 1 && adapterA0.stopped === 0);
 
     // (2c) change A's TOKEN → restarts ONLY A's adapter; B's live gateway is untouched.
     const adapterB1 = gw.forSession("B")[1].adapter;
-    writeConfig(db, { sessionId: "A", token: TOKEN_A2, chatId: "chat-A" });
+    writeConfig(db, { sessionId: "A", token: TOKEN_A2, chatId: "992992001" });
     await controller.reconcile();
     check("2c: A's token change rebuilds ONLY A (old A stopped, new A started)", gw.forSession("A").length === 2 && adapterA0.stopped === 1 && gw.forSession("A")[1].adapter.started === 1);
     check("2c: B's adapter was NEVER touched by A's token rotation", adapterB1.started === 1 && adapterB1.stopped === 0);
@@ -337,7 +337,7 @@ try {
       hooks, env: {}, buildGateway: gw.builder, buildHeartbeat: hb.builder,
     });
     await controller.startInitial(null);
-    writeConfig(db, { sessionId: "solo", token: TOKEN_A, chatId: "chat-solo", cadence: 60 });
+    writeConfig(db, { sessionId: "solo", token: TOKEN_A, chatId: "992992003", cadence: 60 });
     await controller.reconcile();
     check("4: a single enabled config arms exactly one gateway (array-of-one == the old single-companion path)", gw.built.length === 1 && controller.liveSessionIds().join(",") === "solo");
     check("4: chat_reply on solo's session, gate holds exactly one entry", hooks.companionSessionIds.has("solo") && hooks.companionSessionIds.size === 1);
@@ -363,8 +363,8 @@ try {
     });
     seedSession(db, "A");
     seedSession(db, "B");
-    writeConfig(db, { sessionId: "A", token: TOKEN_A, chatId: "chat-A" });
-    writeConfig(db, { sessionId: "B", token: TOKEN_B, chatId: "chat-B" });
+    writeConfig(db, { sessionId: "A", token: TOKEN_A, chatId: "992992001" });
+    writeConfig(db, { sessionId: "B", token: TOKEN_B, chatId: "992992002" });
     // Both sessions start with an ENABLED reminder row so the initial reconcile arms a watcher for each.
     db.insertCompanionReminder({ id: "rem-A", sessionId: "A", cron: "* * * * *", prompt: "a", label: null, route: null, enabled: true, createdAt: new Date().toISOString() });
     db.insertCompanionReminder({ id: "rem-B", sessionId: "B", cron: "* * * * *", prompt: "b", label: null, route: null, enabled: true, createdAt: new Date().toISOString() });
@@ -400,8 +400,8 @@ try {
     const db = new Db(dbFile("p6.db"));
     seedSession(db, "hbA");
     seedSession(db, "hbB");
-    writeConfig(db, { sessionId: "hbA", token: TOKEN_A, chatId: "chat-A", cadence: 60 });
-    writeConfig(db, { sessionId: "hbB", token: TOKEN_B, chatId: "chat-B", cadence: 60 });
+    writeConfig(db, { sessionId: "hbA", token: TOKEN_A, chatId: "992992001", cadence: 60 });
+    writeConfig(db, { sessionId: "hbB", token: TOKEN_B, chatId: "992992002", cadence: 60 });
     // Both A and B armed CONCURRENTLY — mirrors the card's repro ("enable A + B, distinct bots/owner chats").
     db.setCompanionHome("hbA", { channel: "telegram", chatId: "home-A" });
     db.setCompanionHome("hbB", { channel: "telegram", chatId: "home-B" });
@@ -435,8 +435,8 @@ try {
     const db2 = new Db(dbFile("p6b.db"));
     seedSession(db2, "hbC");
     seedSession(db2, "hbD");
-    writeConfig(db2, { sessionId: "hbC", token: TOKEN_A, chatId: "chat-C", cadence: 60 });
-    writeConfig(db2, { sessionId: "hbD", token: TOKEN_B, chatId: "chat-D", cadence: 60 });
+    writeConfig(db2, { sessionId: "hbC", token: TOKEN_A, chatId: "992992004", cadence: 60 });
+    writeConfig(db2, { sessionId: "hbD", token: TOKEN_B, chatId: "992992005", cadence: 60 });
     db2.setCompanionHome("hbC", { channel: "telegram", chatId: "home-C" }); // only hbC has a configured home
     const resolved2 = resolveAllEnabledConfigs(db2, {});
     const cfgD = resolved2.find((c) => c.sessionId === "hbD");
@@ -480,8 +480,8 @@ try {
     // Each session has its OWN bound chat (companion_bindings enforces one session per channel+chatId), but
     // both are explicitly configured to deliver proactive messages to the SAME home route — the real-world
     // collision this guard exists for (e.g. two companions, both told to heartbeat the same owner chat).
-    writeConfig(db, { sessionId: "winner", token: TOKEN_A, chatId: "chat-winner", cadence: 60 });
-    writeConfig(db, { sessionId: "survivor", token: TOKEN_B, chatId: "chat-survivor", cadence: 90 });
+    writeConfig(db, { sessionId: "winner", token: TOKEN_A, chatId: "992992006", cadence: 60 });
+    writeConfig(db, { sessionId: "survivor", token: TOKEN_B, chatId: "992992007", cadence: 90 });
     db.setCompanionHome("winner", { channel: "telegram", chatId: "shared-home" });
     db.setCompanionHome("survivor", { channel: "telegram", chatId: "shared-home" });
     // Give "winner" more real activity so the suppression guard's most-active pick is deterministic.
@@ -527,9 +527,9 @@ try {
     seedSession(db, "winner3");
     seedSession(db, "runnerUp3");
     seedSession(db, "lastPlace3");
-    writeConfig(db, { sessionId: "winner3", token: TOKEN_A, chatId: "chat-winner3", cadence: 60 });
-    writeConfig(db, { sessionId: "runnerUp3", token: TOKEN_B, chatId: "chat-runnerup3", cadence: 70 });
-    writeConfig(db, { sessionId: "lastPlace3", token: "7333333333:CCtoken-C-secret", chatId: "chat-lastplace3", cadence: 80 });
+    writeConfig(db, { sessionId: "winner3", token: TOKEN_A, chatId: "992992008", cadence: 60 });
+    writeConfig(db, { sessionId: "runnerUp3", token: TOKEN_B, chatId: "992992009", cadence: 70 });
+    writeConfig(db, { sessionId: "lastPlace3", token: "7333333333:CCtoken-C-secret", chatId: "992992010", cadence: 80 });
     db.setCompanionHome("winner3", { channel: "telegram", chatId: "shared-home-3" });
     db.setCompanionHome("runnerUp3", { channel: "telegram", chatId: "shared-home-3" });
     db.setCompanionHome("lastPlace3", { channel: "telegram", chatId: "shared-home-3" });
@@ -568,7 +568,7 @@ try {
       hooks, env: {}, buildGateway: gw.builder, buildHeartbeat: hb.builder,
     });
     seedSession(db, "solo7b");
-    writeConfig(db, { sessionId: "solo7b", token: TOKEN_A, chatId: "solo-chat", cadence: 60 });
+    writeConfig(db, { sessionId: "solo7b", token: TOKEN_A, chatId: "992992011", cadence: 60 });
     await controller.startInitial(null);
     await controller.reconcile();
     db.setProcessState("solo7b", "exited");

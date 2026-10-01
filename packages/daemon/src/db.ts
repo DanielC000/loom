@@ -90,12 +90,12 @@ import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
 import { findControlCharViolation, stripEscapeAndControlChars, type ControlByteClass } from "./security/control-chars.js";
-// companion/types.ts has zero runtime imports of its own, so importing its one runtime VALUE
-// (isLikelyGroupTelegramChatId, card 61e33b99) alongside the type-only CompanionReminder can never form a
-// runtime cycle with the companion/* modules that import `Db` from here. CompanionReminder.route reuses
-// THIS module's CompanionRoute (never a duplicate route type, unlike Wake/CompanionBinding's shared/types.ts
-// twins).
-import { isLikelyGroupTelegramChatId, type CompanionReminder } from "./companion/types.js";
+// companion/types.ts has zero runtime imports of its own, so importing its runtime VALUES
+// (isLikelyGroupTelegramChatId/isNonNumericTelegramChatId/InvalidTelegramChatIdError, cards 61e33b99 +
+// 94754bbe) alongside the type-only CompanionReminder can never form a runtime cycle with the companion/*
+// modules that import `Db` from here. CompanionReminder.route reuses THIS module's CompanionRoute (never a
+// duplicate route type, unlike Wake/CompanionBinding's shared/types.ts twins).
+import { isLikelyGroupTelegramChatId, isNonNumericTelegramChatId, InvalidTelegramChatIdError, type CompanionReminder } from "./companion/types.js";
 import { resolveIdPrefix, type IdPrefixResult } from "./id-prefix.js";
 
 /**
@@ -107,9 +107,11 @@ import { resolveIdPrefix, type IdPrefixResult } from "./id-prefix.js";
  */
 export type PairingRedeemResult =
   | { outcome: "rejected" }
-  // `flaggedNonPrivate` is ALWAYS false here (card 7578dea2) — the binding was just (re)created by
-  // upsertCompanionBinding, which always resets it — carried through so a caller never has to reason
-  // about whether an omitted field here means "false" or "not yet known".
+  // `flaggedNonPrivate` is NOT always false here (card 7578dea2, superseded by 61e33b99): the binding was
+  // just (re)created by upsertCompanionBinding, which computes this field FRESH via isLikelyGroupTelegramChatId
+  // on every write — a dm-bind redemption whose chatId is a negative Telegram id is flagged in THIS result,
+  // not reset to false. Carried through so a caller never has to reason about whether an omitted field here
+  // means "false" or "not yet known". See docs/decisions/61e33b99-boot-time-preflag-group-dm-bindings.md.
   | ({ outcome: "bound"; sessionId: string; scope: "dm" | "group"; flaggedNonPrivate: boolean } & CompanionRoute)
   | { outcome: "sender-added"; sessionId: string };
 
@@ -3645,11 +3647,24 @@ export class Db {
    *
    * @decision 61e33b99 — never compute this write's flag from a different predicate than the boot-time
    * check uses; never let a re-bind clear the flag without re-deriving it from the SAME predicate.
+   *
+   * A `dm`-scope Telegram chatId that isn't numeric AT ALL (e.g. "@somechannel") is REFUSED outright —
+   * `InvalidTelegramChatIdError` — rather than merely flagged: unlike a negative-integer chatId (a real
+   * Telegram group id a human might still want to re-bind as scope "group"), there is no legitimate
+   * private chatId this could ever be.
+   *
+   * @decision 94754bbe — never let a dm-scope Telegram chatId that fails `isNonNumericTelegramChatId`
+   * reach the INSERT — refuse it at this same chokepoint, never widen the refusal past "dm" scope.
    */
   upsertCompanionBinding(input: { sessionId: string; scope?: "dm" | "group" } & CompanionRoute): CompanionBinding {
+    const scope = input.scope ?? "dm";
+    if (scope === "dm" && isNonNumericTelegramChatId(input.channel, input.chatId)) {
+      throw new InvalidTelegramChatIdError(
+        `a dm-scope ${input.channel} binding's chatId must be numeric (Telegram's private-chat id scheme) — got ${JSON.stringify(input.chatId)}; bind it with scope "group" instead, or supply the chat's real numeric id`,
+      );
+    }
     const existing = this.db.prepare("SELECT created_at FROM companion_bindings WHERE session_id = ? AND channel = ?").get(input.sessionId, input.channel) as Row | undefined;
     const createdAt = (existing?.created_at as string) ?? new Date().toISOString();
-    const scope = input.scope ?? "dm";
     const flaggedNonPrivate = scope === "dm" && isLikelyGroupTelegramChatId(input.channel, input.chatId);
     const b: CompanionBinding = { sessionId: input.sessionId, channel: input.channel, chatId: input.chatId, scope, createdAt, flaggedNonPrivate };
     this.db.prepare(
@@ -3808,7 +3823,16 @@ export class Db {
         let binding;
         try {
           binding = this.upsertCompanionBinding({ sessionId, channel: input.channel, chatId: input.chatId, scope: "dm" });
-        } catch {
+        } catch (err) {
+          // card 94754bbe: distinguish-but-never-leak. The REMOTE reply must stay the SAME silent `rejected`
+          // either way (no pairing oracle) — but a non-numeric-chatId refusal is a daemon-side SETUP signal
+          // worth a loud log (structurally unreachable from a real Telegram inbound, whose chat.id is always
+          // numeric — see companion/telegram.ts's normalizeTelegramMessage — so this only ever fires for an
+          // adapter bug or a hand-crafted test), unlike the UNIQUE-route-index race below it, which is a
+          // routine, expected contention case not worth logging.
+          if (err instanceof InvalidTelegramChatIdError) {
+            console.error(`[companion] dm-bind pairing redemption REFUSED for session ${sessionId.slice(0, 8)} on ${input.channel}: ${err.message}`);
+          }
           // The UNIQUE (channel, chat_id) route index (a stale in-memory map raced the db). Contain it as
           // the same silent reject; the code stays UNCONSUMED so a legitimate re-try can still land.
           return { outcome: "rejected" };

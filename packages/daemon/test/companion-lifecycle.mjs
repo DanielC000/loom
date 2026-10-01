@@ -132,7 +132,7 @@ function makeGatewayBuilder(submitSpy) {
 }
 
 // Build a full CompanionConfig (the shape resolveEffectiveConfig returns) for the direct-diff test seam.
-function cfgOf({ sessionId, botToken = TOKEN_A, allowedChatId = "chat-1", chatScope = "dm", cadence = 360 }) {
+function cfgOf({ sessionId, botToken = TOKEN_A, allowedChatId = "990990001", chatScope = "dm", cadence = 360 }) {
   return {
     botToken, allowedChatId, sessionId, chatScope,
     homeChannel: "telegram", homeChatId: allowedChatId,
@@ -165,7 +165,7 @@ async function listTools(server) {
 
 // Write a companion config row directly (the durable half of a REST write) — the controller.reconcile then
 // picks it up via resolveEffectiveConfig (env empty ⇒ first-enabled row).
-function writeConfig(db, { sessionId, token = TOKEN_A, chatId = "chat-1", scope = "dm", cadence = 360, enabled = true }) {
+function writeConfig(db, { sessionId, token = TOKEN_A, chatId = "990990001", scope = "dm", cadence = 360, enabled = true }) {
   db.upsertCompanionConfig({
     sessionId, botTokenBlob: encryptSecret(token), channel: "telegram", allowedChatId: chatId,
     chatScope: scope, heartbeatIntervalMinutes: cadence, heartbeatPrompt: null, enabled,
@@ -242,11 +242,11 @@ try {
     check("create: chat_reply gate ON for the bound session", rig.hooks.companionSessionIds.has("assist-1") && (await chatReplyOn(rig.orch, "assist-1")) === true);
     check("create: chat_reply still OFF for a DIFFERENT session (single-session gate)", (await chatReplyOn(rig.orch, "other-sess")) === false);
     // Binding registered: INBOUND routes to the bound session via submitTurn (NOT the outbound path).
-    const inb = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-1", body: "hello", chatIsDirect: true });
+    const inb = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "990990001", body: "hello", chatIsDirect: true });
     check("create: inbound to the bound chat submits a TURN (binding registered, inbound=submitTurn)", inb.accepted === true && rig.submitted.length === 1 && rig.submitted[0].sid === "assist-1" && rig.submitted[0].text === "hello");
     // OUTBOUND routes back to the chat via the adapter — NEVER submits a turn (not cross-wired).
     const out = await rig.controller.deliverReply("assist-1", "hi back");
-    check("create: chat_reply/deliverReply routes OUT to the chat (outbound=deliverReply, no extra turn)", out.delivered === true && rig.gw.built[0].adapter.sent.length === 1 && rig.gw.built[0].adapter.sent[0].chatId === "chat-1" && rig.submitted.length === 1);
+    check("create: chat_reply/deliverReply routes OUT to the chat (outbound=deliverReply, no extra turn)", out.delivered === true && rig.gw.built[0].adapter.sent.length === 1 && rig.gw.built[0].adapter.sent[0].chatId === "990990001" && rig.submitted.length === 1);
     db.close();
   }
 
@@ -257,17 +257,17 @@ try {
   {
     const db = new Db(dbFile("p1b.db"));
     const rig = makeRig(db);
-    writeConfig(db, { sessionId: "assist-1", chatId: "chat-1", cadence: 0 });
+    writeConfig(db, { sessionId: "assist-1", chatId: "990990001", cadence: 0 });
     await rig.controller.startInitial(null);
     await rig.controller.reconcile();
-    check("no-reroute: seeded binding routes chat-1", (await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-1", body: "a", chatIsDirect: true })).accepted === true);
+    check("no-reroute: seeded binding routes chat-1", (await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "990990001", body: "a", chatIsDirect: true })).accepted === true);
 
     // Change ONLY config.allowedChatId → chat-2. No rebuild; routing UNCHANGED (still chat-1, not chat-2).
-    writeConfig(db, { sessionId: "assist-1", chatId: "chat-2", cadence: 0 });
+    writeConfig(db, { sessionId: "assist-1", chatId: "990990002", cadence: 0 });
     await rig.controller.reconcile();
     check("no-reroute: allowedChatId change did NOT rebuild the adapter", rig.gw.built.length === 1 && rig.gw.built[0].adapter.stopped === 0);
-    const stillOld = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-1", body: "b", chatIsDirect: true });
-    const newRejected = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "chat-2", body: "c", chatIsDirect: true });
+    const stillOld = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "990990001", body: "b", chatIsDirect: true });
+    const newRejected = await rig.gw.built[0].gw.handleInbound({ channel: "telegram", chatId: "990990002", body: "c", chatIsDirect: true });
     check("no-reroute: the DURABLE binding (chat-1) still routes — config did not silently re-route", stillOld.accepted === true);
     check("no-reroute: the new config chatId (chat-2) is NOT routed (no phantom route from a config write)", newRejected.accepted === false && newRejected.reason === "chat-not-allowlisted");
     db.close();
@@ -323,12 +323,12 @@ try {
   // Part 1/Part 3's create/delete-live tests), not an in-place diff.
   {
     const db = new Db(dbFile("p2b.db"));
-    let desired = cfgOf({ sessionId: "s1", botToken: TOKEN_A, allowedChatId: "c1", chatScope: "dm", cadence: 360 });
+    let desired = cfgOf({ sessionId: "s1", botToken: TOKEN_A, allowedChatId: "991991001", chatScope: "dm", cadence: 360 });
     const rig = makeRig(db, () => [desired]);
     await rig.controller.reconcile(); // OFF → ON (build #1)
     check("diff: initial build", rig.gw.built.length === 1 && rig.hb.built.length === 1 && rig.hooks.companionSessionIds.has("s1"));
 
-    desired = { ...desired, allowedChatId: "c2" };
+    desired = { ...desired, allowedChatId: "991991002" };
     await rig.controller.reconcile();
     check("diff: allowedChatId change → NO adapter rebuild", rig.gw.built.length === 1);
 
@@ -422,7 +422,7 @@ try {
 
     // POST create → 201, and the LIVE controller started (no restart), chat_reply lit.
     const create = await app.inject({ method: "POST", url: "/api/companion/config", payload: {
-      sessionId: "assist-1", botToken: TOKEN_A, allowedChatId: "chat-1", chatScope: "dm", heartbeatIntervalMinutes: 360,
+      sessionId: "assist-1", botToken: TOKEN_A, allowedChatId: "990990001", chatScope: "dm", heartbeatIntervalMinutes: 360,
     } });
     check("REST create: → 201", create.statusCode === 201);
     check("REST create: controller went live via reconcile (adapter started, heartbeat armed)", rig.controller.snapshot().running === true && rig.gw.built.length === 1 && rig.gw.built[0].adapter.started === 1 && rig.controller.snapshot().heartbeatArmed === true);
@@ -578,7 +578,7 @@ try {
 
     // Distinct tokens — same-token collision guard would otherwise refuse the 2nd companion, unrelated to
     // what this Part is testing.
-    writeConfig(db, { sessionId: "p8-live", token: TOKEN_A, chatId: "chat-live", cadence: 0 });
+    writeConfig(db, { sessionId: "p8-live", token: TOKEN_A, chatId: "991991003", cadence: 0 });
     writeConfig(db, { sessionId: "p8-fresh", token: TOKEN_B, chatId: "chat-fresh", cadence: 0 });
     await rig.controller.reconcile();
 
@@ -590,7 +590,7 @@ try {
     // ON→ON: a cadence change on the already-enabled p8-live companion must NOT re-trigger the respawn —
     // only the OFF→ON transition (startOne) can hit the discovery gap; updateOne never calls it.
     upgradeCalls.length = 0;
-    writeConfig(db, { sessionId: "p8-live", chatId: "chat-live", cadence: 120 });
+    writeConfig(db, { sessionId: "p8-live", chatId: "991991003", cadence: 120 });
     await rig.controller.reconcile();
     check("auto-upgrade: an ON→ON update (updateOne) never triggers the respawn", upgradeCalls.length === 0);
     db.close();
@@ -614,7 +614,7 @@ try {
     const rig = makeRig(db, undefined, { upgradeCompanionSession, wasSessionAlreadyLive });
     await rig.controller.startInitial(null);
 
-    writeConfig(db, { sessionId: "p8b-live", chatId: "chat-1", cadence: 0 });
+    writeConfig(db, { sessionId: "p8b-live", chatId: "990990001", cadence: 0 });
     let threw = false;
     try { await rig.controller.reconcile(); } catch { threw = true; }
     check("auto-upgrade: a REJECTED respawn does not throw out of reconcile (best-effort)", threw === false);
@@ -644,8 +644,8 @@ try {
       upsertCompanionBinding: (b) => { bindings.push(b); },
     };
     const cfg = {
-      botToken: TOKEN_A, allowedChatId: "chat-1", sessionId: "p8c-sess", chatScope: "dm",
-      homeChannel: "telegram", homeChatId: "chat-1", heartbeatIntervalMinutes: 0, heartbeatPrompt: "p",
+      botToken: TOKEN_A, allowedChatId: "990990001", sessionId: "p8c-sess", chatScope: "dm",
+      homeChannel: "telegram", homeChatId: "990990001", heartbeatIntervalMinutes: 0, heartbeatPrompt: "p",
     };
     // No wasSessionAlreadyLive, no upgradeCompanionSession wired — exactly the 4 fixtures' shape.
     const rig = makeRig(db, () => [cfg]);

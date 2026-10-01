@@ -87,7 +87,7 @@ try {
     // originResolver reads the in-flight turn's pinned origin. Both bindings dm ⇒ default auth authorizes.
     const gw = new ChatGateway(
       (s, text, route) => host.enqueueStdin(s, text, "system", undefined, route),
-      [{ sessionId: sid, channel: IN_APP_CHANNEL, chatId: sid, scope: "dm" }, { sessionId: sid, channel: TELEGRAM, chatId: "tg-chat", scope: "dm" }],
+      [{ sessionId: sid, channel: IN_APP_CHANNEL, chatId: sid, scope: "dm" }, { sessionId: sid, channel: TELEGRAM, chatId: "700700001", scope: "dm" }],
       undefined, undefined,
       (s) => host.getActiveTurnOrigin(s),
     );
@@ -103,7 +103,7 @@ try {
 
     // (2) a TELEGRAM inbound INTERLEAVES while the in-app turn is still in flight → QUEUED, does NOT swap the
     //     in-flight turn's origin. A chat_reply now STILL goes to in-app (the turn it answers).
-    const inT = await gw.handleInbound({ channel: TELEGRAM, chatId: "tg-chat", body: "hi via telegram", sender: { id: "owner" }, chatIsDirect: true });
+    const inT = await gw.handleInbound({ channel: TELEGRAM, chatId: "700700001", body: "hi via telegram", sender: { id: "owner" }, chatIsDirect: true });
     check("(a) telegram inbound to the SAME session is accepted (queued behind the busy turn)", inT.accepted === true && inT.sessionId === sid && inT.queued === true);
     const rA2 = await gw.deliverReply(sid, "still cockpit");
     check("(b) NO-SWAP — a reply mid-turn still goes IN-APP despite the queued telegram inbound", rA2.delivered === true && inApp.sent.length === 2 && inApp.sent[1].text === "still cockpit" && tg.sent.length === 0);
@@ -111,7 +111,7 @@ try {
     // (3) the in-app turn ends → the queued telegram inbound becomes its OWN turn → its chat_reply goes TELEGRAM.
     host.deliverHook(sid, { hook_event_name: "Stop" });
     const rT = await gw.deliverReply(sid, "reply to telegram");
-    check("(b) chat_reply for the telegram turn delivers via TELEGRAM (reply-on-inbound-channel)", rT.delivered === true && tg.sent.length === 1 && tg.sent[0].chatId === "tg-chat" && tg.sent[0].text === "reply to telegram");
+    check("(b) chat_reply for the telegram turn delivers via TELEGRAM (reply-on-inbound-channel)", rT.delivered === true && tg.sent.length === 1 && tg.sent[0].chatId === "700700001" && tg.sent[0].text === "reply to telegram");
     check("(b) no cross-wire the other way: in-app adapter did NOT get the telegram reply", inApp.sent.length === 2 && !inApp.sent.some((s) => s.text === "reply to telegram"));
 
     for (const t of ["sess-multi"]) { try { host.stop(t, "hard"); } catch { /* ignore */ } }
@@ -128,7 +128,7 @@ try {
     const tg = fakeAdapter(TELEGRAM);
     const gw = new ChatGateway(
       (s, text, route) => host.enqueueStdin(s, text, "system", undefined, route),
-      [{ sessionId: sid, channel: IN_APP_CHANNEL, chatId: sid, scope: "dm" }, { sessionId: sid, channel: TELEGRAM, chatId: "tg-chat", scope: "dm" }],
+      [{ sessionId: sid, channel: IN_APP_CHANNEL, chatId: sid, scope: "dm" }, { sessionId: sid, channel: TELEGRAM, chatId: "700700002", scope: "dm" }],
       undefined, undefined,
       (s) => host.getActiveTurnOrigin(s),
     );
@@ -186,7 +186,7 @@ try {
       );
       CREATE UNIQUE INDEX idx_companion_bindings_route ON companion_bindings(channel, chat_id);`);
       raw.prepare("INSERT INTO companion_bindings (session_id, channel, chat_id, scope, created_at) VALUES (?,?,?,?,?)")
-        .run("legacy-sess", TELEGRAM, "legacy-chat", "group", "2020-01-01T00:00:00.000Z");
+        .run("legacy-sess", TELEGRAM, "940940001", "group", "2020-01-01T00:00:00.000Z");
       const pkBefore = raw.prepare("PRAGMA table_info(companion_bindings)").all().find((c) => c.name === "session_id").pk;
       check("(f) legacy schema has session_id as PRIMARY KEY before migration", pkBefore > 0);
       raw.close();
@@ -198,18 +198,18 @@ try {
     check("(f) the legacy binding row survived the rebuild (count)", rows.length === 1);
     const r = rows[0];
     check("(f) the legacy row is preserved LOSSLESSLY (all fields intact)",
-      r.sessionId === "legacy-sess" && r.channel === TELEGRAM && r.chatId === "legacy-chat" && r.scope === "group" && r.createdAt === "2020-01-01T00:00:00.000Z");
+      r.sessionId === "legacy-sess" && r.channel === TELEGRAM && r.chatId === "940940001" && r.scope === "group" && r.createdAt === "2020-01-01T00:00:00.000Z");
 
     // The whole point: the SAME session can now bind a SECOND channel (impossible under the old PK, where
     // ON CONFLICT(session_id) would have UPDATED the single row instead of adding one).
     db.upsertCompanionBinding({ sessionId: "legacy-sess", channel: IN_APP_CHANNEL, chatId: "legacy-sess", scope: "dm" });
     const after = db.listCompanionBindings().filter((b) => b.sessionId === "legacy-sess");
     check("(f) a 2nd-channel binding can now be ADDED to the migrated session", after.length === 2 && after.some((b) => b.channel === IN_APP_CHANNEL) && after.some((b) => b.channel === TELEGRAM));
-    check("(f) the original telegram binding was NOT clobbered by the 2nd add", after.find((b) => b.channel === TELEGRAM)?.chatId === "legacy-chat");
+    check("(f) the original telegram binding was NOT clobbered by the 2nd add", after.find((b) => b.channel === TELEGRAM)?.chatId === "940940001");
 
     // The UNIQUE route index still holds after the rebuild: a DIFFERENT session claiming the legacy route throws.
     let threw = false;
-    try { db.upsertCompanionBinding({ sessionId: "other-sess", channel: TELEGRAM, chatId: "legacy-chat", scope: "dm" }); } catch { threw = true; }
+    try { db.upsertCompanionBinding({ sessionId: "other-sess", channel: TELEGRAM, chatId: "940940001", scope: "dm" }); } catch { threw = true; }
     check("(f) the UNIQUE (channel, chat_id) route index still rejects a 2nd session for a bound route", threw === true);
     check("(f) that non-multi upsert on (session, channel) is an in-place update, not a dup", (() => {
       db.upsertCompanionBinding({ sessionId: "legacy-sess", channel: TELEGRAM, chatId: "legacy-chat-2", scope: "group" });
@@ -229,7 +229,7 @@ try {
     const db = new Db(dbFile("p5.db"));
     const sid = "sess-unbind";
     db.upsertCompanionBinding({ sessionId: sid, channel: IN_APP_CHANNEL, chatId: sid, scope: "dm" });
-    db.upsertCompanionBinding({ sessionId: sid, channel: TELEGRAM, chatId: "tg-chat-5", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: sid, channel: TELEGRAM, chatId: "950950001", scope: "dm" });
     check("(g) both channel bindings durably stored before unbind", db.listCompanionBindings().filter((b) => b.sessionId === sid).length === 2);
 
     const host = new TestPtyHost(ptyEvents);
@@ -263,7 +263,7 @@ try {
     host.deliverHook(sid, { hook_event_name: "Stop" });
 
     // The removed telegram channel is now genuinely UNBOUND: an inbound on it is rejected, never submitted.
-    const inT = await gw.handleInbound({ channel: TELEGRAM, chatId: "tg-chat-5", body: "ghost telegram msg" });
+    const inT = await gw.handleInbound({ channel: TELEGRAM, chatId: "950950001", body: "ghost telegram msg" });
     check("(g) telegram inbound after unbind is REJECTED (no binding), not submitted", inT.accepted === false && inT.reason === "chat-not-allowlisted" && tg.sent.length === 0);
 
     // Re-removing an already-unbound channel is a SAFE NO-OP — no throw, in-app stays untouched.

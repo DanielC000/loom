@@ -70,6 +70,24 @@ export function isLikelyGroupTelegramChatId(channel: string, chatId: string): bo
   return Number.isFinite(id) && id < 0;
 }
 
+// @decision 94754bbe — refuse (never merely flag) a dm-scope Telegram chatId that isn't numeric at all
+// (e.g. "@somechannel" — the Bot API sends to that fine as a public channel); no private chatId is ever
+// non-numeric. Never widen past "dm" scope — a group/channel binding may legitimately use "@username".
+export function isNonNumericTelegramChatId(channel: string, chatId: string): boolean {
+  if (channel !== "telegram") return false;
+  return !Number.isFinite(Number(chatId));
+}
+
+/** Thrown by `db.upsertCompanionBinding` when a dm-scope Telegram chatId fails
+ *  {@link isNonNumericTelegramChatId} — a distinct type so a caller can tell this apart from the UNIQUE
+ *  (channel, chatId) route-collision error the same method can also throw. */
+export class InvalidTelegramChatIdError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidTelegramChatIdError";
+  }
+}
+
 /** The gateway's inbound entrypoint, handed to each adapter so it can push normalized messages up. */
 export type InboundHandler = (msg: InboundMessage) => void;
 

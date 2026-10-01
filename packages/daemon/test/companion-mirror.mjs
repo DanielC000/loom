@@ -80,7 +80,7 @@ try {
     // Session A: in-app + telegram bound. Session B: in-app ONLY (no telegram) — proves no broadcast.
     const bindings = [
       { sessionId: "sess-A", channel: IN_APP_CHANNEL, chatId: "sess-A", scope: "dm" },
-      { sessionId: "sess-A", channel: TELEGRAM, chatId: "tg-A", scope: "dm" },
+      { sessionId: "sess-A", channel: TELEGRAM, chatId: "800800001", scope: "dm" },
       { sessionId: "sess-B", channel: IN_APP_CHANNEL, chatId: "sess-B", scope: "dm" },
     ];
     const gw = new ChatGateway(submitSpy, bindings);
@@ -109,12 +109,12 @@ try {
       { botToken: null, allowedChatId: "", sessionId: "sess-B", chatScope: "dm", homeChannel: null, homeChatId: null, heartbeatIntervalMinutes: 0, heartbeatPrompt: "" },
     ]);
 
-    // A web turn on session A (bound to telegram tg-A): accepted, submitted once, and mirrored to tg-A ONLY.
+    // A web turn on session A (bound to telegram 800800001): accepted, submitted once, and mirrored there ONLY.
     const resA = await controller.handleInAppInbound("sess-A", "hello from the cockpit");
     check("A: web turn accepted", resA.accepted === true && resA.sessionId === "sess-A");
     check("A: submitted exactly ONE turn (the original web turn)", submitted.length === 1 && submitted[0].sid === "sess-A" && submitted[0].text === "hello from the cockpit");
     await sleep(20); // let the fire-and-forget mirror settle
-    check("A: mirrored to A's bound telegram chat with the disclaimer", tg.sent.length === 1 && tg.sent[0].chatId === "tg-A" && tg.sent[0].text === "hello from the cockpit\n\n— via web chat");
+    check("A: mirrored to A's bound telegram chat with the disclaimer", tg.sent.length === 1 && tg.sent[0].chatId === "800800001" && tg.sent[0].text === "hello from the cockpit\n\n— via web chat");
     check("A: the in-app adapter itself was never sent the mirror (only the OTHER bound channel)", inApp.sent.length === 0);
 
     // A web turn on session B (in-app ONLY — no telegram binding): accepted + submitted, mirrors NOTHING.
@@ -134,7 +134,7 @@ try {
     const submitSpy = (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; };
     const bindings = [
       { sessionId: "sess-slow", channel: IN_APP_CHANNEL, chatId: "sess-slow", scope: "dm" },
-      { sessionId: "sess-slow", channel: TELEGRAM, chatId: "tg-slow", scope: "dm" },
+      { sessionId: "sess-slow", channel: TELEGRAM, chatId: "800800002", scope: "dm" },
     ];
     const gw = new ChatGateway(submitSpy, bindings);
     const inApp = fakeAdapter(IN_APP_CHANNEL);
@@ -173,7 +173,7 @@ try {
     const submitSpy = (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; };
     const bindings = [
       { sessionId: "sess-fail", channel: IN_APP_CHANNEL, chatId: "sess-fail", scope: "dm" },
-      { sessionId: "sess-fail", channel: TELEGRAM, chatId: "tg-fail", scope: "dm" },
+      { sessionId: "sess-fail", channel: TELEGRAM, chatId: "800800003", scope: "dm" },
     ];
     const gw = new ChatGateway(submitSpy, bindings);
     const inApp = fakeAdapter(IN_APP_CHANNEL);

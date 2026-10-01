@@ -26,6 +26,7 @@ import { createHash } from "node:crypto";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { readCompanionConfig, DEFAULT_HEARTBEAT_PROMPT, type CompanionConfig } from "./config.js";
 import { TELEGRAM_CHANNEL } from "./telegram.js";
+import { isNonNumericTelegramChatId } from "./types.js";
 import type { CompanionConfigRow } from "../db.js";
 import type { CompanionConfigMasked, CompanionRoute } from "@loom/shared";
 
@@ -81,7 +82,21 @@ export function resolveAllCompanionConfigs(
     });
     // Seed THIS session's home target from env if unset (app_meta is the source, PER SESSION; a REST PUT
     // can override later — never touches another companion's home).
-    if (!db.getCompanionHome(envCfg.sessionId)) db.setCompanionHome(envCfg.sessionId, { channel: envCfg.homeChannel, chatId: envCfg.homeChatId });
+    //
+    // @decision 94754bbe — never seed a home that fails this check; ChatGateway.mayDeliverTo is the real
+    // guarantee, but a bad env value should still surface as a loud setup log, not a silently-armed leak.
+    if (!db.getCompanionHome(envCfg.sessionId)) {
+      if (isNonNumericTelegramChatId(envCfg.homeChannel, envCfg.homeChatId)) {
+        console.error(
+          `[companion] SETUP: session ${envCfg.sessionId.slice(0, 8)}'s env/bootstrap home target (` +
+            `${envCfg.homeChannel}/${JSON.stringify(envCfg.homeChatId)}) is not a numeric Telegram chat id — ` +
+            `NO home was seeded. Fix LOOM_COMPANION_HOME_CHAT_ID (or LOOM_COMPANION_CHAT_ID) and restart, or ` +
+            `set home via the REST admin surface (PUT /api/companion/home) instead.`,
+        );
+      } else {
+        db.setCompanionHome(envCfg.sessionId, { channel: envCfg.homeChannel, chatId: envCfg.homeChatId });
+      }
+    }
   }
   return resolveAllEnabledConfigs(db, env, keyPath);
 }

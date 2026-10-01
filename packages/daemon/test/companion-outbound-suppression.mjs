@@ -85,15 +85,15 @@ try {
     const other = "sess-ordinary"; // negative control: a SEPARATE, never-flagged dm binding.
     seedSession(sess);
     seedSession(other);
-    db.upsertCompanionBinding({ sessionId: sess, channel: TELEGRAM_CHANNEL, chatId: "grp-1", scope: "dm" });
-    db.upsertCompanionBinding({ sessionId: other, channel: TELEGRAM_CHANNEL, chatId: "dm-1", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: sess, channel: TELEGRAM_CHANNEL, chatId: "100100111", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: other, channel: TELEGRAM_CHANNEL, chatId: "300300300", scope: "dm" });
 
     const submitted = [];
     const submit = (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; };
     const bindings = db.listCompanionBindings().map((b) => ({ sessionId: b.sessionId, channel: b.channel, chatId: b.chatId, scope: b.scope, flaggedNonPrivate: b.flaggedNonPrivate }));
     const gw = new ChatGateway(
       submit, bindings, createDbCompanionAuth(db), undefined,
-      (sid) => (sid === sess ? { channel: TELEGRAM_CHANNEL, chatId: "grp-1" } : sid === other ? { channel: TELEGRAM_CHANNEL, chatId: "dm-1" } : null), // originResolver
+      (sid) => (sid === sess ? { channel: TELEGRAM_CHANNEL, chatId: "100100111" } : sid === other ? { channel: TELEGRAM_CHANNEL, chatId: "300300300" } : null), // originResolver
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       (sid) => sid === sess, // proactiveResolver: sess's in-flight turn IS heartbeat/reminder/attention-push-originated
       undefined, undefined,
@@ -105,11 +105,11 @@ try {
     // Negative control FIRST (proves the instrument can pass before we make it fail): the ORDINARY binding
     // delivers fine, before either binding has been touched.
     const preA = await gw.deliverReply(other, "hi from the real owner");
-    check("(control) an ordinary, never-flagged dm binding delivers normally", preA.delivered === true && tg.sent.length === 1 && tg.sent[0].chatId === "dm-1");
+    check("(control) an ordinary, never-flagged dm binding delivers normally", preA.delivered === true && tg.sent.length === 1 && tg.sent[0].chatId === "300300300");
 
     // Trigger the SAME real security detector b4f124d8 shipped: an inbound the channel does NOT confirm as
     // private, on the `sess` dm binding — auth.ts refuses it AND warnUnconfirmedDirectInbound flags it.
-    const rejected = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "grp-1", body: "not really a dm", sender: { id: "member" }, chatIsDirect: false });
+    const rejected = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "100100111", body: "not really a dm", sender: { id: "member" }, chatIsDirect: false });
     check("trigger: the unconfirmed-direct inbound is itself refused (b4f124d8, unchanged)", rejected.accepted === false && rejected.reason === "sender-not-authorized");
     check("trigger: it was never submitted as a turn", submitted.length === 0);
 
@@ -131,7 +131,7 @@ try {
 
     // The negative control is UNAFFECTED by flagging the other session's route — suppression is targeted.
     const postA = await gw.deliverReply(other, "still fine, right?");
-    check("(control) the ordinary binding still delivers AFTER the other route got flagged", postA.delivered === true && tg.sent.length === 2 && tg.sent[1].chatId === "dm-1");
+    check("(control) the ordinary binding still delivers AFTER the other route got flagged", postA.delivered === true && tg.sent.length === 2 && tg.sent[1].chatId === "300300300");
 
     // PERSISTENCE (card 7578dea2's own "persist it if needed so it survives a restart"): the flag reached
     // the db row, not just the in-memory routing map.
@@ -152,13 +152,13 @@ try {
     // @decision sha:55f1b628 — one companion's gateway can never hold another's binding).
     const submitted2 = [];
     const submit2 = (sid, text) => { submitted2.push({ sid, text }); return { delivered: true }; };
-    const cfgSess = { botToken: "fake-token", allowedChatId: "grp-1", sessionId: sess, chatScope: "dm", homeChannel: TELEGRAM_CHANNEL, homeChatId: "grp-1", heartbeatIntervalMinutes: 0, heartbeatPrompt: "" };
-    const gw2 = createCompanionGateway(cfgSess, submit2, db, undefined, (sid) => (sid === sess ? { channel: TELEGRAM_CHANNEL, chatId: "grp-1" } : null));
+    const cfgSess = { botToken: "fake-token", allowedChatId: "100100111", sessionId: sess, chatScope: "dm", homeChannel: TELEGRAM_CHANNEL, homeChatId: "100100111", heartbeatIntervalMinutes: 0, heartbeatPrompt: "" };
+    const gw2 = createCompanionGateway(cfgSess, submit2, db, undefined, (sid) => (sid === sess ? { channel: TELEGRAM_CHANNEL, chatId: "100100111" } : null));
     const tg2 = fakeAdapter(TELEGRAM_CHANNEL);
     gw2.registerAdapter(tg2); // overwrites createCompanionGateway's own real Telegram adapter registration (same "telegram" key) — no network ever armed, since gw2.start() is never called
 
-    const cfgOther = { botToken: "fake-token", allowedChatId: "dm-1", sessionId: other, chatScope: "dm", homeChannel: TELEGRAM_CHANNEL, homeChatId: "dm-1", heartbeatIntervalMinutes: 0, heartbeatPrompt: "" };
-    const gwOther2 = createCompanionGateway(cfgOther, submit2, db, undefined, (sid) => (sid === other ? { channel: TELEGRAM_CHANNEL, chatId: "dm-1" } : null));
+    const cfgOther = { botToken: "fake-token", allowedChatId: "300300300", sessionId: other, chatScope: "dm", homeChannel: TELEGRAM_CHANNEL, homeChatId: "300300300", heartbeatIntervalMinutes: 0, heartbeatPrompt: "" };
+    const gwOther2 = createCompanionGateway(cfgOther, submit2, db, undefined, (sid) => (sid === other ? { channel: TELEGRAM_CHANNEL, chatId: "300300300" } : null));
     const tgOther2 = fakeAdapter(TELEGRAM_CHANNEL);
     gwOther2.registerAdapter(tgOther2);
 
@@ -170,7 +170,7 @@ try {
     // REMEDY: re-binding the SAME (channel, chatId) route resets the flag (upsertCompanionBinding, card
     // 7578dea2) — the DoD's own stated fix path. Live-sync it into gw2 exactly like the REST bind handler
     // does (gateway/server.ts), then confirm delivery resumes.
-    const rebound = db.upsertCompanionBinding({ sessionId: sess, channel: TELEGRAM_CHANNEL, chatId: "grp-1", scope: "group" });
+    const rebound = db.upsertCompanionBinding({ sessionId: sess, channel: TELEGRAM_CHANNEL, chatId: "100100111", scope: "group" });
     check("remedy: re-binding resets flaggedNonPrivate in the db", rebound.flaggedNonPrivate === false);
     gw2.bind({ sessionId: rebound.sessionId, channel: rebound.channel, chatId: rebound.chatId, scope: rebound.scope, flaggedNonPrivate: rebound.flaggedNonPrivate });
     // Now group-scoped — deliverReply itself doesn't care about scope, only the flag; this just proves the
@@ -184,9 +184,9 @@ try {
     const sess = "sess-mirror-flagged";
     seedSession(sess);
     db.upsertCompanionBinding({ sessionId: sess, channel: IN_APP_CHANNEL, chatId: sess, scope: "dm" });
-    db.upsertCompanionBinding({ sessionId: sess, channel: TELEGRAM_CHANNEL, chatId: "grp-mirror", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: sess, channel: TELEGRAM_CHANNEL, chatId: "100100222", scope: "dm" });
 
-    const cfg = { botToken: "fake-token", allowedChatId: "grp-mirror", sessionId: sess, chatScope: "dm", homeChannel: TELEGRAM_CHANNEL, homeChatId: "grp-mirror", heartbeatIntervalMinutes: 0, heartbeatPrompt: "" };
+    const cfg = { botToken: "fake-token", allowedChatId: "100100222", sessionId: sess, chatScope: "dm", homeChannel: TELEGRAM_CHANNEL, homeChatId: "100100222", heartbeatIntervalMinutes: 0, heartbeatPrompt: "" };
     const submit = () => ({ delivered: true });
     const gw = createCompanionGateway(cfg, submit, db, undefined, (sid) => (sid === sess ? { channel: IN_APP_CHANNEL, chatId: sess } : null));
     const tg = fakeAdapter(TELEGRAM_CHANNEL);
@@ -200,7 +200,7 @@ try {
       env: {},
       buildGateway: () => gw,
     });
-    await controller.startInitial([{ ...cfg, homeChannel: TELEGRAM_CHANNEL, homeChatId: "grp-mirror" }]);
+    await controller.startInitial([{ ...cfg, homeChannel: TELEGRAM_CHANNEL, homeChatId: "100100222" }]);
 
     // Negative control FIRST: an unflagged Telegram binding mirrors the web turn normally. The mirror is
     // fire-and-forget from handleInAppInbound's perspective, so DETERMINISTICALLY observe it landing —
@@ -210,7 +210,7 @@ try {
     check("(control) mirror to an unflagged Telegram binding delivers", preRes.accepted === true && preSettled && tg.sent.length === 1 && tg.sent[0].text.endsWith("— via web chat"));
 
     // Flag the Telegram route via a real unconfirmed-direct inbound on it.
-    const rejected = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "grp-mirror", body: "not a dm", sender: { id: "x" }, chatIsDirect: false });
+    const rejected = await gw.handleInbound({ channel: TELEGRAM_CHANNEL, chatId: "100100222", body: "not a dm", sender: { id: "x" }, chatIsDirect: false });
     check("trigger: unconfirmed-direct inbound on the telegram route refused", rejected.accepted === false);
 
     const baseline = tg.sent.length;
@@ -233,10 +233,10 @@ try {
     // sending further chunks the instant the route is flagged mid-stream, even though deliverReply's own
     // up-front mayDeliverTo check passed (the binding was NOT yet flagged when the reply started).
     const sess = "sess-midflight-chunks";
-    const binding = { sessionId: sess, channel: TELEGRAM_CHANNEL, chatId: "grp-chunks", scope: "dm" };
+    const binding = { sessionId: sess, channel: TELEGRAM_CHANNEL, chatId: "600600001", scope: "dm" };
     const gw = new ChatGateway(
       () => ({ delivered: true }), [binding], undefined, undefined,
-      (sid) => (sid === sess ? { channel: TELEGRAM_CHANNEL, chatId: "grp-chunks" } : null),
+      (sid) => (sid === sess ? { channel: TELEGRAM_CHANNEL, chatId: "600600001" } : null),
     );
     const chunkSent = [];
     // maxMessageLength:10 forces a 3-chunk split for a 25-char text (chunkText splits on whole words/
@@ -260,9 +260,9 @@ try {
     // voice send outright — proven by a synth() that itself flips the flag, so an unpatched deliverReply
     // would otherwise call adapter.sendVoice with a route that just got flagged mid-synth.
     const sessV = "sess-midflight-voice";
-    const bindingV = { sessionId: sessV, channel: TELEGRAM_CHANNEL, chatId: "grp-voice", scope: "dm" };
+    const bindingV = { sessionId: sessV, channel: TELEGRAM_CHANNEL, chatId: "600600002", scope: "dm" };
     const prefs = inMemoryVoicePrefs();
-    prefs.setVoiceReplies({ sessionId: sessV, channel: TELEGRAM_CHANNEL, chatId: "grp-voice", senderId: null }, "on");
+    prefs.setVoiceReplies({ sessionId: sessV, channel: TELEGRAM_CHANNEL, chatId: "600600002", senderId: null }, "on");
     const voiceSent = [];
     const textSent = [];
     const voiceAdapter = {
@@ -281,7 +281,7 @@ try {
     };
     const gwV = new ChatGateway(
       () => ({ delivered: true }), [bindingV], undefined, undefined,
-      (sid) => (sid === sessV ? { channel: TELEGRAM_CHANNEL, chatId: "grp-voice" } : null),
+      (sid) => (sid === sessV ? { channel: TELEGRAM_CHANNEL, chatId: "600600002" } : null),
       prefs, undefined, synth,
     );
     gwV.registerAdapter(voiceAdapter);

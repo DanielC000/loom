@@ -17,7 +17,7 @@ import { createDbCompanionVoicePrefs, type VoicePrefStore } from "./voice-prefs.
 import type { CompanionConfig } from "./config.js";
 import { createTelegramAdapter, TELEGRAM_CHANNEL } from "./telegram.js";
 import { IN_APP_CHANNEL, type InAppChannel } from "./in-app.js";
-import { isLikelyGroupTelegramChatId, type CompanionHistoryExport, type CompanionHistoryReset, type CompanionLivePush, type CompanionMessageRecorder, type CompanionRoute, type CompanionSynthesizer, type CompanionTranscriber, type SessionBinding, type SubmitTurn } from "./types.js";
+import { isLikelyGroupTelegramChatId, isNonNumericTelegramChatId, InvalidTelegramChatIdError, type CompanionHistoryExport, type CompanionHistoryReset, type CompanionLivePush, type CompanionMessageRecorder, type CompanionRoute, type CompanionSynthesizer, type CompanionTranscriber, type SessionBinding, type SubmitTurn } from "./types.js";
 import type { CompanionBinding, CompanionMessage } from "@loom/shared";
 
 /** The narrow db surface the factory needs: the durable binding store + the allowlist reader (for authz)
@@ -64,10 +64,16 @@ function toSessionBinding(b: CompanionBinding): SessionBinding {
 // longer leave a dm-scope + negative-chatId binding unflagged. This boot-time pass exists for a binding
 // row written by an OLDER daemon build (before the write-time check existed) that predates this fix and
 // has never been re-bound since — it still needs catching at boot, with no inbound required.
+//
+// @decision 94754bbe — a dm-scope + non-numeric Telegram chatId is REFUSED at the write chokepoint for a
+// FRESH bind, so this boot pass can only ever meet one as a LEGACY row (predates the refusal). It still
+// cannot be un-written retroactively — flag it exactly like the negative-integer case, never throw here.
 function preFlagLikelyGroupDmBindings(bindings: CompanionBinding[], db: Pick<CompanionBindingStore, "flagCompanionBindingNonPrivate">): void {
   for (const b of bindings) {
-    if (b.flaggedNonPrivate) continue;
-    if (b.scope !== "dm" || !isLikelyGroupTelegramChatId(b.channel, b.chatId)) continue;
+    if (b.flaggedNonPrivate || b.scope !== "dm") continue;
+    const likelyGroup = isLikelyGroupTelegramChatId(b.channel, b.chatId);
+    const nonNumeric = !likelyGroup && isNonNumericTelegramChatId(b.channel, b.chatId);
+    if (!likelyGroup && !nonNumeric) continue;
     b.flaggedNonPrivate = true;
     try {
       db.flagCompanionBindingNonPrivate(b.sessionId, b.channel);
@@ -77,9 +83,10 @@ function preFlagLikelyGroupDmBindings(bindings: CompanionBinding[], db: Pick<Com
     }
     // eslint-disable-next-line no-console
     console.warn(
-      `[companion] SECURITY: dm-scope Telegram binding (session=${b.sessionId}) names a NEGATIVE chatId — ` +
-        `Telegram's convention for a group/supergroup, not a private chat. Outbound delivery to this route ` +
-        `is now suppressed at boot (card 61e33b99); re-bind it with scope "group", or delete it, if so.`,
+      `[companion] SECURITY: dm-scope Telegram binding (session=${b.sessionId}) names a ` +
+        `${likelyGroup ? "NEGATIVE" : "NON-NUMERIC"} chatId — Telegram's convention for a group/supergroup ` +
+        `(or, non-numeric, never a valid private chat at all), not a private chat. Outbound delivery to this ` +
+        `route is now suppressed at boot (cards 61e33b99/94754bbe); re-bind it with scope "group", or delete it, if so.`,
     );
   }
 }
@@ -118,8 +125,27 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // provision endpoint, not here — so seeding a Telegram binding from an empty allowedChatId is skipped.
   let bindings = db.listCompanionBindings().filter((b) => b.sessionId === cfg.sessionId);
   if (bindings.length === 0 && cfg.botToken) {
-    db.upsertCompanionBinding({ sessionId: cfg.sessionId, channel: TELEGRAM_CHANNEL, chatId: cfg.allowedChatId, scope: cfg.chatScope });
-    bindings = db.listCompanionBindings().filter((b) => b.sessionId === cfg.sessionId);
+    try {
+      db.upsertCompanionBinding({ sessionId: cfg.sessionId, channel: TELEGRAM_CHANNEL, chatId: cfg.allowedChatId, scope: cfg.chatScope });
+      bindings = db.listCompanionBindings().filter((b) => b.sessionId === cfg.sessionId);
+    } catch (err) {
+      // card 94754bbe: never let this refusal die silently inside the generic "hot-lifecycle reconcile
+      // failed" catch (controller.ts's enqueue()) — that log names neither the companion nor the fix. An
+      // owner whose LOOM_COMPANION_CHAT_ID (or allowedChatId, if set via the companion config) is non-numeric
+      // (e.g. "@me") would otherwise just see this companion silently fail to arm, with no further signal
+      // than a one-line "reconcile failed". Degrade instead of re-throwing: the gateway still builds (its
+      // other wiring below is unaffected), just with NO Telegram BINDING until the chat id is fixed — this
+      // is scoped to the binding (inbound + chat_reply) ONLY; a separately-configured home target is its own
+      // value, validated at its own writers and suppressed independently at ChatGateway.mayDeliverTo (see
+      // docs/decisions/94754bbe-refuse-non-numeric-telegram-dm-chatid.md's "Fix round 2").
+      if (!(err instanceof InvalidTelegramChatIdError)) throw err;
+      console.error(
+        `[companion] SETUP: session ${cfg.sessionId.slice(0, 8)}'s env/bootstrap Telegram binding was ` +
+          `REFUSED — ${err.message}. This companion has NO Telegram BINDING (its chat_reply/inbound route) ` +
+          `until the chat id is corrected (LOOM_COMPANION_CHAT_ID, or the companion's allowedChatId) and the ` +
+          `daemon restarts, or it is bound via the REST admin surface instead.`,
+      );
+    }
   }
   preFlagLikelyGroupDmBindings(bindings, db);
   // DM-pairing coordinator: the db-backed redemption path with the real wall clock (epoch ms). Default

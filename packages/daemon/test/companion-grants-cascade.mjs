@@ -54,7 +54,7 @@ try {
     const db = new Db(dbFile("p1.db"));
     const sid = "sess-unbind-cascade";
     const { projectId } = seedCompanion(db, sid);
-    db.upsertCompanionBinding({ sessionId: sid, channel: "telegram", chatId: "tg-chat", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: sid, channel: "telegram", chatId: "930930001", scope: "dm" });
     db.upsertCompanionBinding({ sessionId: sid, channel: IN_APP_CHANNEL, chatId: sid, scope: "dm" });
     db.upsertCompanionCapabilityGrant({ sessionId: sid, capability: "session-status", projectId: null });
     check("(2) setup: grant present before any unbind", db.listCompanionCapabilityGrantsForSession(sid).length === 1);
@@ -129,10 +129,10 @@ try {
     const db = new Db(dbFile("p6.db"));
     const sid = "sess-rebind";
     seedCompanion(db, sid);
-    db.upsertCompanionBinding({ sessionId: sid, channel: "telegram", chatId: "tg-chat-2", scope: "dm" });
+    db.upsertCompanionBinding({ sessionId: sid, channel: "telegram", chatId: "930930002", scope: "dm" });
     db.upsertCompanionCapabilityGrant({ sessionId: sid, capability: "session-status", projectId: null });
     db.deleteCompanionBinding(sid); // full unbind — clears the grant
-    db.upsertCompanionBinding({ sessionId: sid, channel: "telegram", chatId: "tg-chat-2b", scope: "dm" }); // re-bind, same session id
+    db.upsertCompanionBinding({ sessionId: sid, channel: "telegram", chatId: "930930003", scope: "dm" }); // re-bind, same session id
     check("(6) a re-bind of the SAME session id after a full unbind never resurrects the cleared grant",
       db.listCompanionCapabilityGrantsForSession(sid).length === 0);
     db.close();

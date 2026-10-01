@@ -39,7 +39,7 @@ import type {
   SessionBinding,
   SubmitTurn,
 } from "./types.js";
-import { isConfirmedDirectChat } from "./types.js";
+import { isConfirmedDirectChat, isLikelyGroupTelegramChatId, isNonNumericTelegramChatId } from "./types.js";
 import { allowIfDmMatch, type CompanionAuth } from "./auth.js";
 import { noPairing, type CompanionPairing } from "./pairing.js";
 import { inMemoryVoicePrefs, voicePrefRoute, type CompanionVoicePrefs } from "./voice-prefs.js";
@@ -989,8 +989,17 @@ export class ChatGateway {
 
   // @decision 7578dea2 — outbound suppression to a flagged route is SILENT; never send even a re-bind
   // notice to it (that would itself be a disclosure to an unauthorized chat). See the full record.
+  //
+  // @decision 94754bbe — never let an UNBOUND route (e.g. companion HOME, an app_meta value with no
+  // `companion_bindings` row) skip this chatId-shape check just because `bindingForInbound` finds nothing —
+  // see the full record for the "@chan" home-leak this closes.
   private mayDeliverTo(channel: string, chatId: string): boolean {
-    return this.bindingForInbound(channel, chatId)?.flaggedNonPrivate !== true;
+    const binding = this.bindingForInbound(channel, chatId);
+    if (binding?.flaggedNonPrivate === true) return false;
+    if (binding?.scope === "group") return true; // an explicit group binding legitimately owns a @handle/negative id
+    if (isNonNumericTelegramChatId(channel, chatId)) return false;
+    if (isLikelyGroupTelegramChatId(channel, chatId)) return false;
+    return true;
   }
 }
 

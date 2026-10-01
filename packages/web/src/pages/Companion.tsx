@@ -774,7 +774,7 @@ function ChannelRow({ sessionId, binding, onChanged }: { sessionId: string; bind
       {inApp && <span style={hint}>The cockpit chat panel — always this companion's own loopback route.</span>}
       {binding.flaggedNonPrivate && (
         <span style={errStyle}>
-          This chat did not confirm as a private 1:1 — it may actually be a group, and everyone in it could
+          This chat may be a group (negative Telegram id, or an unconfirmed inbound) — everyone in it could
           see the companion's replies. Outbound delivery here is suppressed. Re-bind with the correct scope,
           or remove this channel.
         </span>

@@ -2506,15 +2506,21 @@ export interface CompanionBinding {
   scope: "dm" | "group";
   createdAt: string;
   /**
-   * True once this `dm`-scope binding has been OBSERVED receiving an inbound the channel did NOT confirm
-   * as a private chat (card 7578dea2, closing the OUTBOUND half of card b4f124d8's finding) — i.e. its
-   * chatId may in fact name a shared/group chat that predates the write-side fix (db49891d) or was
-   * hand-bound by a human. `auth.ts` already refuses to AUTHORIZE such an inbound; this flag additionally
-   * suppresses OUTBOUND delivery to the route (ChatGateway's `mayDeliverTo`), so the companion's replies,
-   * heartbeat/reminder/attention-push pushes, and the in-app→other-channel mirror never reach a chat whose
-   * members were never authorized to read them. Surfaced on the binding list (this REST read + the web
-   * Manage UI) so the owner can re-bind or delete it; re-binding the route (`upsertCompanionBinding`)
-   * clears it back to `false` — a fresh bind is a fresh, unobserved decision. Always `false` for a `group`
+   * True when this `dm`-scope binding is suspected non-private — i.e. its chatId may in fact name a
+   * shared/group chat rather than a genuine 1:1. Set either reactively (an inbound arrived that the
+   * channel did not confirm as private) or proactively (the chatId itself is shaped like a group/
+   * supergroup id by the channel's own id scheme) — the proactive case needs no inbound at all, and also
+   * catches a row written by an older daemon build before this behavior existed. Authorization already
+   * refuses to admit an inbound on such a route; this flag additionally suppresses OUTBOUND delivery to
+   * it, so the companion's replies, heartbeat/reminder/attention-push pushes, and the in-app→other-channel
+   * mirror never reach a chat whose members were never authorized to read them. Surfaced on the binding
+   * list (this REST read + the web Manage UI) so the owner can re-bind or delete it; re-binding the route
+   * RE-DERIVES this flag from the same rule — it is NOT unconditionally cleared to `false`, so a re-bind
+   * that doesn't actually fix the misconfiguration (same scope, same or another non-private-looking
+   * chatId) stays flagged; only a genuine fix (scope `"group"`, or a real private chatId) clears it. A
+   * `dm`-scope Telegram chatId that isn't numeric AT ALL (e.g. `"@somechannel"`) is REFUSED outright at
+   * bind time, never merely flagged — see `docs/decisions/61e33b99-boot-time-preflag-group-dm-bindings.md`
+   * and `docs/decisions/94754bbe-refuse-non-numeric-telegram-dm-chatid.md`. Always `false` for a `group`
    * binding (group scope never claims single-owner trust, so this flag is meaningless there).
    */
   flaggedNonPrivate: boolean;

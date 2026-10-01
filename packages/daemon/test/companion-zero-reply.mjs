@@ -242,7 +242,7 @@ function driveTurns(db, sessId, n) {
   const onReplyDelivered = (sid) => delivered.push(sid);
   const gw = new ChatGateway(
     noopSubmit, [], undefined, undefined,
-    (sid) => (sid === "wired-sess" ? { channel: "telegram", chatId: "c1" } : null), // originResolver
+    (sid) => (sid === "wired-sess" ? { channel: "telegram", chatId: "444555666" } : null), // originResolver (numeric: a real Telegram chat id)
     undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
     onReplyDelivered,
   );

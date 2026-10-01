@@ -138,7 +138,7 @@ try {
     const stub = {};
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, companion: rig.controller, requestShutdown: () => {} });
 
-    const put = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "never-armed", channel: "telegram", chatId: "chat-x" } });
+    const put = await app.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "never-armed", channel: "telegram", chatId: "600600600" } });
     check("not-live PUT: still → 200 (durable write unaffected by live reconcile)", put.statusCode === 200);
     check("not-live PUT: no session was spuriously started", rig.controller.liveSessionIds().length === 0);
     const del = await app.inject({ method: "DELETE", url: "/api/companion/home?sessionId=never-armed" });
