@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole, CapabilityGrant } from "@loom/shared";
@@ -8,8 +8,10 @@ import { color, font, radius, tone, type Tone } from "../theme";
 import { agentProfiles } from "../lib/profileRoles";
 import { RolePicker } from "../components/RolePicker";
 import { HarnessPicker, HarnessDropSummary, HarnessFieldDrop, HarnessRejectWarning, HarnessTag, dropStyle } from "../components/HarnessPicker";
-import { HARNESS_FIELD_LABELS, clearCodexRejectedFields, harnessOf, type Harness } from "../lib/harnessFields";
+import { CODEX_REJECTED_FIELDS, HARNESS_FIELD_LABELS, clearCodexRejectedFields, harnessOf, type Harness } from "../lib/harnessFields";
 import { RoleBadge, roleDisplay, roleColor } from "../lib/roleDisplay";
+import { changedFields, type FieldComparers } from "../lib/formSync";
+import { useFormSync } from "../lib/useFormSync";
 import { errorText } from "../lib/loopbackCredential";
 
 // Loom's Profiles — the reusable, platform-level rig (role + model + permission deltas + icon) an
@@ -252,6 +254,70 @@ function MarkitdownProvisioning() {
   );
 }
 
+// ── Concurrent-write safety (card 65aa951c) ─────────────────────────────────────────────────────────
+//
+// Every field below is seeded from the profile row, and an AGENT can rewrite that row while the human has
+// this editor open (the Platform Lead's and Setup operator's own profile tools both write it). Seeding
+// once at mount and then PUTting every modelled field back reverts whatever landed in between — silently,
+// since the PUT merges and then succeeds exactly as it would have anyway. `lib/formSync` owns both halves
+// of the remedy: diff against the SEED this editor last synced from, send only what differs, and adopt a
+// refetched value into any field the human never touched.
+interface ProfileFields {
+  name: string;
+  role: SessionRole | "";
+  description: string;
+  allowText: string;
+  icon: string;
+  model: string;
+  browserTesting: boolean;
+  documentConversion: boolean;
+  restrictedTools: boolean;
+  noCommit: boolean;
+  harness: Harness;
+  skills: string[];
+  connections: string[];
+  capabilities: CapabilityGrant[];
+}
+
+/** The profile row projected into this editor's field shape — the ONE place the seed is derived. */
+const profileFieldsOf = (p: ProfileSummary): ProfileFields => ({
+  name: p.name,
+  role: p.role ?? "",
+  description: p.description,
+  allowText: p.allowDelta.join("\n"),
+  icon: p.icon ?? "",
+  model: p.model ?? "",
+  browserTesting: p.browserTesting ?? false,
+  documentConversion: p.documentConversion ?? false,
+  restrictedTools: p.restrictedTools ?? false,
+  noCommit: p.noCommit ?? false,
+  harness: harnessOf(p.harness),
+  skills: p.skills ?? [],
+  connections: p.connections ?? [],
+  capabilities: p.capabilities ?? [],
+});
+
+const parseAllowDelta = (text: string) => text.split("\n").map((s) => s.trim()).filter(Boolean);
+const sortedJson = (xs: readonly string[]) => JSON.stringify([...xs].sort());
+// Canonical per-grant JSON (key-sorted) so {slug,connectionId} order never spuriously trips dirty/save —
+// mirrors the daemon's customization.ts fieldEqual for the same field.
+const capsJson = (xs: readonly CapabilityGrant[]) =>
+  JSON.stringify(xs.map((g) => JSON.stringify(g, Object.keys(g).sort())).sort());
+
+// Each comparer mirrors the NORMALIZATION `submit` applies to that field, so a difference the wire cannot
+// express — a trailing newline, surrounding whitespace, a reordered multiselect — is neither reported as a
+// human edit nor sent. Getting this wrong in the other direction is the stuck-dirty failure: a field whose
+// local text normalizes to what was saved but does not match it byte-for-byte would stay dirty forever.
+const PROFILE_FIELD_COMPARERS: FieldComparers<ProfileFields> = {
+  name: (a, b) => a.trim() === b.trim(),
+  allowText: (a, b) => JSON.stringify(parseAllowDelta(a)) === JSON.stringify(parseAllowDelta(b)),
+  icon: (a, b) => a.trim() === b.trim(),
+  model: (a, b) => a.trim() === b.trim(),
+  skills: (a, b) => sortedJson(a) === sortedJson(b),
+  connections: (a, b) => sortedJson(a) === sortedJson(b),
+  capabilities: (a, b) => capsJson(a) === capsJson(b),
+};
+
 // Remounted per profile (key=id:nonce) so the fields reset on switch / revert / adopt; after Save the
 // query updates and `dirty` clears against the new values. Mirrors the Skills / agent-preset editors.
 function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, onDelete, deleting, onRevert, reverting, onAdopt, adopting, adoptError }:
@@ -307,7 +373,6 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
   const skillList = useQuery({ queryKey: ["skills"], queryFn: api.skills });
   const available = (skillList.data ?? []).map((s) => s.name);
   const toggleSkill = (n: string) => setSkills((cur) => (cur.includes(n) ? cur.filter((s) => s !== n) : [...cur, n]));
-  const sortedJson = (xs: string[]) => JSON.stringify([...xs].sort());
 
   // The P1 credential store's connections — the menu of what this rig's egress allowlist can grant.
   const connectionList = useQuery({ queryKey: ["connections"], queryFn: api.connections });
@@ -340,26 +405,29 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
   const capabilityConnectionId = (slug: string) => capabilities.find((g) => g.slug === slug)?.connectionId ?? "";
   const setCapabilityConnectionId = (slug: string, connectionId: string) =>
     setCapabilities((cur) => cur.map((g) => (g.slug === slug ? { ...g, connectionId: connectionId || undefined } : g)));
-  // Canonical per-grant JSON (key-sorted) so {slug,connectionId} order never spuriously trips dirty/save —
-  // mirrors the daemon's customization.ts fieldEqual for the same field.
-  const capsJson = (xs: CapabilityGrant[]) => JSON.stringify(xs.map((g) => JSON.stringify(g, Object.keys(g).sort())).sort());
 
-  const allowDelta = allowText.split("\n").map((s) => s.trim()).filter(Boolean);
-  const dirty =
-    name !== profile.name ||
-    (role || null) !== profile.role ||
-    description !== profile.description ||
-    JSON.stringify(allowDelta) !== JSON.stringify(profile.allowDelta) ||
-    (icon || null) !== profile.icon ||
-    (model.trim() || null) !== profile.model ||
-    browserTesting !== (profile.browserTesting ?? false) ||
-    documentConversion !== (profile.documentConversion ?? false) ||
-    restrictedTools !== (profile.restrictedTools ?? false) ||
-    noCommit !== (profile.noCommit ?? false) ||
-    harness !== harnessOf(profile.harness) ||
-    sortedJson(skills) !== sortedJson(profile.skills ?? []) ||
-    sortedJson(connections) !== sortedJson(profile.connections ?? []) ||
-    capsJson(capabilities) !== capsJson(profile.capabilities ?? []);
+  // The live field values, as ONE record — what gets diffed, reconciled and narrowed into a patch below.
+  const values: ProfileFields = {
+    name, role, description, allowText, icon, model, browserTesting, documentConversion,
+    restrictedTools, noCommit, harness, skills, connections, capabilities,
+  };
+  const applyFields = (v: ProfileFields) => {
+    setName(v.name); setRole(v.role); setDescription(v.description); setAllowText(v.allowText);
+    setIcon(v.icon); setModel(v.model); setBrowserTesting(v.browserTesting);
+    setDocumentConversion(v.documentConversion); setRestrictedTools(v.restrictedTools);
+    setNoCommit(v.noCommit); setHarness(v.harness); setSkills(v.skills);
+    setConnections(v.connections); setCapabilities(v.capabilities);
+  };
+
+  // Seed / delta / re-sync / conflict bookkeeping, shared with Settings' ConfigEditor and AgentEditor
+  // (card 65aa951c). The seed is NOT `profile`: the whole point is to tell "the human typed this" apart
+  // from "this is just what the row said when we mounted", and only a seed that LAGS the live row can
+  // express that difference. The hook owns advancing it, adopting an agent's write into any untouched
+  // field, and retiring a conflict once the field stops diverging — which is what this editor got wrong
+  // on its own: it never cleared `conflicted` after a successful save, so a later re-edit of that same
+  // field accused the human of overwriting a write they had just deliberately replaced.
+  const sync = useFormSync(profile, profileFieldsOf, values, applyFields, PROFILE_FIELD_COMPARERS);
+  const { seed, changed, dirty, conflicts: liveConflicts } = sync;
 
   const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
   const ta = {
@@ -367,7 +435,10 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setRestrictedTools(profile.restrictedTools ?? false); setNoCommit(profile.noCommit ?? false); setHarness(harnessOf(profile.harness)); setSkills(profile.skills ?? []); setConnections(profile.connections ?? []); setCapabilities(profile.capabilities ?? []); };
+  // Reset to the SEED, not to `profile` directly — identical in the steady state, but it keeps "discard my
+  // edits" and "what counts as an edit" reading off one value, so the two can never disagree about what
+  // Reset should restore (and a conflicting field resets to the OTHER party's write, as the notice says).
+  const reset = () => applyFields(seed);
 
   // Card 6232fe9d. `clearCodexRejectedFields` is the ONE place a payload is made storable on codex — the
   // same helper that drives the warning copy above the Save button, so what the reader is told and what
@@ -376,19 +447,52 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
   //
   // Local state is then reconciled to WHAT WAS SENT, not left holding the pre-clear values. Without this
   // the editor would stay permanently dirty after a codex save (local `restrictedTools: true` against a
-  // stored `false`), offering a Save that could never settle. The four setters are read off `patch`, so
+  // stored `false`), offering a Save that could never settle. The four setters are read off `sent`, so
   // they can't disagree with it about values — but they do name the fields, so a field ADDED to the
   // rejection mirror needs a setter here too.
+  //
+  // @decision 65aa951c — narrow the payload to the CHANGED fields, and do it AFTER the codex clear: a
+  // field the clear moved must still reach the wire, and diffing the pre-clear values would drop it.
   const submit = () => {
-    const patch = clearCodexRejectedFields(harness, {
-      name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null,
-      model: model.trim() || null, browserTesting, documentConversion, restrictedTools, noCommit, harness,
-      skills: skills.length ? skills : null, connections, capabilities,
-    });
-    setRestrictedTools(patch.restrictedTools);
-    setBrowserTesting(patch.browserTesting);
-    setDocumentConversion(patch.documentConversion);
-    setCapabilities(patch.capabilities);
+    const sent = clearCodexRejectedFields(harness, values);
+    setRestrictedTools(sent.restrictedTools);
+    setBrowserTesting(sent.browserTesting);
+    setDocumentConversion(sent.documentConversion);
+    setCapabilities(sent.capabilities);
+    // Only what the human actually changed. PUT /api/profiles/:id merges the patch over the stored row
+    // before validating, so an omitted field is PRESERVED — including a value an agent wrote after this
+    // editor opened. An untouched field is therefore never on the wire at all, which is what makes this
+    // hold with no refetch at all (the re-sync above is the honesty half, not the safety half).
+    const delta = new Set(changedFields(seed, sent, PROFILE_FIELD_COMPARERS));
+    // 🔴 The delta alone is NOT safe for a switch ONTO codex. A cleared field is dropped from the payload
+    // whenever it already equals the seed — and the seed is the row as it stood at MOUNT. An agent writing
+    // `browserTesting: true` afterwards therefore leaves the store holding a value codex REFUSES while the
+    // patch carries only `harness`; the server merges the two and `validateProfile` 400s a save the reader
+    // was given no way to fix (the control is disabled on codex, and no reject warning fires either,
+    // because `codexRejectedFields` is computed from local state that is already clear).
+    //
+    // So the whole rejection set goes on the wire explicitly, from `sent` — i.e. cleared. Only in this
+    // direction: nothing is refused on claude, so widening the payload there would send values the human
+    // never touched for no reason at all.
+    //
+    // @decision 65aa951c — a field whose SERVER value can make a save invalid must be sent explicitly,
+    // never left to the delta: a delta can only know what the human changed, not what the store holds.
+    if (delta.has("harness") && sent.harness === "codex") for (const f of CODEX_REJECTED_FIELDS) delta.add(f);
+    const patch: Partial<Omit<Profile, "id">> = {};
+    if (delta.has("name")) patch.name = sent.name.trim();
+    if (delta.has("role")) patch.role = sent.role || null;
+    if (delta.has("description")) patch.description = sent.description;
+    if (delta.has("allowText")) patch.allowDelta = parseAllowDelta(sent.allowText);
+    if (delta.has("icon")) patch.icon = sent.icon.trim() || null;
+    if (delta.has("model")) patch.model = sent.model.trim() || null;
+    if (delta.has("browserTesting")) patch.browserTesting = sent.browserTesting;
+    if (delta.has("documentConversion")) patch.documentConversion = sent.documentConversion;
+    if (delta.has("restrictedTools")) patch.restrictedTools = sent.restrictedTools;
+    if (delta.has("noCommit")) patch.noCommit = sent.noCommit;
+    if (delta.has("harness")) patch.harness = sent.harness;
+    if (delta.has("skills")) patch.skills = sent.skills.length ? sent.skills : null;
+    if (delta.has("connections")) patch.connections = sent.connections;
+    if (delta.has("capabilities")) patch.capabilities = sent.capabilities;
     onSave(patch);
   };
 
@@ -653,6 +757,16 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
       </div>
 
       <span style={{ flex: 1 }} />
+      {/* Card 65aa951c. An UNTOUCHED field silently adopts whatever landed while this editor was open —
+          that is just the truth arriving, and announcing it would be noise. A field the human is ALREADY
+          editing cannot be adopted, so Save will overwrite the other write: that one is named here, with
+          the two real options, rather than left to be discovered afterwards. */}
+      {liveConflicts.length > 0 && (
+        <span data-testid="profile-conflict-notice" style={{ color: color.amber, fontFamily: font.mono, fontSize: 11, lineHeight: 1.5 }}>
+          Changed elsewhere since you opened this: {liveConflicts.map(fieldDisplayName).join(", ")}.
+          Saving replaces {liveConflicts.length === 1 ? "it" : "them"} with your version — Reset takes theirs.
+        </span>
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving} onClick={submit}>
           {saving ? "Saving…" : "Save"}
@@ -839,6 +953,9 @@ const FIELD_DISPLAY: Record<string, string> = {
   ...HARNESS_FIELD_LABELS,
   role: "Role", description: "Description", icon: "Icon",
   noCommit: "No-commit role", connections: "Connections", harness: "Harness",
+  // The editor's own ProfileFields keys that have no schema-field twin above (card 65aa951c's conflict
+  // notice names fields by this map, and `allowDelta` is held in the form as raw text).
+  name: "Name", allowText: HARNESS_FIELD_LABELS.allowDelta,
 };
 function fieldDisplayName(field: string): string {
   return FIELD_DISPLAY[field] ?? field;

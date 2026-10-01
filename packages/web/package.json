@@ -15,6 +15,7 @@
     "test:archive-invalidate": "node --experimental-strip-types test/archive-invalidate.mjs",
     "test:sessions": "node --experimental-strip-types test/sessions.mjs",
     "test:column-sort": "node --experimental-strip-types test/column-sort.mjs",
+    "test:form-sync": "node --experimental-strip-types test/form-sync.mjs",
     "test:fleet": "node --experimental-strip-types test/fleet.mjs",
     "test:fleet-socket": "node --experimental-strip-types test/fleetSocket.mjs",
     "test:orchestration-no-global-cluster": "node --experimental-strip-types test/orchestration-no-global-cluster.mjs",

@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -44,6 +44,8 @@ import {
 } from "../lib/msUnits";
 import { MergeGateCadencePanel, cadenceDraftFrom, type CadenceDraft } from "../components/mergeGate";
 import { cadenceConfigWrite, intervalError } from "../lib/mergeGate";
+import { type FieldComparers } from "../lib/formSync";
+import { useFormSync } from "../lib/useFormSync";
 import { color, font, tone, type Tone } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
 
@@ -234,6 +236,158 @@ function RepoPathEditor({ project }: { project: Project }) {
   );
 }
 
+// ── The modelled field set (card 65aa951c) ──────────────────────────────────────────────────────────
+//
+// ONE record of every per-project config field this form edits. It is the form's seed, its dirty diff and
+// its save-payload filter all at once, so the three can never disagree about what "this form models" means
+// — which is what the previous shape got wrong: it seeded from `ov` field by field at mount, then rebuilt
+// a WHOLE override object from a clone of `ov` on every Save. That both re-asserted every modelled field
+// at its MOUNT-TIME value (reverting any agent write since) and dragged the unmodelled remainder along for
+// the ride (so a `kanbanColumns` save from the column editor beside it read as unsaved changes here).
+//
+// ⚠️ A field added to this form must be added HERE too, or it is seeded from nothing, never diffed, and
+// therefore never sent — the control would simply not save. Every state hook below reads its initial value
+// out of this record for exactly that reason: the seed cannot drift from the state it seeds.
+interface ProjectConfigFields {
+  allowText: string;
+  gateCommand: string;
+  cadence: CadenceDraft;
+  maxWorkers: string;
+  maxManagers: string;
+  recycle: string;
+  emergencyRecycle: string;
+  idleNudge: string;
+  stuckWorker: string;
+  blindTurn: string;
+  maxUnanswered: string;
+  idleSnooze: string;
+  docLint: TriState;
+  pythonInterpreter: string;
+  gateTimeout: string;
+  webhookTimeout: string;
+  deployCommand: string;
+  deployTimeout: string;
+  alertWebhookUrl: string;
+  alertWebhookEventsText: string;
+  memoryBudgetTokens: string;
+  memoryTopK: string;
+  memoryMaxNotes: string;
+  rotationMarkers: RotationMarker[];
+  rotationHeading: string;
+  rotationFloor: string;
+  harnessDefault: DefaultValue;
+  harnessScope: ScopeValue;
+}
+
+/** The stored override projected into this form's field shape — the ONE place the seed is derived. */
+function projectConfigFieldsOf(ov: ProjectConfigOverride): ProjectConfigFields {
+  const orch = ov.orchestration;
+  return {
+    allowText: ov.permission?.allow ? ov.permission.allow.join("\n") : "",
+    gateCommand: orch?.gateCommand ?? "",
+    cadence: cadenceDraftFrom(orch),
+    maxWorkers: numStr(orch?.maxConcurrentWorkers),
+    maxManagers: numStr(orch?.maxConcurrentManagers),
+    recycle: numStr(orch?.recycleAtContextRatio),
+    emergencyRecycle: numStr(orch?.emergencyRecycleAtContextRatio),
+    idleNudge: numStr(orch?.idleNudgeMinutes),
+    stuckWorker: numStr(orch?.stuckWorkerMinutes),
+    blindTurn: numStr(orch?.managerBlindTurnMinutes),
+    maxUnanswered: numStr(orch?.maxUnansweredNudges),
+    idleSnooze: numStr(orch?.idleDefaultSnoozeMinutes),
+    docLint: triStr(ov.docLint),
+    pythonInterpreter: ov.python?.interpreterPath ?? "",
+    gateTimeout: msStr(orch?.gateCommandTimeoutMs, "s"),
+    webhookTimeout: msStr(orch?.alertWebhookTimeoutMs, "s"),
+    deployCommand: orch?.deployCommand ?? "",
+    deployTimeout: msStr(orch?.deployCommandTimeoutMs, "s"),
+    alertWebhookUrl: orch?.alertWebhook?.url ?? "",
+    alertWebhookEventsText: orch?.alertWebhook?.events?.join("\n") ?? "",
+    memoryBudgetTokens: numStr(ov.memory?.budgetTokens),
+    memoryTopK: numStr(ov.memory?.topK),
+    memoryMaxNotes: numStr(ov.memory?.maxNotes),
+    rotationMarkers: structuredClone(orch?.rotationMarkers ?? []),
+    rotationHeading: orch?.rotationLiveCommitmentsHeading ?? "",
+    rotationFloor: numStr(orch?.rotationLiveCommitmentsFloor),
+    harnessDefault: ov.harness?.default ?? "",
+    harnessScope: ov.harness?.scope ?? "",
+  };
+}
+
+// rotationMarkers as buildOverride actually WRITES them — trimmed, `caseSensitive` only when true, and a
+// row blank in BOTH token and note dropped. Shared by the build and by the dirty comparer so re-rendering
+// a stored list can never read as an edit, and an edit that normalizes to the stored list never ships.
+function normalizedMarkers(rows: readonly RotationMarker[]): RotationMarker[] {
+  return rows
+    .map((m) => {
+      const out: RotationMarker = { token: m.token.trim() };
+      if (m.caseSensitive) out.caseSensitive = true;
+      const note = m.note?.trim();
+      if (note) out.note = note;
+      return out;
+    })
+    .filter((m) => m.token !== "" || m.note !== undefined);
+}
+
+// Each comparer mirrors the NORMALIZATION the build applies to that field, so a difference the wire cannot
+// express (surrounding whitespace, a trailing newline, a cadence draft that writes the same two keys) is
+// neither reported as an edit nor sent. A plain trimmed compare is deliberate for the numeric fields:
+// "" means INHERIT and "0" means zero, so they must never compare equal.
+const trimmedEq = (a: string, b: string) => a.trim() === b.trim();
+const linesEq = (a: string, b: string) => JSON.stringify(parseLines(a)) === JSON.stringify(parseLines(b));
+const PROJECT_CONFIG_COMPARERS: FieldComparers<ProjectConfigFields> = {
+  allowText: linesEq,
+  alertWebhookEventsText: linesEq,
+  alertWebhookUrl: trimmedEq,
+  gateCommand: trimmedEq,
+  deployCommand: trimmedEq,
+  pythonInterpreter: trimmedEq,
+  rotationHeading: trimmedEq,
+  maxWorkers: trimmedEq, maxManagers: trimmedEq, recycle: trimmedEq, emergencyRecycle: trimmedEq,
+  idleNudge: trimmedEq, stuckWorker: trimmedEq, blindTurn: trimmedEq, maxUnanswered: trimmedEq,
+  idleSnooze: trimmedEq, rotationFloor: trimmedEq, gateTimeout: trimmedEq, webhookTimeout: trimmedEq,
+  deployTimeout: trimmedEq, memoryBudgetTokens: trimmedEq, memoryTopK: trimmedEq, memoryMaxNotes: trimmedEq,
+  rotationMarkers: (a, b) => JSON.stringify(normalizedMarkers(a)) === JSON.stringify(normalizedMarkers(b)),
+  // A three-valued control over two stored keys: compare what it WRITES, not the draft, so e.g. a stale
+  // interval left behind by switching to `never` is correctly not an edit.
+  cadence: (a, b) =>
+    JSON.stringify(cadenceConfigWrite(a.cadence, a.intervalRaw)) ===
+    JSON.stringify(cadenceConfigWrite(b.cadence, b.intervalRaw)),
+};
+
+// What each field is CALLED ON SCREEN — the conflict notice names fields the reader can go and look at,
+// never the state key. A field with no label of its own (a bare textarea) takes its panel's heading.
+const PROJECT_CONFIG_FIELD_LABELS: Record<keyof ProjectConfigFields, string> = {
+  allowText: "Permission allowlist",
+  gateCommand: "Gate command",
+  cadence: "Merge gate",
+  maxWorkers: "Max workers / manager",
+  maxManagers: "Max managers",
+  recycle: "Recycle @ ctx ratio",
+  emergencyRecycle: "Emergency recycle @ ctx ratio",
+  idleNudge: "Idle nudge (min)",
+  stuckWorker: "Worker stuck (min)",
+  blindTurn: "Manager blind turn (min)",
+  maxUnanswered: "Max unanswered nudges",
+  idleSnooze: "Idle snooze (min)",
+  docLint: "Vault-lint hook on .md writes",
+  pythonInterpreter: "Python interpreter",
+  gateTimeout: "Gate command timeout (s)",
+  webhookTimeout: "Alert webhook timeout (s)",
+  deployCommand: "Deploy command",
+  deployTimeout: "Deploy command timeout (s)",
+  alertWebhookUrl: "Alert webhook URL",
+  alertWebhookEventsText: "Alert webhook events",
+  memoryBudgetTokens: "Budget (tokens)",
+  memoryTopK: "Related notes (top K)",
+  memoryMaxNotes: "Max unpinned notes",
+  rotationMarkers: "Rotation markers",
+  rotationHeading: "Live-commitments heading",
+  rotationFloor: "Numbered-item floor",
+  harnessDefault: "Default harness",
+  harnessScope: "Default harness scope",
+};
+
 function ConfigEditor({ project }: { project: Project }) {
   const qc = useQueryClient();
   const ov = project.config; // the stored override
@@ -243,49 +397,56 @@ function ConfigEditor({ project }: { project: Project }) {
   // they'd misrepresent the revert target. (CLAUDE.md: defaults come only from resolveConfig.)
   const defaults = resolveConfig(undefined);
 
+  // The stored override as it stood at MOUNT — the initializer source for every field below, and nothing
+  // more. The SEED those values came from (the thing a save diffs against, and which advances as the row
+  // moves) is owned by `useFormSync` further down; it cannot be called up here because it needs the very
+  // state these lines create. Held in state so a re-render can never recompute it from a moved `ov`.
+  const mounted = useState(() => projectConfigFieldsOf(ov))[0];
+
   // Override-backed form state. "" / "inherit" means NOT overridden (omitted on save → inherits default).
   // NOTE: kanbanColumns is NOT modeled here — it has its own atomic editor (ColumnManager → the columns
-  // endpoint). buildOverride clones the stored override, so a column layout saved there is preserved by
-  // this PATCH untouched (the two surfaces never fight over the same field).
-  const [allowText, setAllowText] = useState(ov.permission?.allow ? ov.permission.allow.join("\n") : "");
-  const [gateCommand, setGateCommand] = useState(ov.orchestration?.gateCommand ?? "");
+  // endpoint). This PATCH carries ONLY the modelled fields the human changed, so a column layout saved
+  // there is untouched by this form (the two surfaces never fight over the same field) and, equally, never
+  // counts toward this form's own dirty state.
+  const [allowText, setAllowText] = useState(mounted.allowText);
+  const [gateCommand, setGateCommand] = useState(mounted.gateCommand);
   // Human-only merge-gate CADENCE (card e8df2659's on/off, widened to three values by card 00664e74).
   // The STORED shape stays `mergeGate: "on" | "off"` + an optional `mergeGateInterval`; the CONTROL is
   // three-valued, because "off with an interval 5" runs the gate regularly and calling that "off" would be
   // false about the project's behaviour. cadenceDraftFrom/cadenceConfigWrite own both directions.
-  const [cadence, setCadence] = useState<CadenceDraft>(() => cadenceDraftFrom(ov.orchestration));
-  const [maxWorkers, setMaxWorkers] = useState(numStr(ov.orchestration?.maxConcurrentWorkers));
-  const [maxManagers, setMaxManagers] = useState(numStr(ov.orchestration?.maxConcurrentManagers));
-  const [recycle, setRecycle] = useState(numStr(ov.orchestration?.recycleAtContextRatio));
-  const [emergencyRecycle, setEmergencyRecycle] = useState(numStr(ov.orchestration?.emergencyRecycleAtContextRatio));
-  const [idleNudge, setIdleNudge] = useState(numStr(ov.orchestration?.idleNudgeMinutes));
-  const [stuckWorker, setStuckWorker] = useState(numStr(ov.orchestration?.stuckWorkerMinutes));
-  const [blindTurn, setBlindTurn] = useState(numStr(ov.orchestration?.managerBlindTurnMinutes));
-  const [maxUnanswered, setMaxUnanswered] = useState(numStr(ov.orchestration?.maxUnansweredNudges));
-  const [idleSnooze, setIdleSnooze] = useState(numStr(ov.orchestration?.idleDefaultSnoozeMinutes));
-  const [docLint, setDocLint] = useState(triStr(ov.docLint));
+  const [cadence, setCadence] = useState<CadenceDraft>(mounted.cadence);
+  const [maxWorkers, setMaxWorkers] = useState(mounted.maxWorkers);
+  const [maxManagers, setMaxManagers] = useState(mounted.maxManagers);
+  const [recycle, setRecycle] = useState(mounted.recycle);
+  const [emergencyRecycle, setEmergencyRecycle] = useState(mounted.emergencyRecycle);
+  const [idleNudge, setIdleNudge] = useState(mounted.idleNudge);
+  const [stuckWorker, setStuckWorker] = useState(mounted.stuckWorker);
+  const [blindTurn, setBlindTurn] = useState(mounted.blindTurn);
+  const [maxUnanswered, setMaxUnanswered] = useState(mounted.maxUnanswered);
+  const [idleSnooze, setIdleSnooze] = useState(mounted.idleSnooze);
+  const [docLint, setDocLint] = useState(mounted.docLint);
   // Human-only base-Python override for the shared venv (document conversion). Like gateCommand it points
   // at a host executable, so the AGENT config validator rejects it — only this REST path accepts it. Blank
   // inherits PATH discovery (python3 → python → py -3).
-  const [pythonInterpreter, setPythonInterpreter] = useState(ov.python?.interpreterPath ?? "");
+  const [pythonInterpreter, setPythonInterpreter] = useState(mounted.pythonInterpreter);
   // Human-only timeouts (paired with gateCommand / alertWebhook). Stored canonical ms; the form shows
   // SECONDS (÷1000 display, ×1000 store) — blank inherits the platform default.
-  const [gateTimeout, setGateTimeout] = useState(msStr(ov.orchestration?.gateCommandTimeoutMs, "s"));
-  const [webhookTimeout, setWebhookTimeout] = useState(msStr(ov.orchestration?.alertWebhookTimeoutMs, "s"));
+  const [gateTimeout, setGateTimeout] = useState(mounted.gateTimeout);
+  const [webhookTimeout, setWebhookTimeout] = useState(mounted.webhookTimeout);
   // Scoped per-project deploy command (mirrors gateCommand exactly — same human-only, host-RCE-capable
   // exec surface, own paired timeout). Sweep §2: schema-complete (projectConfigOverrideSchema), no UI yet.
-  const [deployCommand, setDeployCommand] = useState(ov.orchestration?.deployCommand ?? "");
-  const [deployTimeout, setDeployTimeout] = useState(msStr(ov.orchestration?.deployCommandTimeoutMs, "s"));
+  const [deployCommand, setDeployCommand] = useState(mounted.deployCommand);
+  const [deployTimeout, setDeployTimeout] = useState(mounted.deployTimeout);
   // Outbound alert webhook (exfil-adjacent, human-only like gateCommand/deployCommand). Only its timeout
   // had a field before this — the URL + event-kind list had none. `events` is a free-text one-per-line
   // list (mirrors the Permission Allowlist textarea): the server validates each as a non-empty string,
   // not a strict enum (an unrecognized kind just never matches the emitter's `.includes()` check).
-  const [alertWebhookUrl, setAlertWebhookUrl] = useState(ov.orchestration?.alertWebhook?.url ?? "");
-  const [alertWebhookEventsText, setAlertWebhookEventsText] = useState(ov.orchestration?.alertWebhook?.events?.join("\n") ?? "");
+  const [alertWebhookUrl, setAlertWebhookUrl] = useState(mounted.alertWebhookUrl);
+  const [alertWebhookEventsText, setAlertWebhookEventsText] = useState(mounted.alertWebhookEventsText);
   // Project-scoped shared-memory tuning (card 2fd9abf9) — schema-complete, no Settings field yet.
-  const [memoryBudgetTokens, setMemoryBudgetTokens] = useState(numStr(ov.memory?.budgetTokens));
-  const [memoryTopK, setMemoryTopK] = useState(numStr(ov.memory?.topK));
-  const [memoryMaxNotes, setMemoryMaxNotes] = useState(numStr(ov.memory?.maxNotes));
+  const [memoryBudgetTokens, setMemoryBudgetTokens] = useState(mounted.memoryBudgetTokens);
+  const [memoryTopK, setMemoryTopK] = useState(mounted.memoryTopK);
+  const [memoryMaxNotes, setMemoryMaxNotes] = useState(mounted.memoryMaxNotes);
   // Resume-doc rotation integrity (card 1069c8e1) — the three fields `resume_doc_check` reads. Modeled
   // here because THIS surface is the human-symmetric one: on every AGENT-facing config-write path
   // (manager project_update, setup project_configure) mergeConfigOverride's additiveOnlyRotationGuard
@@ -293,11 +454,9 @@ function ConfigEditor({ project }: { project: Project }) {
   // write. This PATCH validates with validateProjectConfigOverride and stores via setProjectConfigSafe —
   // neither goes near that guard — so SHRINKING and CLEARING are reachable only from here (and the
   // Lead's human-equivalent project_configure). This panel is the documented escape hatch's real route.
-  const [rotationMarkers, setRotationMarkers] = useState<RotationMarker[]>(
-    () => structuredClone(ov.orchestration?.rotationMarkers ?? []),
-  );
-  const [rotationHeading, setRotationHeading] = useState(ov.orchestration?.rotationLiveCommitmentsHeading ?? "");
-  const [rotationFloor, setRotationFloor] = useState(numStr(ov.orchestration?.rotationLiveCommitmentsFloor));
+  const [rotationMarkers, setRotationMarkers] = useState<RotationMarker[]>(mounted.rotationMarkers);
+  const [rotationHeading, setRotationHeading] = useState(mounted.rotationHeading);
+  const [rotationFloor, setRotationFloor] = useState(mounted.rotationFloor);
   // sessionEnv — the WRITE-ONLY secret map (card 32b23f0f). Seeded from the stored KEY NAMES and value
   // LENGTHS only; every row's `value` starts "" because this panel never renders a stored value. See
   // SessionEnvRow / seedSessionEnvRows, and buildOverride's own sessionEnv block for the delta protocol.
@@ -307,154 +466,181 @@ function ConfigEditor({ project }: { project: Project }) {
   // above is called with NO platform layer, so `resolved.harness` would claim "claude" while the platform
   // default actually said codex — an effective-value hint that is confidently wrong. This is the one field
   // on this page whose honest answer needs both layers, so it resolves them directly.
-  const [harnessDefault, setHarnessDefault] = useState<DefaultValue>(ov.harness?.default ?? "");
-  const [harnessScope, setHarnessScope] = useState<ScopeValue>(ov.harness?.scope ?? "");
+  const [harnessDefault, setHarnessDefault] = useState<DefaultValue>(mounted.harnessDefault);
+  const [harnessScope, setHarnessScope] = useState<ScopeValue>(mounted.harnessScope);
   const platformConfig = useQuery({ queryKey: ["platformConfig"], queryFn: () => api.getPlatformConfig() });
   const platformOverride = platformConfig.data?.override;
   const harnessEffective = resolveHarnessConfig(ov, platformOverride);
   const harnessInherited = resolveHarnessConfig(undefined, platformOverride);
 
+  // The live field values, as ONE record — what gets diffed, reconciled and narrowed into a payload below.
+  const values: ProjectConfigFields = {
+    allowText, gateCommand, cadence, maxWorkers, maxManagers, recycle, emergencyRecycle, idleNudge,
+    stuckWorker, blindTurn, maxUnanswered, idleSnooze, docLint, pythonInterpreter, gateTimeout,
+    webhookTimeout, deployCommand, deployTimeout, alertWebhookUrl, alertWebhookEventsText,
+    memoryBudgetTokens, memoryTopK, memoryMaxNotes, rotationMarkers, rotationHeading, rotationFloor,
+    harnessDefault, harnessScope,
+  };
+  const applyFields = (v: ProjectConfigFields) => {
+    setAllowText(v.allowText); setGateCommand(v.gateCommand); setCadence(v.cadence);
+    setMaxWorkers(v.maxWorkers); setMaxManagers(v.maxManagers); setRecycle(v.recycle);
+    setEmergencyRecycle(v.emergencyRecycle); setIdleNudge(v.idleNudge); setStuckWorker(v.stuckWorker);
+    setBlindTurn(v.blindTurn); setMaxUnanswered(v.maxUnanswered); setIdleSnooze(v.idleSnooze);
+    setDocLint(v.docLint); setPythonInterpreter(v.pythonInterpreter); setGateTimeout(v.gateTimeout);
+    setWebhookTimeout(v.webhookTimeout); setDeployCommand(v.deployCommand); setDeployTimeout(v.deployTimeout);
+    setAlertWebhookUrl(v.alertWebhookUrl); setAlertWebhookEventsText(v.alertWebhookEventsText);
+    setMemoryBudgetTokens(v.memoryBudgetTokens); setMemoryTopK(v.memoryTopK); setMemoryMaxNotes(v.memoryMaxNotes);
+    setRotationMarkers(v.rotationMarkers); setRotationHeading(v.rotationHeading); setRotationFloor(v.rotationFloor);
+    setHarnessDefault(v.harnessDefault); setHarnessScope(v.harnessScope);
+  };
+
+  // Seed / delta / re-sync / conflict bookkeeping, shared with ProfileEditor and AgentEditor (card
+  // 65aa951c). It owns the seed this form diffs against, adopts an agent's write into any field the human
+  // has not touched, tracks which touched fields collided, and — via `onSaved` below — re-seeds from the
+  // save's own response without trampling a keystroke typed while that PATCH was in flight.
+  const sync = useFormSync(ov, projectConfigFieldsOf, values, applyFields, PROJECT_CONFIG_COMPARERS);
+
   // Build the OVERRIDE from the current form, PLUS the `unset` dot-paths a cleared field needs (card
-  // 546034fa: the PATCH now MERGES onto the stored override by default, so omitting a key from `override`
+  // 546034fa: the PATCH MERGES onto the stored override by default, so omitting a key from `override`
   // means "leave it alone", not "clear it" — the OLD whole-object-replace behavior this UI relied on to
-  // express a delete). We still start from a clone of the stored override and apply only the fields this
-  // UI models — preserving keys it does NOT model (pty, permission.mode/deny) instead of silently
-  // wiping them; those keys need no `unset` entry since the merge already leaves them untouched. `sessionEnv` is the ONE exception on both counts: it IS modeled (see its own block
-  // at the end of this function), it is deliberately DELETED from the clone rather than preserved, and
-  // it is the only key whose deletions travel as explicit `unset` dot-paths. A modeled field set to
-  // blank/inherit is DELETED locally AND its
-  // dot-path recorded on `unset`, so it actually falls back to the platform default server-side too.
-  // Numbers parse with Number() so a non-numeric entry sends NaN→null and the strict-zod PATCH 400s
-  // with a readable "Expected number" — the demonstrable error path.
+  // express a delete). A modeled field set to blank/inherit is therefore omitted AND its dot-path recorded
+  // on `unset`, so it actually falls back to the platform default server-side too. Numbers parse with
+  // Number() so a non-numeric entry sends NaN→null and the strict-zod PATCH 400s with a readable
+  // "Expected number" — the demonstrable error path.
   //
-  // @decision 654869e2 — this clone-and-echo also re-sends a stored key the REST validator REJECTS
-  // (`permission.startupModeCycles`), which would 400 every save here; latent today, and widening the
-  // validator is a trust-boundary call, not a UI fix.
+  // `include` is what makes this a DELTA rather than an echo (card 65aa951c): called with the changed-field
+  // predicate it emits only what the human actually edited, and called with `() => true` it projects the
+  // WHOLE form (for the read-outs below that must describe what the form shows, not what it would send).
   //
-  function buildOverride(): { override: ProjectConfigOverride; unset: string[] } {
-    const o: ProjectConfigOverride = structuredClone(ov);
+  // @decision 65aa951c — never start this from a clone of the stored override. The clone re-asserted every
+  // unmodelled stored key on every save — including `permission.startupModeCycles`, which the REST
+  // validator REJECTS — and made `dirty` flip on a key this form does not even edit.
+  //
+  function buildOverride(
+    include: (field: keyof ProjectConfigFields) => boolean,
+  ): { override: ProjectConfigOverride; unset: string[] } {
+    const o: ProjectConfigOverride = {};
     const unset: string[] = [];
 
-    // kanbanColumns is intentionally left as-cloned — owned by the dedicated atomic columns endpoint, not
-    // this PATCH (see the state note above). Touching it here would race the column editor.
+    // kanbanColumns is owned by the dedicated atomic columns endpoint, not this PATCH (see the state note
+    // above): it is not modelled here, so it is never written and never read as this form's own change.
 
-    const allow = parseLines(allowText);
-    if (allow.length) {
-      o.permission = { ...o.permission, allow };
-    } else if (o.permission) {
-      const { allow: _drop, ...rest } = o.permission;
-      if (Object.keys(rest).length) o.permission = rest; else delete o.permission;
-      unset.push("permission.allow");
+    if (include("allowText")) {
+      const allow = parseLines(allowText);
+      if (allow.length) o.permission = { allow };
+      else unset.push("permission.allow");
     }
 
-    const orch: Partial<OrchestrationConfig> = { ...o.orchestration };
+    const orch: Partial<OrchestrationConfig> = {};
     // schedulerEnabled moved to the daemon-global config (GlobalConfigForm below) — it's no longer
-    // modeled per-project. Drop it unconditionally (+ unset it) so a project whose STORED override still
-    // carries a stale value (accepted before the move) doesn't get silently re-sent on the next save
-    // (rejected outright by the strict per-project validator) AND actually gets cleaned out of storage
-    // instead of surviving a merge that never touches it.
-    delete orch.schedulerEnabled;
+    // modeled per-project. Unset it unconditionally so a project whose STORED override still carries a
+    // stale value (accepted before the move) actually gets it cleaned out of storage instead of surviving
+    // a merge that never touches it. Not keyed to any field, so it rides along with whatever else is sent.
     unset.push("orchestration.schedulerEnabled");
-    if (gateCommand.trim()) orch.gateCommand = gateCommand.trim();
-    else { delete orch.gateCommand; unset.push("orchestration.gateCommand"); }
+    if (include("gateCommand")) {
+      if (gateCommand.trim()) orch.gateCommand = gateCommand.trim();
+      else unset.push("orchestration.gateCommand");
+    }
     // Cadence → the two stored keys. `every` CLEARS both (inheriting the default) rather than writing
     // mergeGate:"on", matching how the old checkbox behaved; `never` clears only the interval.
-    delete orch.mergeGate;
-    delete orch.mergeGateInterval;
-    const cadenceWrite = cadenceConfigWrite(cadence.cadence, cadence.intervalRaw);
-    Object.assign(orch, cadenceWrite.set);
-    unset.push(...cadenceWrite.unset);
-    applyMs(orch, "gateCommandTimeoutMs", gateTimeout, "s", unset);
-    if (deployCommand.trim()) orch.deployCommand = deployCommand.trim();
-    else { delete orch.deployCommand; unset.push("orchestration.deployCommand"); }
-    applyMs(orch, "deployCommandTimeoutMs", deployTimeout, "s", unset);
-    applyMs(orch, "alertWebhookTimeoutMs", webhookTimeout, "s", unset);
-    // alertWebhook: sent when either half is non-blank, so a partial entry (URL with no events, or vice
-    // versa) still round-trips to the server's readable "both required" 400 rather than being silently
-    // dropped. Both blank ⇒ not configured, delete (+ unset) the key.
-    const webhookUrlTrim = alertWebhookUrl.trim();
-    const webhookEvents = parseLines(alertWebhookEventsText);
-    if (webhookUrlTrim || webhookEvents.length) {
-      orch.alertWebhook = { url: webhookUrlTrim, events: webhookEvents as OrchestrationEventKind[] };
-    } else {
-      delete orch.alertWebhook;
-      unset.push("orchestration.alertWebhook");
+    if (include("cadence")) {
+      const cadenceWrite = cadenceConfigWrite(cadence.cadence, cadence.intervalRaw);
+      Object.assign(orch, cadenceWrite.set);
+      unset.push(...cadenceWrite.unset);
     }
-    applyNum(orch, "maxConcurrentWorkers", maxWorkers, unset);
-    applyNum(orch, "maxConcurrentManagers", maxManagers, unset);
-    applyNum(orch, "recycleAtContextRatio", recycle, unset);
-    applyNum(orch, "emergencyRecycleAtContextRatio", emergencyRecycle, unset);
-    applyNum(orch, "idleNudgeMinutes", idleNudge, unset);
-    applyNum(orch, "stuckWorkerMinutes", stuckWorker, unset);
-    applyNum(orch, "managerBlindTurnMinutes", blindTurn, unset);
-    applyNum(orch, "maxUnansweredNudges", maxUnanswered, unset);
-    applyNum(orch, "idleDefaultSnoozeMinutes", idleSnooze, unset);
-    // rotationMarkers: trimmed; a row blank in BOTH token and note is dropped (an accidental empty add).
-    // A row carrying a note but no token is KEPT so it round-trips to the server's readable "token: String
-    // must contain at least 1 character" 400 instead of vanishing — same reasoning as the partial
-    // alertWebhook entry above. `caseSensitive` is emitted only when true (false is the schema default);
-    // the mount-time baseline normalizes identically, so that never reads as a spurious dirty edit.
-    // An EMPTY list DELETES (+ unsets) the key — the clear half of the escape hatch.
-    const markers: RotationMarker[] = rotationMarkers
-      .map((m) => {
-        const out: RotationMarker = { token: m.token.trim() };
-        if (m.caseSensitive) out.caseSensitive = true;
-        const note = m.note?.trim();
-        if (note) out.note = note;
-        return out;
-      })
-      .filter((m) => m.token !== "" || m.note !== undefined);
-    if (markers.length) orch.rotationMarkers = markers;
-    else { delete orch.rotationMarkers; unset.push("orchestration.rotationMarkers"); }
-    if (rotationHeading.trim()) orch.rotationLiveCommitmentsHeading = rotationHeading.trim();
-    else { delete orch.rotationLiveCommitmentsHeading; unset.push("orchestration.rotationLiveCommitmentsHeading"); }
-    applyNum(orch, "rotationLiveCommitmentsFloor", rotationFloor, unset);
-    if (Object.keys(orch).length) o.orchestration = orch; else delete o.orchestration;
+    if (include("gateTimeout")) applyMs(orch, "gateCommandTimeoutMs", gateTimeout, "s", unset);
+    if (include("deployCommand")) {
+      if (deployCommand.trim()) orch.deployCommand = deployCommand.trim();
+      else unset.push("orchestration.deployCommand");
+    }
+    if (include("deployTimeout")) applyMs(orch, "deployCommandTimeoutMs", deployTimeout, "s", unset);
+    if (include("webhookTimeout")) applyMs(orch, "alertWebhookTimeoutMs", webhookTimeout, "s", unset);
+    // alertWebhook: ONE stored object built from two fields, so either field changing sends BOTH halves —
+    // a leaf-level delta here would post a `url` with no `events` and 400 on the server's "both required".
+    // Sent when either half is non-blank, so a partial entry (URL with no events, or vice versa) still
+    // round-trips to that readable 400 rather than being silently dropped. Both blank ⇒ not configured.
+    if (include("alertWebhookUrl") || include("alertWebhookEventsText")) {
+      const webhookUrlTrim = alertWebhookUrl.trim();
+      const webhookEvents = parseLines(alertWebhookEventsText);
+      if (webhookUrlTrim || webhookEvents.length) {
+        orch.alertWebhook = { url: webhookUrlTrim, events: webhookEvents as OrchestrationEventKind[] };
+      } else {
+        unset.push("orchestration.alertWebhook");
+      }
+    }
+    if (include("maxWorkers")) applyNum(orch, "maxConcurrentWorkers", maxWorkers, unset);
+    if (include("maxManagers")) applyNum(orch, "maxConcurrentManagers", maxManagers, unset);
+    if (include("recycle")) applyNum(orch, "recycleAtContextRatio", recycle, unset);
+    if (include("emergencyRecycle")) applyNum(orch, "emergencyRecycleAtContextRatio", emergencyRecycle, unset);
+    if (include("idleNudge")) applyNum(orch, "idleNudgeMinutes", idleNudge, unset);
+    if (include("stuckWorker")) applyNum(orch, "stuckWorkerMinutes", stuckWorker, unset);
+    if (include("blindTurn")) applyNum(orch, "managerBlindTurnMinutes", blindTurn, unset);
+    if (include("maxUnanswered")) applyNum(orch, "maxUnansweredNudges", maxUnanswered, unset);
+    if (include("idleSnooze")) applyNum(orch, "idleDefaultSnoozeMinutes", idleSnooze, unset);
+    // rotationMarkers: normalized by `normalizedMarkers` (trimmed; a row blank in BOTH token and note is
+    // dropped as an accidental empty add). A row carrying a note but no token is KEPT so it round-trips to
+    // the server's readable "token: String must contain at least 1 character" 400 instead of vanishing —
+    // same reasoning as the partial alertWebhook entry above. An EMPTY list UNSETS the key — the clear
+    // half of the escape hatch.
+    if (include("rotationMarkers")) {
+      const markers = normalizedMarkers(rotationMarkers);
+      if (markers.length) orch.rotationMarkers = markers;
+      else unset.push("orchestration.rotationMarkers");
+    }
+    if (include("rotationHeading")) {
+      if (rotationHeading.trim()) orch.rotationLiveCommitmentsHeading = rotationHeading.trim();
+      else unset.push("orchestration.rotationLiveCommitmentsHeading");
+    }
+    if (include("rotationFloor")) applyNum(orch, "rotationLiveCommitmentsFloor", rotationFloor, unset);
+    if (Object.keys(orch).length) o.orchestration = orch;
 
-    // harness: each half independently overridable, so each gets its own delete + `unset` dot-path (the
-    // PATCH deep-merges, so omitting a key means "leave alone" — only the unset actually clears it).
-    const harness: Partial<{ default: Harness; scope: "workers" | "fleet" }> = { ...o.harness };
-    if (harnessDefault) harness.default = harnessDefault;
-    else { delete harness.default; unset.push("harness.default"); }
-    if (harnessScope) harness.scope = harnessScope;
-    else { delete harness.scope; unset.push("harness.scope"); }
-    if (Object.keys(harness).length) o.harness = harness; else delete o.harness;
+    // harness: each half independently overridable, so each gets its own write-or-`unset` (the PATCH
+    // deep-merges, so omitting a key means "leave alone" — only the unset actually clears it).
+    const harness: Partial<{ default: Harness; scope: "workers" | "fleet" }> = {};
+    if (include("harnessDefault")) {
+      if (harnessDefault) harness.default = harnessDefault;
+      else unset.push("harness.default");
+    }
+    if (include("harnessScope")) {
+      if (harnessScope) harness.scope = harnessScope;
+      else unset.push("harness.scope");
+    }
+    if (Object.keys(harness).length) o.harness = harness;
 
-    if (docLint !== "inherit") o.docLint = docLint === "true";
-    else { delete o.docLint; unset.push("docLint"); }
-
-    // python.interpreterPath: set when non-blank, else drop the key (and the now-empty python block) so a
-    // blank field inherits PATH discovery rather than persisting an empty override.
-    const py = pythonInterpreter.trim();
-    if (py) o.python = { ...o.python, interpreterPath: py };
-    else if (o.python) {
-      const { interpreterPath: _drop, ...rest } = o.python;
-      if (Object.keys(rest).length) o.python = rest; else delete o.python;
-      unset.push("python.interpreterPath");
+    if (include("docLint")) {
+      if (docLint !== "inherit") o.docLint = docLint === "true";
+      else unset.push("docLint");
     }
 
-    // memory: shared-notes tuning (budgetTokens/topK/maxNotes) — each field blank → delete + unset
-    // (inherit the platform default, itself clamped to MEMORY_CONFIG_MAX by resolveConfig).
-    const mem: Partial<MemoryConfig> = { ...o.memory };
-    applyNumField(mem, "budgetTokens", memoryBudgetTokens, unset, "memory");
-    applyNumField(mem, "topK", memoryTopK, unset, "memory");
-    applyNumField(mem, "maxNotes", memoryMaxNotes, unset, "memory");
-    if (Object.keys(mem).length) o.memory = mem; else delete o.memory;
+    // python.interpreterPath: set when non-blank, else unset it so a blank field inherits PATH discovery
+    // rather than persisting an empty override.
+    if (include("pythonInterpreter")) {
+      const py = pythonInterpreter.trim();
+      if (py) o.python = { interpreterPath: py };
+      else unset.push("python.interpreterPath");
+    }
 
-    // sessionEnv — the WRITE-ONLY secret map (card 32b23f0f). ⛔ Deliberately NOT modeled like every
-    // field above: the cloned map is STRIPPED and only DELTAS (changed/new keys) + `unset` dot-paths
-    // (removals) are sent. Do not "simplify" this back into the clone — three things depend on it:
+    // memory: shared-notes tuning (budgetTokens/topK/maxNotes) — each field blank → unset (inherit the
+    // platform default, itself clamped to MEMORY_CONFIG_MAX by resolveConfig).
+    const mem: Partial<MemoryConfig> = {};
+    if (include("memoryBudgetTokens")) applyNumField(mem, "budgetTokens", memoryBudgetTokens, unset, "memory");
+    if (include("memoryTopK")) applyNumField(mem, "topK", memoryTopK, unset, "memory");
+    if (include("memoryMaxNotes")) applyNumField(mem, "maxNotes", memoryMaxNotes, unset, "memory");
+    if (Object.keys(mem).length) o.memory = mem;
+
+    // sessionEnv — the WRITE-ONLY secret map (card 32b23f0f). It was ALREADY a delta before the rest of
+    // this function became one, and it stays on its own protocol: only changed/new keys are written and
+    // removals travel as explicit `unset` dot-paths. It has no `include` key, because its dirtiness is
+    // owned by `sessionEnvDirty` and its payload by the two passes below. Three things depend on that:
     //   1. An UNTOUCHED entry is never in the payload AT ALL, so the server's deep-merge preserves it
     //      BYTE-FOR-BYTE (mergeConfigOverride → deepMergeRecord recurses on any plain object, and
     //      sessionEnv IS a plain Record<string,string>). No client bug can truncate, reorder or wipe a
     //      value the client never sent — that is DoD-3 structurally, not by care.
     //   2. It stops every UNRELATED save (a gateCommand tweak) from re-POSTing the stored secrets back
-    //      over the wire, which `structuredClone(ov)` above otherwise does on EVERY Save — a real
-    //      exposure reduction across request logs and the browser's own Network panel.
+    //      over the wire — a real exposure reduction across request logs and the browser's Network panel.
     //   3. Blankness therefore means "leave as stored", NEVER "delete". Deletion is reachable only via
     //      an explicit staged per-row removal emitting `sessionEnv.<NAME>` on `unset`, so a
     //      render-then-save round-trip is a no-op BY CONSTRUCTION (DoD-4), not by care.
-    delete o.sessionEnv;
     // 🔴 TWO PASSES, and the order is the whole point — do not collapse them into one loop.
     //
     // @decision 32b23f0f — never emit an `unset` for a name this same payload also WRITES: the server
@@ -560,30 +746,24 @@ function ConfigEditor({ project }: { project: Project }) {
     return [...new Set(errs)];
   })();
 
-  // Snapshot the NORMALIZED baseline override (buildOverride() on mount round-trips the stored config
-  // into this UI's canonical key order, so `dirty` is false until a field actually changes — not merely
-  // because the stored key order differs). The baseline is a MUTABLE ref: a successful save re-points it
-  // at the just-saved value so the form drops "unsaved changes" without waiting for a remount. Keyed by
-  // project id → a project switch remounts + re-snapshots.
-  const { override: built, unset } = buildOverride();
-  // `built` stays the PAYLOAD, but the dirty/baseline comparison is taken over a sessionEnv-FREE
-  // projection of it (JSON.stringify drops an `undefined` value, so the key is simply absent).
+  // Which modelled fields the human actually changed, against the SEED this form last synced from. This
+  // one list drives BOTH the Save payload (the `include` predicate below) and `dirty`, so the button can
+  // never offer a save that would send nothing, nor hide one that would send something.
   //
-  // @decision 32b23f0f — never let sessionEnv into this JSON: its own dirtiness is owned entirely by
-  // `sessionEnvDirty` below, and including it BOTH sticks `dirty` true forever after a write AND retains
-  // the typed plaintext secret in `baseline`'s ref for the component's lifetime.
-  //
-  // The stuck flag, concretely: a save stores a baseline containing `sessionEnv: {<delta>}`, then the
-  // rows re-seed from the server and blank every value, so the NEXT build writes nothing and omits the
-  // key — leaving the two JSONs differing by exactly that key, with nothing left to save and no remount
-  // (this editor is keyed by project id) to clear it.
-  const builtJson = JSON.stringify({ ...built, sessionEnv: undefined });
-  const baseline = useRef(builtJson);
-  // 🔴 A staged sessionEnv REMOVAL changes NOTHING in `built` — it emits an `unset` dot-path instead —
-  // so the JSON comparison below cannot see it. Without this the Save button stays DISABLED and the
+  // It also makes the old false-dirty impossible rather than merely fixed: the comparison now runs over
+  // the modelled field record, which has no `kanbanColumns` in it at all, so a save from the column editor
+  // beside this form cannot register here.
+  const { changed, changedSet } = sync;
+  const { override: built, unset } = buildOverride((f) => changedSet.has(f));
+  // The WHOLE form projected as an override — never sent. The read-outs below describe what the form
+  // SHOWS (the rotation guard it would leave in place, the harness it resolves to), which is not the same
+  // object as the delta: diffing the delta would read every untouched marker as freshly dropped.
+  const { override: shown } = buildOverride(() => true);
+  // 🔴 A staged sessionEnv REMOVAL changes NOTHING in the field record — it emits an `unset` dot-path
+  // instead — so the field diff above cannot see it. Without this the Save button stays DISABLED and the
   // panel's primary new action is unperformable. ⛔ `unset.length` cannot stand in for this:
   // "orchestration.schedulerEnabled" is pushed unconditionally on every build, so `unset` is never
-  // empty and the guard would be vacuous. Re-baselined in onSuccess alongside `baseline.current`.
+  // empty and the guard would be vacuous. Cleared in onSuccess by re-seeding the rows from the server.
   const sessionEnvDirty = sessionEnvRows.some((r) =>
     r.removed
       ? r.storedName !== null
@@ -591,7 +771,10 @@ function ConfigEditor({ project }: { project: Project }) {
         ? r.name.trim() !== "" || r.value !== ""
         : r.value !== "" || isSessionEnvRenamed(r),
   );
-  const dirty = builtJson !== baseline.current || sessionEnvDirty;
+  // `sessionEnv` is NOT in the field record, so its dirtiness is ORed on here rather than being something
+  // the shared hook could know about (see its own delta protocol, card 32b23f0f).
+  const dirty = sync.dirty || sessionEnvDirty;
+  const liveConflicts = sync.conflicts;
 
   // What this save would take AWAY from the rotation guard, diffed STORED -> BUILT. Surfaced because these
   // three edits are the ones no agent can make: an agent's patch can only grow the marker set and raise
@@ -599,14 +782,14 @@ function ConfigEditor({ project }: { project: Project }) {
   // exactly what it costs before pressing Save. An EDITED token counts as a drop of the old one — the old
   // string genuinely stops being protected, so calling it anything else would understate the change.
   const storedMarkers = ov.orchestration?.rotationMarkers ?? [];
-  const builtMarkerTokens = new Set((built.orchestration?.rotationMarkers ?? []).map((m) => m.token));
+  const builtMarkerTokens = new Set((shown.orchestration?.rotationMarkers ?? []).map((m) => m.token));
   const droppedMarkers = storedMarkers.filter((m) => !builtMarkerTokens.has(m.token.trim()));
   // Floor/heading compare against the PLATFORM DEFAULT when a side is absent — an omitted key inherits
   // that default, so it is the honest stand-in (never a hardcoded 0 / "").
   const storedFloor = ov.orchestration?.rotationLiveCommitmentsFloor ?? defaults.orchestration.rotationLiveCommitmentsFloor;
-  const builtFloor = built.orchestration?.rotationLiveCommitmentsFloor ?? defaults.orchestration.rotationLiveCommitmentsFloor;
+  const builtFloor = shown.orchestration?.rotationLiveCommitmentsFloor ?? defaults.orchestration.rotationLiveCommitmentsFloor;
   const storedHeading = ov.orchestration?.rotationLiveCommitmentsHeading ?? defaults.orchestration.rotationLiveCommitmentsHeading;
-  const builtHeading = built.orchestration?.rotationLiveCommitmentsHeading ?? defaults.orchestration.rotationLiveCommitmentsHeading;
+  const builtHeading = shown.orchestration?.rotationLiveCommitmentsHeading ?? defaults.orchestration.rotationLiveCommitmentsHeading;
   const rotationWeakenings: string[] = [
     ...droppedMarkers.map((m) => `marker "${m.token}" removed`),
     Number.isFinite(builtFloor) && builtFloor < storedFloor ? `floor lowered ${storedFloor} to ${builtFloor}` : null,
@@ -635,21 +818,31 @@ function ConfigEditor({ project }: { project: Project }) {
 
   // The switch-to-codex gate. Compared on EFFECTIVE values so blanking a codex override back onto a codex
   // platform default is correctly not a "switch", and a save that leaves codex alone never re-asks.
-  const harnessBuiltEffective = resolveHarnessConfig(built, platformOverride);
+  const harnessBuiltEffective = resolveHarnessConfig(shown, platformOverride);
   const codexSwitch = switchesToCodex(harnessEffective.default, harnessBuiltEffective.default);
   const [confirmCodex, setConfirmCodex] = useState(false);
 
+  // ⚠️ The payload AND the field snapshot it was built from ride as mutation VARIABLES, never read off a
+  // render closure in `onSuccess`. react-query re-reads this options object on every render, so by the
+  // time the response lands `values` is whatever the human has typed SINCE — which is exactly the state
+  // `onSaved` must RECONCILE AGAINST, and exactly what it must not be handed as "what was sent".
   const save = useMutation({
-    mutationFn: () => api.updateProjectConfig(project.id, built, unset),
+    mutationFn: (v: { override: ProjectConfigOverride; unset: string[]; sent: ProjectConfigFields }) =>
+      api.updateProjectConfig(project.id, v.override, v.unset),
     // Surface this mutation's failures INLINE (see the Save row below); tell the global mutation-error
     // handler to skip its blocking window.alert for this one.
     meta: { inlineError: true },
-    onSuccess: (updated) => {
-      // The just-saved override is now the clean baseline — clearing the dirty flag immediately.
-      baseline.current = builtJson;
-      // Re-seed the sessionEnv rows from the SERVER's just-persisted map: clears every pending value and
-      // staged removal (dropping sessionEnvDirty) and re-reads each indicator length from the stored
-      // truth rather than from what this form believes it sent.
+    onSuccess: (updated, v) => {
+      // Re-seed from the SERVER's just-persisted override — not from what this form believes it sent. That
+      // clears dirty honestly: a value the server normalized (an entry typed "0.80" and stored as 0.8)
+      // snaps to the stored form instead of sitting permanently dirty against it.
+      //
+      // 🔴 Per FIELD, though, never across the board. Only the Save BUTTON is disabled during a save; the
+      // inputs stay live, so a field typed into while this PATCH was open holds a draft the response knows
+      // nothing about. `onSaved` adopts the persisted value ONLY where local still equals what was sent.
+      sync.onSaved(projectConfigFieldsOf(updated.config), v.sent);
+      // The sessionEnv rows re-seed from that same map: this clears every pending value and staged
+      // removal (dropping sessionEnvDirty) and re-reads each indicator length from the stored truth.
       setSessionEnvRows(seedSessionEnvRows(updated.config.sessionEnv));
       // Patch the cached projects list so the header + this editor re-read the persisted override
       // immediately (a re-read shows it). Remount via the key happens on the next project switch.
@@ -662,6 +855,9 @@ function ConfigEditor({ project }: { project: Project }) {
       qc.invalidateQueries({ queryKey: ["harnessDrain"] });
     },
   });
+  // The ONE place this form's save is fired, so the payload and the snapshot it was built from can never
+  // be captured at different moments.
+  const submitSave = () => save.mutate({ override: built, unset, sent: values });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -862,16 +1058,24 @@ function ConfigEditor({ project }: { project: Project }) {
       {confirmCodex && (
         <CodexDefaultConfirm layer="project" scopeNote={rolesAffected(harnessScope, harnessInherited.scope)}
           onCancel={() => setConfirmCodex(false)}
-          onConfirm={() => { setConfirmCodex(false); save.mutate(); }} />
+          onConfirm={() => { setConfirmCodex(false); submitSave(); }} />
       )}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <Button variant="primary" disabled={!dirty || save.isPending || blockingErrors.length > 0}
-          onClick={() => (codexSwitch ? setConfirmCodex(true) : save.mutate())}>
+          onClick={() => (codexSwitch ? setConfirmCodex(true) : submitSave())}>
           {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty
           ? <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>unsaved changes</span>
           : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+        {/* Card 65aa951c. A field the human has NOT touched silently adopts whatever landed while this
+            page was open — that is just the truth arriving. A field they ARE editing cannot be adopted,
+            so Save will overwrite the other write: name those, with the two real options. */}
+        {liveConflicts.length > 0 && (
+          <span data-testid="config-conflict-notice" style={{ color: color.amber, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+            changed elsewhere since you opened this: {liveConflicts.map((f) => PROJECT_CONFIG_FIELD_LABELS[f]).join(", ")} — Save keeps your version
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         {/* An out-of-range timeout takes the error slot: it's what's blocking Save, and it states the
             limit in the field's own unit — unlike a stale server error still quoting raw ms. */}

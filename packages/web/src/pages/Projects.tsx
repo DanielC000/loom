@@ -7,6 +7,7 @@ import { useActiveProject } from "../lib/activeProject";
 import { Panel, Button, Input, Select, SectionLabel, Chip, Dot, PresetAccentDots, StaleStartupPromptWarning } from "../components/ui";
 import { color, font, radius } from "../theme";
 import { roleDisplay, roleColor } from "../lib/roleDisplay";
+import { useFormSync } from "../lib/useFormSync";
 import type { SessionRole } from "@loom/shared";
 
 // Starter agents seeded on project creation (editable afterward via the preset editor). Generic
@@ -706,7 +707,29 @@ function AgentEditor(
     onDelete: () => void; saving: boolean; deleting: boolean },
 ) {
   const [prompt, setPrompt] = useState(agent.startupPrompt);
-  const dirty = prompt !== agent.startupPrompt;
+  // Seed / delta / re-sync / conflict bookkeeping, shared with Settings' ConfigEditor and ProfileEditor
+  // (card 65aa951c). An AGENT can rewrite `startupPrompt` while this is open — the Platform Lead's
+  // `agent_update`, the Setup operator's, an agent-prompt preset apply — and comparing against the LIVE
+  // row instead would both hide that write behind stale text AND report it as a pending human edit: Save
+  // would light up with nothing typed, and one click would revert it.
+  //
+  // A one-field form goes through the same hook as the twenty-eight-field one deliberately. Its hand-
+  // rolled version was the shortest of the three and still carried the same defect as ProfileEditor's —
+  // a `conflict` boolean that nothing ever cleared, so the notice came back on any later re-edit — which
+  // is the argument for there being one implementation rather than three short ones.
+  const sync = useFormSync(
+    agent.startupPrompt,
+    (startupPrompt: string) => ({ startupPrompt }),
+    { startupPrompt: prompt },
+    (v) => setPrompt(v.startupPrompt),
+  );
+  const seed = sync.seed.startupPrompt;
+  const dirty = sync.dirty;
+  // Named only when the human is already editing, since that is the one case the re-sync cannot resolve
+  // on its own: their draft is kept (never clobbered mid-type) and Save will overwrite the other write, so
+  // the choice is stated rather than discovered afterwards. Already filtered to "still changed" by the
+  // hook, so Reset retires it with no extra bookkeeping here.
+  const conflict = sync.conflicts.length > 0;
   const live = liveCount > 0;
   // `flex:1` (not `height:100%`) so the editor fills the Editor Panel's `minHeight:72vh`: that Panel sits in
   // an `alignItems:start` grid so its `height` is `auto`, against which a percentage height collapses to
@@ -748,8 +771,13 @@ function AgentEditor(
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || saving} onClick={() => onSavePrompt(prompt)}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
-          ? <Button onClick={() => setPrompt(agent.startupPrompt)}>Reset</Button>
+          ? <Button onClick={() => setPrompt(seed)}>Reset</Button>
           : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+        {conflict && (
+          <span data-testid="agent-prompt-conflict" style={{ color: color.amber, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+            This prompt changed elsewhere since you opened it — Save replaces it with your version, Reset takes theirs.
+          </span>
+        )}
       </div>
     </div>
   );
