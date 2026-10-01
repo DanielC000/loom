@@ -301,6 +301,67 @@ function classifyPortResponse(port, timeoutMs = 1500) {
   });
 }
 
+// Best-effort live command line for `pid`, or null if it can't be determined (dead, permission denied, no
+// tool available). Used ONLY to CONFIRM identity before a signal is sent — never to locate a pid to act on
+// by name (that stays forbidden). A null result means "can't confirm", which the caller below treats as a
+// REFUSAL, never as "assume it's ours." Mirrors scripts/daemon-supervisor-stop.mjs's own `commandLineOf` —
+// that script can't be imported here (it's a dev-only self-hosting tool, not part of the packaged CLI), so
+// this is a deliberate, small duplication of the same shape (card 279c0208).
+function commandLineOf(pid) {
+  try {
+    if (process.platform === "win32") {
+      // The modern equivalent of `wmic process get commandline` (wmic is deprecated/absent on recent
+      // Windows). -NoProfile/-NonInteractive: no PSReadLine, no prompts.
+      const r = spawnSync("powershell", [
+        "-NoProfile", "-NonInteractive", "-Command",
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+      ], { encoding: "utf8", timeout: 5000 });
+      if (r.status !== 0) return null;
+      return (r.stdout || "").trim() || null;
+    }
+    const r = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", timeout: 5000 });
+    if (r.status !== 0) return null;
+    return (r.stdout || "").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// @decision 279c0208 — never un-anchor either alternative here: a bare `dist[\/]index\.js|loom(\.mjs)?`
+// matched a foreign app's own `dist/index.js`, and a bare `[\/]loom(?:["'\s]|$)` matched
+// `vim /home/u/src/loom` / `git -C /home/u/loom status` — both reproduced by code review as false positives.
+// Exported (only for a hermetic regex-level test — see cli-stop-pid-identity.mjs) so a false-positive
+// string doesn't need a full real-process spawn to prove/disprove; this is never how `isOurDaemon` itself
+// decides anything, which always reads a REAL pid's REAL live command line.
+export const LEGACY_DAEMON_CMDLINE_RE = /loomctl[\\/](?:dist[\\/]index\.js|bin[\\/]loom\.mjs)|[\\/]bin[\\/]loom(?:["'\s]|$)/i;
+
+function normalizeCmdlinePath(s) {
+  // Windows paths are case-insensitive and a wrapper/shim can reformat separators; POSIX paths are
+  // case-sensitive, so only fold case there on win32 (card 279c0208 review).
+  const withSlashes = s.replace(/\\/g, "/");
+  return process.platform === "win32" ? withSlashes.toLowerCase() : withSlashes;
+}
+
+// Confirms a pid's live command line actually names a LOOM process before `stop()` signals it (card
+// 279c0208). Two tiers:
+//   1. PREFERRED: `rec.entry` — the exact absolute path THIS pid was spawned/invoked with, recorded at
+//      pid-record-write time (`writeForegroundPidRecord`/`startDetached` — see either's own comment) —
+//      confirmed by checking it's a verbatim substring of the pid's own live command line. This is an
+//      EXACT match against what we ourselves launched, not a generic shape, so it cannot mistake a
+//      foreign process for the daemon merely because their paths share a common bundler output name.
+//   2. FALLBACK (a pid record predating this field): `LEGACY_DAEMON_CMDLINE_RE` — `loomctl/dist/index.js`
+//      or `loomctl/bin/loom.mjs` (this package's own name), or `…/bin/loom` (the POSIX global-symlink
+//      shape, anchored on the `bin` DIRECTORY since `loomctl` isn't in that path either — never a bare
+//      `loom`-named path component, which matched `vim …/loom` / `git -C …/loom status` before).
+// Returns false — REFUSE, never guess — when the command line can't be read at all, or matches neither
+// tier: a stale pid record recycled into an unrelated process must never be signalled.
+function isOurDaemon(rec) {
+  const cmd = commandLineOf(rec.pid);
+  if (!cmd) return false;
+  if (rec.entry) return normalizeCmdlinePath(cmd).includes(normalizeCmdlinePath(rec.entry));
+  return LEGACY_DAEMON_CMDLINE_RE.test(cmd);
+}
+
 // POST /internal/shutdown (the daemon's graceful control hook) → { status } or { error }.
 // Card 93249b52: this route now requires the SAME loopback-secret bearer credential every /api/* write
 // does (see gateway/server.ts's `isGuardedInternalWrite`) — this CLI runs on the same host and can read
@@ -387,7 +448,10 @@ This package looks incomplete (was it built/assembled with scripts/build-npm-pac
 // shape `startDetached` already uses, fixes `loom stop` against a foreground/OS-service daemon for free
 // (see `stop()` — its logic is unchanged; it just now has a `rec` to work with).
 function writeForegroundPidRecord({ port, url }) {
-  writePidFile({ pid: process.pid, port, url, version: readVersion(), startedAt: new Date().toISOString() });
+  // `entry: process.argv[1]` (card 279c0208 review) — literally the path this SAME live process was
+  // invoked with (the npm global symlink, or the Windows shim's resolved bin/loom.mjs path), so it is
+  // GUARANTEED to appear verbatim in this pid's own live command line later — see `isOurDaemon`.
+  writePidFile({ pid: process.pid, port, url, entry: process.argv[1], version: readVersion(), startedAt: new Date().toISOString() });
 }
 // Removes the pid file ONLY if it still names OUR OWN pid — never a later invocation's record we lost a
 // clobber race against (e.g. a stray second `loom start` on the same LOOM_HOME). Exported so a test can
@@ -456,7 +520,10 @@ async function startDetached({ port, open }) {
 
   const child = spawn(process.execPath, [daemonEntry], { cwd: pkgRoot, env, detached: true, windowsHide: true, stdio });
   child.unref();
-  writePidFile({ pid: child.pid, port, url, version: readVersion(), startedAt: new Date().toISOString() });
+  // `entry: daemonEntry` (card 279c0208 review) — the exact absolute path this child was spawned with
+  // (see `resolveDaemonEntry`), so it is GUARANTEED to appear verbatim in this pid's own live command
+  // line later — see `isOurDaemon`.
+  writePidFile({ pid: child.pid, port, url, entry: daemonEntry, version: readVersion(), startedAt: new Date().toISOString() });
   console.log(`Starting Loom v${readVersion()} in the background …`);
 
   const ready = await waitForReady(port, 30000);
@@ -480,18 +547,19 @@ It may still be starting — check 'loom status'${logPath ? ` or the log at ${lo
 // IDENTITY, not just liveness (task a242c747): `isAlive(rec.pid)` below only proves *some* process holds
 // this pid — OS pids get reused, so after an unclean exit the pid file can point at a totally unrelated
 // process, and signalling it blind (steps 2/3 use a bare pid — SIGTERM, SIGKILL, and on Windows
-// `taskkill /T /F`, which kills that process's WHOLE tree) can hit an innocent bystander. The (1) hook
-// above already confirms identity whenever it gets ANY HTTP response — even a 404 means an HTTP server
-// answered on this port. Only when the hook gets NO response at all (a connection error) is identity
-// still undecided — resolved just below, before either signal step runs, into one of THREE outcomes: a
-// stale-record cleanup, a fall-through to the signal ladder, or an outright refusal (see that block's own
-// comment for which is which).
+// `taskkill /T /F`, which kills that process's WHOLE tree) can hit an innocent bystander. Resolved into
+// one of several outcomes just below — see that block's own comment for which is which.
+//
+// @decision 279c0208 — do not widen the command-line identity check (`isOurDaemon`, below) beyond the
+// port-probe's "timeout" outcome to the hook.status-defined paths (404/401): that re-breaks
+// cli-stop-auth.mjs's guarded-401 scenario, a bare non-loom-shaped stand-in this check would then refuse.
 //
 // RESIDUAL WINDOW (not closed by the above, card a2f821bf): identity is confirmed BEFORE the signal is
-// chosen, not AT the instant it is issued. Between a passing check (the hook responding, or the
-// port-probe resolving to something other than "refused") and the actual `process.kill`/`taskkill` call
-// below, the confirmed process can exit and the OS can reuse its pid — the signal can then, in principle,
-// reach an unrelated process. On Windows this is worse: the hard-kill path is `taskkill /T /F`, which
+// chosen, not AT the instant it is issued. Between a passing check (the hook responding, the port-probe
+// resolving to something other than "refused", or the command-line confirmation) and the actual
+// `process.kill`/`taskkill` call below, the confirmed process can exit and the OS can reuse its pid — the
+// signal can then, in principle, reach an unrelated process. On Windows this is worse: the hard-kill path
+// is `taskkill /T /F`, which
 // takes the WHOLE process tree, not just the one pid. Not closed by narrowing — a retry, a re-check
 // immediately before signalling, or a shorter gap all leave the same window, just smaller. What WOULD
 // close it is signalling by a stable handle rather than a recyclable number (a Windows process handle
@@ -520,24 +588,20 @@ async function stop() {
     console.error(`loom: the daemon rejected our stop credential (401) — falling back to a signal.${process.platform === "win32" ? " On Windows this means a HARD kill (no graceful teardown)." : ""}`);
   }
 
-  // Identity check before EITHER signal step below. The hook already confirms identity when it got any
-  // HTTP response (hook.status defined, incl. 404). Otherwise, probe the port directly — THREE possible
-  // outcomes, each handled differently:
-  //   - REFUSED (nothing is listening on the port at all): an INFERENCE, not a certainty — a running Loom
-  //     daemon normally holds its port for its whole life, so a pid that's alive without holding the
-  //     expected port is almost certainly a reused one belonging to another process. The residual case
-  //     (the daemon's HTTP listener died while the process itself stayed alive) would also show refused
-  //     and make this inference wrong — but we deliberately prefer a false "stale" here over signalling a
-  //     possible bystander, so: treat it like any other stale PID file (clean it), never signal.
-  //   - TIMEOUT (the port IS held but not responding): consistent with a genuinely wedged real daemon —
-  //     this is exactly the case that must stay killable, so it falls through to the normal signal ladder
-  //     below unchanged. This is also why the check does NOT gate on a successful `fetchVersion`-style
-  //     probe to decide whether to hard-kill at all: a naive "only kill if it answers" would make a truly
-  //     wedged daemon (which by definition ISN'T answering) permanently unkillable — trading a rare
-  //     wrong-kill for a routine can't-stop.
-  //   - anything else (an unclassified connection error) is genuinely UNDECIDABLE from either signal above
-  //     — refuse to guess (never a blind kill, never a silent no-op) and hand the human the exact pid and
-  //     command so they can finish the job themselves if it really is stuck.
+  // Identity check before EITHER signal step below (card 279c0208's decision note above `stop()` states
+  // the scoping rule). The hook already confirms identity when it got any HTTP response (hook.status
+  // defined, incl. 404/401). Otherwise, probe the port directly — THREE outcomes:
+  //   - REFUSED (nothing listening at all): treat it like any other stale PID file (clean it, never
+  //     signal) — a running Loom daemon always holds its port, so a pid alive without holding it is
+  //     almost certainly a reused one.
+  //   - TIMEOUT (the port IS held but not responding): consistent with a genuinely wedged real daemon, so
+  //     falls through to the signal ladder — but only once `isOurDaemon(rec)` confirms the live COMMAND
+  //     LINE actually matches what WE recorded launching this pid with (see `isOurDaemon`'s own comment);
+  //     refuses, rather than guessing, when it can't. A real wedged daemon passes this trivially (its
+  //     command line is readable regardless of HTTP responsiveness), so a truly wedged daemon never
+  //     becomes harder to stop — only a pid recycled into an unrelated process does.
+  //   - anything else (an unclassified connection error): genuinely UNDECIDABLE — refuse to guess and hand
+  //     the human the exact pid and command so they can finish the job themselves if it really is stuck.
   if (!graceful && hook.status === undefined) {
     const probe = await classifyPortResponse(port);
     if (probe === "refused") {
@@ -551,7 +615,14 @@ async function stop() {
       console.error(`loom: refusing to signal an unidentified process. If you're sure PID ${rec.pid} is the stuck daemon, stop it yourself: ${process.platform === "win32" ? `taskkill /PID ${rec.pid} /T /F` : `kill -9 ${rec.pid}`}`);
       return 1;
     }
-    // probe === "timeout": the port IS held but unresponsive — fall through to the signal ladder below.
+    // probe === "timeout": the port IS held but unresponsive. Confirm the command line before falling
+    // through to the signal ladder — see the block comment above for why this, specifically, is the case
+    // the port probe alone can't resolve.
+    if (!isOurDaemon(rec)) {
+      console.error(`loom: PID ${rec.pid} is alive and holds ${urlFor(port)}, but its live command line does not confirm it as the loom daemon — it may have been reused by an unrelated process since the PID file was written.`);
+      console.error(`loom: refusing to signal an unverified process. If you're sure PID ${rec.pid} is the stuck daemon, stop it yourself: ${process.platform === "win32" ? `taskkill /PID ${rec.pid} /T /F` : `kill -9 ${rec.pid}`}`);
+      return 1;
+    }
   }
 
   // (2) POSIX SIGTERM fallback (the daemon's signal handler runs the SAME graceful path). On Windows
@@ -667,6 +738,20 @@ function runNpmInstall(spec) {
   return spawnSync("npm", ["i", "-g", spec], { stdio: "inherit", shell: true });
 }
 
+// `loom update` never touches a registered OS-autostart service artifact, so an existing install's plist/
+// unit/task can drift behind what the just-installed code would now generate. Hints at a refresh rather
+// than silently rewriting one.
+// @decision 279c0208 — hint only; never auto-rewrite/reload a registered service. Best-effort: a probe
+// failure here must never turn a successful update into a reported failure.
+async function hintServiceRefresh() {
+  try {
+    const { isServiceRegistered } = await import(pathToFileURL(path.join(here, "service.mjs")).href);
+    if (isServiceRegistered({ platform: process.platform })) {
+      console.log("loom: an autostart service is registered for Loom — re-run 'loom service install' to refresh it with any service-configuration changes in this release ('loom update' does not rewrite a registered service automatically).");
+    }
+  } catch { /* best-effort — never fail the update over this */ }
+}
+
 // --- update: upgrade in place via npm, then a clean restart ----------------------------------------
 // END USERS run NO supervisor (the exit-75 restart sentinel is supervisor-only — see CLAUDE.md), so an
 // update can't be a self-restart; it's a deliberate stop → reinstall → start cycle driven from here:
@@ -720,6 +805,8 @@ async function update({ channel, port: explicitPort }) {
     console.error(`loom: npm install failed (${why}). The daemon was NOT restarted — start it with 'loom start'.`);
     return 1;
   }
+
+  await hintServiceRefresh();
 
   // (4) bring the (now-updated) daemon back up if it had been running.
   if (wasRunning) {

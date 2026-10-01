@@ -256,9 +256,13 @@ export function servicePlan(opts) {
 
 // --- executor (runs only on the matching OS) --------------------------------------------------------
 
-function runStep(step) {
-  const r = spawnSync(step.file, step.args, { encoding: "utf8", shell: false });
-  // ENOENT (tool absent) surfaces as r.error; a non-zero exit as r.status.
+// `timeoutMs`, when given, bounds the spawn (spawnSync kills the child and returns with `status: null` on
+// expiry — already "not ok" via the check below, so a timeout needs no special-cased branch). Only
+// `isServiceRegistered`'s query call passes one (card 279c0208 review) — install/uninstall steps are
+// unbounded, unchanged.
+function runStep(step, timeoutMs) {
+  const r = spawnSync(step.file, step.args, { encoding: "utf8", shell: false, ...(timeoutMs ? { timeout: timeoutMs } : {}) });
+  // ENOENT (tool absent) surfaces as r.error; a non-zero exit (incl. a timeout kill) as r.status !== 0.
   const ok = !r.error && r.status === 0;
   return { ok, status: r.status, error: r.error, stdout: r.stdout || "", stderr: r.stderr || "" };
 }
@@ -351,6 +355,33 @@ async function status(ctx) {
   console.log(`loom service: running    = ${version ? `yes (v${version} on port ${ctx.port})` : "no"}`);
   // Exit non-zero when not registered, so it is scriptable like `loom status`.
   return isRegistered ? 0 : 1;
+}
+
+// Bounds `isServiceRegistered`'s OS-query spawn (card 279c0208 review): `loom update` calls this AFTER
+// already stopping the daemon it might be about to restart, so a hung/unresponsive query tool (a wedged
+// systemd/launchd/Task-Scheduler client, a broken D-Bus session, …) must never hang the whole update with
+// the daemon already down. A timed-out query is treated the same as any other query failure — not
+// registered, falling back to the artifact-existence check below.
+const SERVICE_QUERY_TIMEOUT_MS = 5000;
+
+// Read-only: is a Loom autostart registration currently present for `ctx.platform`? Same detection
+// `status()` above uses (query the OS manager, falling back to the artifact file existing), factored out
+// so a caller that only needs the yes/no — never the full install/uninstall/status UX — doesn't have to
+// duplicate it. `ctx` needs only `platform` (+ `loomHome`/`LOOM_HOME` implicitly, via `planFor`) — the
+// other `servicePlan` fields (node/loomBin/workingDir/port) only affect the generated ARTIFACT CONTENT,
+// which this never reads. Used by `loom update` (card 279c0208, point 2 — see that call site's own
+// comment for the decision this backs) to decide whether to print a hint; never throws (a platform this
+// process doesn't run on, or any probe failure, is reported as "not registered" — a pure information
+// read has no useful way to fail loudly to a caller that doesn't even show the platform it asked about).
+export function isServiceRegistered(ctx) {
+  let plan;
+  try { plan = planFor(ctx); } catch { return false; }
+  let registered = false;
+  if (plan.queryCmd) {
+    const r = runStep(plan.queryCmd, SERVICE_QUERY_TIMEOUT_MS);
+    registered = r.ok;
+  }
+  try { return registered || fs.existsSync(plan.artifactPath); } catch { return registered; }
 }
 
 // Dispatch entry called from bin/loom.mjs. ctx: { action, platform, node, loomBin, workingDir, port,
