@@ -27,6 +27,10 @@ import type { CompanionBinding, CompanionMessage } from "@loom/shared";
 export interface CompanionBindingStore extends AllowlistReader, PairingStore, VoicePrefStore {
   listCompanionBindings(): CompanionBinding[];
   upsertCompanionBinding(input: { sessionId: string; scope?: "dm" | "group" } & CompanionRoute): CompanionBinding;
+  /** Card a8480338: flip `bindings_seeded` to 1 for `sessionId` — called ONLY right after the bootstrap-seed
+   *  below actually writes that session's first binding, so no LATER build ever re-seeds it again (see
+   *  CompanionConfig.bindingsSeeded's own doc for the full rationale). */
+  markCompanionBindingsSeeded(sessionId: string): void;
   /** The proactive HOME channel target (card 9488951e), PER SESSION — carried explicitly on the
    *  heartbeat's submitted turn (as its per-turn route), not consulted by deliverReply. */
   getCompanionHome(sessionId: string): CompanionRoute | null;
@@ -132,11 +136,16 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // Bootstrap the single env/Telegram binding ONLY when a token exists (the env single-owner path). An
   // IN-APP-ONLY companion (no token) carries no Telegram route — its in-app binding is minted by the
   // provision endpoint, not here — so seeding a Telegram binding from an empty allowedChatId is skipped.
+  //
+  // @decision a8480338 — never drop the `!cfg.bindingsSeeded` guard below: "zero bindings right now" is not
+  // the same fact as "never provisioned" (an owner revoke also leaves zero bindings), and dropping it lets
+  // the next gateway build silently re-seed a binding the owner deliberately revoked.
   let bindings = db.listCompanionBindings().filter((b) => b.sessionId === cfg.sessionId);
-  if (bindings.length === 0 && cfg.botToken) {
+  if (bindings.length === 0 && cfg.botToken && !cfg.bindingsSeeded) {
     try {
       db.upsertCompanionBinding({ sessionId: cfg.sessionId, channel: TELEGRAM_CHANNEL, chatId: cfg.allowedChatId, scope: cfg.chatScope });
       bindings = db.listCompanionBindings().filter((b) => b.sessionId === cfg.sessionId);
+      db.markCompanionBindingsSeeded(cfg.sessionId);
     } catch (err) {
       // card 94754bbe: never let this refusal die silently inside the generic "hot-lifecycle reconcile
       // failed" catch (controller.ts's enqueue()) — that log names neither the companion nor the fix. An
@@ -155,6 +164,14 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
           `daemon restarts, or it is bound via the REST admin surface instead.`,
       );
     }
+  } else if (bindings.length === 0 && cfg.botToken && cfg.bindingsSeeded) {
+    // @decision a8480338 — never let this branch stay silent: a token companion with zero bindings but
+    // bindingsSeeded:true covers TWO stranded shapes (a deliberate owner revoke, or a prior refused seed
+    // now backfilled true), and silence here is indistinguishable from a companion that's just broken.
+    console.warn(
+      `[companion] SETUP: session ${cfg.sessionId.slice(0, 8)} has no Telegram binding (revoked, or a first ` +
+        `bind never landed); rebind via POST /api/companion/bindings.`,
+    );
   }
   preFlagLikelyGroupDmBindings(bindings, db);
   // DM-pairing coordinator: the db-backed redemption path with the real wall clock (epoch ms). Default

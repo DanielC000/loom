@@ -43,6 +43,15 @@ export interface CompanionConfig {
    * framed, NOT untrusted chat). Defaults to DEFAULT_HEARTBEAT_PROMPT. From LOOM_COMPANION_HEARTBEAT_PROMPT.
    */
   heartbeatPrompt: string;
+  /**
+   * Card a8480338: TRUE ⇒ this session's bootstrap Telegram binding has ALREADY been genuinely seeded once
+   * (see CompanionConfigRow.bindingsSeeded, db.ts) — `factory.ts`'s re-seed-on-empty-bindings path reads
+   * this to tell "never provisioned yet" apart from "an owner deliberately revoked every binding", so it
+   * fires only on the former. OPTIONAL (not every CompanionConfig literal is DB-backed, e.g. a test fixture
+   * built by hand): omitted/undefined behaves exactly like `false` — the pre-existing one-time-seed
+   * behavior — so every caller that doesn't know about this field is byte-identical.
+   */
+  bindingsSeeded?: boolean;
 }
 
 /**

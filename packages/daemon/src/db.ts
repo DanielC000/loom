@@ -158,6 +158,13 @@ export interface CompanionConfigRow {
    * to at most one emission per streak, mirroring `companion_heartbeat_deferred`'s once-per-streak rule.
    */
   zeroReplyAlertTurnSeq: number | null;
+  /**
+   * Card a8480338: TRUE ⇒ this session's bootstrap Telegram binding has genuinely been seeded once
+   * (env-bootstrap's first zero-bindings observation, or the provision endpoint's own direct write) —
+   * gates `factory.ts`'s re-seed-on-empty-bindings path so a deliberate owner revoke (deleting every
+   * binding) is never undone by the next gateway build. Backfills to TRUE for a pre-existing (legacy) row.
+   */
+  bindingsSeeded: boolean;
 }
 
 /**
@@ -1002,7 +1009,16 @@ CREATE TABLE IF NOT EXISTS companion_config (
   -- as "not yet observed" (never as an instant zero-turn streak), so an upgraded long-lived companion can
   -- never trip the alert on its very first post-migration turn.
   last_chat_reply_turn_seq INTEGER,
-  zero_reply_alert_turn_seq INTEGER
+  zero_reply_alert_turn_seq INTEGER,
+  -- Card a8480338: 1 ⇒ this session's bootstrap Telegram binding has ALREADY been genuinely seeded once
+  -- (either by factory.ts's env-bootstrap path the first time it ever saw zero bindings, or by the
+  -- provision endpoint minting the session's own binding directly) — a DIFFERENT fact than "a binding
+  -- currently exists". Once set, factory.ts's bootstrap-seed NEVER fires again for this session, even
+  -- after every binding is later deleted (an owner revoke) — without this, re-seeding keyed on "zero
+  -- bindings right now" would silently UNDO a deliberate revoke on the next gateway build (daemon restart).
+  -- DEFAULT 0 here (a brand-new row has never been seeded yet); see COMPANION_CONFIG_ADDED_COLUMNS below for
+  -- why an existing DB's ADD COLUMN backfill uses a DIFFERENT default.
+  bindings_seeded INTEGER NOT NULL DEFAULT 0
 );
 -- Companion RECURRING reminders (Companion Memory & Reminders Design, Surface 2 s3): N named cron jobs
 -- that fire a proactive turn into the companion's OWN long-lived session — generalizes the single
@@ -2003,6 +2019,11 @@ const COMPANION_CONFIG_ADDED_COLUMNS: Record<string, string> = {
   last_chat_reply_turn_seq: "INTEGER",
   // Nullable, no DEFAULT — every legacy row backfills to NULL (no alert active), matching a fresh row.
   zero_reply_alert_turn_seq: "INTEGER",
+  // Card a8480338: DEFAULT 1 here (NOT 0, unlike this table's CREATE TABLE default for a brand-new row) —
+  // a pre-existing config row already went through its one genuine bootstrap before this column existed,
+  // so backfilling it to "already seeded" is what stops factory.ts from re-seeding a binding the owner may
+  // have since deliberately revoked (same shape as pending_gate_ops' surfaced_pending backfilling to 1).
+  bindings_seeded: "INTEGER NOT NULL DEFAULT 1",
 };
 
 /** Columns added to `wakes` after its initial ship (route-aware wake engine); applied to existing DBs
@@ -2775,9 +2796,35 @@ export class Db {
     const have = new Set(
       (this.db.prepare("PRAGMA table_info(companion_config)").all() as { name: string }[]).map((c) => c.name),
     );
+    const bindingsSeededJustAdded = !have.has("bindings_seeded");
     for (const [name, type] of Object.entries(COMPANION_CONFIG_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE companion_config ADD COLUMN ${name} ${type}`);
     }
+    if (bindingsSeededJustAdded) this.narrowBindingsSeededBackfillForRefusedRows();
+  }
+
+  /**
+   * Card a8480338, fix round: `COMPANION_CONFIG_ADDED_COLUMNS`'s blanket `bindings_seeded` backfill (DEFAULT
+   * 1 — "already seeded") is correct for the common case, but wrong for a row whose `allowed_chat_id` would
+   * be REFUSED by the SAME validation `factory.ts`'s bootstrap-seed uses (scope 'dm' + a non-numeric chatId,
+   * via `db.upsertCompanionBinding`'s own `InvalidTelegramChatIdError` chokepoint — card 94754bbe): such a
+   * row's seed was always refused, wrote no binding, and so was NEVER genuinely seeded. Left at the blanket
+   * 1, fixing the chat id and restarting would silently skip the bootstrap-seed forever (the
+   * `!cfg.bindingsSeeded` guard also silences `factory.ts`'s own refusal SETUP log for that branch) — the
+   * companion arms with no Telegram binding and nothing says so. Run ONCE, right after the blanket ADD
+   * COLUMN backfill lands (only when the column was JUST added — never re-narrows a row some LATER, genuine
+   * write already set correctly), narrowing exactly that refused-seed population back to 0 so the next
+   * gateway build treats it as a genuine first provisioning. See
+   * docs/decisions/a8480338-bootstrap-seed-must-not-reseed-a-revoked-binding.md.
+   */
+  private narrowBindingsSeededBackfillForRefusedRows(): void {
+    const rows = this.db.prepare(
+      "SELECT session_id, channel, allowed_chat_id, chat_scope FROM companion_config WHERE bindings_seeded = 1",
+    ).all() as { session_id: string; channel: string; allowed_chat_id: string; chat_scope: string }[];
+    const refused = rows.filter((r) => r.chat_scope === "dm" && isNonNumericTelegramChatId(r.channel, r.allowed_chat_id));
+    if (refused.length === 0) return;
+    const stmt = this.db.prepare("UPDATE companion_config SET bindings_seeded = 0 WHERE session_id = ?");
+    for (const r of refused) stmt.run(r.session_id);
   }
 
   /**
@@ -4045,9 +4092,15 @@ export class Db {
     /** The companion's given name. OMITTED ⇒ PRESERVE the stored value on an update (mirrors `provisioned`),
      *  defaulting to "" (unnamed) on first insert. */
     name?: string;
+    /** Card a8480338: see CompanionConfigRow.bindingsSeeded. OMITTED ⇒ PRESERVE the stored value on an
+     *  update (the env-bootstrap re-upsert on every boot must NEVER reset this back to false), defaulting
+     *  to false on first insert. Pass `true` ONLY at a genuine first-provisioning write (the provision
+     *  endpoint); `markCompanionBindingsSeeded` is the one-way flip for the env-bootstrap path's OWN
+     *  one-time seed. */
+    bindingsSeeded?: boolean;
   }): CompanionConfigRow {
     const existing = this.db.prepare(
-      "SELECT created_at, provisioned, name, last_chat_reply_turn_seq, zero_reply_alert_turn_seq FROM companion_config WHERE session_id = ?",
+      "SELECT created_at, provisioned, name, last_chat_reply_turn_seq, zero_reply_alert_turn_seq, bindings_seeded FROM companion_config WHERE session_id = ?",
     ).get(input.sessionId) as Row | undefined;
     const now = new Date().toISOString();
     const row: CompanionConfigRow = {
@@ -4059,6 +4112,8 @@ export class Db {
       provisioned: input.provisioned ?? (existing?.provisioned as number | undefined) === 1,
       // Same preserve-on-omit pattern as provisioned: a config write that doesn't mention name never clears it.
       name: input.name ?? (existing?.name as string | undefined) ?? "",
+      // Same preserve-on-omit pattern as provisioned/name — see the param doc above.
+      bindingsSeeded: input.bindingsSeeded ?? (existing?.bindings_seeded as number | undefined) === 1,
       createdAt: (existing?.created_at as string) ?? now, updatedAt: now,
       // Zero-reply detector (card 48e8d289): NOT part of the SQL INSERT/UPDATE below (this method never
       // touches them — they're driven exclusively by recordCompanionChatReply/markCompanionZeroReplyAlert),
@@ -4067,14 +4122,23 @@ export class Db {
       zeroReplyAlertTurnSeq: (existing?.zero_reply_alert_turn_seq as number | null) ?? null,
     };
     this.db.prepare(
-      `INSERT INTO companion_config (session_id, bot_token_blob, channel, allowed_chat_id, chat_scope, heartbeat_interval_minutes, heartbeat_prompt, enabled, provisioned, name, created_at, updated_at)
-       VALUES (@sessionId, @botTokenBlob, @channel, @allowedChatId, @chatScope, @heartbeatIntervalMinutes, @heartbeatPrompt, @enabledInt, @provisionedInt, @name, @createdAt, @updatedAt)
+      `INSERT INTO companion_config (session_id, bot_token_blob, channel, allowed_chat_id, chat_scope, heartbeat_interval_minutes, heartbeat_prompt, enabled, provisioned, name, bindings_seeded, created_at, updated_at)
+       VALUES (@sessionId, @botTokenBlob, @channel, @allowedChatId, @chatScope, @heartbeatIntervalMinutes, @heartbeatPrompt, @enabledInt, @provisionedInt, @name, @bindingsSeededInt, @createdAt, @updatedAt)
        ON CONFLICT(session_id) DO UPDATE SET
          bot_token_blob = @botTokenBlob, channel = @channel, allowed_chat_id = @allowedChatId, chat_scope = @chatScope,
          heartbeat_interval_minutes = @heartbeatIntervalMinutes, heartbeat_prompt = @heartbeatPrompt, enabled = @enabledInt,
-         provisioned = @provisionedInt, name = @name, updated_at = @updatedAt`,
-    ).run({ ...row, enabledInt: row.enabled ? 1 : 0, provisionedInt: row.provisioned ? 1 : 0 });
+         provisioned = @provisionedInt, name = @name, bindings_seeded = @bindingsSeededInt, updated_at = @updatedAt`,
+    ).run({ ...row, enabledInt: row.enabled ? 1 : 0, provisionedInt: row.provisioned ? 1 : 0, bindingsSeededInt: row.bindingsSeeded ? 1 : 0 });
     return row;
+  }
+  /**
+   * Card a8480338: flip `bindings_seeded` to 1 for `sessionId` — the one-way mark factory.ts's env-bootstrap
+   * path sets right after it genuinely seeds that session's FIRST Telegram binding (the "zero bindings yet"
+   * observation), so no LATER gateway build ever re-seeds it again, even after every binding is deleted.
+   * Idempotent (a missing/already-set row is a harmless no-op) — never throws.
+   */
+  markCompanionBindingsSeeded(sessionId: string): void {
+    this.db.prepare("UPDATE companion_config SET bindings_seeded = 1, updated_at = ? WHERE session_id = ?").run(new Date().toISOString(), sessionId);
   }
   /**
    * Delete a run-config by session id (idempotent — a missing id matches nothing), CASCADE-cleaning its
@@ -9710,6 +9774,7 @@ function toCompanionConfigRow(r0: unknown): CompanionConfigRow {
     createdAt: (r.created_at as string) ?? "", updatedAt: (r.updated_at as string) ?? "",
     lastChatReplyTurnSeq: (r.last_chat_reply_turn_seq as number | null) ?? null,
     zeroReplyAlertTurnSeq: (r.zero_reply_alert_turn_seq as number | null) ?? null,
+    bindingsSeeded: (r.bindings_seeded as number) === 1,
   };
 }
 function toConnectionRow(r0: unknown): ConnectionRow {

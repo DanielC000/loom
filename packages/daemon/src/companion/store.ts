@@ -39,6 +39,7 @@ export interface CompanionConfigStore {
     chatScope: "dm" | "group"; heartbeatIntervalMinutes: number; heartbeatPrompt: string | null; enabled: boolean;
     provisioned?: boolean;
     name?: string;
+    bindingsSeeded?: boolean;
   }): CompanionConfigRow;
   getCompanionHome(sessionId: string): CompanionRoute | null;
   setCompanionHome(sessionId: string, home: CompanionRoute): void;
@@ -317,6 +318,7 @@ function buildConfigFromRow(row: CompanionConfigRow, home: CompanionRoute | null
     homeChatId: home?.chatId ?? row.allowedChatId,
     heartbeatIntervalMinutes: row.heartbeatIntervalMinutes,
     heartbeatPrompt: row.heartbeatPrompt || DEFAULT_HEARTBEAT_PROMPT,
+    bindingsSeeded: row.bindingsSeeded,
   };
 }
 

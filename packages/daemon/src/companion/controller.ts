@@ -631,10 +631,12 @@ export class CompanionController implements CompanionControl {
    * (companion_bindings — the single source of truth, managed live via the bindings REST / the Access UI
    * section, and consulted live by the gateway at inbound time). config.allowedChatId/chatScope are
    * BOOT-SEED ONLY: createCompanionGateway seeds the INITIAL binding from them ONLY when the SESSION's
-   * bindings are empty (mirroring LOOM_COMPANION_CHAT_ID) — once a binding row exists, a rebuilt gateway
-   * re-reads the SAME durable bindings, so churning the adapter on an allowedChatId/chatScope change would
-   * NOT re-route. They are therefore DELIBERATELY not rebuild triggers (a home change is picked up live by
-   * the gateway's homeResolver — no rebuild needed there either). NOTE: `current.sessionId ===
+   * bindings are empty AND it has never been seeded before (cfg.bindingsSeeded — card a8480338, mirroring
+   * LOOM_COMPANION_CHAT_ID) — once a binding row has EVER existed, a rebuilt gateway re-reads the SAME
+   * durable bindings (even if an owner later revokes them all), so churning the adapter on an
+   * allowedChatId/chatScope change would NOT re-route. They are therefore DELIBERATELY not rebuild
+   * triggers (a home change is picked up live by the gateway's homeResolver — no rebuild needed there
+   * either). NOTE: `current.sessionId ===
    * desired.sessionId` always here (both keyed by the SAME map entry — company_config's sessionId is its
    * primary key and never changes for an existing row), so unlike the old single-slot diff there is no
    * "sessionId changed" case to detect: a session moving out of the enabled set and a DIFFERENT session

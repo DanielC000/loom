@@ -14,6 +14,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      but NOT a manually-bound (provisioned:false) pre-existing session.
 //   5. MULTI-COMPANION (the old single-companion pre-spawn 409 is GONE): provisioning a 2nd companion while
 //      one is already enabled now SUCCEEDS — a distinct session spawns and arms its OWN gateway concurrently.
+//   7. Card a8480338 fix round (Code Review MINOR 2): a companion PROVISIONED over this REST route sets
+//      bindingsSeeded:true at write time (never through factory.ts's bootstrap-seed path) — proven both as
+//      a direct row read, AND end to end: revoke the Telegram binding, rebuild the gateway through the REAL
+//      createCompanionGateway (not the test's injected gateway builder), and it must NOT re-seed.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-provision.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -46,6 +50,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { CompanionController } = await import("../dist/companion/controller.js");
 const { ChatGateway } = await import("../dist/companion/chat-gateway.js");
 const { createCompanionGateway } = await import("../dist/companion/factory.js");
+const { resolveAllEnabledConfigs } = await import("../dist/companion/store.js");
 const { InAppChannel, IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
 const { decryptSecret, encryptSecret } = await import("../dist/keys/envelope.js");
 const { buildServer } = await import("../dist/gateway/server.js");
@@ -425,6 +430,37 @@ try {
     check("factory: tokenless gateway registers the in-app adapter (reply delivered)", inAppOut.delivered === true);
     check("factory: tokenless gateway registers NO Telegram adapter (deliver → no-adapter)", tgOut.delivered === false && tgOut.reason === "no-adapter");
     db.close();
+  }
+
+  // ============ Part 7 — card a8480338 fix round (MINOR 2): provision sets bindingsSeeded; no re-seed =====
+  // Runs the REAL REST provision route (rig.app.inject), then revokes the Telegram binding and rebuilds the
+  // gateway through the REAL createCompanionGateway (not Part 1-6's injected faithful-but-not-real builder)
+  // — proving the bootstrap-seed guard end to end against the config row this REST route actually wrote.
+  {
+    const rig = await makeRig("p7.db"); rigs.push(rig);
+    const res = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { botToken: TOKEN, allowedChatId: "970970099" } });
+    check("(7) provision → 201", res.statusCode === 201);
+    const sid = JSON.parse(res.payload).sessionId;
+
+    const row = rig.db.getCompanionConfig(sid);
+    check("(7) a REST-provisioned companion is marked bindingsSeeded:true at write time (never via the bootstrap-seed path)", row?.bindingsSeeded === true);
+
+    const bindsBefore = rig.db.listCompanionBindings().filter((b) => b.sessionId === sid);
+    check("(7 setup) the provisioned session holds its Telegram binding before the revoke", bindsBefore.some((b) => b.channel === TELEGRAM && b.chatId === "970970099"));
+
+    // Owner revokes: delete every binding for this session (mirrors DELETE /api/companion/bindings/:sessionId
+    // with no `channel` query param).
+    rig.db.deleteCompanionBinding(sid);
+    check("(7) zero bindings remain after the revoke", rig.db.listCompanionBindings().filter((b) => b.sessionId === sid).length === 0);
+
+    // Rebuild the gateway exactly like a daemon restart would: resolveAllEnabledConfigs (the REAL, side-
+    // effect-free resolver reconcile/boot both use) → createCompanionGateway (the REAL factory, not the
+    // test's injected builder).
+    const cfgs = resolveAllEnabledConfigs(rig.db, {});
+    const cfg = cfgs.find((c) => c.sessionId === sid);
+    check("(7 setup) the resolved config carries bindingsSeeded:true through from the row", cfg?.bindingsSeeded === true);
+    createCompanionGateway(cfg, () => ({ delivered: true }), rig.db);
+    check("(7) THE FIX: rebuilding the gateway after a revoke does NOT re-seed the REST-provisioned binding", rig.db.listCompanionBindings().filter((b) => b.sessionId === sid).length === 0);
   }
 } finally {
   for (const r of rigs) { try { await r.app.close(); } catch { /* ignore */ } try { r.db.close(); } catch { /* ignore */ } }
