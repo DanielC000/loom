@@ -310,6 +310,11 @@ export const HUMAN_ONLY_PROJECT_CONFIG_KEYS: readonly string[] = ["harness"];
 /** Dot-path human-only keys the elevated Platform `project_configure` also refuses (card e8df2659). The
  *  top-level list above is `Object.hasOwn`-only and cannot see a nested key. */
 export const HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = ["orchestration.mergeGate", "orchestration.mergeGateInterval"];
+/** The single list driving the "human-only means BOTH directions" unset/replace-drop guard below (card
+ *  74f27ab5) — every human-only key, top-level AND nested, as dot-paths. The separate WRITE-direction
+ *  checks above stay split (raw-payload shape differs by depth); both resolve through the same dot-path
+ *  helpers once a key is stored, so one combined list covers unset/replace regardless of depth. */
+const HUMAN_ONLY_PROJECT_CONFIG_PATHS: readonly string[] = [...HUMAN_ONLY_PROJECT_CONFIG_KEYS, ...HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS];
 /** Nested keys the Lead may CHANGE but never BLANK or DROP (card fa777608). This blocks only the LABELLED
  *  gateless path — a blank/removed `orchestration.gateCommand` ⇒ "no gateCommand configured" (unverified).
  *  It does NOT stop the gate being neutered: the Lead can still change the command to a no-op such as
@@ -325,11 +330,19 @@ function nestedValue(obj: unknown, dotPath: string): unknown {
 }
 const isNonBlankString = (v: unknown): boolean => typeof v === "string" && v.trim() !== "";
 /** ONE check for both nested-key guards above: does this `unset` list (normalized EXACTLY like
- *  `unsetConfigPath`) hit `k` itself, or a prefix of it while `k` is stored? */
+ *  `unsetConfigPath`) hit `k` itself, a PREFIX of it (an ancestor, e.g. "orchestration" over
+ *  "orchestration.mergeGate") while `k` is stored, or a path INSIDE it (a DESCENDANT, e.g.
+ *  "harness.default" under "harness") while `k` is stored? Card 74f27ab5: `harness` is an OBJECT
+ *  ({default, scope}), unlike the leaf-valued nested keys — unsetting just one of its sub-fields drops
+ *  the human-only value exactly as effectively as unsetting "harness" itself, so the descendant case is
+ *  not optional. All three checks are on PATH TEXT only (a plain string prefix like "harnessX" is a
+ *  false positive risk if compared without the "." boundary, which the explicit `${nu}.`/`${k}.`
+ *  separator below rules out). */
 function unsetDropsNestedKey(k: string, stored: boolean, unset: readonly string[] | undefined): boolean {
   return (unset ?? []).some((u) => {
     const nu = normalizeConfigPath(u);
-    return nu !== "" && (nu === k || (stored && k.startsWith(`${nu}.`)));
+    if (nu === "" || nu === k) return nu === k;
+    return stored && (k.startsWith(`${nu}.`) || nu.startsWith(`${k}.`));
   });
 }
 function hasNestedKey(obj: unknown, dotPath: string): boolean {
@@ -1446,10 +1459,11 @@ export class PlatformMcpRouter {
         if (humanOnlyNested) {
           return ok({ error: `invalid config: ${humanOnlyNested} may not be set via an agent MCP tool — it changes the merge gate (human-only, via the REST config PATCH / Settings UI)` });
         }
-        // Human-only means BOTH directions (card e8df2659, manager ruling): the Lead may not CLEAR a stored
-        // human-only nested key either — neither by `unset` (the exact path, or a prefix such as "orchestration"
-        // that would drop it) nor by a `replace:true` whole-object write that omits it.
-        for (const k of HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS) {
+        // Human-only means BOTH directions (card e8df2659, manager ruling; widened to top-level keys by
+        // card 74f27ab5): the Lead may not CLEAR a stored human-only key either — top-level ("harness") or
+        // nested — neither by `unset` (the exact path, or a prefix such as "orchestration" that would drop
+        // it) nor by a `replace:true` whole-object write that omits it.
+        for (const k of HUMAN_ONLY_PROJECT_CONFIG_PATHS) {
           const stored = hasNestedKey(project.config, k);
           // Normalized EXACTLY like `unsetConfigPath` does (split on ".", drop empty segments), so
           // "orchestration.mergeGate.", ".orchestration.mergeGate", "orchestration..mergeGate", "orchestration."
