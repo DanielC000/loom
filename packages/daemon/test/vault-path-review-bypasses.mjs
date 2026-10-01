@@ -424,10 +424,15 @@ try {
     const db = new Db(path.join(tmpHome, "legacy-pairing.db"));
     const svc = new SessionService(db, pty, new OrchestrationControl());
     // A LEGACY pairing where repoPath IS a real git repo (the pre-cdc3792d default-vaultPath-to-repoPath
-    // shape) — repoPath === vaultPath, and repoPath is genuinely a git repo (unlike a true vault-only row).
+    // shape) — repoPath === vaultPath. `vaultOnly:true` (card b98957e9's explicit fact) because this
+    // simulates a row that already went through the one-time migration backfill, which marks EVERY
+    // repoPath===vaultPath legacy row vault-only regardless of whether it's a true vault-only folder or
+    // (as here) a legacy aliased code project — the safe direction given the asymmetric risk (see
+    // docs/decisions/b98957e9-…md); a BRAND-NEW create-time alias (repoPath explicitly given) stays
+    // refused, which PART E below still proves (E1/E2 reject on DIVERGENCE regardless of this flag).
     const { repo: legacyRepo, parent: legacyRepoParent } = mkRepoWithParent("legacy-pairing");
     cleanupDirs.push(legacyRepoParent);
-    db.insertProject({ id: "pLegacy", name: "Legacy", repoPath: legacyRepo, vaultPath: legacyRepo, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+    db.insertProject({ id: "pLegacy", name: "Legacy", repoPath: legacyRepo, vaultPath: legacyRepo, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [], vaultOnly: true });
     db.insertAgent({ id: "aLegacy", projectId: "pLegacy", name: "Mgr", startupPrompt: "", position: 0, profileId: null });
     db.insertSession({ id: "SLegacy", projectId: "pLegacy", agentId: "aLegacy", engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", parentSessionId: null });
 
@@ -497,10 +502,13 @@ try {
   }
 
   // =====================================================================================================
-  // PART G — round-3 review finding 1 (test gap): canonicallyPaired's 4 call sites (REST PATCH, manager,
-  // setup, platform) had ZERO coverage — reverting any one of them to a raw `project.repoPath ===
-  // project.vaultPath` comparison passed the full suite. A case- or trailing-slash-DIFFERENT pre-patch
-  // pairing is the SAME real directory and must keep its legacy-pairing exemption; an UNSAFE pairing (a
+  // PART G — round-3 review finding 1 (test gap), UPDATED for card b98957e9: the 4 `pairingIsIntentional`
+  // call sites (REST PATCH, manager, setup, platform) now read the project's own stored `vaultOnly` fact
+  // (never a live `canonicallyPaired(repoPath, vaultPath)` re-derivation), so G1-G5 fixtures below set
+  // `vaultOnly:true` to represent an ALREADY-migrated legacy vault-only row — the POST-patch comparison
+  // (`pairedCheck`, still `canonicallyPaired` internally) is what G1-G5 actually exercise: a case- or
+  // trailing-slash-DIFFERENT pre-patch pairing is the SAME real directory and must keep its exemption
+  // when reasserted in canonical form. An UNSAFE pairing (a
   // UNC form, a trailing-dot form) must never be treated as exempt, even when string-identical.
   // =====================================================================================================
   {
@@ -516,7 +524,7 @@ try {
     {
       const { repo: legacyRepo } = mkRepoWithParent("canon-paired-case");
       const caseVariantVault = caseFlip(legacyRepo);
-      db.insertProject({ id: "pCanonCase", name: "CanonCase", repoPath: legacyRepo, vaultPath: caseVariantVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+      db.insertProject({ id: "pCanonCase", name: "CanonCase", repoPath: legacyRepo, vaultPath: caseVariantVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [], vaultOnly: true });
       db.insertAgent({ id: "aCanonCase", projectId: "pCanonCase", name: "Mgr", startupPrompt: "", position: 0, profileId: null });
       db.insertSession({ id: "SCanonCase", projectId: "pCanonCase", agentId: "aCanonCase", engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", parentSessionId: null });
       if (caseVariantVault === legacyRepo) {
@@ -529,7 +537,7 @@ try {
     {
       const { repo: legacyRepo } = mkRepoWithParent("canon-paired-slash");
       const slashVariantVault = legacyRepo + path.sep;
-      db.insertProject({ id: "pCanonSlash", name: "CanonSlash", repoPath: legacyRepo, vaultPath: slashVariantVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+      db.insertProject({ id: "pCanonSlash", name: "CanonSlash", repoPath: legacyRepo, vaultPath: slashVariantVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [], vaultOnly: true });
       db.insertAgent({ id: "aCanonSlash", projectId: "pCanonSlash", name: "Mgr", startupPrompt: "", position: 0, profileId: null });
       db.insertSession({ id: "SCanonSlash", projectId: "pCanonSlash", agentId: "aCanonSlash", engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", parentSessionId: null });
       const g2 = await svc.updateProjectStructural("SCanonSlash", "pCanonSlash", { vaultPath: legacyRepo });
@@ -540,7 +548,7 @@ try {
     {
       const { repo: legacyRepo } = mkRepoWithParent("canon-paired-setup");
       const slashVariantVault = legacyRepo + path.sep;
-      db.insertProject({ id: "pCanonSetup", name: "CanonSetup", repoPath: legacyRepo, vaultPath: slashVariantVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+      db.insertProject({ id: "pCanonSetup", name: "CanonSetup", repoPath: legacyRepo, vaultPath: slashVariantVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [], vaultOnly: true });
       class SeamHost extends createSeamHost(PtyHost) { stop() {} }
       const events = { onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); }, onBusy(id, busy) { db.setBusy(id, busy); }, onContextStats() {}, onRateLimited() {}, onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); } };
       const host = new SeamHost(events);
@@ -560,7 +568,7 @@ try {
     {
       const { repo: legacyRepo } = mkRepoWithParent("canon-paired-platform");
       const slashVariantVault = legacyRepo + path.sep;
-      db.insertProject({ id: "pCanonPlatform", name: "CanonPlatform", repoPath: legacyRepo, vaultPath: slashVariantVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+      db.insertProject({ id: "pCanonPlatform", name: "CanonPlatform", repoPath: legacyRepo, vaultPath: slashVariantVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [], vaultOnly: true });
       const router = new PlatformMcpRouter(db, svc);
       const server = router.buildServer();
       const [clientT, serverT] = InMemoryTransport.createLinkedPair();
@@ -576,7 +584,7 @@ try {
     {
       const { repo: legacyRepo } = mkRepoWithParent("canon-paired-rest");
       const slashVariantVault = legacyRepo + path.sep;
-      db.insertProject({ id: "pCanonRest", name: "CanonRest", repoPath: legacyRepo, vaultPath: slashVariantVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+      db.insertProject({ id: "pCanonRest", name: "CanonRest", repoPath: legacyRepo, vaultPath: slashVariantVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [], vaultOnly: true });
       const stub = {};
       const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, control: stub, usageStatus: stub });
       const g5 = await app.inject({ method: "PATCH", url: "/api/projects/pCanonRest", payload: { vaultPath: legacyRepo } });
@@ -612,10 +620,12 @@ try {
   }
 
   // =====================================================================================================
-  // PART H — round-3 review finding 2: checkVaultPathUpdate's vault-only UNBIND guard still used a raw
-  // `project.repoPath === project.vaultPath` — a case- or trailing-slash-DIFFERENT pre-patch pairing (the
-  // SAME real, non-git vault-only folder) silently failed the "already paired" check, so an explicit
-  // unbind was WRONGLY ALLOWED and stranded the vault-only project (reproduced by the reviewer).
+  // PART H — round-3 review finding 2, now structurally closed by card b98957e9: checkVaultPathUpdate's
+  // vault-only UNBIND guard used to compare `project.repoPath === project.vaultPath` live, so a case- or
+  // trailing-slash-DIFFERENT pre-patch pairing (the SAME real folder) silently failed the "already
+  // paired" check and the unbind was WRONGLY ALLOWED. It now reads the stored `vaultOnly` fact directly —
+  // no path comparison at all — so this whole bug CLASS can no longer recur regardless of spelling; this
+  // test keeps proving the observable behavior (rejection) rather than the now-removed mechanism.
   // =====================================================================================================
   {
     const db = new Db(path.join(tmpHome, "unbind-canonical.db"));
@@ -627,7 +637,7 @@ try {
     const vaultOnlyDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-vaultpath-bypass-unbind-"));
     cleanupDirs.push(vaultOnlyDir);
     const variantVaultOnlyDir = caseFlip(vaultOnlyDir) !== vaultOnlyDir ? caseFlip(vaultOnlyDir) : vaultOnlyDir + path.sep;
-    db.insertProject({ id: "pUnbindCanon", name: "UnbindCanon", repoPath: vaultOnlyDir, vaultPath: variantVaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+    db.insertProject({ id: "pUnbindCanon", name: "UnbindCanon", repoPath: vaultOnlyDir, vaultPath: variantVaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [], vaultOnly: true });
     db.insertAgent({ id: "aUnbindCanon", projectId: "pUnbindCanon", name: "Mgr", startupPrompt: "", position: 0, profileId: null });
     db.insertSession({ id: "SUnbindCanon", projectId: "pUnbindCanon", agentId: "aUnbindCanon", engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", parentSessionId: null });
 

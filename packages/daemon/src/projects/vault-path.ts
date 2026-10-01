@@ -215,10 +215,10 @@ export function checkVaultPathRepoContainment(candidate: string, repoPaths: stri
  * explicitly duplicates repoPath into vaultPath produces the exact SAME {repoPath, vaultPath} shape as a
  * genuine vault-only pairing, yet the two must be judged oppositely — the first is exactly the alias bug
  * this card closes, the second is by design), so the CALLER states its intent explicitly:
- *  - An UPDATE caller passes {@link canonicallyPaired}(`project.repoPath`, `project.vaultPath`) — "was
- *    this already an established pairing before this write?" A call that leaves repoPath FIXED while
- *    moving vaultPath into a subfolder of it (or its parent) is NEVER exempted even when this is true,
- *    because `pairedCheck` (the POST-patch equality) will be false.
+ *  - An UPDATE caller passes the project's own stored `vaultOnly` fact — "was this already an
+ *    established pairing before this write?" A call that leaves repoPath FIXED while moving vaultPath
+ *    into a subfolder of it (or its parent) is NEVER exempted even when `vaultOnly` is true, because
+ *    `pairedCheck` (the POST-patch equality) will be false.
  *  - A vault-only CREATE branch (no repoPath given by the caller — the SAME value gets assigned to both
  *    fields internally, by construction) passes `true` unconditionally: there is no separate code repo
  *    here BY DESIGN, regardless of whether that shared folder happens to itself be a git repo (e.g. an
@@ -229,6 +229,10 @@ export function checkVaultPathRepoContainment(candidate: string, repoPaths: stri
  * @decision 5ba4412d — compare the pre-patch pairing CANONICALLY (never a raw `===`), and require it to
  * ALSO still hold canonically AFTER this call — otherwise a paired project either keeps its exemption
  * while moving its vault into/around its own still-real repo, or loses it over a mere case/slash spelling.
+ *
+ * @decision b98957e9 — an UPDATE caller must never re-derive `pairingIsIntentional` via
+ * {@link canonicallyPaired}(`project.repoPath`, `project.vaultPath`) again; that reproduced the exact
+ * unsound vault-only inference this card replaced. Pass the project's stored `vaultOnly` fact instead.
  */
 export async function checkVaultRepoTripleContainment(
   triple: { repoPath: string; vaultPath: string; repos: RepoRegistryEntry[] },
@@ -261,8 +265,11 @@ export type VaultPathUpdateCheck =
  * `raw` is the caller's incoming patch value exactly as received (untrimmed): `undefined` means "this
  * patch doesn't touch vaultPath" and passes through unchanged. A trimmed-empty value is the legitimate
  * explicit-unbind case per {@link validateVaultPath}'s own decision notes above, UNLESS it would strand a
- * vault-only project (refused instead — see the vault-only check below). Any other non-empty value is
- * `expandTilde`-expanded and run through {@link validateVaultPath} (absolute path required).
+ * vault-only project (refused instead — see the vault-only check below, which reads the project's own
+ * stored `vaultOnly` fact, never a live `repoPath`/`isGitRepo` re-derivation).
+ *
+ * @decision b98957e9 — never re-derive vault-only-ness from `repoPath`/`vaultPath`/`isGitRepo` here
+ * again; read the project's stored `vaultOnly` fact instead.
  *
  * CONTAINMENT (does this vaultPath alias, nest into, or get nested by a code repo) is deliberately NOT
  * this function's job — see {@link checkVaultRepoTripleContainment}, the SEPARATE shared check every
@@ -271,13 +278,13 @@ export type VaultPathUpdateCheck =
  * exists to close (a repoPath-only or repos-only write would never reach it).
  */
 export async function checkVaultPathUpdate(
-  project: { repoPath: string; vaultPath: string },
+  project: { repoPath: string; vaultPath: string; vaultOnly: boolean },
   raw: string | undefined,
 ): Promise<VaultPathUpdateCheck> {
   if (raw === undefined) return { ok: true, value: undefined };
   const trimmed = raw.trim();
   if (!trimmed) {
-    if (canonicallyPaired(project.repoPath, project.vaultPath) && !(await isGitRepo(project.repoPath))) {
+    if (project.vaultOnly) {
       return { ok: false, error: "cannot unbind the vault of a vault-only project (it has no separate repoPath) — archive it instead" };
     }
     return { ok: true, value: "" };
@@ -285,4 +292,58 @@ export async function checkVaultPathUpdate(
   const absCheck = validateVaultPath(expandTilde(trimmed));
   if (!absCheck.ok) return absCheck;
   return { ok: true, value: absCheck.value };
+}
+
+/** Result of {@link checkVaultOnlyOnUpdate}. `vaultOnlyPatch: undefined` means "leave the stored
+ *  `vaultOnly` fact alone" (the project isn't vault-only, this write doesn't touch repoPath/vaultPath at
+ *  all, or the pair is still canonically equal after the write); `vaultOnlyPatch: false` means "clear it
+ *  in this same write" (a repoPath rebind diverged the pair). */
+export type VaultOnlyUpdateCheck =
+  | { ok: true; vaultOnlyPatch: boolean | undefined }
+  | { ok: false; error: string };
+
+/**
+ * The SHARED `vaultOnly`-flag update guard — every surface that can change a project's `repoPath` and/or
+ * `vaultPath` (human REST PATCH, the manager's own `project_update`, the setup operator's
+ * `project_update`, and the elevated platform MCP `project_update`) calls this instead of recomputing the
+ * clear-on-divergence logic itself (or, for the manager/setup surfaces, not checking it at all). Call it
+ * AFTER `checkVaultPathUpdate`/`checkVaultRepoTripleContainment` have already approved the write (an
+ * explicit unbind of a vault-only project is refused upstream, before this ever runs) and BEFORE
+ * `Db.updateProject`, passing it the SAME `patch.repoPath`/`patch.vaultPath` values (`undefined` = "this
+ * write doesn't touch that field") those checks saw.
+ *
+ * A vault-only project's invariant is "repoPath and vaultPath stay canonically paired" (LEAD ruling, card
+ * `b98957e9` fix round). Three cases, by what THIS write changes:
+ *  - a `repoPath` rebind (this write passes `patch.repoPath`) that leaves the pair diverged ⇒ clear the
+ *    fact to `false` in the SAME write — only the REST PATCH and platform `project_update` surfaces can
+ *    ever reach this branch (the only two surfaces that can rebind `repoPath` at all).
+ *  - a `repoPath` rebind (alone, or together with `vaultPath`) that leaves the pair STILL canonically
+ *    equal ⇒ leave the fact untouched (still `true`) — relocating both fields together onto one new
+ *    shared folder is a legitimate move, not an unpairing.
+ *  - a `vaultPath`-ONLY write (`patch.repoPath` is `undefined`) that would UNPAIR the project ⇒ REFUSE the
+ *    write outright, rather than silently flipping the fact to `false` — a vault-only project has no
+ *    separate repoPath to fall back to, so letting this through leaves it governed by neither path. Every
+ *    one of the four surfaces can reach this branch (including the two that can never touch `repoPath` at
+ *    all) — it is the asymmetry this helper exists to close.
+ *
+ * Never fires at all for a project that isn't `vaultOnly` (returns `vaultOnlyPatch: undefined`
+ * unconditionally) — only project CREATE may ever set the fact `true`; this function never does.
+ *
+ * @decision b98957e9 — do not reproduce this per-surface; every repoPath/vaultPath update surface must
+ * call this ONE helper, never a hand-rolled copy of the clear-on-divergence check.
+ */
+export function checkVaultOnlyOnUpdate(
+  project: { repoPath: string; vaultPath: string; vaultOnly: boolean },
+  patch: { repoPath?: string; vaultPath?: string },
+): VaultOnlyUpdateCheck {
+  if (!project.vaultOnly) return { ok: true, vaultOnlyPatch: undefined };
+  if (patch.repoPath === undefined && patch.vaultPath === undefined) return { ok: true, vaultOnlyPatch: undefined };
+  const effectiveRepoPath = patch.repoPath ?? project.repoPath;
+  const effectiveVaultPath = patch.vaultPath ?? project.vaultPath;
+  if (canonicallyPaired(effectiveRepoPath, effectiveVaultPath)) return { ok: true, vaultOnlyPatch: undefined };
+  if (patch.repoPath !== undefined) return { ok: true, vaultOnlyPatch: false };
+  return {
+    ok: false,
+    error: "moving a vault-only project's vaultPath away from its repoPath would unpair it (it has no separate repoPath) — move repoPath and vaultPath together to relocate it, or archive the project instead",
+  };
 }

@@ -30,7 +30,7 @@ import { boundedSimpleGit } from "../git/bounded.js";
 import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, parseMainlineWatermark, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
-import { checkVaultPathUpdate, checkVaultRepoTripleContainment, canonicallyPaired } from "../projects/vault-path.js";
+import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import type { RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
@@ -12936,10 +12936,16 @@ export class SessionService {
     if (vaultPath !== undefined) {
       const tripleCheck = await checkVaultRepoTripleContainment(
         { repoPath: project.repoPath, vaultPath, repos: project.repos },
-        { pairingIsIntentional: canonicallyPaired(project.repoPath, project.vaultPath) },
+        { pairingIsIntentional: project.vaultOnly },
       );
       if (!tripleCheck.ok) throw new Error(tripleCheck.error);
     }
+    // Card b98957e9 (fix round): the SHARED vaultOnly-flag guard — this surface can never touch repoPath,
+    // so a vaultPath move that would unpair a vault-only project is REFUSED outright rather than silently
+    // leaving a stale `true` fact behind (see checkVaultOnlyOnUpdate's own doc).
+    const vaultOnlyCheck = checkVaultOnlyOnUpdate(project, { vaultPath });
+    if (!vaultOnlyCheck.ok) throw new Error(vaultOnlyCheck.error);
+    const vaultOnlyPatch = vaultOnlyCheck.vaultOnlyPatch;
     // Re-read AFTER the await, and do every write below off THIS row with NO further await in between —
     // so nothing can land between reading and writing. (The vaultPath validation above still ran against
     // the PRE-await snapshot — a narrower, single-await residual, not something this re-read closes; see
@@ -12969,7 +12975,7 @@ export class SessionService {
       const wrote = setProjectConfigSafe(this.db, projectId, merged, `manager:${managerSessionId}`);
       if (!wrote.ok) throw new Error(wrote.error);
     }
-    this.db.updateProject(projectId, { name: patch.name, vaultPath });
+    this.db.updateProject(projectId, { name: patch.name, vaultPath, vaultOnly: vaultOnlyPatch });
     this.auditManage(managerSessionId, "project_update", {
       projectId, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined),
     });

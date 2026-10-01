@@ -3,7 +3,8 @@
 // — no pty/claude boots). Covers the card's DoD GUARDS + cascade + happy paths:
 //   A. PATCH /api/projects/:id renames + edits vaultPath (happy path); /config still works untouched.
 //   A2. PATCH vaultPath:"" UNBINDs a vault on a repo-bound project (distinct from omitting the field);
-//       refused on a VAULT-ONLY project (repoPath === vaultPath) to keep at-least-one-of-{repo,vault}.
+//       refused on a VAULT-ONLY project (the explicit `vaultOnly` fact, card b98957e9) to keep
+//       at-least-one-of-{repo,vault}.
 //   B. archive→restore round-trip (bare DELETE = soft archive; POST /restore brings it back).
 //   C. RESERVED guard: the reserved "Loom Platform" home refuses archive AND permanent-delete (4xx).
 //   D. LIVE-session block: a project (DELETE + /permanent) AND an agent (DELETE) with a live session
@@ -87,10 +88,10 @@ try {
   check("A2: PATCH with vaultPath OMITTED → 200, vaultPath left untouched",
     noop.statusCode === 200 && db.getProject("pUnbind").vaultPath === "C:/tmp/loom-mgmt/vault2");
 
-  // A VAULT-ONLY project (no separate repo — repoPath === vaultPath, the shape mcp/setup.ts's project_create
-  // and the REST create route both produce for a no-repo bind) REFUSES the same unbind: it would otherwise
-  // leave the project with nothing usable bound at all.
-  db.insertProject(mkProject("pVaultOnly", { repoPath: "C:/tmp/loom-mgmt/notes", vaultPath: "C:/tmp/loom-mgmt/notes" }));
+  // A VAULT-ONLY project (card b98957e9: the explicit `vaultOnly` fact, set at creation — the shape
+  // mcp/setup.ts's project_create and the REST create route both produce for a no-repo bind) REFUSES
+  // the same unbind: it would otherwise leave the project with nothing usable bound at all.
+  db.insertProject(mkProject("pVaultOnly", { repoPath: "C:/tmp/loom-mgmt/notes", vaultPath: "C:/tmp/loom-mgmt/notes", vaultOnly: true }));
   const refused = await app.inject({ method: "PATCH", url: "/api/projects/pVaultOnly", payload: { vaultPath: "" } });
   check("A2: PATCH vaultPath:\"\" on a VAULT-ONLY project → 400 (refused)", refused.statusCode === 400);
   check("A2: vault-only project's vaultPath UNCHANGED after the refusal",
@@ -98,9 +99,10 @@ try {
   const badType = await app.inject({ method: "PATCH", url: "/api/projects/pUnbind", payload: { vaultPath: 123 } });
   check("A2: PATCH vaultPath as a non-string → 400", badType.statusCode === 400);
 
-  // A LEGACY repo-bound project (repoPath === vaultPath, but repoPath IS a real git repo — the shape a
-  // project created before cdc3792d has, when the default was vaultPath = repoPath) is NOT vault-only:
-  // it genuinely has a repo, so the unbind must SUCCEED (card d867e478 — the over-refusal fix).
+  // A LEGACY repo-bound project (repoPath === vaultPath, but `vaultOnly` is false — the shape a project
+  // created before cdc3792d has, when the default was vaultPath = repoPath) is NOT vault-only: it
+  // genuinely has a repo, so the unbind must SUCCEED (card d867e478's original fix, now backed by the
+  // explicit `vaultOnly` fact per card b98957e9 rather than a live isGitRepo re-derivation).
   const legacyRepo = path.join(os.tmpdir(), `loom-mgmt-legacyrepo-${Date.now()}-${process.pid}`);
   fs.mkdirSync(legacyRepo, { recursive: true });
   fs.writeFileSync(path.join(legacyRepo, "README.md"), "# legacy\n");

@@ -146,7 +146,11 @@ try {
   {
     const db = new Db(path.join(tmpHome, "patch.db"));
     const now = new Date().toISOString();
-    db.insertProject({ id: "pPatch", name: "PatchMe", repoPath: primary, vaultPath: primary, config: {}, createdAt: now, archivedAt: null, reserved: false, referenceRepos: [] });
+    // Card b98957e9: `vaultOnly:true` makes this the "relocate a vault-only project's shared folder"
+    // shape (repoPath/vaultPath move TOGETHER to the SAME new tilde-expanded path below) — the
+    // explicit-fact exemption this PATCH relies on to stay un-refused by the alias/containment check,
+    // replacing the old `canonicallyPaired(repoPath, vaultPath)` re-derivation this fixture used to lean on.
+    db.insertProject({ id: "pPatch", name: "PatchMe", repoPath: primary, vaultPath: primary, config: {}, createdAt: now, archivedAt: null, reserved: false, referenceRepos: [], vaultOnly: true });
     const stub = {};
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, control: stub, usageStatus: stub });
     try {
@@ -157,6 +161,7 @@ try {
       check("(C1) PATCH with a '~/…' repoPath/vaultPath → 200", patched.statusCode === 200);
       check("(C1) stored repoPath is the EXPANDED absolute path", db.getProject("pPatch")?.repoPath === refRepo);
       check("(C1) stored vaultPath is the EXPANDED absolute path", db.getProject("pPatch")?.vaultPath === refRepo);
+      check("(C1) vaultOnly fact survives the relocation (still true — repoPath/vaultPath still paired)", db.getProject("pPatch")?.vaultOnly === true);
     } finally {
       db.close();
     }

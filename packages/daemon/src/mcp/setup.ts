@@ -14,7 +14,7 @@ import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, AGENT_CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
 import { ensureVaultRoot } from "../vault/writer.js";
-import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, canonicallyPaired } from "../projects/vault-path.js";
+import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
@@ -229,6 +229,7 @@ export class SetupMcpRouter {
           noGateByDesign: false, // human-only flag (card 58b0bb60); never agent-settable, see project_update
           denyGlobs: ["mockups/**"], // human-only flag (card d5d3bdc9); never agent-settable, see project_update
           repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, see project_update
+          vaultOnly: !isCodeRepo, // the vault-only branch above — no separate repo was ever given
         };
         db.insertProject(project);
         // Bind-time commit-identity assert (CODE repos only — a vault-only notes folder takes no commits):
@@ -278,6 +279,7 @@ export class SetupMcpRouter {
           noGateByDesign: false, // human-only flag (card 58b0bb60); never agent-settable, see project_update
           denyGlobs: ["mockups/**"], // human-only flag (card d5d3bdc9); never agent-settable, see project_update
           repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, see project_update
+          vaultOnly: !isGit, // kind "vault": the created dir IS the vault, no separate repo
         };
         db.insertProject(project);
         // Same bind-time identity assert as project_create, for the git kind (a vault folder takes no
@@ -383,10 +385,16 @@ export class SetupMcpRouter {
         if (vaultPath !== undefined) {
           const tripleCheck = await checkVaultRepoTripleContainment(
             { repoPath: project.repoPath, vaultPath, repos: project.repos },
-            { pairingIsIntentional: canonicallyPaired(project.repoPath, project.vaultPath) },
+            { pairingIsIntentional: project.vaultOnly },
           );
           if (!tripleCheck.ok) return ok({ error: tripleCheck.error });
         }
+        // Card b98957e9 (fix round): the SHARED vaultOnly-flag guard — this surface can never touch
+        // repoPath, so a vaultPath move that would unpair a vault-only project is REFUSED outright rather
+        // than silently leaving a stale `true` fact behind (see checkVaultOnlyOnUpdate's own doc).
+        const vaultOnlyCheck = checkVaultOnlyOnUpdate(project, { vaultPath });
+        if (!vaultOnlyCheck.ok) return ok({ error: vaultOnlyCheck.error });
+        const vaultOnlyPatch = vaultOnlyCheck.vaultOnlyPatch;
         // Re-read AFTER the await, and do every write below off THIS row with NO further await in
         // between — so nothing can land between reading and writing. (The vaultPath validation above
         // still ran against the PRE-await snapshot — a narrower, single-await residual, not something
@@ -409,7 +417,7 @@ export class SetupMcpRouter {
           const wrote = setProjectConfigSafe(db, projectId, merged, callerSessionId ? `setup:${callerSessionId}` : "setup");
           if (!wrote.ok) return ok({ error: wrote.error });
         }
-        if (name !== undefined || vaultPath !== undefined) db.updateProject(projectId, { name, vaultPath });
+        if (name !== undefined || vaultPath !== undefined) db.updateProject(projectId, { name, vaultPath, vaultOnly: vaultOnlyPatch });
         return ok(projectFields(db.getProject(projectId)));
       },
     );

@@ -243,7 +243,14 @@ CREATE TABLE IF NOT EXISTS projects (
   -- distinct from reference_repos (read-only). repo_path stays the one PRIMARY repo. Added to existing
   -- DBs via the idempotent migration below; NOT NULL + constant DEFAULT '[]' backfills legacy rows to []
   -- (mirrors reference_repos exactly).
-  repos TEXT NOT NULL DEFAULT '[]'
+  repos TEXT NOT NULL DEFAULT '[]',
+  -- Card b98957e9: explicit vault-only fact, set once at creation; never re-derive it from
+  -- repo_path/vault_path/isGitRepo again (see docs/decisions/b98957e9-…md — that heuristic
+  -- misclassified a vault-only project the moment its folder became a git repo). Added to existing DBs
+  -- via the idempotent migration below, which ALSO one-time-backfills legacy rows (see
+  -- backfillVaultOnlyOnce) — NOT NULL + constant DEFAULT 0 here only covers a FRESH install, which
+  -- never has pre-existing rows to backfill.
+  vault_only INTEGER NOT NULL DEFAULT 0
 );
 -- Profiles (platform-level rig: role + model + permission-delta + skill-subset + icon). NO project
 -- FK — a profile is cross-project, reused by agents across projects. allow_delta/skills are JSON text.
@@ -1763,6 +1770,10 @@ const PROJECT_ADDED_COLUMNS: Record<string, string> = {
   // Multi-repo epic (49136451) phase 1: WRITABLE repo registry; legacy rows backfill to '[]' (no
   // registered repos — behaves byte-identically to today, every task resolves to the primary repo).
   repos: "TEXT NOT NULL DEFAULT '[]'",
+  // Card b98957e9: explicit vault-only fact. The ADD COLUMN default is 0 (ordinary); migrateProjects()
+  // runs a ONE-TIME data backfill to 1 for rows where repo_path === vault_path (backfillVaultOnlyOnce)
+  // right after this ALTER, so a legacy row ends up correctly flagged, not just defaulted to "no".
+  vault_only: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `agents` after phase-1; applied to existing DBs by migrateAgents(). */
@@ -2536,8 +2547,46 @@ export class Db {
       (this.db.prepare("PRAGMA table_info(projects)").all() as { name: string }[]).map((c) => c.name),
     );
     for (const [name, type] of Object.entries(PROJECT_ADDED_COLUMNS)) {
-      if (!have.has(name)) this.db.exec(`ALTER TABLE projects ADD COLUMN ${name} ${type}`);
+      if (!have.has(name)) {
+        if (name === "vault_only") {
+          // Card b98957e9 (fix round): the ALTER + backfill must land atomically — a crash between the
+          // two (SQLite DDL is transactional) would otherwise leave the column present but unbackfilled,
+          // and never retried (migrateProjects only runs this branch while the column is MISSING).
+          this.db.transaction(() => {
+            this.db.exec(`ALTER TABLE projects ADD COLUMN ${name} ${type}`);
+            this.backfillVaultOnlyOnce();
+          })();
+        } else {
+          this.db.exec(`ALTER TABLE projects ADD COLUMN ${name} ${type}`);
+        }
+      }
     }
+  }
+
+  /**
+   * One-shot backfill for the freshly-ALTER-added `vault_only` column (card b98957e9) — runs ONLY from
+   * the `migrateProjects` branch above, the instant the column is discovered missing, never on a later
+   * boot where it already exists (unlike a constant SQL DEFAULT, this needs to read data back for the
+   * log line below, so it can't be expressed as a `PROJECT_ADDED_COLUMNS` default string alone).
+   *
+   * Every legacy row with a non-empty `repo_path === vault_path` is marked `vault_only = 1` — the SAFE
+   * direction given the two misclassification risks are asymmetric (see docs/decisions/
+   * b98957e9-vault-only-is-an-explicit-fact.md): understating a true vault-only project would later make
+   * it fail every future project_update the instant its folder becomes a git repo; overstating it on a
+   * legacy repo-bound project (pre-cdc3792d default) only costs that project the new inability to unbind
+   * its vault to "" — recoverable, and no worse than today's pre-existing exemption behavior for that
+   * same row. This never touches `repo_path`/`vault_path` themselves — only the new column.
+   */
+  private backfillVaultOnlyOnce(): void {
+    const rows = this.db.prepare(
+      "SELECT id, name FROM projects WHERE repo_path = vault_path AND vault_path != ''",
+    ).all() as { id: string; name: string }[];
+    if (rows.length === 0) return;
+    this.db.exec("UPDATE projects SET vault_only = 1 WHERE repo_path = vault_path AND vault_path != ''");
+    console.log(
+      `[db] vault_only backfill: marked ${rows.length} legacy project(s) vault-only (repoPath === vaultPath): ` +
+      rows.map((r) => `${r.name} (${r.id.slice(0, 8)})`).join(", "),
+    );
   }
 
   /**
@@ -3053,8 +3102,8 @@ export class Db {
   }
   insertProject(p: Project): void {
     this.db.prepare(
-      `INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at,reserved,reference_repos,no_gate_by_design,deny_globs,repos)
-       VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt,@reserved,@referenceRepos,@noGateByDesign,@denyGlobs,@repos)`,
+      `INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at,reserved,reference_repos,no_gate_by_design,deny_globs,repos,vault_only)
+       VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt,@reserved,@referenceRepos,@noGateByDesign,@denyGlobs,@repos,@vaultOnly)`,
     ).run({
       ...p,
       config: JSON.stringify(p.config),
@@ -3064,6 +3113,7 @@ export class Db {
       noGateByDesign: p.noGateByDesign ? 1 : 0,
       denyGlobs: JSON.stringify(p.denyGlobs ?? ["mockups/**"]),
       repos: JSON.stringify(p.repos ?? []),
+      vaultOnly: p.vaultOnly ? 1 : 0,
     });
   }
   /**
@@ -3072,14 +3122,22 @@ export class Db {
    * `denyGlobs` (card d5d3bdc9), and `repos` (host-RCE via each entry's own `gateCommand`, epic 49136451)
    * are editable ONLY via elevated platform MCP / human-only REST — NEVER exposed on any agent-facing
    * surface (loom-setup / loom-orchestration). Do not add an agent MCP path for any of these five fields.
+   * `vaultOnly` (card b98957e9) is NEVER a caller-supplied request field at all — it is computed
+   * server-side, only by the two `repoPath`-rebind call sites, as a side effect of that same write; it
+   * only ever carries `false` here (clearing a now-diverged pairing), never `true`.
    */
-  updateProject(id: string, patch: { name?: string; vaultPath?: string; repoPath?: string; referenceRepos?: string[]; noGateByDesign?: boolean; denyGlobs?: string[]; repos?: RepoRegistryEntry[] }): void {
+  updateProject(id: string, patch: { name?: string; vaultPath?: string; repoPath?: string; referenceRepos?: string[]; noGateByDesign?: boolean; denyGlobs?: string[]; repos?: RepoRegistryEntry[]; vaultOnly?: boolean }): void {
     const cols: Record<string, unknown> = {
       name: patch.name, vault_path: patch.vaultPath, repo_path: patch.repoPath,
       reference_repos: patch.referenceRepos === undefined ? undefined : JSON.stringify(patch.referenceRepos),
       no_gate_by_design: patch.noGateByDesign === undefined ? undefined : (patch.noGateByDesign ? 1 : 0),
       deny_globs: patch.denyGlobs === undefined ? undefined : JSON.stringify(patch.denyGlobs),
       repos: patch.repos === undefined ? undefined : JSON.stringify(patch.repos),
+      // Card b98957e9: callers only ever pass `vaultOnly:false` here — a repoPath/vaultPath rebind that
+      // made a previously-vault-only project's pair diverge (see checkVaultRepoTripleContainment's
+      // callers in gateway/server.ts + mcp/platform.ts). Write-once otherwise: `undefined` leaves the
+      // stored fact untouched, exactly like every other field here.
+      vault_only: patch.vaultOnly === undefined ? undefined : (patch.vaultOnly ? 1 : 0),
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -8767,6 +8825,7 @@ function toProject(r0: unknown): Project {
     noGateByDesign: (r.no_gate_by_design as number) === 1,
     denyGlobs: JSON.parse((r.deny_globs as string) || "[\"mockups/**\"]") as string[],
     repos: JSON.parse((r.repos as string) || "[]") as RepoRegistryEntry[],
+    vaultOnly: (r.vault_only as number) === 1,
   };
 }
 function toAgent(r0: unknown): Agent {

@@ -68,7 +68,7 @@ import { activeMergeQuarantineFor, clearMergeQuarantine } from "../git/merge-qua
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
 import { validateRepoRegistry, resolveRepoKeyOrError, diffRepoRegistry, composeRepoRegistryChangeNote, type RepoRegistryDiff } from "../projects/repos.js";
-import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, canonicallyPaired } from "../projects/vault-path.js";
+import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
 import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
@@ -3647,6 +3647,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       noGateByDesign,
       denyGlobs,
       repos,
+      vaultOnly: !isGit, // kind "vault": the created dir IS the vault, no separate repo
     };
     deps.db.insertProject(project);
     // Card ce9a3a91: redact sessionEnv on BOTH exits below like the other project-returning WRITE routes
@@ -4144,15 +4145,6 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
   });
 
-  // Whether repoPath is a real git repo — lets the web Manage-project panel tell a genuine vault-only
-  // project (repoPath not a repo) apart from a legacy repo-bound project whose vaultPath happens to equal
-  // repoPath (card d867e478, mirrors the PATCH unbind-refusal check below), without spawning git for
-  // every project on every /api/projects list load — the client calls this only for the ambiguous case.
-  app.get("/api/projects/:id/is-git-repo", async (req, reply) => {
-    const p = deps.db.getProject((req.params as { id: string }).id);
-    if (!p) return reply.code(404).send({ error: "project not found" });
-    return { isGitRepo: await isGitRepo(p.repoPath) };
-  });
 
   // Reference-repo git log (reference-repos epic Phase 5, card f4888775, "Interpretation A") — read-only,
   // reusing the SAME GitReader as the primary-repo log above. SECURITY: the client passes an INDEX into
@@ -4323,6 +4315,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       noGateByDesign,
       denyGlobs,
       repos,
+      vaultOnly: !repoPath, // the vault-only branch above — no separate repo was ever given
     };
     deps.db.insertProject(project);
     return reply.code(201).send(redactSessionEnvForRead(project));
@@ -4452,10 +4445,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (repoPath !== undefined || vaultPath !== undefined || repos !== undefined) {
       const tripleCheck = await checkVaultRepoTripleContainment(
         { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath, repos: repos ?? p.repos },
-        { pairingIsIntentional: canonicallyPaired(p.repoPath, p.vaultPath) },
+        { pairingIsIntentional: p.vaultOnly },
       );
       if (!tripleCheck.ok) return reply.code(400).send({ error: tripleCheck.error });
     }
+    // Card b98957e9 (fix round): the SHARED vaultOnly-flag guard — a repoPath rebind that diverges the
+    // pair clears the fact in this same write, a repoPath+vaultPath move that stays paired leaves it
+    // untouched, and a vaultPath-ONLY move that would unpair a vault-only project is REFUSED outright (see
+    // checkVaultOnlyOnUpdate's own doc for why this must not silently clear the fact instead).
+    const vaultOnlyCheck = checkVaultOnlyOnUpdate(p, { repoPath, vaultPath });
+    if (!vaultOnlyCheck.ok) return reply.code(400).send({ error: vaultOnlyCheck.error });
+    const vaultOnlyPatch = vaultOnlyCheck.vaultOnlyPatch;
     const namePatch = b.name === undefined ? undefined : (b.name as string).trim();
     deps.db.updateProject(id, {
       name: namePatch,
@@ -4465,6 +4465,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       noGateByDesign: b.noGateByDesign as boolean | undefined,
       denyGlobs,
       repos,
+      vaultOnly: vaultOnlyPatch,
     });
     // STALE-PROMPT LINT (card 0597e092): `p` is the PRE-update row (fetched at the top of this handler,
     // before the write above), so this compares old-vs-new correctly. Read BEFORE the notify block below

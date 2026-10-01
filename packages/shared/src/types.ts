@@ -38,6 +38,15 @@ export interface Project {
   repoPath: string;   // cwd for spawned sessions; source of project-local .claude/skills
   vaultPath: string;  // Obsidian docs folder (auto-committed)
   /**
+   * Is this project VAULT-ONLY (no separate code repo) — an explicit FACT set once at creation, never
+   * re-derived.
+   *
+   * @decision b98957e9 — never reintroduce `repoPath === vaultPath && !isGitRepo(repoPath)` as a
+   * vault-only test: it misclassifies the instant VaultVersioner git-inits the vault folder, and it
+   * misclassifies a vault-only folder nested inside another git repo from day one.
+   */
+  vaultOnly: boolean;
+  /**
    * Additional repos a manager + its workers may READ but never own — never a cwd, worktree base,
    * or gate target (repoPath stays the one primary repo for all of that). Absolute host paths.
    * Additive; legacy rows backfill to []. Read by prompt injection (worker-prompt.ts/manager-prompt.ts)

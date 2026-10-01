@@ -164,6 +164,7 @@ export function seedPlatformHome(db: Db): string[] {
     noGateByDesign: false,
     denyGlobs: [], // reserved system home, not a normal worker_merge flow — opt out of the mockups/ warning
     repos: [],
+    vaultOnly: true, // reserved home: repoPath and vaultPath both bind the same folder, no separate repo
   };
   db.insertProject(project);
 

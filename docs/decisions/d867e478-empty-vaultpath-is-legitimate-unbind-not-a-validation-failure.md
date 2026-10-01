@@ -30,11 +30,28 @@ repo exists there.
   `isGitRepo(repoPath)` to distinguish a genuine bare vault-only folder from a real repo that happens
   to share its path with the vault.
 
+## Superseded (card b98957e9)
+
+The second "Do not" bullet above — "pair `repoPath === vaultPath` with `isGitRepo(repoPath)`" — is now
+WRONG and must not be followed. That pairing is itself unsound: `VaultVersioner.start()` git-inits a
+bare vault folder at the first boot after creation, so `isGitRepo` flips to `true` for a genuine
+vault-only project the moment it has ever been opened, silently defeating the unbind refusal this record
+describes. It also never distinguished a vault-only folder nested inside another git repo (e.g. a
+subfolder of a notes vault) from a real standalone repo — both read `isGitRepo:true` from day one.
+
+Vault-only-ness is now an explicit, stored `Project.vaultOnly` fact set once at creation (see
+`docs/decisions/b98957e9-vault-only-is-an-explicit-fact.md`) — never re-derived from `repoPath`/
+`vaultPath`/`isGitRepo` at read time. `GET /api/projects/:id/is-git-repo` and its ambiguous-case
+re-derivation in the web `Projects.tsx` panel are gone for this purpose too; read `project.vaultOnly`
+directly.
+
 ## Source
 
 JSDoc comment above `validateVaultPath` in `packages/daemon/src/projects/vault-path.ts` (originally
-line 19-20, part of the file's original introduction). Also cited in `gateway/server.ts` at the
-`GET /api/projects/:id/is-git-repo` route comment and inside the `PATCH /api/projects/:id` unbind-
-refusal check. Introduced by commit `ec22669e7` — see `docs/decisions/96c4b245-…md`'s Source note for
+line 19-20, part of the file's original introduction). Previously ALSO cited in `gateway/server.ts` at
+the `GET /api/projects/:id/is-git-repo` route comment and inside the `PATCH /api/projects/:id` unbind-
+refusal check — both removed by card `b98957e9` (see the Superseded section above); the unbind refusal
+now lives in `checkVaultPathUpdate` (`projects/vault-path.ts`), reading the project's stored `vaultOnly`
+fact instead. Introduced by commit `ec22669e7` — see `docs/decisions/96c4b245-…md`'s Source note for
 why that commit's subject line does not describe this diff; verify with `git show ec22669e7`, not the
 subject alone.

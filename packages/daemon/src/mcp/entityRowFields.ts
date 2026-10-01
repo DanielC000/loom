@@ -53,7 +53,7 @@ export function pickFields<T>(row: T, keys: readonly (keyof T)[]): T {
 
 const PROJECT_FIELDS: Record<keyof Project, 1> = {
   id: 1, name: 1, repoPath: 1, vaultPath: 1, referenceRepos: 1, repos: 1,
-  config: 1, createdAt: 1, archivedAt: 1, reserved: 1, noGateByDesign: 1, denyGlobs: 1,
+  config: 1, createdAt: 1, archivedAt: 1, reserved: 1, noGateByDesign: 1, denyGlobs: 1, vaultOnly: 1,
 };
 const PROJECT_KEYS = Object.keys(PROJECT_FIELDS) as (keyof Project)[];
 

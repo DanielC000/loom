@@ -32,7 +32,7 @@ const projectRow = {
   id: "proj-1", name: "Demo", repoPath: "/repo", vaultPath: "/vault",
   referenceRepos: ["/ref1"], repos: [{ key: "r1", repoPath: "/repo2" }],
   config: { orchestration: {} }, createdAt: "2026-09-04T00:00:00.000Z", archivedAt: null,
-  reserved: false, noGateByDesign: false, denyGlobs: ["mockups/**"],
+  reserved: false, noGateByDesign: false, denyGlobs: ["mockups/**"], vaultOnly: false,
   futureColumnFromTheDb: "leak-me", // NOT a real Project field — must never appear in the projection
 };
 
@@ -54,7 +54,7 @@ const profileRow = {
 // that's the whole point: an unnamed field on the input row must not reach the output).
 const EXPECTED_PROJECT_KEYS = [
   "id", "name", "repoPath", "vaultPath", "referenceRepos", "repos", "config", "createdAt",
-  "archivedAt", "reserved", "noGateByDesign", "denyGlobs",
+  "archivedAt", "reserved", "noGateByDesign", "denyGlobs", "vaultOnly",
 ];
 const EXPECTED_AGENT_KEYS = [
   "id", "projectId", "name", "startupPrompt", "position", "profileId", "endpoint", "ioSchema",

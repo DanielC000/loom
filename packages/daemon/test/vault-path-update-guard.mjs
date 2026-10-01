@@ -14,6 +14,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // alias check (reusing `validateRepoRegistry`'s own registry logic + `repos.ts`'s path-normalization
 // primitives for the direct repoPath comparison, not a second alias rule).
 //
+// UPDATED for card b98957e9: every "vault-only" fixture below now sets `vaultOnly:true` explicitly —
+// `checkVaultPathUpdate`'s unbind refusal and `checkVaultRepoTripleContainment`'s `pairingIsIntentional`
+// both read that stored fact now, never a live `repoPath === vaultPath && !isGitRepo(repoPath)` (or
+// `canonicallyPaired`) re-derivation. The mkVaultOnlyDir() fixtures (non-git folders) would have passed
+// the OLD inference too, but the explicit fact is what keeps them correctly classified even after
+// VaultVersioner git-inits them — see docs/decisions/b98957e9-vault-only-is-an-explicit-fact.md.
+//
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE. Proves the DoD:
 //   PART A — MANAGER (SessionService.updateProjectStructural, the project_update MCP tool's backing
 //            method): (A1) a vault-only project's vaultPath:"" unbind is REJECTED (previously silently
@@ -110,7 +117,7 @@ try {
 
     const vaultOnlyDir = mkVaultOnlyDir("mgr");
     cleanupDirs.push(vaultOnlyDir);
-    db.insertProject({ id: "pMgrVaultOnly", name: "MgrVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false });
+    db.insertProject({ id: "pMgrVaultOnly", name: "MgrVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, vaultOnly: true });
     const repoBound = mkRepo("mgr");
     cleanupDirs.push(repoBound);
     const repoBoundVault = path.join(tmpHome, "mgr-repobound-vault");
@@ -165,7 +172,7 @@ try {
     const db = new Db(path.join(tmpHome, "setup.db"));
     const vaultOnlyDir = mkVaultOnlyDir("setup");
     cleanupDirs.push(vaultOnlyDir);
-    db.insertProject({ id: "pSetupVaultOnly", name: "SetupVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false });
+    db.insertProject({ id: "pSetupVaultOnly", name: "SetupVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, vaultOnly: true });
     const repoBound = mkRepo("setup");
     cleanupDirs.push(repoBound);
     const repoBoundVault = path.join(tmpHome, "setup-repobound-vault");
@@ -203,7 +210,7 @@ try {
     const db = new Db(path.join(tmpHome, "platform.db"));
     const vaultOnlyDir = mkVaultOnlyDir("plat");
     cleanupDirs.push(vaultOnlyDir);
-    db.insertProject({ id: "pPlatVaultOnly", name: "PlatVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false });
+    db.insertProject({ id: "pPlatVaultOnly", name: "PlatVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, vaultOnly: true });
     const repoBound = mkRepo("plat");
     cleanupDirs.push(repoBound);
     const repoBoundVault = path.join(tmpHome, "plat-repobound-vault");
@@ -241,7 +248,7 @@ try {
     const db = new Db(path.join(tmpHome, "rest.db"));
     const vaultOnlyDir = mkVaultOnlyDir("rest");
     cleanupDirs.push(vaultOnlyDir);
-    db.insertProject({ id: "pRestVaultOnly", name: "RestVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false });
+    db.insertProject({ id: "pRestVaultOnly", name: "RestVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, vaultOnly: true });
 
     const stub = {};
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, control: stub, usageStatus: stub });
@@ -271,7 +278,7 @@ try {
     db.insertProject({ id: "pAliasMgr", name: "AliasMgr", repoPath: codeRepo, vaultPath: separateVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
     const vaultOnlyDir = mkVaultOnlyDir("alias-mgr");
     cleanupDirs.push(vaultOnlyDir);
-    db.insertProject({ id: "pAliasMgrVaultOnly", name: "AliasMgrVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+    db.insertProject({ id: "pAliasMgrVaultOnly", name: "AliasMgrVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [], vaultOnly: true });
     const secondaryRepo = mkRepo("alias-mgr-secondary");
     cleanupDirs.push(secondaryRepo);
     db.insertProject({ id: "pAliasMgrRegistry", name: "AliasMgrRegistry", repoPath: codeRepo, vaultPath: separateVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [{ key: "secondary", path: secondaryRepo }] });
@@ -324,7 +331,7 @@ try {
     db.insertProject({ id: "pAliasSetup", name: "AliasSetup", repoPath: codeRepo, vaultPath: separateVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
     const vaultOnlyDir = mkVaultOnlyDir("alias-setup");
     cleanupDirs.push(vaultOnlyDir);
-    db.insertProject({ id: "pAliasSetupVaultOnly", name: "AliasSetupVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+    db.insertProject({ id: "pAliasSetupVaultOnly", name: "AliasSetupVaultOnly", repoPath: vaultOnlyDir, vaultPath: vaultOnlyDir, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [], vaultOnly: true });
 
     class SeamHost extends createSeamHost(PtyHost) { stop() {} }
     const events = { onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); }, onBusy(id, busy) { db.setBusy(id, busy); }, onContextStats() {}, onRateLimited() {}, onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); } };

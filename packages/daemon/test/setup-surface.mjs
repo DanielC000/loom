@@ -220,6 +220,7 @@ try {
   check("(c) project_create: returns a project with an id", !!created.id && !created.error);
   check("(c) project_create: vaultPath omitted ⇒ no vault bound (NOT defaulted to repoPath)", created.vaultPath === "");
   check("(c) project_create: persisted (db.getProject)", !!db.getProject(created.id) && db.getProject(created.id).reserved === false);
+  check("(c) project_create(code repo): stamps the explicit vaultOnly fact false (card b98957e9)", db.getProject(created.id)?.vaultOnly === false);
   // Guardrail: a non-git dir is rejected, nothing created.
   const nBefore = db.listAllProjects().length;
   const badRepo = await call("project_create", { name: "Bad", repoPath: nonGit });
@@ -769,6 +770,7 @@ try {
   check("(k) project_create(vault-only): both repoPath and vaultPath bind to the notes folder",
     vaultOnly.repoPath === nonGit && vaultOnly.vaultPath === nonGit);
   check("(k) project_create(vault-only): persisted as a non-reserved project", db.getProject(vaultOnly.id)?.reserved === false);
+  check("(k) project_create(vault-only): stamps the explicit vaultOnly fact true (card b98957e9)", db.getProject(vaultOnly.id)?.vaultOnly === true);
   // A vault-only create with NO vaultPath (and no repoPath) is rejected — nothing to bind.
   const noTarget = await call("project_create", { name: "Nothing" });
   check("(k) project_create: omitting BOTH repoPath and vaultPath is rejected", typeof noTarget.error === "string" && !noTarget.id);

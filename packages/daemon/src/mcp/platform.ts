@@ -20,7 +20,7 @@ import { expandTilde, PORT, isLoomDev } from "../paths.js";
 import { isForbiddenAllowedHost, canonicalHost, canonicalTrustedProxyOrigin } from "../gateway/trust-tier.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
-import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, canonicallyPaired } from "../projects/vault-path.js";
+import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { validateRepoRegistry } from "../projects/repos.js";
 import { resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { GitWriter } from "../git/writer.js";
@@ -1142,6 +1142,7 @@ export class PlatformMcpRouter {
           noGateByDesign: false, // human-only flag (card 58b0bb60); never agent-settable, even on this elevated surface
           denyGlobs: ["mockups/**"], // human-only flag (card d5d3bdc9); never agent-settable, even on this elevated surface
           repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, even on this elevated surface
+          vaultOnly: false, // this tool requires repoPath — never vault-only
         };
         db.insertProject(project);
         return ok(project);
@@ -1182,6 +1183,7 @@ export class PlatformMcpRouter {
           noGateByDesign: false, // human-only flag (card 58b0bb60); never agent-settable, even on this elevated surface
           denyGlobs: ["mockups/**"], // human-only flag (card d5d3bdc9); never agent-settable, even on this elevated surface
           repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, even on this elevated surface
+          vaultOnly: !isGit, // kind "vault": the created dir IS the vault, no separate repo
         };
         db.insertProject(project);
         return ok(project);
@@ -2458,11 +2460,18 @@ export class PlatformMcpRouter {
         if (repoPath !== undefined || vaultPath !== undefined) {
           const tripleCheck = await checkVaultRepoTripleContainment(
             { repoPath: repoPath ?? project.repoPath, vaultPath: vaultPath ?? project.vaultPath, repos: repos ?? project.repos },
-            { pairingIsIntentional: canonicallyPaired(project.repoPath, project.vaultPath) },
+            { pairingIsIntentional: project.vaultOnly },
           );
           if (!tripleCheck.ok) return ok({ error: tripleCheck.error });
         }
-        db.updateProject(projectId, { name, vaultPath, repoPath, repos });
+        // Card b98957e9 (fix round): the SHARED vaultOnly-flag guard — a repoPath rebind that diverges the
+        // pair clears the fact in this same write, a repoPath+vaultPath move that stays paired leaves it
+        // untouched, and a vaultPath-ONLY move that would unpair a vault-only project is REFUSED outright
+        // (see checkVaultOnlyOnUpdate's own doc for why this must not silently clear the fact instead).
+        const vaultOnlyCheck = checkVaultOnlyOnUpdate(project, { repoPath, vaultPath });
+        if (!vaultOnlyCheck.ok) return ok({ error: vaultOnlyCheck.error });
+        const vaultOnlyPatch = vaultOnlyCheck.vaultOnlyPatch;
+        db.updateProject(projectId, { name, vaultPath, repoPath, repos, vaultOnly: vaultOnlyPatch });
         // STALE-PROMPT LINT (card 0597e092): `project` is the PRE-update row (fetched above, before the
         // write), so this compares old-vs-new correctly — the SAME shared lint the REST PATCH path uses,
         // so a rename produces identical warnings regardless of which surface performed it.
