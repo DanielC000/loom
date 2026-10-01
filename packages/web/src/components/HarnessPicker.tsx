@@ -1,8 +1,9 @@
 import { createContext, useContext, type CSSProperties, type ReactNode } from "react";
 import { color, font, radius, tone as toneVar } from "../theme";
 import {
-  CODEX_DROPPED_FIELDS, CODEX_FAIL_OPEN_FIELDS, SEVERITY_META,
-  harnessDrop, liveHarnesses, type DroppedFieldKey, type Harness, type HarnessMixSession,
+  CODEX_DROPPED_BUT_STORED_FIELDS, CODEX_DROPPED_FIELDS, CODEX_FAIL_OPEN_FIELDS,
+  HARNESS_FIELD_LABELS, SEVERITY_META, codexRejectedFields, harnessDrop, liveHarnesses,
+  type CodexRejectInput, type DroppedFieldKey, type Harness, type HarnessMixSession,
 } from "../lib/harnessFields";
 
 // The harness picker on the Profiles editor (card fa2277b6, on an explicit owner directive): which vendor
@@ -94,6 +95,10 @@ export function HarnessPicker({ value, onChange }: { value: Harness; onChange: (
 export function HarnessDropSummary({ harness }: { harness: Harness }) {
   if (harness !== "codex") return null;
   const n = Object.keys(CODEX_DROPPED_FIELDS).length;
+  // Both counts are DERIVED from the two field sets, never written as literals: the old copy promised all
+  // five "stay stored", which was false for the two codex also refuses to store (card 6232fe9d).
+  const stored = CODEX_DROPPED_BUT_STORED_FIELDS.length;
+  const storedLabels = CODEX_DROPPED_BUT_STORED_FIELDS.map((f) => HARNESS_FIELD_LABELS[f]).join(", ");
   const accent = CODEX_FAIL_OPEN_FIELDS.length > 0 ? color.red : color.amber;
   return (
     <div data-testid="harness-drop-summary" role="status"
@@ -103,9 +108,43 @@ export function HarnessDropSummary({ harness }: { harness: Harness }) {
         {n} settings below are not read by the codex spawn path.
       </span>
       <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>
-        They stay stored and become live again if you switch this rig back to Claude Code, so each one is
-        shown disabled rather than cleared. Restricted tools is the one that matters most: on codex it
-        restricts nothing, so treat this rig as unrestricted no matter what that checkbox reads.
+        {stored} of them ({storedLabels}) stay stored and become live again if you switch this rig back to
+        Claude Code, so they are shown disabled rather than cleared. The rest Codex refuses to store at
+        all — if this rig has any of them set, saving removes them, and the panel below says which.
+      </span>
+    </div>
+  );
+}
+
+// ── The rejection warning ───────────────────────────────────────────────────────────────────────────
+//
+// The companion to HarnessDropSummary above, and a DIFFERENT statement: that one says which settings stop
+// APPLYING on codex, this one says which values this particular rig will LOSE when it is saved. It renders
+// only when there is something to lose, so it reads as a consequence of the rig's own state rather than as
+// a permanent scold attached to the harness choice — and it retires itself once the save has cleared them.
+//
+// @decision 6232fe9d — the removal must be named BEFORE the Save click; never silently send (or silently
+// clear) a value the validator rejects.
+//
+// Amber, not red: this is an announced, consented consequence, and the red slot on this screen belongs to
+// the one genuinely dangerous signal (restrictedTools reading ON while enforcing nothing). Two reds here
+// would flatten the distinction the severity triage exists to draw.
+export function HarnessRejectWarning({ harness, values }: { harness: Harness; values: CodexRejectInput }) {
+  if (harness !== "codex") return null;
+  const rejected = codexRejectedFields(values);
+  if (rejected.length === 0) return null;
+  return (
+    <div data-testid="harness-reject-warning" role="status"
+      style={{ border: `1px solid ${color.amber}`, borderRadius: radius.base, padding: "8px 10px",
+        background: color.panel2, display: "flex", flexDirection: "column", gap: 5 }}>
+      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.amber, lineHeight: 1.5 }}>
+        Saving removes {rejected.length === 1 ? "one setting" : `${rejected.length} settings`} Codex cannot
+        honour: {rejected.map((f) => HARNESS_FIELD_LABELS[f]).join(", ")}.
+      </span>
+      <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>
+        Codex has no per-tool disallow lever and mounts only HTTP MCP servers, so Loom refuses to store
+        these against a codex rig rather than let them read as active. They are still set until you save —
+        switch back to Claude Code now and nothing is lost. To keep them, keep this rig on Claude Code.
       </span>
     </div>
   );

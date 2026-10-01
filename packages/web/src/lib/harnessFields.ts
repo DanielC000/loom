@@ -91,6 +91,81 @@ export function harnessDrop(harness: Harness, field: DroppedFieldKey): HarnessDr
   return harness === "codex" ? CODEX_DROPPED_FIELDS[field] : null;
 }
 
+// ── The codex REJECTION set — a DIFFERENT set from CODEX_DROPPED_FIELDS above ────────────────────────
+//
+// @decision 6232fe9d — never conflate DROPPED (codex stores it, ignores it at spawn) with REJECTED
+// (`validateProfile` refuses to store it at all): neither set contains the other, and a control that is
+// disabled for one reason while its value is still SENT makes the rig unsaveable with no way to fix it.
+//
+// ⚠️ MIRROR of the daemon's `profiles/codex-compat.ts` › `codexIncompatibilities`, the ONE source of this
+// rule — the web package cannot import from `packages/daemon`, so this is a copy by necessity. Keep it in
+// step field for field, re-verify at source before editing, and never re-derive the list at a call site.
+export const CODEX_REJECTED_FIELDS = ["restrictedTools", "browserTesting", "documentConversion", "capabilities"] as const;
+
+export type CodexRejectedFieldKey = (typeof CODEX_REJECTED_FIELDS)[number];
+
+/**
+ * The Profiles-editor control label for every field this module names — so a summary or warning calls a
+ * field what the reader can actually SEE on screen, rather than by its schema key. Covers the union of
+ * {@link DroppedFieldKey} and {@link CodexRejectedFieldKey}; `FIELD_DISPLAY` in the Profiles editor spreads
+ * this rather than restating the overlapping entries, so the two can never disagree about a label.
+ */
+export const HARNESS_FIELD_LABELS: Record<DroppedFieldKey | CodexRejectedFieldKey, string> = {
+  restrictedTools: "Restricted tools",
+  browserTesting: "Browser testing",
+  documentConversion: "Document conversion",
+  capabilities: "Capabilities",
+  skills: "Skills",
+  model: "Model",
+  allowDelta: "Allow delta",
+};
+
+/** The subset of the profile a codex rejection depends on — mirrors the daemon's `CodexCompatInput`. */
+export interface CodexRejectInput {
+  restrictedTools?: boolean;
+  browserTesting?: boolean;
+  documentConversion?: boolean;
+  capabilities?: readonly unknown[] | null;
+}
+
+/**
+ * Which fields of `input` a codex save would be REFUSED for — empty ⇒ this rig can move onto codex as-is.
+ * Harness-agnostic on purpose (it answers "what blocks codex", not "what is blocked now"), so a caller
+ * asking about a rig already on claude passes the same values and branches on the harness itself.
+ * Ordering matches `codexIncompatibilities` so the UI lists them in the same order the daemon reports.
+ */
+export function codexRejectedFields(input: CodexRejectInput): CodexRejectedFieldKey[] {
+  return [
+    input.restrictedTools === true ? "restrictedTools" : null,
+    input.browserTesting === true ? "browserTesting" : null,
+    input.documentConversion === true ? "documentConversion" : null,
+    input.capabilities && input.capabilities.length > 0 ? "capabilities" : null,
+  ].filter((f): f is CodexRejectedFieldKey => f !== null);
+}
+
+/**
+ * `values` with every codex-rejected field cleared — the ONE place a save payload is made storable on
+ * codex. Returns `values` UNTOUCHED (same object) on any other harness and whenever nothing is set, so a
+ * claude save is byte-identical to before this existed.
+ *
+ * Clearing rather than refusing is card `6232fe9d`'s chosen branch: the alternative (leave them editable
+ * so the user clears them by hand) asks the reader to understand a validator rule before they can save at
+ * all. The honesty condition the card attaches to it is that the removal is NAMED BEFORE the click —
+ * `codexRejectedFields` above drives that copy from this same source, never a hand-copied list.
+ */
+export function clearCodexRejectedFields<T extends CodexRejectInput>(harness: Harness, values: T): T {
+  if (harness !== "codex" || codexRejectedFields(values).length === 0) return values;
+  return { ...values, restrictedTools: false, browserTesting: false, documentConversion: false, capabilities: [] };
+}
+
+/**
+ * The dropped fields codex genuinely KEEPS in the store — i.e. dropped-but-not-rejected. Derived from the
+ * two sets rather than hand-listed, so the "they stay stored" promise in the drop summary can never claim
+ * a field that a save actually removes (which is exactly what it claimed for all five before this card).
+ */
+export const CODEX_DROPPED_BUT_STORED_FIELDS = (Object.keys(CODEX_DROPPED_FIELDS) as DroppedFieldKey[])
+  .filter((k) => !(CODEX_REJECTED_FIELDS as readonly string[]).includes(k));
+
 // ── Mixed-harness views + the default-harness config ────────────────────────────────────────────────
 
 /** Vendor product name, for a control that names the choice rather than tagging a row. */

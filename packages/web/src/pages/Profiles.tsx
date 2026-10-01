@@ -7,8 +7,8 @@ import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components
 import { color, font, radius, tone, type Tone } from "../theme";
 import { agentProfiles } from "../lib/profileRoles";
 import { RolePicker } from "../components/RolePicker";
-import { HarnessPicker, HarnessDropSummary, HarnessFieldDrop, HarnessTag, dropStyle } from "../components/HarnessPicker";
-import { harnessOf, type Harness } from "../lib/harnessFields";
+import { HarnessPicker, HarnessDropSummary, HarnessFieldDrop, HarnessRejectWarning, HarnessTag, dropStyle } from "../components/HarnessPicker";
+import { HARNESS_FIELD_LABELS, clearCodexRejectedFields, harnessOf, type Harness } from "../lib/harnessFields";
 import { RoleBadge, roleDisplay, roleColor } from "../lib/roleDisplay";
 import { errorText } from "../lib/loopbackCredential";
 
@@ -48,6 +48,7 @@ export default function Profiles() {
     onSuccess: (p) => { qc.invalidateQueries({ queryKey: ["profiles"] }); setSelected(p.id); setNewName(""); },
   });
   const save = useMutation({
+    meta: { inlineError: true },
     mutationFn: (v: { id: string; patch: Partial<Omit<Profile, "id">> }) => api.updateProfile(v.id, v.patch),
     onSuccess: (p) => {
       qc.invalidateQueries({ queryKey: ["profiles"] });
@@ -120,6 +121,7 @@ export default function Profiles() {
           <ProfileEditor key={`${selected}:${grantParam ?? ""}:${reloadNonce}`} profile={current.data}
             grantConnectionId={selected === profileParam ? grantParam : null}
             onSave={(patch) => save.mutate({ id: selected, patch })} saving={save.isPending}
+            saveError={save.error as Error | null}
             onDelete={() => remove.mutate(selected)} deleting={remove.isPending}
             onRevert={() => revert.mutate(selected)} reverting={revert.isPending}
             onAdopt={(resolutions) => adopt.mutate(resolutions)} adopting={adopt.isPending} adoptError={adopt.error as Error | null} />
@@ -252,8 +254,8 @@ function MarkitdownProvisioning() {
 
 // Remounted per profile (key=id:nonce) so the fields reset on switch / revert / adopt; after Save the
 // query updates and `dirty` clears against the new values. Mirrors the Skills / agent-preset editors.
-function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, deleting, onRevert, reverting, onAdopt, adopting, adoptError }:
-  { profile: ProfileSummary; grantConnectionId?: string | null; onSave: (patch: Partial<Omit<Profile, "id">>) => void; saving: boolean;
+function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, onDelete, deleting, onRevert, reverting, onAdopt, adopting, adoptError }:
+  { profile: ProfileSummary; grantConnectionId?: string | null; onSave: (patch: Partial<Omit<Profile, "id">>) => void; saving: boolean; saveError: Error | null;
     onDelete: () => void; deleting: boolean; onRevert: () => void; reverting: boolean;
     onAdopt: (resolutions?: Record<string, ProfileFieldResolution>) => void; adopting: boolean; adoptError: Error | null }) {
   const bundled = profile.bundled;
@@ -367,6 +369,29 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
 
   const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setRestrictedTools(profile.restrictedTools ?? false); setNoCommit(profile.noCommit ?? false); setHarness(harnessOf(profile.harness)); setSkills(profile.skills ?? []); setConnections(profile.connections ?? []); setCapabilities(profile.capabilities ?? []); };
 
+  // Card 6232fe9d. `clearCodexRejectedFields` is the ONE place a payload is made storable on codex — the
+  // same helper that drives the warning copy above the Save button, so what the reader is told and what
+  // gets sent cannot disagree. A no-op on claude and on a codex rig with none of them set, so every other
+  // save is byte-identical to before.
+  //
+  // Local state is then reconciled to WHAT WAS SENT, not left holding the pre-clear values. Without this
+  // the editor would stay permanently dirty after a codex save (local `restrictedTools: true` against a
+  // stored `false`), offering a Save that could never settle. The four setters are read off `patch`, so
+  // they can't disagree with it about values — but they do name the fields, so a field ADDED to the
+  // rejection mirror needs a setter here too.
+  const submit = () => {
+    const patch = clearCodexRejectedFields(harness, {
+      name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null,
+      model: model.trim() || null, browserTesting, documentConversion, restrictedTools, noCommit, harness,
+      skills: skills.length ? skills : null, connections, capabilities,
+    });
+    setRestrictedTools(patch.restrictedTools);
+    setBrowserTesting(patch.browserTesting);
+    setDocumentConversion(patch.documentConversion);
+    setCapabilities(patch.capabilities);
+    onSave(patch);
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -420,6 +445,10 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
         <span style={fieldLabel}>Harness · which CLI this rig spawns</span>
         <HarnessPicker value={harness} onChange={setHarness} />
         <HarnessDropSummary harness={harness} />
+        {/* Named BEFORE the Save click, and only while this rig actually holds something codex refuses to
+            store — see card 6232fe9d. Sits here rather than beside each field because the loss is a
+            consequence of THIS choice, and a reader who has just picked codex is looking right at it. */}
+        <HarnessRejectWarning harness={harness} values={{ restrictedTools, browserTesting, documentConversion, capabilities }} />
       </div>
 
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -625,8 +654,7 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
 
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, restrictedTools, noCommit, harness, skills: skills.length ? skills : null, connections, capabilities })}>
+        <Button variant="primary" disabled={!dirty || !name.trim() || saving} onClick={submit}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty
@@ -641,6 +669,19 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
           </>
         ) : <Button onClick={() => setConfirmRevert(true)} title="Discard edits and restore this profile to its shipped (bundled) fields">Revert to bundled</Button>)}
       </div>
+      {/* Card 6232fe9d. The save mutation's error used to be thrown away, so a refused PUT left the editor
+          silently dirty — indistinguishable from a Save button that does nothing, which is exactly how the
+          codex rejection this card fixes stayed invisible. The daemon's refusals already name the offending
+          field AND the remedy, so the text is worth showing verbatim. Its own line below the row, not
+          inside it: these messages run to several lines and would otherwise squeeze the buttons. Matches
+          the update banner's error line above. Rendering here is why `save` sets `meta: { inlineError: true }`
+          — without it the MutationCache would stack a blocking modal on top of this line. */}
+      {saveError && (
+        <span data-testid="profile-save-error" role="alert"
+          style={{ color: color.red, fontFamily: font.mono, fontSize: 11, lineHeight: 1.5 }}>
+          {errorText(saveError)}
+        </span>
+      )}
 
       {resolver && !resolver.clean && (
         <ConflictResolver name={profile.name} conflicts={resolver.conflicts} applying={adopting} error={adoptError}
@@ -791,12 +832,13 @@ function FieldSide({ label, tone: t, active, value, onPick }: { label: string; t
 
 // --- field formatting helpers (pure) ------------------------------------------------------------
 
-// Human label for a mergeable profile field (keys mirror the daemon's MERGEABLE_PROFILE_FIELDS).
+// Human label for a mergeable profile field (keys mirror the daemon's MERGEABLE_PROFILE_FIELDS). The seven
+// fields the harness annotations also name are SPREAD from HARNESS_FIELD_LABELS rather than restated, so
+// the conflict resolver here and the codex drop/reject copy can never call the same field two things.
 const FIELD_DISPLAY: Record<string, string> = {
-  role: "Role", description: "Description", allowDelta: "Allow delta", skills: "Skills",
-  model: "Model", icon: "Icon", browserTesting: "Browser testing", documentConversion: "Document conversion",
-  restrictedTools: "Restricted tools", noCommit: "No-commit role", connections: "Connections",
-  capabilities: "Capabilities", harness: "Harness",
+  ...HARNESS_FIELD_LABELS,
+  role: "Role", description: "Description", icon: "Icon",
+  noCommit: "No-commit role", connections: "Connections", harness: "Harness",
 };
 function fieldDisplayName(field: string): string {
   return FIELD_DISPLAY[field] ?? field;
