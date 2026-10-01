@@ -3880,8 +3880,17 @@ export function detectDefaultShell(): string {
 
 /** @decision 621ef252 — best-effort reap, at pty `onExit`, of any descendant a torn-down root escapes
  * node-pty's containment into (a backgrounded `pnpm dev` vite server — six stale servers observed live);
- * enumerates the whole process list (a dead root breaks taskkill /T) with a `seen`-pid guard for reuse. */
+ * enumerates the whole process list (a dead root breaks taskkill /T) with a `seen`-pid guard for reuse.
+ *
+ * @decision d634cd2e — never spawn the enumeration helper for `rootPid <= 1`, a non-integer, or a
+ * pid equal to `process.pid`/`process.ppid` — a bad root must never reach a sweep that SIGKILLs every
+ * process the runner user owns. */
 export function reapOrphanedDescendants(rootPid: number): void {
+  if (!Number.isInteger(rootPid) || rootPid <= 1 || rootPid === process.pid || rootPid === process.ppid) {
+    // eslint-disable-next-line no-console
+    console.log(`[pty-reap] root=${rootPid}: skipped (not a reapable root pid)`);
+    return;
+  }
   const sweep = (out: string): void => {
     const byParent = new Map<number, number[]>();
     for (const line of out.split("\n")) {
@@ -4772,8 +4781,9 @@ export class PtyHost {
       }
       // Reap any descendant (e.g. a backgrounded `pnpm dev`) that escaped node-pty's own orphan-free
       // containment — the durable backstop for board card 621ef252. Fires on EVERY exit path, including
-      // an unexpected crash that never went through stop().
-      reapOrphanedDescendants(live.pid);
+      // an unexpected crash that never went through stop(). Routed through the `reapExitedDescendants`
+      // seam (card d634cd2e), not the free function directly — see that method's own doc.
+      this.reapExitedDescendants(live.pid);
       // Card aed28554: bound the subagent-drift `live` leak (a SubagentStart with no matching SubagentStop
       // would otherwise strand `live > 0` for this session forever) to the session's own lifetime — see
       // SubagentDriftTracker.evict's own doc. Fires on EVERY exit path, same as the cleanup above.
@@ -5432,7 +5442,7 @@ export class PtyHost {
         for (const w of waiters) w(false);
       }
       live.pending.length = 0;
-      reapOrphanedDescendants(live.pid);
+      this.reapExitedDescendants(live.pid);
       this.toolAttribution.forget(opts.sessionId);
       this.repeatedCalls.forget(opts.sessionId);
       // Card 176bdb0c: diagnostic-only — see `secondSigintWrittenAt`'s own doc. Computed unconditionally
@@ -6103,6 +6113,23 @@ export class PtyHost {
       env,
       useConptyDll: isPtyUseConptyDllEnabled(),
     });
+  }
+
+  /**
+   * Injectable seam for the post-exit orphan-descendant reap (board card 621ef252), called from BOTH
+   * `onExit` handlers instead of the free {@link reapOrphanedDescendants} function directly. Defaults to
+   * calling the real reaper, so production and every existing subclass that doesn't override this — e.g.
+   * `dev-server-teardown.mjs`'s own local `TestPtyHost`, which deliberately wires a REAL spawned
+   * process's pid through this exact `onExit` path to prove the real reap works end to end — stay
+   * byte-equivalent to the old unconditional call. `test/_seam-host-fixture.mjs`'s shared fake pty (used
+   * by ~279 test files) returns a fixed, fictional `pid: 4242` and its `kill()` fires this file's REAL
+   * `onExit` callback — without this seam, every one of those tests would run a real OS-wide
+   * process-tree enumeration + SIGKILL sweep against whatever pid 4242 happens to be on the host (card
+   * d634cd2e: harmless on a Windows dev box, but a real pid 4242 on Linux CI is plausible). That fixture
+   * is the ONE place this is overridden to a no-op — see its own doc comment.
+   */
+  protected reapExitedDescendants(rootPid: number): void {
+    reapOrphanedDescendants(rootPid);
   }
 
   /**

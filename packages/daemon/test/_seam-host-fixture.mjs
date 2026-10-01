@@ -40,5 +40,11 @@ export function createSeamHost(PtyHost) {
         resize() {},
       };
     }
+    // Card d634cd2e: this fixture's fake pty uses a fixed, fictional pid (4242) that can collide with a
+    // REAL pid on the host (a Linux CI runner, in particular) — kill() above fires the real onExit
+    // callback, which would otherwise run a real OS-wide process-tree enumeration + SIGKILL sweep against
+    // whatever that pid actually is. No-op here instead of running the real reaper. See PtyHost's own
+    // `reapExitedDescendants` doc comment for why this is the ONE place that overrides it.
+    reapExitedDescendants(_rootPid) {}
   };
 }
