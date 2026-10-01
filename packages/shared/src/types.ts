@@ -237,10 +237,9 @@ export interface Profile {
    * Connection ids a session under this rig may use with the `authenticated_request` tool. Default OFF
    * (absent/empty — UNLIKE `skills`, absent here means NO access, never "all connections") and fully
    * additive — a rig without it spawns byte-identically to today. HUMAN-set only, via the Profiles UI /
-   * REST `POST`/`PUT /api/profiles` — stricter than `browserTesting`/`documentConversion`: this field is
-   * REJECTED even on the Setup Assistant's and Platform Lead's own profile-writing MCP tools (see
-   * `profiles/validate.ts`'s agent-restriction helper), because it grants access to REAL external secrets
-   * rather than a sandboxed capability. Never exposed as an agent MCP setter, full stop.
+   * REST `POST`/`PUT /api/profiles`: this field is REJECTED even on the Setup Assistant's and Platform
+   * Lead's own profile-writing MCP tools (see `profiles/validate.ts`'s agent-restriction helper), because
+   * it grants access to REAL external secrets. Never exposed as an agent MCP setter, full stop.
    */
   connections?: string[];
   /**

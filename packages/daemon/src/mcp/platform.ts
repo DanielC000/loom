@@ -1866,7 +1866,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). `connections`/`capabilities`/`vaultWrite` are REJECTED here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, `capabilities` can launch a host process / inject an MCP server, and `vaultWrite` grants confined write access into a project's vault; not even the Platform Lead may set them. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a cross-project Profile (rig: role + skills subset + model + icon + restrictedTools + noCommit). `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` are REJECTED here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, `capabilities` can launch a host process / inject an MCP server, `vaultWrite` grants confined write access into a project's vault, `harness` selects the spawn binary, `browserTesting`/`documentConversion` launch a per-session browser/subprocess capability, and `allowDelta` widens the spawn permission allowlist (e.g. `Bash(*)`); not even the Platform Lead may set them. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: strictShape({ profile: z.object({}).passthrough() }),
       },
       async ({ profile }) => {
@@ -1883,7 +1883,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections`/`capabilities`/`vaultWrite` (authenticated-egress grants / registry-capability grants / the confined vault-write grant — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: strictShape({ profileId: z.string(), patch: z.object({}).passthrough() }),
       },
       async ({ profileId, patch }) => {

@@ -46,43 +46,52 @@ const profileSchema = z
     name: z.string().min(1),
     role: PROFILE_ROLE_SCHEMA.nullable().optional(),
     description: z.string().optional(),
+    // @decision 8c27ae8e — human-only (AGENT_FORBIDDEN_PROFILE_KEYS below); an unreviewed allowDelta
+    // entry (e.g. "Bash(*)") widens a rig's spawn permission allowlist, same trust class as gateCommand.
     allowDelta: z.array(z.string()).optional(),
     skills: z.array(z.string()).nullable().optional(),
     model: z.string().nullable().optional(),
     icon: z.string().nullable().optional(),
-    // Opt-in browser-automation capability (default off). Agent MCP write surfaces DO exist for profiles
-    // (loom-setup's profile_create/update/agent_update; the LOOM_DEV Platform Lead) and CAN set this field —
-    // but both are role-gated away from ever minting/assigning role:"assistant" (setupRoleError's
-    // SETUP_ALLOWED_PROFILE_ROLES omits it; only the maximally-trusted Platform Lead can reach it), so the
-    // one role that would gain a NEW capability from browserTesting (the untrusted-chat-facing Companion)
-    // can only get it via a HUMAN Profiles UI/REST write, never an agent one. The Playwright MCP itself
-    // additionally disallows its RCE-equivalent browser_run_code_unsafe tool regardless of who granted this
-    // flag — see PLAYWRIGHT_DISALLOWED_TOOLS (pty/host.ts).
+    // @decision 8c27ae8e — browserTesting is human-only (AGENT_FORBIDDEN_PROFILE_KEYS below).
+    //
+    // Opt-in browser-automation capability (default off). The Playwright MCP itself additionally
+    // disallows its RCE-equivalent browser_run_code_unsafe tool regardless of who granted this flag —
+    // see PLAYWRIGHT_DISALLOWED_TOOLS (pty/host.ts).
     browserTesting: z.boolean().optional(),
-    // Opt-in document-conversion capability (default off). Human-gated identically to browserTesting —
-    // it launches a host markitdown process, so it is never an agent MCP write surface.
+    // @decision 8c27ae8e — documentConversion is human-only (AGENT_FORBIDDEN_PROFILE_KEYS below).
+    //
+    // Opt-in document-conversion capability (default off): launches a host markitdown process.
     documentConversion: z.boolean().optional(),
-    // Opt-in confined vault-write capability (default off), gates the `vault_write` tool. STRICTER than
-    // browserTesting/documentConversion (see AGENT_FORBIDDEN_PROFILE_KEYS below), the SAME posture as
-    // connections/capabilities — a write grant into a human-reviewed corpus is exfil/tamper-
-    // adjacent, rejected even on the elevated Setup Assistant's/Platform Lead's own profile-writing tools.
+    // @decision be8be211 — vaultWrite is human-only (AGENT_FORBIDDEN_PROFILE_KEYS below).
+    //
+    // Opt-in confined vault-write capability (default off), gates the `vault_write` tool. A write grant
+    // into a human-reviewed corpus is exfil/tamper-adjacent, rejected even on the elevated Setup
+    // Assistant's/Platform Lead's own profile-writing tools.
     vaultWrite: z.boolean().optional(),
+    // @decision 8c27ae8e — restrictedTools stays OUT of AGENT_FORBIDDEN_PROFILE_KEYS below: it only
+    // RESTRICTS a rig's own tool surface rather than granting a new one, so it remains settable via the
+    // Setup Assistant's/Platform Lead's own profile-writing tools.
+    //
     // Opt-in RESTRICTED-tools (default off). Blast-radius control for a chat-reachable Companion: when on,
     // the curated dangerous native tools (Bash/Edit/Write/NotebookEdit/MultiEdit) are appended to
-    // --disallowedTools at spawn. Human-gated identically to browserTesting — it is never a NEW agent MCP
-    // write surface; a companion (assistant role) has no profile write tool, so it can never self-widen.
+    // --disallowedTools at spawn. A companion (assistant role) has no profile write tool of its own
+    // either way, so it can never self-widen.
     restrictedTools: z.boolean().optional(),
+    // @decision 8c27ae8e — noCommit stays OUT of AGENT_FORBIDDEN_PROFILE_KEYS below: it only declares
+    // lifecycle behavior rather than granting a new capability, so it remains settable via the Setup
+    // Assistant's/Platform Lead's own profile-writing tools.
+    //
     // Declared no-commit role (default off). Lifecycle-only flag (no spawn-time host capability) — a
-    // 0-commit done auto-retires + skips the forgot-to-commit warning. Human-gated like browserTesting.
+    // 0-commit done auto-retires + skips the forgot-to-commit warning.
     noCommit: z.boolean().optional(),
     // Opt-in authenticated-egress connection-id allowlist (agent-tooling epic P2, default []=no access).
-    // STRICTER than browserTesting/documentConversion: this field grants access to REAL external secrets,
+    // Human-only (AGENT_FORBIDDEN_PROFILE_KEYS below): this field grants access to REAL external secrets,
     // so it is rejected even on the Setup Assistant's / Platform Lead's own profile-writing MCP tools (see
     // `agentProfileKeyError` below) — the human REST path (POST/PUT /api/profiles) is the ONLY grant path.
     connections: z.array(z.string()).optional(),
     // Registry-capability grants (agent-tooling epic P4, default []=none). Each names a catalog slug plus
-    // an OPTIONAL bound P1 connection id. STRICTER than browserTesting/documentConversion, like
-    // `connections` above (see AGENT_FORBIDDEN_PROFILE_KEYS): a grant can launch a host process and bind
+    // an OPTIONAL bound P1 connection id. Human-only, like `connections` above (see
+    // AGENT_FORBIDDEN_PROFILE_KEYS): a grant can launch a host process and bind
     // egress, so it is rejected even on the elevated Setup Assistant's/Platform Lead's own profile writers.
     // A grant naming a RESERVED legacy slug (browser-testing/document-conversion) is rejected here too —
     // those are exclusively conferred via the browserTesting/documentConversion booleans (the bridge in
@@ -97,10 +106,9 @@ const profileSchema = z
       })
       .optional(),
     // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: which vendor CLI a session under this rig
-    // spawns as. STRICTER than browserTesting/documentConversion (see AGENT_FORBIDDEN_PROFILE_KEYS
-    // below): selecting which BINARY gets spawned is the same trust class as gateCommand, not a
-    // sandboxed capability — rejected even on the elevated Setup Assistant's/Platform Lead's own
-    // profile-writing MCP tools, human REST is the ONLY grant path.
+    // spawns as. Human-only (AGENT_FORBIDDEN_PROFILE_KEYS below): selecting which BINARY gets spawned
+    // is the same trust class as gateCommand — rejected even on the elevated Setup Assistant's/Platform
+    // Lead's own profile-writing MCP tools, human REST is the ONLY grant path.
     harness: HARNESS_ID_SCHEMA.optional(),
   })
   .strict();
@@ -119,24 +127,47 @@ export const PROFILE_FIELD_NAMES = Object.keys(profileSchema.shape) as (keyof z.
  * Profile keys that must NEVER be settable through an agent MCP tool, even the elevated Setup
  * Assistant / Platform Lead profile writers that otherwise share this same strict validator for every
  * other field. Mirrors `agentOrchestrationOverride`'s omission of `gateCommand`/`alertWebhook` (mcp/
- * platform.ts) — `connections` grants access to REAL external secrets (P1 credential store), which is
- * categorically more sensitive than a sandboxed capability like `browserTesting`/`documentConversion`.
- * `capabilities` (agent-tooling P4) gets the SAME stricter posture, not the milder `browserTesting`/
- * `documentConversion` one: a capability grant launches a host process and can bind egress via a P1
- * connection, so it is owner-only end-to-end, never delegable to an elevated profile-writing agent.
+ * platform.ts) — `connections` grants access to REAL external secrets (P1 credential store); `capabilities`
+ * (agent-tooling P4) gets the same posture, since a grant launches a host process and can bind egress via
+ * a P1 connection, owner-only end-to-end.
  *
- * @decision be8be211 — `vaultWrite` gets the SAME stricter posture: a write grant into a
- * human-reviewed vault corpus is exfil/tamper-adjacent.
+ * @decision be8be211 — `vaultWrite`: a write grant into a human-reviewed vault corpus is
+ * exfil/tamper-adjacent.
  *
- * An elevated profile-writing agent must never be able to grant itself (or any other rig) the ability
- * to write vault content a human will later trust as their own.
+ * `harness` (multi-harness epic df1f94b0 Phase 1, card 353f6dc4): selecting which vendor BINARY a
+ * session spawns is the same trust class as `gateCommand`, per an explicit lead ruling on that card.
  *
- * `harness` (multi-harness epic df1f94b0 Phase 1, card 353f6dc4) gets the SAME stricter posture too, per
- * an explicit lead ruling on that card: selecting which vendor BINARY a session spawns is the same trust
- * class as `gateCommand`, not a sandboxed capability like `browserTesting`/`documentConversion` — an
- * elevated profile-writing agent must never be able to switch a rig onto a different CLI unsupervised.
+ * @decision 8c27ae8e — `browserTesting`/`documentConversion`/`allowDelta` must never be settable by an
+ * elevated profile-writing agent (previously writable here by omission, not decision); `allowDelta` is
+ * the same trust class as `gateCommand` — an unreviewed entry (e.g. `Bash(*)`) widens the spawn allowlist.
+ *
+ * An elevated profile-writing agent must never be able to grant itself (or any other rig) one of these
+ * capabilities.
  */
-const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections", "capabilities", "vaultWrite", "harness"] as const;
+const AGENT_FORBIDDEN_PROFILE_KEYS = [
+  "connections",
+  "capabilities",
+  "vaultWrite",
+  "harness",
+  "browserTesting",
+  "documentConversion",
+  "allowDelta",
+] as const;
+
+/**
+ * @decision 8c27ae8e — each forbidden key's rejection message must name ITS OWN reason, not one generic
+ * "grants access to real external secrets" line: that was only ever true of connections/capabilities,
+ * and was misleading for harness/vaultWrite/browserTesting/documentConversion/allowDelta.
+ */
+const AGENT_FORBIDDEN_PROFILE_KEY_REASONS: Record<(typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number], string> = {
+  connections: "it grants access to real external secrets",
+  capabilities: "a grant can launch a host process and bind egress via a P1 connection",
+  vaultWrite: "it grants write access into a human-reviewed vault corpus",
+  harness: "it selects which vendor CLI binary a session spawns — the same trust class as gateCommand",
+  browserTesting: "it launches a per-session browser-automation capability (arbitrary web navigation)",
+  documentConversion: "it launches a host subprocess (markitdown) capability",
+  allowDelta: "an unreviewed entry (e.g. \"Bash(*)\") widens a rig's spawn permission allowlist — the same trust class as gateCommand",
+};
 
 /**
  * Reject a RAW create/patch payload (BEFORE any merge with an existing profile) that tries to set a
@@ -150,7 +181,7 @@ export function agentProfileKeyError(raw: unknown): string | null {
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     for (const key of AGENT_FORBIDDEN_PROFILE_KEYS) {
       if (key in (raw as Record<string, unknown>)) {
-        return `${key} may not be set via an agent MCP tool — it grants access to real external secrets (human-only, via the Profiles UI / REST)`;
+        return `${key} may not be set via an agent MCP tool — ${AGENT_FORBIDDEN_PROFILE_KEY_REASONS[key]} (human-only, via the Profiles UI / REST)`;
       }
     }
   }

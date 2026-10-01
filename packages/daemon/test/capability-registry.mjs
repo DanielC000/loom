@@ -68,7 +68,32 @@ check("(validate-profile) capabilities normalizes to [] when absent", validatePr
 check("(agent-forbidden) an agent MCP profile writer's payload with 'capabilities' is REJECTED",
   typeof agentProfileKeyError({ capabilities: [{ slug: "x" }] }) === "string");
 check("(agent-forbidden) 'connections' stays rejected too (no regression)", typeof agentProfileKeyError({ connections: ["c1"] }) === "string");
-check("(agent-forbidden) a payload with neither forbidden key passes", agentProfileKeyError({ name: "P", browserTesting: true }) === null);
+check("(agent-forbidden) a payload with no forbidden key passes", agentProfileKeyError({ name: "P", description: "x" }) === null);
+
+// ===================== card 8c27ae8e: browserTesting/documentConversion/allowDelta join the forbidden list =====================
+// Repro this card fixed: an agent MCP profile writer could previously set all three unchecked.
+check("(agent-forbidden 8c27ae8e) 'browserTesting' is REJECTED", typeof agentProfileKeyError({ browserTesting: true }) === "string");
+check("(agent-forbidden 8c27ae8e) 'documentConversion' is REJECTED", typeof agentProfileKeyError({ documentConversion: true }) === "string");
+check("(agent-forbidden 8c27ae8e) 'allowDelta' is REJECTED", typeof agentProfileKeyError({ allowDelta: ["Bash(*)"] }) === "string");
+check("(agent-forbidden 8c27ae8e) the exact card repro payload (all three + role) is REJECTED",
+  typeof agentProfileKeyError({ role: "worker", browserTesting: true, documentConversion: true, allowDelta: ["Bash(*)"] }) === "string");
+
+// Per-key reason messages (card 8c27ae8e item 2): one generic "grants access to real external secrets"
+// sentence was misleading for every key but connections/capabilities — each now names its own reason.
+const secretsPhrase = /real external secrets/;
+check("(agent-forbidden reasons) connections cites real external secrets", secretsPhrase.test(agentProfileKeyError({ connections: ["c1"] })));
+check("(agent-forbidden reasons) capabilities cites a host process, NOT the generic secrets phrase",
+  /host process/.test(agentProfileKeyError({ capabilities: [{ slug: "x" }] })) && !secretsPhrase.test(agentProfileKeyError({ capabilities: [{ slug: "x" }] })));
+check("(agent-forbidden reasons) vaultWrite cites the vault, NOT the generic secrets phrase",
+  /vault/.test(agentProfileKeyError({ vaultWrite: true })) && !secretsPhrase.test(agentProfileKeyError({ vaultWrite: true })));
+check("(agent-forbidden reasons) harness cites gateCommand's trust class, NOT the generic secrets phrase",
+  /gateCommand/.test(agentProfileKeyError({ harness: "codex" })) && !secretsPhrase.test(agentProfileKeyError({ harness: "codex" })));
+check("(agent-forbidden reasons) browserTesting cites browser automation, NOT the generic secrets phrase",
+  /browser/i.test(agentProfileKeyError({ browserTesting: true })) && !secretsPhrase.test(agentProfileKeyError({ browserTesting: true })));
+check("(agent-forbidden reasons) documentConversion cites a host subprocess, NOT the generic secrets phrase",
+  /subprocess|markitdown/i.test(agentProfileKeyError({ documentConversion: true })) && !secretsPhrase.test(agentProfileKeyError({ documentConversion: true })));
+check("(agent-forbidden reasons) allowDelta cites gateCommand's trust class, NOT the generic secrets phrase",
+  /gateCommand/.test(agentProfileKeyError({ allowDelta: ["Bash(*)"] })) && !secretsPhrase.test(agentProfileKeyError({ allowDelta: ["Bash(*)"] })));
 
 // ===================== (a) resolveProfileCapabilities bridge =====================
 check("(bridge) neither boolean nor capabilities ⇒ []",

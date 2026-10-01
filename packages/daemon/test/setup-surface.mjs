@@ -309,6 +309,38 @@ try {
   const upOk = await call("profile_update", { profileId: okWrk.id, patch: { icon: "🔧" } });
   check("(e) profile_update still applies a non-role patch (icon)", upOk.icon === "🔧" && upOk.role === "worker" && !upOk.error);
 
+  // ============ (n) card 8c27ae8e: browserTesting/documentConversion/allowDelta are HUMAN-only ============
+  // The exact repro this card fixed: profile_create used to accept all three unchecked. Now
+  // agentProfileKeyError rejects each on the RAW payload before validateProfile even runs, nothing is
+  // persisted, and the error names the field.
+  const nProfBeforeHuman = db.listProfiles().length;
+  const browserProf = await call("profile_create", { profile: { name: "BrowserRig", role: "worker", browserTesting: true } });
+  check("(n) profile_create REJECTS browserTesting (human-only, card 8c27ae8e)",
+    typeof browserProf.error === "string" && !browserProf.id && /browserTesting/.test(browserProf.error));
+  const docConvProf = await call("profile_create", { profile: { name: "DocRig", role: "worker", documentConversion: true } });
+  check("(n) profile_create REJECTS documentConversion (human-only, card 8c27ae8e)",
+    typeof docConvProf.error === "string" && !docConvProf.id && /documentConversion/.test(docConvProf.error));
+  const allowDeltaProf = await call("profile_create", { profile: { name: "BashRig", role: "worker", allowDelta: ["Bash(*)"] } });
+  check("(n) profile_create REJECTS allowDelta (same trust class as gateCommand, card 8c27ae8e)",
+    typeof allowDeltaProf.error === "string" && !allowDeltaProf.id && /allowDelta/.test(allowDeltaProf.error));
+  // The exact repro payload: role + browserTesting + documentConversion + allowDelta in ONE call.
+  const repro = await call("profile_create", { profile: { name: "ReproRig", role: "worker", browserTesting: true, documentConversion: true, allowDelta: ["Bash(*)"] } });
+  check("(n) profile_create REJECTS the exact card-8c27ae8e repro payload", typeof repro.error === "string" && !repro.id);
+  check("(n) none of the rejected (n) creates persisted anything", db.listProfiles().length === nProfBeforeHuman);
+
+  // profile_update: the patch may not INTRODUCE any of the three either...
+  const upBrowserIntroduce = await call("profile_update", { profileId: okWrk.id, patch: { browserTesting: true } });
+  check("(n) profile_update REJECTS a patch introducing browserTesting", typeof upBrowserIntroduce.error === "string");
+  // ...but an unrelated patch to a profile that ALREADY carries one (human-set, e.g. via the Profiles UI)
+  // must still succeed untouched — the same handling vaultWrite/harness already get (agentProfileKeyError
+  // checks the RAW incoming patch, never the merged object).
+  db.updateProfile(okWrk.id, { browserTesting: true }); // simulate a prior HUMAN REST/UI grant
+  const upUnrelated = await call("profile_update", { profileId: okWrk.id, patch: { icon: "🎨" } });
+  check("(n) profile_update: an unrelated patch on a profile that already HAS browserTesting (human-set) still succeeds",
+    !upUnrelated.error && upUnrelated.icon === "🎨");
+  check("(n) profile_update: that unrelated patch left the existing browserTesting grant UNCHANGED",
+    db.getProfile(okWrk.id)?.browserTesting === true);
+
   // reads.
   const projs = await call("list_all_projects", {});
   check("(c) list_all_projects: includes the created project", projs.some((p) => p.id === created.id));

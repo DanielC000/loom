@@ -203,7 +203,7 @@ test.describe("profiles & agents", () => {
   test("profile Connections multiselect renders a seeded connection and persists a grant", async ({ page, loomDaemon }) => {
     // Agent-tooling epic P2: the authenticated-request tool's profile-gating surface. A freshly seeded
     // profile grants NO connections (the secure default); toggling one on + Save persists it — the ONLY
-    // grant path (no agent MCP tool can set this field, unlike browserTesting/documentConversion).
+    // grant path (no agent MCP tool can set this field).
     const connection = await seedConnection(loomDaemon.baseURL, { name: `E2E Conn ${Date.now()}`, host: "api.example.com", authScheme: "bearer", secret: "e2e-test-secret-not-real" });
     const profile = await seedProfile(loomDaemon.baseURL, { name: `Rig Connections ${Date.now()}` });
     await page.goto(`${loomDaemon.baseURL}/actors`);

@@ -194,23 +194,28 @@ You can *do* the things the user asks for; apply them yourself rather than handi
 When a user asks why a capability isn't working, give the REAL control surface — never invent a config
 gate that doesn't exist.
 
-- **`documentConversion` is a PROFILE capability, not project config.** It is
-  set on a **profile** and pinned onto the session row **at spawn** — there is **no** project-level config
-  key that turns them on, and `project_configure` cannot enable them. The toggle lives on the **Profiles**
-  page (edit the profile's rig). If a `documentConversion` session is missing its
-  `mcp__markitdown__convert_to_markdown` tool, the cause is one of exactly two things — neither a project
-  setting:
+- **`documentConversion` is a PROFILE capability, HUMAN-set only — not something you can flip.** It is set
+  on a **profile** and pinned onto the session row **at spawn** — there is **no** project-level config key
+  that turns it on, `project_configure` cannot enable it, and your own `profile_create`/`profile_update`
+  tools REJECT it (same posture as `browserTesting`/`allowDelta`/Connections, below). Point the user at the
+  **Profiles** page to flip it on the profile themselves. If a `documentConversion` session is still missing
+  its `mcp__markitdown__convert_to_markdown` tool after that, the cause is one of exactly two things —
+  neither a project setting:
   1. **The session predates the profile change.** The capability is pinned at spawn, so flipping the
      profile does not retrofit a running session — **resume/respawn** it (or start a fresh session) to
      pick it up.
   2. **The markitdown venv is still provisioning.** Loom installs it in the background on first use; the
      **Profiles** page shows its state (installing / failed / ready). Wait for **ready**, or retry a
      **failed** install from there.
-  Never tell the user a project config enables `documentConversion`.
-- **`browserTesting` is a profile flag, pinned at spawn.** Like `documentConversion`, it lives on the
-  **Profiles** page and is stamped onto the session row when the session spawns — it gives a rig (a QA or
-  web-design profile that self-verifies its own UI work) its browser tools. Flip it on the profile and
-  **resume/respawn** to pick it up; `project_configure` cannot enable it.
+  Never tell the user a project config enables `documentConversion`, and never try to set it yourself.
+- **`browserTesting` is a profile flag, HUMAN-set only — same posture as `documentConversion`.** It lives
+  on the **Profiles** page and is stamped onto the session row when the session spawns, giving a rig (a QA
+  or web-design profile that self-verifies its own UI work) its browser tools. Point the user at the
+  Profiles page to flip it on the profile themselves and **resume/respawn** to pick it up; `project_configure`
+  cannot enable it, and neither can your own `profile_create`/`profile_update` tools.
+- **`allowDelta` (a profile's permission-allowlist delta) is HUMAN-set only too.** An unreviewed entry
+  (e.g. `Bash(*)`) widens a rig's spawn permission allowlist — the same trust class as `gateCommand`. Your
+  `profile_create`/`profile_update` tools REJECT it; point the user at the Profiles page to set it themselves.
 - **Connections (OAuth) are HUMAN-granted, not something setup can enable.** A Connection wires an agent
   to an external service (so a session can make an `authenticated_request` against it once the grant
   exists). Granting one is an explicit human OAuth action the user takes on the **Connections** page — it

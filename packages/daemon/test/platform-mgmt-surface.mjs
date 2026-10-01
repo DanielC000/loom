@@ -252,15 +252,28 @@ try {
 
   // ===================== (a) PROFILES (the human-equivalent elevation, gated to platform) =====================
   const nProfBefore = db.listProfiles().length;
-  const pc = await call("profile_create", { profile: { name: "Reviewer", role: "worker", allowDelta: ["Bash(git diff:*)"] } });
+  const pc = await call("profile_create", { profile: { name: "Reviewer", role: "worker" } });
   check("profile_create: returns a profile with an id", !!pc.id && !pc.error);
-  check("profile_create: persists to the Db (role + allowDelta survive)",
-    db.getProfile(pc.id)?.role === "worker" && db.getProfile(pc.id)?.allowDelta.length === 1 && db.listProfiles().length === nProfBefore + 1);
+  check("profile_create: persists to the Db (role survives)",
+    db.getProfile(pc.id)?.role === "worker" && db.listProfiles().length === nProfBefore + 1);
   const pcBad = await call("profile_create", { profile: { name: "Bad", bogusField: 1 } });
   check("profile_create: an unknown field is rejected (strict validator), nothing created",
     typeof pcBad.error === "string" && !pcBad.id && db.listProfiles().length === nProfBefore + 1);
   const pcBadRole = await call("profile_create", { profile: { name: "BadRole", role: "wizard" } });
   check("profile_create: an invalid role is rejected", typeof pcBadRole.error === "string" && !pcBadRole.id);
+
+  // card 8c27ae8e: allowDelta/browserTesting/documentConversion are human-only even on this ELEVATED
+  // Platform Lead surface — same posture as connections/capabilities/vaultWrite/harness. Used to persist
+  // unchecked (the `allowDelta: ["Bash(git diff:*)"]` create above, pre-fix).
+  const pcAllowDelta = await call("profile_create", { profile: { name: "BashRig", role: "worker", allowDelta: ["Bash(*)"] } });
+  check("profile_create: REJECTS allowDelta even on the elevated Platform Lead surface (card 8c27ae8e)",
+    typeof pcAllowDelta.error === "string" && !pcAllowDelta.id && db.listProfiles().length === nProfBefore + 1);
+  const pcBrowser = await call("profile_create", { profile: { name: "BrowserRig", role: "worker", browserTesting: true } });
+  check("profile_create: REJECTS browserTesting even on the elevated Platform Lead surface (card 8c27ae8e)",
+    typeof pcBrowser.error === "string" && !pcBrowser.id);
+  const pcDocConv = await call("profile_create", { profile: { name: "DocRig", role: "worker", documentConversion: true } });
+  check("profile_create: REJECTS documentConversion even on the elevated Platform Lead surface (card 8c27ae8e)",
+    typeof pcDocConv.error === "string" && !pcDocConv.id);
 
   const pu = await call("profile_update", { profileId: pc.id, patch: { description: "edited", icon: "🔍" } });
   check("profile_update: partial patch merges + persists", pu.description === "edited" && pu.icon === "🔍" && pu.role === "worker" && !pu.error);
@@ -268,6 +281,20 @@ try {
   const puBad = await call("profile_update", { profileId: pc.id, patch: { role: "wizard" } });
   check("profile_update: an invalid merged result is rejected; stored profile unchanged",
     typeof puBad.error === "string" && db.getProfile(pc.id)?.role === "worker");
+
+  // card 8c27ae8e: profile_update may not INTRODUCE browserTesting even on this elevated surface...
+  const puIntroduceBrowser = await call("profile_update", { profileId: pc.id, patch: { browserTesting: true } });
+  check("profile_update: REJECTS a patch that INTRODUCES browserTesting even on the elevated surface (card 8c27ae8e)",
+    typeof puIntroduceBrowser.error === "string" && !db.getProfile(pc.id)?.browserTesting);
+  // ...but an unrelated patch to a profile that ALREADY has browserTesting (human-set — profQA, seeded
+  // above) must still succeed untouched, same handling as vaultWrite/harness (agentProfileKeyError checks
+  // the RAW incoming patch, never the merged object).
+  check("(precondition) profQA already carries a human-set browserTesting:true", db.getProfile("profQA")?.browserTesting === true);
+  const puUnrelatedQA = await call("profile_update", { profileId: "profQA", patch: { icon: "🔬" } });
+  check("profile_update: an unrelated patch on profQA (already browserTesting:true) still succeeds (card 8c27ae8e)",
+    !puUnrelatedQA.error && puUnrelatedQA.icon === "🔬");
+  check("profile_update: that unrelated patch left profQA's existing browserTesting grant UNCHANGED",
+    db.getProfile("profQA")?.browserTesting === true);
 
   const pa = await call("profile_assign", { agentId: "agentWork", profileId: "profQA" });
   check("profile_assign: assigns an existing profile", pa.profileId === "profQA" && !pa.error);
