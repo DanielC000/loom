@@ -3053,22 +3053,9 @@ export class SessionService {
       throw e;
     }
     // Card badba5a8: observability only — record whether the codescape block was injected. Only fires for
-    // the role==="manager" branch (the only one that ever computes codescapeStatus above).
-    //
-    // @decision 72c58b1c — wrapped so a DB failure here can NEVER make startNew() throw after pty.spawn
-    // has already succeeded (a live session must not be reported as a failed spawn to the caller).
-    if (codescapeStatus) {
-      try {
-        this.db.appendEvent({
-          id: randomUUID(), ts: new Date().toISOString(),
-          managerSessionId: session.id, kind: "discovery_block_injection",
-          detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
-        });
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.error(`[sessions] failed to record discovery_block_injection observability event for ${session.id} (informational only, not fatal):`, (e as Error).message);
-      }
-    }
+    // the role==="manager" branch (the only one that ever computes codescapeStatus above). Card 40738f24:
+    // folded onto the shared best-effort recordDiscoveryBlockInjection helper (see its own doc).
+    if (codescapeStatus) this.recordDiscoveryBlockInjection({ managerSessionId: session.id }, codescapeStatus);
     return { ...session, processState: "live" };
   }
 
@@ -3170,12 +3157,9 @@ export class SessionService {
       this.reconcileFailedSpawn(session.id, e);
       throw e;
     }
-    // Card badba5a8: observability only — record whether the codescape block was injected.
-    this.db.appendEvent({
-      id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId: session.id, kind: "discovery_block_injection",
-      detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
-    });
+    // Card badba5a8: observability only — record whether the codescape block was injected. Card 40738f24:
+    // folded onto the shared best-effort recordDiscoveryBlockInjection helper (see its own doc).
+    this.recordDiscoveryBlockInjection({ managerSessionId: session.id }, codescapeStatus);
     return { ...session, processState: "live" };
   }
 
@@ -6587,6 +6571,15 @@ export class SessionService {
   onRunSessionExit(sessionId: string): void {
     const run = this.db.getRunBySession(sessionId);
     if (!run) return;
+    // Card 40738f24: reconcileFailedSpawn can now hard-kill a genuinely-live pty when startRun's own
+    // spawn attempt throws after pty.spawn already registered it live — startRun's catch calls
+    // reconcileFailedSpawn (which may kill synchronously or, on a real pty, asynchronously) BEFORE its own
+    // db.failRun. Either ordering can land this method on an already-`failed` run. Without this early
+    // return, the guard below (which excludes completed/cancelled/timed_out but not failed) would
+    // overwrite startRun's precise "run spawn failed before it could start: ..." error with the generic
+    // message below, and re-run the whole teardown (usage capture + webhook fire) for a run that never had
+    // a real engine session to begin with.
+    if (run.status === "failed") return;
     this.clearRunTimer(run.id); // catch-all: a session exit is terminal for its run — disarm any pending timer
     const session = this.db.getSession(sessionId);
     if (run.status !== "completed" && run.status !== "cancelled" && run.status !== "timed_out") {
@@ -7220,12 +7213,9 @@ export class SessionService {
           detail: { fromSessionId: internal.revive.sourceSessionId, toSessionId: worker.id, taskId, commitSha: internal.revive.commitSha },
         });
       }
-      // Card badba5a8: observability only — record whether the codescape block was injected.
-      this.db.appendEvent({
-        id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId, workerSessionId: worker.id, taskId, kind: "discovery_block_injection",
-        detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
-      });
+      // Card badba5a8: observability only — record whether the codescape block was injected. Card 40738f24:
+      // folded onto the shared best-effort recordDiscoveryBlockInjection helper (see its own doc).
+      this.recordDiscoveryBlockInjection({ managerSessionId, workerSessionId: worker.id, taskId }, codescapeStatus);
       // Wasted-dispatch advisory (card 7b5944fc): runs AFTER pty.spawn so it never delays the worker's
       // actual start — only the point at which this call's result resolves. Tasked spawns only; taskless
       // has no card title to check against.
@@ -7342,11 +7332,46 @@ export class SessionService {
   // (fa1b77c1) onto this helper too — all 14 live-flip spawn sites in this file now call this uniformly;
   // see live-flip-reconcile-guard.mjs, which structurally checks that invariant holds.
   //
+  // @decision 40738f24 — only call with an id THIS attempt itself just live-flipped, or one that
+  // isAlive-short-circuited before the live-flip; see the full record for the safety precondition,
+  // the exact scope (post pty.onExit-registration throws only), and why "kill" beats "keep it live".
+  //
   // @decision 4be56c33 — never unlink `recycled_from` here: resume() passes an EXISTING, often
   // gen>=1, row, and nulling it severs a live lineage.
   private reconcileFailedSpawn(sessionId: string, e: unknown): void {
+    // @decision 40738f24 — a post-spawn step can throw after createPty already handed back a live
+    // process; kill it first (best-effort) so "reconcileFailedSpawn ran" keeps meaning "no live session
+    // resulted" for every caller, without requiring this catch to stop rethrowing.
+    if (this.pty.isAlive(sessionId)) {
+      try { this.pty.stop(sessionId, "hard"); } catch { /* best-effort — never mask the original spawn failure */ }
+    }
     this.db.setProcessState(sessionId, "exited");
     this.db.setLastError(sessionId, `session spawn failed before it could start: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // Card 40738f24 (round 2 finding #2 on 72c58b1c): ONE best-effort writer for the `discovery_block_injection`
+  // observability event, shared by all 5 live-flip spawn sites that compute a codescapeStatus (startNew,
+  // startManager, spawnWorker, recycleWorker, recycleManager) — 72c58b1c guarded only startNew's own call
+  // site inline; the other four are folded onto this same non-fatal shape here instead of reproducing the
+  // try/catch fourfold.
+  //
+  // @decision 72c58b1c — a DB failure recording this purely-informational event must never make a
+  // genuinely successful spawn look like a failed one (it runs AFTER pty.spawn has already succeeded, so
+  // it must never reach reconcileFailedSpawn).
+  private recordDiscoveryBlockInjection(
+    event: Pick<OrchestrationEvent, "managerSessionId" | "workerSessionId" | "taskId">,
+    codescapeStatus: CodescapeInjectionStatus,
+  ): void {
+    try {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        ...event,
+        kind: "discovery_block_injection",
+        detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
+      });
+    } catch (e) {
+      console.error(`[sessions] failed to record discovery_block_injection observability event for ${event.workerSessionId ?? event.managerSessionId} (informational only, not fatal):`, (e as Error).message);
+    }
   }
 
   /**
@@ -11480,8 +11505,9 @@ export class SessionService {
         });
       } catch (e) {
         this.reconcileFailedSpawn(fresh.id, e);
-        // @decision 4be56c33 — unlink only here: `fresh` was inserted in this same synchronous
-        // call and no process for it ever existed.
+        // @decision 4be56c33 — unlink only here: `fresh`'s id is exclusive to this attempt — any live
+        // process for it is this attempt's own spawn, already reconciled (killed if alive) just above —
+        // so unlinking here can never sever a link a different live successor depends on.
         this.db.setOrchestration(fresh.id, { recycledFrom: null });
         // @decision 08320d02 — archive the failed successor (worker_list excludes archived rows) and cancel
         // the predecessor's own pending wakes:
@@ -11597,12 +11623,9 @@ export class SessionService {
         managerSessionId, workerSessionId: fresh.id, taskId, kind: "recycle_complete",
         detail: { recycledFrom: old.id, gen: newGen },
       });
-      // Card badba5a8: observability only — record whether the codescape block was injected.
-      this.db.appendEvent({
-        id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId, workerSessionId: fresh.id, taskId, kind: "discovery_block_injection",
-        detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
-      });
+      // Card badba5a8: observability only — record whether the codescape block was injected. Card 40738f24:
+      // folded onto the shared best-effort recordDiscoveryBlockInjection helper (see its own doc).
+      this.recordDiscoveryBlockInjection({ managerSessionId, workerSessionId: fresh.id, taskId }, codescapeStatus);
       return { ...fresh, processState: "live" };
     } finally {
       this.recycleTeardownInFlight.delete(workerSessionId);
@@ -12261,12 +12284,9 @@ export class SessionService {
       managerSessionId: fresh.id, kind: "recycle_complete",
       detail: { recycledFrom: old.id, gen: newGen, reparentedWorkers: reparented },
     });
-    // Card badba5a8: observability only — record whether the codescape block was injected.
-    this.db.appendEvent({
-      id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId: fresh.id, kind: "discovery_block_injection",
-      detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
-    });
+    // Card badba5a8: observability only — record whether the codescape block was injected. Card 40738f24:
+    // folded onto the shared best-effort recordDiscoveryBlockInjection helper (see its own doc).
+    this.recordDiscoveryBlockInjection({ managerSessionId: fresh.id }, codescapeStatus);
 
     // Close the predecessor once the successor SETTLES (@decision e07b1b1a) — either it reaches
     // SessionStart (the ordinary case, same flush-first delay as before) or it dies before ever getting

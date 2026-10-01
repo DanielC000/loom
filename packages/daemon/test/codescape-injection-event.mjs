@@ -29,6 +29,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) NEGATIVE CONTROL: a role that never reaches the codescape branch (a plain/companion startNew
 //       spawn) records NO "discovery_block_injection" event at all — proving (3) isn't vacuously passing
 //       because every spawn gets one regardless of role.
+//   (5)-(8) Card 40738f24 test gap (a): an appendEvent failure for THIS kind specifically must not make
+//       startNew, spawnWorker, recycleWorker, or recycleManager throw — each now shares ONE
+//       recordDiscoveryBlockInjection helper (72c58b1c originally guarded only startNew's own call site).
+//       Each throw is SELECTIVE (kind==="discovery_block_injection" only), so a sibling appendEvent call
+//       for a DIFFERENT kind on the same method (spawn_worker, recycle_complete) is proven to still
+//       record fine — the fix is scoped to this one observability event, not a blanket appendEvent guard.
 //
 // SCOPE, STATED NOT PAPERED OVER: the asset-unreadable/asset-empty REASONS are proven at the pure-
 // function level (1)+(2) only, never end-to-end through a real spawn — doing that would require making
@@ -361,6 +367,90 @@ try {
     liveIds.push(mgrProfile2.id);
     check("(5) ...and the session it returned is genuinely LIVE (the real fire happened)", mgrProfile2.processState === "live");
     check("(5) ...and no discovery_block_injection event was recorded for it (the append genuinely failed, not silently faked)", codescapeEventsFor(mgrProfile2.id).length === 0);
+  }
+
+  // ===================== (6)-(8), card 40738f24 test gap (a): the SAME non-fatality, now for the three
+  // siblings 72c58b1c left unguarded (spawnWorker, recycleWorker, recycleManager) — folded onto the
+  // shared recordDiscoveryBlockInjection helper. Each throw below is SELECTIVE (kind ===
+  // "discovery_block_injection" only) — a blind throw-on-everything would also break the OTHER real
+  // appendEvent calls these methods make (spawn_worker, recycle_complete, ...), which are NOT wrapped and
+  // must still propagate on a genuine failure; that would prove nothing about THIS fix specifically. =====
+  const selectiveThrow = (realFn) => (event) => {
+    if (event.kind === "discovery_block_injection") throw new Error("simulated SQLITE_BUSY (discovery_block_injection)");
+    return realFn(event);
+  };
+
+  db.insertAgent({ id: "agentMgrDbi", projectId: "pLive", name: "MgrDbi", startupPrompt: "MGR_DOCTRINE", position: 5, profileId: null });
+  const mgrDbi = svc.startManager("agentMgrDbi");
+  liveIds.push(mgrDbi.id);
+  const taskDbi = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  db.insertTask({ id: taskDbi, projectId: "pLive", title: "T-DBI", body: "", columnKey: "todo", position: 2, createdAt: now, updatedAt: now });
+
+  // --- (6) spawnWorker ---
+  let workerDbi;
+  let spawnWorkerThrew = false;
+  {
+    const real = db.appendEvent.bind(db);
+    db.appendEvent = selectiveThrow(real);
+    try {
+      workerDbi = await svc.spawnWorker(mgrDbi.id, { taskId: taskDbi, agentId: "agentWorkerLive", kickoffPrompt: "GO DBI" });
+    } catch {
+      spawnWorkerThrew = true;
+    } finally {
+      db.appendEvent = real;
+    }
+  }
+  check("(6) spawnWorker does NOT throw even though its discovery_block_injection appendEvent call fails", spawnWorkerThrew === false);
+  if (workerDbi) {
+    liveIds.push(workerDbi.id);
+    worktrees.push(workerDbi.worktreePath);
+    check("(6) ...and the worker it returned is genuinely LIVE", workerDbi.processState === "live");
+    check("(6) ...and no discovery_block_injection event was recorded for it", codescapeEventsFor(workerDbi.id).length === 0);
+    check("(6) ...and the OTHER spawn_worker event (a different kind) still recorded fine — the throw was selective", db.listEventsForSession(workerDbi.id).some((e) => e.kind === "spawn_worker"));
+  }
+
+  // --- (7) recycleWorker (same manager, the worker just spawned above) ---
+  let workerDbiSuccessor;
+  let recycleWorkerThrew = false;
+  if (workerDbi) {
+    const real = db.appendEvent.bind(db);
+    db.appendEvent = selectiveThrow(real);
+    try {
+      workerDbiSuccessor = await svc.recycleWorker(mgrDbi.id, workerDbi.id, "HANDOFF_DBI");
+    } catch {
+      recycleWorkerThrew = true;
+    } finally {
+      db.appendEvent = real;
+    }
+  }
+  check("(7) recycleWorker does NOT throw even though its discovery_block_injection appendEvent call fails", recycleWorkerThrew === false);
+  if (workerDbiSuccessor) {
+    liveIds.push(workerDbiSuccessor.id);
+    check("(7) ...and the successor it returned is genuinely LIVE", workerDbiSuccessor.processState === "live");
+    check("(7) ...and no discovery_block_injection event was recorded for it", codescapeEventsFor(workerDbiSuccessor.id).length === 0);
+    check("(7) ...and the OTHER recycle_complete event still recorded fine — the throw was selective", db.listEventsForSession(workerDbiSuccessor.id).some((e) => e.kind === "recycle_complete"));
+  }
+
+  // --- (8) recycleManager (mgrDbi, still carrying its recycled worker) ---
+  let mgrDbiSuccessor;
+  let recycleManagerThrew = false;
+  {
+    const real = db.appendEvent.bind(db);
+    db.appendEvent = selectiveThrow(real);
+    try {
+      mgrDbiSuccessor = await svc.recycleManager(mgrDbi.id, "CONTINUE_DBI");
+    } catch {
+      recycleManagerThrew = true;
+    } finally {
+      db.appendEvent = real;
+    }
+  }
+  check("(8) recycleManager does NOT throw even though its discovery_block_injection appendEvent call fails", recycleManagerThrew === false);
+  if (mgrDbiSuccessor) {
+    liveIds.push(mgrDbiSuccessor.id);
+    check("(8) ...and the successor it returned is genuinely LIVE", mgrDbiSuccessor.processState === "live");
+    check("(8) ...and no discovery_block_injection event was recorded for it", codescapeEventsFor(mgrDbiSuccessor.id).length === 0);
+    check("(8) ...and the OTHER recycle_complete event still recorded fine — the throw was selective", db.listEventsForSession(mgrDbiSuccessor.id).some((e) => e.kind === "recycle_complete"));
   }
 } finally {
   for (const wt of worktrees) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } }

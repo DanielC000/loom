@@ -123,11 +123,13 @@ ingress depends on (`enqueueStdin` never throws), so it needed the identical fix
 scan (also pinned as a structural test case, see below) that `persistBusy` is the ONLY direct caller of
 `events.onBusy(` in `host.ts`.
 
-Deliberately NOT touched, per the reviewer's own ruling — each is its own card:
+Deliberately NOT touched at the time, per the reviewer's own ruling — each was its own card. **Both are
+now closed by card `40738f24`** (see that card's own decision record, `40738f24-*.md`, for the fix detail):
 - The four sibling `discovery_block_injection` `appendEvent` call sites (`resume`-adjacent paths,
-  `spawnWorker`, `recycleWorker`, `recycleManager`) — same shape as (A)'s `startNew` fix, not yet audited.
-- `reconcileFailedSpawn`'s own orphan-pty behavior (it marks a row "exited" but does not verify the
-  underlying process is actually dead) — a separate, pre-existing concern this card's fixes don't touch.
+  `spawnWorker`, `recycleWorker`, `recycleManager`) — same shape as (A)'s `startNew` fix. Folded, with
+  startNew's own site, onto one shared `recordDiscoveryBlockInjection` helper.
+- `reconcileFailedSpawn`'s own orphan-pty behavior (it marked a row "exited" but never verified the
+  underlying process was actually dead) — it now hard-kills a still-alive pty for that id first.
 
 ## Round 2 — a duplicate arriving while the first fire is still in flight (no code change; documents existing, unchanged behavior)
 
@@ -169,9 +171,9 @@ unchanged by anything in this card.
   `events.onBusy(` caller — route it through `persistBusy` too; the structural pin in
   `pty-setbusy-persistence-non-fatal.mjs` (case D) fails if a new direct caller appears anywhere in
   `host.ts` outside that helper.
-- Do not expand this card to also guard the four sibling `discovery_block_injection` `appendEvent` sites or
-  to touch `reconcileFailedSpawn`'s orphan-pty behavior — both are deliberately left for their own cards
-  (Round 3's ruling).
+- Do not treat the four sibling `discovery_block_injection` `appendEvent` sites or `reconcileFailedSpawn`'s
+  orphan-pty behavior as still open — Round 3's ruling deliberately left both for their own card, and card
+  `40738f24` closed both; see that card's own decision record for what changed, not this one.
 - Do not read this record as proof `fireWebhookTarget` "mirrors `EventTriggerService.fire`'s own wake/spawn
   branching exactly" — that historical claim went stale when that path moved to
   `SessionService.enqueueDurableNudge` (card 90b9e904); the two are similar in shape, not converged, and
