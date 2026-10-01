@@ -54,6 +54,40 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // `5113c720` specimen rather than an invented placeholder name.
 const NOT_HERMETIC_NAME = "board-consistency";
 
+// Card 24d6ccdb: each scenario below calls `confirmWorkerMerge` on a FRESH temp repo/worktree, which runs
+// `mergeMainIntoWorktree` (git/worktrees.ts) BEFORE the gate (fakeGate) is ever reached — a REAL `git
+// rev-parse HEAD`/`merge-base`/`merge --no-edit` against the canonical repo and the worktree, each bounded
+// by confirmWorkerMerge's own `gitOpMs` (GIT_OP_TIMEOUT_MS=15000ms by default here — see worktrees.ts).
+// Under a heavily loaded host (several concurrent merge/worker gates each spawning real git subprocesses —
+// the exact shape investigated for card 30dd2dab, which found and fixed the SAME class of flake in
+// deploy-staleness.mjs) the OS can legitimately delay SCHEDULING one of these spawned git processes past
+// that bound even though git itself, once running, completes in well under 100ms. Reproduced directly for
+// this card via fault injection (a `gitFactory` seam that delays a targeted git.raw() call past a tight
+// timeoutMs): this makes `mergeMainIntoWorktree` fail CLOSED (`ok:false`, reason containing `withTimeout`'s
+// own "exceeded <N>ms (hung git child?)" wording — see bounded.ts), which confirmWorkerMerge turns into an
+// EARLY `{merged:false, reason, detailText, notified, opId}` return that carries NO `gateRan` key at all
+// (not merely `false`) and never reaches the gate — correct, honest production behaviour ("squash phase
+// never reached, canonical repo untouched, worktree retained" — the standard remedy is simply to re-run
+// worker_merge_confirm), never a bug. A hermetic test calling the same real git subprocess inherits the
+// SAME host-contention exposure purely from running alongside other load in the full suite, so this
+// wrapper retries ONLY this specific, narrowly-matched transient-timeout shape, a small FIXED number of
+// times — logging every retried attempt so it is visible in gate output, never silent — and still fails
+// loud on the very first attempt for anything else (a genuine assertion failure, a real union-merge
+// conflict, or any other refusal), never masking a real regression.
+const UNION_MERGE_TIMEOUT_RETRY_MAX_ATTEMPTS = 3;
+const isTransientUnionMergeGitTimeout = (confirm) =>
+  confirm?.merged === false && confirm?.gateRan === undefined &&
+  typeof confirm?.reason === "string" && /exceeded \d+ms \(hung git child\?\)/.test(confirm.reason);
+async function confirmWorkerMergeRetryTransientTimeout(sessions, mgrId, workerId, label) {
+  let attempt = 1;
+  for (;;) {
+    const confirm = await sessions.confirmWorkerMerge(mgrId, workerId);
+    if (!isTransientUnionMergeGitTimeout(confirm) || attempt >= UNION_MERGE_TIMEOUT_RETRY_MAX_ATTEMPTS) return confirm;
+    console.log(`RETRY (${attempt}/${UNION_MERGE_TIMEOUT_RETRY_MAX_ATTEMPTS}) (${label}): confirmWorkerMerge's union-merge hit a transient git ETIMEDOUT under host load (reason: ${JSON.stringify(confirm.reason)}) — retrying`);
+    attempt++;
+  }
+}
+
 function initRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   registerForCleanup(p.repo);
@@ -89,7 +123,7 @@ try {
     commitAll(worktreePath, `test: update kickoff-real + ${NOT_HERMETIC_NAME}`, GIT_ID);
     seed(db, N);
 
-    const confirm = await sessions.confirmWorkerMerge(N.mgrId, N.workerId);
+    const confirm = await confirmWorkerMergeRetryTransientTimeout(sessions, N.mgrId, N.workerId, "N");
     check("(N) gateRan:true", confirm.gateRan === true);
     check("(N) gate called exactly once", calls === 1);
     check("(N) captured command is the REDUCED gate, not the full gate", capturedGate !== FULL_GATE);
@@ -119,7 +153,7 @@ try {
     commitAll(worktreePath, "test: update kickoff-real", GIT_ID);
     seed(db, O);
 
-    const confirm = await sessions.confirmWorkerMerge(O.mgrId, O.workerId);
+    const confirm = await confirmWorkerMergeRetryTransientTimeout(sessions, O.mgrId, O.workerId, "O");
     const expected = ["pnpm build", ...GUARD_BASENAMES.map((g) => `node packages/daemon/test/${g}`), "pnpm --filter @loom/daemon test:daemon --only=kickoff-real"].join(" && ");
     check("(O) gateRan:true", confirm.gateRan === true);
     check("(O) ⭐ POSITIVE CONTROL: an all-hermetic diff's command is BYTE-IDENTICAL to the pre-card shape (the fix never touches the normal path)", capturedGate === expected);
@@ -145,7 +179,7 @@ try {
     commitAll(worktreePath, `test: update ${NOT_HERMETIC_NAME}`, GIT_ID);
     seed(db, P);
 
-    const confirm = await sessions.confirmWorkerMerge(P.mgrId, P.workerId);
+    const confirm = await confirmWorkerMergeRetryTransientTimeout(sessions, P.mgrId, P.workerId, "P");
     const expected = ["pnpm build", ...GUARD_BASENAMES.map((g) => `node packages/daemon/test/${g}`)].join(" && ");
     check("(P) gateRan:true", confirm.gateRan === true);
     check("(P) still REDUCED, not the full gate (a NOT_HERMETIC-only diff is still eligible — DoD-3)", capturedGate !== FULL_GATE);
