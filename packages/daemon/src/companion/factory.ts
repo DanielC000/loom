@@ -17,7 +17,7 @@ import { createDbCompanionVoicePrefs, type VoicePrefStore } from "./voice-prefs.
 import type { CompanionConfig } from "./config.js";
 import { createTelegramAdapter, TELEGRAM_CHANNEL } from "./telegram.js";
 import { IN_APP_CHANNEL, type InAppChannel } from "./in-app.js";
-import type { CompanionHistoryExport, CompanionHistoryReset, CompanionLivePush, CompanionMessageRecorder, CompanionRoute, CompanionSynthesizer, CompanionTranscriber, SessionBinding, SubmitTurn } from "./types.js";
+import { isLikelyGroupTelegramChatId, type CompanionHistoryExport, type CompanionHistoryReset, type CompanionLivePush, type CompanionMessageRecorder, type CompanionRoute, type CompanionSynthesizer, type CompanionTranscriber, type SessionBinding, type SubmitTurn } from "./types.js";
 import type { CompanionBinding, CompanionMessage } from "@loom/shared";
 
 /** The narrow db surface the factory needs: the durable binding store + the allowlist reader (for authz)
@@ -56,28 +56,31 @@ function toSessionBinding(b: CompanionBinding): SessionBinding {
   return { sessionId: b.sessionId, channel: b.channel, chatId: b.chatId, scope: b.scope, flaggedNonPrivate: b.flaggedNonPrivate };
 }
 
-/**
- * BOOT-TIME HEURISTIC (card b4f124d8, optional DoD item) — logs a `dm`-scope Telegram binding whose
- * chatId parses as a negative integer, Telegram's own convention for a group/supergroup id (a private
- * chat's id is always positive). This is a HEURISTIC ONLY: it flags a binding worth a human's review, it
- * does NOT and must NEVER gate authorization — the real security check is `isConfirmedDirectChat` at
- * inbound authorization time (auth.ts), which requires the inbound's OWN `chatIsDirect` regardless of what
- * this heuristic finds (a positive-looking chatId proves nothing either way; Telegram could change its id
- * scheme, and this check would silently stop catching anything). Runs once per gateway build (effectively
- * once per companion at boot, since `createCompanionGateway` is called once per enabled config).
- */
-function warnLikelyGroupDmBindings(bindings: CompanionBinding[]): void {
+// @decision 61e33b99 — never use a different predicate here than db.upsertCompanionBinding's write-time
+// check (isLikelyGroupTelegramChatId, companion/types.ts); never let this gate INBOUND authorization.
+//
+// This is now a BACKSTOP, not the primary enforcement point: upsertCompanionBinding computes the flag on
+// every write (bind, re-bind, pairing redemption, bootstrap seed, provision), so a FRESH write can no
+// longer leave a dm-scope + negative-chatId binding unflagged. This boot-time pass exists for a binding
+// row written by an OLDER daemon build (before the write-time check existed) that predates this fix and
+// has never been re-bound since — it still needs catching at boot, with no inbound required.
+function preFlagLikelyGroupDmBindings(bindings: CompanionBinding[], db: Pick<CompanionBindingStore, "flagCompanionBindingNonPrivate">): void {
   for (const b of bindings) {
-    if (b.scope !== "dm" || b.channel !== TELEGRAM_CHANNEL) continue;
-    const id = Number(b.chatId);
-    if (Number.isFinite(id) && id < 0) {
+    if (b.flaggedNonPrivate) continue;
+    if (b.scope !== "dm" || !isLikelyGroupTelegramChatId(b.channel, b.chatId)) continue;
+    b.flaggedNonPrivate = true;
+    try {
+      db.flagCompanionBindingNonPrivate(b.sessionId, b.channel);
+    } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn(
-        `[companion] HEURISTIC: dm-scope Telegram binding (session=${b.sessionId}) names a NEGATIVE ` +
-          `chatId — Telegram's convention for a group/supergroup, not a private chat. This does not by ` +
-          `itself prove anything (the real check is at authorization time); review this binding.`,
-      );
+      console.error(`[companion] persisting boot-time non-private binding flag failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[companion] SECURITY: dm-scope Telegram binding (session=${b.sessionId}) names a NEGATIVE chatId — ` +
+        `Telegram's convention for a group/supergroup, not a private chat. Outbound delivery to this route ` +
+        `is now suppressed at boot (card 61e33b99); re-bind it with scope "group", or delete it, if so.`,
+    );
   }
 }
 
@@ -118,7 +121,7 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
     db.upsertCompanionBinding({ sessionId: cfg.sessionId, channel: TELEGRAM_CHANNEL, chatId: cfg.allowedChatId, scope: cfg.chatScope });
     bindings = db.listCompanionBindings().filter((b) => b.sessionId === cfg.sessionId);
   }
-  warnLikelyGroupDmBindings(bindings);
+  preFlagLikelyGroupDmBindings(bindings, db);
   // DM-pairing coordinator: the db-backed redemption path with the real wall clock (epoch ms). Default
   // rate-limit/lockout policy (5 attempts / 10-min window / 15-min lockout) — tests inject a fake clock.
   const pairing = createDbCompanionPairing(db, { now: () => Date.now() });

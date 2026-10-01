@@ -59,6 +59,17 @@ export function isConfirmedDirectChat(chatIsDirect?: boolean): boolean {
   return chatIsDirect === true;
 }
 
+// @decision 61e33b99 — do not let the bind-time writer and the boot-time check use a different predicate
+// for "likely a group"; do not let this gate INBOUND authorization — only ever OUTBOUND suppression.
+export function isLikelyGroupTelegramChatId(channel: string, chatId: string): boolean {
+  // The literal here is Telegram's own TELEGRAM_CHANNEL ("telegram", telegram.ts) duplicated rather than
+  // imported: telegram.ts pulls in the grammY bot client, which this low-level, dependency-free module
+  // (imported by db.ts) must never transitively carry. Keep in sync if telegram.ts's constant ever changes.
+  if (channel !== "telegram") return false;
+  const id = Number(chatId);
+  return Number.isFinite(id) && id < 0;
+}
+
 /** The gateway's inbound entrypoint, handed to each adapter so it can push normalized messages up. */
 export type InboundHandler = (msg: InboundMessage) => void;
 

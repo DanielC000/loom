@@ -44,5 +44,6 @@ counts as "confirmed direct."
 - Do not let `auth.ts`'s dm-scope check and `pairing.ts`'s dm-bind mint check diverge on what counts as
   "confirmed direct" — both must call the one shared `isConfirmedDirectChat` predicate in `types.ts`.
 - Do not treat a positive-looking heuristic (e.g. a Telegram chatId's sign) as a substitute for
-  `chatIsDirect` — `factory.ts`'s `warnLikelyGroupDmBindings` boot-time log is explicitly heuristic-only
-  and must never gate authorization.
+  `chatIsDirect` — `factory.ts`'s boot-time negative-chatId check (`preFlagLikelyGroupDmBindings`, card
+  61e33b99) now pre-flags such a binding for OUTBOUND suppression, but it remains heuristic-only for
+  authorization and must never gate it; see `docs/decisions/61e33b99-boot-time-preflag-group-dm-bindings.md`.

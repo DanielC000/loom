@@ -130,9 +130,10 @@ export function createDbCompanionPairing(db: PairingStore, policy: PairingPolicy
         maxAttempts, windowMs, lockoutMs,
       }, now());
       if (res.outcome === "bound") {
-        // flaggedNonPrivate threaded through (card 7578dea2) — always false here (upsertCompanionBinding
-        // just reset it), carried explicitly so the live routing map never has to reason about an omitted
-        // field vs. a known-false one.
+        // flaggedNonPrivate threaded through (card 7578dea2) — carried explicitly so the live routing map
+        // never has to reason about an omitted field vs. a known value. NOT always false: upsertCompanionBinding
+        // now computes it from isLikelyGroupTelegramChatId (card 61e33b99), so a dm-bind redemption whose
+        // chatId is a negative Telegram id (e.g. an upstream chatIsDirect misreport) is flagged here too.
         return { outcome: "bound", binding: { sessionId: res.sessionId, channel: res.channel, chatId: res.chatId, scope: res.scope, flaggedNonPrivate: res.flaggedNonPrivate } };
       }
       if (res.outcome === "sender-added") return { outcome: "sender-added", sessionId: res.sessionId };

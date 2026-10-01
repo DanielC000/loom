@@ -90,10 +90,12 @@ import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
 import { findControlCharViolation, stripEscapeAndControlChars, type ControlByteClass } from "./security/control-chars.js";
-// Type-only — companion/types.ts has zero runtime imports, so this can never form a runtime cycle with
-// the companion/* modules that import `Db` from here. CompanionReminder.route reuses THIS module's
-// CompanionRoute (never a duplicate route type, unlike Wake/CompanionBinding's shared/types.ts twins).
-import type { CompanionReminder } from "./companion/types.js";
+// companion/types.ts has zero runtime imports of its own, so importing its one runtime VALUE
+// (isLikelyGroupTelegramChatId, card 61e33b99) alongside the type-only CompanionReminder can never form a
+// runtime cycle with the companion/* modules that import `Db` from here. CompanionReminder.route reuses
+// THIS module's CompanionRoute (never a duplicate route type, unlike Wake/CompanionBinding's shared/types.ts
+// twins).
+import { isLikelyGroupTelegramChatId, type CompanionReminder } from "./companion/types.js";
 import { resolveIdPrefix, type IdPrefixResult } from "./id-prefix.js";
 
 /**
@@ -3557,23 +3559,32 @@ export class Db {
    * UNIQUE route index and THROWS (a SqliteError) — still at most one session per route, by construction
    * (the caller/REST surfaces this as a 409). Stamps created_at on first insert; keeps it on update
    * (ON CONFLICT touches only chat_id/scope — channel is part of the conflict key). Returns the stored row.
-   * ALWAYS resets `flagged_non_private` to 0, on both the insert and the ON CONFLICT update — a (re)bind is
-   * a fresh, unobserved routing decision (card 7578dea2): a re-bind is the DoD's own stated remedy for a
-   * flagged route, so it must clear the flag rather than carry a stale one forward onto what may now be a
-   * genuinely different chat.
+   *
+   * `flagged_non_private` is computed FRESH on EVERY write (both the insert and the ON CONFLICT update) via
+   * the SAME shared predicate `isLikelyGroupTelegramChatId` (card 61e33b99, companion/types.ts) the
+   * boot-time check (`preFlagLikelyGroupDmBindings`, factory.ts) applies — a `dm`-scope binding whose
+   * Telegram chatId is a negative integer is flagged in THIS write, not left to the reactive
+   * `warnUnconfirmedDirectInbound` path or the next boot. This is THE write chokepoint for every binding
+   * write in the daemon (REST bind, pairing-code dm-bind redemption, the env bootstrap seed, the provision
+   * endpoint all call this one method) — fixing it here fixes all of them. A re-bind with a genuine fix
+   * (scope "group", or a real positive chatId) still clears the flag in the SAME write — the owner's
+   * existing remedy is unchanged; what's gone is the WINDOW where a re-bind that does NOT fix the
+   * misconfiguration could clear the flag and leave outbound open until the next boot.
+   *
+   * @decision 61e33b99 — never compute this write's flag from a different predicate than the boot-time
+   * check uses; never let a re-bind clear the flag without re-deriving it from the SAME predicate.
    */
   upsertCompanionBinding(input: { sessionId: string; scope?: "dm" | "group" } & CompanionRoute): CompanionBinding {
     const existing = this.db.prepare("SELECT created_at FROM companion_bindings WHERE session_id = ? AND channel = ?").get(input.sessionId, input.channel) as Row | undefined;
     const createdAt = (existing?.created_at as string) ?? new Date().toISOString();
-    const b: CompanionBinding = {
-      sessionId: input.sessionId, channel: input.channel, chatId: input.chatId,
-      scope: input.scope ?? "dm", createdAt, flaggedNonPrivate: false,
-    };
+    const scope = input.scope ?? "dm";
+    const flaggedNonPrivate = scope === "dm" && isLikelyGroupTelegramChatId(input.channel, input.chatId);
+    const b: CompanionBinding = { sessionId: input.sessionId, channel: input.channel, chatId: input.chatId, scope, createdAt, flaggedNonPrivate };
     this.db.prepare(
       `INSERT INTO companion_bindings (session_id, channel, chat_id, scope, created_at, flagged_non_private)
-       VALUES (@sessionId, @channel, @chatId, @scope, @createdAt, 0)
-       ON CONFLICT(session_id, channel) DO UPDATE SET chat_id = @chatId, scope = @scope, flagged_non_private = 0`,
-    ).run(b);
+       VALUES (@sessionId, @channel, @chatId, @scope, @createdAt, @flaggedNonPrivate)
+       ON CONFLICT(session_id, channel) DO UPDATE SET chat_id = @chatId, scope = @scope, flagged_non_private = @flaggedNonPrivate`,
+    ).run({ sessionId: b.sessionId, channel: b.channel, chatId: b.chatId, scope: b.scope, createdAt: b.createdAt, flaggedNonPrivate: flaggedNonPrivate ? 1 : 0 });
     return b;
   }
   /**
