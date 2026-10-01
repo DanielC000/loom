@@ -21,6 +21,7 @@ import {
   type MsBounds,
   GOOGLE_ANALYTICS_SCOPE_PRESETS,
   ORCHESTRATION_TIMEOUT_MS_BOUNDS,
+  PLATFORM_MS_BOUNDS,
   MEMORY_CONFIG_MAX,
 } from "@loom/shared";
 import {
@@ -38,6 +39,9 @@ import {
   rolesAffected, switchesToCodex, type DefaultValue, type ScopeValue,
 } from "../components/DefaultHarness";
 import { HARNESS_TITLE, type Harness } from "../lib/harnessFields";
+import {
+  UNIT_MS, msFromUnit, msInUnit, msRangeError, msRangeErrors, msRangeHint, msStr, type Unit,
+} from "../lib/msUnits";
 import { MergeGateCadencePanel, cadenceDraftFrom, type CadenceDraft } from "../components/mergeGate";
 import { cadenceConfigWrite, intervalError } from "../lib/mergeGate";
 import { color, font, tone, type Tone } from "../theme";
@@ -614,13 +618,11 @@ function ConfigEditor({ project }: { project: Project }) {
   // submit (card 48365fda) — an out-of-range entry blocks Save rather than round-tripping to a server
   // error that quotes the raw ms ceiling into a field measured in seconds. Each field also renders its
   // own inline message; this list is what names the offending field next to the Save button.
-  const timeoutRangeErrors = ([
-    ["Gate command timeout", gateTimeout, ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs],
-    ["Deploy command timeout", deployTimeout, ORCHESTRATION_TIMEOUT_MS_BOUNDS.deployCommandTimeoutMs],
-    ["Alert webhook timeout", webhookTimeout, ORCHESTRATION_TIMEOUT_MS_BOUNDS.alertWebhookTimeoutMs],
-  ] as const)
-    .map(([label, value, b]) => { const e = msRangeError(value, "s", b); return e ? `${label} ${e}` : null; })
-    .filter((e): e is string => e !== null);
+  const timeoutRangeErrors = msRangeErrors([
+    ["Gate command timeout", gateTimeout, "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs],
+    ["Deploy command timeout", deployTimeout, "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.deployCommandTimeoutMs],
+    ["Alert webhook timeout", webhookTimeout, "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.alertWebhookTimeoutMs],
+  ]);
 
   // An out-of-range merge-gate interval blocks Save the same way an out-of-range timeout does (card
   // 00664e74 / mockup state S4). Only at the `every Nth` cadence — the field is inert at the other two, and
@@ -894,6 +896,10 @@ function ConfigEditor({ project }: { project: Project }) {
 // follow the epic: rate-limit backoff/deadlines/windows in h/m, buffers + cadences + timeouts in s.
 type Grp = "rateLimit" | "watchers" | "timeouts";
 interface GlobalFieldDesc { grp: Grp; key: string; label: string; unit: Unit; note?: string; }
+/** This field's accepted canonical-ms range, read from the SHARED table (card 0a5d61c9) — never a local
+ *  literal. Every ms-keyed member of these three groups has an entry, so the lookup is always defined. */
+const globalBounds = (f: GlobalFieldDesc): MsBounds =>
+  (PLATFORM_MS_BOUNDS[f.grp] as unknown as Record<string, MsBounds>)[f.key] as MsBounds;
 const GLOBAL_FIELDS: GlobalFieldDesc[] = [
   // Rate Limits
   { grp: "rateLimit", key: "defaultBackoffMs", label: "Default backoff (h)", unit: "h" },
@@ -1077,7 +1083,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         if (f.grp !== grp) continue;
         const s = vals[f.key] ?? "";
         if (s.trim() === "") { entries[f.key] = null; continue; }
-        const n = Number(s) * UNIT_MS[f.unit];
+        const n = msFromUnit(s, f.unit);
         entries[f.key] = Number.isFinite(n) ? n : s;
       }
       // exhaustedThresholdPct is a plain percentage (no ms unit) sharing the rateLimit group's own
@@ -1100,7 +1106,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
       const entries: Record<string, number | string> = {};
       const rt = connRequestTimeoutS.trim();
       if (rt !== "") {
-        const n = Number(rt) * UNIT_MS.s;
+        const n = msFromUnit(rt, "s");
         entries.requestTimeoutMs = Number.isFinite(n) ? n : rt;
       }
       const mrb = connMaxResponseBytes.trim();
@@ -1115,7 +1121,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
       }
       const rlw = connRateLimitWindowM.trim();
       if (rlw !== "") {
-        const n = Number(rlw) * UNIT_MS.m;
+        const n = msFromUnit(rlw, "m");
         entries.rateLimitWindowMs = Number.isFinite(n) ? n : rlw;
       }
       (o as Record<string, unknown>).connections = entries;
@@ -1188,7 +1194,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     if (usiTrim === "") {
       o.usageSampleIntervalMs = null;
     } else {
-      const n = Number(usiTrim) * UNIT_MS.m;
+      const n = msFromUnit(usiTrim, "m");
       (o as Record<string, unknown>).usageSampleIntervalMs = Number.isFinite(n) ? n : usiTrim;
     }
     const usrTrim = usageSampleRetentionDays.trim();
@@ -1203,7 +1209,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     if (ucTrim === "") {
       o.updateCheckIntervalMs = null;
     } else {
-      const n = Number(ucTrim) * UNIT_MS.h;
+      const n = msFromUnit(ucTrim, "h");
       (o as Record<string, unknown>).updateCheckIntervalMs = Number.isFinite(n) ? n : ucTrim;
     }
     // harness: a DEEP_MERGE_GROUPS member whose shape is per-field nullable, so a blank half sends the
@@ -1245,6 +1251,19 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     },
   });
 
+  // Every bounded ms field on THIS form, validated against the SHARED canonical-ms bounds before submit —
+  // the daemon-global twin of the project form's `timeoutRangeErrors` (card 48365fda, widened here by card
+  // 0a5d61c9). An out-of-range entry blocks Save rather than round-tripping to a 400 that quotes the raw ms
+  // ceiling under an s/m/h label. Each field also renders its own inline message; this list is what names
+  // the offending field next to the Save button.
+  const globalRangeErrors = msRangeErrors([
+    ...GLOBAL_FIELDS.map((f) => [f.label, vals[f.key] ?? "", f.unit, globalBounds(f)] as const),
+    ["Request timeout (s)", connRequestTimeoutS, "s", PLATFORM_MS_BOUNDS.connections.requestTimeoutMs],
+    ["Rate limit window (m)", connRateLimitWindowM, "m", PLATFORM_MS_BOUNDS.connections.rateLimitWindowMs],
+    ["Usage-sample cadence (m)", usageSampleIntervalMinutes, "m", PLATFORM_MS_BOUNDS.usageSampleIntervalMs],
+    ["Update-check cadence (h)", updateCheckHours, "h", PLATFORM_MS_BOUNDS.updateCheckIntervalMs],
+  ]);
+
   const group = (grp: Grp) => GLOBAL_FIELDS.filter((f) => f.grp === grp);
   // resolved/defaults sub-groups are typed structs (no index signature); the field key is known to
   // exist, so read it through an `unknown`-cast Record. ?? 0 satisfies noUncheckedIndexedAccess.
@@ -1253,7 +1272,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     <MsField key={f.key} label={f.label} value={vals[f.key] ?? ""}
       set={(v) => setVals((s) => ({ ...s, [f.key]: v }))}
       effectiveMs={msOf(resolved[f.grp], f.key)}
-      defMs={msOf(defaults[f.grp], f.key)} unit={f.unit} note={f.note} />
+      defMs={msOf(defaults[f.grp], f.key)} unit={f.unit} note={f.note} bounds={globalBounds(f)} />
   );
 
   return (
@@ -1302,14 +1321,16 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         </Hint>
         <div className="loom-field-grid loom-field-grid-2" style={{ marginTop: 12 }}>
           <MsField label="Request timeout (s)" value={connRequestTimeoutS} set={setConnRequestTimeoutS}
-            effectiveMs={resolved.connections.requestTimeoutMs} defMs={defaults.connections.requestTimeoutMs} unit="s" />
+            effectiveMs={resolved.connections.requestTimeoutMs} defMs={defaults.connections.requestTimeoutMs} unit="s"
+            bounds={PLATFORM_MS_BOUNDS.connections.requestTimeoutMs} />
           <NumField label="Max response bytes" value={connMaxResponseBytes} set={setConnMaxResponseBytes}
             effective={resolved.connections.maxResponseBytes} def={defaults.connections.maxResponseBytes}
             note="1KB-20MB" />
           <NumField label="Rate limit (requests / window)" value={connRateLimitMax} set={setConnRateLimitMax}
             effective={resolved.connections.rateLimitMax} def={defaults.connections.rateLimitMax} />
           <MsField label="Rate limit window (m)" value={connRateLimitWindowM} set={setConnRateLimitWindowM}
-            effectiveMs={resolved.connections.rateLimitWindowMs} defMs={defaults.connections.rateLimitWindowMs} unit="m" />
+            effectiveMs={resolved.connections.rateLimitWindowMs} defMs={defaults.connections.rateLimitWindowMs} unit="m"
+            bounds={PLATFORM_MS_BOUNDS.connections.rateLimitWindowMs} />
         </div>
       </Panel>
 
@@ -1459,16 +1480,12 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
           <Hint>{effHint(backupResolved.keep)} (takes effect after a daemon restart)</Hint>
           <Hint>How many newest auto snapshots to retain (older pruned by mtime). Whole number, 1–500.</Hint>
         </label>
-        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
-          <span style={fieldLabel}>Usage-sample cadence (minutes) · restart required</span>
-          <Input value={usageSampleIntervalMinutes} onChange={(e) => setUsageSampleIntervalMinutes(e.target.value)}
-            inputMode="decimal" placeholder={`inherit (default ${usageIntervalDefault / UNIT_MS.m}m)`} />
-          <Hint>{effHint(`${usageIntervalResolved / UNIT_MS.m}m`)} (takes effect after a daemon restart)</Hint>
-          <Hint>
-            How often the background sampler reads each live session&apos;s transcript and records a usage
-            delta. 1–60 minutes.
-          </Hint>
-        </label>
+        <div style={{ maxWidth: 420, marginTop: 12 }}>
+          <MsField label="Usage-sample cadence (m) · restart required" value={usageSampleIntervalMinutes}
+            set={setUsageSampleIntervalMinutes} effectiveMs={usageIntervalResolved} defMs={usageIntervalDefault}
+            unit="m" bounds={PLATFORM_MS_BOUNDS.usageSampleIntervalMs}
+            note="Takes effect after a daemon restart. How often the background sampler reads each live session's transcript and records a usage delta." />
+        </div>
         <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
           <span style={fieldLabel}>Usage-sample retention (days) · restart required</span>
           <Input value={usageSampleRetentionDays} onChange={(e) => setUsageSampleRetentionDays(e.target.value)}
@@ -1476,16 +1493,12 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
           <Hint>{effHint(usageRetentionResolved)} (takes effect after a daemon restart)</Hint>
           <Hint>Samples older than this are pruned so the usage-telemetry table stays bounded. Whole number, 1–3650.</Hint>
         </label>
-        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
-          <span style={fieldLabel}>Update-check cadence (hours) · restart required</span>
-          <Input value={updateCheckHours} onChange={(e) => setUpdateCheckHours(e.target.value)}
-            inputMode="decimal" placeholder={`inherit (default ${updateCheckDefault / UNIT_MS.h}h)`} />
-          <Hint>{effHint(`${updateCheckResolved / UNIT_MS.h}h`)} (takes effect after a daemon restart)</Hint>
-          <Hint>
-            How often the daemon polls the npm registry for a newer loomctl release (packaged installs
-            only). 1–24 hours.
-          </Hint>
-        </label>
+        <div style={{ maxWidth: 420, marginTop: 12 }}>
+          <MsField label="Update-check cadence (h) · restart required" value={updateCheckHours}
+            set={setUpdateCheckHours} effectiveMs={updateCheckResolved} defMs={updateCheckDefault}
+            unit="h" bounds={PLATFORM_MS_BOUNDS.updateCheckIntervalMs}
+            note="Takes effect after a daemon restart. How often the daemon polls the npm registry for a newer loomctl release (packaged installs only)." />
+        </div>
       </Panel>
 
       <Panel>
@@ -1530,7 +1543,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
           onConfirm={() => { setConfirmCodex(false); save.mutate(); }} />
       )}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <Button variant="primary" disabled={!dirty || save.isPending}
+        <Button variant="primary" disabled={!dirty || save.isPending || globalRangeErrors.length > 0}
           onClick={() => (codexSwitch ? setConfirmCodex(true) : save.mutate())}>
           {save.isPending ? "Saving…" : "Save"}
         </Button>
@@ -1538,7 +1551,13 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
           ? <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>unsaved changes</span>
           : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
         <span style={{ flex: 1 }} />
-        {save.isError && (
+        {/* A blocked Save is never silent about WHICH entry blocks it — the range errors take the error
+            slot ahead of any server error, mirroring the project form's own blockingErrors row. */}
+        {globalRangeErrors.length > 0 ? (
+          <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
+            {globalRangeErrors.join(" · ")}
+          </span>
+        ) : save.isError && (
           <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
             {errorText(save.error)}
           </span>
@@ -2673,7 +2692,7 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
       return;
     }
     onSubmit({
-      connectionId, path: path.trim(), method, intervalMs: Math.round(sec * 1000),
+      connectionId, path: path.trim(), method, intervalMs: msFromUnit(intervalSec, "s"),
       itemsPath: itemsPath.trim(), idPath: idPath.trim(), mode,
       sessionId: mode === "wake" ? sessionId : undefined,
       agentId: mode === "spawn" ? agentId : undefined,
@@ -3378,54 +3397,16 @@ function applyNumField<T extends Record<string, unknown>>(obj: T, key: keyof T, 
   else (obj as Record<string, unknown>)[key as string] = Number(s);
 }
 
-// --- ms <-> human-unit helpers (display s/m/h, store canonical ms) -------------------------------
+// --- ms <-> human-unit helpers ------------------------------------------------------------------
+//
+// The pure conversion/bound-translation half lives in ../lib/msUnits.ts (extracted by card 0a5d61c9 so it
+// can be unit-tested; see test/ms-units.mjs). Only this config-shaped setter stays here.
 
-type Unit = "s" | "m" | "h";
-const UNIT_MS: Record<Unit, number> = { s: 1000, m: 60000, h: 3600000 };
-
-// Canonical ms → display string in `unit` (÷). undefined → "" (inherit/blank).
-function msStr(v: number | undefined, unit: Unit): string {
-  return v === undefined ? "" : String(v / UNIT_MS[unit]);
-}
-// Set/clear a canonical-ms orchestration key from a form string in `unit`. Blank → delete + record its
-// dot-path on `unset` (inherit the default — see applyNum's own note on why `unset` is now required). A
-// non-numeric entry passes through as NaN (→ null over JSON) so the strict-zod PATCH rejects it with a
-// readable error — the demonstrable invalid-value path (mirrors applyNum).
+// Set/clear a canonical-ms orchestration key from a form string in `unit`. Blank -> delete + record its
+// dot-path on `unset` (inherit the default -- see applyNum's own note on why `unset` is now required). A
+// non-numeric entry passes through as NaN (-> null over JSON) so the strict-zod PATCH rejects it with a
+// readable error -- the demonstrable invalid-value path (mirrors applyNum).
 function applyMs(orch: Partial<OrchestrationConfig>, key: keyof OrchestrationConfig, s: string, unit: Unit, unset: string[]): void {
   if (s.trim() === "") { delete (orch as Record<string, unknown>)[key]; unset.push(`orchestration.${String(key)}`); }
-  else (orch as Record<string, unknown>)[key] = Number(s) * UNIT_MS[unit];
-}
-
-// --- ms-bound translation (state the schema's limit in the FIELD'S OWN unit) ---------------------
-//
-// Card 48365fda. An MsField is labelled and entered in a human unit (s/m/h) but stores canonical ms, so
-// the server's own rejection quoted the raw MILLISECOND bound into a field measured in seconds: typing
-// `2000` into "Gate command timeout (s)" sent 2_000_000 and came back "expected number to be <=1800000"
-// (the gate ceiling AT THE TIME — since raised to 3_600_000 by card fc8aa167; this incident's own numbers
-// are historical and no longer track the live bound, read live from ORCHESTRATION_TIMEOUT_MS_BOUNDS).
-// The rejection was CORRECT — the true ceiling was 1800s at the time — but there was no way to derive that
-// from the message. Two different project owners read it as a broken validator on the same night.
-//
-// Fix: divide the shared bound by the field's own unit and both (a) show the range up front and (b) catch
-// an out-of-range entry client-side, so the raw-ms server error is never the thing the user reads.
-
-/** A canonical-ms bound rendered in `unit` — e.g. 1_800_000 in "s" → "1800s", 500 in "s" → "0.5s". */
-function msInUnit(ms: number, unit: Unit): string {
-  return `${ms / UNIT_MS[unit]}${unit}`;
-}
-/** The always-on range hint shown under a bounded MsField, in the field's own unit. */
-function msRangeHint(b: MsBounds, unit: Unit): string {
-  return `min ${msInUnit(b.min, unit)} · max ${msInUnit(b.max, unit)}`;
-}
-// Validate an MsField entry (a string in `unit`) against its canonical-ms bounds, returning the error
-// STATED IN `unit` — or null when there is nothing to report. Blank is always fine (blank = inherit the
-// default). A non-numeric entry is deliberately NOT claimed here: the existing NaN→null→strict-zod path
-// already 400s it readably, and inventing a range message for "abc" would be the wrong complaint.
-function msRangeError(value: string, unit: Unit, b: MsBounds | undefined): string | null {
-  if (!b || value.trim() === "") return null;
-  const n = Number(value);
-  if (!Number.isFinite(n)) return null;
-  const ms = n * UNIT_MS[unit];
-  if (ms < b.min || ms > b.max) return `must be between ${msInUnit(b.min, unit)} and ${msInUnit(b.max, unit)}`;
-  return null;
+  else (orch as Record<string, unknown>)[key] = msFromUnit(s, unit);
 }

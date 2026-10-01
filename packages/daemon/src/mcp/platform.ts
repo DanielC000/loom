@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { TASK_STRUCTURE_SHAPE, TASK_STRUCTURE_DOC, TASK_CREATE_STRUCTURE_SHAPE, TASK_CREATE_STRUCTURE_DOC } from "../tasks/relations.js";
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds, RotationMarker } from "@loom/shared";
-import { MEMORY_CONFIG_MAX, MERGE_GATE_INTERVAL_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, harnessFleetScopeAvailable, resolveConfig } from "@loom/shared";
+import { MEMORY_CONFIG_MAX, MERGE_GATE_INTERVAL_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, PLATFORM_MS_BOUNDS, harnessFleetScopeAvailable, resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
@@ -774,37 +774,41 @@ export function findConfigPatchUnsetCollisions(
  * the per-project schemas are `.strict()` and carry NO `platform` key, so an agent's `platform:{}` is
  * already a rejected unknown key — this schema only ever runs on the human REST `/api/platform/config`.
  */
+// @decision 0a5d61c9 — every ms range below reads PLATFORM_MS_BOUNDS; never write one back as a literal
+// here. The Settings grid is entered in s/m/h, and only a shared table can state a bound in that unit.
 const rateLimitOverride = z.object({
-  defaultBackoffMs: z.number().int().min(60000).max(86400000).optional(),
-  resetBufferMs: z.number().int().min(0).max(600000).optional(),
-  deadlineAfterResetMs: z.number().int().min(60000).max(86400000).optional(),
-  deadlineNoResetMs: z.number().int().min(600000).max(172800000).optional(),
-  recencyWindowMs: z.number().int().min(0).max(86400000).optional(),
+  defaultBackoffMs: msBounded(PLATFORM_MS_BOUNDS.rateLimit.defaultBackoffMs),
+  resetBufferMs: msBounded(PLATFORM_MS_BOUNDS.rateLimit.resetBufferMs),
+  deadlineAfterResetMs: msBounded(PLATFORM_MS_BOUNDS.rateLimit.deadlineAfterResetMs),
+  deadlineNoResetMs: msBounded(PLATFORM_MS_BOUNDS.rateLimit.deadlineNoResetMs),
+  recencyWindowMs: msBounded(PLATFORM_MS_BOUNDS.rateLimit.recencyWindowMs),
+  // Unitless (a whole percentage), so it is deliberately NOT in PLATFORM_MS_BOUNDS — there is no unit to
+  // translate its rejection into, and its own message already reads in the unit the field is entered in.
   exhaustedThresholdPct: z.number().int().min(50).max(100).optional(),
 }).strict();
-// Every watcher cadence shares the §bounds 5000–3600000 range (5s floor guards against busy-looping).
-const watcherMs = z.number().int().min(5000).max(3600000).optional();
+// Every watcher cadence shares one range (5s floor guards against busy-looping) — stated once in
+// PLATFORM_MS_BOUNDS.watchers, which is why each key below names itself rather than reusing one schema.
 const watchersOverride = z.object({
-  contextWatchMs: watcherMs,
-  idleWatchMs: watcherMs,
-  rateLimitWatchMs: watcherMs,
-  usagePollMs: watcherMs,
-  wakeMs: watcherMs,
-  schedulerMs: watcherMs,
-  reconcileMs: watcherMs,
-  snapshotMs: watcherMs,
-  crashRecoveryWatchMs: watcherMs,
+  contextWatchMs: msBounded(PLATFORM_MS_BOUNDS.watchers.contextWatchMs),
+  idleWatchMs: msBounded(PLATFORM_MS_BOUNDS.watchers.idleWatchMs),
+  rateLimitWatchMs: msBounded(PLATFORM_MS_BOUNDS.watchers.rateLimitWatchMs),
+  usagePollMs: msBounded(PLATFORM_MS_BOUNDS.watchers.usagePollMs),
+  wakeMs: msBounded(PLATFORM_MS_BOUNDS.watchers.wakeMs),
+  schedulerMs: msBounded(PLATFORM_MS_BOUNDS.watchers.schedulerMs),
+  reconcileMs: msBounded(PLATFORM_MS_BOUNDS.watchers.reconcileMs),
+  snapshotMs: msBounded(PLATFORM_MS_BOUNDS.watchers.snapshotMs),
+  crashRecoveryWatchMs: msBounded(PLATFORM_MS_BOUNDS.watchers.crashRecoveryWatchMs),
   // PollService's own tick cadence (local poll-job triggers, agent-tooling epic P3) — distinct from
   // usagePollMs (the Claude-usage sampler above); see index.ts's `pollIntervalMs = watchers.pollMs`.
-  pollMs: watcherMs,
+  pollMs: msBounded(PLATFORM_MS_BOUNDS.watchers.pollMs),
 }).strict();
 const timeoutsOverride = z.object({
-  gitOpMs: z.number().int().min(1000).max(120000).optional(),
-  gitLocalMs: z.number().int().min(1000).max(120000).optional(),
-  gitPushMs: z.number().int().min(1000).max(600000).optional(),
-  provisionMs: z.number().int().min(10000).max(1800000).optional(),
-  busyStaleMs: z.number().int().min(30000).max(1800000).optional(),
-  runMs: z.number().int().min(30000).max(3600000).optional(), // Agent Runs hard run-timeout: 30s..1h
+  gitOpMs: msBounded(PLATFORM_MS_BOUNDS.timeouts.gitOpMs),
+  gitLocalMs: msBounded(PLATFORM_MS_BOUNDS.timeouts.gitLocalMs),
+  gitPushMs: msBounded(PLATFORM_MS_BOUNDS.timeouts.gitPushMs),
+  provisionMs: msBounded(PLATFORM_MS_BOUNDS.timeouts.provisionMs),
+  busyStaleMs: msBounded(PLATFORM_MS_BOUNDS.timeouts.busyStaleMs),
+  runMs: msBounded(PLATFORM_MS_BOUNDS.timeouts.runMs),
 }).strict();
 // Sweep G4: daemon-global auto-backup tuning (see PlatformConfigOverride.backup / @loom/shared's
 // BackupConfig), the 4th deep-partial group alongside rateLimit/watchers/timeouts above. intervalMinutes
@@ -826,10 +830,11 @@ const gateRetryOverride = z.object({
 // P2 authenticated-request bounds + per-connection rate guard. HUMAN-only, exactly like the other
 // `platform` sub-groups (no agent variant — see the platformConfigOverrideSchema note above).
 const connectionsOverride = z.object({
-  requestTimeoutMs: z.number().int().min(1000).max(120000).optional(),
+  requestTimeoutMs: msBounded(PLATFORM_MS_BOUNDS.connections.requestTimeoutMs),
+  // Both unitless counts — deliberately not in PLATFORM_MS_BOUNDS (see exhaustedThresholdPct above).
   maxResponseBytes: z.number().int().min(1024).max(20000000).optional(), // 1KB..20MB
   rateLimitMax: z.number().int().min(1).max(10000).optional(),
-  rateLimitWindowMs: z.number().int().min(1000).max(3600000).optional(),
+  rateLimitWindowMs: msBounded(PLATFORM_MS_BOUNDS.connections.rateLimitWindowMs),
 }).strict();
 // HUMAN-only by construction (no agent-facing platform-config surface exists at all — see the function
 // doc below) — remoteAccess is as unreachable to an agent as gateCommand is via the project schema.
@@ -936,14 +941,14 @@ const platformConfigOverrideSchema = z.object({
   // session-usage telemetry sampler cadence. Floor 60000 (1m — a busy-loop guard, same reasoning as the
   // watcher 5s floor scaled to this sampler's own realistic range); ceiling 3600000 (1h — a stale-enough
   // cadence still worth calling "sampled" telemetry).
-  usageSampleIntervalMs: z.number().int().min(60000).max(3600000).optional(),
+  usageSampleIntervalMs: msBounded(PLATFORM_MS_BOUNDS.usageSampleIntervalMs),
   // Sweep G5: retention window (days) for session_usage_samples rows. Floor 1 (at least a day of
   // history); ceiling 3650 (10y — generous, bounds against a fat-fingered unbounded-growth value).
   usageSampleRetentionDays: z.number().int().min(1).max(3650).optional(),
   // Sweep G6: update-check poll cadence (see PlatformConfigOverride.updateCheckIntervalMs). Floor
   // 3600000 (1h — the registry rarely changes; anything tighter is needless polling); ceiling 86400000
   // (24h — still checks at least daily).
-  updateCheckIntervalMs: z.number().int().min(3600000).max(86400000).optional(),
+  updateCheckIntervalMs: msBounded(PLATFORM_MS_BOUNDS.updateCheckIntervalMs),
 }).strict();
 
 /**

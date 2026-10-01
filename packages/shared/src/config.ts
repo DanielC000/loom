@@ -258,6 +258,64 @@ export interface MsBounds {
   max: number;
 }
 
+/** Every daemon-global watcher cadence shares one range — the 5s floor guards against busy-looping. */
+const WATCHER_MS_BOUNDS: MsBounds = { min: 5_000, max: 3_600_000 };
+
+/**
+ * The accepted range (in canonical MS) of each DAEMON-GLOBAL, human-only ms-keyed platform field — the
+ * same single-source-of-truth role `ORCHESTRATION_TIMEOUT_MS_BOUNDS` plays for the per-project timeouts,
+ * one layer up. The daemon's human platform validator (`mcp/platform.ts` ›
+ * `platformConfigOverrideSchema`) builds its zod `.min()/.max()` from this table, and the Settings UI
+ * reads the same table to state each field's permitted range — and reject an out-of-range entry — IN THE
+ * UNIT THE FIELD IS ENTERED IN.
+ *
+ * @decision 0a5d61c9 — never duplicate a daemon-global ms bound as a second literal in `packages/web`,
+ * not even as prose in a field's hint ("1–60 minutes" is the same duplicate in a different font).
+ *
+ * ⚠️ Keyed by config GROUP then field, mirroring `PlatformConfigOverride`'s own shape — only the ms-keyed
+ * fields appear. A plain-count field (`exhaustedThresholdPct`, `backup.keep`, `maxConcurrentGates`,
+ * `usageSampleRetentionDays`, …) has no unit to translate, so it is deliberately absent: its validator
+ * message already reads in the unit the field is entered in.
+ */
+export const PLATFORM_MS_BOUNDS = {
+  rateLimit: {
+    defaultBackoffMs: { min: 60_000, max: 86_400_000 },
+    resetBufferMs: { min: 0, max: 600_000 },
+    deadlineAfterResetMs: { min: 60_000, max: 86_400_000 },
+    deadlineNoResetMs: { min: 600_000, max: 172_800_000 },
+    recencyWindowMs: { min: 0, max: 86_400_000 },
+  },
+  watchers: {
+    contextWatchMs: WATCHER_MS_BOUNDS,
+    idleWatchMs: WATCHER_MS_BOUNDS,
+    rateLimitWatchMs: WATCHER_MS_BOUNDS,
+    usagePollMs: WATCHER_MS_BOUNDS,
+    wakeMs: WATCHER_MS_BOUNDS,
+    schedulerMs: WATCHER_MS_BOUNDS,
+    reconcileMs: WATCHER_MS_BOUNDS,
+    snapshotMs: WATCHER_MS_BOUNDS,
+    crashRecoveryWatchMs: WATCHER_MS_BOUNDS,
+    pollMs: WATCHER_MS_BOUNDS,
+  },
+  timeouts: {
+    gitOpMs: { min: 1_000, max: 120_000 },
+    gitLocalMs: { min: 1_000, max: 120_000 },
+    gitPushMs: { min: 1_000, max: 600_000 },
+    provisionMs: { min: 10_000, max: 1_800_000 },
+    busyStaleMs: { min: 30_000, max: 1_800_000 },
+    /** Agent Runs hard run-timeout: 30s..1h. */
+    runMs: { min: 30_000, max: 3_600_000 },
+  },
+  connections: {
+    requestTimeoutMs: { min: 1_000, max: 120_000 },
+    rateLimitWindowMs: { min: 1_000, max: 3_600_000 },
+  },
+  /** Session-usage telemetry sampler cadence: 1m floor (busy-loop guard) .. 1h. */
+  usageSampleIntervalMs: { min: 60_000, max: 3_600_000 },
+  /** npm-registry update poll: 1h floor (the registry rarely changes) .. 24h (still daily). */
+  updateCheckIntervalMs: { min: 3_600_000, max: 86_400_000 },
+} as const satisfies Record<string, MsBounds | Record<string, MsBounds>>;
+
 /**
  * Outbound alert webhook (Richer-notifications, external delivery). When set, the daemon POSTs a
  * small JSON payload to `url` on each orchestration event whose `kind` is in `events`, so the human
