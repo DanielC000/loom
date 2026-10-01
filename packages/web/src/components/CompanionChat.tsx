@@ -115,6 +115,11 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
     refetchInterval: 5000,
   });
   const stuck = replyHealth.data?.alerting ? replyHealth.data : null;
+  // card 1b0df437: a SEPARATE, live-derived fact from `stuck` above — a proactive HOME set but currently
+  // refused at the outbound chokepoint (no live binding backs it). Kept on its own banner deliberately:
+  // folding it into the zero-reply copy ("has stopped replying... check its Terminal tab") would misdirect
+  // the owner toward the wrong diagnosis — this companion may be perfectly healthy, just mis-homed.
+  const homeRouteRefused = replyHealth.data?.homeRouteRefused ?? false;
 
   // Held in a ref so the sessionId-keyed WS effect below always calls the LATEST callback without
   // re-subscribing the socket when the parent passes a fresh function each render.
@@ -432,6 +437,26 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
             {stuck.zeroReplyAlertTurnSeq} (threshold {stuck.threshold}). It's running, so messages are
             landing; check its <strong style={{ color: color.text }}>Terminal</strong> tab to see what
             it's doing.
+          </span>
+        </div>
+      )}
+
+      {/* card 1b0df437: the home-route-refused notice — deliberately a SEPARATE banner from the zero-reply
+          alert above (see `homeRouteRefused`'s own comment for why), and above the "not wired" notice:
+          both are proactive-routing faults, but this one is more specific (a route WAS configured and is
+          now actively refused, vs. "no route configured at all"). */}
+      {homeRouteRefused && (
+        <div
+          style={notice("amber")}
+          data-testid="companion-home-refused-alert"
+          data-session-id={sessionId}
+          role="alert"
+        >
+          <span aria-hidden style={{ color: color.amber }}>▲</span>
+          <span>
+            <strong style={{ color: color.text }}>{name}'s home route is refused.</strong>{" "}
+            Proactive delivery (heartbeat/reminder/attention-push) can't reach it — fix the home under{" "}
+            <strong style={{ color: color.text }}>Manage → Proactive home</strong>.
           </span>
         </div>
       )}

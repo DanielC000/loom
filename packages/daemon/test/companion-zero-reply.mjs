@@ -378,6 +378,52 @@ function driveTurns(db, sessId, n) {
   check("(9d negative control) a route-flagged-non-private refusal is NOT route-unbound", rf3.delivered === false && rf3.reason === "route-flagged-non-private");
   check("(9d negative control) the unbound-route hook does NOT fire for a flagged-binding refusal", flagged3.length === 0);
 
+  // 9e. card 1b0df437 Code Review, item 4(iii): deliverMedia's OWN up-front gate (chat-gateway.ts ~903)
+  // fires the SAME hook — a separate call site from deliverReply's, never exercised above.
+  const unbound4 = [];
+  const mediaGw = new ChatGateway(
+    () => ({ delivered: true }), [], undefined, undefined,
+    (sid) => (sid === "media-unbound-sess" ? { channel: "telegram", chatId: "666777888" } : null),
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined,
+    (sid, channel, chatId) => unbound4.push({ sid, channel, chatId }),
+  );
+  const mediaSent = [];
+  mediaGw.registerAdapter({ name: "telegram", maxMessageLength: 4096, start() {}, async stop() {}, async send() {}, async sendMedia(chatId, filePath) { mediaSent.push({ chatId, filePath }); } });
+  const rMedia = await mediaGw.deliverMedia("media-unbound-sess", "/tmp/mockup.png");
+  check("(9e) deliverMedia reports route-unbound for a route with no live binding at all", rMedia.delivered === false && rMedia.reason === "route-unbound");
+  check("(9e) NOTHING was sent", mediaSent.length === 0);
+  check("(9e) deliverMedia's OWN gate fires the SAME onUnboundRouteRefused hook", unbound4.length === 1 && unbound4[0].sid === "media-unbound-sess" && unbound4[0].chatId === "666777888");
+
+  // 9f. card 1b0df437 Code Review, item 4(iii): the MID-FLIGHT per-chunk path inside sendVia
+  // (chat-gateway.ts ~813, reached via deliverReply's chunked send) — a route that was LIVE when the
+  // up-front gate ran (so that gate can never be the thing that blocks this) goes unbound BETWEEN two
+  // chunks of a long reply; sendVia's own per-chunk recheck catches it and deliverReply must fire the
+  // SAME hook from its separate mid-flight branch, not just the up-front one exercised in 9a-9d.
+  const unbound5 = [];
+  const chunkBindings = [{ sessionId: "chunk-unbound-sess", channel: "telegram", chatId: "555444333", scope: "dm", flaggedNonPrivate: false }];
+  const chunkGw = new ChatGateway(
+    () => ({ delivered: true }), chunkBindings, undefined, undefined,
+    (sid) => (sid === "chunk-unbound-sess" ? { channel: "telegram", chatId: "555444333" } : null),
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined,
+    (sid, channel, chatId) => unbound5.push({ sid, channel, chatId }),
+  );
+  const chunkSent = [];
+  // maxMessageLength 10 forces a long reply into several chunks; unbinding after the FIRST chunk's send
+  // simulates a concurrent revoke landing mid-flight — the up-front gate already passed by the time this runs.
+  chunkGw.registerAdapter({
+    name: "telegram", maxMessageLength: 10, start() {}, async stop() {},
+    async send(chatId, text) {
+      chunkSent.push({ chatId, text });
+      if (chunkSent.length === 1) chunkGw.unbind("chunk-unbound-sess");
+    },
+  });
+  const rChunk = await chunkGw.deliverReply("chunk-unbound-sess", "this reply is long enough to need several chunks to send in full");
+  check("(9f) deliverReply reports route-unbound once the MID-FLIGHT recheck trips", rChunk.delivered === false && rChunk.reason === "route-unbound");
+  check("(9f) exactly the first chunk reached the adapter before the route went unbound", chunkSent.length === 1);
+  check("(9f) the mid-flight branch fires the SAME onUnboundRouteRefused hook (not just the up-front gate)", unbound5.length === 1 && unbound5[0].sid === "chunk-unbound-sess" && unbound5[0].chatId === "555444333");
+
   cleanupEnv(e2);
 }
 

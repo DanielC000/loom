@@ -341,6 +341,23 @@ try {
     check("10: the binding was still durably written", db.listCompanionBindings().some((b) => b.sessionId === sess && b.chatId === "920920920"));
     check("10: the reconcile failure was logged, not swallowed silently", spy.calls.some((c) => /reconcile failed/i.test(c)));
   }
+
+  // ============ 11 — card 1b0df437 Code Review, item 4(iv): unbinding a GROUP binding clears an @handle ===
+  // ============      home it backed, exactly like the dm/numeric case in case 1 above ===========================
+  {
+    const sess = makeCompanionSession("unbind-group-handle-home");
+    db.upsertCompanionBinding({ sessionId: sess, channel: TELEGRAM_CHANNEL, chatId: "@ourgrouphandle", scope: "group" });
+    db.setCompanionHome(sess, { channel: TELEGRAM_CHANNEL, chatId: "@ourgrouphandle" });
+
+    const res = await app.inject({ method: "DELETE", url: `/api/companion/bindings/${sess}?channel=${TELEGRAM_CHANNEL}` });
+    check("11 setup: unbind REST call succeeds", res.statusCode === 200);
+
+    check("11: the @handle home, now backed by NO live binding, is CLEARED — the group scope exemption only ever applied while a live group binding backed it", db.getCompanionHome(sess) === null);
+    check("11: a durable companion_home_cleared event was filed, naming the cleared @handle route", (() => {
+      const evs = homeClearedEvents(sess);
+      return evs.length === 1 && evs[0].detail?.channel === TELEGRAM_CHANNEL && evs[0].detail?.chatId === "@ourgrouphandle";
+    })());
+  }
 } finally {
   await app.close();
   try { db.close(); } catch { /* ignore */ }
@@ -348,6 +365,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — unbinding a channel clears the proactive home and reroutes a recurring reminder when (and ONLY when) that specific route no longer has a live binding, each left as a durable event (companion_home_cleared / companion_reminder_rerouted) rather than a silent reroute to a different chat; a route still backed by a live binding is untouched; the in-app channel is exempt even from a full unbind; a route-less reminder is skipped cleanly; reconcile() runs when a live companion controller is wired; a re-bind (POST) to a new chat clears a home naming the now-orphaned old chat the same way an unbind does; PUT /api/companion/home onto an unbound route is refused (400) up front, in-app exempt; POST/PUT /api/companion/config's own `home` field is now refused the same way (the same validateHomeTarget guard, not a second divergent copy); and a dm-bind pairing redemption whose reconcile hook throws still reaches paired-dm and still sends the PAIRED ack."
+  ? "\n✅ ALL PASS — unbinding a channel clears the proactive home and reroutes a recurring reminder when (and ONLY when) that specific route no longer has a live binding, each left as a durable event (companion_home_cleared / companion_reminder_rerouted) rather than a silent reroute to a different chat; a route still backed by a live binding is untouched; the in-app channel is exempt even from a full unbind; a route-less reminder is skipped cleanly; reconcile() runs when a live companion controller is wired; a re-bind (POST) to a new chat clears a home naming the now-orphaned old chat the same way an unbind does; PUT /api/companion/home onto an unbound route is refused (400) up front, in-app exempt; POST/PUT /api/companion/config's own `home` field is now refused the same way (the same validateHomeTarget guard, not a second divergent copy); a dm-bind pairing redemption whose reconcile hook throws still reaches paired-dm and still sends the PAIRED ack; and unbinding a GROUP binding clears the @handle home it backed, exactly like the dm/numeric case, since the group exemption only ever held while a live binding backed it."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

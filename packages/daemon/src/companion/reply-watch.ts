@@ -100,6 +100,11 @@ export function buildCompanionReplyStatus(
   row: { sessionId: string; name: string; enabled: boolean; lastChatReplyTurnSeq: number | null; zeroReplyAlertTurnSeq: number | null },
   turnSeq: number,
   threshold: number = DEFAULT_ZERO_REPLY_TURN_THRESHOLD,
+  // card 1b0df437: whether this session's proactive home currently has no live binding backing it — a
+  // LIVE fact the caller resolves (it needs the companion's home + bindings, neither of which this pure
+  // builder reads), gated here by `enabled` for the same defense-in-depth reason `alerting` already is:
+  // a disabled companion's stale home is never actively used, so it's never worth surfacing as a fault.
+  homeRouteRefused = false,
 ): CompanionReplyStatus {
   return {
     sessionId: row.sessionId,
@@ -113,5 +118,6 @@ export function buildCompanionReplyStatus(
     turnsSinceLastReply: row.lastChatReplyTurnSeq == null ? null : turnSeq - row.lastChatReplyTurnSeq,
     threshold,
     alerting: row.enabled && row.zeroReplyAlertTurnSeq != null,
+    homeRouteRefused: row.enabled && homeRouteRefused,
   };
 }

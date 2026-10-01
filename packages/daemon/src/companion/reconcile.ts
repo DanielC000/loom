@@ -11,7 +11,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { IN_APP_CHANNEL } from "./in-app.js";
-import type { CompanionRoute } from "./types.js";
+import type { CompanionRoute, SessionBinding } from "./types.js";
+import { isLikelyGroupTelegramChatId, isNonNumericTelegramChatId } from "./types.js";
 
 /** The narrow store surface this reconcile needs — satisfied by both the real `Db` (server.ts's REST
  *  writers) and the factory's `CompanionBindingStore` (chat-gateway.ts's dm-bind pairing redemption). */
@@ -24,11 +25,70 @@ export interface CompanionRouteReconcileStore {
   appendEvent(evt: { id: string; ts: string; managerSessionId: string; kind: string; detail?: Record<string, unknown> }): void;
 }
 
+/** The minimal surface {@link hasLiveCompanionBinding} needs — deliberately narrower than
+ *  `CompanionRouteReconcileStore` (which also needs home/reminder read-writers + appendEvent) so a
+ *  READ-ONLY caller that has no business clearing homes/reminders — `store.ts`'s boot-time stale-home
+ *  check (card 1b0df437) — can reuse this predicate without widening to the full reconcile surface.
+ *  `CompanionRouteReconcileStore` and `store.ts`'s `CompanionConfigStore` both satisfy this structurally. */
+export interface CompanionBindingLivenessStore {
+  getCompanionBindingsForSession(sessionId: string): { channel: string; chatId: string }[];
+}
+
 /** The one true "does `route` currently have a live binding for `sessionId`" predicate every reconcile
  *  site below shares — never a second, divergent reimplementation of this question. IN_APP_CHANNEL is
- *  always considered live (mirrors ChatGateway.hasLiveBinding's own doc: in-app has no "unbound" state). */
-export function hasLiveCompanionBinding(store: CompanionRouteReconcileStore, sessionId: string, route: CompanionRoute): boolean {
+ *  always considered live (mirrors ChatGateway.hasLiveBinding's own doc: in-app has no "unbound" state).
+ *  ⚠️ This is a binding-ROW-EXISTS check ONLY — it does NOT know about a flagged-non-private binding or a
+ *  group-shaped id backed by a non-group binding, both of which a real delivery attempt still refuses. It
+ *  stays scoped to the binding-MUTATION reconcile below (clear a home/reminder whose route lost its binding
+ *  row entirely) on purpose — for "would delivery to this route actually be refused", every other caller
+ *  must use {@link companionRouteBlockReason} instead; see its own doc for why these are deliberately two
+ *  different questions. */
+export function hasLiveCompanionBinding(store: CompanionBindingLivenessStore, sessionId: string, route: CompanionRoute): boolean {
   return route.channel === IN_APP_CHANNEL || store.getCompanionBindingsForSession(sessionId).some((b) => b.channel === route.channel && b.chatId === route.chatId);
+}
+
+/** Minimal binding-row shape {@link companionRouteBlockReason} needs — just enough of SessionBinding (the
+ *  gateway's own live routing-map objects) / CompanionBinding (a db row) for either to satisfy this
+ *  structurally without widening to its full shape. */
+export type CompanionRouteBindingLike = Pick<SessionBinding, "scope"> & { flaggedNonPrivate?: boolean };
+
+export type CompanionRouteBlockReason = "route-unbound" | "route-flagged-non-private";
+
+/**
+ * THE one pure per-route delivery decision (card ddf08614) — extracted from `ChatGateway`'s own private
+ * `deliveryBlockReason`, same semantics, same order, so every caller that needs to know "would a real
+ * delivery attempt to this route be refused, and why" shares ONE implementation instead of each growing
+ * its own approximation. The gap this closes: `hasLiveCompanionBinding` above only asks "does a binding
+ * ROW exist for this route" — a `dm`-scope binding flagged non-private (card 7578dea2), or a negative/
+ * non-numeric Telegram id with no matching GROUP binding (card 94754bbe), both pass that row-exists check
+ * while `ChatGateway.deliveryBlockReason` would still refuse every delivery to them. A session could set
+ * such a route as its home (or boot with one already stored) and see no warning anywhere, while every
+ * proactive turn silently burned itself refusing to deliver.
+ *
+ * `binding` is the ONE binding row (if any) that currently backs `route` — resolved however the caller's
+ * own scope demands: `ChatGateway.deliveryBlockReason` resolves it via its existing GLOBAL per-
+ * (channel,chatId) lookup (`bindingForInbound`, unchanged by this extraction — a route is unique across
+ * every session's bindings, so that global scope is deliberate there, not a bug); a caller scoped to one
+ * session's own rows (`warnStaleStoredHomes`, `validateHomeTarget`, the reply status's `homeRouteRefused`)
+ * resolves it by scanning THAT session's own `getCompanionBindingsForSession` rows for a channel+chatId
+ * match instead — this predicate is agnostic to which scope handed it the binding.
+ *
+ * @decision ddf08614 — never approximate this with a binding-row-exists check alone (reintroducing the
+ * exact gap above); every "would this route's delivery be refused" question routes through this function.
+ */
+export function companionRouteBlockReason(
+  route: CompanionRoute,
+  binding: CompanionRouteBindingLike | undefined,
+): CompanionRouteBlockReason | undefined {
+  if (binding?.flaggedNonPrivate === true) return "route-flagged-non-private"; // card 7578dea2
+  if (binding?.scope === "group") return undefined; // an explicit group binding legitimately owns a @handle/negative id
+  // @decision 94754bbe — a dm-shape chatId that could never carry a legitimate (non-group) binding is
+  // blocked regardless of whether a binding exists at all; never re-gate this on a binding lookup
+  // succeeding (that's the "@chan"/negative-id companion-HOME leak the record closes).
+  if (isNonNumericTelegramChatId(route.channel, route.chatId) || isLikelyGroupTelegramChatId(route.channel, route.chatId)) return "route-unbound";
+  const live = route.channel === IN_APP_CHANNEL || binding !== undefined; // card d3f9b4d2
+  if (!live) return "route-unbound";
+  return undefined;
 }
 
 /**

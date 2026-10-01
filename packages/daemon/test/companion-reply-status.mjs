@@ -25,6 +25,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (7) No new persisted state: the status is derivable from columns that already existed before this card
 //       (companion_config.last_chat_reply_turn_seq / zero_reply_alert_turn_seq + sessions.turn_seq).
 //   (8) The two GETs are Tier-1 (remote-readable with a gateway token), like every other companion GET.
+//   (9) card 1b0df437: `homeRouteRefused` — a SEPARATE, LIVE-derived field on the SAME read (false with no
+//       home or a live-bound one, true for a home with no live binding, self-heals once bound, gated to
+//       enabled companions like `alerting`), independent of `alerting` itself.
 // Run: 1) pnpm build (turbo builds shared first), 2) node test/companion-reply-status.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -144,7 +147,7 @@ for (let i = 0; i < THRESHOLD + 5; i++) completeTurn("off-1");
 
 // --- 6. LIFETIME SEPARATION, with a positive control --------------------------------------------------
 {
-  const RUNTIME_KEYS = ["turnSeq", "lastChatReplyTurnSeq", "zeroReplyAlertTurnSeq", "turnsSinceLastReply", "alerting"];
+  const RUNTIME_KEYS = ["turnSeq", "lastChatReplyTurnSeq", "zeroReplyAlertTurnSeq", "turnsSinceLastReply", "alerting", "homeRouteRefused"];
   const present = (payload) => RUNTIME_KEYS.filter((k) => k in payload);
 
   // POSITIVE CONTROL FIRST — polarity discipline: (6) asserts an ABSENCE, and an absence assertion made with
@@ -184,11 +187,67 @@ for (let i = 0; i < THRESHOLD + 5; i++) completeTurn("off-1");
   check("(8) control: an unlisted GET reads Tier-0", routeTier("GET", "/api/companion/status/:sessionId/nonsense") === 0);
 }
 
+// --- 9. card 1b0df437 Code Review item 1: `homeRouteRefused` — a SEPARATE, LIVE-derived field from
+//        `alerting` above, fed into the SAME status read ---------------------------------------------------
+{
+  seedCompanion("home-no-home", true);
+  const noHome = await statusOf("home-no-home");
+  check("(9a) no home set at all -> homeRouteRefused:false", noHome?.homeRouteRefused === false);
+
+  seedCompanion("home-live-bound", true);
+  db.upsertCompanionBinding({ sessionId: "home-live-bound", channel: "telegram", chatId: "700800900", scope: "dm" });
+  db.setCompanionHome("home-live-bound", { channel: "telegram", chatId: "700800900" });
+  const liveBound = await statusOf("home-live-bound");
+  check("(9b) a home backed by a live binding -> homeRouteRefused:false", liveBound?.homeRouteRefused === false);
+
+  // A home set with NO live binding backing it (direct db write, bypassing validateHomeTarget — see
+  // gateway/server.ts's own `companionHomes` e2e seed doc for why the REST surface can't reach this state).
+  seedCompanion("home-refused", true);
+  db.setCompanionHome("home-refused", { channel: "telegram", chatId: "700800901" }); // no matching binding
+  const refused = await statusOf("home-refused");
+  check("(9c) a home with NO live binding -> homeRouteRefused:true", refused?.homeRouteRefused === true);
+  check("(9c) alerting is UNAFFECTED — the two fields are independent", refused?.alerting === false);
+
+  // RECOVERY: the field self-heals the instant the route is actually bound — it is LIVE-derived, never
+  // latched off the durable `companion_unbound_route_refused` event.
+  db.upsertCompanionBinding({ sessionId: "home-refused", channel: "telegram", chatId: "700800901", scope: "dm" });
+  const healed = await statusOf("home-refused");
+  check("(9d) recovery: binding the SAME chat clears homeRouteRefused back to false with no other change", healed?.homeRouteRefused === false);
+
+  // (9g, card ddf08614) THE REAL REPRO: a home backed by a LIVE binding row that `ChatGateway.
+  // deliveryBlockReason` would still refuse (here: a dm-scope Telegram binding on a negative/group-shaped
+  // chatId, auto-flagged non-private by the write chokepoint — card 61e33b99) must STILL read
+  // homeRouteRefused:true — RED on the pre-fix row-exists-only check, which saw a live binding row and
+  // read false even though every real delivery to this route would be refused.
+  seedCompanion("home-flagged", true);
+  db.upsertCompanionBinding({ sessionId: "home-flagged", channel: "telegram", chatId: "-100555", scope: "dm" });
+  db.setCompanionHome("home-flagged", { channel: "telegram", chatId: "-100555" });
+  const flaggedHome = await statusOf("home-flagged");
+  check("(9g) a home backed by a LIVE but flagged-non-private binding row -> homeRouteRefused:true", flaggedHome?.homeRouteRefused === true);
+
+  // GATING (defense in depth, mirrors alerting's own forced-disabled check in (5) above): a DISABLED
+  // companion's unbound home is never surfaced as refused, even if the server layer somehow passed true in.
+  seedCompanion("home-refused-disabled", false);
+  db.setCompanionHome("home-refused-disabled", { channel: "telegram", chatId: "700800902" }); // no binding
+  const disabledRefused = await statusOf("home-refused-disabled");
+  check("(9e) a DISABLED companion's unbound home never reads homeRouteRefused:true", disabledRefused !== undefined && disabledRefused.homeRouteRefused === false);
+  const forcedHome = buildCompanionReplyStatus(
+    { sessionId: "x", name: "", enabled: false, lastChatReplyTurnSeq: 0, zeroReplyAlertTurnSeq: null }, 10, undefined, true,
+  );
+  check("(9e) builder: homeRouteRefused:true passed in for a DISABLED row still reads false", forcedHome.homeRouteRefused === false);
+
+  // Builder-level default: an OMITTED 4th arg defaults to false (every pre-card call site stays byte-identical).
+  const defaulted = buildCompanionReplyStatus(
+    { sessionId: "x", name: "", enabled: true, lastChatReplyTurnSeq: 0, zeroReplyAlertTurnSeq: null }, 10,
+  );
+  check("(9f) builder: an omitted homeRouteRefused arg defaults to false", defaulted.homeRouteRefused === false);
+}
+
 await app.close();
 try { db.close(); } catch { /* ignore */ }
 cleanupPathSync(tmpHome);
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the zero-reply alert is readable over a DEDICATED runtime route that flips false→true when the REAL detector fires and back to false when a reply lands, is gated to enabled companions, adds no persisted state, stays Tier-1 read-only, and is kept OUT of the config-masking shape (proved with a positive control, not a bare absence)."
+  ? "\n✅ ALL PASS — the zero-reply alert is readable over a DEDICATED runtime route that flips false→true when the REAL detector fires and back to false when a reply lands, is gated to enabled companions, adds no persisted state, stays Tier-1 read-only, and is kept OUT of the config-masking shape (proved with a positive control, not a bare absence); and `homeRouteRefused` (card 1b0df437) is a SEPARATE, LIVE-derived field on the SAME read that is false with no home or a live-bound one, true for a home with no live binding, self-heals the instant that route is actually bound (never latched off the durable event), and is gated to enabled companions like `alerting`."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

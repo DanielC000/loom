@@ -39,13 +39,14 @@ import type {
   SessionBinding,
   SubmitTurn,
 } from "./types.js";
-import { isConfirmedDirectChat, isLikelyGroupTelegramChatId, isNonNumericTelegramChatId } from "./types.js";
+import { isConfirmedDirectChat } from "./types.js";
 import { allowIfDmMatch, type CompanionAuth } from "./auth.js";
 import { noPairing, type CompanionPairing } from "./pairing.js";
 import { inMemoryVoicePrefs, voicePrefRoute, type CompanionVoicePrefs } from "./voice-prefs.js";
 import { parseCommand, commandHandler } from "./commands.js";
 import { vendorProcessSlashCommand } from "../pty/claude-doctrine.js";
 import { IN_APP_CHANNEL } from "./in-app.js";
+import { companionRouteBlockReason, type CompanionRouteBlockReason } from "./reconcile.js";
 
 /**
  * Split `text` into chunks no longer than `max` chars, preferring a newline then a whitespace boundary so
@@ -219,7 +220,8 @@ export class ChatGateway {
      *  construction stays byte-identical (no-op). factory.ts injects the shared
      *  companion/reconcile.ts helper, built from `db` (mirrors flagNonPrivateBinding's own pattern). */
     private readonly reconcileBindingChange: ((sessionId: string) => void | Promise<void>) | undefined = undefined,
-    /** Observability hook (card 1b0df437): called at most ONCE per (session, route) — see
+    /** Observability hook (card 1b0df437): called at most ONCE per (session, route) PER DAEMON PROCESS —
+     *  the dedup Set below resets on restart, so a route can warn again across a restart; see
      *  `warnUnboundRouteRefused` below — when a `chat_reply`/media delivery is refused with reason
      *  `route-unbound` (no live binding backs the target at all, e.g. a stale/bad companion HOME stored
      *  before 94754bbe's write-time guards existed). Unlike `route-flagged-non-private`
@@ -1056,15 +1058,19 @@ export class ChatGateway {
    * SECURITY/observability (card 1b0df437): `deliveryBlockReason` returned `route-unbound` for a
    * `sessionId` delivery attempt — unlike a flagged binding (`warnUnconfirmedDirectInbound` above), there
    * is NO binding row here to flag/surface (an unbound route has none, by definition), so this was
-   * otherwise COMPLETELY silent: no log, no event, no UI flag, while `onReplyDelivered` still resets the
-   * zero-reply streak every time (see deliverReply's own comment on why that reset is still correct once
-   * this is no longer silent). Logged + durably eventED at most ONCE per (session, route) — keyed on the
-   * session too (unlike the flagged-binding warn above, which is route-only), since a route-unbound
+   * otherwise COMPLETELY silent: no log, no event, while `onReplyDelivered` still resets the zero-reply
+   * streak every time (see deliverReply's own comment on why that reset is still correct once this is no
+   * longer silent). Logged + durably eventED at most ONCE per (session, route) per daemon process — keyed
+   * on the session too (unlike the flagged-binding warn above, which is route-only), since a route-unbound
    * refusal has no binding row to key off and the SAME route could in principle be a different session's
-   * home after a future rebind. Disclosure-safe console log (session id + channel only, never the
-   * chatId — same posture as `warnUnconfirmedDirectInbound`); the durable event's `detail` DOES carry the
-   * chatId (same as `companion_home_cleared`/`companion_reminder_rerouted` — a project-scoped durable
-   * record, not a public log).
+   * home after a future rebind. Disclosure-safe console log (session id + channel only, never the chatId —
+   * same posture as `warnUnconfirmedDirectInbound`); the durable event's `detail` DOES carry the chatId
+   * (same as `companion_home_cleared`/`companion_reminder_rerouted` — a project-scoped durable record, not
+   * a public log).
+   *
+   * @decision 1b0df437 — never read `CompanionReplyStatus.homeRouteRefused` (the UI banner) off this
+   * event; it is LIVE-derived from current home+binding state so it self-heals on a fix, while this
+   * durable event is an audit trail that stays fired once per (session, route) per process.
    */
   private warnUnboundRouteRefused(sessionId: string, channel: string, chatId: string): void {
     const key = `${sessionId}:${channel}:${chatId}`;
@@ -1098,17 +1104,13 @@ export class ChatGateway {
 
   /** The discriminated reason `channel`/`chatId` may NOT currently receive outbound, or undefined when it
    *  may — `mayDeliverTo`'s own boolean collapses this; every real call site needs the actual reason to
-   *  report on its DeliverResult, so this is the one implementation both read from. */
-  private deliveryBlockReason(channel: string, chatId: string): "route-unbound" | "route-flagged-non-private" | undefined {
-    const binding = this.bindingForInbound(channel, chatId);
-    if (binding?.flaggedNonPrivate === true) return "route-flagged-non-private"; // card 7578dea2
-    if (binding?.scope === "group") return undefined; // an explicit group binding legitimately owns a @handle/negative id
-    // @decision 94754bbe — a dm-shape chatId that could never carry a legitimate (non-group) binding is
-    // blocked regardless of whether a binding exists at all; never re-gate this on a binding lookup
-    // succeeding (that's the "@chan"/negative-id companion-HOME leak the record closes).
-    if (isNonNumericTelegramChatId(channel, chatId) || isLikelyGroupTelegramChatId(channel, chatId)) return "route-unbound";
-    if (!this.hasLiveBinding(channel, chatId)) return "route-unbound"; // card d3f9b4d2
-    return undefined;
+   *  report on its DeliverResult, so this is the one implementation both read from. The actual decision is
+   *  `companionRouteBlockReason` (reconcile.ts) — shared with `warnStaleStoredHomes`, the reply status's
+   *  `homeRouteRefused`, and `validateHomeTarget` (card ddf08614) — this method's own job is just resolving
+   *  the GLOBAL binding (`bindingForInbound`) that predicate needs; see its doc for why that scope is right
+   *  here but wrong for those other, per-session callers. */
+  private deliveryBlockReason(channel: string, chatId: string): CompanionRouteBlockReason | undefined {
+    return companionRouteBlockReason({ channel, chatId }, this.bindingForInbound(channel, chatId));
   }
 }
 

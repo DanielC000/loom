@@ -21,9 +21,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   2.5. card 1b0df437: store.ts's OWN env/bootstrap HOME-seed guard refuses a bad-shape
 //      LOOM_COMPANION_HOME_CHAT_ID with a specific SETUP log, leaving no home seeded (distinct from the
 //      binding-bootstrap refusal covered in Part 2/companion-nonnumeric-telegram-chatid-refusal.mjs); the
-//      NEW boot-time backstop catches an ALREADY-STORED bad-shape home on EVERY enabled row (not just the
-//      env-pinned session), never clears/rewrites it, skips a disabled row, and exempts a group-handle
-//      home backed by a live group binding on the exact same route.
+//      boot-time backstop catches an ALREADY-STORED home with NO live binding backing it on EVERY enabled
+//      row (not just the env-pinned session) — bad-SHAPED or not (Code Review item 2: the shape check
+//      alone missed a numeric-but-unbound home) — never clears/rewrites it, skips a disabled row, and
+//      exempts ANY home (shape notwithstanding) actually backed by a live binding, group-scope included.
 //   4. token never in any captured log line across the whole run.
 //   5. HUMAN-ONLY: the companion's OWN agent-facing MCP surface (orchestration assistant + manager) carries
 //      NO config/token tool — it can never read/write its own bot token.
@@ -435,13 +436,28 @@ try {
     );
     check("(2.5b) the stale home is NEVER cleared/rewritten — a WARNING pass only", JSON.stringify(db2.getCompanionHome("sess-stale-home")) === JSON.stringify({ channel: "telegram", chatId: "@stalehandle" }));
 
-    // (2.5b control) a GOOD numeric stored home on an enabled row never warns.
+    // (2.5b control) a GOOD numeric stored home, WITH a live binding backing it, never warns.
     db2.upsertCompanionConfig({ sessionId: "sess-good-home", botTokenBlob: "", channel: "in-app", allowedChatId: "", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    db2.upsertCompanionBinding({ sessionId: "sess-good-home", channel: "telegram", chatId: "700800300", scope: "dm" });
     db2.setCompanionHome("sess-good-home", { channel: "telegram", chatId: "700800300" });
     const logBefore2b = logSink.length;
     resolveAllCompanionConfigs(db2, {});
     const newLines2b = logSink.slice(logBefore2b);
-    check("(2.5b control) a numeric stored home never warns", !newLines2b.some((l) => l.includes("sess-good-home".slice(0, 8))));
+    check("(2.5b control) a numeric stored home backed by a live binding never warns", !newLines2b.some((l) => l.includes("sess-good-home".slice(0, 8))));
+
+    // (2.5b gap-fix, Code Review item 2) a numeric-SHAPED stored home with NO live binding backing it at
+    // all DOES now warn — RED before this fix: the shape check alone never caught this, since the chatId
+    // looks like a perfectly ordinary private Telegram chat id.
+    db2.upsertCompanionConfig({ sessionId: "sess-numeric-unbound-home", botTokenBlob: "", channel: "in-app", allowedChatId: "", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    db2.setCompanionHome("sess-numeric-unbound-home", { channel: "telegram", chatId: "700800301" }); // no matching binding ever created
+    const logBefore2d = logSink.length;
+    resolveAllCompanionConfigs(db2, {});
+    const newLines2d = logSink.slice(logBefore2d);
+    check(
+      "(2.5b gap-fix) a numeric-shaped stored home with NO live binding now warns too (not just a bad-shape one)",
+      newLines2d.some((l) => l.includes("sess-numeric-unbound-home".slice(0, 8)) && /no live binding/i.test(l) && /card 1b0df437/.test(l)),
+    );
+    check("(2.5b gap-fix) that home is NEVER cleared/rewritten either — a WARNING pass only, same as the bad-shape case", JSON.stringify(db2.getCompanionHome("sess-numeric-unbound-home")) === JSON.stringify({ channel: "telegram", chatId: "700800301" }));
 
     // (2.5b control 2) a DISABLED row's bad home never warns (only enabled rows are checked).
     db2.upsertCompanionConfig({ sessionId: "sess-disabled-badhome", botTokenBlob: "", channel: "in-app", allowedChatId: "", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: false });
@@ -475,6 +491,25 @@ try {
     const newLines3b = logSink.slice(logBefore3b);
     check("(2.5c negative control) a group-handle home with NO live group binding on that route still warns", newLines3b.some((l) => l.includes("sess-dm-badhome".slice(0, 8)) && /STORED home target/.test(l)));
     db3.close();
+
+    // (2.5d, card ddf08614) THE REAL REPRO: a home backed by a LIVE binding ROW that `ChatGateway.
+    // deliveryBlockReason` would STILL refuse (here: a dm-scope Telegram binding on a negative/group-
+    // shaped chatId, auto-flagged non-private by the write chokepoint itself — card 61e33b99) must still
+    // warn. RED on the pre-fix `hasLiveCompanionBinding` row-exists-only check: the binding ROW exists, so
+    // the old guard silently skipped this exact case — the gap the Code Review of 1b0df437 found.
+    const db4 = new Db(dbFile("p25d.db"));
+    db4.upsertCompanionConfig({ sessionId: "sess-flagged-home", botTokenBlob: "", channel: "in-app", allowedChatId: "", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    db4.upsertCompanionBinding({ sessionId: "sess-flagged-home", channel: "telegram", chatId: "-100555", scope: "dm" });
+    db4.setCompanionHome("sess-flagged-home", { channel: "telegram", chatId: "-100555" });
+    const logBefore4 = logSink.length;
+    resolveAllCompanionConfigs(db4, {});
+    const newLines4 = logSink.slice(logBefore4);
+    check(
+      "(2.5d) a home backed by a LIVE but flagged-non-private/group-shaped binding row still warns",
+      newLines4.some((l) => l.includes("sess-flagged-home".slice(0, 8)) && /STORED home target/.test(l) && /card 1b0df437/.test(l)),
+    );
+    check("(2.5d) the home is never cleared/rewritten — a WARNING pass only, same as every other case here", JSON.stringify(db4.getCompanionHome("sess-flagged-home")) === JSON.stringify({ channel: "telegram", chatId: "-100555" }));
+    db4.close();
   }
 
   // ============ Part 3 — the human-only REST CRUD via the REAL buildServer (app.inject) ============
@@ -685,6 +720,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — DB-backed companion config: bot token ENCRYPTED at rest (plaintext never stored/returned/logged), masked reads expose only configured+last-4, env bootstraps + OVERRIDES the DB row, an enabled row alone boots, disabled/corrupt ⇒ OFF, default-OFF byte-identical, REST CRUD round-trips, NO config/token tool on the companion's MCP surface, a bad-shape env HOME_CHAT_ID is refused with a specific SETUP log (never seeded, the binding still arms), an ALREADY-STORED bad-shape home is caught at every boot (not just the env-seed path) without ever being cleared/rewritten, a disabled row's bad home is never checked, and a group-handle home backed by a live group binding on the exact route is exempt from that warning while one with no such binding still warns."
+  ? "\n✅ ALL PASS — DB-backed companion config: bot token ENCRYPTED at rest (plaintext never stored/returned/logged), masked reads expose only configured+last-4, env bootstraps + OVERRIDES the DB row, an enabled row alone boots, disabled/corrupt ⇒ OFF, default-OFF byte-identical, REST CRUD round-trips, NO config/token tool on the companion's MCP surface, a bad-shape env HOME_CHAT_ID is refused with a specific SETUP log (never seeded, the binding still arms), an ALREADY-STORED home with NO live binding is caught at every boot (not just the env-seed path, and not just a bad-SHAPED one — a perfectly numeric-shaped unbound home now warns too) without ever being cleared/rewritten, a disabled row's bad home is never checked, and a home actually backed by a live binding (group-handle included) is exempt from that warning."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -63,6 +63,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      the provision endpoint's `home` field all reject a non-numeric Telegram target up front — EXCEPT
 //      (card 1b0df437) `PUT /api/companion/home` now accepts a `@handle` once a LIVE GROUP binding backs
 //      the exact same route, mirroring ChatGateway.deliveryBlockReason's own group-scope exemption.
+//   K. card ddf08614: `PUT /api/companion/home` (K.i) and the provision endpoint's `home` field (K.ii, pre-
+//      spawn) both now refuse a home whose chatId HAS a live binding ROW but that `deliveryBlockReason`
+//      would still refuse (here: auto-flagged non-private by the write chokepoint, card 61e33b99) — closing
+//      the gap where a binding-row-exists check alone (the pre-fix `validateHomeTarget`) missed this.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/companion-nonnumeric-telegram-chatid-refusal.mjs
 import fs from "node:fs";
@@ -399,8 +403,10 @@ try {
     const groupHomeOk = await appI.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "write-guard-sess", channel: "telegram", chatId: "@ourgrouphome" } });
     check("(I2c) the SAME group handle, now backed by a live GROUP binding, is accepted → 200", groupHomeOk.statusCode === 200);
     check("(I2c) the group-handle home was actually written", JSON.stringify(db.getCompanionHome("write-guard-sess")) === JSON.stringify({ channel: "telegram", chatId: "@ourgrouphome" }));
-    // Restore the numeric home for the rest of this block's assumptions.
-    await appI.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "write-guard-sess", channel: "telegram", chatId: "600700800" } });
+    // (card 1b0df437 Code Review, nitpick) no "restore the numeric home" call here — nothing in the I3-I5
+    // block below reads this session's home, so a bare unasserted PUT call would be exactly the "silently
+    // 400s and nobody notices" shape this cleanup is about; dropped rather than asserted on for a value
+    // nothing downstream depends on.
 
     // I3/I4: POST /api/companion/config's allowedChatId (buildCompanionUpsert).
     const badConfig = await appI.inject({
@@ -424,6 +430,108 @@ try {
     check("(I5) provision: a non-numeric home.chatId → 400", badProvisionHome.statusCode === 400);
     check("(I5) 400's error names the problem", /numeric/i.test(JSON.parse(badProvisionHome.payload).error));
     check("(I5) GUARD rejected BEFORE any session spawn — startNew never called", startNewCallsI === 0);
+
+    // ============ J. card 1b0df437 Code Review, item 4 =====================================================
+    // J(i) TRUST NEGATIVE: validateHomeTarget's group-scope exemption (I2b/I2c above) reads bindings
+    // SCOPED TO THE SESSION whose home is being set — a DIFFERENT session's live group binding on the
+    // exact same (channel, chatId) handle must NOT let this session claim that handle as its own home.
+    // RED on a buggy implementation that queried bindings globally instead of per-session.
+    const sessOwnerB = "write-guard-sess-owner-b";
+    db.insertSession({
+      id: sessOwnerB, projectId: "chatid-write-proj", agentId: "chatid-write-agent", engineSessionId: `eng-${sessOwnerB}`, title: null, cwd: "chatid-write-proj",
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "assistant",
+    });
+    db.upsertCompanionBinding({ sessionId: sessOwnerB, channel: "telegram", chatId: "@sessionbtrustscope", scope: "group" });
+    const sessOwnerA = "write-guard-sess-owner-a";
+    db.insertSession({
+      id: sessOwnerA, projectId: "chatid-write-proj", agentId: "chatid-write-agent", engineSessionId: `eng-${sessOwnerA}`, title: null, cwd: "chatid-write-proj",
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "assistant",
+    });
+    const crossSessionHome = await appI.inject({
+      method: "PUT", url: "/api/companion/home",
+      payload: { sessionId: sessOwnerA, channel: "telegram", chatId: "@sessionbtrustscope" },
+    });
+    check("(Ji TRUST NEGATIVE) session A cannot claim session B's live group-bound handle as its OWN home → 400", crossSessionHome.statusCode === 400);
+    // validateHomeTarget's group-scope EXEMPTION (the shape check's own `groupBound` lookup) is ALSO scoped
+    // to the session whose home is being set — so for session A (who owns no binding on this handle at
+    // all) the exemption never applies, and the SHAPE check refuses it first, before the live-binding check
+    // ever runs. Both checks are per-session; this is which one fires first, not a second trust gap.
+    check("(Ji) the 400 is the SHAPE guard (groupBound is scoped to session A, which owns no binding here)", /numeric/i.test(JSON.parse(crossSessionHome.payload).error));
+    check("(Ji) no home was written for session A", db.getCompanionHome(sessOwnerA) === null);
+    // Control: session B itself (the actual owner of the binding) CAN set it as its own home.
+    const ownHomeOk = await appI.inject({
+      method: "PUT", url: "/api/companion/home",
+      payload: { sessionId: sessOwnerB, channel: "telegram", chatId: "@sessionbtrustscope" },
+    });
+    check("(Ji control) the binding's OWN session can set it as its home → 200", ownHomeOk.statusCode === 200);
+
+    // (Ji isolation) the SAME trust boundary, isolated past the shape guard: a NUMERIC chatId (so the shape
+    // check can never be the thing that blocks this) bound live to session B must still refuse session A —
+    // this is what actually proves the LIVE-BINDING check itself (not just the shape exemption) is
+    // per-session, not a global "does ANY session have this route bound" lookup.
+    db.upsertCompanionBinding({ sessionId: sessOwnerB, channel: "telegram", chatId: "600700801", scope: "dm" });
+    const crossSessionNumericHome = await appI.inject({
+      method: "PUT", url: "/api/companion/home",
+      payload: { sessionId: sessOwnerA, channel: "telegram", chatId: "600700801" },
+    });
+    check("(Ji isolation TRUST NEGATIVE) session A cannot claim session B's live NUMERIC binding as its OWN home → 400", crossSessionNumericHome.statusCode === 400);
+    check("(Ji isolation) the 400 is the LIVE-BINDING guard this time (the shape is fine)", /no live binding/i.test(JSON.parse(crossSessionNumericHome.payload).error));
+    check("(Ji isolation) no home was written for session A", db.getCompanionHome(sessOwnerA) === null);
+
+    // J(ii): the config route's own `home` field (applyHomeIfPresent, routed through the SAME
+    // validateHomeTarget as PUT /home above) also accepts a group-backed @handle — mirrors I2b/I2c, but
+    // through POST /api/companion/config's `home` field rather than the dedicated PUT /home route.
+    const sessConfigHome = "write-guard-sess-config-home";
+    db.insertSession({
+      id: sessConfigHome, projectId: "chatid-write-proj", agentId: "chatid-write-agent", engineSessionId: `eng-${sessConfigHome}`, title: null, cwd: "chatid-write-proj",
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "assistant",
+    });
+    const badConfigHomeHandle = await appI.inject({
+      method: "POST", url: "/api/companion/config",
+      payload: { sessionId: sessConfigHome, botToken: "123456:fake-token-config-home", allowedChatId: "121121122", home: { channel: "telegram", chatId: "@configroutegroup" } },
+    });
+    check("(Jii) config route: a group handle home with NO live group binding on that route is refused → 400", badConfigHomeHandle.statusCode === 400);
+    db.upsertCompanionBinding({ sessionId: sessConfigHome, channel: "telegram", chatId: "@configroutegroup", scope: "group" });
+    const goodConfigHomeHandle = await appI.inject({
+      method: "POST", url: "/api/companion/config",
+      payload: { sessionId: sessConfigHome, botToken: "123456:fake-token-config-home", allowedChatId: "121121122", home: { channel: "telegram", chatId: "@configroutegroup" } },
+    });
+    check("(Jii) config route: the SAME group handle, now backed by a live GROUP binding, is accepted → 201", goodConfigHomeHandle.statusCode === 201);
+    check("(Jii) the group-handle home was actually written via the config route", JSON.stringify(db.getCompanionHome(sessConfigHome)) === JSON.stringify({ channel: "telegram", chatId: "@configroutegroup" }));
+
+    // ============ K. card ddf08614 ===========================================================================
+    // K(i) THE REAL REPRO: a dm-scope Telegram binding on a negative/group-shaped chatId is auto-flagged
+    // non-private by the write chokepoint itself (card 61e33b99) — it is still a LIVE binding ROW, so the
+    // pre-fix validateHomeTarget (which only checked a binding row EXISTS) wrongly accepted it as a home.
+    // RED on that pre-fix code: PUT /api/companion/home must now refuse it, same as `deliveryBlockReason`
+    // would refuse every real delivery to it.
+    const sessFlaggedHome = "write-guard-sess-flagged-home";
+    db.insertSession({
+      id: sessFlaggedHome, projectId: "chatid-write-proj", agentId: "chatid-write-agent", engineSessionId: `eng-${sessFlaggedHome}`, title: null, cwd: "chatid-write-proj",
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "assistant",
+    });
+    db.upsertCompanionBinding({ sessionId: sessFlaggedHome, channel: "telegram", chatId: "-100555", scope: "dm" });
+    const flaggedHomeRejected = await appI.inject({
+      method: "PUT", url: "/api/companion/home",
+      payload: { sessionId: sessFlaggedHome, channel: "telegram", chatId: "-100555" },
+    });
+    check("(Ki) PUT /api/companion/home: a LIVE but flagged-non-private binding's chatId is now refused → 400", flaggedHomeRejected.statusCode === 400);
+    check("(Ki) 400's error names the problem", /flagged non-private/i.test(JSON.parse(flaggedHomeRejected.payload).error));
+    check("(Ki) no home was written", db.getCompanionHome(sessFlaggedHome) === null);
+
+    // K(ii) the provision endpoint's `home` field gets the SAME treatment, pre-spawn: a home matching the
+    // Telegram dm route THIS call is about to bind (negative/group-shaped chatId ⇒ the write chokepoint
+    // would flag it non-private) is refused up front, before any session is spawned.
+    let startNewCallsK = 0;
+    const sessionsStubK = { startNew: () => { startNewCallsK++; return { id: `fake-session-k-${startNewCallsK}` }; } };
+    const appK = await buildServer({ db, pty: otherStubI, sessions: sessionsStubK, mcp: otherStubI, orchMcp: otherStubI, platformMcp: otherStubI, auditMcp: otherStubI, userAuditMcp: otherStubI, setupMcp: otherStubI, runMcp: otherStubI, control: otherStubI, usageStatus: otherStubI, companion: companionStub });
+    const badProvisionFlaggedHome = await appK.inject({
+      method: "POST", url: "/api/companion/provision",
+      payload: { agentId: agentIdI, botToken: "123456:fake-token-xyz-flagged-home", allowedChatId: "-100555", home: { channel: "telegram", chatId: "-100555" } },
+    });
+    check("(Kii) provision: a home matching the about-to-be-flagged telegram route → 400", badProvisionFlaggedHome.statusCode === 400);
+    check("(Kii) 400's error names the problem", /flagged non-private/i.test(JSON.parse(badProvisionFlaggedHome.payload).error));
+    check("(Kii) GUARD rejected BEFORE any session spawn — startNew never called", startNewCallsK === 0);
   }
 } finally {
   db.close();
@@ -431,6 +539,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — db.upsertCompanionBinding refuses (InvalidTelegramChatIdError) a dm-scope Telegram binding whose chatId isn't numeric at all, at the one write chokepoint, so the REST bind handler (400), the provision endpoint (400, pre-spawn), the env bootstrap seed, and pairing-code redemption (structurally unreachable, and safe either way) can never persist one; a negative-integer chatId is still only flagged (never refused); a group-scope or non-Telegram binding is never refused; a legacy pre-fix row is still caught at boot; the duplicated TELEGRAM_CHANNEL literal still matches the real constant; the outbound chokepoint (ChatGateway.mayDeliverTo) now also refuses a non-numeric or negative-integer target with NO binding at all (companion HOME, generalized), the actual leak the Code Review widened this card to close, while a group-scope-backed target is never refused; the write-time guards (PUT /api/companion/home, POST/PUT /api/companion/config's allowedChatId, the provision endpoint's home field) all reject a non-numeric dm-scope target up front; and (card 1b0df437) PUT /api/companion/home now accepts a @handle home once a live GROUP binding backs the exact same route, mirroring the outbound chokepoint's own exemption, while one with no such binding is still refused."
+  ? "\n✅ ALL PASS — db.upsertCompanionBinding refuses (InvalidTelegramChatIdError) a dm-scope Telegram binding whose chatId isn't numeric at all, at the one write chokepoint, so the REST bind handler (400), the provision endpoint (400, pre-spawn), the env bootstrap seed, and pairing-code redemption (structurally unreachable, and safe either way) can never persist one; a negative-integer chatId is still only flagged (never refused); a group-scope or non-Telegram binding is never refused; a legacy pre-fix row is still caught at boot; the duplicated TELEGRAM_CHANNEL literal still matches the real constant; the outbound chokepoint (ChatGateway.mayDeliverTo) now also refuses a non-numeric or negative-integer target with NO binding at all (companion HOME, generalized), the actual leak the Code Review widened this card to close, while a group-scope-backed target is never refused; the write-time guards (PUT /api/companion/home, POST/PUT /api/companion/config's allowedChatId, the provision endpoint's home field) all reject a non-numeric dm-scope target up front; (card 1b0df437) PUT /api/companion/home now accepts a @handle home once a live GROUP binding backs the exact same route, mirroring the outbound chokepoint's own exemption, while one with no such binding is still refused; a DIFFERENT session's live group binding on that exact handle can never be claimed as another session's home (the live-binding check is per-session, not global); and the config route's own `home` field accepts the same group-backed @handle the dedicated PUT /home route does."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

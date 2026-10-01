@@ -2812,6 +2812,23 @@ export interface CompanionReplyStatus {
   threshold: number;
   /** The headline: this companion is enabled and currently in an un-cleared zero-reply streak that has crossed the threshold. */
   alerting: boolean;
+  /**
+   * card 1b0df437 (Code Review round 2, item 1), reworded by card ddf08614: this companion is enabled and
+   * has a proactive HOME set that `ChatGateway.deliveryBlockReason` would refuse — not merely "no binding
+   * row exists" (a `dm`-scope binding flagged non-private, or a negative/non-numeric Telegram id with no
+   * matching `group`-scope binding, both HAVE a binding row and are still refused) — so every heartbeat/
+   * reminder/attention-push to it is refused at the outbound chokepoint (ChatGateway.mayDeliverTo),
+   * silently, by design (the chat itself never hears about its own suppression). This field means EXACTLY
+   * "delivery to the home would be refused right now" — never approximate it with a weaker row-exists
+   * check. LIVE-derived (not latched off the `companion_unbound_route_refused` durable event) so it clears
+   * the instant the home is fixed/rebound, and flags the problem BEFORE a turn is ever wasted on it —
+   * unlike `alerting`, which only trips after real silent turns accrue. Deliberately a SEPARATE field from
+   * `alerting`, never folded into the same banner: the two causes need different owner actions ("fix the
+   * home" vs. "check the Terminal tab"), and conflating them would misdirect a human toward the wrong one
+   * (see deliverReply's own comment on why `onReplyDelivered` still resets the zero-reply streak for this
+   * cause).
+   */
+  homeRouteRefused: boolean;
 }
 
 /** Auth scheme a stored Connection uses. `oauth2` added in agent-tooling P5a (authorization-code + PKCE). */

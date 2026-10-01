@@ -43,9 +43,9 @@ import type { CompanionControl } from "../companion/controller.js";
 import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
-import { isNonNumericTelegramChatId, InvalidTelegramChatIdError } from "../companion/types.js";
+import { isNonNumericTelegramChatId, isLikelyGroupTelegramChatId, InvalidTelegramChatIdError } from "../companion/types.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
-import { reconcileCompanionBindingRoutes, hasLiveCompanionBinding } from "../companion/reconcile.js";
+import { reconcileCompanionBindingRoutes, companionRouteBlockReason } from "../companion/reconcile.js";
 import { buildCompanionReplyStatus, checkCompanionReplyHealth } from "../companion/reply-watch.js";
 import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, GIT_PUSH_TARGETS, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
@@ -1514,22 +1514,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // duplicate only the numeric-shape half of this and skip the live-binding half entirely, so it could
   // write a home the very next reconcile would immediately clear. One function means the two writers can
   // never again diverge the way the outbound shape check already did once (see the H1/H2 test fix above).
+  //
+  // card ddf08614: now routes through the SAME `companionRouteBlockReason` predicate `deliveryBlockReason`
+  // does, scoped to THIS session's own bindings — refuse setting a home that delivery would always refuse
+  // (a flagged-non-private binding, or a group-shaped id with no group binding), not just a shape/row-
+  // exists check that could pass while every real delivery to it still fails silently.
   const validateHomeTarget = (channel: string, chatId: string, sessionId: string): string | null => {
-    // card 1b0df437: mirror ChatGateway.deliveryBlockReason's own group-scope exemption BEFORE the
-    // numeric-only check below — an explicit LIVE group binding on this exact route legitimately owns a
-    // @handle/negative id (docs/decisions/94754bbe-refuse-non-numeric-telegram-dm-chatid.md's "Fix round
-    // 2"), so don't reject a home the outbound chokepoint would actually deliver to. A dm-scope (or
-    // unbound) route still gets the numeric-only check.
-    const groupBound = deps.db.getCompanionBindingsForSession(sessionId).some((b) => b.channel === channel && b.chatId === chatId && b.scope === "group");
-    // card 94754bbe: a numeric-only check, same posture as GUARD 6 below — the real guarantee is
-    // ChatGateway.mayDeliverTo; this is immediate setup-time feedback.
-    if (!groupBound && isNonNumericTelegramChatId(channel, chatId)) {
-      return `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(chatId)}) — Telegram private chat ids are always numbers`;
+    const route = { channel, chatId };
+    const binding = deps.db.getCompanionBindingsForSession(sessionId).find((b) => b.channel === channel && b.chatId === chatId);
+    const blockReason = companionRouteBlockReason(route, binding);
+    if (blockReason === "route-flagged-non-private") {
+      return `(channel=${channel}, chatId=${chatId}) on session ${sessionId.slice(0, 8)} is flagged non-private — delivery to it is refused; re-bind it with scope "group", or pick a different route`;
     }
-    // card d3f9b4d2 Minor 1: reject up front rather than writing a home the very next reconcile would
-    // immediately clear — the same live-binding predicate the outbound chokepoint (ChatGateway.mayDeliverTo)
-    // and every reconcile site share. in-app is exempt (it has no "unbound" state).
-    if (!hasLiveCompanionBinding(deps.db, sessionId, { channel, chatId })) {
+    if (blockReason === "route-unbound") {
+      if (isNonNumericTelegramChatId(channel, chatId) || isLikelyGroupTelegramChatId(channel, chatId)) {
+        // card 94754bbe: a numeric-only check, same posture as GUARD 6 below — the real guarantee is
+        // ChatGateway.mayDeliverTo; this is immediate setup-time feedback.
+        return `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(chatId)}) — Telegram private chat ids are always numbers`;
+      }
       // card d3f9b4d2 round 2, Finding 4: name the UI path a human actually uses, not the raw REST route —
       // a companion owner pairs a chat (DM pairing) or binds it under the Companion page's Access tab; they
       // never call POST /api/companion/bindings by hand.
@@ -1730,8 +1732,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   // @decision 8bda9fc6 — companion runtime status is a DEDICATED read, never folded into
   // `maskCompanionConfig` — a config row and a per-turn runtime counter have different lifetimes.
-  const replyStatusOf = (row: import("../db.js").CompanionConfigRow) =>
-    buildCompanionReplyStatus(row, deps.db.getSession(row.sessionId)?.turnSeq ?? 0);
+
+  // card 1b0df437 / ddf08614: `homeRouteRefused` is resolved HERE via the SAME `companionRouteBlockReason`
+  // predicate `deliveryBlockReason` runs, so it self-heals the instant the home is fixed rather than
+  // latching, and means exactly "delivery to the home would be refused" — not merely "no binding row".
+  const replyStatusOf = (row: import("../db.js").CompanionConfigRow) => {
+    const home = deps.db.getCompanionHome(row.sessionId);
+    const homeBinding = home ? deps.db.getCompanionBindingsForSession(row.sessionId).find((b) => b.channel === home.channel && b.chatId === home.chatId) : undefined;
+    const homeRouteRefused = !!home && companionRouteBlockReason(home, homeBinding) !== undefined;
+    return buildCompanionReplyStatus(row, deps.db.getSession(row.sessionId)?.turnSeq ?? 0, undefined, homeRouteRefused);
+  };
   app.get("/api/companion/status", async () => deps.db.listCompanionConfigs().map(replyStatusOf));
   app.get("/api/companion/status/:sessionId", async (req, reply) => {
     const sessionId = (req.params as { sessionId: string }).sessionId;
@@ -1920,15 +1930,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         });
       }
     }
-    // home: optional { channel, chatId } proactive target.
+    // home: optional { channel, chatId } proactive target. card ddf08614: validated via the SAME
+    // `companionRouteBlockReason` predicate `validateHomeTarget`/`deliveryBlockReason` use — "the config
+    // route's home field and provision's home path get the same treatment" (so a home this provision call
+    // would itself bind-then-immediately-reconcile-clear is rejected up front instead). Computable entirely
+    // PRE-SPAWN (no wasted spawn+rollback, same posture as GUARD 6 above): the only two bindings THIS call
+    // can ever write are the always-written in-app route (below, keyed on the not-yet-minted sessionId — a
+    // home can never pre-target it) and the Telegram dm route this provision writes when a token + chat are
+    // given (`channel`/`allowedChatId`, both already resolved above) — a home matching that route resolves
+    // against exactly the binding `db.upsertCompanionBinding` would compute for it.
     let home: CompanionRoute | null = null;
     if (b.home !== undefined && b.home !== null) {
       const h = b.home as { channel?: unknown; chatId?: unknown };
       if (!isNonBlankStr(h.channel) || !isNonBlankStr(h.chatId)) return reply.code(400).send({ error: "home must be { channel, chatId } non-empty strings" });
       const homeChannel = h.channel.trim();
       const homeChatId = h.chatId.trim();
-      // card 94754bbe: same numeric-only guard as GUARD 6 above — a home target gets the same pre-spawn check.
-      if (isNonNumericTelegramChatId(homeChannel, homeChatId)) {
+      const plannedTelegramBinding = botToken && allowedChatId && homeChannel === channel && homeChatId === allowedChatId
+        ? { scope: "dm" as const, flaggedNonPrivate: isLikelyGroupTelegramChatId(channel, allowedChatId) }
+        : undefined;
+      const blockReason = companionRouteBlockReason({ channel: homeChannel, chatId: homeChatId }, plannedTelegramBinding);
+      if (blockReason === "route-flagged-non-private") {
+        return reply.code(400).send({ error: `home (channel=${homeChannel}, chatId=${homeChatId}) would be flagged non-private — delivery to it is refused; give it its own, confirmed-private route` });
+      }
+      if (blockReason === "route-unbound") {
+        // card 94754bbe: same numeric-only guard as GUARD 6 above — a home target gets the same pre-spawn check.
         return reply.code(400).send({ error: `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(homeChatId)}) — Telegram private chat ids are always numbers` });
       }
       home = { channel: homeChannel, chatId: homeChatId };
@@ -3137,6 +3162,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // `db.recordChatReplyDelivered`, the exact call chat-gateway.ts makes on a successful deliverReply.
         // Lets an e2e prove the alert CLEARS (a one-way latch would pass the "it appears" spec and fail this).
         companionReplyDelivered?: string[];
+        // card 1b0df437: a DIRECT `db.setCompanionHome` write, bypassing `validateHomeTarget` (the REST
+        // `PUT /api/companion/home` route refuses a home with no live binding) — the ONLY way an e2e spec
+        // can reach the "home set, no live binding backing it" state this card's banner surfaces, since
+        // every PRODUCTION write path either validates liveness up front or reconciles it away on the next
+        // binding mutation. Mirrors `companionConfigs`'s own posture (a direct db write for e2e-only state
+        // unreachable through the validated REST surface).
+        companionHomes?: { sessionId: string; channel: string; chatId: string }[];
         companionMemories?: { sessionId: string; name: string; content: string }[];
         companionReminders?: { sessionId: string; cron?: string; prompt?: string; label?: string | null; enabled?: boolean }[];
         // Companion chat MESSAGES + conversation boundaries (conversation-history browser e2e, card 59e8e0c9).
@@ -3316,6 +3348,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       for (const sid of b.companionReplyDelivered ?? []) {
         if (typeof sid !== "string") return reply.code(400).send({ error: "companionReplyDelivered[] must be session id strings" });
         deps.db.recordChatReplyDelivered(sid);
+      }
+      for (const h of b.companionHomes ?? []) {
+        if (typeof h.sessionId !== "string" || typeof h.channel !== "string" || typeof h.chatId !== "string") {
+          return reply.code(400).send({ error: "companionHomes[].sessionId, channel, and chatId are required strings" });
+        }
+        deps.db.setCompanionHome(h.sessionId, { channel: h.channel, chatId: h.chatId });
       }
       // Companion memory: authored straight into the companion's OWN MEMORY.md file store (there is no
       // DB table — companion-memory-store.ts is filesystem-backed), the same writer the companion's own

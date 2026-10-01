@@ -295,6 +295,14 @@ export interface LoomDaemon {
    * prove the alert CLEARS rather than latching on (card 8bda9fc6).
    */
   seedCompanionReplyDelivered: (sessionId: string) => Promise<void>;
+  /**
+   * card 1b0df437: a DIRECT `db.setCompanionHome` write via the test-only POST /internal/test/seed,
+   * bypassing `validateHomeTarget` (the REST `PUT /api/companion/home` route refuses a home with no live
+   * binding, and every production write path either validates liveness up front or reconciles it away on
+   * the next binding mutation) — the ONLY way an e2e spec can reach the "home set, no live binding backing
+   * it" state the home-route-refused banner surfaces.
+   */
+  seedCompanionHome: (sessionId: string, home: { channel: string; chatId: string }) => Promise<void>;
   seedCompanionConversations: (
     sessionId: string,
     conversations: { author: "user" | "companion"; text: string; viaVoice?: boolean; channel?: string }[][],
@@ -676,6 +684,10 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       await apiPost(baseURL, "/internal/test/seed", { companionTurns: [{ sessionId, turns }] });
     };
 
+    const seedCompanionHome: LoomDaemon["seedCompanionHome"] = async (sessionId, home) => {
+      await apiPost(baseURL, "/internal/test/seed", { companionHomes: [{ sessionId, ...home }] });
+    };
+
     const seedCompanionReplyDelivered: LoomDaemon["seedCompanionReplyDelivered"] = async (sessionId) => {
       await apiPost(baseURL, "/internal/test/seed", { companionReplyDelivered: [sessionId] });
     };
@@ -817,7 +829,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionConversations, seedLiveSession, respawnSeededPty, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
+    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionHome, seedCompanionConversations, seedLiveSession, respawnSeededPty, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.
