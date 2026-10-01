@@ -114,8 +114,12 @@ function spawnLiveSession(id, projectId, role) {
 }
 
 try {
+  // vaultPath "" (card 57c2a487): aliasing it onto repoPath is refused on every repos/repoPath/vaultPath
+  // PATCH by checkVaultRepoTripleContainment (card 5ba4412d) unless vaultOnly is true, which this project
+  // isn't — this test doesn't exercise the vault at all, so an unbound vaultPath sidesteps the check
+  // entirely (checkVaultRepoTripleContainment returns ok on a falsy vaultPath) instead of aliasing it.
   const proj = db.insertProject({
-    id: "pA", name: "Alpha Project", repoPath: primary, vaultPath: primary, config: {}, createdAt: now,
+    id: "pA", name: "Alpha Project", repoPath: primary, vaultPath: "", config: {}, createdAt: now,
     archivedAt: null, reserved: false, repos: [],
   });
   const MGR = "mgr-1";
@@ -229,8 +233,9 @@ try {
   // write already succeeded and is not allowed to be undone or reported as an error by a best-effort nudge.
   // =====================================================================================================
   {
+    // vaultPath "" (card 57c2a487): same reasoning as pA above.
     const proj2 = db.insertProject({
-      id: "pB", name: "Beta Project", repoPath: primary2, vaultPath: primary2, config: {}, createdAt: now,
+      id: "pB", name: "Beta Project", repoPath: primary2, vaultPath: "", config: {}, createdAt: now,
       archivedAt: null, reserved: false, repos: [],
     });
     const THROWY = "mgr-throwy";
