@@ -366,9 +366,17 @@ try {
     let confirm2Settled = false;
     const p2 = sessions.confirmWorkerMerge(N2.mgrId, N2.workerId).then((r) => { confirm2Settled = true; return r; });
 
+    // Card ddce5734: same real-git-before-admission exposure as (O) above (findLandedSquashCommit,
+    // mergeMainIntoWorktree's rev-parse/merge-base/merge, computeEmitCompareGate's diff-based reads) — N2 is
+    // not preLanded, so it takes the identical cap-queue-admission shape (O)'s header already documents. A
+    // baseline timing run of this exact scenario, on an otherwise-idle host, already spent ~4.4s of the
+    // prior 10s budget on this same pre-queue work with zero injected load — consistent with (O)'s own
+    // ~4.1s baseline. 20s keeps this a genuine, bounded condition-wait (a real hang still fails well short
+    // of the per-file timeout) while giving real git subprocess scheduling delay room that production's own
+    // GIT_OP_TIMEOUT_MS (15_000ms) already tolerates for any ONE of these calls.
     const queued = await pollUntil(
       () => sessions.gateSemaphore.snapshot().entries.some((e) => e.phase === "queued" && e.projectId === N2.projId),
-      { timeoutMs: 10000 },
+      { timeoutMs: 20000 },
     );
     check("(N) N2 genuinely reached the semaphore's CAP-queue wait before N1 released", queued);
 
