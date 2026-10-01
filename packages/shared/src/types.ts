@@ -967,6 +967,10 @@ export type OrchestrationEventKind =
   // (unlinkAndArchiveDeadRecycleSuccessor), not genuinely broken; resume()'s chokepoint refuses an
   // automatic caller only when this + resumability:"dead"+archivedAt all agree. `workerSessionId` = retired successor.
   | "recycle_successor_retired"
+  // @decision 4ee527d1 — the durable marker that a WORKER was deliberately, permanently retired (never a
+  // crash); `retireWorkerSession` (sessions/service.ts) is the ONE place this is appended, and resume()'s
+  // chokepoint refuses an automatic caller on it, mirroring `recycle_successor_retired` exactly.
+  | "worker_retired"
   // Card dc13bcf1 — a MERGED worker's conversation was forked onto a fresh worktree/branch bound to a
   // follow-up card (`worker_revive`). `workerSessionId` = the NEW (revived) session; detail =
   // {fromSessionId, toSessionId, taskId, commitSha}. Deliberately NOT a recycle_* kind: resume()'s
@@ -1669,6 +1673,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true,
   codex_auto_commit: true,
   credential_revoked: true,
+  worker_retired: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

@@ -3605,6 +3605,12 @@ export class SessionService {
     if (!opts.allowSuperseded && this.db.hasWorkerEventKind(session.id, "recycle_successor_retired")) {
       throw new Error("session was administratively retired (its recycle successor was superseded by the predecessor) — only a manual (human) resume may force it");
     }
+    // @decision 4ee527d1 — mirrors recycle_successor_retired above, for a worker deliberately retired via
+    // retireWorkerSession (worker_stop/killAllWorkers/auto-retire/merge-confirm/sibling-sweep): never
+    // auto-resumed by its own due wake or any other automatic caller.
+    if (!opts.allowSuperseded && this.db.hasWorkerEventKind(session.id, "worker_retired")) {
+      throw new Error("session was administratively retired (worker_stop/killAllWorkers/auto-retire/merge-confirm/sibling-sweep) — only a manual (human) resume may force it");
+    }
     const project = this.db.getProject(session.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
@@ -7880,6 +7886,27 @@ export class SessionService {
     }
   }
 
+  /**
+   * ONE chokepoint for every DELIBERATE, permanent worker retirement: cancels the worker's own pending
+   * `wake_me` wakes and files the durable `worker_retired` marker `resume()` refuses an automatic caller
+   * on. Called from `stopWorker`, `killAllWorkers`, the noChanges/noCommit auto-retire branch of
+   * `workerReport`, `confirmWorkerMerge`'s/`finishAlreadyMerged`'s hard-stop, and
+   * `retireSiblingSessionsForTask`'s zombie-sibling sweep.
+   *
+   * @decision 4ee527d1 — never call this from `archiveOnExit` (fires on every exit, crash included; a
+   *  crashed worker's wake is its correct recovery path) or from `recycleWorker`'s SUCCESS path (its
+   *  wakes are REPARENTED onto the live successor via `reparentWakes`, never cancelled).
+   */
+  private retireWorkerSession(workerSessionId: string, reason: string): void {
+    const worker = this.db.getSession(workerSessionId);
+    const cancelledWakes = this.db.cancelWakesForSession(workerSessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: worker?.parentSessionId ?? "", workerSessionId, taskId: worker?.taskId ?? null,
+      kind: "worker_retired", detail: { reason, cancelledWakes },
+    });
+  }
+
   /** Stop one of a manager's workers (parent-scoped). Worktree is RETAINED (merge/recycle own it).
    *  Returns whether a live pty actually existed to stop — NEVER `{stopped:true}` unconditionally.
    *  `pty.stop()` silently no-ops when there's no in-memory Live entry for this session (a phantom
@@ -7905,6 +7932,7 @@ export class SessionService {
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "stop_worker",
     });
+    this.retireWorkerSession(workerSessionId, "worker_stop");
     this.sweepWorktreeStrays(worker);
     return wasAlive ? { stopped: true } : { stopped: false, reason: "no live pty for this session" };
   }
@@ -7917,7 +7945,7 @@ export class SessionService {
    */
   killAllWorkers(): number {
     const live = this.db.listAllSessions().filter((s) => s.role === "worker" && s.processState === "live");
-    for (const w of live) { this.pty.stop(w.id, "hard"); this.sweepWorktreeStrays(w); }
+    for (const w of live) { this.pty.stop(w.id, "hard"); this.retireWorkerSession(w.id, "kill_all_workers"); this.sweepWorktreeStrays(w); }
     this.control.pause("global");
     return live.length;
   }
@@ -10928,6 +10956,7 @@ export class SessionService {
           managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "stop_worker",
           detail: { reason: "no-commit-auto-retire", trigger: autoRetireTrigger },
         });
+        this.retireWorkerSession(workerSessionId, `auto_retire:${autoRetireTrigger}`);
         // @decision ce7d99bb — a BOUNDED wait for the worker's turn to end NATURALLY, never a flat
         // setTimeout — a flat timer routinely Ctrl-C'd an in-flight generation, skipped the Stop hook
         // (ctx metrics stayed null), and stamped a false "[Request interrupted by user]" line.
@@ -16079,6 +16108,7 @@ export class SessionService {
     // removing the worktree (recycleWorker does the same before reusing one). A no-pty worker row
     // (e.g. merge-gate's seed) is already !isAlive, so this is a no-op there.
     this.pty.stop(workerSessionId, "hard");
+    this.retireWorkerSession(workerSessionId, "merge_confirm");
     for (let i = 0; i < this.finalizeWorkerDeathPolls && this.pty.isAlive(workerSessionId); i++) {
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -16493,6 +16523,7 @@ export class SessionService {
     // drains stale, describing a merge this call is about to settle synchronously.
     try { this.pty.purgeQueuedWorkerIdleNudges(args.managerSessionId, args.workerSessionId); } catch { /* manager not live */ }
     this.pty.stop(args.workerSessionId, "hard");
+    this.retireWorkerSession(args.workerSessionId, "merge_confirm");
     for (let i = 0; i < this.finalizeWorkerDeathPolls && this.pty.isAlive(args.workerSessionId); i++) {
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -19165,6 +19196,7 @@ export class SessionService {
       this.pty.stop(sib.id, "graceful");
       this.db.setProcessState(sib.id, "exited");
       this.db.setBusy(sib.id, false);
+      this.retireWorkerSession(sib.id, "sibling_sweep");
       // Task 69a128b0: same stale-nudge purge as the primary recycled worker above — a retired sibling
       // never re-engages either, so any `[loom:worker-idle]` nudge already queued for it must not survive
       // to drain naming a now-dead session. A sibling can belong to a DIFFERENT manager (board-wide lookup

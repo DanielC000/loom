@@ -7425,13 +7425,16 @@ export class Db {
   deleteWake(id: string): void {
     this.db.prepare("DELETE FROM wakes WHERE id = ?").run(id);
   }
-  /** @decision 08320d02 — bulk-cancel every pending wake for a session, for the ONE case where a session
-   *  is being permanently retired with no live successor to `reparentWakes` onto (a `recycleWorker`
-   *  pre-spawn failure:
+  /** Bulk-cancel every pending wake for a session being permanently retired with no live successor to
+   *  `reparentWakes` onto. Two callers: `recycleWorker`'s pre-spawn-failure catch (the predecessor was
+   *  hard-killed before the spawn attempt, and its failed successor's `recycled_from` link is unlinked in
+   *  the same catch, so a due wake would otherwise auto-`resume()` the exact worker the manager just tried
+   *  to retire — see its own call site), and `retireWorkerSession` (every OTHER deliberate
+   *  worker-retirement site). Returns the count deleted.
    *
-   *  the predecessor was hard-killed before the spawn attempt, and its failed successor's
-   *  `recycled_from` link is unlinked in the same catch — so a due wake would otherwise auto-`resume()`
-   *  the exact worker the manager just tried to retire). Returns the count deleted. */
+   *  @decision 08320d02 — the recycleWorker pre-spawn-failure caller's own reasoning, above.
+   *
+   *  @decision 4ee527d1 — the retireWorkerSession caller's own reasoning, above. */
   cancelWakesForSession(sessionId: string): number {
     return this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sessionId).changes;
   }
