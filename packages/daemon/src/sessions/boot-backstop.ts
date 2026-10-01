@@ -2,6 +2,7 @@ import type { Db } from "../db.js";
 import type { Session } from "@loom/shared";
 import { snapshotTranscript } from "./transcript.js";
 import { reconcileStrandedRecycleSettlesEarly, type RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
+import { reconcileHaltedRecycleSuccessorsEarly, type HaltedRecycleEarlyResult } from "./halted-recycle-reconcile.js";
 import { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 
 /**
@@ -26,6 +27,7 @@ export function snapshotAndArchiveRecovered(db: Db, recovered: Session[]): void 
 
 export interface BootRecoveryPrefixResult {
   early: RecycleSettleEarlyResult;
+  haltedEarly: HaltedRecycleEarlyResult;
   recovered: Session[];
   crashOrphanedWorkers: CrashOrphanedWorker[];
   crashOrphanedManagers: string[];
@@ -44,13 +46,18 @@ export interface BootRecoveryPrefixResult {
  * after both derivations have already read the un-archived rows. Deliberately narrower than index.ts's
  * FULL pre-PtyHost boot sequence — `sweepDeadSessions`/`watchClaudeProjects`/`watchCodexSessions` (dead-
  * transcript detection, unrelated to recycle-settle) are NOT part of this shared prefix and the test never
- * replicated them either; only the four calls actually load-bearing for THIS card's ordering live here.
+ * replicated them either; only the calls actually load-bearing for recycle-settle/halt ordering live here
+ * — read the function body for the current list rather than trusting a count restated here.
+ * @decision f1969787 — `reconcileHaltedRecycleSuccessorsEarly` joins this prefix under the IDENTICAL
+ * ordering constraint as `reconcileStrandedRecycleSettlesEarly`; see its own doc for why.
  */
 export function runBootRecoveryPrefix(db: Db): BootRecoveryPrefixResult {
   const early = reconcileStrandedRecycleSettlesEarly(db);
+  // @decision f1969787 — same ordering constraint as `early` above, same reason; see that function's doc.
+  const haltedEarly = reconcileHaltedRecycleSuccessorsEarly(db);
   const recovered = db.recoverStaleSessions();
   const crashOrphanedWorkers = deriveCrashOrphanedWorkers(db, recovered);
   const crashOrphanedManagers = deriveCrashOrphanedManagers(db, recovered, crashOrphanedWorkers);
   snapshotAndArchiveRecovered(db, recovered);
-  return { early, recovered, crashOrphanedWorkers, crashOrphanedManagers };
+  return { early, haltedEarly, recovered, crashOrphanedWorkers, crashOrphanedManagers };
 }

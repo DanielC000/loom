@@ -966,6 +966,17 @@ export type OrchestrationEventKind =
   // (unlinkAndArchiveDeadRecycleSuccessor), not genuinely broken; resume()'s chokepoint refuses an
   // automatic caller only when this + resumability:"dead"+archivedAt all agree. `workerSessionId` = retired successor.
   | "recycle_successor_retired"
+  // Card f1969787 — a manager recycle's OWNERSHIP-TRANSFER steps (reparenting live workers/wakes/
+  // questions/event-trigger+poll+webhook targets/pending-owner-message/cap-queue, plus the pending-queue
+  // carry) are retried once; this fires only when at least one is STILL failing after that retry. Unlike
+  // every other recycle_* kind, the predecessor is deliberately NOT retired when this fires — stopping it
+  // would strand whatever didn't transfer under a now-dead owner, which is the exact defect this card
+  // fixes (see `recycleManager`'s own doc). `managerSessionId` = the successor (mirrors `recycle_complete`'s
+  // filing identity — both managers stay live and queryable). `detail` carries { recycledFrom, gen,
+  // failedSteps: string[], strandedWorkerIds, strandedQuestionIds, strandedWakeIds, failedMessageRefs }.
+  // Deliberately NOT added to EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/REPORT_RESOLVED_EVENT_KINDS —
+  // mirrors `recycle_fleet_unresolved`'s posture; no wake-mode trigger should fire off this.
+  | "recycle_ownership_transfer_failed"
   // @decision 4ee527d1 — the durable, EPOCH-scoped marker (not permanent, unlike recycle_successor_retired
   // above) that a WORKER was deliberately retired; resume()'s chokepoint `Db.isWorkerRetirementActive`
   // epoch-compares this against `worker_retirement_lifted` below. See that record for the mechanism.
@@ -1644,7 +1655,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   spawn_worker: true, message_worker: true, worker_report: true, stop_worker: true,
   redirect_worker: true, recycle_begin: true, recycle_complete: true, recycle_failed: true,
   recycle_fleet_recovered: true, recycle_fleet_unresolved: true, recycle_fleet_resolved: true,
-  recycle_fleet_stranded_across_restart: true, recycle_successor_retired: true, worker_revived: true, merge_request: true,
+  recycle_fleet_stranded_across_restart: true, recycle_successor_retired: true, recycle_ownership_transfer_failed: true, worker_revived: true, merge_request: true,
   merge_done: true, merge_rejected: true, merge_cancelled: true, build_gate: true,
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
   build_gate_single_file_retry: true, build_gate_single_file_retry_attempt: true, schedule_fire_failed: true, schedule_fire_deferred: true,

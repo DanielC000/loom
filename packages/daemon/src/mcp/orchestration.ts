@@ -5219,7 +5219,11 @@ export class OrchestrationMcpRouter {
           "(log progress to the vault) and take stock, THEN call this with a self-contained continuationPrompt " +
           "for your successor — current goal, what's done, your in-flight workers and their tasks/status, the " +
           "next steps, and key decisions. Loom boots a fresh manager seeded with this agent's warm-up + your " +
-          "continuationPrompt, re-parents your live workers onto it, and then closes you. `continuationPrompt` " +
+          "continuationPrompt, re-parents your live workers onto it, and then closes you — UNLESS the " +
+          "ownership handoff (workers/wakes/questions/event-triggers/poll-jobs/webhooks/pending-queue) is " +
+          "STILL failing after one retry, in which case you are NOT closed and remain fully live: the " +
+          "result carries `halted:true` + `failedSteps` naming exactly what didn't transfer, and both of " +
+          "you are durably nudged with who owns what now. `continuationPrompt` " +
           "is the canonical param; `handoffSummary` (the sibling worker_recycle tool's name for the same " +
           "concept) is accepted as an ALIAS — pass either one (if both are given, continuationPrompt wins).",
         inputSchema: strictShape({ continuationPrompt: z.string().optional(), handoffSummary: z.string().optional() }),
@@ -5231,6 +5235,12 @@ export class OrchestrationMcpRouter {
         if (!prompt) return ok({ error: "continuationPrompt (or handoffSummary) is required" });
         try {
           const fresh = await sessions.recycleManager(managerSessionId, prompt);
+          // @decision f1969787 — a halt leaves `fresh` live but NOT retiring the caller; surface it via the
+          // durable recycle_ownership_transfer_failed event rather than silently reporting success.
+          const haltEvent = db.listEventsForSession(fresh.id).find((e) => e.kind === "recycle_ownership_transfer_failed");
+          if (haltEvent) {
+            return ok({ newManagerSessionId: fresh.id, gen: fresh.gen, halted: true, failedSteps: haltEvent.detail?.failedSteps ?? [] });
+          }
           return ok({ newManagerSessionId: fresh.id, gen: fresh.gen });
         } catch (e) {
           return ok({ error: (e as Error).message });

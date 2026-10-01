@@ -306,7 +306,7 @@ async function main(): Promise<void> {
   // never silently drift apart on ordering again — see that function's own doc for the full reasoning.
   // The LATER half (sessions.finishReconcilingRecycleSettles) runs further below, once SessionService/
   // PtyHost exist, consuming `recycleSettleEarly`.
-  const { early: recycleSettleEarly, recovered, crashOrphanedWorkers, crashOrphanedManagers } = runBootRecoveryPrefix(db);
+  const { early: recycleSettleEarly, haltedEarly: haltedRecycleSettleEarly, recovered, crashOrphanedWorkers, crashOrphanedManagers } = runBootRecoveryPrefix(db);
   if (recovered.length > 0) console.log(`[boot] reconciled ${recovered.length} stale session(s) -> exited`);
   const dead = sweepDeadSessions(db);
   if (dead > 0) console.log(`[boot] marked ${dead} session(s) dead (engine transcript gone)`);
@@ -1466,6 +1466,13 @@ async function main(): Promise<void> {
         `${strandedPredecessors.length} lineage(s) left with no automatic owner (check [loom:orphaned-fleet] banners)`,
       );
     }
+  }
+  // @decision f1969787 — same ordering requirement as the recycle-settle reconcile just above: a halted
+  // recycle's unresumable successor must be archived (and its retirement recorded) BEFORE the resume paths
+  // below compute their candidate sets, or they'd attempt to resume an archived row for nothing.
+  {
+    const { recovered } = sessions.finishReconcilingHaltedRecycleSuccessors(haltedRecycleSettleEarly);
+    if (recovered.length) console.log(`[boot] halted-recycle reconcile: ${recovered.length} predecessor(s) recovered their unresumable successor's fleet`);
   }
 
   // Self-host restart recovery (consume the intent read above): a manager deliberately restarted the

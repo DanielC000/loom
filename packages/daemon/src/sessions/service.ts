@@ -34,6 +34,7 @@ import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOn
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import type { RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
+import type { HaltedRecycleEarlyResult } from "./halted-recycle-reconcile.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile, readContextStats } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
@@ -6078,8 +6079,17 @@ export class SessionService {
     const sender = typeof e.detail?.sender === "string" ? e.detail.sender : e.managerSessionId;
 
     const recipient = this.db.getSession(recipientId);
-    if (!recipient || this.db.hasSuccessor(recipientId) || recipient.archivedAt) {
-      // Gone / recycled-forward / archived → retire so it never re-scans forever.
+    if (!recipient || recipient.archivedAt) {
+      // Gone / archived → retire so it never re-scans forever.
+      this.resolveQueuedMessage(msgId, { recipientId, reason: "recipient-gone-or-superseded", sender });
+      return "retired";
+    }
+    // @decision f1969787 — scoped to role:"manager" ONLY: its ownership-transfer halt path keeps a
+    // predecessor genuinely LIVE on purpose despite having a successor, so a live manager must still be
+    // redriven directly; worker/platform recycle never reaches live+hasSuccessor, so stay unchanged.
+    if (recipient.role === "manager" ? recipient.processState !== "live" && this.db.hasSuccessor(recipientId) : this.db.hasSuccessor(recipientId)) {
+      // Gone (non-manager) / not-live-and-recycled-forward (manager) → the successor owns it now; retire
+      // so it never re-scans forever.
       this.resolveQueuedMessage(msgId, { recipientId, reason: "recipient-gone-or-superseded", sender });
       return "retired";
     }
@@ -9084,20 +9094,26 @@ export class SessionService {
    *    reclassified, so the human-only queue mutators could no longer touch it. We carry m.source.
    *  - KIND — a held 'agent'-kind entry re-enqueued at the default 'warning' kind would start coalescing
    *    with unrelated operational nudges instead of draining one-per-turn. We carry m.kind.
-   *  - CRASH-SURVIVAL — a durable message's record still names the OLD recipient; on the next boot the
-   *    recovery scan RETIRES it as superseded (the predecessor hasSuccessor), so a bare carry that drops
-   *    the durable channel loses the message if the daemon restarts before the successor drains it.
+   *  - CRASH-SURVIVAL — a durable message's record still names the OLD recipient; once a recycle genuinely
+   *    retires it, the next boot's recovery scan retires the record too (the predecessor hasSuccessor AND
+   *    is no longer live — see `redriveQueuedMessage`'s own doc for why BOTH now matter, card f1969787),
+   *    so a bare carry that drops the durable channel loses the message if the daemon restarts before the
+   *    successor drains it.
    *
    * @decision f25bf3bf — a still-held `giveUpHeldUntil` entry is DELIVERED here immediately, never carried
    * forward — the OPPOSITE of the resume-path conclusion for the SAME card: a recycle successor is FRESH
    * (no `--resume`), so there's no shared transcript to confuse and its `giveUpConfirmQueue` starts empty.
    *
-   * So, exactly like `redirectWorker`: SUPERSEDE each carried durable record (fire its onDeliver with
-   * "superseded" — resolves the old record so the boot scan + done-guard never re-drive it), then re-MINT
-   * it onto the successor via `enqueueDurableMessage` (a NEW record naming the successor as recipient,
-   * carrying the ORIGINAL sender/taskId so an undelivered re-mint still surfaces to its sender on boot).
-   * Non-durable entries (idle/resume nudges, raw human turns) carry across with their source AND their
-   * warning/agent classification preserved.
+   * So, exactly like `redirectWorker`: re-MINT each durable record onto the successor via
+   * `enqueueDurableMessage` FIRST (a NEW record naming the successor as recipient, carrying the ORIGINAL
+   * sender/taskId so an undelivered re-mint still surfaces to its sender on boot) — only once that mint
+   * actually succeeds do we SUPERSEDE the old record (`resolveQueuedMessage(..., "superseded")`), so the
+   * boot scan + done-guard never re-drive it. Non-durable entries (idle/resume nudges, raw human turns)
+   * carry across with their source AND their warning/agent classification preserved.
+   *
+   * @decision f1969787 — never resolve the old durable record "superseded" before its replacement mint
+   * onto the successor actually succeeds; a failed mint must re-arm the old record on `oldId` instead of
+   * silently dropping it.
    *
    * @decision f907c8c4 — a re-minted record whose text is a peer_message frame (`PEER_MESSAGE_FRAME_RE`)
    * gets an inheritance label prepended before re-mint, scoped to peer frames only; the underlying frame
@@ -9108,32 +9124,44 @@ export class SessionService {
    */
   private carryPendingToSuccessor(
     oldId: string, successorId: string, flushed: QueuedMessage[], durableRecords: OrchestrationEvent[],
-  ): void {
+  ): { failedRefs: string[] } {
+    const failedRefs: string[] = [];
     for (const m of flushed) {
-      if (m.onDeliver) {
-        // Durable entry — its record is re-minted from `durableRecords` below; resolve the OLD record now.
-        try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the recycle */ }
-      } else {
-        // Non-durable (nudge / raw human turn): carry the text, source, AND kind so a 'human'/'agent' entry
-        // stays classified exactly as it was (a warning nudge doesn't become one-per-turn, an agent message
-        // doesn't start coalescing). DELIVER, never hold — deliberately omit `m.giveUpHeldUntil` even when
-        // set: see this method's own doc above for why a fresh, non-resumed successor gets none of the
-        // benefit a hold would provide on a restarted/resumed SAME conversation, only the needless delay.
-        //
-        // @decision 1c47454b — carry `m.mintedAtWallClock`, never `m.mintedAtGen`: a recycle successor's
-        // `submitGeneration` restarts at 0, so a carried predecessor generation count would compare against
-        // an unrelated counter and silently disclose nothing to `annotatePasteRecoveryAge`.
-        // @decision e01687ea — code-review follow-up: also carry `m.senderId`, previously dropped here so a
-        // recycle-carried directive could never coalesce with a fresh same-sender arrival on the successor.
-        // No re-mapping needed — `enqueueStdin` already null-maps it at original enqueue time.
-        // @decision 4d9f7471 — also carry `m.questionId`: the only carry site that omitted it, leaving a
-        // still-queued answered-question nudge unmatched by `purgeAnsweredQuestionNudges`/
-        // `purgeQueuedByQuestionIds` on the successor after a recycle.
+      // Durable entry — resolved below, driven entirely by `durableRecords`; see this method's own
+      // @decision f1969787 doc for why its `onDeliver` closure is deliberately never invoked here.
+      if (m.onDeliver) continue;
+      // Non-durable (nudge / raw human turn): carry the text, source, AND kind so a 'human'/'agent' entry
+      // stays classified exactly as it was (a warning nudge doesn't become one-per-turn, an agent message
+      // doesn't start coalescing). DELIVER, never hold — deliberately omit `m.giveUpHeldUntil` even when
+      // set: see this method's own doc above for why a fresh, non-resumed successor gets none of the
+      // benefit a hold would provide on a restarted/resumed SAME conversation, only the needless delay.
+      //
+      // @decision 1c47454b — carry `m.mintedAtWallClock`, never `m.mintedAtGen`: a recycle successor's
+      // `submitGeneration` restarts at 0, so a carried predecessor generation count would compare against
+      // an unrelated counter and silently disclose nothing to `annotatePasteRecoveryAge`.
+      // @decision e01687ea — code-review follow-up: also carry `m.senderId`, previously dropped here so a
+      // recycle-carried directive could never coalesce with a fresh same-sender arrival on the successor.
+      // No re-mapping needed — `enqueueStdin` already null-maps it at original enqueue time.
+      // @decision 4d9f7471 — also carry `m.questionId`: the only carry site that omitted it, leaving a
+      // still-queued answered-question nudge unmatched by `purgeAnsweredQuestionNudges`/
+      // `purgeQueuedByQuestionIds` on the successor after a recycle.
+      try {
         this.pty.enqueueStdin(successorId, m.text, m.source, undefined, undefined, m.kind, m.questionId, undefined, undefined, m.senderId, { mintedAtWallClock: m.mintedAtWallClock });
+      } catch (e) {
+        // @decision f1969787 — re-arm on `oldId` instead of just logging "this entry is lost": it has no
+        // durable record to otherwise fall back on, and a caller's "still yours to deliver" nudge is only
+        // true if something is actually re-enqueued there.
+        console.error(`[recycle] carrying a non-durable pending entry onto successor ${successorId.slice(0, 8)} failed — re-arming it on ${oldId.slice(0, 8)} instead:`, (e as Error).message);
+        try {
+          this.pty.enqueueStdin(oldId, m.text, m.source, undefined, undefined, m.kind, m.questionId, undefined, undefined, m.senderId, { mintedAtWallClock: m.mintedAtWallClock });
+        } catch (e2) {
+          console.error(`[recycle] re-arming the failed non-durable carry back onto ${oldId.slice(0, 8)} ALSO failed — this entry is now genuinely lost:`, (e2 as Error).message);
+        }
+        failedRefs.push(m.id);
       }
     }
-    // Re-mint each unresolved durable record onto the successor (recipient ← successor), so crash-survival
-    // follows the recycle chain instead of dead-ending at the retired predecessor.
+    // Re-mint each unresolved durable record onto the successor (recipient ← successor) BEFORE resolving
+    // its old copy — see this method's own @decision f1969787 doc above for why the order is load-bearing.
     for (const rec of durableRecords) {
       const text = typeof rec.detail?.text === "string" ? rec.detail.text : null;
       if (text === null) continue; // malformed — nothing to re-drive
@@ -9159,24 +9187,58 @@ export class SessionService {
       // attempts (`GIVE_UP_REMINT_LIMIT`), and a recycle is a lifecycle event, not a delivery failure: it
       // should preserve the remaining give-up budget, not consume a unit of it just for surviving a recycle.
       const chainDepth = typeof rec.detail?.chainDepth === "number" ? rec.detail.chainDepth : undefined;
-      const reminted = this.enqueueDurableMessage(successorId, carriedText, { sender, taskId: rec.taskId ?? null, reportEventId, kind, rootMsgId, chainDepth });
+      const oldMsgId = typeof rec.detail?.msgId === "string" ? rec.detail.msgId : undefined;
+      let reminted: (EnqueueResult & { msgId: string }) | undefined;
+      try {
+        reminted = this.enqueueDurableMessage(successorId, carriedText, { sender, taskId: rec.taskId ?? null, reportEventId, kind, rootMsgId, chainDepth });
+      } catch (e) {
+        console.error(`[recycle] re-minting a carried durable message (msgId=${oldMsgId ?? "unknown"}) onto successor ${successorId.slice(0, 8)} failed — leaving the OLD record on ${oldId.slice(0, 8)} unresolved and re-arming it there instead:`, (e as Error).message);
+        if (!oldMsgId) { failedRefs.push(`unknown-durable-record:${rec.id}`); continue; }
+        failedRefs.push(oldMsgId);
+        // Re-arm the SAME record's delivery directly on `oldId` — the mint failed, so the record must stay
+        // deliverable where it actually still lives, never left with nothing to drain it (see this method's
+        // own @decision f1969787 doc). Mirrors `enqueueDurableMessage`'s own wiring, just re-targeted at
+        // `oldId` with the SAME `oldMsgId` instead of minting a fresh one.
+        const routeDetail = rec.detail?.route as { channel?: unknown; chatId?: unknown } | undefined;
+        const route: CompanionRoute | undefined = routeDetail && typeof routeDetail.channel === "string" && typeof routeDetail.chatId === "string"
+          ? { channel: routeDetail.channel, chatId: routeDetail.chatId } : undefined;
+        const rootMsgIdForRearm = rootMsgId ?? oldMsgId;
+        const chainDepthForRearm = chainDepth ?? 0;
+        const kindForRearm: QueuedMessageKind = kind ?? "agent";
+        try {
+          this.pty.enqueueStdin(
+            oldId, text, "system",
+            (reason?: string) => this.resolveQueuedMessage(oldMsgId, { recipientId: oldId, reason, sender }),
+            route, kindForRearm, undefined, undefined, undefined, sender,
+            {
+              onGiveUpExhausted: () => this.handleGiveUpExhausted(oldId, text, oldMsgId, rootMsgIdForRearm, chainDepthForRearm, sender, rec.taskId ?? null, kindForRearm, reportEventId),
+              logicalId: rootMsgIdForRearm,
+              reportEventId,
+            },
+          );
+        } catch (e2) {
+          console.error(`[recycle] re-arming the failed carry (msgId=${oldMsgId}) back onto ${oldId.slice(0, 8)} ALSO failed — this record is now stuck unresolved with nothing driving its delivery:`, (e2 as Error).message);
+        }
+        continue;
+      }
       // Card af995d1d: LINK the old msgId to the new one (see this method's own doc above) so a sender
       // still holding the OLD msgId can resolve it forward instead of reading "pending" forever.
-      const oldMsgId = typeof rec.detail?.msgId === "string" ? rec.detail.msgId : undefined;
       if (oldMsgId) {
+        this.resolveQueuedMessage(oldMsgId, { recipientId: oldId, reason: "superseded", sender });
         this.db.appendEvent({
           id: randomUUID(), ts: new Date().toISOString(),
           managerSessionId: sender, workerSessionId: successorId, taskId: rec.taskId ?? null,
           kind: "session_message_gave_up",
           detail: {
             msgId: oldMsgId,
-            rootMsgId: typeof rec.detail?.rootMsgId === "string" ? rec.detail.rootMsgId : oldMsgId,
-            chainDepth: typeof rec.detail?.chainDepth === "number" ? rec.detail.chainDepth : 0,
+            rootMsgId: rootMsgId ?? oldMsgId,
+            chainDepth: chainDepth ?? 0,
             outcome: "reminted", remintedAs: reminted.msgId,
           },
         });
       }
     }
+    return { failedRefs };
   }
 
   /** Per-caller framing for {@link deliverSessionMessage} — the ONLY thing that differs between the
@@ -11740,8 +11802,15 @@ export class SessionService {
       this.bestEffortPostSpawn("reparenting the predecessor's webhook targets", fresh.id, () => this.db.reparentWebhookTargets(workerSessionId, fresh.id));
       // @decision 2fd55955 — unlike its siblings, a failed carry notifies the manager (counts only, never
       // message content) rather than going silent — the predecessor's queue may be partially lost.
+      // @decision f1969787 — `carryPendingToSuccessor` no longer throws as a whole on a per-record
+      // failure (its own doc); read `failedRefs` to detect a partial loss instead of relying on a throw.
       try {
-        this.carryPendingToSuccessor(workerSessionId, fresh.id, carried, carriedDurable);
+        const { failedRefs } = this.carryPendingToSuccessor(workerSessionId, fresh.id, carried, carriedDurable);
+        if (failedRefs.length > 0) {
+          this.enqueueDurableNudge(managerSessionId, this.db.getSession(managerSessionId)?.role ?? null,
+            `[loom:recycle-carry-failed] worker ${workerSessionId.slice(0, 8)} -> ${fresh.id.slice(0, 8)} (task ${taskId ?? "none"}): ${failedRefs.length} of ${carried.length + carriedDurable.length} pending message(s) failed to carry onto the successor. A durable one stays on the (now-stopped) predecessor's own record, unresolved. Check events_search or worker_message the successor directly if context looks missing.`,
+            taskId);
+        }
       } catch (e) {
         console.error(`[sessions] carrying the predecessor's pending queue to the successor failed for ${fresh.id} (post-spawn bookkeeping, best-effort — the recycle itself already succeeded):`, (e as Error).message);
         this.enqueueDurableNudge(managerSessionId, this.db.getSession(managerSessionId)?.role ?? null,
@@ -11864,6 +11933,41 @@ export class SessionService {
       }
     } finally {
       this.db.clearRecycleSettlePending(oldId);
+    }
+  }
+
+  /**
+   * @decision f1969787 — armed only from `recycleManager`'s HALT branch: reclaims onto the (never-stopped)
+   * predecessor whatever DID transfer if the successor dies before reaching ready. Has NO "reached ready ->
+   * stop predecessor" branch, unlike {@link settleRecycleHandoff} — a halted predecessor is never stopped.
+   *
+   * Mirrors that method's own unresolved-alert leg (fires once past the same bound if the successor
+   * neither reaches ready nor confirms dead, then keeps watching at the slower cadence) — alert only,
+   * never a disposition change: the predecessor was never stopped either way.
+   */
+  private async watchHaltedRecycleSuccessor(oldId: string, freshId: string): Promise<void> {
+    const deadline = Date.now() + SessionService.RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS;
+    let alerted = false;
+    for (;;) {
+      if (!this.pty.isAlive(freshId)) {
+        this.recoverFleetAfterFailedRecycleSuccessor(oldId, freshId, "manager");
+        return;
+      }
+      if (this.pty.hasReachedReady(freshId)) return;
+      if (!alerted && Date.now() >= deadline) {
+        alerted = true;
+        try {
+          this.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
+            kind: "recycle_fleet_unresolved", detail: { deadSuccessorId: freshId, oldStillLive: true, reason: "timeout", halted: true },
+          });
+          this.enqueueDurableNudge(oldId, "manager",
+            `[loom:recycle-failed] your halted recycle's successor ${freshId.slice(0, 8)} never confirmed reaching SessionStart or dying — its fate is unknown; you remain the live owner of whatever did not transfer. Loom recorded this and is still watching.`);
+        } catch (e) {
+          console.error(`[recycle] recording halted-successor unresolved alert failed for ${oldId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
+        }
+      }
+      await new Promise((r) => setTimeout(r, alerted ? SessionService.RECYCLE_SUCCESSOR_SETTLE_SLOW_POLL_MS : SessionService.RECYCLE_SUCCESSOR_SETTLE_POLL_MS));
     }
   }
 
@@ -12197,12 +12301,84 @@ export class SessionService {
   }
 
   /**
+   * @decision f1969787 — the LATER half of boot recovery for a HALTED recycle's unresumable successor (see
+   * `halted-recycle-reconcile.ts`'s early half): archives it + nudges the predecessor, and — same reason as
+   * `finishReconcilingRecycleSettles` — must run BEFORE the resume paths below so they never retry it.
+   */
+  finishReconcilingHaltedRecycleSuccessors(early: HaltedRecycleEarlyResult): { recovered: string[] } {
+    const recovered: string[] = [];
+    for (const { predecessorId, freshId, reparentedWorkers } of early.recovered) {
+      try {
+        this.retiredRecycleSuccessorIds.add(freshId);
+        this.carryPendingToSuccessor(freshId, predecessorId, [], this.db.listUnresolvedQueuedMessagesForWorker(freshId));
+        this.unlinkAndArchiveDeadRecycleSuccessor(predecessorId, freshId);
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
+          kind: "recycle_fleet_recovered", detail: { deadSuccessorId: freshId, oldStillLive: true, reparentedWorkers },
+        });
+        this.enqueueDurableNudge(predecessorId, "manager",
+          `[loom:recycle-failed] a daemon restart found your halted recycle's successor ${freshId.slice(0, 8)} unresumable — your workers/wakes/questions/pending (whatever had transferred) are back on you — re-read worker_list to continue.`);
+        recovered.push(predecessorId);
+      } catch (e) {
+        console.error(`[halted-recycle-reconcile] later pass failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
+      }
+    }
+    return { recovered };
+  }
+
+  /**
+   * Run `recycleManager`'s 8 ownership-transfer DB/cap-queue steps (worker/wake/question/event-trigger/
+   * poll-job/webhook/pending-owner-message reparent, cap-queue reparent), retrying ONLY the steps that
+   * failed exactly once before giving up on them — each step is a single atomic statement or an idempotent
+   * copy-then-clear, so a successful step is never worth re-running, but a genuinely still-failing one
+   * gets exactly one more chance before `recycleManager` treats it as a hard failure (decision f1969787,
+   * below). Never throws: a step's own failure is caught, logged, and named in the returned `failedSteps`,
+   * not propagated — `recycleManager` decides what a non-empty `failedSteps` means.
+   */
+  private attemptManagerOwnershipTransfer(oldManagerId: string, freshId: string): { reparentedWorkers: number; failedSteps: string[] } {
+    let reparentedWorkers = 0;
+    const steps: Array<{ name: string; run: () => void }> = [
+      { name: "workers", run: () => { reparentedWorkers = this.db.reparentLiveWorkers(oldManagerId, freshId); } },
+      { name: "wakes", run: () => { this.db.reparentWakes(oldManagerId, freshId); } },
+      { name: "questions", run: () => { this.db.reparentQuestions(oldManagerId, freshId); } },
+      { name: "eventTriggers", run: () => { this.db.reparentEventTriggerTargets(oldManagerId, freshId); } },
+      { name: "pollJobs", run: () => { this.db.reparentPollJobTargets(oldManagerId, freshId); } },
+      { name: "webhooks", run: () => { this.db.reparentWebhookTargets(oldManagerId, freshId); } },
+      { name: "pendingOwnerMessage", run: () => { this.db.reparentPendingOwnerMessage(oldManagerId, freshId); } },
+      { name: "capQueue", run: () => { this.capQueue.reparent(oldManagerId, freshId); } },
+    ];
+    const runPass = (list: typeof steps): string[] => {
+      const failed: string[] = [];
+      for (const s of list) {
+        try { s.run(); } catch (e) {
+          console.error(`[recycle] manager ownership-transfer step "${s.name}" failed for ${oldManagerId.slice(0, 8)} -> ${freshId.slice(0, 8)}:`, (e as Error).message);
+          failed.push(s.name);
+        }
+      }
+      return failed;
+    };
+    let failedSteps = runPass(steps);
+    if (failedSteps.length > 0) {
+      const retrySet = new Set(failedSteps);
+      failedSteps = runPass(steps.filter((s) => retrySet.has(s.name)));
+      for (const name of failedSteps) {
+        console.error(`[recycle] manager ownership-transfer step "${name}" STILL failing after retry for ${oldManagerId.slice(0, 8)} -> ${freshId.slice(0, 8)}`);
+      }
+    }
+    return { reparentedWorkers, failedSteps };
+  }
+
+  /**
    * Recycle a MANAGER near its context limit (the `recycle_me` flow). The manager has already run
    * /loom-session-end and written `continuationPrompt`; here Loom boots a FRESH successor manager seeded
    * with the agent warm-up prompt + that continuation (NOT --resume — fresh context, intent carried),
    * RE-PARENTS the old manager's live workers onto the successor so the fleet survives, then settles the
    * old manager's teardown against the successor actually proving itself (see settleRecycleHandoff's own
    * doc — never an unconditional fixed delay). gen+1; recycledFrom = old.
+   *
+   * @decision f1969787 — the ownership-transfer steps below retry once (`attemptManagerOwnershipTransfer`)
+   * and, if still failing, never retire the predecessor at all — see this method's own code for the full
+   * halt-and-notify branch.
    */
   async recycleManager(oldManagerId: string, continuationPrompt: string): Promise<Session> {
     const old = this.db.getSession(oldManagerId);
@@ -12353,84 +12529,171 @@ export class SessionService {
 
     // Re-parent live workers onto the successor BEFORE closing the old manager, so they're never
     // orphaned (worker_report routes by parent_session_id; the successor sees them via worker_list).
-    // @decision 2fd55955 — these OWNERSHIP-TRANSFER steps throw (unwrapped), never best-effort:
-    // settleRecycleHandoff below stops the predecessor regardless of whether ownership transferred, so a
-    // swallowed failure here would strand live workers/wakes under a now-dead manager, invisibly.
-    const reparented = this.db.reparentLiveWorkers(oldManagerId, fresh.id);
+    // @decision f1969787 — retried once as a unit (attemptManagerOwnershipTransfer); still-failing steps
+    // after that retry halt the recycle below instead of letting settleRecycleHandoff retire a predecessor
+    // that something still depends on — see this method's own halt branch, further down.
+    const { reparentedWorkers: reparented, failedSteps } = this.attemptManagerOwnershipTransfer(oldManagerId, fresh.id);
     // Carry the old manager's scheduled wakes + its in-flight inbound queue (worker reports / human
     // turns held while it was busy, plus any durable cross-tree platform message) onto the successor — it
-    // owns the fleet now, so these are its to handle. Re-pointing the wakes also guarantees nothing fires
-    // at the retired manager (which would zombie-resurrect it). FLUSH the queue (not getPending) while the
-    // old pty is still alive (its teardown is settled below, never before its own 3s flush floor) so each
-    // entry's source + durable onDeliver come with it; durable records are re-minted onto the successor
-    // — see carryPendingToSuccessor.
-    this.db.reparentWakes(oldManagerId, fresh.id);
-    // Card 8701bdbb: move the predecessor's decision-inbox questions onto the successor too — otherwise
-    // question_pull's exact-session_id scoping strands an 'answered' (or still-'pending') question the
-    // predecessor asked, unreachable from the successor's own session id.
-    this.db.reparentQuestions(oldManagerId, fresh.id);
-    // Card df9d1c71: move any wake-mode event-trigger/poll/webhook target aimed at the predecessor onto
-    // the successor too — otherwise a fire on it calls resume(predecessor), which hasSuccessor refuses.
-    this.db.reparentEventTriggerTargets(oldManagerId, fresh.id);
-    this.db.reparentPollJobTargets(oldManagerId, fresh.id);
-    this.db.reparentWebhookTargets(oldManagerId, fresh.id);
-    // Card 788ed7f4: carry an open "owner message left without a disposition" episode onto the successor
-    // too — a park-then-recycle is exactly how such a message would otherwise get silently lost (unlike
-    // idle_nudge_policy, which deliberately resets fresh on recycle — that's the watchdog's own cadence,
-    // a different concern from an unactioned owner request).
-    this.db.reparentPendingOwnerMessage(oldManagerId, fresh.id);
-    // Card daf7dfa1: move any of the predecessor's still-queued cap-queue entries onto the successor too —
-    // otherwise a spawn queued behind the cap gets permanently orphaned under a manager id that no future
-    // retirement will ever drain again (see CapQueueRegistry.reparent's own doc). Fire-and-forget catch-up
-    // drain right after, mirroring recycleWorker's own finally-drain: the successor may already have free
-    // capacity (workers were just reparented onto it too), so a migrated entry shouldn't have to wait for
-    // an unrelated future retirement if it could fire right now.
-    this.capQueue.reparent(oldManagerId, fresh.id);
-    void this.maybeDrainCapQueue(fresh.id);
+    // owns the fleet now, so these are its to handle. FLUSH the queue (not getPending) while the old pty is
+    // still alive (its teardown is settled below, never before its own 3s flush floor, and never at all if
+    // the halt branch fires) so each entry's source + durable onDeliver come with it; durable records are
+    // re-minted onto the successor — see carryPendingToSuccessor.
     // Card 9f279c7b DoD-4: purge stale recycle/emergency nudges NARROWLY (by exact text tag) before the
     // generic carry below — a "you're near your context limit" nudge addressed to the PREDECESSOR is
     // actively misleading on a fresh successor whose own occupancy starts near zero. Matched on
     // CONTEXT_RECYCLE_NUDGE_PREFIX / CONTEXT_EMERGENCY_REDIRECT_TAG ONLY (see this method's own doc for
     // the negative proof this does not touch anything else) — every other queued entry (a worker report,
     // a peer message, a boarded directive) is untouched and still carries forward exactly as before.
-    // @decision 2fd55955 — the DB read runs BEFORE the in-memory flush: if listUnresolvedQueuedMessagesForWorker
-    // throws, flushPending never runs, so the predecessor's live in-memory queue is never destructively
-    // drained on a failed recycle (the old order could lose it even though nothing else here needed it to run).
-    const durableRaw = this.db.listUnresolvedQueuedMessagesForWorker(oldManagerId);
-    const flushedRaw = this.pty.flushPending(oldManagerId);
-    const isStaleContextNudge = (text: string): boolean =>
-      text.startsWith(CONTEXT_RECYCLE_NUDGE_PREFIX) || text.startsWith(`[${CONTEXT_EMERGENCY_REDIRECT_TAG}]`);
-    const carried: QueuedMessage[] = [];
-    for (const m of flushedRaw) {
-      if (isStaleContextNudge(m.text)) {
-        // A stale emergency redirect is durable (has onDeliver) — resolve its record now, same as
-        // carryPendingToSuccessor's own flushed loop would, so it never dangles as unresolved. The
-        // ordinary nudge is non-durable (no onDeliver) — nothing to resolve, just drop it.
-        if (m.onDeliver) { try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the recycle */ } }
-        continue;
+    // @decision f1969787 — the durable-queue READ and the destructive FLUSH are retried INDEPENDENTLY, and
+    // `pty.flushPending` is NEVER re-run once it has already succeeded once — a second flush on an
+    // already-drained queue returns empty and would look like a clean, complete carry while carrying
+    // nothing (see this card's own decision record's "Do not" on this exact point).
+    //
+    // @decision f1969787 — do not carry the pending queue when "workers" is still failing: the predecessor
+    // remains the real parent of its live workers, so carrying worker reports to a successor that can't
+    // act on them strands those reports on the wrong owner.
+    const workersStepFailed = failedSteps.includes("workers");
+    let durableRaw: OrchestrationEvent[] = [];
+    let flushedRaw: QueuedMessage[] = [];
+    let pendingCarryHardFailed = false;
+    let pendingCarryFailedRefs: string[] = [];
+    if (!workersStepFailed) {
+      const readDurableQueue = (): boolean => {
+        try { durableRaw = this.db.listUnresolvedQueuedMessagesForWorker(oldManagerId); return true; }
+        catch (e) { console.error(`[recycle] reading the predecessor's unresolved durable queue failed for ${oldManagerId.slice(0, 8)}:`, (e as Error).message); return false; }
+      };
+      if (!readDurableQueue() && !readDurableQueue()) pendingCarryHardFailed = true;
+      const flushLiveQueue = (): boolean => {
+        try { flushedRaw = this.pty.flushPending(oldManagerId); return true; }
+        catch (e) { console.error(`[recycle] flushing the predecessor's pending stdin queue failed for ${oldManagerId.slice(0, 8)}:`, (e as Error).message); return false; }
+      };
+      if (!pendingCarryHardFailed && !flushLiveQueue() && !flushLiveQueue()) pendingCarryHardFailed = true;
+      if (!pendingCarryHardFailed) {
+        const isStaleContextNudge = (text: string): boolean =>
+          text.startsWith(CONTEXT_RECYCLE_NUDGE_PREFIX) || text.startsWith(`[${CONTEXT_EMERGENCY_REDIRECT_TAG}]`);
+        const carried: QueuedMessage[] = [];
+        for (const m of flushedRaw) {
+          if (isStaleContextNudge(m.text)) {
+            // A stale emergency redirect is durable (has onDeliver) — resolve its record now, same as
+            // carryPendingToSuccessor's own flushed loop would, so it never dangles as unresolved. The
+            // ordinary nudge is non-durable (no onDeliver) — nothing to resolve, just drop it.
+            if (m.onDeliver) { try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the recycle */ } }
+            continue;
+          }
+          carried.push(m);
+        }
+        const carriedDurable = durableRaw.filter((rec) => {
+          const text = typeof rec.detail?.text === "string" ? rec.detail.text : null;
+          return text === null || !isStaleContextNudge(text);
+        });
+        try {
+          pendingCarryFailedRefs = this.carryPendingToSuccessor(oldManagerId, fresh.id, carried, carriedDurable).failedRefs;
+        } catch (e) {
+          // carryPendingToSuccessor no longer throws as a whole in normal operation (every per-record
+          // failure is independently try/caught internally) — this is a defensive backstop only.
+          console.error(`[recycle] carryPendingToSuccessor threw unexpectedly for ${oldManagerId.slice(0, 8)} -> ${fresh.id.slice(0, 8)}:`, (e as Error).message);
+          pendingCarryHardFailed = true;
+        }
       }
-      carried.push(m);
+      // A hard failure (the read/flush/call itself threw) OR any individual message that didn't transfer
+      // both name this step — `pendingCarryFailedRefs` is reported separately (failedMessageRefs) for the
+      // per-message detail, but the step-level name belongs in `failedSteps` alongside the other 8 either way.
+      if (pendingCarryHardFailed || pendingCarryFailedRefs.length > 0) failedSteps.push("pendingQueueCarry");
     }
-    const carriedDurable = durableRaw.filter((rec) => {
-      const text = typeof rec.detail?.text === "string" ? rec.detail.text : null;
-      return text === null || !isStaleContextNudge(text);
-    });
-    this.carryPendingToSuccessor(oldManagerId, fresh.id, carried, carriedDurable);
 
+    // @decision f1969787 — `recycle_complete` ALWAYS carries `failedSteps` (present only when non-empty)
+    // so `reparentedWorkers: 0` can never again be confused with "the predecessor had no workers."
     this.bestEffortPostSpawn("recording the recycle_complete event", fresh.id, () => {
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId: fresh.id, kind: "recycle_complete",
-        detail: { recycledFrom: old.id, gen: newGen, reparentedWorkers: reparented },
+        detail: { recycledFrom: old.id, gen: newGen, reparentedWorkers: reparented, failedSteps: failedSteps.length ? failedSteps : undefined },
       });
     });
     // Card badba5a8: observability only — record whether the codescape block was injected. Card 40738f24:
     // folded onto the shared best-effort recordDiscoveryBlockInjection helper (see its own doc).
     this.recordDiscoveryBlockInjection({ managerSessionId: fresh.id }, codescapeStatus);
 
-    // Close the predecessor once the successor SETTLES (@decision e07b1b1a) — either it reaches
-    // SessionStart (the ordinary case, same flush-first delay as before) or it dies before ever getting
-    // there, in which case the predecessor's fleet is recovered instead of being stranded.
+    if (failedSteps.length > 0 || pendingCarryFailedRefs.length > 0) {
+      // @decision f1969787 — HALT, don't retire: at least one ownership-transfer step (or an individual
+      // carried message) is still failing after retry. Stopping the predecessor here (settleRecycleHandoff
+      // below) would strand whatever didn't transfer under a now-dead owner — exactly the defect this card
+      // fixes. The predecessor stays genuinely live and functional (never archived, never excluded from
+      // idle-watchdog coverage, MCP, message routing by explicit session id, or the next restart's resume
+      // set — see this card's own decision record for what was verified). Clear the settle-pending marker
+      // directly (normally only cleared inside settleRecycleHandoff's own finally) so boot-time
+      // recycle-settle-reconcile.ts never tries to reconcile a settle that will now never happen.
+      this.db.clearRecycleSettlePending(oldManagerId);
+      // @decision f1969787 — Code Review fix: these three reads are pure observability (what to NAME in
+      // the event/nudges below), never the ownership-transfer itself — a persisting-DB fault here must not
+      // throw past the event/nudges that follow, so each is best-effort with an empty-list fallback.
+      const strandedWorkerIds = failedSteps.includes("workers")
+        ? this.bestEffortPostSpawnResultSync("computing stranded worker ids for the ownership-transfer-failed event", fresh.id,
+          () => this.db.listWorkers(oldManagerId).filter((s) => s.processState === "live").map((s) => s.id), [])
+        : [];
+      const strandedQuestionIds = failedSteps.includes("questions")
+        ? this.bestEffortPostSpawnResultSync("computing stranded question ids for the ownership-transfer-failed event", fresh.id,
+          () => this.db.listQuestionsForSession(oldManagerId).map((q) => q.id), [])
+        : [];
+      const strandedWakeIds = failedSteps.includes("wakes")
+        ? this.bestEffortPostSpawnResultSync("computing stranded wake ids for the ownership-transfer-failed event", fresh.id,
+          () => this.db.listWakesForSession(oldManagerId).map((w) => w.id), [])
+        : [];
+      this.bestEffortPostSpawn("recording the recycle_ownership_transfer_failed event", fresh.id, () => {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          // @decision f1969787 — `workerSessionId: oldManagerId` is what `reconcileHaltedRecycleSuccessorsEarly`
+          // keys its boot-time predecessor lookup + stale-generation guard on; `resume()`/crash-recovery
+          // deliberately do NOT read it (ROUND 3, card 386e4eb5). Never drop this field.
+          managerSessionId: fresh.id, workerSessionId: oldManagerId, kind: "recycle_ownership_transfer_failed",
+          detail: { recycledFrom: old.id, gen: newGen, failedSteps, strandedWorkerIds, strandedQuestionIds, strandedWakeIds, failedMessageRefs: pendingCarryFailedRefs, pendingQueueCarrySkipped: workersStepFailed },
+        });
+      });
+      // @decision f1969787 — arm successor-death recovery even though we're halting: if the successor
+      // dies before ever reaching ready, whatever DID transfer must come back to the (never-stopped)
+      // predecessor rather than being stranded under a dead owner forever.
+      void this.watchHaltedRecycleSuccessor(oldManagerId, fresh.id).catch((e) => {
+        console.error(`[recycle] halted-successor watch failed for ${oldManagerId.slice(0, 8)} -> ${fresh.id.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
+      });
+      const failedList = failedSteps.length ? failedSteps.join(", ") : "(none — only individual carried message(s) failed)";
+      const skippedCarryNoteForOld = workersStepFailed
+        ? "Your queued inbound (worker reports among it) was deliberately left with you rather than carried to your successor, since the workers it concerns were never reparented. "
+        : "";
+      const skippedCarryNoteForFresh = workersStepFailed
+        ? "Nothing from your predecessor's pending inbound queue was carried to you either, for the same reason — it was deliberately left with your predecessor. "
+        : "";
+      try {
+        this.enqueueDurableNudge(oldManagerId, "manager",
+          `[loom:recycle-ownership-transfer-failed] your recycle's ownership handoff to successor ${fresh.id.slice(0, 8)} partially failed after a retry (failed step(s): ${failedList}). You were NOT retired and remain live. ` +
+          `${strandedWorkerIds.length ? `Still yours: worker(s) ${strandedWorkerIds.map((id) => id.slice(0, 8)).join(", ")}. ` : ""}` +
+          `${strandedQuestionIds.length ? `Still yours: question(s) ${strandedQuestionIds.map((id) => id.slice(0, 8)).join(", ")}. ` : ""}` +
+          `${strandedWakeIds.length ? `Still yours: wake(s) ${strandedWakeIds.map((id) => id.slice(0, 8)).join(", ")}. ` : ""}` +
+          `${pendingCarryFailedRefs.length ? `${pendingCarryFailedRefs.length} queued message(s) also did not transfer and remain yours to deliver. ` : ""}` +
+          `${skippedCarryNoteForOld}` +
+          `Everything else transferred correctly to your successor.`);
+      } catch (e) {
+        console.error(`[recycle] notifying predecessor ${oldManagerId.slice(0, 8)} of its failed ownership transfer failed:`, (e as Error).message);
+      }
+      try {
+        this.enqueueDurableNudge(fresh.id, "manager",
+          `[loom:recycle-ownership-transfer-failed] CORRECTION to your kickoff: your predecessor ${oldManagerId.slice(0, 8)}'s ownership handoff to you partially failed after a retry (failed step(s): ${failedList}) — your predecessor was NOT retired and remains live. ` +
+          `${strandedWorkerIds.length ? `The claim "your predecessor's live workers have been re-parented to you" is WRONG for worker(s) ${strandedWorkerIds.map((id) => id.slice(0, 8)).join(", ")} — those remain your predecessor's, not yours; do not run worker_list expecting them there. ` : "Worker re-parenting itself DID succeed — any live workers are genuinely yours. "}` +
+          `${strandedQuestionIds.length ? `Question(s) ${strandedQuestionIds.map((id) => id.slice(0, 8)).join(", ")} also remain your predecessor's. ` : ""}` +
+          `${strandedWakeIds.length ? `Wake(s) ${strandedWakeIds.map((id) => id.slice(0, 8)).join(", ")} also remain your predecessor's. ` : ""}` +
+          `${pendingCarryFailedRefs.length ? `${pendingCarryFailedRefs.length} queued message(s) also did not reach you and remain your predecessor's to deliver. ` : ""}` +
+          `${skippedCarryNoteForFresh}` +
+          `Coordinate with your predecessor directly if you need any of this.`);
+      } catch (e) {
+        console.error(`[recycle] notifying successor ${fresh.id.slice(0, 8)} of its predecessor's failed ownership transfer failed:`, (e as Error).message);
+      }
+      return { ...fresh, processState: "live" };
+    }
+
+    // Close the predecessor once the successor SETTLES — either it reaches SessionStart (the ordinary
+    // case, same flush-first delay as before) or it dies before ever getting there, in which case the
+    // predecessor's fleet is recovered instead of being stranded.
+    // @decision e07b1b1a — never an unconditional fixed delay; see settleRecycleHandoff's own doc.
     void this.settleRecycleHandoff({ oldId: oldManagerId, freshId: fresh.id, role: "manager" }).catch((e) => {
       console.error(`[recycle] settle failed for manager ${oldManagerId.slice(0, 8)} -> ${fresh.id.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
     });

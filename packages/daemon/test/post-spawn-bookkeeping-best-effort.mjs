@@ -17,13 +17,21 @@
 //
 // CORRECTION (Code Review of 9a0d06a6, reviewer 6252dfd0) — recycleManager's OWNERSHIP-TRANSFER steps
 // (reparentLiveWorkers/Wakes/Questions/EventTriggerTargets/PollJobTargets/WebhookTargets/
-// PendingOwnerMessage, capQueue.reparent, the carry block) are DELIBERATELY NOT best-effort: unlike
+// PendingOwnerMessage, capQueue.reparent, the carry block) are DELIBERATELY NOT swallowed-silently: unlike
 // spawnWorker/recycleWorker, recycleManager's predecessor is stopped LATER, asynchronously, by
 // settleRecycleHandoff — independently of whether ownership transferred. A swallowed reparent failure
-// there would let that stop proceed anyway and silently strand live workers under a dead manager. Those
-// steps throw (as on main); only recycleManager's pure bookkeeping (appendEvent(recycle_complete),
-// recordDiscoveryBlockInjection) stays best-effort. See cases G below (recycleManager throws, nothing
-// stranded) and docs/decisions/2fd55955-*.md for the corrected rationale.
+// there would let that stop proceed anyway and silently strand live workers under a dead manager.
+//
+// SECOND CORRECTION (card f1969787, Code Review of 2fd55955 landed as 82b68e28) — "throw straight out of
+// recycleManager" (this file's OWN prior behavior, until this card) turned out to be the wrong fix for the
+// wrong reason: the successor was ALREADY live by the time any of these steps run, so a bare throw left
+// BOTH managers live with no structured signal of what transferred — the caller just saw a raw error. The
+// steps now retry ONCE (attemptManagerOwnershipTransfer); if still failing after that retry, recycleManager
+// HALTS instead of either swallowing OR throwing: it does NOT call settleRecycleHandoff (so the predecessor
+// is never retired — nothing it still owns gets stranded), appends a dedicated `recycle_ownership_transfer_failed`
+// event naming exactly which step(s) failed plus the real stranded worker/question/wake ids, and durably
+// nudges BOTH managers with who owns what. See case G below (recycleManager halts, never throws, nothing
+// stranded) and docs/decisions/f1969787-*.md for the full rationale.
 //
 // recycleWorker's own reparent/carry steps DO stay best-effort (its predecessor is already hard-stopped
 // BEFORE these run, so there's no later stop to race) — but a failed carryPendingToSuccessor no longer
@@ -36,8 +44,9 @@
 // consumed-once latch, so an unrelated call of the same method elsewhere never gets caught by surprise),
 // call the method under test, and assert (a) the injected throw was actually consumed — proving the probe
 // really exercised the target line, not a no-op — and (b) the call still returned successfully with a
-// genuinely live session/successor, never a propagated exception (cases A-F, H) OR (b') the call genuinely
-// throws and leaves the predecessor/fleet untouched (case G).
+// genuinely live session/successor, never a propagated exception (cases A-F, H) OR (b') the call still
+// returns successfully (never throws) but HALTS instead of retiring the predecessor, naming the real
+// failure structurally (case G, card f1969787).
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + SessionService driven against the
 // shared fake-pty seam (_seam-host-fixture.mjs) + a real temp git repo (spawnWorker's own createWorktree,
@@ -263,9 +272,9 @@ try {
     check("(F) the successor's pty is genuinely alive (never killed/rolled back)", host.isAlive(result?.id) === true);
   }
 
-  // ===================== G) recycleManager — reparentLiveWorkers throws ⇒ THROWS, predecessor untouched,
-  // worker stays parented to it (RED on 9a0d06a6 — the pre-correction code swallowed this and let
-  // settleRecycleHandoff stop the predecessor anyway, stranding the worker under a dead manager) =========
+  // ===================== G) recycleManager — reparentLiveWorkers throws (every attempt, surviving the
+  // one retry) ⇒ recycleManager does NOT throw, HALTS instead of retiring the predecessor, predecessor
+  // untouched, worker stays parented to it, and the failure is named structurally (card f1969787) ========
   {
     const taskId = "taskG";
     db.insertTask({ id: taskId, projectId: "pP", title: "task G", body: "", columnKey: "in_progress", position: 7, priority: "p2", createdAt: now, updatedAt: now });
@@ -290,12 +299,18 @@ try {
     db.reparentLiveWorkers = realReparentLiveWorkers;
 
     check("(G) the injected reparentLiveWorkers throw actually fired", reparentThrowConsumed === true);
-    check("(G) recycleManager DOES throw (ownership-transfer steps are NOT best-effort)", !!err && String(err.message).includes(INJECTED));
-    check("(G) recycleManager returns no result on the throw", result === undefined);
+    check("(G) recycleManager does NOT throw — it HALTS instead (card f1969787)", !err && !!result);
+    check("(G) recycleManager still returns the successor as live", result?.processState === "live");
     check("(G) the predecessor manager row is STILL live, not stopped (nothing stranded)", db.getSession(oldMgrId)?.processState === "live");
     check("(G) the predecessor's pty was NEVER stopped (settleRecycleHandoff never ran)", host.isAlive(oldMgrId) === true);
     check("(G) the worker is STILL parented to the (still-alive) predecessor, not silently orphaned under a dead one",
       db.getSession(workerId)?.parentSessionId === oldMgrId);
+
+    const failedEvent = db.listEventsForSession(result?.id).find((e) => e.kind === "recycle_ownership_transfer_failed");
+    check("(G) a recycle_ownership_transfer_failed event names the real failed step", !!failedEvent && Array.isArray(failedEvent.detail?.failedSteps) && failedEvent.detail.failedSteps.includes("workers"));
+    check("(G) it names the real stranded worker id", Array.isArray(failedEvent?.detail?.strandedWorkerIds) && failedEvent.detail.strandedWorkerIds.includes(workerId));
+    const completeEvent = db.listEventsForSession(result?.id).find((e) => e.kind === "recycle_complete");
+    check("(G) recycle_complete.detail.failedSteps is set too — never an ambiguous bare 0", Array.isArray(completeEvent?.detail?.failedSteps) && completeEvent.detail.failedSteps.includes("workers"));
   }
 
   // ===================== H) recycleWorker — carryPendingToSuccessor throws ⇒ still best-effort (does NOT
@@ -369,6 +384,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — spawnWorker/recycleWorker's post-spawn bookkeeping is best-effort (a DB error is logged, never propagated); recycleManager's OWNERSHIP-TRANSFER steps correctly still THROW (never silently stranding live workers under a dead predecessor) while its pure bookkeeping stays best-effort; a failed carry is surfaced to the manager, never silent; and spawnWorker's capacity fallback is null, never false all-zero data."
+  ? "\n✅ ALL PASS — spawnWorker/recycleWorker's post-spawn bookkeeping is best-effort (a DB error is logged, never propagated); recycleManager's OWNERSHIP-TRANSFER steps retry once and, if still failing, HALT instead of throwing OR silently stranding live workers under a dead predecessor (card f1969787), naming the real failure structurally; a failed carry is surfaced to the manager, never silent; and spawnWorker's capacity fallback is null, never false all-zero data."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
