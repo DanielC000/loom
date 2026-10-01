@@ -171,7 +171,43 @@ const tmpHome = trackDir(path.join(os.tmpdir(), `loom-dpstl-${Date.now()}-${proc
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
-const { computeDeployStaleness: computeDeployStalenessRaw, newestMtimeMs: newestMtimeMsRaw, MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES } = await import("../dist/deploy-staleness.js");
+const { computeDeployStaleness: computeDeployStalenessRawUnwrapped, newestMtimeMs: newestMtimeMsRaw, MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES } = await import("../dist/deploy-staleness.js");
+
+// Card 30dd2dab: deploy-staleness.ts's own git calls each carry a short, deliberate GIT_TIMEOUT_MS=1000ms
+// (see that module's own `c6e7ebe7` decision record — this bound STAYS; never loosen it here, in
+// production, or by adding a production-side retry — see the project memory this card settled). Under a
+// heavily loaded host (several concurrent merge/worker gates each spawning real git subprocesses) the OS
+// can legitimately delay SCHEDULING a spawned git process past that 1000ms bound even though git itself,
+// once running, completes in well under 100ms — reproduced directly for this card via a fault-injection
+// harness (a stub git shadowing the real one via PATH, delaying only targeted subcommands): this is
+// correct, honest production behaviour (an `available:false`/`could-not-measure` result, or an internal
+// git call failing closed to `null` — e.g. `computeAncestorBehaviouralMatch`/`isAncestor`, both documented
+// as NEVER fabricating a verdict on a failed git read), never a bug. A hermetic test spawning the SAME
+// real git subprocess inherits the SAME host-contention exposure purely from running alongside other
+// load, so this suite retries ONLY the specific, narrowly-matched transient-timeout shape, a small FIXED
+// number of times — logging every retried attempt so it is visible in gate output, never silent — and
+// still fails loud if the evidence doesn't support a timeout, never masking a real regression.
+const GIT_TIMEOUT_RETRY_MAX_ATTEMPTS = 3;
+// Just under production's own GIT_TIMEOUT_MS (1000ms), with slack for scheduling jitter right at the
+// boundary. Used only where production swallows the specific git error (no reason string to key off) and
+// elapsed wall time is the sole available evidence that a timeout — not a fast, unrelated failure — is
+// what happened.
+const GIT_TIMEOUT_EVIDENCE_MS = 900;
+// Unambiguous: computeDeployStaleness's own `unavailable()` call sites set this EXACT reasonKind/reason
+// shape only when its one unconditional `runGit` call throws (see deploy-staleness.ts's own `unavailable`
+// call sites) — never for an intentional, non-timeout unavailable state (e.g. no .git, a missing dist
+// entry), which carry a different reasonKind or reason text and must never be retried.
+const isTransientGitTimeout = (result) =>
+  result?.available === false && result?.reasonKind === "could-not-measure" && /ETIMEDOUT/i.test(result?.reason ?? "");
+function computeDeployStalenessRaw(options) {
+  let attempt = 1;
+  for (;;) {
+    const result = computeDeployStalenessRawUnwrapped(options);
+    if (!isTransientGitTimeout(result) || attempt >= GIT_TIMEOUT_RETRY_MAX_ATTEMPTS) return result;
+    console.log(`RETRY (${attempt}/${GIT_TIMEOUT_RETRY_MAX_ATTEMPTS}) computeDeployStaleness hit a transient git ETIMEDOUT under host load (reason: ${JSON.stringify(result.reason)}) — retrying`);
+    attempt++;
+  }
+}
 // Card 8ff7ccde: the `processStartedAt` option lets a test control the "since when has the CURRENTLY
 // RUNNING code been in effect" clock independently of `distBuiltAt`. No section BEFORE (11)
 // intends to exercise that axis — left to the real default (derived from this test process's own
@@ -1198,13 +1234,36 @@ try {
     }
     return originalReaddirSync2.call(fs, dir, ...rest);
   };
+  // Card 30dd2dab: under host contention, an EARLIER real git call inside computeAncestorBehaviouralMatch
+  // (its own `diff --name-status`/`git show` calls) or the isAncestor `merge-base` check immediately
+  // before it can itself hit production's GIT_TIMEOUT_MS=1000ms bound and bail the whole soundness check
+  // closed to null — the SAME `builtContentMatchesHead:null`/`stale:true` shape (23o) below asserts —
+  // BEFORE the walk ever reaches this patched nested/ dir. Reproduced directly for this card via fault
+  // injection (see the module-level comment above `computeDeployStalenessRaw`). That makes a false
+  // racePatchFired2 ambiguous: it can mean either Code Review B1's regression came back, OR an unrelated,
+  // transient git timeout pre-empted the walk entirely. Elapsed wall time is the only evidence available
+  // to tell them apart (production swallows the specific git error here, so there's no reason string to
+  // key off): a call that took ~GIT_TIMEOUT_MS or longer without the patch firing is consistent with a
+  // timeout and worth retrying (logged, bounded); a FAST failure that still didn't fire the patch is NOT a
+  // timeout — it's a real regression in the soundness-check's own code path and must fail LOUD on the
+  // very first attempt, never be silently retried away.
   let rRacePatched;
+  let raceAttempt = 1;
+  let raceElapsedMs = 0;
   try {
-    rRacePatched = computeDeployStalenessRaw({ distEntry: raceDistEntry2, repoRoot: raceRepo, processBuiltSha: raceBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+    for (;;) {
+      racePatchFired2 = false;
+      const raceT0 = performance.now();
+      rRacePatched = computeDeployStalenessRaw({ distEntry: raceDistEntry2, repoRoot: raceRepo, processBuiltSha: raceBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+      raceElapsedMs = performance.now() - raceT0;
+      if (racePatchFired2 || raceElapsedMs < GIT_TIMEOUT_EVIDENCE_MS || raceAttempt >= GIT_TIMEOUT_RETRY_MAX_ATTEMPTS) break;
+      console.log(`RETRY (${raceAttempt}/${GIT_TIMEOUT_RETRY_MAX_ATTEMPTS}) (23o): the nested/ readdirSync patch did not fire and the call took ${Math.round(raceElapsedMs)}ms (>= ${GIT_TIMEOUT_EVIDENCE_MS}ms) — consistent with an earlier git call hitting production's GIT_TIMEOUT_MS=1000ms bound under host load, not Code Review B1's regression; retrying`);
+      raceAttempt++;
+    }
   } finally {
     fs.readdirSync = originalReaddirSync2; // never leave the global fs module patched
   }
-  check("(23o self-check) the readdirSync patch actually fired on the nested/ dir (positive control — a never-fired patch proves nothing)", racePatchFired2 === true);
+  check(`(23o self-check) the readdirSync patch actually fired on the nested/ dir within ${raceAttempt} attempt(s) (positive control — a never-fired patch proves nothing; a FAST never-fired result is never retried, only a slow, timeout-shaped one is — see the comment above)`, racePatchFired2 === true);
   check("(23o) THE FIX (Code Review B1): a readdirSync failure mid-walk fails the WHOLE soundness check closed ⇒ builtContentMatchesHead:null, stale STAYS true — never a partial-scan false positive",
     rRacePatched.builtContentMatchesHead === null && rRacePatched.stale === true);
 
