@@ -385,6 +385,9 @@ export const NOT_HERMETIC = new Set([
   // scheduled as its own separate, locked gate step) this file has no such scheduling — it is proof-once,
   // manual-only. Its own header carries the exact run command + the evidence from the run that proved this
   // card's fix. Run manually per its own header comment.
+  "loom-home-write-deny-real-spawn", // card 37310431: same cost/flake rationale as
+  // disallow-harness-scheduling-tools-real-spawn above (one real, authenticated `claude` process, one real
+  // model turn) — proof-once, manual-only, not scheduled. Run manually per its own header comment.
 ]);
 
 // Directories that are established non-test containers under test/ — never descended into by the

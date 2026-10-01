@@ -20,6 +20,7 @@ import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
 import { TRANSCRIPT_ROOT_READ_DENY_RULE, otherProjectTranscriptDenyRules } from "./claude-transcript.js";
+import { withLoomHomeWriteDenyForSpawn } from "./loom-home-deny.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, matchEmbeddedPlaceholderToken, PASTE_TRIPWIRE_TOKEN_WINDOW, type PasteLengthLossCandidate, type WrittenLineCountEntry, type SeenPlaceholderTokenEntry } from "../orchestration/paste-tripwire.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled } from "../paths.js";
@@ -6254,7 +6255,17 @@ export class PtyHost {
       : undefined;
     // Card ed0757d6: SETTINGS_DIR read-deny, unconditional for every role (see withSettingsDirDenyForSpawn's
     // own doc for why this — unlike the role-scoped transcript-root deny just below — has no carve-out).
-    const permission = withSettingsDirDenyForSpawn(withTranscriptRootDenyForSpawn(permissionWithAllow, opts.role, workerProjectDenyRules));
+    // Card 37310431: LOOM_HOME write-deny (Edit() covers Edit/Write/NotebookEdit/MultiEdit, plus the
+    // engine's own Bash write-path classifier — see loom-home-deny.ts's own doc). Its MAIN registry
+    // (secrets/DB/skills/etc.) is unconditional for every role, with no carve-out — a note/working path
+    // is simply never in it. Its INSTRUCTION registry (CLAUDE.md/.claude/PLATFORM-LEAD-RESUME*.md) IS
+    // role-conditional, PER ENTRY — today every entry exempts `platform` only (own home IS LOOM_HOME;
+    // `setup` is NOT exempt, deliberately — see paths.ts's own doc) — plus `role===null` (plain, human-
+    // driven) exempt from the whole registry — see loom-home-deny.ts's `loomHomeWriteDenyRules`.
+    const permission = withLoomHomeWriteDenyForSpawn(
+      withSettingsDirDenyForSpawn(withTranscriptRootDenyForSpawn(permissionWithAllow, opts.role, workerProjectDenyRules)),
+      { role: opts.role, sessionId: opts.sessionId },
+    );
     // Card 51926260 — computed HERE (before writeSessionSettings) and reused verbatim at buildSpawnArgs
     // below: the settings.json `permissions.defaultMode` and the `--permission-mode` CLI flag must agree,
     // or the two boot-mode mechanisms could disagree about where this session actually lands. See

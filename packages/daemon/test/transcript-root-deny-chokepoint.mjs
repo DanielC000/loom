@@ -129,6 +129,11 @@ if (process.platform !== "win32") {
   // length/equality check here goes stale the moment that unrelated card lands. Import the real constant
   // rather than hand-copying its literal value, so this file can never drift from it independently.
   const { SETTINGS_DIR_READ_DENY_RULE } = await import("../dist/pty/claude-settings.js");
+  // Card 37310431 (round 2): the LOOM_HOME write-deny is now a FLAT, registry-only map with no per-role
+  // logic (no readdir, no disk dependency) — so its exact rule set can be computed in-process and
+  // compared EXACTLY, rather than hand-deriving a shape-only "every other entry starts with Edit(" check
+  // the way round 1's readdir-dependent, disk-content-dependent count required.
+  const { loomHomeWriteDenyRules } = await import("../dist/pty/loom-home-deny.js");
   ensureDirs();
   registerForCleanup(WORKTREES_DIR); // sibling of LOOM_HOME, created by production ensureDirs()
 
@@ -150,12 +155,22 @@ if (process.platform !== "win32") {
     check("(real) host actually spawned a real process for the assistant session (exercised the REAL createPty, not a stub)", host.isAlive(sidAssistant));
     check("(real) assistant spawn: WRITTEN settings.json permissions.deny INCLUDES the transcript-root rule", (readWrittenDeny(sidAssistant) ?? []).includes(ROLE_DENY));
 
-    // (b) role="worker" — OUT of scope, must be byte-identical to the (empty) input deny.
+    // (b) role="worker" — OUT of scope for the transcript-root rule. Card 37310431 (round 2): every real
+    // spawn (worker included — that deny is role-UNCONDITIONAL, same posture as SETTINGS_DIR) now ALSO
+    // carries the LOOM_HOME write-deny's own Edit(...) rules — a FLAT, registry-only set with no per-role
+    // logic, so it can be asserted EXACTLY against `loomHomeWriteDenyRules({role, sessionId})` computed
+    // in-process, rather than the shape-only "every other entry starts with Edit(" check round 1's
+    // disk-dependent, role-gated count required.
     const sidWorker = "trdc-real-worker";
     host.spawn({ sessionId: sidWorker, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [] }, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "worker" });
     spawned.push(sidWorker);
-    check("(real) worker spawn: WRITTEN settings.json permissions.deny has NO role-scoped (transcript-root) entry leaked — only the unconditional SETTINGS_DIR rule (card ed0757d6)",
-      JSON.stringify(readWrittenDeny(sidWorker)) === JSON.stringify([SETTINGS_DIR_READ_DENY_RULE]));
+    const writtenWorker = readWrittenDeny(sidWorker) ?? [];
+    const expectedLoomHomeWorker = loomHomeWriteDenyRules({ role: "worker", sessionId: sidWorker });
+    check("(real) worker spawn: WRITTEN settings.json permissions.deny has NO role-scoped (transcript-root) entry leaked", !writtenWorker.includes(ROLE_DENY));
+    check("(real) worker spawn: WRITTEN settings.json permissions.deny carries the unconditional SETTINGS_DIR rule (card ed0757d6)", writtenWorker.includes(SETTINGS_DIR_READ_DENY_RULE));
+    check("(real) worker spawn: every OTHER entry is EXACTLY the LOOM_HOME write-deny's own computed rule set (card 37310431) — no more, no fewer, never an unaccounted third source",
+      JSON.stringify(writtenWorker.filter((r) => r !== SETTINGS_DIR_READ_DENY_RULE).sort()) === JSON.stringify([...expectedLoomHomeWorker].sort()));
+    check("(real) worker spawn: at least one LOOM_HOME write-deny rule was actually added (so the check above can fail)", expectedLoomHomeWorker.length > 0);
 
     // (c) role="assistant" with a project's OWN custom deny — union survives through the REAL write.
     const sidCustom = "trdc-real-assistant-custom";
@@ -165,7 +180,11 @@ if (process.platform !== "win32") {
     check("(real) assistant+custom-deny spawn: WRITTEN settings.json KEEPS the project's own custom entry", customWritten.includes(CUSTOM_DENY));
     check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the role-scoped rule (union)", customWritten.includes(ROLE_DENY));
     check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the unconditional SETTINGS_DIR rule (card ed0757d6)", customWritten.includes(SETTINGS_DIR_READ_DENY_RULE));
-    check("(real) assistant+custom-deny spawn: exactly 3 entries, no more (custom + transcript-root + SETTINGS_DIR)", customWritten.length === 3);
+    // Card 37310431 (round 2): same exact-comparison fix as (b) above — see that block's comment for why.
+    const expectedLoomHomeCustom = loomHomeWriteDenyRules({ role: "assistant", sessionId: sidCustom });
+    check("(real) assistant+custom-deny spawn: every OTHER entry is EXACTLY the LOOM_HOME write-deny's own computed rule set, never an unaccounted third source",
+      JSON.stringify(customWritten.filter((r) => r !== CUSTOM_DENY && r !== ROLE_DENY && r !== SETTINGS_DIR_READ_DENY_RULE).sort()) === JSON.stringify([...expectedLoomHomeCustom].sort()));
+    check("(real) assistant+custom-deny spawn: at least one LOOM_HOME write-deny rule was actually added (so the check above can fail)", expectedLoomHomeCustom.length > 0);
 
     // (d)-(f) card d78f8217: manager/platform/setup are now BLANKET-denied too.
     for (const [sid, role] of [["trdc-real-manager", "manager"], ["trdc-real-platform", "platform"], ["trdc-real-setup", "setup"]]) {
@@ -199,7 +218,11 @@ if (process.platform !== "win32") {
       expectedOther.every((r) => scopedDeny.includes(r)));
     check("(real, project-scoped) worker's deny does NOT include the blanket root rule (worker never gets the blanket)", !scopedDeny.includes(ROLE_DENY));
     check("(real, project-scoped) worker's deny ALSO carries the unconditional SETTINGS_DIR rule (card ed0757d6)", scopedDeny.includes(SETTINGS_DIR_READ_DENY_RULE));
-    check("(real, project-scoped) worker's deny has exactly the 5 expected entries, no more (2 other-project rules + SETTINGS_DIR)", scopedDeny.length === 5);
+    // Card 37310431 (round 2): same exact-comparison fix as (b)/(c) above — see (b)'s comment for why.
+    const expectedLoomHomeScoped = loomHomeWriteDenyRules({ role: "worker", sessionId: sidScopedWorker });
+    check("(real, project-scoped) worker's deny: every entry beyond the other-project rules + SETTINGS_DIR is EXACTLY the LOOM_HOME write-deny's own computed rule set, never an unaccounted third source",
+      JSON.stringify(scopedDeny.filter((r) => !expectedOther.includes(r) && r !== SETTINGS_DIR_READ_DENY_RULE).sort()) === JSON.stringify([...expectedLoomHomeScoped].sort()));
+    check("(real, project-scoped) worker's deny: at least one LOOM_HOME write-deny rule was actually added (so the check above can fail)", expectedLoomHomeScoped.length > 0);
 
     // A worker spawned FOR one of the "other" projects gets denied the OTHER two, but not its own.
     const sidScopedWorkerB = "trdc-real-worker-scoped-b";

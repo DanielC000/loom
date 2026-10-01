@@ -3697,6 +3697,15 @@ export const STATIC_GUARD_REPO_PATHS = [
   // — a source-TEXT property (a missing class member) the reduced/emit-compare path cannot reason about,
   // so it could otherwise take the reduced path and never trip a single check.
   "packages/daemon/test/pty-subclass-reap-seam-guard.mjs",
+  // Card 37310431 (round 2): round 1's LOOM_HOME write-deny unioned the static registry with a live
+  // `readdirSync` pass, so any new LOOM_HOME-rooted path was automatically caught; round 2 drops that
+  // pass (it broke the Platform/Setup homes' own legitimate LOOM_HOME-rooted note writes), so a NEW
+  // `path.join(LOOM_HOME, …)` call site now reaches neither the deny nor any acknowledgement unless this
+  // guard catches it. Belongs here on the same ground as `profile-field-consumer-guard.mjs` above: a
+  // source-TEXT scan cross-referenced against compiled registry DATA, changing zero behavior the
+  // reduced/emit-compare path can reason about on its own, so a NEW unregistered call site could
+  // otherwise take the reduced path and never trip a single check.
+  "packages/daemon/test/loom-home-write-deny-registry-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run

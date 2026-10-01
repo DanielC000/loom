@@ -100,6 +100,10 @@ const ALLOWLIST = new Map([
   ["pty/adapter.ts", "both"],             // the HarnessAdapter interface's own doc — cites literals for documentation
   ["pty/claude-adapter.ts", "both"],      // the concrete claude implementation
   ["pty/claude-doctrine.ts", "both"],     // small shared claude-specific constants/helpers
+  // Card 37310431, item 8: CLAUDE_DOCTRINE_DIR split out of claude-doctrine.ts into this dependency-free
+  // leaf so paths.ts can reuse the literal without pulling in chokidar transitively — same adapter
+  // territory as claude-doctrine.ts itself, just relocated for a dependency reason, not a scope change.
+  ["pty/claude-dirname.ts", "both"],
   ["pty/claude-transcript.ts", "both"],   // the claude JSONL path/parse mechanism
   ["pty/claude-config.ts", "both"],       // Scope-4: folds into the claude adapter module
   ["pty/claude-settings.ts", "both"],     // Scope-4: folds into the claude adapter module

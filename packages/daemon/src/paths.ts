@@ -3,6 +3,8 @@ import os from "node:os";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolveExecutable } from "./pty/resolve-bin.js";
+import { CLAUDE_DOCTRINE_DIR } from "./pty/claude-dirname.js";
+import type { SessionRole } from "@loom/shared";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -478,6 +480,94 @@ export function ensureDirs(): void {
   for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR, SKILL_BASE_DIR, WORKSPACE_ROOT]) fs.mkdirSync(d, { recursive: true });
   ensureLoomHomeGitignore();
 }
+
+/** One entry in {@link LOOM_HOME_WRITE_DENY_REGISTRY} — `relPath` is relative to LOOM_HOME (never absolute,
+ *  so it's junction/realpath-agnostic by construction — the caller joins it onto the already-resolved root). */
+export interface LoomHomeWriteDenyEntry {
+  relPath: string;
+  kind: "file" | "dir";
+}
+
+/** One entry in {@link LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY} — PER-ENTRY exemption (card 37310431
+ *  delta review, item 1): `setup` is a lower-privilege operator with native Edit/Write/Bash and a cwd
+ *  that's ALSO LOOM_HOME, so a single shared exempt-role set let it write the Platform Lead's own
+ *  instruction files — exactly the cross-role escalation this registry exists to close. A plain,
+ *  human-driven session (`role===null`) is exempt from EVERY entry unconditionally (checked once in
+ *  `loomHomeWriteDenyRules`, not per-entry — `null` isn't a member of `SessionRole`, so it can't live in
+ *  this field). */
+export interface LoomHomeInstructionWriteDenyEntry extends LoomHomeWriteDenyEntry {
+  exemptRoles: readonly SessionRole[];
+}
+
+/**
+ * The WHOLE of the LOOM_HOME write-deny fail-closed set (round 2 — `pty/loom-home-deny.ts` no longer
+ * unions this with a live `readdirSync` pass). Denies ONLY a named, known-SENSITIVE path, for EVERY role,
+ * with no per-role exemption — a note/working path (Platform/Setup's own LOOM_HOME-rooted notes
+ * included) is simply never listed here, never carved out with role-gated logic. Covers a path that may
+ * not exist yet at a given spawn (lazily-created — `.env`, `secret.key`, etc. — or a fresh LOOM_HOME).
+ *
+ * A GUARD TEST (`test/loom-home-write-deny-registry-guard.mjs`) source-scans `packages/daemon/src/**` for
+ * every `path.join(LOOM_HOME, …)` / `path.resolve(LOOM_HOME, …)` call site and fails when the literal
+ * path it constructs is covered by neither this registry nor that guard's own `ALLOWLIST` — add an entry
+ * to one of the two whenever you add a new `path.join(LOOM_HOME, …)` call.
+ *
+ * @decision 37310431 — do not deny `SCRATCH_ROOT_DIR`/`WORKSPACE_ROOT`/`RUNS_DIR`, and do not reintroduce
+ * a live-disk enumeration alongside this registry. See record for the full rationale.
+ */
+export const LOOM_HOME_WRITE_DENY_REGISTRY: readonly LoomHomeWriteDenyEntry[] = [
+  { relPath: "loom.db", kind: "file" },
+  { relPath: "loom.db-wal", kind: "file" }, // SQLite WAL-mode sibling of loom.db (db.ts: `journal_mode = WAL`) — never itself a path.join(LOOM_HOME, …) literal, registered defensively
+  { relPath: "loom.db-shm", kind: "file" }, // SQLite WAL-mode sibling of loom.db — same as above
+  { relPath: "secret.key", kind: "file" },
+  { relPath: "gateway-loopback.key", kind: "file" },
+  { relPath: ".env", kind: "file" }, // loaded by the repo-root scripts/daemon-supervisor.mjs (`path.join(LOOM_HOME, ".env")`, outside this package) — registered here regardless of the guard test's packages/daemon/src-only scan
+  { relPath: ".gitignore", kind: "file" }, // defense-in-depth for secret.key (see ensureLoomHomeGitignore below) — denying this keeps an agent from quietly un-ignoring it
+  { relPath: "skill-provenance.json", kind: "file" },
+  { relPath: "restart-intent.json", kind: "file" },
+  { relPath: "last-shutdown.json", kind: "file" },
+  { relPath: "crash.log", kind: "file" },
+  { relPath: "reports", kind: "dir" }, // scripts/daemon-supervisor.mjs's Node `--report-directory` (fatal-error/uncaught-exception reports) — crash forensics, same class as crash.log, NOT a Platform Lead note path (that earlier reading was wrong — see decision record)
+  { relPath: "daemon-supervisor.pid", kind: "file" },
+  { relPath: "daemon.pid", kind: "file" }, // bin/loom.mjs's pidFilePath() — `path.join(loomHome(), …)`, a parameter not the literal LOOM_HOME identifier, so the guard's scan never finds this call site either
+  { relPath: "update-config.json", kind: "file" }, // update/check.ts + bin/update-config.mjs's channelConfigPath() — same parameter-not-literal blind spot
+  { relPath: "logs", kind: "dir" }, // also covers logs/daemon-supervisor.log and logs/daemon-output.log — never separate path.join literals, both nested under this dir
+  { relPath: "skills", kind: "dir" },
+  { relPath: "skill-base", kind: "dir" },
+  { relPath: "companion-skills", kind: "dir" },
+  { relPath: "companion-memory", kind: "dir" },
+  { relPath: "backups", kind: "dir" },
+  { relPath: "codescape", kind: "dir" },
+  { relPath: "python", kind: "dir" }, // also covers python/venv, python/hf-cache, python/kokoro-cache — all nested
+  { relPath: "bin", kind: "dir" }, // also covers bin/github-mcp-server/<version>
+  { relPath: "deploy-backup", kind: "dir" },
+  { relPath: "merge-danger-latches", kind: "dir" },
+  { relPath: "merge-quarantines", kind: "dir" },
+  { relPath: "gate-output", kind: "dir" },
+  { relPath: "gate-timing", kind: "dir" },
+  { relPath: "archives", kind: "dir" }, // archives/<projectId> — session-transcript archive, sessions/transcript.ts
+  { relPath: "codex-rollout-archive", kind: "dir" },
+  { relPath: path.join("tmp", "settings"), kind: "dir" },
+  { relPath: path.join("tmp", "decision-records"), kind: "dir" },
+  { relPath: path.join("tmp", "companion-audio"), kind: "dir" },
+  { relPath: path.join("tmp", "claude-usage.json"), kind: "file" },
+];
+
+/**
+ * Files the most-privileged sessions take INSTRUCTIONS from, not just data — denied PER-ENTRY (see
+ * {@link LoomHomeInstructionWriteDenyEntry}'s own doc for why `setup` is NOT a blanket exemption here).
+ * `platform` is the only role exempt from any of these three today (its own home IS LOOM_HOME, so it
+ * legitimately authors/edits them); a plain, human-driven session (`role===null`) is exempt from all
+ * three unconditionally, checked once in `pty/loom-home-deny.ts`'s `loomHomeWriteDenyRules`.
+ *
+ * @decision 37310431 — a cross-role prompt-injection vector distinct from the main registry above (that
+ * one guards data/secrets; this one guards instructions a future, more-privileged session will read
+ * verbatim). See record for the mid-segment-glob measurement and the resume-doc-archive exclusion.
+ */
+export const LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY: readonly LoomHomeInstructionWriteDenyEntry[] = [
+  { relPath: "PLATFORM-LEAD-RESUME*.md", kind: "file", exemptRoles: ["platform"] },
+  { relPath: "CLAUDE.md", kind: "file", exemptRoles: ["platform"] }, // setup's own doctrine only ever seeds a CLAUDE.md for a USER project outside LOOM_HOME, never its own LOOM_HOME-rooted one — no exemption needed
+  { relPath: CLAUDE_DOCTRINE_DIR, kind: "dir", exemptRoles: ["platform"] }, // `pty/claude-dirname.ts`'s own constant, not a hand-written literal — see harness-adapter-claude-literal-guard.mjs's own allowlist discipline (card 2b099e48)
+];
 
 /**
  * Defense-in-depth (p3): a fresh LOOM_HOME has NO git history of its own by default, but a user who

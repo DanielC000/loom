@@ -1,6 +1,7 @@
 import chokidar, { type FSWatcher } from "chokidar";
 import os from "node:os";
 import path from "node:path";
+import { CLAUDE_DOCTRINE_DIR } from "./claude-dirname.js";
 
 /**
  * HarnessAdapter seam (card 2b099e48, Phase 0): the claude adapter's ownership of the SMALLER
@@ -15,8 +16,10 @@ import path from "node:path";
  * could silently drift apart.
  */
 
-/** The directory name Claude Code discovers project-local doctrine (skills, settings) under. */
-export const CLAUDE_DOCTRINE_DIR = ".claude";
+/** Re-exported from `claude-dirname.ts` (card 37310431, item 8) — that split-out file is the real source
+ *  of truth now, kept dependency-free so `paths.ts` can reuse this ONE literal without acquiring this
+ *  file's own `chokidar` dependency transitively. Every existing consumer of this export is unaffected. */
+export { CLAUDE_DOCTRINE_DIR };
 
 /** The default CLI binary name, absent a `LOOM_CLAUDE_BIN` override — resolved via
  *  `pty/resolve-bin.ts#resolveExecutable`. Shared so callers outside `pty/` (e.g.
