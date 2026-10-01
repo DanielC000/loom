@@ -58,7 +58,7 @@ function makeFakePty() {
   fakes.push(fake);
   return fake;
 }
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
+class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } reapExitedDescendants(_rootPid) {} }
 
 const busyLog = [];
 const events = { onEngineSessionId() {}, onBusy(_id, b) { busyLog.push(b); }, onContextStats() {}, onRateLimited() {}, onExit() {} };

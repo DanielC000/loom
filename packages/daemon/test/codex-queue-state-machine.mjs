@@ -70,6 +70,7 @@ function makeFakePty() {
 }
 
 class FakeCodexHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   constructor(events) {
     super(events);
     this.fakeCodexPtys = new Map();

@@ -62,6 +62,7 @@ function makeFakePty() {
 }
 
 class FakeCodexHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   constructor(events) {
     super(events);
     this.fakeCodexPtys = new Map();
@@ -221,6 +222,7 @@ function writeRollout(conversationId, cwd, mtimeMs) {
 // `createCodexPty` itself (simulating the real codex process starting to persist ITS OWN session_meta), so
 // this check goes RED the instant that statement order is ever reversed. -----------------------------------
 class OrderSensitiveFakeCodexHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   constructor(events) {
     super(events);
     this.fakeCodexPtys = new Map();

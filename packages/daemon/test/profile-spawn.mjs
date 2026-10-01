@@ -102,6 +102,7 @@ db.insertTask({ id: taskW, projectId: "pP", title: "WORK", body: "", columnKey: 
 // conditionally and synchronously at registration time (not on kill()) to model the M5 race — a
 // genuinely different mechanism, not the discard bug the shared fixture fixes.
 class SeamHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   constructor(events) { super(events); this.capture = []; this.failFast = false; }
   createPty(opts) {
     this.capture.push(opts);

@@ -69,6 +69,7 @@ try {
   // several concurrent ptys and needs to address one by sessionId — the shared base's design is already
   // correct (kill() invokes the tracked callback) but doesn't expose that per-session addressing.
   class SeamHost extends PtyHost {
+    reapExitedDescendants(_rootPid) {}
     constructor(events) { super(events); this.exitCbs = new Map(); }
     createPty(opts) {
       const self = this;

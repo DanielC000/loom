@@ -28,6 +28,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const fakes = [];
 class TestPtyHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   createShellPty() {
     const writes = []; let exitCb = null; let kills = 0;
     const fake = { pid: 7777, write: (d) => { writes.push(d); }, resize() {}, onData: () => ({ dispose() {} }),

@@ -84,7 +84,7 @@ function makeFakePty(sessionId) {
     writes,
   };
 }
-class TestPtyHost extends PtyHost { createPty(opts) { return makeFakePty(opts.sessionId); } }
+class TestPtyHost extends PtyHost { createPty(opts) { return makeFakePty(opts.sessionId); } reapExitedDescendants(_rootPid) {} }
 
 let sessions;
 const events = {

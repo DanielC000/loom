@@ -70,6 +70,7 @@ function makeFakeShellPty() {
 }
 
 class TestPtyHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   createShellPty() { return makeFakeShellPty(); }
 }
 

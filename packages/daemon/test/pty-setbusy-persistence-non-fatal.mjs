@@ -187,6 +187,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
     };
   }
   class FakeCodexHost extends PtyHost {
+    reapExitedDescendants(_rootPid) {}
     constructor(events) { super(events); this.fakeCodexPtys = new Map(); }
     createCodexPty(opts) {
       const fake = makeFakeCodexPty();

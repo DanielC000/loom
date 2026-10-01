@@ -121,6 +121,7 @@ function makeFakePty() {
   };
 }
 class FakeCodexHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   constructor(ev) { super(ev); this.ptys = new Map(); this.kickoffs = new Map(); }
   createCodexPty(opts) { const f = makeFakePty(); this.ptys.set(opts.sessionId, f); return f; }
   enqueueStdin(sessionId, text, ...rest) { this.kickoffs.set(sessionId, text); return { queued: true }; }

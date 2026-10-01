@@ -114,6 +114,7 @@ function makeFakePty() {
 }
 
 class TestPtyHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   createPty() { return makeFakePty(); }
 }
 

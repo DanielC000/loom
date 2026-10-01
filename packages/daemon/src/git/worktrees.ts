@@ -3689,6 +3689,14 @@ export const STATIC_GUARD_REPO_PATHS = [
   // `.ts`-keyed scanner list would ever see it. See the guard's header for why harness-provided-only is NOT
   // a pass, and for its named gaps.
   "packages/daemon/test/createworktree-loom-home-guard.mjs",
+  // Card 27383e5a: a corpus-wide AST scan (same shape as its onexit-discard-guard.mjs sibling above)
+  // asserting every test-local `class X extends PtyHost` (bare-identifier heritage, never
+  // `createSeamHost(PtyHost)`) overrides `reapExitedDescendants` to a no-op, outside a small documented
+  // exemption list (see the guard's own header). Without this, a NEW such subclass with a hardcoded
+  // fictional pid would reintroduce the exact flaky-lane risk card d634cd2e fixed for the shared fixture
+  // — a source-TEXT property (a missing class member) the reduced/emit-compare path cannot reason about,
+  // so it could otherwise take the reduced path and never trip a single check.
+  "packages/daemon/test/pty-subclass-reap-seam-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run

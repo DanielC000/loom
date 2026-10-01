@@ -80,7 +80,7 @@ function makeFakePty(sessionId) {
     writes,
   };
 }
-class TestPtyHost extends PtyHost { createPty(opts) { return makeFakePty(opts.sessionId); } }
+class TestPtyHost extends PtyHost { createPty(opts) { return makeFakePty(opts.sessionId); } reapExitedDescendants(_rootPid) {} }
 
 /** Fabricates a fake engine transcript so resume()'s engineTranscriptExists check passes — genuinely
  *  existing, mirrors resume-refuses-retired-recycle-successor.mjs's own fixture. */

@@ -54,6 +54,7 @@ const INJECTED_MESSAGE = "injected post-spawn throw (run-session-exit-skips-alre
 // test's own explicit fireExit(), so the test controls exactly when the deferred exit lands relative to
 // startRun's own catch, rather than the shared fixture's synchronous (and here, misleading) kill().
 class SeamHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   constructor(events) { super(events); this.exitCbs = new Map(); }
   createPty(opts) {
     const self = this;

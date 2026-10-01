@@ -25,7 +25,7 @@ const fake = {
   pid: 4242, write: (d) => { writes.push(d); }, onData: () => ({ dispose() {} }), onExit: (cb) => { void cb; return { dispose() {} }; },
   kill() {}, resize() {},
 };
-class TestPtyHost extends PtyHost { createPty() { return fake; } }
+class TestPtyHost extends PtyHost { createPty() { return fake; } reapExitedDescendants(_rootPid) {} }
 const host = new TestPtyHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
 const SID = "sess-repaint-inflight";
 host.spawn({ sessionId: SID, cwd: TMP, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });

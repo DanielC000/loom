@@ -107,6 +107,7 @@ const db = new Db();
 // (mirroring a real node-pty) to exercise the cap-queue drain's own wait/poll behavior, which the shared
 // fixture's synchronous kill() would short-circuit.
 class SeamHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   createPty() {
     let exitCb = null;
     return {

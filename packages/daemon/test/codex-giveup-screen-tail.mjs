@@ -39,6 +39,7 @@ function makeFakePty() {
   };
 }
 class FakeCodexHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   constructor(events) { super(events); this.fakeCodexPtys = new Map(); }
   createCodexPty(opts) { const f = makeFakePty(); this.fakeCodexPtys.set(opts.sessionId, f); return f; }
 }

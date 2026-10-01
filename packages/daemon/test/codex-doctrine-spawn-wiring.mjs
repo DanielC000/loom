@@ -39,6 +39,7 @@ function makeFakePty() {
 }
 
 class FakeCodexHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   createCodexPty() { return makeFakePty(); }
 }
 

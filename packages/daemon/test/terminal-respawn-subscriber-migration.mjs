@@ -63,6 +63,7 @@ function makeFakePty() {
 }
 
 class SeamHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   createPty(_opts) { return makeFakePty(); }
 }
 

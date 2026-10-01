@@ -99,6 +99,7 @@ const fakePty = () => {
   return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit(cb) { exitCb = cb; return { dispose() {} }; }, kill() { exitCb?.({ exitCode: 0 }); }, resize() {} };
 };
 class SeamHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) { this.capture.push(opts); return fakePty(); }
   createCodexPty(opts) { this.capture.push(opts); return fakePty(); }

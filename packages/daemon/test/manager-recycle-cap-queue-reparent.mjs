@@ -56,6 +56,7 @@ function initRepo(repo) {
 }
 
 class SeamHost extends PtyHost {
+  reapExitedDescendants(_rootPid) {}
   createPty() {
     let exitCb = null;
     return {

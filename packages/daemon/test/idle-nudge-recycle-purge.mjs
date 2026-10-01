@@ -65,7 +65,7 @@ function makeFakePty(sessionId) {
     writes,
   };
 }
-class TestPtyHost extends PtyHost { createPty(opts) { return makeFakePty(opts.sessionId); } }
+class TestPtyHost extends PtyHost { createPty(opts) { return makeFakePty(opts.sessionId); } reapExitedDescendants(_rootPid) {} }
 
 // Mirrors index.ts's ACTUAL onBusy/onExit wiring: falling busy edge notifies, rising edge purges (finding
 // 2e3a8e6f); onExit retires the row. `sessions` is assigned after `host` is constructed — same
