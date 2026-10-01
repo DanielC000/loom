@@ -25,6 +25,11 @@ import { pollUntil } from "./_timing-guard.mjs";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
+// Regression guard for the CWD-leak this card fixes (every fixture below must live under a managed OS
+// temp dir, never a bare relative path resolved against the checkout) — snapshot BEFORE any fixture is
+// created, compare again at the very end, right before exit.
+const cwdEntriesBefore = fs.readdirSync(process.cwd());
+
 // ═══════════════════ [0] THE GENUINELY NEW THING THIS CARD ADDS ═══════════════════
 // Code Review of a8dbb159: a call against an ALREADY-quarantined repo (sections [3]/[2] below) is refused
 // by withCanonicalIndexLock's own PRE-EXISTING entry check (round 6 of 24c0bdba) — that mechanism predates
@@ -37,7 +42,14 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // raises the quarantine as a side effect, simulating a SIBLING op quarantining the canonical repo in that
 // exact window; the assertion is that `commit` is never invoked.
 {
-  const msRepoPath = "loom-test-mid-sequence-quarantine-fake-repo"; // never resolved as a real path
+  // Absolute, mkdtemp'd path (never a bare relative literal) — `GitWriter.commit()`'s advisory
+  // `pauseVaultAutoCommit` lease write (`vault/versioner.ts`) unconditionally `mkdirSync`s
+  // `<repoPath>/.git/` and drops a lease file in it, a REAL fs side effect that fires even against
+  // this fake-git seam and even though `canonicalRepoLockKey`/the quarantine map only ever treat
+  // `msRepoPath` as a string key. A bare relative literal here resolved that mkdirSync against the
+  // process CWD (the checkout itself), leaving a nested, un-removed `.git` behind on every run —
+  // `mkdtempManaged` roots it under the OS temp dir instead and registers it for guaranteed cleanup.
+  const msRepoPath = path.join(fs.realpathSync(mkdtempManaged("loom-gw-killconfirm-ms-")), "fake-repo");
   let addCalled = false;
   let commitRawCalled = false;
   let commitMethodCalled = false; // the OLD (pre-fix) code shape — git.commit(), never git.raw(["commit",...])
@@ -153,6 +165,14 @@ check("[5] the commit actually landed", git("log", "--oneline").includes("test: 
 // change rode along into this LEGITIMATE commit rather than being lost or corrupting an earlier one.
 check("[5] the escaped descendant's own staged file rode along cleanly (no corruption, nothing lost)",
   git("show", "--stat", "HEAD").includes("fixedX.txt"));
+
+// The actual regression check for this card: every fixture above lives under a managed OS temp dir, so
+// the CWD itself (the checkout, or a merge gate's worktree) must show no new entries at all — the
+// pre-fix bug was section [0]'s bare relative `msRepoPath`, whose `pauseVaultAutoCommit` lease write
+// `mkdirSync`'d a nested `.git` straight into this directory.
+const cwdEntriesAfter = fs.readdirSync(process.cwd());
+check(`[cwd] the test created no new entries in the CWD (before: [${cwdEntriesBefore.join(", ")}], after: [${cwdEntriesAfter.join(", ")}])`,
+  cwdEntriesAfter.length === cwdEntriesBefore.length && cwdEntriesAfter.every((e) => cwdEntriesBefore.includes(e)));
 
 console.log(failures === 0
   ? "\nALL PASS — GitWriter.commit()/checkout()/createBranch() are kill-confirmed: a quarantine raised MID-SEQUENCE (between add and commit) is caught by the NEW per-call re-check (section [0]); an unconfirmed kill quarantines the canonical repo, and every later call on it (all three methods) refuses — via the pre-existing entry check — until the escaped descendant's own eventual exit lets the auto-clear fire."
