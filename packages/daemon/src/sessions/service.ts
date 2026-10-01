@@ -6816,7 +6816,7 @@ export class SessionService {
      *  FIFO position instead of letting a fresh `record()` mint a new one at the back). Every OTHER caller
      *  (worker_spawn/spawnWorkerTracked) omits this — byte-identical cap-reject behavior for them. */
     internal?: { skipCapQueueRecord?: boolean; revive?: ReviveSpawnSpec },
-  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity }> {
+  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
     const project = this.db.getProject(manager.projectId);
@@ -7217,19 +7217,30 @@ export class SessionService {
       // hardcoded "in_progress" key). If the board has no active lane, leave the card where it is rather
       // than inventing a key — the invariant: a move never points a task at a non-existent column. A
       // taskless spawn (taskId null) has no card to move — skip entirely, nothing to leave stale.
+      // @decision 2fd55955 — best-effort: a failed lane move leaves the card in its prior lane, but the
+      // worker is already live and liveSessionIdForTask (not the lane) is what blocks a double-dispatch.
       if (taskId) {
-        const activeKey = columnKeyForRole(config.kanbanColumns, "active");
-        if (activeKey) this.db.updateTask(taskId, { columnKey: activeKey });
+        this.bestEffortPostSpawn("moving the task into the active lane", worker.id, () => {
+          const activeKey = columnKeyForRole(config.kanbanColumns, "active");
+          if (activeKey) this.db.updateTask(taskId, { columnKey: activeKey });
+        });
       }
-      this.db.appendEvent({
-        id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId, workerSessionId: worker.id, taskId, kind: "spawn_worker",
-      });
-      if (internal?.revive) {
+      // @decision 2fd55955 — best-effort: this event is observability only, same class as
+      // discovery_block_injection (72c58b1c) — never let it make a live spawn look failed.
+      this.bestEffortPostSpawn("recording the spawn_worker event", worker.id, () => {
         this.db.appendEvent({
           id: randomUUID(), ts: new Date().toISOString(),
-          managerSessionId, workerSessionId: worker.id, taskId, kind: "worker_revived",
-          detail: { fromSessionId: internal.revive.sourceSessionId, toSessionId: worker.id, taskId, commitSha: internal.revive.commitSha },
+          managerSessionId, workerSessionId: worker.id, taskId, kind: "spawn_worker",
+        });
+      });
+      if (internal?.revive) {
+        const revive = internal.revive;
+        this.bestEffortPostSpawn("recording the worker_revived event", worker.id, () => {
+          this.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(),
+            managerSessionId, workerSessionId: worker.id, taskId, kind: "worker_revived",
+            detail: { fromSessionId: revive.sourceSessionId, toSessionId: worker.id, taskId, commitSha: revive.commitSha },
+          });
         });
       }
       // Card badba5a8: observability only — record whether the codescape block was injected. Card 40738f24:
@@ -7243,21 +7254,29 @@ export class SessionService {
       // the task was written) must not blow up an advisory-only check that runs AFTER the worker is
       // already live — degrade to the primary repo, same posture as the ship-state read path in
       // mcp/tasks.ts resolveMergedInfo.
-      let shippedMatchRepoPath = project.repoPath;
-      if (taskId) {
-        try {
-          shippedMatchRepoPath = resolveRepo(project, this.db.getTask(taskId)).path;
-        } catch (e) {
-          if (!(e instanceof UnknownRepoKeyError)) throw e;
-          console.warn(`[sessions/service] task ${taskId} has a stale repoKey (${e.repoKey}) not in project ${project.id}'s registry — falling back to the primary repo for the shipped-card advisory`);
-        }
-      }
-      const shippedMatch = taskId && taskTitle ? await findShippedCardMatch(shippedMatchRepoPath, taskTitle) : null;
+      // @decision 2fd55955 — best-effort, result-fallback null: a git-read failure here (resolveRepo or
+      // findShippedCardMatch) is purely advisory and must never surface as a thrown worker_spawn failure.
+      const shippedMatch = taskId && taskTitle
+        ? await this.bestEffortPostSpawnResult("computing the shipped-card advisory", worker.id, async () => {
+            let shippedMatchRepoPath = project.repoPath;
+            try {
+              shippedMatchRepoPath = resolveRepo(project, this.db.getTask(taskId)).path;
+            } catch (e) {
+              if (!(e instanceof UnknownRepoKeyError)) throw e;
+              console.warn(`[sessions/service] task ${taskId} has a stale repoKey (${e.repoKey}) not in project ${project.id}'s registry — falling back to the primary repo for the shipped-card advisory`);
+            }
+            return findShippedCardMatch(shippedMatchRepoPath, taskTitle);
+          }, null)
+        : null;
       // The "I re-drove it" signal: a successful spawn clears any cap-queued marker for
       // the same taskId (tasked) or the same agentId (taskless, no stable per-call key) so the
       // worker_list placeholder doesn't linger alongside the now-real worker row.
-      if (taskId) this.capQueue.clearForTask(taskId);
-      else this.capQueue.clearTasklessForAgent(managerSessionId, workerAgent.id);
+      // @decision 2fd55955 — best-effort: a stale cap-queue placeholder is cosmetic, never worth failing
+      // an already-live spawn over.
+      this.bestEffortPostSpawn("clearing the cap-queue entry for this spawn", worker.id, () => {
+        if (taskId) this.capQueue.clearForTask(taskId);
+        else this.capQueue.clearTasklessForAgent(managerSessionId, workerAgent.id);
+      });
       const reviewOf = reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined;
       // Card 548a0c7e: live capacity on the SUCCESS response — this is the exact moment a manager
       // decides whether to dispatch again, and a boot-time snapshot (see composeManagerStartupPrompt's
@@ -7266,7 +7285,9 @@ export class SessionService {
       // went live (`releaseCapSlotClaim`), so `rawInFlight` here can only ever belong to an UNRELATED,
       // genuinely-still-in-flight sibling spawn; excluding "this call's own claim" would wrongly subtract
       // 1 from that (docs/decisions/16637a9e-worker-spawn-cap-claim-released-on-live-not-finally.md)
-      const capacity = this.getWorkerCapacity(managerSessionId);
+      // @decision 2fd55955 — best-effort, result-fallback NULL (never an all-zero snapshot — that would
+      // be FALSE DATA claiming the fleet is full when it's really just unreadable right now).
+      const capacity = this.bestEffortPostSpawnResultSync("computing worker capacity", worker.id, () => this.getWorkerCapacity(managerSessionId), null);
       return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree, discardedOnRecut, staleBase, reviewOf, harnessDefaultSkipped: workerSpawn.harnessDefaultSkipped, capacity };
     } finally {
       // Release the per-taskId (or taskless per-call) claim. By here the row is either live (liveHolder now
@@ -7292,7 +7313,7 @@ export class SessionService {
   async reviveWorker(
     managerSessionId: string,
     opts: { workerSessionId: string; taskId: string; note?: string },
-  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity; revivedFrom: string; commitSha: string | null }> {
+  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity | null; revivedFrom: string; commitSha: string | null }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
     const src = this.db.getSession(opts.workerSessionId);
@@ -7368,6 +7389,36 @@ export class SessionService {
     this.db.setLastError(sessionId, `session spawn failed before it could start: ${e instanceof Error ? e.message : String(e)}`);
   }
 
+  // @decision 2fd55955 — generic best-effort wrappers for post-spawn-success bookkeeping (spawnWorker/
+  // recycleWorker/recycleManager): never let a DB error after a successful pty.spawn make the call report
+  // FAILURE over a LIVE session — that would let the manager double-dispatch.
+  private bestEffortPostSpawn(label: string, sessionId: string, fn: () => void): void {
+    try { fn(); } catch (e) {
+      console.error(`[sessions] ${label} failed for ${sessionId} (post-spawn bookkeeping, best-effort — the spawn/recycle itself already succeeded):`, (e as Error).message);
+    }
+  }
+
+  /** Same as {@link bestEffortPostSpawn}, but for a genuinely ASYNC step whose RESULT feeds the response
+   *  (e.g. the shipped-card advisory's git read) — returns `fallback` on failure instead of swallowing
+   *  into nothing. Use {@link bestEffortPostSpawnResultSync} for a synchronous result-producing step —
+   *  this one's `await` would otherwise add a needless event-loop yield to an atomic recycle/spawn tail. */
+  private async bestEffortPostSpawnResult<T>(label: string, sessionId: string, fn: () => Promise<T>, fallback: T): Promise<T> {
+    try { return await fn(); } catch (e) {
+      console.error(`[sessions] ${label} failed for ${sessionId} (post-spawn bookkeeping, best-effort — the spawn/recycle itself already succeeded):`, (e as Error).message);
+      return fallback;
+    }
+  }
+
+  /** Same as {@link bestEffortPostSpawn}, but for a SYNCHRONOUS step whose RESULT feeds the response (e.g.
+   *  a capacity snapshot) — returns `fallback` on failure, with no `await`/Promise involved, so it never
+   *  interleaves with a concurrent call the way an async wrapper around a sync step needlessly would. */
+  private bestEffortPostSpawnResultSync<T>(label: string, sessionId: string, fn: () => T, fallback: T): T {
+    try { return fn(); } catch (e) {
+      console.error(`[sessions] ${label} failed for ${sessionId} (post-spawn bookkeeping, best-effort — the spawn/recycle itself already succeeded):`, (e as Error).message);
+      return fallback;
+    }
+  }
+
   // Card 40738f24 (round 2 finding #2 on 72c58b1c): ONE best-effort writer for the `discovery_block_injection`
   // observability event, shared by all 5 live-flip spawn sites that compute a codescapeStatus (startNew,
   // startManager, spawnWorker, recycleWorker, recycleManager) — 72c58b1c guarded only startNew's own call
@@ -7424,10 +7475,10 @@ export class SessionService {
   async spawnWorkerTracked(
     managerSessionId: string,
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string; reviewOfWorkerSessionId?: string; reviewOfTaskId?: string },
-  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity }>> {
+  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }>> {
     const taskRef = (opts.taskId ?? "").trim();
     const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
-    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity }>(
+    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }>(
       key, "spawn", managerSessionId, this.syncAttachBudgetMs,
       () => this.spawnWorker(managerSessionId, opts),
       undefined,
@@ -7466,8 +7517,8 @@ export class SessionService {
   async reviveWorkerTracked(
     managerSessionId: string,
     opts: { workerSessionId: string; taskId: string; note?: string },
-  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity; revivedFrom: string; commitSha: string | null }>> {
-    type ReviveResult = Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity; revivedFrom: string; commitSha: string | null };
+  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity | null; revivedFrom: string; commitSha: string | null }>> {
+    type ReviveResult = Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity | null; revivedFrom: string; commitSha: string | null };
     const key = `spawn:${(opts.taskId ?? "").trim()}`;
     // The key is SHARED with worker_spawn (so the pendingSpawn placeholder + same-card dedupe apply), which
     // means an attach could land on a PLAIN spawn's op — and report that worker as a revive. Refuse both
@@ -11359,8 +11410,11 @@ export class SessionService {
     // while the old pty is still alive, so each entry's source + durable onDeliver come with it (the old
     // pty's queue, and any text-only snapshot of it, dies on exit). The durable records are re-driven onto
     // the fresh worker below — see carryPendingToSuccessor. Wakes are moved below too.
-    const carried = this.pty.flushPending(workerSessionId);
+    // @decision 2fd55955 — the DB read runs BEFORE the in-memory flush: if listUnresolvedQueuedMessagesForWorker
+    // throws, flushPending never runs, so the old pty's live in-memory queue is never destructively drained
+    // on a failed recycle attempt.
     const carriedDurable = this.db.listUnresolvedQueuedMessagesForWorker(workerSessionId);
+    const carried = this.pty.flushPending(workerSessionId);
     // SUPPRESS auto-drain for this manager from the moment the old worker's slot MIGHT free (its hard-stop,
     // below) until the fresh successor's row is itself live again — recycleWorker re-claims that freed
     // slot directly (insertSession + setProcessState below is a 1:1 swap, never routed through spawnWorker's
@@ -11630,17 +11684,31 @@ export class SessionService {
       // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
       // due wake can't resurrect the retired worker) and re-drive the held messages onto the fresh worker
       // (busy-gated; they drain on its first turn boundary, after its handoff turn).
-      this.db.reparentWakes(workerSessionId, fresh.id);
+      // @decision 2fd55955 — every reparent/carry/event step below runs AFTER the successor is already
+      // live; each is wrapped best-effort so a DB error in one never reports this recycle as failed over
+      // a live successor (the manager would double-recycle), and a failure in one never blocks the rest.
+      this.bestEffortPostSpawn("reparenting the predecessor's wakes", fresh.id, () => this.db.reparentWakes(workerSessionId, fresh.id));
       // Card df9d1c71: a wake-mode trigger/poll/webhook can target ANY session (no role restriction at
       // create time), a worker included — re-point it onto the successor for the same reason wakes are.
-      this.db.reparentEventTriggerTargets(workerSessionId, fresh.id);
-      this.db.reparentPollJobTargets(workerSessionId, fresh.id);
-      this.db.reparentWebhookTargets(workerSessionId, fresh.id);
-      this.carryPendingToSuccessor(workerSessionId, fresh.id, carried, carriedDurable);
-      this.db.appendEvent({
-        id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId, workerSessionId: fresh.id, taskId, kind: "recycle_complete",
-        detail: { recycledFrom: old.id, gen: newGen },
+      this.bestEffortPostSpawn("reparenting the predecessor's event-trigger targets", fresh.id, () => this.db.reparentEventTriggerTargets(workerSessionId, fresh.id));
+      this.bestEffortPostSpawn("reparenting the predecessor's poll-job targets", fresh.id, () => this.db.reparentPollJobTargets(workerSessionId, fresh.id));
+      this.bestEffortPostSpawn("reparenting the predecessor's webhook targets", fresh.id, () => this.db.reparentWebhookTargets(workerSessionId, fresh.id));
+      // @decision 2fd55955 — unlike its siblings, a failed carry notifies the manager (counts only, never
+      // message content) rather than going silent — the predecessor's queue may be partially lost.
+      try {
+        this.carryPendingToSuccessor(workerSessionId, fresh.id, carried, carriedDurable);
+      } catch (e) {
+        console.error(`[sessions] carrying the predecessor's pending queue to the successor failed for ${fresh.id} (post-spawn bookkeeping, best-effort — the recycle itself already succeeded):`, (e as Error).message);
+        this.enqueueDurableNudge(managerSessionId, this.db.getSession(managerSessionId)?.role ?? null,
+          `[loom:recycle-carry-failed] worker ${workerSessionId.slice(0, 8)} -> ${fresh.id.slice(0, 8)} (task ${taskId ?? "none"}): carrying the predecessor's queued messages onto the successor failed after the successor was already live (${carried.length} non-durable + ${carriedDurable.length} durable message(s) were pending). Some or all may not have reached the successor — check events_search or worker_message it directly if context looks missing.`,
+          taskId);
+      }
+      this.bestEffortPostSpawn("recording the recycle_complete event", fresh.id, () => {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId, workerSessionId: fresh.id, taskId, kind: "recycle_complete",
+          detail: { recycledFrom: old.id, gen: newGen },
+        });
       });
       // Card badba5a8: observability only — record whether the codescape block was injected. Card 40738f24:
       // folded onto the shared best-effort recordDiscoveryBlockInjection helper (see its own doc).
@@ -12240,6 +12308,9 @@ export class SessionService {
 
     // Re-parent live workers onto the successor BEFORE closing the old manager, so they're never
     // orphaned (worker_report routes by parent_session_id; the successor sees them via worker_list).
+    // @decision 2fd55955 — these OWNERSHIP-TRANSFER steps throw (unwrapped), never best-effort:
+    // settleRecycleHandoff below stops the predecessor regardless of whether ownership transferred, so a
+    // swallowed failure here would strand live workers/wakes under a now-dead manager, invisibly.
     const reparented = this.db.reparentLiveWorkers(oldManagerId, fresh.id);
     // Carry the old manager's scheduled wakes + its in-flight inbound queue (worker reports / human
     // turns held while it was busy, plus any durable cross-tree platform message) onto the successor — it
@@ -12277,8 +12348,11 @@ export class SessionService {
     // CONTEXT_RECYCLE_NUDGE_PREFIX / CONTEXT_EMERGENCY_REDIRECT_TAG ONLY (see this method's own doc for
     // the negative proof this does not touch anything else) — every other queued entry (a worker report,
     // a peer message, a boarded directive) is untouched and still carries forward exactly as before.
-    const flushedRaw = this.pty.flushPending(oldManagerId);
+    // @decision 2fd55955 — the DB read runs BEFORE the in-memory flush: if listUnresolvedQueuedMessagesForWorker
+    // throws, flushPending never runs, so the predecessor's live in-memory queue is never destructively
+    // drained on a failed recycle (the old order could lose it even though nothing else here needed it to run).
     const durableRaw = this.db.listUnresolvedQueuedMessagesForWorker(oldManagerId);
+    const flushedRaw = this.pty.flushPending(oldManagerId);
     const isStaleContextNudge = (text: string): boolean =>
       text.startsWith(CONTEXT_RECYCLE_NUDGE_PREFIX) || text.startsWith(`[${CONTEXT_EMERGENCY_REDIRECT_TAG}]`);
     const carried: QueuedMessage[] = [];
@@ -12298,10 +12372,12 @@ export class SessionService {
     });
     this.carryPendingToSuccessor(oldManagerId, fresh.id, carried, carriedDurable);
 
-    this.db.appendEvent({
-      id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId: fresh.id, kind: "recycle_complete",
-      detail: { recycledFrom: old.id, gen: newGen, reparentedWorkers: reparented },
+    this.bestEffortPostSpawn("recording the recycle_complete event", fresh.id, () => {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: fresh.id, kind: "recycle_complete",
+        detail: { recycledFrom: old.id, gen: newGen, reparentedWorkers: reparented },
+      });
     });
     // Card badba5a8: observability only — record whether the codescape block was injected. Card 40738f24:
     // folded onto the shared best-effort recordDiscoveryBlockInjection helper (see its own doc).
