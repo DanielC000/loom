@@ -8,12 +8,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (a) agent_clone provisions a clone of a source agent into a target project via the SAME
 //       createAgentCore path agent_create uses — name/startupPrompt/profileId carry over, nameOverride
 //       and promptPatch REPLACE their field when given, project/agent 404s match agent_create's.
-//   (b) LEAST-PRIVILEGE: cloning an agent whose profile role is platform/auditor is REJECTED — mirrors
-//       the guard on assigning an elevated profile directly — and creates NO agent.
+//   (b) LEAST-PRIVILEGE: cloning an agent whose profile role is platform/auditor is REJECTED (clone's own
+//       narrower role check, clonedProfileRoleError) — mirrors the guard on assigning an elevated profile
+//       directly — and creates NO agent. Card a06650d2 (fix round): cloning a NON-elevated-role profile
+//       that still carries connections/capabilities/vaultWrite is ALSO rejected — but via a SEPARATE
+//       field-only check on THIS agent-facing tool itself (cloneSourceFieldError, mcp/platform.ts), never
+//       inside the shared cloneAgentCore core (which the human-only REST companion auto-clone route also
+//       calls, and must keep its pre-card no-field-check behaviour — see companion-provision.mjs (6i)).
 //   (c) agent_clone_batch clones one source into MANY target projects in one call, each entry
 //       independent (a bad target's error doesn't block the others), same least-privilege guard applies
 //       per-entry.
-//   (d) existing agent_create/agent_update are UNCHANGED (additive-only regression check).
+//   (d) agent_create/agent_update: assigning an elevated-role profileId directly is UNCHANGED (still
+//       allowed — administering the Lead's own rigs is this surface's job), but card a06650d2 adds a NEW
+//       rejection for a profileId carrying connections/capabilities/vaultWrite, on both tools.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-agent-clone.mjs
 import fs from "node:fs";
@@ -62,13 +69,18 @@ db.insertProject({ id: "pB", name: "Sibling B", repoPath: repo, vaultPath: repo,
 db.insertProfile({ id: "profQA", name: "QA Tester", role: "worker", description: "qa rig", allowDelta: [], skills: null, model: null, icon: "🧪", browserTesting: true });
 db.insertProfile({ id: "profPlatform", name: "Platform Rig", role: "platform", description: "elevated rig", allowDelta: [], skills: null, model: null, icon: "🛡️" });
 db.insertProfile({ id: "profAuditor", name: "Auditor Rig", role: "auditor", description: "elevated rig", allowDelta: [], skills: null, model: null, icon: "🔎" });
+// Card a06650d2: a NON-elevated (worker) role that still carries a human-only field — the shared
+// agentAssignableProfileError predicate's FIELD check applies regardless of role or allowElevatedRoles.
+db.insertProfile({ id: "profVaultWrite", name: "Vault Rig", role: "worker", description: "vault-write rig", allowDelta: [], skills: null, model: null, icon: "📓", vaultWrite: true });
 
-// The source agents to clone: a plain one, one with an ordinary (worker) profile, and two with an
-// elevated (platform/auditor) profile — the escalation-reject fixtures.
+// The source agents to clone: a plain one, one with an ordinary (worker) profile, two with an
+// elevated (platform/auditor) profile, and one with a non-elevated-but-field-bearing (vaultWrite) profile
+// — the escalation-reject fixtures.
 db.insertAgent({ id: "agentPlain", projectId: "pSrc", name: "Web Designer", startupPrompt: "You build UI for {{site}}.", position: 0, profileId: null });
 db.insertAgent({ id: "agentQA", projectId: "pSrc", name: "QA", startupPrompt: "You test {{site}}.", position: 1, profileId: "profQA" });
 db.insertAgent({ id: "agentPlatform", projectId: "pSrc", name: "Lead-ish", startupPrompt: "elevated", position: 2, profileId: "profPlatform" });
 db.insertAgent({ id: "agentAuditor", projectId: "pSrc", name: "Audit-ish", startupPrompt: "elevated", position: 3, profileId: "profAuditor" });
+db.insertAgent({ id: "agentVaultWrite", projectId: "pSrc", name: "Vault-ish", startupPrompt: "vault-write", position: 4, profileId: "profVaultWrite" });
 
 // A no-op SessionService/PtyHost — these tools never touch sessions, but the router constructor needs one.
 // LOCAL OVERRIDE (not _seam-host-fixture.mjs's shared SeamHost, card ec7983c6): createPty() throws by
@@ -133,6 +145,12 @@ try {
   const cloneElevAuditor = await call("agent_clone", { sourceAgentId: "agentAuditor", targetProjectId: "pA" });
   check("(b) agent_clone REJECTS cloning an auditor-role-profiled agent",
     typeof cloneElevAuditor.error === "string" && /auditor/i.test(cloneElevAuditor.error) && !cloneElevAuditor.id);
+  // Card a06650d2: the FIELD check applies to clone too, even for a NON-elevated (worker) role — this
+  // agent-facing tool checks the source profile's fields itself (cloneSourceFieldError), skipRoleCheck,
+  // since role is clonedProfileRoleError's own job.
+  const cloneVaultWrite = await call("agent_clone", { sourceAgentId: "agentVaultWrite", targetProjectId: "pA" });
+  check("(b) agent_clone REJECTS cloning a vaultWrite-carrying (non-elevated-role) profiled agent",
+    typeof cloneVaultWrite.error === "string" && /vaultWrite/i.test(cloneVaultWrite.error) && !cloneVaultWrite.id);
   check("(b) neither rejected clone created an agent anywhere", db.listAgents("pSrc").length === nAgentsPSrcBefore);
 
   // ===================== (c) agent_clone_batch — one source, many targets =====================
@@ -162,6 +180,15 @@ try {
   check("(c) agent_clone_batch: LEAST-PRIVILEGE applies per-entry too (both targets rejected)",
     batchElev.every((r) => typeof r.error === "string" && /platform/i.test(r.error) && !r.agent));
 
+  // The batch's FIELD check (cloneSourceFieldError, computed ONCE for the shared sourceAgentId) is
+  // applied to every entry too — same case as (b) above, but through agent_clone_batch.
+  const batchVaultWrite = await call("agent_clone_batch", {
+    sourceAgentId: "agentVaultWrite",
+    targets: [{ targetProjectId: "pA" }, { targetProjectId: "pB" }],
+  });
+  check("(c) agent_clone_batch: the FIELD check applies per-entry too (both targets rejected, vaultWrite)",
+    batchVaultWrite.every((r) => typeof r.error === "string" && /vaultWrite/i.test(r.error) && !r.agent));
+
   // ===================== (d) REGRESSION — agent_create/agent_update unchanged =====================
   const created = await call("agent_create", { projectId: "pA", name: "Fresh", startupPrompt: "hi", profileId: "profQA" });
   check("(d) agent_create: still works exactly as before", created.name === "Fresh" && created.profileId === "profQA" && !created.error);
@@ -169,11 +196,24 @@ try {
   check("(d) agent_create: 404 unchanged", createdBadProject.error === "project not found");
   const updated = await call("agent_update", { agentId: created.id, name: "Fresh2" });
   check("(d) agent_update: still works exactly as before", updated.name === "Fresh2" && !updated.error);
-  // agent_create/agent_update on THIS surface still do NOT reject an elevated profileId directly —
-  // additive-only: this task must not retrofit that guard onto the existing single-record tools.
+  // Card a06650d2: agent_create/agent_update on THIS surface deliberately still ALLOW an elevated
+  // profileId directly — administering the Lead's own elevated rigs is this surface's job
+  // (allowElevatedRoles:true, per the 3de74275 decision record's amendment) — but a profile carrying
+  // connections/capabilities/vaultWrite is now REJECTED regardless of role, on both tools.
   const createdElevDirect = await call("agent_create", { projectId: "pA", name: "DirectElevated", profileId: "profPlatform" });
-  check("(d) agent_create: assigning an elevated profileId DIRECTLY is UNCHANGED (still allowed on this surface)",
+  check("(d) agent_create: assigning an elevated profileId DIRECTLY is still allowed on this surface (role check lifted)",
     createdElevDirect.profileId === "profPlatform" && !createdElevDirect.error);
+  const createdVaultWrite = await call("agent_create", { projectId: "pA", name: "DirectVaultWrite", profileId: "profVaultWrite" });
+  check("(d) agent_create: REJECTS a vaultWrite-carrying profileId even though the role check is lifted here",
+    typeof createdVaultWrite.error === "string" && /vaultWrite/i.test(createdVaultWrite.error) && !createdVaultWrite.id);
+  const updatedElevDirect = await call("agent_update", { agentId: created.id, profileId: "profAuditor" });
+  check("(d) agent_update: assigning an elevated profileId DIRECTLY is still allowed on this surface (role check lifted)",
+    updatedElevDirect.profileId === "profAuditor" && !updatedElevDirect.error);
+  const updatedVaultWrite = await call("agent_update", { agentId: created.id, profileId: "profVaultWrite" });
+  check("(d) agent_update: REJECTS a vaultWrite-carrying profileId even though the role check is lifted here",
+    typeof updatedVaultWrite.error === "string" && /vaultWrite/i.test(updatedVaultWrite.error));
+  check("(d) agent_update: the rejected vaultWrite patch left the agent's profile UNCHANGED (still profAuditor)",
+    db.getAgent(created.id)?.profileId === "profAuditor");
 
   await client.close();
 } finally {
@@ -183,6 +223,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — agent_clone provisions a clone via the SAME createAgentCore path as agent_create (name/startupPrompt/profileId carry over, nameOverride/promptPatch replace their field), agent_clone_batch clones one source into many targets independently (a bad entry doesn't block the others), the least-privilege guard rejects cloning a platform/auditor-profiled agent (single AND batch), and agent_create/agent_update are unchanged."
+  ? "\n✅ ALL PASS — agent_clone provisions a clone via the SAME createAgentCore path as agent_create (name/startupPrompt/profileId carry over, nameOverride/promptPatch replace their field), agent_clone_batch clones one source into many targets independently (a bad entry doesn't block the others), the least-privilege guard rejects cloning a platform/auditor-profiled OR a connections/capabilities/vaultWrite-carrying agent (single AND batch), and agent_create/agent_update still allow an elevated-role profileId directly but now reject a connections/capabilities/vaultWrite-carrying one (card a06650d2)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

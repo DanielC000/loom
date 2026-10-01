@@ -18,6 +18,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      bindingsSeeded:true at write time (never through factory.ts's bootstrap-seed path) — proven both as
 //      a direct row read, AND end to end: revoke the Telegram binding, rebuild the gateway through the REAL
 //      createCompanionGateway (not the test's injected gateway builder), and it must NOT re-seed.
+//   6i. Card a06650d2 fix round: the agent-surface connections/capabilities/vaultWrite field check must
+//      NEVER reach this human-only REST route's auto-clone (cloneAgentCore → createAgentCore) — a 2nd
+//      provision still SUCCEEDS even after the bundled Companion profile is granted capabilities+
+//      connections (a supported live-upgrade flow).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-provision.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -361,6 +365,26 @@ try {
     const secondAgent = rig.db.getAgent(rig.db.getSession(secondSid).agentId);
     check("label(6h): the unnamed clone gets a label DISTINCT from the bundled default's bare name",
       secondAgent.name !== COMPANION_AGENT_NAME && secondAgent.name.startsWith(COMPANION_AGENT_NAME));
+  }
+  // (6i) card a06650d2 fix round: the owner GRANTS the bundled Companion profile capabilities+connections
+  // (a supported live-upgrade flow — see companion-live-upgrade.mjs ~176, a direct db.updateProfile write
+  // mirroring what a human-only REST PATCH /api/profiles would persist). Provisioning a 2nd companion (the
+  // auto-clone path: cloneAgentCore → createAgentCore) must still SUCCEED — the field check (connections/
+  // capabilities/vaultWrite) is an AGENT-SURFACE rule and must never reach this human-only REST route (the
+  // bug: it used to 403 here, since the check lived inside the shared clone-core).
+  {
+    const rig = await makeRig("p6i.db"); rigs.push(rig);
+    const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("fieldcheck(6i): first (default) provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
+    const companionAgent = rig.db.getAgent(rig.companionAgentId);
+    rig.db.updateProfile(companionAgent.profileId, { capabilities: [{ slug: "acme-tool" }], connections: ["connX"] });
+    check("fieldcheck(6i): the Companion profile now carries capabilities+connections",
+      rig.db.getProfile(companionAgent.profileId).capabilities.length > 0 && rig.db.getProfile(companionAgent.profileId).connections.length > 0);
+    const second = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("fieldcheck(6i): a 2nd provision (auto-clone) SUCCEEDS even though the source profile carries capabilities+connections (201, not 403)",
+      second.statusCode === 201);
+    const secondSid = JSON.parse(second.payload).sessionId;
+    check("fieldcheck(6i): a 2nd DISTINCT session was spawned", rig.spawned.length === 2 && secondSid !== first && !!secondSid);
   }
   // (6b) botToken without allowedChatId → 400 (a token with nowhere to reach).
   {

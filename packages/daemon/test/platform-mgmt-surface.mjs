@@ -94,6 +94,10 @@ db.insertAgent({ id: "eeeeeeee-aaaa-4a1a-8000-000000000001", projectId: "c348c3b
 db.insertAgent({ id: "eeeeeeee-bbbb-4a1a-8000-000000000002", projectId: "c348c3b5-1111-4a1a-8000-000000000001", name: "Dupe Agent B", startupPrompt: "B", position: 2, profileId: null });
 // A human-authored profile (the only kind that exists pre-P2) — profile_assign target.
 db.insertProfile({ id: "profQA", name: "QA Tester", role: "worker", description: "qa rig", allowDelta: [], skills: null, model: null, icon: "🧪", browserTesting: true });
+// Card a06650d2 fixtures: an elevated-role profile (profile_assign's role check is LIFTED on this
+// surface) and a non-elevated profile that carries a human-only field (never lifted, on any surface).
+db.insertProfile({ id: "profPlatform", name: "Platform Rig", role: "platform", description: "elevated rig", allowDelta: [], skills: null, model: null, icon: "🛡️" });
+db.insertProfile({ id: "profVaultWrite", name: "Vault Rig", role: "worker", description: "vault-write rig", allowDelta: [], skills: null, model: null, icon: "📓", vaultWrite: true });
 // One session per role (bound to pOrd/agentWork) — the role-gate fixtures.
 const seedSession = (id, role, parent) => db.insertSession({
   id, projectId: "pOrd", agentId: "agentWork", engineSessionId: null, title: null, cwd: repo,
@@ -302,6 +306,21 @@ try {
   check("profile_assign: 404 on an unknown agent", (await call("profile_assign", { agentId: "ghost", profileId: "profQA" })).error === "agent not found");
   check("profile_assign: 404 on an unknown profile (never mints one)", (await call("profile_assign", { agentId: "agentWork", profileId: "ghost" })).error === "profile not found");
 
+  // Card a06650d2: profile_assign on the Platform Lead surface allows an ELEVATED role directly —
+  // administering the Lead's own elevated rigs is this surface's job (allowElevatedRoles:true) — but a
+  // profile carrying connections/capabilities/vaultWrite is REJECTED regardless of role. See the
+  // 3de74275 decision record's amendment for why this surface differs from manager/setup here. A
+  // DEDICATED agent (not agentWork) so this doesn't disturb the profile_delete fixtures below.
+  db.insertAgent({ id: "agentAssign", projectId: "pHome", name: "AssignTarget", startupPrompt: "", position: 1, profileId: null });
+  const paElevated = await call("profile_assign", { agentId: "agentAssign", profileId: "profPlatform" });
+  check("profile_assign: assigns an ELEVATED (platform) role profile directly (role check lifted on this surface)",
+    paElevated.profileId === "profPlatform" && !paElevated.error);
+  const paVaultWrite = await call("profile_assign", { agentId: "agentAssign", profileId: "profVaultWrite" });
+  check("profile_assign: REJECTS a vaultWrite-carrying profile even though the role check is lifted here",
+    typeof paVaultWrite.error === "string" && /vaultWrite/i.test(paVaultWrite.error));
+  check("profile_assign: the rejected vaultWrite assign left the agent's profile UNCHANGED (still profPlatform)",
+    db.getAgent("agentAssign")?.profileId === "profPlatform");
+
   // ===================== profile_delete / agent_delete (task 2c9b2960) =====================
   // Unused profile → deletes cleanly (reuses db.deleteProfile, same as the human REST path).
   db.insertProfile({ id: "profUnused", name: "Unused", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
@@ -457,6 +476,20 @@ try {
   check("(f) template_apply: an unknown projectId is rejected (404, matches project_update/project_archive)",
     unknownProject.error === "project not found");
 
+  // Card a06650d2 fix round: template_apply itself (not just applyWorkflowTemplate, which no longer checks
+  // this at all) also checks the resolved profile's role/fields (templateAssignableProfileError), even on
+  // this elevated surface (never allowElevatedRoles). Force a NAME COLLISION: profiles are resolved by
+  // NAME at apply time (profilesByName), so a LATER-inserted profile sharing the "Dev" name the "Solo
+  // builder" template binds wins the lookup — if it's elevated, the whole apply must be rejected.
+  const nAgentsBeforeElevCollision = db.listAgents("pOrd").length;
+  db.insertProfile({ id: "elevDevCollision", name: "Dev", role: "platform", description: "", allowDelta: [], skills: null, model: null, icon: null });
+  const elevCollisionApply = await call("template_apply", { projectId: "pOrd", templateName: "Solo builder" });
+  check("(f) template_apply REJECTS when a templated profileName now resolves to an elevated-role profile",
+    typeof elevCollisionApply.error === "string" && !elevCollisionApply.agents);
+  check("(f) template_apply: the rejected elevated-collision apply wrote NO agents",
+    db.listAgents("pOrd").length === nAgentsBeforeElevCollision);
+  db.deleteProfile("elevDevCollision"); // restore the "Dev" name back to the bundled profile for cleanliness
+
   // ===================== (g) project_get exposes the board layout READ-ONLY (card bb95a379) =====================
   // Board columns were previously readable on this surface only by inference from other reads (never at
   // all, actually — project_get returned config.kanbanColumns which is only the STORED override, absent
@@ -497,8 +530,11 @@ try {
   // ===================== (h) agent_update — appendToStartupPrompt / replaceInStartupPrompt parity (card ae1e50a7) =====================
   // resolveStartupPromptEdit (agents/validate.ts) is now the SAME pure algorithm the manager surface's
   // agent_update (agent-get-append.mjs) already exercises — this proves it fires correctly on the
-  // platform Lead surface too. This surface has no least-privilege role gate (it's the fully-elevated
-  // Lead), so there's no composition case to prove here, unlike the setup surface's (g3).
+  // platform Lead surface too. This surface has no least-privilege ROLE gate on agent_update's profileId
+  // (it's the fully-elevated Lead, administering its own elevated rigs is its job — see the (d)-style
+  // elevated-profileId checks in platform-agent-clone.mjs), so there's no role-composition case to prove
+  // here, unlike the setup surface's (g3) — but card a06650d2's connections/capabilities/vaultWrite FIELD
+  // check still applies even on this surface, proved there too.
   const ID_H = "f4000001-0000-4000-8000-000000000001";
   const BRIEF_H = "ALPHA LINE\nBETA CLAUSE TO EDIT\nGAMMA LINE\nDELTA LINE";
   db.insertAgent({ id: ID_H, projectId: "pOrd", name: "HReplacer", startupPrompt: BRIEF_H, position: 20, profileId: null });
@@ -537,6 +573,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the platform P2 management surface works for a platform session (reads / profiles / session_spawn|stop / project update+archive / schedules / template_list+template_apply mirrored from loom-setup), the role gate holds (manager/worker/plain → no surface), session_spawn NEVER mints a platform or worker session (only manager|plain) and creates nothing on rejection, project_archive refuses the reserved home, template_apply rejects an unknown templateName/projectId with nothing written, list_all_sessions' scope axis (card 2fb68e76) defaults to archived-excluded (byte-identical to its pre-scope behavior) while scope:\"archived\"/\"all\" opt archived rows in and exempt them from the state filter, and agent_update's appendToStartupPrompt/replaceInStartupPrompt modes (card ae1e50a7) now work here too, rejecting a 0/2+-occurrence or combined-mode replace with no write while a genuine single-occurrence match applies byte-exactly — claude-free, network-free."
+  ? "\n✅ ALL PASS — the platform P2 management surface works for a platform session (reads / profiles / session_spawn|stop / project update+archive / schedules / template_list+template_apply mirrored from loom-setup), the role gate holds (manager/worker/plain → no surface), session_spawn NEVER mints a platform or worker session (only manager|plain) and creates nothing on rejection, project_archive refuses the reserved home, template_apply rejects an unknown templateName/projectId OR a resolved profile that's elevated/field-carrying (card a06650d2, templateAssignableProfileError) with nothing written, list_all_sessions' scope axis (card 2fb68e76) defaults to archived-excluded (byte-identical to its pre-scope behavior) while scope:\"archived\"/\"all\" opt archived rows in and exempt them from the state filter, and agent_update's appendToStartupPrompt/replaceInStartupPrompt modes (card ae1e50a7) now work here too, rejecting a 0/2+-occurrence or combined-mode replace with no write while a genuine single-occurrence match applies byte-exactly — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

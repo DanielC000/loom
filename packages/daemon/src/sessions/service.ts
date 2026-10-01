@@ -14,6 +14,7 @@ import {
 // `usesOrchestrationMcp` import as a whole statement, so the split is no longer load-bearing for that guard.
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
+import { agentAssignableProfileError } from "../profiles/validate.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
@@ -13248,16 +13249,21 @@ export class SessionService {
   }
 
   /**
-   * Assign an EXISTING human-authored profile to an agent (or clear it with `profileId: null`).
-   * Option B: profile CREATE/edit stays human-only, so any assignable profileId was minted by a
-   * human who intended it assignable — assignment can't escalate beyond what a human already blessed.
-   * No ⊆-capabilities check is needed under Option B. A non-null profileId MUST resolve (else reject).
+   * Assign an EXISTING profile to an agent (or clear it with `profileId: null`). A non-null profileId
+   * MUST resolve (else reject) and must pass `agentAssignableProfileError` at its default (strict).
+   *
+   * @decision 3de74275 — Option B's "every assignable profile is human-blessed" premise no longer holds.
    */
   assignAgentProfile(managerSessionId: string, agentId: string, profileId: string | null): Agent {
     this.requireManager(managerSessionId, "agent_assign_profile");
     const agent = this.resolveManagerAgentRef(managerSessionId, agentId);
     this.requireOwnProject(managerSessionId, agent.projectId, "agent_assign_profile");
-    if (profileId != null && !this.db.getProfile(profileId)) throw new Error("profile not found");
+    if (profileId != null) {
+      const profile = this.db.getProfile(profileId);
+      if (!profile) throw new Error("profile not found");
+      const assignErr = agentAssignableProfileError(profile);
+      if (assignErr) throw new Error(assignErr);
+    }
     this.db.updateAgent(agent.id, { profileId });
     this.auditManage(managerSessionId, "agent_assign_profile", { agentId: agent.id, profileId });
     return this.db.getAgent(agent.id)!;

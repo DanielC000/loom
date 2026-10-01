@@ -9,7 +9,7 @@ import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { expandTilde } from "../paths.js";
-import { validateProfile, agentProfileKeyError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError, agentAssignableProfileError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, AGENT_CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
@@ -22,7 +22,7 @@ import { projectFields, agentFields, profileFields } from "./entityRowFields.js"
 import { spillableAgentGet, spillRowsIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { skillListData, skillWriteData } from "./skillTools.js";
 import { getByIdPrefix } from "../id-prefix.js";
-import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
+import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate, templateAssignableProfileError } from "../setup/templates.js";
 import { spawnableRoleError } from "./spawnable-role.js";
 import { strictShape } from "./arg-alias.js";
 
@@ -55,7 +55,8 @@ export function setupRoleError(role: string | null | undefined): string | null {
 
 /**
  * Roles this ungated surface may never rebind AWAY FROM, clear, rename, or silently rewrite ONCE
- * ASSIGNED — the target's CURRENT role, never the incoming one (that's `setupRoleError`'s job, above).
+ * ASSIGNED — the target's CURRENT role, never the incoming one (that's `agentAssignableProfileError`'s
+ * job at an assignment site, or `setupRoleError`'s at a mint site).
  *
  * @decision 4d70cc06 — do not let this surface rebind/clear/rename an agent, or edit a profile, whose
  * role is anything but manager/worker/null — however the caller reached it (a fresh bind, a rename, a
@@ -80,7 +81,7 @@ function setupLockedRoleError(role: string | null | undefined, subject: string):
  * renaming the real "Companion" away and `agent_create`-ing an impostor under that name would DoS
  * `gateway/server.ts`'s by-NAME default-companion resolution, so a rename can never be the exempt case).
  * Refuses when the agent's CURRENT rig role is locked (`SETUP_LOCKED_ROLES` above) — regardless of what
- * NEW role the caller is trying to assign, that's `setupRoleError`'s job — or when the agent lives in a
+ * NEW profile the caller is trying to assign, that's `agentAssignableProfileError`'s job — or when the agent lives in a
  * reserved/system project (the Setup Assistant's own home, or the dev-only "Loom Platform" home): every
  * standing agent seeded there (Setup Assistant, Companion, Workspace Auditor, Elevated Operator, and
  * under LOOM_DEV the Platform Lead/Audit) is one of Loom's own agents, never a user's, even on the rare
@@ -113,7 +114,8 @@ function setupMayTouchAgentError(db: Db, agent: Agent): string | null {
  * ║   rigs       — profile_create / profile_update / profile_assign                                       ║
  * ║   templates  — template_list (read) / template_apply (apply a named workflow template to an           ║
  * ║               EXISTING project — reuses agent_create + task-insert only, NO new writer surface;       ║
- * ║               setupRoleError guard, binds existing profiles only, unknown template/project rejected)  ║
+ * ║               agentAssignableProfileError guard, binds existing profiles only, unknown                ║
+ * ║               template/project rejected)                                                              ║
  * ║   lifecycle  — session_spawn (manager|plain ONLY — never platform/auditor/worker/setup);              ║
  * ║                project_archive (SOFT, reversible — REFUSES a reserved/system home; rows retained);     ║
  * ║                end_me (SELF-SCOPED terminal exit, no target arg — always ends the CALLING setup        ║
@@ -450,7 +452,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "agent_create",
       {
-        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human/assistant-authored) profileId as the agent's rig — assignment only (use profile_create to mint a new one); a non-existent profileId is rejected. LEAST-PRIVILEGE: profileId is rejected if its role is anything but manager/worker/null (setupRoleError), symmetric with agent_update/profile_assign. REJECTED outright when projectId is a reserved/system project (the workspace home) — this closes a name-hijack: a same-named impostor agent (e.g. a fake \"Companion\") could otherwise be created there to collide with the real one that gateway/server.ts resolves BY NAME.",
+        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human/assistant-authored) profileId as the agent's rig — assignment only (use profile_create to mint a new one); a non-existent profileId is rejected. LEAST-PRIVILEGE: profileId is rejected if its role is anything but manager/worker/null, or if it carries a connections/capabilities/vaultWrite grant (agentAssignableProfileError), symmetric with agent_update/profile_assign. REJECTED outright when projectId is a reserved/system project (the workspace home) — this closes a name-hijack: a same-named impostor agent (e.g. a fake \"Companion\") could otherwise be created there to collide with the real one that gateway/server.ts resolves BY NAME.",
         inputSchema: strictShape({
           projectId: z.string(),
           name: z.string(),
@@ -468,11 +470,12 @@ export class SetupMcpRouter {
         if (profileId !== undefined) {
           const profile = db.getProfile(profileId);
           if (!profile) return ok({ error: "profile not found" });
-          // M2 (card 4d70cc06): agent_update/profile_assign already gate a profileId through
-          // setupRoleError — agent_create was the odd path that skipped it, accepting e.g. an
-          // assistant-role profile straight onto a brand-new agent.
-          const roleErr = setupRoleError(profile.role);
-          if (roleErr) return ok({ error: roleErr });
+          // M2 (card 4d70cc06): agent_update/profile_assign already gate a profileId through the shared
+          // predicate — agent_create was the odd path that skipped it, accepting e.g. an assistant-role
+          // profile straight onto a brand-new agent. Strict/default (no elevated roles) per the 3de74275
+          // decision record's amendment: the ungated setup surface never administers an elevated rig.
+          const assignErr = agentAssignableProfileError(profile);
+          if (assignErr) return ok({ error: assignErr });
         }
         const agent: Agent = {
           id: randomUUID(), projectId, name,
@@ -549,11 +552,12 @@ export class SetupMcpRouter {
         const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false });
         if (!v.ok) return ok({ error: v.error });
         // LEAST-PRIVILEGE (setup-only, ON TOP of the shared validator): a non-null profileId is validated to
-        // EXIST by validateAgentPatch above, so getProfile resolves — reject if its role is elevated, so the
-        // ungated setup surface can never bind an agent to a platform/auditor/workspace-auditor rig.
+        // EXIST by validateAgentPatch above, so getProfile resolves — reject if its role is elevated, or if
+        // it carries connections/capabilities/vaultWrite, so the ungated setup surface can never bind an
+        // agent to a platform/auditor/workspace-auditor rig or a secrets/vault-write grant (strict/default).
         if (v.patch.profileId != null) {
-          const roleErr = setupRoleError(db.getProfile(v.patch.profileId)?.role);
-          if (roleErr) return ok({ error: roleErr });
+          const assignErr = agentAssignableProfileError(db.getProfile(v.patch.profileId)!);
+          if (assignErr) return ok({ error: assignErr });
         }
         // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
         const warning = agentUpdatePromptWarning(db, resolved, v.patch);
@@ -568,9 +572,11 @@ export class SetupMcpRouter {
 
     // === templates (Guided Onboarding & Templates, onboarding C2) — read the canonical presets + apply one
     // to an EXISTING project. NO new writer surface: applyWorkflowTemplate (setup/templates.ts) writes only
-    // ordinary agent-create + task-insert rows, and checks every templated agent's resolved profile role
-    // against setupRoleError before writing it — the same least-privilege allowlist the rest of this surface
-    // enforces, so a template can never be an elevation back-door. ===
+    // ordinary agent-create + task-insert rows.
+    //
+    // @decision 3de74275 — template_apply itself (below), not applyWorkflowTemplate, checks every
+    // templated agent's resolved profile (templateAssignableProfileError) before applying — the human-only
+    // REST route shares applyWorkflowTemplate and keeps its pre-card, no-check behaviour. ===
     server.registerTool(
       "template_list",
       {
@@ -597,9 +603,10 @@ export class SetupMcpRouter {
           "each bound to an EXISTING bundled profile by name, never minted — and seeds its starter board " +
           "cards. Reuses the existing agent_create + task-insert writers only, no new writer surface. " +
           "Fail-closed: an unknown templateName, an unknown projectId, an unknown profileName, a " +
-          "template whose agent resolves to a role other than manager/worker/null, or a reserved/system " +
-          "projectId (the workspace home — closes the same name-hijack agent_create refuses) " +
-          "are all rejected and nothing is written.",
+          "template whose agent resolves to a role other than manager/worker/null, one whose resolved " +
+          "profile carries a non-empty connections, a non-empty capabilities, or vaultWrite:true, or a " +
+          "reserved/system projectId (the workspace home — closes the same name-hijack agent_create " +
+          "refuses) are all rejected and nothing is written.",
         inputSchema: strictShape({
           projectId: z.string(),
           templateName: z.string(),
@@ -616,11 +623,17 @@ export class SetupMcpRouter {
         if (project.reserved) return ok({ error: "the setup surface cannot apply a workflow template to a reserved/system project (the workspace home) — only a human (Agents UI or REST) may add agents there." });
         const template = findWorkflowTemplate(templateName);
         if (!template) return ok({ error: `unknown workflow template: "${templateName}"` });
+        // @decision 3de74275 — this EARLY pre-check gives a clearer error at the point of the actual
+        // request; it is NOT the only defense — applyWorkflowTemplate's own check (role unconditional,
+        // field fail-closed) backstops it, so removing this call changes the error text, never the outcome.
+        const assignErr = templateAssignableProfileError(db, template);
+        if (assignErr) return ok({ error: assignErr });
         try {
           return ok(applyWorkflowTemplate(db, template, projectId));
         } catch (e) {
-          // applyWorkflowTemplate throws on an unknown profileName or an elevated resolved role
-          // (setupRoleError) — surface as a clean tool error, not an uncaught exception.
+          // applyWorkflowTemplate throws on an unknown profileName or a resolved profile that fails its
+          // own role/field check (the pre-check above is redundant here, not exhaustive) — surface as a
+          // clean tool error, not an uncaught exception.
           return ok({ error: (e as Error).message });
         }
       },
@@ -691,7 +704,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_assign",
       {
-        description: "Assign an EXISTING profile to an agent (explicit agentId + profileId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). LEAST-PRIVILEGE: REJECTED outright when the TARGET agent's CURRENT rig role is anything but manager/worker/null, or when it lives in a reserved/system project — regardless of which profile you're trying to assign it — and separately rejected when the NEW profile's role is anything but manager/worker/null.",
+        description: "Assign an EXISTING profile to an agent (explicit agentId + profileId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). LEAST-PRIVILEGE: REJECTED outright when the TARGET agent's CURRENT rig role is anything but manager/worker/null, or when it lives in a reserved/system project — regardless of which profile you're trying to assign it — and separately rejected when the NEW profile's role is anything but manager/worker/null, or when it carries a connections/capabilities/vaultWrite grant.",
         inputSchema: strictShape({ agentId: z.string(), profileId: z.string() }),
       },
       async ({ agentId, profileId }) => {
@@ -705,10 +718,12 @@ export class SetupMcpRouter {
         const assigned = db.getProfile(profileId);
         if (!assigned) return ok({ error: "profile not found" });
         // LEAST-PRIVILEGE (setup-only): mirror agent_update — reject binding an agent to a profile whose
-        // RESOLVED role is elevated (platform/auditor/workspace-auditor), so the ungated setup surface can
-        // never plant a latent elevation by this back door. A manager/null/plain rig still assigns fine.
-        const roleErr = setupRoleError(assigned.role);
-        if (roleErr) return ok({ error: roleErr });
+        // RESOLVED role is elevated (platform/auditor/workspace-auditor), or that carries connections/
+        // capabilities/vaultWrite, so the ungated setup surface can never plant a latent elevation or
+        // launder a secrets/vault-write grant by this back door (strict/default). A manager/null/plain
+        // rig with no such grant still assigns fine.
+        const assignErr = agentAssignableProfileError(assigned);
+        if (assignErr) return ok({ error: assignErr });
         db.updateAgent(agent.id, { profileId });
         return ok(agentFields(db.getAgent(agent.id)));
       },

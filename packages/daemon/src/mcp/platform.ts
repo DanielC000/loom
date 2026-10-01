@@ -28,9 +28,9 @@ import { writeVaultFile, ensureVaultRoot } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { recordBoardReadForProjects } from "../orchestration/board-read.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
-import { validateProfile, agentProfileKeyError, HARNESS_ID_SCHEMA } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError, agentAssignableProfileError, HARNESS_ID_SCHEMA } from "../profiles/validate.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
-import { createAgentCore, cloneAgentCore } from "../agents/clone-core.js";
+import { createAgentCore, cloneAgentCore, cloneSourceFieldError } from "../agents/clone-core.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { setProjectConfigSafe, currentColumns } from "../tasks/columns.js";
@@ -43,7 +43,7 @@ import type { PendingMergeOpNotice } from "../sessions/service.js";
 import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } from "./promptSearch.js";
 import { searchProjectMemory, DEFAULT_MEMORY_SEARCH_CAP, MAX_MEMORY_SEARCH_CAP } from "./projectMemorySearch.js";
 
-import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
+import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate, templateAssignableProfileError } from "../setup/templates.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { resolvePlatformLeadResumeDocPath } from "../sessions/platform-lead-prompt.js";
 import { lineageRootId } from "../sessions/lineage.js";
@@ -1257,7 +1257,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "agent_create",
       {
-        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human-authored) profileId as the agent's rig — you can only assign a profile a human already created, never mint one (a non-existent profileId is rejected).",
+        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human-authored) profileId as the agent's rig — you can only assign a profile a human already created, never mint one (a non-existent profileId is rejected). An elevated/locked-role profile (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job) — but a profile carrying connections/capabilities/vaultWrite is REJECTED regardless of role (human-only, via the Profiles UI / REST): those fields grant real external secrets / host-process launch / vault-write, and binding one across projects is never allowed through this tool.",
         inputSchema: strictShape({
           projectId: z.string(),
           name: z.string(),
@@ -1266,7 +1266,7 @@ export class PlatformMcpRouter {
         }),
       },
       async ({ projectId, name, startupPrompt, profileId }) => {
-        const res = createAgentCore(db, { projectId, name, startupPrompt, profileId });
+        const res = createAgentCore(db, { projectId, name, startupPrompt, profileId }, { allowElevatedRoles: true });
         return res.ok ? ok(res.promptWarning ? { ...res.agent, promptWarning: res.promptWarning } : res.agent) : ok({ error: res.error });
       },
     );
@@ -1275,7 +1275,7 @@ export class PlatformMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
+          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId. An elevated/locked-role profileId (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job), but a profileId carrying connections/capabilities/vaultWrite is REJECTED regardless of role (human-only, via the Profiles UI / REST). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
         inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
@@ -1314,6 +1314,13 @@ export class PlatformMcpRouter {
         if (resolvedStartupPrompt !== undefined) rawPatch.startupPrompt = resolvedStartupPrompt;
         const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false });
         if (!v.ok) return ok({ error: v.error });
+        // @decision 3de74275 — a non-null profileId is validated to EXIST above, so getProfile resolves;
+        // elevated roles are allowed here (administering the Lead's own rigs is this surface's job), but
+        // connections/capabilities/vaultWrite are never assignable through an agent-facing tool.
+        if (v.patch.profileId != null) {
+          const assignErr = agentAssignableProfileError(db.getProfile(v.patch.profileId)!, { allowElevatedRoles: true });
+          if (assignErr) return ok({ error: assignErr });
+        }
         // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
         const warning = agentUpdatePromptWarning(db, resolved, v.patch);
         db.updateAgent(resolved.id, v.patch);
@@ -1338,7 +1345,9 @@ export class PlatformMcpRouter {
           "core agent_create uses (createAgentCore) — no forked create path. LEAST-PRIVILEGE (load-bearing, " +
           "mirrors the guard on assigning an elevated profile directly): REFUSED if the source agent's " +
           "profile role is platform/auditor — cloning an elevated rig into another project is never " +
-          "allowed. 404 (\"source agent not found\") if sourceAgentId is unknown; \"project not found\" if " +
+          "allowed. ALSO REFUSED, regardless of role, if the source agent's profile carries a non-empty " +
+          "connections, a non-empty capabilities, or vaultWrite:true — human-only, via the Profiles UI / " +
+          "REST. 404 (\"source agent not found\") if sourceAgentId is unknown; \"project not found\" if " +
           "targetProjectId is unknown (same as agent_create); \"profile not found\" is impossible here (the " +
           "source's profileId was already validated when the source agent itself was created/updated).",
         inputSchema: strictShape({
@@ -1349,6 +1358,12 @@ export class PlatformMcpRouter {
         }),
       },
       async ({ sourceAgentId, targetProjectId, nameOverride, promptPatch }) => {
+        // @decision 3de74275 — this EARLY pre-check gives a clearer error at the point of the actual
+        // request; cloneAgentCore's own field check (fail-closed by default) backstops it.
+        const source = db.getAgent(sourceAgentId);
+        if (!source) return ok({ error: "source agent not found" });
+        const fieldErr = cloneSourceFieldError(db, source.profileId);
+        if (fieldErr) return ok({ error: fieldErr });
         const res = cloneAgentCore(db, sourceAgentId, targetProjectId, { nameOverride, promptPatch });
         return res.ok ? ok(res.promptWarning ? { ...res.agent, promptWarning: res.promptWarning } : res.agent) : ok({ error: res.error });
       },
@@ -1362,8 +1377,10 @@ export class PlatformMcpRouter {
           "agent_clone, for standing up a per-family role across N sibling projects (a tool-site roster, a " +
           "portfolio of similar repos) without N hand-written agent_clone round-trips. Each entry in " +
           "`targets` is applied INDEPENDENTLY through the exact same agent_clone core (same validation, " +
-          "same least-privilege platform/auditor-role guard) — a bad entry (unknown targetProjectId) " +
-          "surfaces its own { error } and does NOT block the other targets; nothing is transactional. " +
+          "same least-privilege platform/auditor-role guard, same REJECTION of a connections/capabilities/" +
+          "vaultWrite-carrying source profile regardless of role — human-only, via the Profiles UI / REST) " +
+          "— a bad entry (unknown targetProjectId) surfaces its own { error } and does NOT block the " +
+          "other targets; nothing is transactional. " +
           "Returns one result per target, in the given order: { targetProjectId, agent } on success or " +
           "{ targetProjectId, error } on failure. SPILL (card eec70b79): each cloned agent's full " +
           "startupPrompt rides inline in `agent`, so the batch array is bare when it fits but when the " +
@@ -1382,7 +1399,12 @@ export class PlatformMcpRouter {
         }),
       },
       async ({ sourceAgentId, targets }) => {
+        // @decision 3de74275 — same agent-surface FIELD check as agent_clone, computed ONCE (it depends
+        // only on sourceAgentId, identical for every target) and applied to every entry independently.
+        const source = db.getAgent(sourceAgentId);
+        const fieldErr = source ? cloneSourceFieldError(db, source.profileId) : "source agent not found";
         const results = targets.map((t) => {
+          if (fieldErr) return { targetProjectId: t.targetProjectId, error: fieldErr };
           const res = cloneAgentCore(db, sourceAgentId, t.targetProjectId, {
             nameOverride: t.nameOverride, promptPatch: t.promptPatch,
           });
@@ -1929,13 +1951,18 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_assign",
       {
-        description: "Assign an EXISTING profile to an agent (cross-project, explicit agentId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create).",
+        description: "Assign an EXISTING profile to an agent (cross-project, explicit agentId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). An elevated/locked-role profile (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job), but a profile carrying connections/capabilities/vaultWrite is REJECTED regardless of role (human-only, via the Profiles UI / REST).",
         inputSchema: strictShape({ agentId: z.string(), profileId: z.string() }),
       },
       async ({ agentId, profileId }) => {
         const agent = getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent");
         if ("error" in agent) return ok(agent);
-        if (!db.getProfile(profileId)) return ok({ error: "profile not found" });
+        const profile = db.getProfile(profileId);
+        if (!profile) return ok({ error: "profile not found" });
+        // @decision 3de74275 — elevated roles are allowed here (administering the Lead's own rigs is this
+        // surface's job), but connections/capabilities/vaultWrite are never assignable through an agent tool.
+        const assignErr = agentAssignableProfileError(profile, { allowElevatedRoles: true });
+        if (assignErr) return ok({ error: assignErr });
         db.updateAgent(agent.id, { profileId });
         return ok(agentFields(db.getAgent(agent.id)));
       },
@@ -2571,11 +2598,11 @@ export class PlatformMcpRouter {
     // surface so the loom-setup ⊆ loom-platform invariant holds (every operator tool is also on the Lead's
     // surface). Identical implementation: template_list reads the canonical WORKFLOW_TEMPLATES catalog;
     // template_apply resolves projectId via the SAME plain db.getProject existence guard project_configure/
-    // project_update/agent_create already use above, then applies via applyWorkflowTemplate (setup/
-    // templates.ts), which itself checks every templated agent's resolved profile role against
-    // setupRoleError before writing it — a template can never be an elevation back-door, on this surface
-    // either. The Lead's broader cross-project reach (any projectId) is BY DESIGN, same as agent_create/
-    // project_create above — it is not a widened guard, just the Lead's ordinary reach. ===
+    // project_update/agent_create already use above.
+    //
+    // @decision 3de74275 — template_apply itself (below), not applyWorkflowTemplate, checks every
+    // templated agent's resolved profile (templateAssignableProfileError, strict even here). The Lead's
+    // broader cross-project reach (any projectId) is BY DESIGN, same as agent_create/project_create. ===
     server.registerTool(
       "template_list",
       {
@@ -2614,6 +2641,10 @@ export class PlatformMcpRouter {
         if (!project) return ok({ error: "project not found" });
         const template = findWorkflowTemplate(templateName);
         if (!template) return ok({ error: `unknown workflow template: "${templateName}"` });
+        // @decision 3de74275 — this EARLY pre-check gives a clearer error at the point of the actual
+        // request; applyWorkflowTemplate's own check (role unconditional, field fail-closed) backstops it.
+        const assignErr = templateAssignableProfileError(db, template);
+        if (assignErr) return ok({ error: assignErr });
         try {
           return ok(applyWorkflowTemplate(db, template, projectId));
         } catch (e) {

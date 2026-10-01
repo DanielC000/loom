@@ -13,6 +13,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) an unknown projectId is rejected (404), nothing written;
 //   (5) HUMAN-ONLY: no MCP router file registers a tool at these REST paths (grepped statically below,
 //       not just asserted by comment) — the only reachable path is the loopback REST route.
+//   (6) card a06650d2 delta-review ruling on 3de74275: this REST route passes `humanAuthorized: true` to
+//       applyWorkflowTemplate — which skips ONLY the FIELD check (connections/capabilities/vaultWrite):
+//       a template bound (by name collision) to a vaultWrite-carrying profile still APPLIES over this
+//       route (the whole point of the opt-out — mirrors companion-provision.mjs's (6i) for clone). The
+//       ROLE check is NEVER lifted, even here: a template bound to an elevated-role profile still 400s
+//       with nothing written.
 // Run: 1) build (turbo builds shared first), 2) node test/setup-templates-rest.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -177,7 +183,63 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
   }
 }
 
+// ===== (6) card a06650d2 delta-review: humanAuthorized skips FIELD, never ROLE, over this REST route =====
+{
+  const db = new Db(path.join(TMP, "loom-human-authorized.db"));
+  seedDefaultProfiles(db);
+  const now = new Date().toISOString();
+  const projectId = "pHumanAuthorized";
+  db.insertProject({ id: projectId, name: "Human Authorized Project", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: now, archivedAt: null, reserved: false });
+
+  // Name-collision: a LATER-inserted profile sharing the "Dev" name the "Solo builder" template binds
+  // wins the by-name lookup (profilesByName is built fresh on every apply) — so rebinding "Dev" to a
+  // vaultWrite-carrying profile here exercises the REAL REST route's field-check behaviour end to end.
+  db.insertProfile({ id: "vaultWriteDevCollision", name: "Dev", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, vaultWrite: true });
+
+  const app = await buildApp(db);
+  try {
+    const r = await app.inject({
+      method: "POST", url: "/api/setup/templates/apply",
+      payload: { projectId, templateName: "Solo builder" },
+    });
+    check("(6) field-carrying: POST /api/setup/templates/apply → 201 (humanAuthorized skips the FIELD check)", r.statusCode === 201);
+    const body = r.json();
+    check("(6) field-carrying: response carries all 3 created agents", Array.isArray(body.agents) && body.agents.length === 3);
+    check("(6) field-carrying: the vaultWrite-bound 'Dev' agent is actually bound to the collision profile",
+      db.listAgents(projectId).find((a) => a.name === "Dev")?.profileId === "vaultWriteDevCollision");
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+{
+  const db = new Db(path.join(TMP, "loom-human-authorized-role.db"));
+  seedDefaultProfiles(db);
+  const now = new Date().toISOString();
+  const projectId = "pHumanAuthorizedRole";
+  db.insertProject({ id: projectId, name: "Human Authorized Role Project", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: now, archivedAt: null, reserved: false });
+
+  // Same name-collision trick, but the collision profile is ELEVATED-role this time — the ROLE check is
+  // never lifted by humanAuthorized, so this must still be rejected with NOTHING written.
+  db.insertProfile({ id: "elevatedDevCollision", name: "Dev", role: "platform", description: "", allowDelta: [], skills: null, model: null, icon: null });
+
+  const app = await buildApp(db);
+  try {
+    const r = await app.inject({
+      method: "POST", url: "/api/setup/templates/apply",
+      payload: { projectId, templateName: "Solo builder" },
+    });
+    check("(6) elevated-role: POST /api/setup/templates/apply → 400 (humanAuthorized NEVER lifts the ROLE check)", r.statusCode === 400);
+    check("(6) elevated-role: 400 body carries a reason", typeof r.json().error === "string");
+    check("(6) elevated-role: NOTHING was written (no agents)", db.listAgents(projectId).length === 0);
+    check("(6) elevated-role: NOTHING was written (no tasks)", db.listTasks(projectId).length === 0);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GET /api/setup/templates lists the bundled presets, POST /api/setup/templates/apply stands up a preset's roster + starter card on a real project via ordinary agent-create/task-insert rows, an unknown template or project is rejected with nothing written, and no MCP router exposes these REST paths (human-only)."
+  ? "\n✅ ALL PASS — GET /api/setup/templates lists the bundled presets, POST /api/setup/templates/apply stands up a preset's roster + starter card on a real project via ordinary agent-create/task-insert rows, an unknown template or project is rejected with nothing written, no MCP router exposes these REST paths (human-only), and this route's humanAuthorized opt-out (card a06650d2) skips ONLY the field check (a vaultWrite-bound template still applies) while NEVER lifting the role check (an elevated-role-bound template still 400s with nothing written)."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

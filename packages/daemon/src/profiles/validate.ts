@@ -201,6 +201,53 @@ export function agentProfileKeyError(raw: unknown): string | null {
   return null;
 }
 
+/**
+ * @decision 3de74275 — do not skip this at an assignment call site believing `agentProfileKeyError` at
+ * mint time already covers it: a human-minted profile can independently carry `connections`/
+ * `capabilities`/`vaultWrite`, and BINDING an existing such profile was never checked anywhere.
+ *
+ * Two DISTINCT reasons a caller may want the role branch skipped — kept as separate options rather than
+ * one overloaded flag (fix round, card `a06650d2`: the clone path's old reuse of `allowElevatedRoles` to
+ * mean "skip, it's handled elsewhere" was byte-identical to Platform Lead's real-widening use of the same
+ * flag, which made the two impossible to tell apart at a call site):
+ *  - `allowElevatedRoles: true` — genuine widening. ONLY the Platform Lead's direct `profile_assign`/
+ *    `agent_update`/`agent_create` (administering its own elevated rigs is its job).
+ *  - `skipRoleCheck: true` — the role axis is being checked by the CALLER's own narrower mechanism
+ *    instead (e.g. clone's `operator`/`isPlatformProfile` check, below) — never widens WHO may bind an
+ *    elevated role, only avoids double-checking a role that was already vetted a different way.
+ * Neither option ever lifts the field checks (connections/capabilities/vaultWrite) below — ONLY
+ * `humanAuthorized: true` does that, and ONLY the field checks: see the delta-review ruling on card
+ * `a06650d2` (the 3de74275 record's "Fix round" section) for why the field axis is fail-CLOSED by
+ * default in every CORE (`createAgentCore`/`cloneAgentCore`, `applyWorkflowTemplate`) and needs this
+ * explicit opt-out, set ONLY by the two bearer-guarded human-only REST routes that call those cores
+ * directly (`gateway/server.ts`'s `/api/companion/provision` auto-clone and `/api/setup/templates/apply`)
+ * — never by an agent-facing MCP tool. `humanAuthorized` never affects the ROLE branch above, which stays
+ * unconditional for every caller (role eligibility on a template/clone predates this card entirely and
+ * was never meant to be REST-exempt).
+ *
+ * Returns an error string, or null when the profile is safe to bind via an agent-facing tool, OR (with
+ * `humanAuthorized`) via one of the two named human-only REST routes.
+ */
+export function agentAssignableProfileError(
+  profile: Pick<Profile, "role" | "connections" | "capabilities" | "vaultWrite">,
+  opts?: { allowElevatedRoles?: boolean; skipRoleCheck?: boolean; humanAuthorized?: boolean },
+): string | null {
+  if (!opts?.allowElevatedRoles && !opts?.skipRoleCheck && profile.role != null && LOCKED_PROFILE_ROLES.has(profile.role)) {
+    return `cannot assign profile: role "${profile.role}" is elevated/locked — it may not be bound via this tool (human-only, via the Profiles UI / REST)`;
+  }
+  if (opts?.humanAuthorized) return null; // field checks below are the agent-surface-only axis; skip for the two named REST routes
+  if (profile.connections && profile.connections.length > 0) {
+    return "cannot assign profile: it carries a connections grant (access to real external secrets) — human-only, via the Profiles UI / REST";
+  }
+  if (profile.capabilities && profile.capabilities.length > 0) {
+    return "cannot assign profile: it carries a capabilities grant (can launch a host process / bind egress via a connection) — human-only, via the Profiles UI / REST";
+  }
+  if (profile.vaultWrite) {
+    return "cannot assign profile: it carries vaultWrite (write access into a human-reviewed vault corpus) — human-only, via the Profiles UI / REST";
+  }
+  return null;
+}
+
 /** The narrow db surface `capabilityGrantBindingError` needs — mirrors the read-only slice of
  *  CapabilitiesDbStore/ConnectionsDbStore (capabilities/registry.ts, connections/store.ts) it consults. */
 export interface CapabilityGrantBindingDbStore {

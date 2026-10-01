@@ -32,6 +32,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (g) agent_update EDITS an existing agent (amend startupPrompt / rename / (re)assign-or-clear profile),
 //       404s an unknown id, and LEAST-PRIVILEGE rejects assigning an elevated-role (platform/auditor/
 //       workspace-auditor) rig — the gap that collapsed "action these cards for me" into "paste this text."
+//       Card a06650d2: it ALSO rejects an allowed-ROLE (worker) profile carrying connections/capabilities/
+//       vaultWrite — the shared agentAssignableProfileError predicate's field check, same on agent_create/
+//       profile_assign, since this surface never passes allowElevatedRoles.
 //   (g2) agent_update / profile_assign resolve an agentId id-PREFIX like agent_get does (the read/write
 //       asymmetry that yielded a silent "agent not found" on a prefix agent_get itself resolved fine):
 //       an unambiguous 8-char prefix resolves, a full id still works, and an ambiguous prefix is REJECTED
@@ -507,6 +510,38 @@ try {
   const paOk = await call("profile_assign", { agentId: agent.id, profileId: prof.id });
   check("(g) profile_assign: an allowed-role (worker) profile still assigns fine", paOk.profileId === prof.id && !paOk.error);
 
+  // Card a06650d2: the setup surface ALSO can't bind an allowed-ROLE (worker) profile that carries a
+  // human-only connections/capabilities/vaultWrite grant — the field check applies regardless of role,
+  // and regardless of allowElevatedRoles (which this surface never passes anyway).
+  db.insertProfile({ id: "vaultWriteRig", name: "Vault Rig", role: "worker", description: "vault-write rig", allowDelta: [], skills: null, model: null, icon: "📓", vaultWrite: true });
+  db.insertProfile({ id: "connectionsRig", name: "Connections Rig", role: "worker", description: "connections rig", allowDelta: [], skills: null, model: null, icon: "🔌", connections: ["connX"] });
+  db.insertProfile({ id: "capabilitiesRig", name: "Capabilities Rig", role: "worker", description: "capabilities rig", allowDelta: [], skills: null, model: null, icon: "🧩", capabilities: [{ slug: "some-cap" }] });
+  const auBeforeField = db.getAgent(agent.id)?.profileId ?? null;
+  const auVaultWrite = await call("agent_update", { agentId: agent.id, profileId: "vaultWriteRig" });
+  check("(g) agent_update REJECTS a worker-role profile carrying vaultWrite", typeof auVaultWrite.error === "string" && /vaultWrite/i.test(auVaultWrite.error));
+  check("(g) agent_update: the rejected vaultWrite assign left the agent's assignment UNCHANGED", (db.getAgent(agent.id)?.profileId ?? null) === auBeforeField);
+  const paVaultWrite = await call("profile_assign", { agentId: agent.id, profileId: "vaultWriteRig" });
+  check("(g) profile_assign REJECTS a worker-role profile carrying vaultWrite", typeof paVaultWrite.error === "string" && /vaultWrite/i.test(paVaultWrite.error));
+  const acVaultWrite = await call("agent_create", { projectId: created.id, name: "VaultWriteTarget", profileId: "vaultWriteRig" });
+  check("(g) agent_create REJECTS a worker-role profile carrying vaultWrite", typeof acVaultWrite.error === "string" && /vaultWrite/i.test(acVaultWrite.error) && !acVaultWrite.id);
+  const paConnections = await call("profile_assign", { agentId: agent.id, profileId: "connectionsRig" });
+  check("(g) profile_assign REJECTS a worker-role profile carrying a non-empty connections", typeof paConnections.error === "string" && /connections/i.test(paConnections.error));
+  const paCapabilities = await call("profile_assign", { agentId: agent.id, profileId: "capabilitiesRig" });
+  check("(g) profile_assign REJECTS a worker-role profile carrying a non-empty capabilities", typeof paCapabilities.error === "string" && /capabilities/i.test(paCapabilities.error));
+  // Card a06650d2 fix round: connections/capabilities were only exercised above on profile_assign — add
+  // the SAME coverage on agent_update/agent_create (vaultWrite already covered both; connections/
+  // capabilities were not).
+  const auConnections = await call("agent_update", { agentId: agent.id, profileId: "connectionsRig" });
+  check("(g) agent_update REJECTS a worker-role profile carrying a non-empty connections", typeof auConnections.error === "string" && /connections/i.test(auConnections.error));
+  check("(g) agent_update: the rejected connections assign left the agent's assignment UNCHANGED", (db.getAgent(agent.id)?.profileId ?? null) === auBeforeField);
+  const auCapabilities = await call("agent_update", { agentId: agent.id, profileId: "capabilitiesRig" });
+  check("(g) agent_update REJECTS a worker-role profile carrying a non-empty capabilities", typeof auCapabilities.error === "string" && /capabilities/i.test(auCapabilities.error));
+  check("(g) agent_update: the rejected capabilities assign left the agent's assignment UNCHANGED", (db.getAgent(agent.id)?.profileId ?? null) === auBeforeField);
+  const acConnections = await call("agent_create", { projectId: created.id, name: "ConnectionsTarget", profileId: "connectionsRig" });
+  check("(g) agent_create REJECTS a worker-role profile carrying a non-empty connections", typeof acConnections.error === "string" && /connections/i.test(acConnections.error) && !acConnections.id);
+  const acCapabilities = await call("agent_create", { projectId: created.id, name: "CapabilitiesTarget", profileId: "capabilitiesRig" });
+  check("(g) agent_create REJECTS a worker-role profile carrying a non-empty capabilities", typeof acCapabilities.error === "string" && /capabilities/i.test(acCapabilities.error) && !acCapabilities.id);
+
   // ============ (g2) agent_update / profile_assign resolve an id-PREFIX like agent_get does ============
   // The bug: agent_get resolves an 8-char id-PREFIX, but the agent WRITE handlers (agent_update,
   // profile_assign) did EXACT-match only — a prefix that read fine 404'd on write. CRAFTED UUID-shaped
@@ -845,6 +880,23 @@ try {
   const unknownProject = await call("template_apply", { projectId: "not-a-real-project-id", templateName: "Solo builder" });
   check("(l) template_apply: an unknown projectId is rejected (project-scope guard)",
     unknownProject.error === "project not found");
+
+  // BLOCKING fix (delta review, card a06650d2): template_apply must REJECT a template whose resolved
+  // profile carries vaultWrite — not just an elevated role. Name-collision: a LATER-inserted profile
+  // sharing the "Dev" name the "Solo builder" template binds wins the by-name lookup (profilesByName is
+  // built fresh on every apply), so rebinding "Dev" to a vaultWrite-carrying profile exercises the real
+  // agent-facing MCP route end to end. Applied to a FRESH project (not `created`, which already has its
+  // own "Solo builder" roster from (l) above) so the agent count delta is unambiguous.
+  const created2 = await call("project_create", { name: "FieldCheckProj", repoPath: repo });
+  check("(l) precondition: a 2nd real project exists for the field-check case", !!created2.id && !created2.error);
+  db.insertProfile({ id: "vaultWriteDevCollision", name: "Dev", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, vaultWrite: true });
+  const nAgentsBeforeFieldCheck = db.listAgents(created2.id).length;
+  const fieldCheckApply = await call("template_apply", { projectId: created2.id, templateName: "Solo builder" });
+  check("(l) template_apply REJECTS when a templated profileName now resolves to a vaultWrite-carrying profile",
+    typeof fieldCheckApply.error === "string" && /vaultWrite/i.test(fieldCheckApply.error) && !fieldCheckApply.agents);
+  check("(l) template_apply: the rejected vaultWrite-collision apply wrote NO agents",
+    db.listAgents(created2.id).length === nAgentsBeforeFieldCheck);
+  db.deleteProfile("vaultWriteDevCollision"); // restore the "Dev" name back to the bundled profile
 
   await client.close();
 } finally {

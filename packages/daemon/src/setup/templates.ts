@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import type { Agent, Task } from "@loom/shared";
 import type { Db } from "../db.js";
-import { setupRoleError } from "../mcp/setup.js";
+import { agentAssignableProfileError } from "../profiles/validate.js";
 
 /**
  * Guided Onboarding & Templates (onboarding C1) — the workflow-template model. A BUNDLED TS preset, the
@@ -14,11 +14,8 @@ import { setupRoleError } from "../mcp/setup.js";
  * `seedPlatformHome`/`seedSetupHome` bind their agents to a bundled profile) — a template NEVER mints a
  * profile. Skills are inherited from the bound profile.
  *
- * Defense-in-depth: every templated agent's resolved profile role is checked against `setupRoleError`
- * (mcp/setup.ts) — the same least-privilege allowlist the ungated setup surface enforces on
- * profile/agent writes. A template can never be an elevation back-door: applying one that (by a future
- * authoring mistake) references a platform/auditor/workspace-auditor profile throws rather than silently
- * seeding an elevated agent.
+ * @decision 3de74275 — `applyWorkflowTemplate` checks every resolved profile itself (role unconditional,
+ * every caller; field fail-closed unless `humanAuthorized`) — see that function's own doc for the split.
  */
 
 /** One agent a workflow template stands up, bound to an EXISTING bundled profile by name. */
@@ -107,20 +104,44 @@ export function findWorkflowTemplate(name: string): WorkflowTemplate | undefined
 }
 
 /**
+ * EARLY, agent-surface-only pre-flight check for a template apply (the `template_apply` MCP tools in
+ * setup.ts/platform.ts call this BEFORE `applyWorkflowTemplate`, for a clearer error at the point of the
+ * actual request) — NOT the only defense: `applyWorkflowTemplate`'s own check (below) backstops it, per
+ * the 3de74275 record's fix-round ruling. Checks every resolved agent's profile against
+ * `agentAssignableProfileError` at its true default (strict — no `allowElevatedRoles`/`humanAuthorized`:
+ * applying a template through an agent-facing tool is never a legitimate way to bind an elevated or
+ * field-bearing rig). Returns the FIRST offending agent's error, or null when every resolved profile is
+ * clean. An unresolvable `profileName` is left to `applyWorkflowTemplate`'s own pre-flight (its dedicated
+ * "unknown bundled profile" error), not this check.
+ */
+export function templateAssignableProfileError(db: Db, template: WorkflowTemplate): string | null {
+  const profilesByName = new Map(db.listProfiles().map((p) => [p.name, p]));
+  for (const spec of template.agents) {
+    const profile = profilesByName.get(spec.profileName);
+    if (!profile) continue;
+    const assignErr = agentAssignableProfileError(profile);
+    if (assignErr) return `agent "${spec.name}" — ${assignErr}`;
+  }
+  return null;
+}
+
+/**
  * Apply a workflow template to an ALREADY-EXISTING project: create its agents (each bound to an existing
  * bundled profile by name) and seed its starter board cards. PURE in the sense of writing only through
  * the existing `insertAgent`/`insertTask` rows — no new writer surface, no new DB table.
  *
- * ATOMIC: a pre-flight VALIDATION pass resolves + checks every `template.agents` entry BEFORE any write —
+ * ATOMIC: a pre-flight VALIDATION pass resolves + checks EVERY `template.agents` entry BEFORE any write —
  * so a mixed-validity template (a valid agent before an invalid one) throws with NOTHING written, rather
  * than leaking the valid agents inserted before the throw.
  *
- * Each agent's resolved profile role passes `setupRoleError` (mcp/setup.ts) before it is written — the
- * same least-privilege allowlist enforced on the ungated setup surface — so a template can never be an
- * elevation back-door. Throws if the project doesn't exist, if a `profileName` doesn't match an existing
- * profile, or if a resolved profile's role is elevated (platform/auditor/workspace-auditor).
+ * @decision 3de74275 — every resolved profile is checked via `agentAssignableProfileError(profile,
+ * { humanAuthorized: opts?.humanAuthorized })`: ROLE is unconditional on every caller, REST included
+ * (manager/worker/null only); FIELD is fail-closed, skippable ONLY by the REST template-apply route.
  */
-export function applyWorkflowTemplate(db: Db, template: WorkflowTemplate, projectId: string): { agents: Agent[]; tasks: Task[] } {
+export function applyWorkflowTemplate(
+  db: Db, template: WorkflowTemplate, projectId: string,
+  opts?: { humanAuthorized?: boolean },
+): { agents: Agent[]; tasks: Task[] } {
   const project = db.getProject(projectId);
   if (!project) throw new Error(`applyWorkflowTemplate: project not found: ${projectId}`);
 
@@ -130,8 +151,8 @@ export function applyWorkflowTemplate(db: Db, template: WorkflowTemplate, projec
   const resolved = template.agents.map((spec) => {
     const profile = profilesByName.get(spec.profileName);
     if (!profile) throw new Error(`applyWorkflowTemplate: unknown bundled profile "${spec.profileName}" for agent "${spec.name}"`);
-    const roleError = setupRoleError(profile.role);
-    if (roleError) throw new Error(`applyWorkflowTemplate: agent "${spec.name}" — ${roleError}`);
+    const assignErr = agentAssignableProfileError(profile, { humanAuthorized: opts?.humanAuthorized });
+    if (assignErr) throw new Error(`applyWorkflowTemplate: agent "${spec.name}" — ${assignErr}`);
     return { spec, profile };
   });
 

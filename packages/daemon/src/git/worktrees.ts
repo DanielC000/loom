@@ -3697,6 +3697,15 @@ export const STATIC_GUARD_REPO_PATHS = [
   // — a source-TEXT property (a missing class member) the reduced/emit-compare path cannot reason about,
   // so it could otherwise take the reduced path and never trip a single check.
   "packages/daemon/test/pty-subclass-reap-seam-guard.mjs",
+  // Card a06650d2 (delta-review fix round 2 on the 3de74275 decision record): a corpus-wide, comment-
+  // stripped scan asserting the ONLY two literal `humanAuthorized: true` grants anywhere in
+  // packages/daemon/src are the two bearer-guarded human-only REST routes in gateway/server.ts (the
+  // createAgentCore/cloneAgentCore/applyWorkflowTemplate field-check opt-out) — a new 3rd grant site would
+  // silently widen the bypass with no agent-facing symptom to notice it by. Belongs here on the same
+  // ground as its corpus-wide-scan siblings above: a source-TEXT property (which call sites pass this
+  // literal) the reduced/emit-compare path cannot reason about, so a new grant site could otherwise take
+  // the reduced path and never trip a single check.
+  "packages/daemon/test/human-authorized-call-site-allowlist-guard.mjs",
   // Card 37310431 (round 2): round 1's LOOM_HOME write-deny unioned the static registry with a live
   // `readdirSync` pass, so any new LOOM_HOME-rooted path was automatically caught; round 2 drops that
   // pass (it broke the Platform/Setup homes' own legitimate LOOM_HOME-rooted note writes), so a NEW

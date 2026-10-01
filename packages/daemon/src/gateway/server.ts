@@ -1983,14 +1983,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // spawn below live on the SAME guarded/rollback path (no orphan agent on a later spawn/post-spawn
     // failure — see the two rollback sites below). An unnamed clone gets a distinguishing numeric-suffixed
     // label instead of inheriting the bundled rig's bare name verbatim (else every unnamed companion would
-    // be indistinguishable in the picker). cloneAgentCore's least-privilege guard is a no-op here (the
+    // be indistinguishable in the picker). cloneAgentCore's least-privilege ROLE guard is a no-op here (the
     // bundled Companion rig is always an assistant-role profile), but it stays load-bearing if that rig were
     // ever repointed at something elevated — REJECTED (403), not silently propagated.
+    //
+    // @decision 3de74275 — `humanAuthorized: true` opts OUT of createAgentCore's otherwise fail-closed
+    // FIELD check — ONE of exactly two call sites allowed to (the other: the REST template-apply route
+    // below) — both human-only (bearer/gateway-token), never agent-reachable.
     let clonedAgentId: string | null = null;
     if (cloneSource) {
       const source = deps.db.getAgent(cloneSource.sourceAgentId)!;
       const label = name || `${source.name} ${deps.db.listAgents(cloneSource.targetProjectId).length + 1}`;
-      const cloned = cloneAgentCore(deps.db, cloneSource.sourceAgentId, cloneSource.targetProjectId, { nameOverride: label });
+      const cloned = cloneAgentCore(deps.db, cloneSource.sourceAgentId, cloneSource.targetProjectId, { nameOverride: label }, { humanAuthorized: true });
       if (!cloned.ok) return reply.code(403).send({ error: `failed to clone a new companion agent: ${cloned.error}` });
       agentId = cloned.agent.id;
       clonedAgentId = cloned.agent.id;
@@ -3846,10 +3850,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const template = findWorkflowTemplate(b.templateName);
     if (!template) return reply.code(400).send({ error: `unknown workflow template: "${b.templateName}"` });
     try {
-      return reply.code(201).send(applyWorkflowTemplate(deps.db, template, b.projectId));
+      // @decision 3de74275 — `humanAuthorized: true` is this route's OWN opt-out of applyWorkflowTemplate's
+      // otherwise fail-closed FIELD check — ONE of exactly two allowed call sites (the other: the
+      // companion auto-clone route above). The ROLE check still applies here, unconditionally.
+      return reply.code(201).send(applyWorkflowTemplate(deps.db, template, b.projectId, { humanAuthorized: true }));
     } catch (e) {
-      // applyWorkflowTemplate throws on an unknown profileName or an elevated resolved role
-      // (setupRoleError) — surface as a clean 400, not an uncaught exception.
       return reply.code(400).send({ error: (e as Error).message });
     }
   });

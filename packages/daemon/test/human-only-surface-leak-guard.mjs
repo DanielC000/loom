@@ -27,6 +27,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //   5. update-endpoint.mjs (d)          — no registerTool() name on any src/mcp/*.ts router is self-update-shaped
 //   6. shell-terminal.mjs               — mcp/server.ts, mcp/orchestration.ts, mcp/platform.ts never reference
 //                                          the shell-spawn surface, and register no terminal/shell-shaped tool
+//   7. (card a06650d2 delta-review)     — no src/mcp/*.ts file mentions "humanAuthorized" (the createAgentCore/
+//                                          cloneAgentCore/applyWorkflowTemplate field-check opt-out) at all
 // (4) and (5) originally scanned the COMPILED `dist/mcp/*.js` — this guard scans SOURCE `src/mcp/*.ts`
 // instead, same content (TypeScript doesn't rename string literals) and consistent with every OTHER member of
 // STATIC_GUARD_REPO_PATHS, none of which depend on `dist/` having just been rebuilt.
@@ -70,12 +72,17 @@ check(`the real corpus scan opened at least one src/mcp/*.ts file (found ${mcpFi
 // guard, not this loop.
 const mcpFileContents = new Map(mcpFiles.map((f) => [f, fs.readFileSync(path.join(MCP_DIR, f), "utf8")]));
 
-// ── (1)+(2) substring-absence table — one entry per forbidden REST-path literal ──────────────────────────
+// ── (1)+(2)+(7) substring-absence table — one entry per forbidden REST-path/flag literal ───────────────────
 const SUBSTRING_FORBIDDEN = [
   { label: "setup-project-init-rest.mjs (7)", needle: "/api/setup/project-init" },
   { label: "setup-templates-rest.mjs (5)", needle: "/api/setup/templates" },
   { label: "event-trigger-mcp-absence.mjs (1) [event_trigger]", needle: "event_trigger" },
   { label: "event-trigger-mcp-absence.mjs (1) [eventTrigger]", needle: "eventTrigger" },
+  // (7) card a06650d2 delta-review ruling on 3de74275: `humanAuthorized` is the createAgentCore/
+  // cloneAgentCore/applyWorkflowTemplate field-check opt-out, set ONLY by the two named human-only REST
+  // routes in gateway/server.ts — it must never be settable (or even mentioned) from an agent-facing MCP
+  // tool, since no inputSchema exposes it and it must stay that way.
+  { label: "a06650d2 delta-review: humanAuthorized never agent-reachable", needle: "humanAuthorized" },
 ];
 for (const { label, needle } of SUBSTRING_FORBIDDEN) {
   const offenders = mcpFiles.filter((f) => mcpFileContents.get(f).includes(needle));
@@ -92,6 +99,8 @@ check('positive control: "/api/setup/templates" IS findable in gateway/server.ts
 const eventTriggersText = fs.readFileSync(path.join(SRC_DIR, "orchestration", "event-triggers.ts"), "utf8");
 check('positive control: "event_trigger" or "eventTrigger" IS findable in orchestration/event-triggers.ts',
   /event_trigger|eventTrigger/i.test(eventTriggersText));
+check('positive control: "humanAuthorized" IS findable in gateway/server.ts (proves the needle isn\'t a typo matching nothing anywhere)',
+  gatewayText.includes("humanAuthorized"));
 
 // ── (3) setCompanionLeadMode( call-site allowlist — corpus-wide src/**/*.ts, not just mcp/ ────────────────
 {
@@ -169,6 +178,6 @@ check('positive control: "event_trigger" or "eventTrigger" IS findable in orches
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — every human-only surface's no-MCP-exposure sub-assertion (setup/project-init, setup/templates, companion lead-mode write, event-triggers, self-update, shell terminals) holds against the current src/ tree."
+  ? "\n✅ ALL PASS — every human-only surface's no-MCP-exposure sub-assertion (setup/project-init, setup/templates, companion lead-mode write, event-triggers, self-update, shell terminals, the humanAuthorized field-check opt-out) holds against the current src/ tree."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
