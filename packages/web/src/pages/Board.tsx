@@ -143,6 +143,10 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
     queryFn: () => api.getTask(openTask!.id),
     enabled: !!openTask,
     refetchInterval: 4000,
+    // retry:false (matches Git.tsx/mergeGate.tsx/platformHome's own expected-error reads): a failure here
+    // is deterministic (404/403/401), not transient, so fail fast into TaskDrawerError below rather than
+    // leaving TaskDrawerLoading spinning through react-query's default 3-attempt backoff first.
+    retry: false,
     // NO keepPreviousData here, unlike the board query above: this key changes when a links-block click
     // opens a DIFFERENT card, and carrying the previous card's row across that change would render the
     // OLD card's relations (and, for a done card, its whole body) under the NEW card's header for a beat.
@@ -152,6 +156,12 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   // mid-transition can otherwise surface the wrong row for one render.
   const detail = taskDetail.data && openTask && taskDetail.data.id === openTask.id ? taskDetail.data : null;
   const drawerTask: Task | null = !openTask ? null : needsBodyFetch ? detail : (openTask as Task);
+  // A DONE card's body never rode along on the board response (card 4fa2c146), so when its lazy fetch
+  // above fails outright (e.g. a remote bind with no Tier-1 route for it — card 3485a489), `detail` stays
+  // null forever and the drawer would otherwise spin on TaskDrawerLoading indefinitely with no way out
+  // but Escape/click-outside. Only gates on the needsBodyFetch path — a live card already has its row from
+  // the board response and renders the real drawer regardless of this fetch's outcome.
+  const drawerError = needsBodyFetch && !drawerTask && taskDetail.isError;
 
   // ── Client-side view filter (no server round-trip) ───────────────────────────
   // Search matches id+title+body (case-insensitive substring — a full card id or any prefix finds the
@@ -229,8 +239,11 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
           a done card's body is still loading (needsBodyFetch) for the brief window before the lazy
           fetch above resolves — a minimal placeholder rather than rendering the editable form against a
           not-yet-loaded body (which would let an edit race the fetch and clobber unsaved keystrokes). */}
-      {openTask && !drawerTask && (
+      {openTask && !drawerTask && !drawerError && (
         <TaskDrawerLoading onClose={() => setOpenTaskId(null)} />
+      )}
+      {openTask && drawerError && (
+        <TaskDrawerError onClose={() => setOpenTaskId(null)} onRetry={() => taskDetail.refetch()} />
       )}
       {openTask && drawerTask && (
         <TaskDrawer key={drawerTask.id} task={drawerTask} column={openColumn} onClose={() => setOpenTaskId(null)}
@@ -697,6 +710,35 @@ function TaskDrawerLoading({ onClose }: { onClose: () => void }) {
           background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
           padding: 16, display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box" }}>
         <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>Loading task…</span>
+      </div>
+    </div>
+  );
+}
+
+// Card 3485a489: the single-task fetch backing a DONE card's drawer (needsBodyFetch above) can fail
+// outright — e.g. a remote bind with no route for it — leaving `detail` permanently null. Without this,
+// the drawer fell back to TaskDrawerLoading forever with no way out but Escape/click-outside. Same
+// backdrop/Esc/click-outside-closes shape as TaskDrawerLoading, plus a retry.
+function TaskDrawerError({ onClose, onRetry }: { onClose: () => void; onRetry: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} role="dialog" aria-modal
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
+        alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflowY: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ width: "min(820px, 92vw)", maxWidth: "100%", minHeight: "min(820px, 85vh)", maxHeight: "88vh",
+          background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
+          padding: 16, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          gap: 10, boxSizing: "border-box" }}>
+        <span style={{ color: color.red, fontFamily: font.mono, fontSize: 12 }}>couldn’t load this task</span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={onRetry} style={{ fontFamily: font.mono, fontSize: 12 }}>retry</button>
+          <button onClick={onClose} style={{ fontFamily: font.mono, fontSize: 12 }}>close</button>
+        </div>
       </div>
     </div>
   );

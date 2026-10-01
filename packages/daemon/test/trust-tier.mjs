@@ -161,7 +161,7 @@ try {
 
   const EXPECTED_TIER_1 = new Set([
     "GET /api/projects", "GET /api/sessions", "GET /api/sessions/:id/transcript", "GET /api/sessions/:id/diff",
-    "GET /api/projects/:id/board", "GET /api/projects/:id/tasks", "GET /api/projects/:id/agents",
+    "GET /api/projects/:id/board", "GET /api/projects/:id/tasks", "GET /api/tasks/:id", "GET /api/projects/:id/agents",
     "GET /api/agents/:id/sessions", "GET /api/sessions/:id/queue", "GET /api/sessions/:id/wakes",
     "GET /api/audit/session/:id", "GET /api/audit/wave/:managerId", "GET /api/audit/diff",
     "GET /api/gates/active", "GET /api/gates/history",
@@ -301,6 +301,11 @@ try {
   check("(3b) remote POST /mcp/:sessionId → 403", remoteMcp.statusCode === 403);
   const remoteWriterSameSurfaceOtherMethod = await appOn.inject({ method: "PUT", url: "/api/projects/proj1/vault/file", remoteAddress: "203.0.113.5" });
   check("(3b) remote PUT vault/file (writer sibling of a Tier-1 GET) → 403", remoteWriterSameSurfaceOtherMethod.statusCode === 403);
+  // Card 3485a489: GET /api/tasks/:id is now Tier-1, but its own writer sibling on the SAME path
+  // (POST /api/tasks/:id, a real task update) must stay Tier-0 — a remote peer must never be able to
+  // write a task just because the read on the same path was promoted.
+  const remoteTaskWriteSameSurfaceOtherMethod = await appOn.inject({ method: "POST", url: "/api/tasks/nonexistent", remoteAddress: "203.0.113.5" });
+  check("(3b) remote POST /api/tasks/:id (writer sibling of the new Tier-1 GET) → 403", remoteTaskWriteSameSurfaceOtherMethod.statusCode === 403);
   // Belt-and-suspenders (CR follow-up on card 56ffe50a): the gateway-token ADMIN surface itself is NOT in
   // TIER_1_ROUTES, so it stays Tier-0 (loopback-only) by construction — even a VALID gateway token must
   // NOT authorize minting/rotating/revoking gateway tokens over a remote bind. Pinned here with the SAME

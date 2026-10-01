@@ -47,6 +47,10 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/api/sessions/:id/diff" },
   { method: "GET", pattern: "/api/projects/:id/board" },
   { method: "GET", pattern: "/api/projects/:id/tasks" },
+  // Single-task read (card 3485a489) — the board drawer's lazy per-card fetch (a DONE card's body is
+  // omitted from the board LIST route above). Read-only, same class as the board/tasks reads; the
+  // writer on this SAME path (POST /api/tasks/:id) deliberately stays Tier 0.
+  { method: "GET", pattern: "/api/tasks/:id" },
   { method: "GET", pattern: "/api/projects/:id/agents" },
   // Memory = the per-project project_memory read (backs the /memory explorer page). Read-only, human-only,
   // project-scoped — same posture as the sibling board/tasks/vault project reads above.
