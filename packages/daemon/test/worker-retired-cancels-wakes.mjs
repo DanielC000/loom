@@ -31,7 +31,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       door is REFUSED with the specific "administratively retired" message, recorded in the wake's own
 //       wake_dropped event — never a vacuous "something threw".
 //   (6) The human-only allowSuperseded override still works: a direct resume() with it succeeds despite
-//       the marker (one-time; the marker itself is never cleared).
+//       the marker (the marker itself is never cleared), AND it is EPOCH-scoped, not one-time: it files a
+//       worker_retirement_lifted event that re-arms every automatic resume path (wake/crash-recovery/
+//       boot-resume) for this epoch — reproducing the Code Review finding (stopWorker -> resume
+//       (allowSuperseded) -> wake_me -> crash -> wakes.tick used to wrongly wake_drop "administratively
+//       retired" forever; it must now succeed) until a FRESH deliberate retirement re-arms the refusal.
 //
 // HERMETIC — a REAL PtyHost (fake pty backend whose kill() synchronously fires the REAL captured onExit
 // callback, mirrors idle-nudge-recycle-purge.mjs's SeamHost) driving a REAL Db + SessionService + a REAL
@@ -174,10 +178,25 @@ try {
     const dropped = h.db.listEvents(wkr).find((e) => e.kind === "wake_dropped");
     check("(5) the wake is dropped with the SPECIFIC administratively-retired reason (not merely some throw)", !!dropped && retiredRefusal(dropped.detail?.reason));
 
-    // (6) allowSuperseded is a one-time human escape hatch — succeeds despite the marker.
+    // (6) allowSuperseded is a human escape hatch — succeeds despite the marker — AND it LIFTS the
+    // retirement for this epoch (the Code Review fix): the marker itself is never erased, but a newer
+    // worker_retirement_lifted event re-arms automatic resume going forward.
     const resumed = h.sessions.resume(wkr, { allowSuperseded: true });
     check("(6) a human allowSuperseded resume of a worker_retired worker SUCCEEDS", !!resumed && h.host.isAlive(wkr) === true);
     check("(6) the worker_retired marker is NEVER cleared by a human override", h.db.hasWorkerEventKind(wkr, "worker_retired"));
+    check("(6) a worker_retirement_lifted event is filed by the revive", h.db.hasWorkerEventKind(wkr, "worker_retirement_lifted"));
+    check("(6) the retirement is no longer ACTIVE post-revive (epoch lifted)", h.db.isWorkerRetirementActive(wkr) === false);
+
+    // Reviewer's exact repro: stopWorker -> resume(allowSuperseded) -> wake_me -> crash -> wakes.tick.
+    // Pre-fix this wrongly wake_dropped "administratively retired" forever, even after the human revive.
+    exitCbs.get(wkr)?.({ exitCode: 1 }); // a genuine crash of the just-revived worker — never a retirement call
+    check("(6 post-revive) the revived-then-crashed worker is archived normally", !!h.db.getSession(wkr)?.archivedAt);
+    const { wakeId: wakeId2 } = h.wakes.schedule(wkr, { delaySeconds: 60, note: "post-revive wake" });
+    await h.wakes.tick(new Date(Date.now() + 61_000));
+    check("(6) the post-revive wake SUCCEEDS — automatic resume is un-refused after the human revive", h.host.isAlive(wkr) === true);
+    const postReviveFired = h.db.listEvents(wkr).find((e) => e.kind === "wake_fired" && e.detail?.wakeId === wakeId2);
+    const postReviveDropped = h.db.listEvents(wkr).find((e) => e.kind === "wake_dropped" && e.detail?.wakeId === wakeId2);
+    check("(6) the post-revive wake fired normally (wake_fired, never wake_dropped) — the epoch lift actually re-armed automatic resume", !!postReviveFired && !postReviveDropped);
   }
 
   // ==================== (2) killAllWorkers cancels every live worker's wakes ====================
@@ -247,7 +266,7 @@ try {
   failures++;
 } finally {
   console.log(failures === 0
-    ? "\n✅ ALL PASS — retireWorkerSession cancels a deliberately-retired worker's pending wakes and files the durable worker_retired marker at every non-git retirement site (stopWorker, killAllWorkers, retireSiblingSessionsForTask), leaves a recycle predecessor's wakes correctly REPARENTED (never cancelled, never marked retired), never touches a crashed worker's wake (legitimate auto-resume still works), and resume()'s defense-in-depth layer refuses the real WakeService auto-resume door on the marker alone (not merely some throw) — with a human allowSuperseded override still working as a one-time escape hatch."
+    ? "\n✅ ALL PASS — retireWorkerSession cancels a deliberately-retired worker's pending wakes and files the durable worker_retired marker at every non-git retirement site (stopWorker, killAllWorkers, retireSiblingSessionsForTask), leaves a recycle predecessor's wakes correctly REPARENTED (never cancelled, never marked retired), never touches a crashed worker's wake (legitimate auto-resume still works), resume()'s defense-in-depth layer refuses the real WakeService auto-resume door on the marker alone (not merely some throw), and a human allowSuperseded override LIFTS the retirement for that epoch — re-arming every automatic resume path (wake/crash-recovery/boot-resume) until a fresh deliberate retirement closes it again."
     : `\n❌ ${failures} FAILURE(S).`);
   process.exit(failures === 0 ? 0 : 1);
 }

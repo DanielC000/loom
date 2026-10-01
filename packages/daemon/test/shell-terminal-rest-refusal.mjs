@@ -45,7 +45,8 @@ const db = new Db(path.join(TMP, "loom.db"));
 db.insertProject({ id: "p1", name: "P1", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: new Date().toISOString(), archivedAt: null });
 db.setPlatformConfig({ remoteAccess: { enabled: true, bindHost: HOST } });
 const app = await buildServer({
-  db, pty: host, sessions: { killAllWorkers: () => 0 }, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub,
+  // retireWorkerSessionIfWorker: card 4ee527d1 — POST /stop calls this after a successful stop.
+  db, pty: host, sessions: { killAllWorkers: () => 0, retireWorkerSessionIfWorker: () => {} }, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub,
   userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, requestShutdown: () => {},
   verifyGatewayToken: (t) => t === TOKEN, loopbackSecret: SECRET,
   // card 23496950: a remote peer's Origin must be the FULL remote origin (scheme + host + the remote listener's port).

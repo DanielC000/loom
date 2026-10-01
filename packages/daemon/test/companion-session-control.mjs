@@ -257,6 +257,11 @@ try {
   }
 
   // ============ session_stop + session_resume: REAL lifecycle round-trip ============
+  // Target role is "manager" (NOT "worker") deliberately: card 4ee527d1 made a worker-role stop through
+  // this SAME stopSession rail a deliberate RETIREMENT (cancels its wakes, bars automatic resume) — a
+  // companion session_resume never passes allowSuperseded, so resuming a stopped WORKER is now correctly
+  // refused (see the dedicated "worker retirement" block below). A non-worker target has no such
+  // retirement and round-trips exactly as before.
   {
     const proj = `proj-lifecycle-${randomUUID()}`;
     const companionSess = `companion-lifecycle-${randomUUID()}`;
@@ -265,10 +270,10 @@ try {
     const engineSessionId = `eng-${randomUUID()}`;
     plantEngineTranscript(cwd, engineSessionId);
     const { db, pty, orch } = setup(companionSess, proj);
-    seedSession(db, target, proj, "worker", { cwd, engineSessionId });
+    seedSession(db, target, proj, "manager", { cwd, engineSessionId });
     pty.setLive(target);
     db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "session-steer", projectId: proj, mode: "act" });
-    pty.setOwnerText("the owner said: stop that worker, then bring it back");
+    pty.setOwnerText("the owner said: stop that session, then bring it back");
     const client = await connect(orch.buildServer(companionSess, "assistant"));
 
     const stopRes = await call(client, "session_stop", { target });
@@ -291,6 +296,36 @@ try {
     db.close();
     // cwd's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed cleanup
     // — this bare call previously sat with no finally, so an earlier throw would have skipped it (995be21f).
+  }
+
+  // ============ card 4ee527d1: session_stop of a WORKER is a retirement; session_resume stays refused ============
+  // Companion session_resume deliberately never passes allowSuperseded (it stays non-human) — a WORKER
+  // stopped via companion session_stop is therefore administratively retired and its companion-driven
+  // resume is correctly refused, same as every other automatic resume path.
+  {
+    const proj = `proj-worker-retire-${randomUUID()}`;
+    const companionSess = `companion-worker-retire-${randomUUID()}`;
+    const target = `target-worker-retire-${randomUUID()}`;
+    const cwd = mkdtempManaged("loom-sc-worker-cwd-");
+    const engineSessionId = `eng-${randomUUID()}`;
+    plantEngineTranscript(cwd, engineSessionId);
+    const { db, pty, orch } = setup(companionSess, proj);
+    seedSession(db, target, proj, "worker", { cwd, engineSessionId });
+    pty.setLive(target);
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "session-steer", projectId: proj, mode: "act" });
+    pty.setOwnerText("the owner said: stop that worker");
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const stopRes = await call(client, "session_stop", { target });
+    check("worker session_stop: returns stopped:true", stopRes.stopped === true);
+    check("worker session_stop: files a durable worker_retired marker", db.hasWorkerEventKind(target, "worker_retired"));
+
+    const resumeRes = await call(client, "session_resume", { target });
+    check("worker session_resume (companion, non-human): rejected with an {error}", typeof resumeRes.error === "string" && resumeRes.id === undefined);
+    check("worker session_resume (companion, non-human): did NOT respawn the retired worker", !pty.spawns.some((s) => s.sessionId === target));
+
+    await client.close();
+    db.close();
   }
 
   // ============ session_resume: a RECYCLED session (successor exists) is rejected ============
@@ -650,6 +685,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — session_message/session_steer/session_stop/session_resume each drive the REAL scoped SessionService rail (durable delivery, flush+supersede+interrupt, actual pty stop, actual respawn with DB processState flipping live); a read-only-granted or ungranted target project rejects all four, as does any proactive (no-owner-text) turn (Primitive A); an optional roleFilter restricts by role while an unconfigured one admits every role; delivered message/steer text is always framed [loom:from-owner-via-companion]; NO Primitive C — every action commits on the first call; a recycled (superseded) target's resume is refused; and the whole tool surface is unregistered under a read-only or absent grant."
+  ? "\n✅ ALL PASS — session_message/session_steer/session_stop/session_resume each drive the REAL scoped SessionService rail (durable delivery, flush+supersede+interrupt, actual pty stop, actual respawn with DB processState flipping live); a read-only-granted or ungranted target project rejects all four, as does any proactive (no-owner-text) turn (Primitive A); an optional roleFilter restricts by role while an unconfigured one admits every role; delivered message/steer text is always framed [loom:from-owner-via-companion]; NO Primitive C — every action commits on the first call; a recycled (superseded) target's resume is refused; stopping a WORKER through session_stop administratively retires it (card 4ee527d1), so a companion-driven session_resume of it stays correctly refused; and the whole tool surface is unregistered under a read-only or absent grant."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

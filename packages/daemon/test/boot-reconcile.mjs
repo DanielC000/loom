@@ -5,7 +5,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Proves:
 //   (1) an INTERRUPTED MERGE (branch already merged into the canonical branch, but task still
 //       in_progress + worktree present) is finished — worktree gone, branch deleted, task done, a
-//       merge_done event appended — AND a second run is a clean no-op (no duplicate merge_done).
+//       merge_done event appended, the worker retired + its wakes cancelled (card 4ee527d1) — AND a
+//       second run is a clean no-op (no duplicate merge_done or worker_retired).
 //   (2) an ORPHANED WORKTREE (exited worker, no merge) is pruned, leaving the task untouched.
 // Run: 1) build daemon, 2) node test/boot-reconcile.mjs
 import fs from "node:fs";
@@ -141,6 +142,10 @@ try {
   check("(1) merged-scenario worktree removed", !fs.existsSync(M.worktreePath));
   check("(1) merged-scenario branch deleted", git(M.repo, `branch --list ${M.branch}`) === "");
   check("(1) merged-scenario merge_done event appended (exactly 1)", mergeDoneCount(M.mgrId) === 1);
+  // Card 4ee527d1: Pass A's finalize of a landed-but-unfinalized worker must retire it too (cancel its
+  // wakes + file worker_retired), same as every other finalizeMerge caller — it was the one gap.
+  check("(1) merged-scenario worker is marked worker_retired(reason:boot_reconcile_pass_a_finalize)",
+    db.listEventsForWorker(M.workerId).some((e) => e.kind === "worker_retired" && e.detail?.reason === "boot_reconcile_pass_a_finalize"));
 
   // Scenario 2 KEPT: the worktree holds unmerged committed work, so Pass B's guard leaves it on disk —
   // contents intact, task untouched, branch retained, no spurious merge_done. (Pre-fix this was deleted.)
@@ -156,6 +161,8 @@ try {
   check("(no-op) second run STILL keeps the work-holding worktree (idempotent)", r2.worktreesKept === 1 && fs.existsSync(O.worktreePath));
   check("(no-op) merged-scenario still done", db.getTask(M.taskId).columnKey === "done");
   check("(no-op) merged-scenario merge_done NOT duplicated (still exactly 1)", mergeDoneCount(M.mgrId) === 1);
+  check("(no-op) merged-scenario worker_retired NOT duplicated (still exactly 1)",
+    db.listEventsForWorker(M.workerId).filter((e) => e.kind === "worker_retired").length === 1);
 
   // --- deleteBranch idempotency: a missing branch is the DESIRED end state → resolve WITHOUT throw and
   //     WITHOUT a warn. Inject a git whose `git branch -D` rejects with git's real not-found message. ---
@@ -183,6 +190,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — boot reconcile finishes interrupted merges idempotently (worktree gone, branch deleted, task done, one merge_done); per the P0 data-loss guard KEEPS an orphaned worktree that still holds unmerged/uncommitted work (contents + branch + task intact); GCs a DEAD LEFTOVER (no-`.git` dir → pruned, not kept, no warn); and deleteBranch treats a missing branch as the idempotent end state (no throw, no warn) while still warning on genuine failures."
+  ? "\n✅ ALL PASS — boot reconcile finishes interrupted merges idempotently (worktree gone, branch deleted, task done, one merge_done, the worker retired + its wakes cancelled); per the P0 data-loss guard KEEPS an orphaned worktree that still holds unmerged/uncommitted work (contents + branch + task intact); GCs a DEAD LEFTOVER (no-`.git` dir → pruned, not kept, no warn); and deleteBranch treats a missing branch as the idempotent end state (no throw, no warn) while still warning on genuine failures."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -2255,7 +2255,10 @@ const SESSION_STEER: CompanionCapability = {
           "an {error}. A session that is STILL live but already has a recycle successor (the brief " +
           "settleRecycleHandoff handoff window) is a no-op instead: there is nothing to resume, so the " +
           "existing (about-to-be-retired) session is simply returned unchanged — it is not an error, and " +
-          "the response carries no replacedBy field either way.",
+          "the response carries no replacedBy field either way. A WORKER that was deliberately stopped " +
+          "(worker_stop, a retired merge, etc.) is ALSO rejected with an {error} — this tool never forces " +
+          "that override (it is a human-only escape hatch); if the owner wants that worker back, tell them " +
+          "to use the app's own manual resume (the Overview/Terminals session controls), not this tool.",
         inputSchema: { target: z.string() },
       },
       async ({ target }) => {

@@ -5426,6 +5426,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // @decision 710a34fa — PtyHost.stop refuses a host shell id (returns false); map it to a 409.
     if (deps.pty.stop(id, mode === "hard" ? "hard" : "graceful") === false)
       return reply.code(409).send({ error: "host shell terminals are not sessions; close them from the Terminals page" });
+    // @decision 4ee527d1 — a human deliberately stopping a WORKER here IS a retirement; no-op otherwise.
+    deps.sessions.retireWorkerSessionIfWorker(id, "human_stop");
     return reply.send({ ok: true });
   });
   // Manual per-session rate-limit override + retry-now (HUMAN/REST only — trust boundary like

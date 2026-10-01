@@ -6589,6 +6589,19 @@ export class Db {
       "SELECT 1 FROM orchestration_events WHERE kind = ? AND worker_session_id = ? LIMIT 1",
     ).get(kind, workerSessionId) != null;
   }
+  /** @decision 4ee527d1 — EPOCH-aware `worker_retired` check (unlike the permanent `hasWorkerEventKind`
+   *  check resume() still uses for `recycle_successor_retired`), compared by the never-reused
+   *  `orchestration_events.seq`, not `ts`/rowid — see that record for the mechanism. */
+  isWorkerRetirementActive(workerSessionId: string): boolean {
+    const retired = this.db.prepare(
+      "SELECT seq FROM orchestration_events WHERE kind = 'worker_retired' AND worker_session_id = ? ORDER BY seq DESC LIMIT 1",
+    ).get(workerSessionId) as { seq: number } | undefined;
+    if (!retired) return false;
+    const lifted = this.db.prepare(
+      "SELECT seq FROM orchestration_events WHERE kind = 'worker_retirement_lifted' AND worker_session_id = ? ORDER BY seq DESC LIMIT 1",
+    ).get(workerSessionId) as { seq: number } | undefined;
+    return !lifted || lifted.seq < retired.seq;
+  }
   /**
    * EVERY orchestration event that TOUCHES a session — it appears as the manager OR the worker. The
    * union of listEvents + listEventsForWorker in one ordered pass; the audit-log read model (sessions/

@@ -1,5 +1,34 @@
 # 4ee527d1 — a deliberately-retired worker's pending wakes are cancelled, and a durable `worker_retired` marker blocks any later automatic resume
 
+## Fix round (Code Review): the marker is EPOCH-scoped, not permanent
+
+Round 1 (below) refused an automatic resume on `hasWorkerEventKind(id, "worker_retired")` alone — a
+single bit, never cleared. The reviewer REPRODUCED a real consequence: a manager stops a worker, a human
+then revives it from the UI (`allowSuperseded`), and the worker is live and working — but forever after it
+is ineligible for EVERY automatic resume, because the old bit is still set. Its own `wake_me` fallbacks are
+dropped, crash recovery (the wake door, `CrashRecoveryWatcher`, `recoverCrashOrphanedWorkers`) refuses it,
+`resumeFleetOnBoot` counts it failed, and poll/event-trigger/webhook wakes all throw.
+
+The fix: a second kind, `worker_retirement_lifted`, filed ONLY by `resume()`'s own `allowSuperseded`
+branch. `Db.isWorkerRetirementActive(id)` replaces the bare `hasWorkerEventKind` check: a worker's
+retirement is active only while the newest `worker_retired` for that session is newer — compared by the
+never-reused `orchestration_events.seq`, never `ts`/rowid — than its newest `worker_retirement_lifted`. A
+human/Lead `allowSuperseded` resume both passes the refusal and files the lift, re-arming every automatic
+path for THIS epoch; a later fresh `worker_retired` (any of the 7 sites) closes the epoch again. The marker
+itself is still never erased — only the epoch comparison changed.
+
+Three more gaps closed in the same round:
+- The human-only REST `/api/sessions/:id/stop` and `stopSession` (Platform Lead `session_stop` + companion
+  `session_stop`) could stop a WORKER-role session without going through `retireWorkerSession`, so its due
+  wake would still resurrect it. Ruling: a deliberate stop of a worker by a human, the Lead, or the
+  companion IS a retirement — `retireWorkerSessionIfWorker` (a no-op for any non-worker target) routes both
+  surfaces through the same chokepoint.
+- Boot-reconcile Pass A's finalize of a landed-but-unfinalized worker called `finalizeMerge` directly,
+  skipping the `retireWorkerSession` call every OTHER `finalizeMerge` caller makes immediately before it.
+- Companion `session_resume` deliberately stays non-human (no `allowSuperseded`): a stopped worker is
+  refused there too, by design — its tool description now tells the companion to point the owner at the
+  app's own manual resume instead of claiming it can force the override itself.
+
 ## Background
 
 `stopWorker`, `killAllWorkers`, the noChanges/noCommit auto-retire branch of `workerReport`, the hard-stop
@@ -76,3 +105,12 @@ recycle-successor case.
 - Do not key the new resume() refusal on `archivedAt`/`resumability` alone, or on `lastError` text —
   `@decision 5a56bb0a`'s own "Do not" list already rules both out for the identical reason (self-heals
   wrongly / fragile); this card's marker follows the same discipline.
+- Do not compare `worker_retired`/`worker_retirement_lifted` by `ts` or rowid — `ts` can collide at
+  millisecond resolution and sqlite's rowid is reused on delete; only `orchestration_events.seq` (the
+  never-reused counter) gives a safe total order for the epoch comparison.
+- Do not file `worker_retirement_lifted` from anywhere but `resume()`'s own `allowSuperseded` branch, and
+  only when `isWorkerRetirementActive` was already true — an unconditional file on every `allowSuperseded`
+  resume would add a dead write for every OTHER `allowSuperseded` caller (hasSuccessor's own recycled-
+  session path, etc.) that has nothing to do with a worker retirement.
+- Do not route `session_resume` (companion/capabilities.ts) through `allowSuperseded` to "fix" the refusal
+  for a stopped worker — it deliberately stays non-human; see the Fix round section above.

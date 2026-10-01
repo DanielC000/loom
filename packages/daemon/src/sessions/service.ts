@@ -3605,11 +3605,18 @@ export class SessionService {
     if (!opts.allowSuperseded && this.db.hasWorkerEventKind(session.id, "recycle_successor_retired")) {
       throw new Error("session was administratively retired (its recycle successor was superseded by the predecessor) — only a manual (human) resume may force it");
     }
-    // @decision 4ee527d1 — mirrors recycle_successor_retired above, for a worker deliberately retired via
-    // retireWorkerSession (worker_stop/killAllWorkers/auto-retire/merge-confirm/sibling-sweep): never
-    // auto-resumed by its own due wake or any other automatic caller.
-    if (!opts.allowSuperseded && this.db.hasWorkerEventKind(session.id, "worker_retired")) {
+    // @decision 4ee527d1 — mirrors recycle_successor_retired above, but EPOCH-scoped, not permanent: an
+    // allowSuperseded resume both passes this refusal and files the lift below. See that record.
+    const workerRetirementActive = this.db.isWorkerRetirementActive(session.id);
+    if (!opts.allowSuperseded && workerRetirementActive) {
       throw new Error("session was administratively retired (worker_stop/killAllWorkers/auto-retire/merge-confirm/sibling-sweep) — only a manual (human) resume may force it");
+    }
+    if (opts.allowSuperseded && workerRetirementActive) {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: session.parentSessionId ?? "", workerSessionId: session.id, taskId: session.taskId ?? null,
+        kind: "worker_retirement_lifted", detail: { reason: "allow_superseded_resume" },
+      });
     }
     const project = this.db.getProject(session.projectId);
     if (!project) throw new Error("project not found");
@@ -7887,11 +7894,13 @@ export class SessionService {
   }
 
   /**
-   * ONE chokepoint for every DELIBERATE, permanent worker retirement: cancels the worker's own pending
-   * `wake_me` wakes and files the durable `worker_retired` marker `resume()` refuses an automatic caller
-   * on. Called from `stopWorker`, `killAllWorkers`, the noChanges/noCommit auto-retire branch of
-   * `workerReport`, `confirmWorkerMerge`'s/`finishAlreadyMerged`'s hard-stop, and
-   * `retireSiblingSessionsForTask`'s zombie-sibling sweep.
+   * ONE chokepoint for every DELIBERATE worker retirement: cancels the worker's own pending `wake_me`
+   * wakes and files the durable `worker_retired` marker `resume()` refuses an automatic caller on for the
+   * current retirement epoch (see `Db.isWorkerRetirementActive`). Called from `stopWorker`,
+   * `killAllWorkers`, the noChanges/noCommit auto-retire branch of `workerReport`,
+   * `confirmWorkerMerge`'s/`finishAlreadyMerged`'s hard-stop, `retireSiblingSessionsForTask`'s
+   * zombie-sibling sweep, boot-reconcile Pass A's finalize of a landed-but-unfinalized worker, and (via
+   * {@link retireWorkerSessionIfWorker}) the human-only REST `/stop` route and `stopSession`.
    *
    * @decision 4ee527d1 — never call this from `archiveOnExit` (fires on every exit, crash included; a
    *  crashed worker's wake is its correct recovery path) or from `recycleWorker`'s SUCCESS path (its
@@ -7905,6 +7914,13 @@ export class SessionService {
       managerSessionId: worker?.parentSessionId ?? "", workerSessionId, taskId: worker?.taskId ?? null,
       kind: "worker_retired", detail: { reason, cancelledWakes },
     });
+  }
+  /** @decision 4ee527d1 — a human/Lead deliberately stopping a WORKER (REST `/stop`, `stopSession`) IS a
+   *  retirement too; a no-op for any non-worker target. Public: REST `/stop` (gateway/server.ts) calls
+   *  `pty.stop` directly (its own host-shell 409 mapping) rather than `stopSession`, so calls this too. */
+  retireWorkerSessionIfWorker(sessionId: string, reason: string): void {
+    const session = this.db.getSession(sessionId);
+    if (session?.role === "worker") this.retireWorkerSession(sessionId, reason);
   }
 
   /** Stop one of a manager's workers (parent-scoped). Worktree is RETAINED (merge/recycle own it).
@@ -13186,10 +13202,13 @@ export class SessionService {
    * STOP half of the companion session-control ACT lever (card 305a54fb, `session_stop`) —
    * scope/roleFilter/Primitive-A enforcement live entirely in the lever (companion/capabilities.ts); this
    * method needs no companion-specific variant since it carries no framed text to differentiate.
+   * @decision 4ee527d1 — a human/Lead/companion deliberately stopping a WORKER through here IS a
+   *  retirement (see `retireWorkerSessionIfWorker`); a non-worker target is unaffected.
    */
   stopSession(sessionId: string, mode: StopMode): { stopped: true; sessionId: string } {
     if (!this.db.getSession(sessionId)) throw new Error("session not found");
     this.pty.stop(sessionId, mode);
+    this.retireWorkerSessionIfWorker(sessionId, "session_stop");
     return { stopped: true, sessionId };
   }
 
@@ -20107,6 +20126,10 @@ export class SessionService {
         // `landedSha` + `s.repoKey` (card 1eebc46a) are already resolved above (the squash-detection
         // lookup this pass exists to do) — free to persist, no extra git call.
         const paGuard = this.soloFinalizeTipGuard({ opId: randomUUID(), managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId, branch: s.branch, landedTip: paLooked.landedTip, branchGone: paLooked.branchGone, landedSha, repoKey: s.repoKey ?? null });
+        // @decision 4ee527d1 — mirrors confirmWorkerMerge's/finishAlreadyMerged's own retireWorkerSession
+        // call ahead of finalizeMerge (every OTHER finalizeMerge caller already does this) — Pass A was
+        // the one gap.
+        this.retireWorkerSession(s.id, "boot_reconcile_pass_a_finalize");
         await this.finalizeMerge({
           managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
           worktreePath, branch: s.branch, repoPath, projectId: project.id,
