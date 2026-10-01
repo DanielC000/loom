@@ -43,7 +43,9 @@ fs.writeFileSync(path.join(repo, "README.md"), "# worker-report test\n");
 execSync(`git init -q`, { cwd: repo });
 commitAll(repo, "init", "-c user.email=wr@loom -c user.name=wr");
 
-const P = await post("/api/projects", { name: `WorkerReport-${sfx}`, repoPath: repo, vaultPath: repo });
+// vaultPath omitted (card daee3532): aliasing it onto repoPath is refused at create time by
+// checkVaultRepoTripleContainment (card 5ba4412d) — this test doesn't exercise the vault at all.
+const P = await post("/api/projects", { name: `WorkerReport-${sfx}`, repoPath: repo });
 const task = await post(`/api/projects/${P.id}/tasks`, { title: "WR-TASK", columnKey: "todo" });
 const startupPrompt =
   `You are a Loom orchestration manager. First, call the worker_spawn tool with taskId='${task.id}' and ` +

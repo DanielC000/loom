@@ -73,7 +73,9 @@ let session = null;
 try {
   // Project + agent. The startup prompt runs one tool-free turn and stops — one full
   // UserPromptSubmit -> Stop busy cycle.
-  const P = await post("/api/projects", { name: `Busy-${Date.now()}`, repoPath: dir, vaultPath: dir });
+  // vaultPath omitted (card daee3532): aliasing it onto repoPath is refused at create time by
+  // checkVaultRepoTripleContainment (card 5ba4412d) — this test doesn't exercise the vault at all.
+  const P = await post("/api/projects", { name: `Busy-${Date.now()}`, repoPath: dir });
   check("project created", !!P.id);
   const STARTUP = "Respond with exactly the word READY and nothing else, then stop. Do not use any tools and do not ask any questions.";
   const agent = await post(`/api/projects/${P.id}/agents`, { name: "busy", startupPrompt: STARTUP });

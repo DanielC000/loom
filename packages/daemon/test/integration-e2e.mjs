@@ -74,7 +74,9 @@ const realHadKeyBefore = (() => {
 let session = null;
 try {
   // 1. project + agent
-  const P = await post("/api/projects", { name: `E2E-${Date.now()}`, repoPath: dir, vaultPath: dir });
+  // vaultPath omitted (card daee3532): aliasing it onto repoPath is refused at create time by
+  // checkVaultRepoTripleContainment (card 5ba4412d) — this test doesn't exercise the vault at all.
+  const P = await post("/api/projects", { name: `E2E-${Date.now()}`, repoPath: dir });
   check("1. project created", !!P.id);
   const PROMPT = "Call the tasks_list tool. Then call tasks_create with title set to exactly 'SAW=' followed by the titles of the tasks you saw joined with '+'. Then stop. Do not use other tools or ask questions.";
   const agent = await post(`/api/projects/${P.id}/agents`, { name: "build", startupPrompt: PROMPT });

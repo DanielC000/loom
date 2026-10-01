@@ -76,7 +76,9 @@ try {
       // (A1) create with noGateByDesign:true round-trips it.
       const created = await app.inject({
         method: "POST", url: "/api/projects",
-        payload: { name: "P", repoPath: primary, vaultPath: primary, noGateByDesign: true },
+        // vaultPath omitted (card daee3532): aliasing it onto repoPath is refused at create time by
+        // checkVaultRepoTripleContainment (card 5ba4412d) — this test only cares about noGateByDesign.
+        payload: { name: "P", repoPath: primary, noGateByDesign: true },
       });
       check("(A1) POST /api/projects with noGateByDesign:true → 201", created.statusCode === 201);
       const p1 = created.json();
@@ -84,7 +86,7 @@ try {
       check("(A1) persisted to the Db", db.getProject(p1.id)?.noGateByDesign === true);
 
       // (A2) create omitting noGateByDesign defaults to false.
-      const created2 = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "P2", repoPath: primary, vaultPath: primary } });
+      const created2 = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "P2", repoPath: primary } });
       check("(A2) POST /api/projects omitting noGateByDesign → false default", created2.json().noGateByDesign === false);
 
       // (A3) PATCH sets noGateByDesign on an existing (false) project.

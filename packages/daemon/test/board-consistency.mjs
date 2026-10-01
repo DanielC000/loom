@@ -92,7 +92,9 @@ try {
   if (!(await waitReady())) { console.error("daemon did not become ready"); process.exit(2); }
   loopbackToken = readLoopbackToken(LOOM_HOME);
 
-  const P = await post("/api/projects", { name: `Board-${Date.now()}`, repoPath: dir, vaultPath: dir });
+  // vaultPath omitted (card daee3532): aliasing it onto repoPath is refused at create time by
+  // checkVaultRepoTripleContainment (card 5ba4412d) — this test doesn't exercise the vault at all.
+  const P = await post("/api/projects", { name: `Board-${Date.now()}`, repoPath: dir });
   const t1 = await post(`/api/projects/${P.id}/tasks`, { title: "BOARD-ONE" });           // backlog
   await post(`/api/tasks/${t1.id}`, { columnKey: "review" });                              // MOVE via REST
   const agent = await post(`/api/projects/${P.id}/agents`, { name: "probe", startupPrompt: PROMPT });

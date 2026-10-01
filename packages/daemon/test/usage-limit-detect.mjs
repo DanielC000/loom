@@ -183,7 +183,9 @@ const realHadKeyBefore = (() => {
 
 let session = null;
 try {
-  const P = await post("/api/projects", { name: `RL-${Date.now()}`, repoPath: dir, vaultPath: dir });
+  // vaultPath omitted (card daee3532): aliasing it onto repoPath is refused at create time by
+  // checkVaultRepoTripleContainment (card 5ba4412d) — this test doesn't exercise the vault at all.
+  const P = await post("/api/projects", { name: `RL-${Date.now()}`, repoPath: dir });
   const STARTUP = "Respond with exactly the word READY and nothing else, then stop. Do not use any tools and do not ask any questions.";
   const agent = await post(`/api/projects/${P.id}/agents`, { name: "rl", startupPrompt: STARTUP });
   session = await post(`/api/agents/${agent.id}/sessions`, {});

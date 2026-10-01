@@ -50,7 +50,9 @@ try {
   if (!up) throw new Error("daemon never listened");
   loopbackToken = readLoopbackToken(home);
 
-  const P = await post("/api/projects", { name: `E2E-${Date.now()}`, repoPath: repo, vaultPath: repo });
+  // vaultPath omitted (card daee3532): aliasing it onto repoPath is refused at create time by
+  // checkVaultRepoTripleContainment (card 5ba4412d) — this test doesn't exercise the vault at all.
+  const P = await post("/api/projects", { name: `E2E-${Date.now()}`, repoPath: repo });
   const agent = await post(`/api/projects/${P.id}/agents`, { name: "t", startupPrompt: "Reply with exactly READY and stop. Do not use tools." });
   const session = await post(`/api/agents/${agent.id}/sessions`, {});
   check("session spawned live", session.processState === "live");
