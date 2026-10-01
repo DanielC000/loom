@@ -70,11 +70,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-commit-kill-confirm.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertNeverWithControl, pollUntil } from "./_timing-guard.mjs";
+import { mkdtempManaged } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
@@ -99,7 +99,6 @@ const SETTLE_MARGIN_MS = 3000; // extra wait AFTER both merges settle, comfortab
 const BRANCH_A = "loom/kc-card-a";
 const BRANCH_B = "loom/kc-card-b";
 
-const tmpDirs = [];
 // B2 (Code Review, card 24c0bdba): a REPO-LOCAL identity, not just a `-c` override on THIS file's OWN
 // direct git calls — mergeBranch's internal commit calls carry no identity override of their own, so on
 // a host with no global git identity (a likely CI shape) they'd fail "Author identity unknown" and
@@ -107,10 +106,17 @@ const tmpDirs = [];
 // kill-confirm path this file exists to prove). `git config` (no --global) persists into THIS repo's own
 // `.git/config`, so every later commit here — including one mergeBranch fires with no `-c` of its own —
 // resolves an identity regardless of the host's ambient config.
+//
+// Card a6b1c4c7: both `repo` and `wt` used to be FIXED paths (`os.tmpdir()/loom-killconfirm-<tag>` /
+// `-wt-<branch>-<tag>`) with no per-run suffix — two concurrent invocations of this file (two worker
+// run_gates admitted at once) shared those dirs, so one run's writes made the other's commit empty and
+// either run's cleanup deleted the other's live repo. `mkdtempManaged` (`_tmp-fixture.mjs`) mints an
+// atomically-unique dir per call (kernel-guaranteed, not a hand-rolled Date.now()/pid suffix) and
+// registers it for guaranteed cleanup in the same call — confirmed empirically that `git worktree add`
+// accepts a pre-existing EMPTY directory as its target, so minting the worktree dir this way needs no
+// special-casing.
 function makeRepo(tag) {
-  const repo = path.join(os.tmpdir(), `loom-killconfirm-${tag}`);
-  fs.mkdirSync(repo, { recursive: true });
-  tmpDirs.push(repo);
+  const repo = mkdtempManaged(`loom-killconfirm-${tag}-`);
   execFileSync("git", ["init", "-q"], { cwd: repo });
   execFileSync("git", ["config", "user.email", "killconfirm@loom"], { cwd: repo });
   execFileSync("git", ["config", "user.name", "killconfirm"], { cwd: repo });
@@ -118,8 +124,7 @@ function makeRepo(tag) {
   return repo;
 }
 function makeWorktree(repo, branch, file, content, tag) {
-  const wt = path.join(os.tmpdir(), `loom-killconfirm-wt-${branch.replace(/\//g, "-")}-${tag}`);
-  tmpDirs.push(wt);
+  const wt = mkdtempManaged(`loom-killconfirm-wt-${branch.replace(/\//g, "-")}-${tag}-`);
   execFileSync("git", ["worktree", "add", "-q", "-b", branch, wt, "HEAD"], { cwd: repo });
   fs.writeFileSync(path.join(wt, file), content);
   execFileSync("git", ["add", "-A"], { cwd: wt });
@@ -326,182 +331,175 @@ async function runScenario5(tag) {
   return { repo, merge1, merge2, markerPath };
 }
 
-try {
-  // POSITIVE CONTROL — proves corruptionExists() can actually observe the violation shape, independent of
-  // mergeBranch: manufacture the exact signature directly (branch A's trailer, branch B's file) in a
-  // throwaway repo with no merges involved at all.
-  const controlRepo = makeRepo("positive-control");
-  fs.writeFileSync(path.join(controlRepo, "file-b.txt"), "content-b\n");
-  execFileSync("git", ["-C", controlRepo, "add", "-A"]);
-  execFileSync("git", ["-C", controlRepo, ...GIT_ID_ARGV, "commit", "-q", "-m",
-    `feat(a): add a\n\nLoom-Worker-Branch: ${BRANCH_A}\n`]);
-  check("[setup] positive control: a manufactured commit carrying branch A's trailer but branch B's file " +
-    "IS detected as corruption by corruptionExists()", corruptionExists(controlRepo));
+// POSITIVE CONTROL — proves corruptionExists() can actually observe the violation shape, independent of
+// mergeBranch: manufacture the exact signature directly (branch A's trailer, branch B's file) in a
+// throwaway repo with no merges involved at all.
+const controlRepo = makeRepo("positive-control");
+fs.writeFileSync(path.join(controlRepo, "file-b.txt"), "content-b\n");
+execFileSync("git", ["-C", controlRepo, "add", "-A"]);
+execFileSync("git", ["-C", controlRepo, ...GIT_ID_ARGV, "commit", "-q", "-m",
+  `feat(a): add a\n\nLoom-Worker-Branch: ${BRANCH_A}\n`]);
+check("[setup] positive control: a manufactured commit carrying branch A's trailer but branch B's file " +
+  "IS detected as corruption by corruptionExists()", corruptionExists(controlRepo));
 
-  const tag = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-  let scenario;
-  const result = await assertNeverWithControl({
-    label: "an orphaned squash commit from a timed-out merge never lands a LATER merge's content under its own trailer",
-    check: () => corruptionExists(scenario.repo),
-    positiveControl: async () => corruptionExists(controlRepo),
-    settle: async () => { scenario = await runScenario1(tag); },
-  });
+const tag = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+let scenario;
+const result = await assertNeverWithControl({
+  label: "an orphaned squash commit from a timed-out merge never lands a LATER merge's content under its own trailer",
+  check: () => corruptionExists(scenario.repo),
+  positiveControl: async () => corruptionExists(controlRepo),
+  settle: async () => { scenario = await runScenario1(tag); },
+});
 
-  check("[scenario 1] outcome: no corruption — no commit exists bearing branch A's trailer with branch B's file",
-    result === true);
-  assertTruthfulIfLanded(scenario.repo, scenario.merge1, BRANCH_A, "file-a.txt", "content-a\n");
-  assertTruthfulIfLanded(scenario.repo, scenario.merge2, BRANCH_B, "file-b.txt", "content-b\n");
-  // "no ok:false-then-later-landing": if a merge reported failure, no commit for that side should exist
-  // bearing its trailer at all — a false ok:false with a real commit lurking anyway is exactly the
-  // silent-success-reported-as-failure shape this card's DoD calls out (the flip side of scenario 2 below).
-  // B2 (Code Review): assert the FAILURE REASON specifically names the timeout/kill path — a merge that
-  // failed for an UNRELATED reason (e.g. no git identity resolvable) would ALSO make the two checks above
-  // pass, VACUOUSLY, without ever exercising the kill-confirm mechanism this file exists to prove.
-  const KILL_REASON_RE = /exceeded \d+ms/;
-  // Round 3 (m-d): a QUARANTINED refusal (the NEXT merge attempt on an already-quarantined repo) never
-  // itself names a timeout — reused by scenarios 3/4 below alongside KILL_REASON_RE.
-  const KILL_OR_QUARANTINE_REASON_RE = /exceeded \d+ms|QUARANTINED/;
-  if (scenario.merge1?.ok === false) {
-    check("[scenario 1] merge1 failed for the TIMEOUT/kill reason specifically (not vacuously for something else)",
-      KILL_REASON_RE.test(scenario.merge1?.reason ?? ""));
-    check("[scenario 1] merge1 reported ok:false and truthfully landed nothing under its own trailer",
-      trailerCommits(scenario.repo, BRANCH_A).length === 0);
-  }
-  if (scenario.merge2?.ok === false) {
-    check("[scenario 1] merge2 failed for the TIMEOUT/kill reason specifically (not vacuously for something else)",
-      KILL_REASON_RE.test(scenario.merge2?.reason ?? ""));
-    check("[scenario 1] merge2 reported ok:false and truthfully landed nothing under its own trailer",
-      trailerCommits(scenario.repo, BRANCH_B).length === 0);
-  }
-  console.log(`[scenario 1] info: merge1=${JSON.stringify({ ok: scenario.merge1?.ok, reason: scenario.merge1?.reason })} ` +
-    `merge2=${JSON.stringify({ ok: scenario.merge2?.ok, reason: scenario.merge2?.reason })}`);
-
-  // SCENARIO 2 — post-commit hook: HEAD genuinely moves before the hang even starts (on BOTH pre-fix and
-  // post-fix code); only the TRUTHFULNESS of the report should differ.
-  const pc = await runScenario2(tag);
-  const headMoved = pc.head !== pc.initHead;
-  check("[scenario 2] the commit actually landed (HEAD moved) despite the post-commit hook hanging past the timeout",
-    headMoved);
-  check("[scenario 2] mergeBranch reports this TRUTHFULLY as ok:true (not a false ok:false while a real commit sits unreported)",
-    pc.result?.ok === true);
-  if (pc.result?.ok === true) {
-    check("[scenario 2] the reported sha matches what HEAD actually is", pc.result.sha === pc.head);
-    let content = null;
-    try { content = execFileSync("git", ["-C", pc.repo, "show", `${pc.result.sha}:file-a.txt`], { encoding: "utf8" }); } catch { /* absent */ }
-    check("[scenario 2] the reported sha truthfully contains the branch's own file", content === "content-a\n");
-  } else {
-    console.log(`[scenario 2] info: mergeBranch reported ${JSON.stringify({ ok: pc.result?.ok, reason: pc.result?.reason })} ` +
-      `while HEAD actually moved to ${pc.head} (was ${pc.initHead}) — this is the false-negative this scenario exists to catch`);
-  }
-
-  // SCENARIO 3 (Code Review repro 1) — POSITIVE CONTROL first: prove the marker-check can actually
-  // observe a real write, by letting the SAME backgrounding hook run to natural completion (a timeoutMs
-  // large enough that mergeBranch's own kill-trigger never fires).
-  const s3ControlRepo = makeRepo(`s3-control-${tag}`);
-  makeWorktree(s3ControlRepo, BRANCH_A, "file-a.txt", "content-a\n", `s3-control-${tag}`);
-  const s3ControlMarker = path.join(s3ControlRepo, "grandchild-touched.marker");
-  installBackgroundingPreCommitHook(s3ControlRepo, s3ControlMarker, 200);
-  await mergeBranch(s3ControlRepo, BRANCH_A, "feat(a): add a", { timeoutMs: GRANDCHILD_DELAY_MS + HOOK_TOTAL_MS + SETTLE_MARGIN_MS });
-  check("[setup] positive control: an UNKILLED backgrounded grandchild's write IS observed (the marker check can detect a real violation)",
-    fs.existsSync(s3ControlMarker));
-
-  let s3;
-  const s3Result = await assertNeverWithControl({
-    label: "a backgrounded grandchild of a killed commit's hook never touches the repo after the kill",
-    check: () => fs.existsSync(s3.markerPath),
-    positiveControl: async () => fs.existsSync(s3ControlMarker),
-    settle: async () => { s3 = await runScenario3(tag); await wait(GRANDCHILD_DELAY_MS + SETTLE_MARGIN_MS); },
-  });
-  check("[scenario 3] outcome: the backgrounded grandchild's marker write never happened — the tree-kill reached it too",
-    s3Result === true);
-  // Round 3 (m-d): scenario 1's own vacuity guard, applied here too — a merge that failed for an
-  // UNRELATED reason would also pass the check above, vacuously, without exercising the kill-confirm path.
-  if (s3.merge?.ok === false) {
-    check("[scenario 3] merge failed for the TIMEOUT/kill/quarantine reason specifically (not vacuously for something else)",
-      KILL_OR_QUARANTINE_REASON_RE.test(s3.merge?.reason ?? ""));
-  }
-  console.log(`[scenario 3] info: merge=${JSON.stringify({ ok: s3.merge?.ok, reason: s3.merge?.reason })}`);
-
-  // SCENARIO 4 (Code Review repro 2) — POSITIVE CONTROL: anyCommitHasPath can observe a real fixedA.txt commit.
-  const s4ControlRepo = makeRepo(`s4-control-${tag}`);
-  fs.writeFileSync(path.join(s4ControlRepo, "fixedA.txt"), "fixedA\n");
-  execFileSync("git", ["-C", s4ControlRepo, "add", "-A"]);
-  execFileSync("git", ["-C", s4ControlRepo, ...GIT_ID_ARGV, "commit", "-q", "-m", "manufactured fixedA.txt commit"]);
-  check("[setup] positive control: a manufactured commit containing fixedA.txt IS detected by anyCommitHasPath()",
-    anyCommitHasPath(s4ControlRepo, "fixedA.txt"));
-
-  let s4;
-  const s4Result = await assertNeverWithControl({
-    label: "a lint-staged-shaped hook's own unprompted git add never lands in any commit either merge actually makes",
-    check: () => anyCommitHasPath(s4.repo, "fixedA.txt"),
-    positiveControl: async () => anyCommitHasPath(s4ControlRepo, "fixedA.txt"),
-    settle: async () => { s4 = await runScenario4(tag); },
-  });
-  check("[scenario 4] outcome: fixedA.txt (the hook's own unprompted git add) never lands in any commit",
-    s4Result === true);
-  // Round 3 (m-d): same vacuity guard as scenario 1 — with the round-3 fix, merge1 is expected to hit the
-  // UNCONFIRMED-kill path (still matches KILL_REASON_RE: its message embeds the original "exceeded Nms"
-  // text) and merge2 is expected to be refused by the QUARANTINE this scenario's own merge1 just entered.
-  if (s4.merge1?.ok === false) {
-    check("[scenario 4] merge1 failed for the TIMEOUT/kill reason specifically (not vacuously for something else)",
-      KILL_REASON_RE.test(s4.merge1?.reason ?? ""));
-  }
-  if (s4.merge2?.ok === false) {
-    check("[scenario 4] merge2 failed for the QUARANTINE reason specifically (not vacuously for something else)",
-      KILL_OR_QUARANTINE_REASON_RE.test(s4.merge2?.reason ?? ""));
-  }
-  console.log(`[scenario 4] info: merge1=${JSON.stringify({ ok: s4.merge1?.ok, reason: s4.merge1?.reason })} ` +
-    `merge2=${JSON.stringify({ ok: s4.merge2?.ok, reason: s4.merge2?.reason })}`);
-
-  // SCENARIO 5 (round 3) — drive the unconfirmed path itself and prove the full quarantine lifecycle.
-  const s5 = await runScenario5(tag);
-  console.log(`[scenario 5] info: merge1=${JSON.stringify({ ok: s5.merge1?.ok, reason: s5.merge1?.reason })} ` +
-    `merge2=${JSON.stringify({ ok: s5.merge2?.ok, reason: s5.merge2?.reason })}`);
-  check("[scenario 5] merge1 (whose hook's own descendant escapes the tree-kill) is refused",
-    s5.merge1?.ok === false);
-  if (s5.merge1?.ok === false) {
-    check("[scenario 5] merge1 failed for the TIMEOUT/kill reason specifically (not vacuously for something else)",
-      KILL_REASON_RE.test(s5.merge1?.reason ?? ""));
-  }
-  check("[scenario 5] merge2 (a DIFFERENT branch, same repo, attempted immediately after) is refused by the QUARANTINE, not a generic failure",
-    s5.merge2?.ok === false && /QUARANTINED/.test(s5.merge2?.reason ?? ""));
-  check("[scenario 5] the quarantine is visible directly via the internal quarantine state (not merely inferred from merge2's refusal)",
-    !!activeMergeQuarantineFor(s5.repo));
-
-  // POSITIVE CONTROL for the marker check: proves the escaped descendant genuinely runs (this scenario is
-  // not vacuous) — a bounded POLL on the real event, never a single fixed-length guessed sleep.
-  const s5MarkerAppeared = await pollUntil(() => fs.existsSync(s5.markerPath), { timeoutMs: S5_HOLD_MS + SETTLE_MARGIN_MS });
-  check("[scenario 5] the escaped descendant's marker write IS eventually observed (proves it genuinely ran)",
-    s5MarkerAppeared);
-  check("[scenario 5] but the escaped descendant's own git add (fixedX.txt) never lands in EITHER merge's real commit — no corruption",
-    !anyCommitHasPath(s5.repo, "fixedX.txt"));
-
-  // AUTO-CLEAR: once the descendant's own exit lets the real confirmation finally arrive, the quarantine
-  // lifts on its own — bounded poll on the real internal state, never a fixed guessed sleep.
-  // Generous bound: the underlying OS-level pipe-close signal (what `onTreeDeathSettled` ultimately waits
-  // on) was measured, empirically, to lag the escaped descendant's own last write by several more seconds
-  // on Windows — wider than the marker-poll window above, deliberately, not a guess.
-  const s5AutoCleared = await pollUntil(() => !activeMergeQuarantineFor(s5.repo), { timeoutMs: 20_000 });
-  check("[scenario 5] the quarantine AUTO-CLEARS once the real tree-death confirmation eventually arrives (no human action)",
-    s5AutoCleared);
-
-  // The quarantine's own lift does not by itself clear the SEPARATE, correctly-refusing staged-residue
-  // guard the interrupted commit left behind (@decision 2eddf573) — simulate "a human resolves it by
-  // hand" (the documented recovery path: reset the residue, remove the now-irrelevant slow hook) and
-  // confirm a fresh merge succeeds afterwards, proving the quarantine was the only PERMANENT-looking
-  // obstacle, not a repo left broken forever.
-  fs.rmSync(path.join(s5.repo, ".git", "hooks", "pre-commit"), { force: true });
-  git(s5.repo, ["reset", "--hard", "HEAD"]);
-  const merge3 = await mergeBranch(s5.repo, BRANCH_B, "feat(b): add b", { timeoutMs: SMALL_MS });
-  check("[scenario 5] once the quarantine has cleared AND a human has resolved the residue, a fresh merge succeeds",
-    merge3.ok === true);
-  console.log(`[scenario 5] info: merge3=${JSON.stringify({ ok: merge3.ok, reason: merge3.reason })}`);
-} finally {
-  for (const d of tmpDirs) {
-    try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort: a killed git.exe can
-      leave transient lock files; a stale orphaned hook may still hold something briefly */ }
-  }
+check("[scenario 1] outcome: no corruption — no commit exists bearing branch A's trailer with branch B's file",
+  result === true);
+assertTruthfulIfLanded(scenario.repo, scenario.merge1, BRANCH_A, "file-a.txt", "content-a\n");
+assertTruthfulIfLanded(scenario.repo, scenario.merge2, BRANCH_B, "file-b.txt", "content-b\n");
+// "no ok:false-then-later-landing": if a merge reported failure, no commit for that side should exist
+// bearing its trailer at all — a false ok:false with a real commit lurking anyway is exactly the
+// silent-success-reported-as-failure shape this card's DoD calls out (the flip side of scenario 2 below).
+// B2 (Code Review): assert the FAILURE REASON specifically names the timeout/kill path — a merge that
+// failed for an UNRELATED reason (e.g. no git identity resolvable) would ALSO make the two checks above
+// pass, VACUOUSLY, without ever exercising the kill-confirm mechanism this file exists to prove.
+const KILL_REASON_RE = /exceeded \d+ms/;
+// Round 3 (m-d): a QUARANTINED refusal (the NEXT merge attempt on an already-quarantined repo) never
+// itself names a timeout — reused by scenarios 3/4 below alongside KILL_REASON_RE.
+const KILL_OR_QUARANTINE_REASON_RE = /exceeded \d+ms|QUARANTINED/;
+if (scenario.merge1?.ok === false) {
+  check("[scenario 1] merge1 failed for the TIMEOUT/kill reason specifically (not vacuously for something else)",
+    KILL_REASON_RE.test(scenario.merge1?.reason ?? ""));
+  check("[scenario 1] merge1 reported ok:false and truthfully landed nothing under its own trailer",
+    trailerCommits(scenario.repo, BRANCH_A).length === 0);
 }
+if (scenario.merge2?.ok === false) {
+  check("[scenario 1] merge2 failed for the TIMEOUT/kill reason specifically (not vacuously for something else)",
+    KILL_REASON_RE.test(scenario.merge2?.reason ?? ""));
+  check("[scenario 1] merge2 reported ok:false and truthfully landed nothing under its own trailer",
+    trailerCommits(scenario.repo, BRANCH_B).length === 0);
+}
+console.log(`[scenario 1] info: merge1=${JSON.stringify({ ok: scenario.merge1?.ok, reason: scenario.merge1?.reason })} ` +
+  `merge2=${JSON.stringify({ ok: scenario.merge2?.ok, reason: scenario.merge2?.reason })}`);
+
+// SCENARIO 2 — post-commit hook: HEAD genuinely moves before the hang even starts (on BOTH pre-fix and
+// post-fix code); only the TRUTHFULNESS of the report should differ.
+const pc = await runScenario2(tag);
+const headMoved = pc.head !== pc.initHead;
+check("[scenario 2] the commit actually landed (HEAD moved) despite the post-commit hook hanging past the timeout",
+  headMoved);
+check("[scenario 2] mergeBranch reports this TRUTHFULLY as ok:true (not a false ok:false while a real commit sits unreported)",
+  pc.result?.ok === true);
+if (pc.result?.ok === true) {
+  check("[scenario 2] the reported sha matches what HEAD actually is", pc.result.sha === pc.head);
+  let content = null;
+  try { content = execFileSync("git", ["-C", pc.repo, "show", `${pc.result.sha}:file-a.txt`], { encoding: "utf8" }); } catch { /* absent */ }
+  check("[scenario 2] the reported sha truthfully contains the branch's own file", content === "content-a\n");
+} else {
+  console.log(`[scenario 2] info: mergeBranch reported ${JSON.stringify({ ok: pc.result?.ok, reason: pc.result?.reason })} ` +
+    `while HEAD actually moved to ${pc.head} (was ${pc.initHead}) — this is the false-negative this scenario exists to catch`);
+}
+
+// SCENARIO 3 (Code Review repro 1) — POSITIVE CONTROL first: prove the marker-check can actually
+// observe a real write, by letting the SAME backgrounding hook run to natural completion (a timeoutMs
+// large enough that mergeBranch's own kill-trigger never fires).
+const s3ControlRepo = makeRepo(`s3-control-${tag}`);
+makeWorktree(s3ControlRepo, BRANCH_A, "file-a.txt", "content-a\n", `s3-control-${tag}`);
+const s3ControlMarker = path.join(s3ControlRepo, "grandchild-touched.marker");
+installBackgroundingPreCommitHook(s3ControlRepo, s3ControlMarker, 200);
+await mergeBranch(s3ControlRepo, BRANCH_A, "feat(a): add a", { timeoutMs: GRANDCHILD_DELAY_MS + HOOK_TOTAL_MS + SETTLE_MARGIN_MS });
+check("[setup] positive control: an UNKILLED backgrounded grandchild's write IS observed (the marker check can detect a real violation)",
+  fs.existsSync(s3ControlMarker));
+
+let s3;
+const s3Result = await assertNeverWithControl({
+  label: "a backgrounded grandchild of a killed commit's hook never touches the repo after the kill",
+  check: () => fs.existsSync(s3.markerPath),
+  positiveControl: async () => fs.existsSync(s3ControlMarker),
+  settle: async () => { s3 = await runScenario3(tag); await wait(GRANDCHILD_DELAY_MS + SETTLE_MARGIN_MS); },
+});
+check("[scenario 3] outcome: the backgrounded grandchild's marker write never happened — the tree-kill reached it too",
+  s3Result === true);
+// Round 3 (m-d): scenario 1's own vacuity guard, applied here too — a merge that failed for an
+// UNRELATED reason would also pass the check above, vacuously, without exercising the kill-confirm path.
+if (s3.merge?.ok === false) {
+  check("[scenario 3] merge failed for the TIMEOUT/kill/quarantine reason specifically (not vacuously for something else)",
+    KILL_OR_QUARANTINE_REASON_RE.test(s3.merge?.reason ?? ""));
+}
+console.log(`[scenario 3] info: merge=${JSON.stringify({ ok: s3.merge?.ok, reason: s3.merge?.reason })}`);
+
+// SCENARIO 4 (Code Review repro 2) — POSITIVE CONTROL: anyCommitHasPath can observe a real fixedA.txt commit.
+const s4ControlRepo = makeRepo(`s4-control-${tag}`);
+fs.writeFileSync(path.join(s4ControlRepo, "fixedA.txt"), "fixedA\n");
+execFileSync("git", ["-C", s4ControlRepo, "add", "-A"]);
+execFileSync("git", ["-C", s4ControlRepo, ...GIT_ID_ARGV, "commit", "-q", "-m", "manufactured fixedA.txt commit"]);
+check("[setup] positive control: a manufactured commit containing fixedA.txt IS detected by anyCommitHasPath()",
+  anyCommitHasPath(s4ControlRepo, "fixedA.txt"));
+
+let s4;
+const s4Result = await assertNeverWithControl({
+  label: "a lint-staged-shaped hook's own unprompted git add never lands in any commit either merge actually makes",
+  check: () => anyCommitHasPath(s4.repo, "fixedA.txt"),
+  positiveControl: async () => anyCommitHasPath(s4ControlRepo, "fixedA.txt"),
+  settle: async () => { s4 = await runScenario4(tag); },
+});
+check("[scenario 4] outcome: fixedA.txt (the hook's own unprompted git add) never lands in any commit",
+  s4Result === true);
+// Round 3 (m-d): same vacuity guard as scenario 1 — with the round-3 fix, merge1 is expected to hit the
+// UNCONFIRMED-kill path (still matches KILL_REASON_RE: its message embeds the original "exceeded Nms"
+// text) and merge2 is expected to be refused by the QUARANTINE this scenario's own merge1 just entered.
+if (s4.merge1?.ok === false) {
+  check("[scenario 4] merge1 failed for the TIMEOUT/kill reason specifically (not vacuously for something else)",
+    KILL_REASON_RE.test(s4.merge1?.reason ?? ""));
+}
+if (s4.merge2?.ok === false) {
+  check("[scenario 4] merge2 failed for the QUARANTINE reason specifically (not vacuously for something else)",
+    KILL_OR_QUARANTINE_REASON_RE.test(s4.merge2?.reason ?? ""));
+}
+console.log(`[scenario 4] info: merge1=${JSON.stringify({ ok: s4.merge1?.ok, reason: s4.merge1?.reason })} ` +
+  `merge2=${JSON.stringify({ ok: s4.merge2?.ok, reason: s4.merge2?.reason })}`);
+
+// SCENARIO 5 (round 3) — drive the unconfirmed path itself and prove the full quarantine lifecycle.
+const s5 = await runScenario5(tag);
+console.log(`[scenario 5] info: merge1=${JSON.stringify({ ok: s5.merge1?.ok, reason: s5.merge1?.reason })} ` +
+  `merge2=${JSON.stringify({ ok: s5.merge2?.ok, reason: s5.merge2?.reason })}`);
+check("[scenario 5] merge1 (whose hook's own descendant escapes the tree-kill) is refused",
+  s5.merge1?.ok === false);
+if (s5.merge1?.ok === false) {
+  check("[scenario 5] merge1 failed for the TIMEOUT/kill reason specifically (not vacuously for something else)",
+    KILL_REASON_RE.test(s5.merge1?.reason ?? ""));
+}
+check("[scenario 5] merge2 (a DIFFERENT branch, same repo, attempted immediately after) is refused by the QUARANTINE, not a generic failure",
+  s5.merge2?.ok === false && /QUARANTINED/.test(s5.merge2?.reason ?? ""));
+check("[scenario 5] the quarantine is visible directly via the internal quarantine state (not merely inferred from merge2's refusal)",
+  !!activeMergeQuarantineFor(s5.repo));
+
+// POSITIVE CONTROL for the marker check: proves the escaped descendant genuinely runs (this scenario is
+// not vacuous) — a bounded POLL on the real event, never a single fixed-length guessed sleep.
+const s5MarkerAppeared = await pollUntil(() => fs.existsSync(s5.markerPath), { timeoutMs: S5_HOLD_MS + SETTLE_MARGIN_MS });
+check("[scenario 5] the escaped descendant's marker write IS eventually observed (proves it genuinely ran)",
+  s5MarkerAppeared);
+check("[scenario 5] but the escaped descendant's own git add (fixedX.txt) never lands in EITHER merge's real commit — no corruption",
+  !anyCommitHasPath(s5.repo, "fixedX.txt"));
+
+// AUTO-CLEAR: once the descendant's own exit lets the real confirmation finally arrive, the quarantine
+// lifts on its own — bounded poll on the real internal state, never a fixed guessed sleep.
+// Generous bound: the underlying OS-level pipe-close signal (what `onTreeDeathSettled` ultimately waits
+// on) was measured, empirically, to lag the escaped descendant's own last write by several more seconds
+// on Windows — wider than the marker-poll window above, deliberately, not a guess.
+const s5AutoCleared = await pollUntil(() => !activeMergeQuarantineFor(s5.repo), { timeoutMs: 20_000 });
+check("[scenario 5] the quarantine AUTO-CLEARS once the real tree-death confirmation eventually arrives (no human action)",
+  s5AutoCleared);
+
+// The quarantine's own lift does not by itself clear the SEPARATE, correctly-refusing staged-residue
+// guard the interrupted commit left behind (@decision 2eddf573) — simulate "a human resolves it by
+// hand" (the documented recovery path: reset the residue, remove the now-irrelevant slow hook) and
+// confirm a fresh merge succeeds afterwards, proving the quarantine was the only PERMANENT-looking
+// obstacle, not a repo left broken forever.
+fs.rmSync(path.join(s5.repo, ".git", "hooks", "pre-commit"), { force: true });
+git(s5.repo, ["reset", "--hard", "HEAD"]);
+const merge3 = await mergeBranch(s5.repo, BRANCH_B, "feat(b): add b", { timeoutMs: SMALL_MS });
+check("[scenario 5] once the quarantine has cleared AND a human has resolved the residue, a fresh merge succeeds",
+  merge3.ok === true);
+console.log(`[scenario 5] info: merge3=${JSON.stringify({ ok: merge3.ok, reason: merge3.reason })}`);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — mergeBranchLocked's squash commit is kill-confirmed: a timed-out commit's real git " +
