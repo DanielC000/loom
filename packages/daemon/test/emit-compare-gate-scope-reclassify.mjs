@@ -490,9 +490,24 @@ try {
     let confirm2Settled = false;
     const p2 = sessions.confirmWorkerMerge(O2.mgrId, O2.workerId).then((r) => { confirm2Settled = true; return r; });
 
+    // Card 88469855: before O2 ever reaches this cap-queue admission wait, confirmWorkerMerge already ran
+    // SEVERAL real git subprocess calls against O2's own repo/worktree (findLandedSquashCommit,
+    // mergeMainIntoWorktree's rev-parse/merge-base/merge, computeEmitCompareGate's diff-based reads) — the
+    // SAME class of real-git-before-admission work already fixed for a production ETIMEDOUT in
+    // deploy-staleness.mjs (card 30dd2dab) and emit-compare-gate-not-hermetic.mjs (card 24d6ccdb). Here
+    // none of those calls ever error (each stays comfortably inside its own 15s GIT_OP_TIMEOUT_MS), so
+    // there is no exception shape to retry on — but under host contention they merely run SLOWER, and that
+    // slowness lands entirely inside the window this poll races against. Fault-injection proof (a
+    // `gitFactory` seam wrapping mergeMainIntoWorktree's own `raw()` with an artificial, non-erroring delay
+    // on one `merge-base` call) showed a 6s delay adds ~6.3s of latency 1:1 while `union.ok` stays `true`
+    // the whole time — and a baseline timing run of this exact scenario, on an otherwise-idle host, already
+    // spent ~4.1s of the prior 10s budget on this same pre-queue work with zero injected load. 20s keeps
+    // this a genuine, bounded condition-wait (a real hang still fails well short of the per-file timeout)
+    // while giving real git subprocess scheduling delay room that production's own GIT_OP_TIMEOUT_MS
+    // (15_000ms) already tolerates for any ONE of these calls.
     const queued = await pollUntil(
       () => sessions.gateSemaphore.snapshot().entries.some((e) => e.phase === "queued" && e.projectId === O2.projId),
-      { timeoutMs: 10000 },
+      { timeoutMs: 20000 },
     );
     check("(O) O2 genuinely reached the semaphore's CAP-queue wait before O1 released", queued);
 

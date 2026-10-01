@@ -43,7 +43,7 @@ const GENEROUS_SYNC_BUDGET_MS = 600_000;
 // exactly the wall-clock-coincidence flake this file's own DoD explicitly rejects (never assert on elapsed
 // wall-clock), and it's genuinely too fragile here: a block running right after a real squash-merge/
 // worktree-removal can see its OWN git subprocess prep take longer than a fixed short sleep under host
-// load. Bounded generously (8s) so a real bug still fails fast rather than hanging.
+// load. Bounded generously (16s) so a real bug still fails fast rather than hanging.
 // Retrofitted onto the shared _wait.mjs waitUntil (card 22796d42) — same timeoutMs/intervalMs defaults,
 // same "return the predicate's own value; one last try, then give up honestly" contract on timeout — only
 // difference is the added [waitUntil-outcome] diagnostic before that fallback try.
@@ -51,7 +51,14 @@ const GENEROUS_SYNC_BUDGET_MS = 600_000;
 // never-throw contract genuinely differs from the shared helper's throw-on-timeout one, and real call
 // sites below (e.g. the `liveEntry`/`mergeEntry` guards) depend on a timed-out call yielding undefined
 // instead of throwing. merge-gate-retry.mjs/merge-gate-single-file-retry.mjs now share this exact pattern.
-async function waitUntil(predicate, { intervalMs = 15, timeoutMs = 8000 } = {}) {
+// Card 88469855: the 8s default genuinely arrived LATE, not never — the (e2e single-admission)/(DoD-6)
+// scenarios' own retained log showed "[waitUntil-outcome] ARRIVED LATE at 10829ms (budget 8000ms,
+// overshoot 1.4x)". Same mechanism this comment already documented above (real git subprocess prep under
+// host contention, not a production ordering bug — see case (O)'s identical fix in
+// emit-compare-gate-scope-reclassify.mjs for the fault-injection proof this is a genuine-but-slow
+// condition, never an error). 16s keeps ~2x margin over the one measured overshoot while still failing a
+// genuinely wedged op in well under this file's per-test budget.
+async function waitUntil(predicate, { intervalMs = 15, timeoutMs = 16000 } = {}) {
   try {
     return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label: "gate-cancel: condition" });
   } catch {
