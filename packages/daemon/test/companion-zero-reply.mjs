@@ -26,6 +26,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       past the threshold. Without this, the zero-reply alarm would misfire for a companion that is
 //       actively working, misdirecting a human toward "the agent is stuck" instead of "re-bind the channel"
 //       (the binding-flag log/UI is the correct, already-surfaced diagnosis for this cause).
+//   (9) card 1b0df437: a `route-unbound` refusal (no binding at all — e.g. a stale/bad home) is ALSO a
+//       genuine attempt (onReplyDelivered still resets the streak, unchanged) AND is no longer silent —
+//       the new `onUnboundRouteRefused` hook + a disclosure-safe console.warn fire exactly ONCE per
+//       (session, route), never once per attempt, even driven well past the threshold; a
+//       route-flagged-non-private refusal does NOT fire this new hook (the two causes stay distinct).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-zero-reply.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -301,7 +306,82 @@ function driveTurns(db, sessId, n) {
   cleanupEnv(e);
 }
 
+// --- 9. card 1b0df437: a `route-unbound` refusal (no binding at all — a stale/bad home) is ALSO a
+//     genuine attempt (resets the streak, unchanged) AND is no longer SILENT: logged + durably eventED
+//     exactly once per (session, route), never once per attempt ---
+{
+  // 9a. UNIT: onReplyDelivered fires (unchanged reset behavior) AND the new onUnboundRouteRefused hook
+  // fires, with the session/channel/chatId of the refused route.
+  const delivered3 = [];
+  const unbound3 = [];
+  const unboundGw = new ChatGateway(
+    () => ({ delivered: true }), [], undefined, undefined,
+    (sid) => (sid === "unbound-sess" ? { channel: "telegram", chatId: "999888777" } : null), // originResolver
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    (sid) => delivered3.push(sid), undefined, undefined,
+    (sid, channel, chatId) => unbound3.push({ sid, channel, chatId }),
+  );
+  unboundGw.registerAdapter({ name: "telegram", maxMessageLength: 4096, start() {}, async stop() {}, async send() {} });
+  const realWarn = console.warn;
+  const warnCalls = [];
+  console.warn = (...args) => { warnCalls.push(args.map(String).join(" ")); };
+  const ru1 = await unboundGw.deliverReply("unbound-sess", "nobody home");
+  console.warn = realWarn;
+  check("(9a) deliverReply reports route-unbound for a route with no live binding at all", ru1.delivered === false && ru1.reason === "route-unbound");
+  check("(9a) onReplyDelivered STILL fires (a route-unbound refusal is still a genuine attempt, unchanged)", delivered3.length === 1 && delivered3[0] === "unbound-sess");
+  check("(9a) the new onUnboundRouteRefused hook fires with the session/channel/chatId", unbound3.length === 1 && unbound3[0].sid === "unbound-sess" && unbound3[0].channel === "telegram" && unbound3[0].chatId === "999888777");
+  check("(9a) a disclosure-safe console.warn fires (session id + channel, never the chatId)", warnCalls.some((c) => c.includes("unbound-sess") && c.includes("telegram") && !c.includes("999888777")));
+
+  // 9b. DEDUP: a SECOND refusal on the SAME (session, route) resets the streak again but does NOT
+  // re-fire the hook or the log — once-per-(session,route), mirroring warnUnconfirmedDirectInbound.
+  const ru2 = await unboundGw.deliverReply("unbound-sess", "still nobody home");
+  check("(9b) a second refusal on the SAME route still resets the streak (onReplyDelivered fires again)", ru2.delivered === false && ru2.reason === "route-unbound" && delivered3.length === 2);
+  check("(9b) but the durable-event hook does NOT fire again — deduped per (session, route)", unbound3.length === 1);
+
+  // 9c. END-TO-END, REAL Db: a companion that keeps trying every turn against a route with NO binding at
+  // all (e.g. a stale/bad home) never trips companion_zero_reply_detected (same posture as 8b), and the
+  // real durable event lands exactly ONCE despite being driven well past the threshold.
+  const e2 = makeEnv();
+  const gw2 = new ChatGateway(
+    () => ({ delivered: true }), [], undefined, undefined,
+    (sid) => (sid === e2.sessId ? { channel: "telegram", chatId: "222333444" } : null),
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    (sid) => e2.db.recordChatReplyDelivered(sid), undefined, undefined,
+    (sid, channel, chatId) => e2.db.recordCompanionUnboundRouteRefused(sid, channel, chatId), // REAL production wiring (factory.ts)
+  );
+  const sent2 = [];
+  gw2.registerAdapter({ name: "telegram", maxMessageLength: 4096, start() {}, async stop() {}, async send(chatId, text) { sent2.push({ chatId, text }); } });
+  for (let round = 0; round < 6; round++) {
+    driveTurns(e2.db, e2.sessId, 5);
+    const rr2 = await gw2.deliverReply(e2.sessId, "trying every turn, always route-unbound");
+    check(`(9c) round ${round}: deliverReply is route-unbound every time (still trying, never landing)`, rr2.delivered === false && rr2.reason === "route-unbound");
+  }
+  check("(9c) a companion that keeps TRYING every turn against an unbound route NEVER trips companion_zero_reply_detected", events(e2, "companion_zero_reply_detected").length === 0);
+  check("(9c) NOTHING was ever actually sent to the unbound route across the whole run", sent2.length === 0);
+  const unboundEvents = events(e2, "companion_unbound_route_refused");
+  check("(9c) exactly ONE companion_unbound_route_refused event landed despite 6 rounds of refusal (deduped)", unboundEvents.length === 1);
+  check("(9c) its detail carries the refused route", unboundEvents[0]?.detail?.channel === "telegram" && unboundEvents[0]?.detail?.chatId === "222333444");
+
+  // 9d. NEGATIVE CONTROL: a route-flagged-non-private refusal (existing cause, card 7578dea2) does NOT
+  // fire the new unbound-route hook — the two causes stay distinct, never cross-counted.
+  const flagged3 = [];
+  const flaggedGw3 = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: "flagged-sess-3", channel: "telegram", chatId: "grp-3", scope: "dm", flaggedNonPrivate: true }],
+    undefined, undefined,
+    (sid) => (sid === "flagged-sess-3" ? { channel: "telegram", chatId: "grp-3" } : null),
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined,
+    (sid, channel, chatId) => flagged3.push({ sid, channel, chatId }),
+  );
+  flaggedGw3.registerAdapter({ name: "telegram", maxMessageLength: 4096, start() {}, async stop() {}, async send() {} });
+  const rf3 = await flaggedGw3.deliverReply("flagged-sess-3", "flagged, not unbound");
+  check("(9d negative control) a route-flagged-non-private refusal is NOT route-unbound", rf3.delivered === false && rf3.reason === "route-flagged-non-private");
+  check("(9d negative control) the unbound-route hook does NOT fire for a flagged-binding refusal", flagged3.length === 0);
+
+  cleanupEnv(e2);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the companion zero-reply detector fires exactly once per genuine silent streak past the threshold, never fires on a periodically-replying (negative-control) or freshly-observed session, is gated to enabled companion sessions only, survives an ADD-COLUMN migration from the pre-card schema without a false alarm, its ChatGateway hook fires only on a genuine delivered reply OR a route-flagged-non-private suppression (both are attempts, never silence), and a companion suppressed by a flagged binding never misfires the alarm even when driven well past the threshold."
+  ? "\n✅ ALL PASS — the companion zero-reply detector fires exactly once per genuine silent streak past the threshold, never fires on a periodically-replying (negative-control) or freshly-observed session, is gated to enabled companion sessions only, survives an ADD-COLUMN migration from the pre-card schema without a false alarm, its ChatGateway hook fires only on a genuine delivered reply OR a route-flagged-non-private/route-unbound suppression (all are attempts, never silence), a companion suppressed by a flagged binding or an unbound route never misfires the alarm even when driven well past the threshold, and a route-unbound refusal is now logged + durably eventED exactly once per (session, route) rather than being completely silent."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -1464,6 +1464,19 @@ export type OrchestrationEventKind =
   // fallback (never rerouted to a different chat) rather than continuing to target an unreachable one.
   // Filed under the companion session; `detail` carries { reminderId, channel, chatId }.
   | "companion_reminder_rerouted"
+  // ── Companion route-unbound delivery refusal (card 1b0df437) ─────────────────────────────────────
+  // A `chat_reply`/deliverMedia attempt was refused with reason `route-unbound` (ChatGateway.
+  // deliveryBlockReason — no live binding backs the target at all: a chatId-shape refusal, card
+  // 94754bbe, or a route that was never bound / had its binding revoked, card d3f9b4d2). Unlike
+  // `route-flagged-non-private`, there's no binding row to flag/surface, so this was otherwise
+  // COMPLETELY silent while `onReplyDelivered` kept resetting the zero-reply streak every time. Filed
+  // under the companion session (managerSessionId = sessionId); `detail` carries { channel, chatId }.
+  // Emitted AT MOST ONCE per (session, route) — mirrors companion_zero_reply_detected's once-per-streak
+  // discipline (ChatGateway.warnUnboundRouteRefused's process-lifetime dedup). Deliberately excluded
+  // from EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS —
+  // companion-internal diagnostic, not a general orchestration lifecycle signal (same reasoning as
+  // companion_zero_reply_detected).
+  | "companion_unbound_route_refused"
   // Scoped per-project DEPLOY (orchestration `deploy`, design [[Scoped Per-Project Deploy — Design]]
   // 13235b62): a manager ran its OWN project's HUMAN-configured `orchestration.deployCommand` (the
   // owner's opt-in-once trust decision — no per-deploy confirm). Filed under the CALLING MANAGER
@@ -1689,7 +1702,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   session_rate_limited: true, rate_limit_resumed: true, rate_limit_recovered: true,
   rate_limit_bailed: true, usage_latch_armed: true, usage_latch_cleared: true,
   worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,
-  companion_home_cleared: true, companion_reminder_rerouted: true,
+  companion_home_cleared: true, companion_reminder_rerouted: true, companion_unbound_route_refused: true,
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true,

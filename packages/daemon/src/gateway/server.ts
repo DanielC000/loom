@@ -1515,9 +1515,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // write a home the very next reconcile would immediately clear. One function means the two writers can
   // never again diverge the way the outbound shape check already did once (see the H1/H2 test fix above).
   const validateHomeTarget = (channel: string, chatId: string, sessionId: string): string | null => {
+    // card 1b0df437: mirror ChatGateway.deliveryBlockReason's own group-scope exemption BEFORE the
+    // numeric-only check below — an explicit LIVE group binding on this exact route legitimately owns a
+    // @handle/negative id (docs/decisions/94754bbe-refuse-non-numeric-telegram-dm-chatid.md's "Fix round
+    // 2"), so don't reject a home the outbound chokepoint would actually deliver to. A dm-scope (or
+    // unbound) route still gets the numeric-only check.
+    const groupBound = deps.db.getCompanionBindingsForSession(sessionId).some((b) => b.channel === channel && b.chatId === chatId && b.scope === "group");
     // card 94754bbe: a numeric-only check, same posture as GUARD 6 below — the real guarantee is
     // ChatGateway.mayDeliverTo; this is immediate setup-time feedback.
-    if (isNonNumericTelegramChatId(channel, chatId)) {
+    if (!groupBound && isNonNumericTelegramChatId(channel, chatId)) {
       return `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(chatId)}) — Telegram private chat ids are always numbers`;
     }
     // card d3f9b4d2 Minor 1: reject up front rather than writing a home the very next reconcile would

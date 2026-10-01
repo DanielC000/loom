@@ -1753,7 +1753,11 @@ export class OrchestrationMcpRouter {
           "reason is DIFFERENT and PERMANENT: this route was flagged because it does not confirm as a " +
           "private chat, and Loom will deliberately withhold every reply to it until a human re-binds it — " +
           "retrying chat_reply here will never succeed, so if you're bound to another channel, tell the " +
-          "user there instead; otherwise there is nothing more to do this turn. Mirrors " +
+          "user there instead; otherwise there is nothing more to do this turn. A `route-unbound` reason " +
+          "is ALSO PERMANENT for this attempt: the route has no live binding at all (it was never bound, " +
+          "or its binding was revoked) — if this is your configured HOME route, the fix is for a human to " +
+          "change it (not re-bind), so just like `route-flagged-non-private`, tell the user on another " +
+          "channel if you're bound to one, otherwise there is nothing more to do. Mirrors " +
           "worker_report: emit one clean, final reply. Optional `voice:true` asks to SPEAK this reply " +
           "instead of texting it — it only has effect when the user's voice-reply setting is 'auto' (their " +
           "own on/off choice always wins otherwise); omit it (or pass false) to send plain text.",

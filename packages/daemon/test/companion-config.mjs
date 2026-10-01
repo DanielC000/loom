@@ -18,6 +18,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      the SAME resolveCompanionAgent the read routes use — a non-assistant (manager/worker) sessionId is
 //      refused (400, matching the read routes' error shape) and writes no row; an assistant sessionId still
 //      succeeds on every one of the four routes.
+//   2.5. card 1b0df437: store.ts's OWN env/bootstrap HOME-seed guard refuses a bad-shape
+//      LOOM_COMPANION_HOME_CHAT_ID with a specific SETUP log, leaving no home seeded (distinct from the
+//      binding-bootstrap refusal covered in Part 2/companion-nonnumeric-telegram-chatid-refusal.mjs); the
+//      NEW boot-time backstop catches an ALREADY-STORED bad-shape home on EVERY enabled row (not just the
+//      env-pinned session), never clears/rewrites it, skips a disabled row, and exempts a group-handle
+//      home backed by a live group binding on the exact same route.
 //   4. token never in any captured log line across the whole run.
 //   5. HUMAN-ONLY: the companion's OWN agent-facing MCP surface (orchestration assistant + manager) carries
 //      NO config/token tool — it can never read/write its own bot token.
@@ -378,6 +384,99 @@ try {
     db10.close();
   }
 
+  // ============ Part 2.5 — card 1b0df437: the env/bootstrap HOME-seed refusal (distinct from Part 2's
+  //      binding-bootstrap refusal coverage), and the boot-time stale-STORED-home backstop ============
+  {
+    // (2.5a) env sets a VALID numeric allowedChatId (the binding bootstrap succeeds) but a BAD non-numeric
+    // LOOM_COMPANION_HOME_CHAT_ID — store.ts's OWN home-seed guard (a SEPARATE check from factory.ts's
+    // binding-bootstrap refusal, already covered in Part 2 above and companion-nonnumeric-telegram-chatid-
+    // refusal.mjs's section G) must refuse to seed it, log a SPECIFIC SETUP error, and leave NO home
+    // written — while the config row + binding still arm normally (only HOME was bad).
+    const db = new Db(dbFile("p25a.db"));
+    const envBadHome = {
+      LOOM_COMPANION_BOT_TOKEN: PLAINTEXT, LOOM_COMPANION_CHAT_ID: "700800202", LOOM_COMPANION_SESSION_ID: "sess-badhome",
+      LOOM_COMPANION_HOME_CHAT_ID: "@badhome",
+    };
+    const logBefore = logSink.length;
+    const resolved = resolveAllCompanionConfigs(db, envBadHome);
+    const newLines = logSink.slice(logBefore);
+    check("(2.5a) the companion still resolves (the BINDING chatId was fine — only HOME was bad)", resolved.length === 1 && resolved[0].sessionId === "sess-badhome");
+    check("(2.5a) NO home was seeded for the bad env HOME_CHAT_ID", db.getCompanionHome("sess-badhome") === null);
+    check(
+      "(2.5a) a SPECIFIC SETUP console.error names the session (short form) + 'env/bootstrap home target' + the remedy",
+      newLines.some((l) => l.includes("sess-badhome".slice(0, 8)) && /env\/bootstrap home target/.test(l) && /numeric/i.test(l) && /PUT \/api\/companion\/home/.test(l)),
+    );
+    db.close();
+
+    // (2.5a control) the SAME shape but a GOOD numeric HOME_CHAT_ID seeds the home normally (no regression).
+    const dbGood = new Db(dbFile("p25a-control.db"));
+    const envGoodHome = {
+      LOOM_COMPANION_BOT_TOKEN: PLAINTEXT, LOOM_COMPANION_CHAT_ID: "700800203", LOOM_COMPANION_SESSION_ID: "sess-goodhome",
+      LOOM_COMPANION_HOME_CHAT_ID: "700800203",
+    };
+    resolveAllCompanionConfigs(dbGood, envGoodHome);
+    check("(2.5a control) a numeric HOME_CHAT_ID seeds the home normally", JSON.stringify(dbGood.getCompanionHome("sess-goodhome")) === JSON.stringify({ channel: "telegram", chatId: "700800203" }));
+    dbGood.close();
+
+    // (2.5b) BOOT-TIME BACKSTOP: a home ALREADY STORED with a bad shape (set directly, bypassing every
+    // write-time guard — simulating a legacy row written before 94754bbe's writers existed, or by an older
+    // daemon build) is NEVER caught by the env-seed guard above (it only fires when getCompanionHome is
+    // UNSET) — RED on the pre-card code: this used to sail through silently every boot. resolveAllConfigs
+    // must now warn for EVERY enabled row with a bad-shape stored home, not just the env-pinned session.
+    const db2 = new Db(dbFile("p25b.db"));
+    db2.upsertCompanionConfig({ sessionId: "sess-stale-home", botTokenBlob: "", channel: "in-app", allowedChatId: "", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    db2.setCompanionHome("sess-stale-home", { channel: "telegram", chatId: "@stalehandle" });
+    const logBefore2 = logSink.length;
+    resolveAllCompanionConfigs(db2, {});
+    const newLines2 = logSink.slice(logBefore2);
+    check(
+      "(2.5b) an ALREADY-STORED bad-shape home is caught at boot (no env involved at all)",
+      newLines2.some((l) => l.includes("sess-stale-home".slice(0, 8)) && /STORED home target/.test(l) && /card 1b0df437/.test(l)),
+    );
+    check("(2.5b) the stale home is NEVER cleared/rewritten — a WARNING pass only", JSON.stringify(db2.getCompanionHome("sess-stale-home")) === JSON.stringify({ channel: "telegram", chatId: "@stalehandle" }));
+
+    // (2.5b control) a GOOD numeric stored home on an enabled row never warns.
+    db2.upsertCompanionConfig({ sessionId: "sess-good-home", botTokenBlob: "", channel: "in-app", allowedChatId: "", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    db2.setCompanionHome("sess-good-home", { channel: "telegram", chatId: "700800300" });
+    const logBefore2b = logSink.length;
+    resolveAllCompanionConfigs(db2, {});
+    const newLines2b = logSink.slice(logBefore2b);
+    check("(2.5b control) a numeric stored home never warns", !newLines2b.some((l) => l.includes("sess-good-home".slice(0, 8))));
+
+    // (2.5b control 2) a DISABLED row's bad home never warns (only enabled rows are checked).
+    db2.upsertCompanionConfig({ sessionId: "sess-disabled-badhome", botTokenBlob: "", channel: "in-app", allowedChatId: "", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: false });
+    db2.setCompanionHome("sess-disabled-badhome", { channel: "telegram", chatId: "@disabledstale" });
+    const logBefore2c = logSink.length;
+    resolveAllCompanionConfigs(db2, {});
+    const newLines2c = logSink.slice(logBefore2c);
+    check("(2.5b control 2) a DISABLED row's bad-shape home never warns", !newLines2c.some((l) => l.includes("sess-disabled-badhome".slice(0, 8))));
+    db2.close();
+
+    // (2.5c) card 1b0df437 item 6: a group-"@handle" home backed by a LIVE GROUP binding on the EXACT
+    // same route is NOT a bad config — it's deliberately exempt, mirroring ChatGateway.deliveryBlockReason's
+    // own group-scope exemption (docs/decisions/94754bbe...​.md's new "Is a group @handle HOME supported?"
+    // section) — must NOT warn.
+    const db3 = new Db(dbFile("p25c.db"));
+    db3.upsertCompanionConfig({ sessionId: "sess-group-home", botTokenBlob: "", channel: "in-app", allowedChatId: "", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    db3.setCompanionHome("sess-group-home", { channel: "telegram", chatId: "@ourgroup" });
+    db3.upsertCompanionBinding({ sessionId: "sess-group-home", channel: "telegram", chatId: "@ourgroup", scope: "group" });
+    const logBefore3 = logSink.length;
+    resolveAllCompanionConfigs(db3, {});
+    const newLines3 = logSink.slice(logBefore3);
+    check("(2.5c) a group-handle home backed by a LIVE GROUP binding on the exact route is exempt — no warning", !newLines3.some((l) => l.includes("sess-group-home".slice(0, 8))));
+
+    // (2.5c negative control) the SAME shape but the binding is dm-scope (not group) — the exemption must
+    // NOT apply; this is a genuinely bad config and must still warn.
+    db3.upsertCompanionConfig({ sessionId: "sess-dm-badhome", botTokenBlob: "", channel: "in-app", allowedChatId: "", chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true });
+    db3.setCompanionHome("sess-dm-badhome", { channel: "telegram", chatId: "@notourgroup" });
+    db3.upsertCompanionBinding({ sessionId: "sess-dm-badhome", channel: "in-app", chatId: "sess-dm-badhome", scope: "dm" });
+    const logBefore3b = logSink.length;
+    resolveAllCompanionConfigs(db3, {});
+    const newLines3b = logSink.slice(logBefore3b);
+    check("(2.5c negative control) a group-handle home with NO live group binding on that route still warns", newLines3b.some((l) => l.includes("sess-dm-badhome".slice(0, 8)) && /STORED home target/.test(l)));
+    db3.close();
+  }
+
   // ============ Part 3 — the human-only REST CRUD via the REAL buildServer (app.inject) ============
   {
     const db = new Db(dbFile("p3.db"));
@@ -586,6 +685,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — DB-backed companion config: bot token ENCRYPTED at rest (plaintext never stored/returned/logged), masked reads expose only configured+last-4, env bootstraps + OVERRIDES the DB row, an enabled row alone boots, disabled/corrupt ⇒ OFF, default-OFF byte-identical, REST CRUD round-trips, and NO config/token tool on the companion's MCP surface."
+  ? "\n✅ ALL PASS — DB-backed companion config: bot token ENCRYPTED at rest (plaintext never stored/returned/logged), masked reads expose only configured+last-4, env bootstraps + OVERRIDES the DB row, an enabled row alone boots, disabled/corrupt ⇒ OFF, default-OFF byte-identical, REST CRUD round-trips, NO config/token tool on the companion's MCP surface, a bad-shape env HOME_CHAT_ID is refused with a specific SETUP log (never seeded, the binding still arms), an ALREADY-STORED bad-shape home is caught at every boot (not just the env-seed path) without ever being cleared/rewritten, a disabled row's bad home is never checked, and a group-handle home backed by a live group binding on the exact route is exempt from that warning while one with no such binding still warns."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

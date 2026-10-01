@@ -351,7 +351,13 @@ export type DeliverResult =
   // design silently (no notice sent to the route itself; see mayDeliverTo's own doc for why).
   // `route-unbound` (card d3f9b4d2): the target route has NO live binding at all (never bound, or its
   // binding was revoked since the turn carrying this route was formed) — same chokepoint, same silent
-  // suppression; see ChatGateway.hasLiveBinding's doc for the one channel this never applies to.
+  // SUPPRESSION (nothing is ever sent to the route itself); see ChatGateway.hasLiveBinding's doc for the
+  // one channel this never applies to. The fix for this cause is usually to CHANGE the stale target (e.g.
+  // a bad companion HOME, via PUT /api/companion/home) rather than to re-bind — there is often no binding
+  // to re-bind in the first place. Since card 1b0df437, this is no longer silent to an OPERATOR reading
+  // the daemon's own log/events: ChatGateway.warnUnboundRouteRefused logs + records a
+  // `companion_unbound_route_refused` event once per (session, route) — only the CHAT ITSELF still hears
+  // nothing, by design (card 7578dea2's decision record, near ChatGateway.mayDeliverTo, is why).
   | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" | "no-target" | "route-flagged-non-private" | "route-unbound" };
 
 /** The result of routing one inbound message. */

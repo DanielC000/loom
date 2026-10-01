@@ -60,7 +60,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //          NOT refused — the scope exemption holds even for a route mayDeliverTo resolves structurally.
 //   I. WRITE-TIME GUARDS (convenience 400s, never the real guarantee — H is): `PUT /api/companion/home`,
 //      `POST`/`PUT /api/companion/config`'s `allowedChatId` (dm-scope only; group-scope is unaffected), and
-//      the provision endpoint's `home` field all reject a non-numeric Telegram target up front.
+//      the provision endpoint's `home` field all reject a non-numeric Telegram target up front — EXCEPT
+//      (card 1b0df437) `PUT /api/companion/home` now accepts a `@handle` once a LIVE GROUP binding backs
+//      the exact same route, mirroring ChatGateway.deliveryBlockReason's own group-scope exemption.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/companion-nonnumeric-telegram-chatid-refusal.mjs
 import fs from "node:fs";
@@ -388,6 +390,18 @@ try {
     const goodHome = await appI.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "write-guard-sess", channel: "telegram", chatId: "600700800" } });
     check("(I2 control) PUT /api/companion/home: a numeric telegram chatId still succeeds → 200", goodHome.statusCode === 200);
 
+    // I2b/I2c: card 1b0df437 item 6 — a group-"@handle" home IS accepted once a LIVE GROUP binding backs
+    // the exact same route (mirrors ChatGateway.deliveryBlockReason's own group-scope exemption), but a
+    // "@handle" with NO group binding on that route is still refused exactly like I1.
+    const stillBadHandle = await appI.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "write-guard-sess", channel: "telegram", chatId: "@ourgrouphome" } });
+    check("(I2b) a group handle with NO live group binding on that route is still refused → 400", stillBadHandle.statusCode === 400);
+    db.upsertCompanionBinding({ sessionId: "write-guard-sess", channel: "telegram", chatId: "@ourgrouphome", scope: "group" });
+    const groupHomeOk = await appI.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "write-guard-sess", channel: "telegram", chatId: "@ourgrouphome" } });
+    check("(I2c) the SAME group handle, now backed by a live GROUP binding, is accepted → 200", groupHomeOk.statusCode === 200);
+    check("(I2c) the group-handle home was actually written", JSON.stringify(db.getCompanionHome("write-guard-sess")) === JSON.stringify({ channel: "telegram", chatId: "@ourgrouphome" }));
+    // Restore the numeric home for the rest of this block's assumptions.
+    await appI.inject({ method: "PUT", url: "/api/companion/home", payload: { sessionId: "write-guard-sess", channel: "telegram", chatId: "600700800" } });
+
     // I3/I4: POST /api/companion/config's allowedChatId (buildCompanionUpsert).
     const badConfig = await appI.inject({
       method: "POST", url: "/api/companion/config",
@@ -417,6 +431,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — db.upsertCompanionBinding refuses (InvalidTelegramChatIdError) a dm-scope Telegram binding whose chatId isn't numeric at all, at the one write chokepoint, so the REST bind handler (400), the provision endpoint (400, pre-spawn), the env bootstrap seed, and pairing-code redemption (structurally unreachable, and safe either way) can never persist one; a negative-integer chatId is still only flagged (never refused); a group-scope or non-Telegram binding is never refused; a legacy pre-fix row is still caught at boot; the duplicated TELEGRAM_CHANNEL literal still matches the real constant; the outbound chokepoint (ChatGateway.mayDeliverTo) now also refuses a non-numeric or negative-integer target with NO binding at all (companion HOME, generalized), the actual leak the Code Review widened this card to close, while a group-scope-backed target is never refused; and the write-time guards (PUT /api/companion/home, POST/PUT /api/companion/config's allowedChatId, the provision endpoint's home field) all reject a non-numeric dm-scope target up front."
+  ? "\n✅ ALL PASS — db.upsertCompanionBinding refuses (InvalidTelegramChatIdError) a dm-scope Telegram binding whose chatId isn't numeric at all, at the one write chokepoint, so the REST bind handler (400), the provision endpoint (400, pre-spawn), the env bootstrap seed, and pairing-code redemption (structurally unreachable, and safe either way) can never persist one; a negative-integer chatId is still only flagged (never refused); a group-scope or non-Telegram binding is never refused; a legacy pre-fix row is still caught at boot; the duplicated TELEGRAM_CHANNEL literal still matches the real constant; the outbound chokepoint (ChatGateway.mayDeliverTo) now also refuses a non-numeric or negative-integer target with NO binding at all (companion HOME, generalized), the actual leak the Code Review widened this card to close, while a group-scope-backed target is never refused; the write-time guards (PUT /api/companion/home, POST/PUT /api/companion/config's allowedChatId, the provision endpoint's home field) all reject a non-numeric dm-scope target up front; and (card 1b0df437) PUT /api/companion/home now accepts a @handle home once a live GROUP binding backs the exact same route, mirroring the outbound chokepoint's own exemption, while one with no such binding is still refused."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

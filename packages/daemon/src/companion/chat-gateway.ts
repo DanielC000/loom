@@ -100,6 +100,10 @@ export class ChatGateway {
    *  inbound" security event (card b4f124d8) — see `warnUnconfirmedDirectInbound` below. */
   private readonly warnedUnconfirmedDirectBindings = new Set<string>();
 
+  /** (session, route) keys (`sessionId:channel:chatId`) already warned for a `route-unbound` delivery
+   *  refusal (card 1b0df437) — see `warnUnboundRouteRefused` below. */
+  private readonly warnedUnboundRoutes = new Set<string>();
+
   /**
    * @param submitTurn  the injected pty turn-submit primitive (kept db-free — see SubmitTurn).
    * @param bindings    the initial session↔chat bindings (loaded from the db by the factory).
@@ -215,6 +219,19 @@ export class ChatGateway {
      *  construction stays byte-identical (no-op). factory.ts injects the shared
      *  companion/reconcile.ts helper, built from `db` (mirrors flagNonPrivateBinding's own pattern). */
     private readonly reconcileBindingChange: ((sessionId: string) => void | Promise<void>) | undefined = undefined,
+    /** Observability hook (card 1b0df437): called at most ONCE per (session, route) — see
+     *  `warnUnboundRouteRefused` below — when a `chat_reply`/media delivery is refused with reason
+     *  `route-unbound` (no live binding backs the target at all, e.g. a stale/bad companion HOME stored
+     *  before 94754bbe's write-time guards existed). Unlike `route-flagged-non-private`
+     *  (`flagNonPrivateBinding` above), there is no binding row to flag/surface here — without this hook
+     *  the refusal was COMPLETELY silent: `onReplyDelivered` still resets the zero-reply streak every
+     *  time (see deliverReply's own comment), so a bad home burned a heartbeat/reminder/attention-push
+     *  turn forever with zero trace. Default undefined ⇒ every existing/test construction stays
+     *  byte-identical (no-op; the console warning + process-lifetime dedup below still happen regardless
+     *  — this hook only adds durability). The daemon injects `(sid, channel, chatId) =>
+     *  db.recordCompanionUnboundRouteRefused(sid, channel, chatId)` (factory.ts). Never allowed to throw
+     *  out of the outbound path — the call site wraps it. */
+    private readonly onUnboundRouteRefused: ((sessionId: string, channel: string, chatId: string) => void) | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -748,12 +765,14 @@ export class ChatGateway {
     if (blockReason) {
       // Zero-reply detector (card 48e8d289) hardening: this IS a genuine chat_reply ATTEMPT — the agent
       // called it, and the reason it can't land is a PERMANENT, already-surfaced-elsewhere condition (the
-      // binding-flag UI/log, or the route having been unbound), not the agent going silent/stuck. Firing
-      // onReplyDelivered here resets that detector's "turns since last reply" baseline so it can never
-      // misfire `companion_zero_reply_detected` for a companion that is actively trying every turn — that
-      // alarm exists to catch an UNDIAGNOSED silence, and this cause is already fully diagnosed and
-      // surfaced through a different channel; letting both fire for the same root cause would misdirect a
-      // human toward "the agent is stuck" instead of "re-bind the channel".
+      // binding-flag UI/log, or — card 1b0df437 — the once-per-(session,route) log/event below for an
+      // unbound route), not the agent going silent/stuck. Firing onReplyDelivered here resets that
+      // detector's "turns since last reply" baseline so it can never misfire `companion_zero_reply_detected`
+      // for a companion that is actively trying every turn — that alarm exists to catch an UNDIAGNOSED
+      // silence, and this cause is already fully diagnosed and surfaced through a different channel; letting
+      // both fire for the same root cause would misdirect a human toward "the agent is stuck" instead of
+      // "re-bind the channel" / "fix the home".
+      if (blockReason === "route-unbound") this.warnUnboundRouteRefused(sessionId, target.channel, target.chatId);
       this.onReplyDelivered?.(sessionId);
       return { delivered: false, reason: blockReason };
     }
@@ -791,6 +810,7 @@ export class ChatGateway {
         // is still a genuine chat_reply attempt, exactly like the up-front deliveryBlockReason gate above —
         // see that gate's own comment on why this resets the streak instead of letting it accumulate
         // toward a misfire.
+        if (result.reason === "route-unbound") this.warnUnboundRouteRefused(sessionId, target.channel, target.chatId); // card 1b0df437
         this.onReplyDelivered?.(sessionId);
         return { delivered: false, reason: result.reason };
       }
@@ -880,7 +900,10 @@ export class ChatGateway {
     const target = this.replyTarget(sessionId);
     if (!target) return { delivered: false, reason: "no-target" };
     const blockReason = this.deliveryBlockReason(target.channel, target.chatId); // card 7578dea2 / d3f9b4d2
-    if (blockReason) return { delivered: false, reason: blockReason };
+    if (blockReason) {
+      if (blockReason === "route-unbound") this.warnUnboundRouteRefused(sessionId, target.channel, target.chatId); // card 1b0df437
+      return { delivered: false, reason: blockReason };
+    }
     const adapter = this.adapters.get(target.channel);
     if (!adapter) return { delivered: false, reason: "no-adapter" };
     if (!adapter.sendMedia) return { delivered: false, reason: "unsupported-channel" };
@@ -1027,6 +1050,38 @@ export class ChatGateway {
         `delivery to this route is now suppressed (card 7578dea2). This binding may name a group/supergroup ` +
         `chat — re-bind it with scope "group", or delete it, if so.`,
     );
+  }
+
+  /**
+   * SECURITY/observability (card 1b0df437): `deliveryBlockReason` returned `route-unbound` for a
+   * `sessionId` delivery attempt — unlike a flagged binding (`warnUnconfirmedDirectInbound` above), there
+   * is NO binding row here to flag/surface (an unbound route has none, by definition), so this was
+   * otherwise COMPLETELY silent: no log, no event, no UI flag, while `onReplyDelivered` still resets the
+   * zero-reply streak every time (see deliverReply's own comment on why that reset is still correct once
+   * this is no longer silent). Logged + durably eventED at most ONCE per (session, route) — keyed on the
+   * session too (unlike the flagged-binding warn above, which is route-only), since a route-unbound
+   * refusal has no binding row to key off and the SAME route could in principle be a different session's
+   * home after a future rebind. Disclosure-safe console log (session id + channel only, never the
+   * chatId — same posture as `warnUnconfirmedDirectInbound`); the durable event's `detail` DOES carry the
+   * chatId (same as `companion_home_cleared`/`companion_reminder_rerouted` — a project-scoped durable
+   * record, not a public log).
+   */
+  private warnUnboundRouteRefused(sessionId: string, channel: string, chatId: string): void {
+    const key = `${sessionId}:${channel}:${chatId}`;
+    if (this.warnedUnboundRoutes.has(key)) return;
+    this.warnedUnboundRoutes.add(key);
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[companion] session ${sessionId} chat_reply/media delivery route (channel=${channel}) was refused ` +
+        `— no live binding backs this route (card 1b0df437). If this is the companion's HOME, fix it via ` +
+        `PUT /api/companion/home; if it's a reminder's own pinned route, update or delete that reminder.`,
+    );
+    try {
+      this.onUnboundRouteRefused?.(sessionId, channel, chatId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[companion] persisting unbound-route-refused event failed: ${describeError(err)}`);
+    }
   }
 
   // @decision 7578dea2 — outbound suppression to a flagged route is SILENT; never send even a re-bind

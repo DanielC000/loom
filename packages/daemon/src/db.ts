@@ -3733,6 +3733,16 @@ export class Db {
     this.db.prepare("UPDATE companion_bindings SET flagged_non_private = 1 WHERE session_id = ? AND channel = ?").run(sessionId, channel);
   }
   /**
+   * Persist a `companion_unbound_route_refused` durable event (card 1b0df437) — the durable half of
+   * `chat-gateway.ts`'s `warnUnboundRouteRefused` once-per-(session,route) console warning, so a
+   * `route-unbound` delivery refusal (no live binding at all, e.g. a stale/bad companion HOME) leaves an
+   * audit trail even though there's no binding row here to flag the way `flagCompanionBindingNonPrivate`
+   * does. Filed under `sessionId`; `detail` carries { channel, chatId }.
+   */
+  recordCompanionUnboundRouteRefused(sessionId: string, channel: string, chatId: string): void {
+    this.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sessionId, kind: "companion_unbound_route_refused", detail: { channel, chatId } });
+  }
+  /**
    * Delete a binding by session id, or (when `channel` is given) only that session's binding on that ONE
    * channel — the other channels' bindings are untouched. Idempotent either way. CASCADE-clears that
    * scope's allowlisted senders AND unconsumed pairing codes in the SAME transaction: a re-bind of the

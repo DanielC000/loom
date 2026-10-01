@@ -87,6 +87,25 @@ the provision endpoint's pre-existing GUARD 6) now reject a non-numeric Telegram
 convenience guards, not the security boundary — a value written before this fix, or written by a future
 caller that forgets the check, is still caught by the outbound chokepoint above.
 
+## Is a group `@handle` HOME supported? (card 1b0df437)
+
+Mostly yes, narrowly: `validateHomeTarget` (the one function `PUT /api/companion/home` and
+`applyHomeIfPresent` share — server.ts) now mirrors `mayDeliverTo`'s own group-scope exemption, skipping
+the numeric-shape check when a LIVE group binding already exists on the exact (channel, chatId) route —
+the same thing a negative-integer group chatId could already do, since a negative integer passes the
+numeric-shape check on its own. Without this, those two writers rejected a `@handle` home even when a live
+group binding already backed it and `mayDeliverTo` would have delivered to it fine — an inconsistency, not
+a deliberate restriction. Bind the group chat first (scope `"group"`), then set it as home.
+
+The **provision endpoint**'s `home` field (`POST /api/companion/provision`) deliberately did NOT get this
+exemption: that endpoint only ever writes `dm`-scope bindings (never `group`), so a live group binding can
+never exist for its own home at write time — the exemption would be structurally unreachable there.
+
+The **env/bootstrap home-seed** check (`companion/store.ts`) also did NOT get this exemption: it runs
+BEFORE the bootstrap binding is ever created (`resolveAllCompanionConfigs` only writes `companion_config` +
+`app_meta`; the binding write is a separate step in `factory.ts`, later), so there is no live binding yet
+to check against — a chicken-and-egg problem a live-binding lookup can't resolve at that point in boot.
+
 ## Never silent
 
 A refusal that only shows up as a generic, unspecific error (or as "the companion just didn't arm, with no

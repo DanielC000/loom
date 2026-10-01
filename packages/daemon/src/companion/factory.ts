@@ -51,6 +51,10 @@ export interface CompanionBindingStore extends AllowlistReader, PairingStore, Vo
   /** Outbound-suppression flag persistence (card 7578dea2): threaded to the gateway's `flagNonPrivateBinding`
    *  hook, so a binding `warnUnconfirmedDirectInbound` observes as non-private stays flagged across a restart. */
   flagCompanionBindingNonPrivate(sessionId: string, channel: string): void;
+  /** Durable-event persistence (card 1b0df437): threaded to the gateway's `onUnboundRouteRefused` hook, so
+   *  a `route-unbound` delivery refusal `warnUnboundRouteRefused` observes is recorded for later audit, not
+   *  just a process-lifetime console warning. */
+  recordCompanionUnboundRouteRefused(sessionId: string, channel: string, chatId: string): void;
   // card d3f9b4d2 Minor 1: the remaining surface companion/reconcile.ts's CompanionRouteReconcileStore
   // needs (getCompanionHome is already declared above) — threaded to the gateway's `reconcileBindingChange`
   // hook (dm-bind pairing redemption).
@@ -237,7 +241,10 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // session at a different chatId on that SAME channel, but allows a different channel's first bind
   // through, so this never sees an existing route reconciled away, only a new one added.
   const reconcileBindingChange = (sessionId: string) => reconcileCompanionBindingRoutes(db, sessionId);
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow, onReplyDelivered, flagNonPrivateBinding, reconcileBindingChange);
+  // card 1b0df437: see ChatGateway's onUnboundRouteRefused doc — records the durable half of
+  // warnUnboundRouteRefused's once-per-(session,route) console warning.
+  const onUnboundRouteRefused = (sessionId: string, channel: string, chatId: string) => db.recordCompanionUnboundRouteRefused(sessionId, channel, chatId);
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow, onReplyDelivered, flagNonPrivateBinding, reconcileBindingChange, onUnboundRouteRefused);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { readCompanionConfig, DEFAULT_HEARTBEAT_PROMPT, type CompanionConfig } from "./config.js";
 import { TELEGRAM_CHANNEL } from "./telegram.js";
-import { isNonNumericTelegramChatId } from "./types.js";
+import { isLikelyGroupTelegramChatId, isNonNumericTelegramChatId } from "./types.js";
 import type { CompanionConfigRow } from "../db.js";
 import type { CompanionConfigMasked, CompanionRoute } from "@loom/shared";
 
@@ -43,6 +43,10 @@ export interface CompanionConfigStore {
   }): CompanionConfigRow;
   getCompanionHome(sessionId: string): CompanionRoute | null;
   setCompanionHome(sessionId: string, home: CompanionRoute): void;
+  /** card 1b0df437: the boot-time stale-home check below needs a session's live bindings to tell a
+   *  deliberately-configured group-scope home apart from a genuinely stale/bad one (scope included,
+   *  unlike `reconcile.ts`'s narrower `CompanionRouteReconcileStore` surface). */
+  getCompanionBindingsForSession(sessionId: string): { channel: string; chatId: string; scope: "dm" | "group" }[];
   /** Narrowed session read (home-collision heartbeat de-dup, below) — most callers pass the real `Db`,
    *  whose `getSession` returns the full `Session`; only these fields are used here. `processState` +
    *  `archivedAt` gate LIVENESS (a dead-but-still-enabled companion must never win/suppress in the
@@ -99,7 +103,38 @@ export function resolveAllCompanionConfigs(
       }
     }
   }
+  warnStaleStoredHomes(db);
   return resolveAllEnabledConfigs(db, env, keyPath);
+}
+
+/**
+ * Boot-time backstop (card 1b0df437): the env-seed guard above only fires when `getCompanionHome` is
+ * UNSET — an ALREADY-STORED bad-shape home (predating 94754bbe's write-time guards) sails through
+ * silently every boot after the first, until a companion actually tries it and ChatGateway's own
+ * once-per-route runtime warning fires. This is the earlier, louder half: checked for EVERY enabled row,
+ * mirroring factory.ts's preFlagLikelyGroupDmBindings boot backstop for bindings. WARNING ONLY — never
+ * clears/writes; ChatGateway.mayDeliverTo is the real suppression guarantee either way. A GROUP-scope-
+ * shaped home backed by a live group binding is exempt (mirrors deliveryBlockReason's own scope
+ * exemption — docs/decisions/94754bbe-refuse-non-numeric-telegram-dm-chatid.md) — not inherently invalid.
+ */
+function warnStaleStoredHomes(db: CompanionConfigStore): void {
+  for (const row of db.listCompanionConfigs()) {
+    if (!row.enabled) continue;
+    const home = db.getCompanionHome(row.sessionId);
+    if (!home) continue;
+    const badShape = isNonNumericTelegramChatId(home.channel, home.chatId) || isLikelyGroupTelegramChatId(home.channel, home.chatId);
+    if (!badShape) continue;
+    const groupBound = db.getCompanionBindingsForSession(row.sessionId).some((b) => b.channel === home.channel && b.chatId === home.chatId && b.scope === "group");
+    if (groupBound) continue;
+    // eslint-disable-next-line no-console
+    console.error(
+      `[companion] SETUP: session ${row.sessionId.slice(0, 8)}'s STORED home target (${home.channel}/` +
+        `${JSON.stringify(home.chatId)}) is not shaped like a private Telegram chat id — proactive ` +
+        `delivery (heartbeat/reminder/attention-push) to it is refused at the outbound chokepoint (card ` +
+        `1b0df437) and will stay refused until it's fixed. Update it via PUT /api/companion/home, or bind ` +
+        `it with scope "group" first if this is actually a group/channel handle you want as home.`,
+    );
+  }
 }
 
 /**
