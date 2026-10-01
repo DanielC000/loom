@@ -5365,6 +5365,26 @@ export class Db {
   liveSessions(agentId: string): Session[] {
     return this.listSessions(agentId).filter((s) => s.processState === "live");
   }
+  /**
+   * DISTINCT `cwd` of every NON-ARCHIVED, non-`"dead"` session with role `role` in project `projectId`.
+   * Card 00a999e8: feeds the LOOM_HOME write-deny's rebound-Platform-home extension — `session.cwd` is
+   * pinned at spawn/recycle and NEVER re-derived from the project row on resume (`sessions/service.ts`:
+   * a fresh `startPlatformLead` sets `cwd: project.repoPath`, but `recyclePlatformLead` pins `cwd:
+   * old.cwd` and a resume reuses `session.cwd` unchanged), so an in-flight Platform Lead lineage can keep
+   * reading an OLDER `repoPath` after the project's own `repoPath` is rebound forward. The caller unions
+   * this with the project's CURRENT `repoPath` (what a FRESH spawn will use) to get every real root a
+   * live-or-still-resumable lineage might read `CLAUDE.md`/`.claude/**` from. `resumability != 'dead'`
+   * excludes a session that can never come back to reclaim its old cwd via resume (an exited, proven-dead
+   * row); `archived_at IS NULL` excludes one already moved out of the rail — mirrors `listSessions`'
+   * own archived filter above. Not scoped to "live only": an exited-but-resumable row's cwd still needs
+   * protecting, since resuming it reuses that same cwd rather than re-deriving a fresh one.
+   */
+  listSessionCwdsForProjectRole(projectId: string, role: string): string[] {
+    const rows = this.db.prepare(
+      "SELECT DISTINCT cwd FROM sessions WHERE project_id = ? AND role = ? AND archived_at IS NULL AND resumability != 'dead'",
+    ).all(projectId, role) as { cwd: string }[];
+    return rows.map((r) => r.cwd);
+  }
   getSession(id: string): Session | undefined {
     const r = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as Row | undefined;
     return r ? toSession(r) : undefined;

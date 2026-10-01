@@ -4492,6 +4492,19 @@ export class PtyHost {
    * behaves byte-identically: a worker spawn gets no project-scoped deny rules at all.
    */
   private readonly getOtherProjects: (projectId: string) => Array<{ id: string; repoPath: string }>;
+  /**
+   * Card 00a999e8: read access to the reserved "Loom Platform" project's CURRENT bound roots — see
+   * loom-home-deny.ts's own doc on `LoomHomeDenyOptions.platformHomePaths` for the full shape/rationale
+   * (`repoPaths` is a SET — `project.repoPath` unioned with every live/resumable platform-role session's
+   * `cwd`, which outlives a rebind; `vaultPath` is single-valued). Wired in by index.ts at boot (it holds
+   * `db`; PtyHost deliberately does not — mirrors `getOtherProjects` above). Called PER-SPAWN (never
+   * boot-bound) so a rebind reaches the very next spawn with no daemon restart. Fed to
+   * `withLoomHomeWriteDenyForSpawn` so LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY also covers a rebound
+   * home at each entry's own real root(s). Defaults to a harmless no-op (`() => ({ repoPaths: [],
+   * vaultPath: null })`) so a PtyHost built without this opt — every existing hermetic test, and any boot
+   * with LOOM_DEV off — behaves byte-identically to before this field existed.
+   */
+  private readonly getPlatformHomePaths: () => { repoPaths: string[]; vaultPath: string | null };
   /** Card c8f855e1: optional advisory transform of a FRESH spawn's kickoff (never resume/fork). Must return the prompt; a throw is swallowed. */
   private readonly decorateStartupPrompt: ((o: { projectId: string; role?: SessionRole; prompt: string }) => string) | null;
   /**
@@ -4513,6 +4526,7 @@ export class PtyHost {
       getIntegrationPaths?: () => { codescape?: string };
       getCodescapeSupervisorState?: () => { port: number | null; resolveProjectId: (repoPath: string) => string | null };
       getOtherProjects?: (projectId: string) => Array<{ id: string; repoPath: string }>;
+      getPlatformHomePaths?: () => { repoPaths: string[]; vaultPath: string | null };
       decorateStartupPrompt?: (o: { projectId: string; role?: SessionRole; prompt: string }) => string;
       resolveCredentialSessionEnv?: (projectId: string) => Record<string, string>;
     },
@@ -4524,6 +4538,7 @@ export class PtyHost {
     this.getIntegrationPaths = opts?.getIntegrationPaths ?? (() => ({}));
     this.getCodescapeSupervisorState = opts?.getCodescapeSupervisorState ?? (() => ({ port: null, resolveProjectId: () => null }));
     this.getOtherProjects = opts?.getOtherProjects ?? (() => []);
+    this.getPlatformHomePaths = opts?.getPlatformHomePaths ?? (() => ({ repoPaths: [], vaultPath: null }));
     this.decorateStartupPrompt = opts?.decorateStartupPrompt ?? null;
     this.resolveCredentialSessionEnv = opts?.resolveCredentialSessionEnv ?? (() => ({}));
   }
@@ -6261,10 +6276,14 @@ export class PtyHost {
     // is simply never in it. Its INSTRUCTION registry (CLAUDE.md/.claude/PLATFORM-LEAD-RESUME*.md) IS
     // role-conditional, PER ENTRY — today every entry exempts `platform` only (own home IS LOOM_HOME;
     // `setup` is NOT exempt, deliberately — see paths.ts's own doc) — plus `role===null` (plain, human-
-    // driven) exempt from the whole registry — see loom-home-deny.ts's `loomHomeWriteDenyRules`.
+    // driven) exempt from the whole registry — see loom-home-deny.ts's `loomHomeWriteDenyRules`. Card
+    // 00a999e8: `platformHomePaths` is read LIVE per-spawn from the injected `getPlatformHomePaths`
+    // callback (never cached) so the instruction registry also covers a REBOUND Platform home, at EACH
+    // entry's own real root (repoPath for CLAUDE.md/.claude/**, vaultPath for the resume doc — they can
+    // differ from each other, not just from LOOM_HOME), not just LOOM_HOME itself.
     const permission = withLoomHomeWriteDenyForSpawn(
       withSettingsDirDenyForSpawn(withTranscriptRootDenyForSpawn(permissionWithAllow, opts.role, workerProjectDenyRules)),
-      { role: opts.role, sessionId: opts.sessionId },
+      { role: opts.role, sessionId: opts.sessionId, platformHomePaths: this.getPlatformHomePaths() },
     );
     // Card 51926260 — computed HERE (before writeSessionSettings) and reused verbatim at buildSpawnArgs
     // below: the settings.json `permissions.defaultMode` and the `--permission-mode` CLI flag must agree,

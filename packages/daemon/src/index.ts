@@ -16,7 +16,7 @@ import { runBootRecoveryPrefix } from "./sessions/boot-backstop.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedDefaultCapabilities, migrateGithubCapabilityToBinary } from "./capabilities/seed.js";
-import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
+import { seedPlatformHome, migratePlatformPrompts, PLATFORM_PROJECT_NAME } from "./platform/seed.js";
 import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js";
@@ -590,6 +590,24 @@ async function main(): Promise<void> {
     // reserved Platform/Setup homes are denied too, same inclusive posture as `mcp/tasks.ts`'s own
     // other-projects lookup.
     getOtherProjects: (projectId: string) => db.listAllProjects().filter((p) => p.id !== projectId).map((p) => ({ id: p.id, repoPath: p.repoPath })),
+    // Card 00a999e8 (round 3, Code Review): read LIVE per-spawn (like getOtherProjects above) access to
+    // the reserved "Loom Platform" project's CURRENT bound roots, so LOOM_HOME_INSTRUCTION_WRITE_DENY_
+    // REGISTRY also covers a REBOUND home, at each entry's own real root (loom-home-deny.ts picks
+    // per-entry via `platformRoot`). `repoPaths` is a SET, not one path: `project.repoPath` (what a FRESH
+    // spawn will use) UNIONED with the `cwd` of every non-archived, non-dead platform-role session of the
+    // project (`db.listSessionCwdsForProjectRole`) — a Lead session's `cwd` is pinned at spawn/recycle and
+    // never re-derived from the project row, so an in-flight lineage can keep reading an OLDER repoPath
+    // after a rebind moves the project's own repoPath forward; both readers must stay denied. `vaultPath`
+    // stays single-valued (the resume doc is always resolved fresh against the project's CURRENT
+    // vaultPath). When the Platform project was never seeded (LOOM_DEV off), resolves to `{repoPaths: [],
+    // vaultPath: null}`, which loom-home-deny.ts treats as a no-op for every entry — unchanged from before
+    // this field existed.
+    getPlatformHomePaths: () => {
+      const p = db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+      if (!p) return { repoPaths: [], vaultPath: null };
+      const liveCwds = db.listSessionCwdsForProjectRole(p.id, "platform");
+      return { repoPaths: [...new Set([p.repoPath, ...liveCwds])], vaultPath: p.vaultPath };
+    },
     // Card c8f855e1: advisory [loom:prompt-stale] banner on a fresh kickoff that claims "new project / empty board".
     decorateStartupPrompt: ({ projectId, role, prompt }) =>
       composePromptStaleBanner(prompt, { role, countBoardCards: () => db.countTasks(projectId) }),

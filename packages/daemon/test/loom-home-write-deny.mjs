@@ -210,6 +210,174 @@ const ruleForEntries = (entries) => new Set(entries.map((e) => {
   }
 }
 
+// --- Card 00a999e8: a REBOUND Platform home also gets the instruction registry denied, for every
+// non-exempt role — not just LOOM_HOME's own copy — and stays exempt for platform everywhere. PER-ENTRY,
+// not a single shared root: `PLATFORM-LEAD-RESUME*.md` follows `resolvePlatformLeadResumeDocPath`, which
+// is passed `project.vaultPath` explicitly; `CLAUDE.md`/`.claude/**` are read by the harness relative to
+// the session's spawn CWD, which `startPlatformLead` pins to `project.repoPath` — so a rebind that moves
+// repoPath and vaultPath APART from each other (not just away from LOOM_HOME) needs the resume doc denied
+// at the vault and CLAUDE.md/.claude/** denied at the repo, independently. RED on a commit that roots
+// every entry at a single shared `platformHomePath` (round 2 of this fix did exactly that): with repoPath
+// and vaultPath genuinely split, that draft would deny CLAUDE.md at whichever ONE path it was given and
+// leave the other silently uncovered — the split-case assertions below are the ones that catch it.
+// ROUND 3 (Code Review, this revision): `repoPaths` is a SET, not one path, because a Platform Lead
+// session's `cwd` is pinned at spawn/recycle and NEVER re-derived from the project row on resume — see the
+// DB-level "Lead cwd outlives a rebind" scenario further below for the RED proof against round 2's
+// single-candidate shape. ---
+{
+  const { canonicalizeExistingPath } = await import("../dist/projects/repos.js");
+  const reboundHome = mkdtempManaged("loom-hwd-rebound-platform-home-");
+  const reboundReal = canonicalizeExistingPath(reboundHome).replace(/\\/g, "/");
+  const reboundGlob = toClaudeAbsoluteGlob(reboundReal);
+
+  // --- same-root rebind (repoPaths===[vaultPath], both moved away from LOOM_HOME — the shape a rebind
+  // normally takes, since the project UI edits one `vaultPath` field for a vaultOnly reserved home) ---
+  const workerRules = loomHomeWriteDenyRules({ role: "worker", sessionId: "s1", platformHomePaths: { repoPaths: [reboundHome], vaultPath: reboundHome } });
+  check("[worker] a REBOUND Platform home's CLAUDE.md is ALSO denied (not just LOOM_HOME's own copy)",
+    workerRules.includes(`Edit(${reboundGlob}/CLAUDE.md)`));
+  check("[worker] a REBOUND Platform home's PLATFORM-LEAD-RESUME*.md is ALSO denied",
+    workerRules.includes(`Edit(${reboundGlob}/PLATFORM-LEAD-RESUME*.md)`));
+  check("[worker] a REBOUND Platform home's .claude/** is ALSO denied",
+    workerRules.includes(`Edit(${reboundGlob}/.claude/**)`));
+  check("[worker] the ORIGINAL LOOM_HOME instruction rules are STILL present too (both locations denied)",
+    workerRules.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/CLAUDE.md)`));
+
+  const platformRules = loomHomeWriteDenyRules({ role: "platform", sessionId: "s1", platformHomePaths: { repoPaths: [reboundHome], vaultPath: reboundHome } });
+  check("[platform] the rebound home's CLAUDE.md is NOT denied (platform stays exempt from the instruction registry everywhere, not just at LOOM_HOME)",
+    !platformRules.some((r) => r.includes(reboundGlob)));
+
+  // --- SPLIT rebind: repoPath and vaultPath point at TWO DIFFERENT directories, both different from
+  // LOOM_HOME_REAL — the case the manager flagged: CLAUDE.md/.claude/** must follow repoPath (the
+  // harness's own spawn cwd), the resume doc must follow vaultPath, and NEITHER may leak into the other's
+  // root. RED on a single-shared-root implementation, which would deny CLAUDE.md at whichever ONE path it
+  // was handed and leave the real repoPath copy uncovered. ---
+  const reboundRepo = mkdtempManaged("loom-hwd-rebound-platform-repo-");
+  const reboundVault = mkdtempManaged("loom-hwd-rebound-platform-vault-");
+  const reboundRepoReal = canonicalizeExistingPath(reboundRepo).replace(/\\/g, "/");
+  const reboundVaultReal = canonicalizeExistingPath(reboundVault).replace(/\\/g, "/");
+  const reboundRepoGlob = toClaudeAbsoluteGlob(reboundRepoReal);
+  const reboundVaultGlob = toClaudeAbsoluteGlob(reboundVaultReal);
+  const splitRules = loomHomeWriteDenyRules({ role: "worker", sessionId: "s1", platformHomePaths: { repoPaths: [reboundRepo], vaultPath: reboundVault } });
+  check("[worker, SPLIT rebind] CLAUDE.md is denied at repoPath (the harness's own spawn cwd)",
+    splitRules.includes(`Edit(${reboundRepoGlob}/CLAUDE.md)`));
+  check("[worker, SPLIT rebind] .claude/** is denied at repoPath",
+    splitRules.includes(`Edit(${reboundRepoGlob}/.claude/**)`));
+  check("[worker, SPLIT rebind] CLAUDE.md is NOT ALSO denied at vaultPath (it has no reader there)",
+    !splitRules.includes(`Edit(${reboundVaultGlob}/CLAUDE.md)`));
+  check("[worker, SPLIT rebind] the resume doc is denied at vaultPath (resolvePlatformLeadResumeDocPath's own root)",
+    splitRules.includes(`Edit(${reboundVaultGlob}/PLATFORM-LEAD-RESUME*.md)`));
+  check("[worker, SPLIT rebind] the resume doc is NOT ALSO denied at repoPath (it has no reader there)",
+    !splitRules.includes(`Edit(${reboundRepoGlob}/PLATFORM-LEAD-RESUME*.md)`));
+  const splitPlatformRules = loomHomeWriteDenyRules({ role: "platform", sessionId: "s1", platformHomePaths: { repoPaths: [reboundRepo], vaultPath: reboundVault } });
+  check("[platform, SPLIT rebind] neither rebound root is denied (platform stays exempt from both)",
+    !splitPlatformRules.some((r) => r.includes(reboundRepoGlob) || r.includes(reboundVaultGlob)));
+
+  const expectedBoth = new Set([...ruleForEntries(LOOM_HOME_WRITE_DENY_REGISTRY), ...ruleForEntries(LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY)]);
+  const unRebound = loomHomeWriteDenyRules({ role: "worker", sessionId: "s1", platformHomePaths: { repoPaths: [LOOM_HOME_REAL], vaultPath: LOOM_HOME_REAL } });
+  check("[worker] platformHomePaths both === LOOM_HOME_REAL (never rebound, the common/seeded-default case) is a pure no-op — no duplicate rules",
+    unRebound.length === expectedBoth.size && unRebound.every((r) => expectedBoth.has(r)));
+
+  const noPlatform = loomHomeWriteDenyRules({ role: "worker", sessionId: "s1", platformHomePaths: { repoPaths: [], vaultPath: null } });
+  check("[worker] platformHomePaths empty repoPaths + null vaultPath (Platform project never seeded — LOOM_DEV off) behaves exactly like omitting the field: no crash, no stray rules",
+    noPlatform.length === expectedBoth.size && noPlatform.every((r) => expectedBoth.has(r)));
+
+  const omitted = loomHomeWriteDenyRules({ role: "worker", sessionId: "s1" });
+  check("[worker] omitting platformHomePaths entirely behaves identically to passing empty repoPaths + null vaultPath",
+    omitted.length === expectedBoth.size && omitted.every((r) => expectedBoth.has(r)));
+
+  let neverThrewRebound = true;
+  try { loomHomeWriteDenyRules({ role: "worker", sessionId: "s1", platformHomePaths: { repoPaths: ["/does/not/exist/on/disk"], vaultPath: "/also/does/not/exist" } }); } catch { neverThrewRebound = false; }
+  check("loomHomeWriteDenyRules never throws when platformHomePaths don't resolve on disk (canonicalizeExistingPath falls back to path.resolve)", neverThrewRebound);
+
+  // --- ROUND 3, BLOCKING FIX 1 (Code Review on d0ce14d4): a Platform Lead session's `cwd` OUTLIVES a
+  // rebind — a REAL DB scenario, not a hand-fabricated candidate list. A Lead was spawned while
+  // project.repoPath was A (its session row's cwd is pinned to A forever, per sessions/service.ts:
+  // startPlatformLead sets cwd:project.repoPath at spawn time, and recycle/resume both reuse session.cwd
+  // unchanged); the project's repoPath is THEN rebound to B. The live Lead lineage keeps reading
+  // A/CLAUDE.md (nobody re-derives its cwd), while a FRESH spawn would use B/CLAUDE.md — BOTH must stay
+  // denied for every other role. RED on d0ce14d4 (round 2): `platformHomePaths.repoPath` was a single
+  // string, so passing the union the caller is expected to build here would either not exist as a field
+  // (`repoPaths`) or silently ignore every candidate but one — this exercises the ACTUAL
+  // db.listSessionCwdsForProjectRole query, not a stand-in. ---
+  {
+    const { Db } = await import("../dist/db.js");
+    const { randomUUID } = await import("node:crypto");
+    const db = new Db(); // hermetic temp loom.db under tmpHome (useOwnLoomHome set LOOM_HOME at the top of this file)
+    const now = new Date().toISOString();
+    const repoA = mkdtempManaged("loom-hwd-lead-cwd-a-");
+    const repoB = mkdtempManaged("loom-hwd-lead-cwd-b-");
+    const repoAReal = canonicalizeExistingPath(repoA).replace(/\\/g, "/");
+    const repoBReal = canonicalizeExistingPath(repoB).replace(/\\/g, "/");
+    const repoAGlob = toClaudeAbsoluteGlob(repoAReal);
+    const repoBGlob = toClaudeAbsoluteGlob(repoBReal);
+
+    const projectId = randomUUID();
+    db.insertProject({
+      id: projectId, name: "lhwd-lead-cwd-test", repoPath: repoA, vaultPath: repoA, config: {},
+      createdAt: now, archivedAt: null, reserved: true, referenceRepos: [], noGateByDesign: false,
+      denyGlobs: [], repos: [], vaultOnly: true,
+    });
+    // sessions.agent_id has a real FK to agents(id) — one throwaway agent row, reused by every session
+    // literal below (nothing here cares about the agent beyond satisfying the constraint).
+    const agentId = randomUUID();
+    db.insertAgent({ id: agentId, projectId, name: "lhwd-lead-cwd-agent", startupPrompt: "", position: 0, profileId: null });
+    // The Lead session: spawned while repoPath was still A, cwd pinned to A, LIVE, not archived, not dead.
+    db.insertSession({
+      id: randomUUID(), projectId, agentId, engineSessionId: null, title: null,
+      cwd: repoA, processState: "live", resumability: "unknown", busy: false,
+      createdAt: now, lastActivity: now, lastError: null, role: "platform",
+    });
+    // An ARCHIVED platform-role session at a THIRD path — must NOT contribute a candidate.
+    const repoArchived = mkdtempManaged("loom-hwd-lead-cwd-archived-");
+    const archivedSessionId = randomUUID();
+    db.insertSession({
+      id: archivedSessionId, projectId, agentId, engineSessionId: null, title: null,
+      cwd: repoArchived, processState: "exited", resumability: "resumable", busy: false,
+      createdAt: now, lastActivity: now, lastError: null, role: "platform",
+    });
+    db.archiveSession(archivedSessionId); // insertSession's own column list has no archived_at — a separate write, mirrors production (auto-archive-on-exit)
+    // A DEAD (proven-unresumable) platform-role session at a FOURTH path — must NOT contribute either.
+    const repoDead = mkdtempManaged("loom-hwd-lead-cwd-dead-");
+    db.insertSession({
+      id: randomUUID(), projectId, agentId, engineSessionId: null, title: null,
+      cwd: repoDead, processState: "exited", resumability: "dead", busy: false,
+      createdAt: now, lastActivity: now, lastError: null, role: "platform",
+    });
+    // A WORKER-role session at a FIFTH path, same project — must NOT contribute (wrong role).
+    const repoWorker = mkdtempManaged("loom-hwd-lead-cwd-worker-");
+    db.insertSession({
+      id: randomUUID(), projectId, agentId, engineSessionId: null, title: null,
+      cwd: repoWorker, processState: "live", resumability: "unknown", busy: false,
+      createdAt: now, lastActivity: now, lastError: null, role: "worker",
+    });
+
+    // THE REBIND: repoPath moves from A to B. The Lead session row's own cwd is untouched (still A).
+    db.updateProject(projectId, { repoPath: repoB });
+
+    const liveCwds = db.listSessionCwdsForProjectRole(projectId, "platform");
+    check("db.listSessionCwdsForProjectRole: returns EXACTLY the live Lead's cwd (A) — archived/dead/wrong-role excluded",
+      liveCwds.length === 1 && liveCwds[0] === repoA);
+
+    const project = db.getProject(projectId);
+    const repoPaths = [...new Set([project.repoPath, ...liveCwds])]; // the SAME union index.ts's getPlatformHomePaths builds
+    const rules = loomHomeWriteDenyRules({ role: "worker", sessionId: "s1", platformHomePaths: { repoPaths, vaultPath: project.vaultPath } });
+    check("[worker] CLAUDE.md is denied at A (the LIVE Lead's pinned cwd, pre-rebind — still being read right now)",
+      rules.includes(`Edit(${repoAGlob}/CLAUDE.md)`));
+    check("[worker] .claude/** is denied at A",
+      rules.includes(`Edit(${repoAGlob}/.claude/**)`));
+    check("[worker] CLAUDE.md is ALSO denied at B (the rebound repoPath — what a FRESH Lead spawn would use)",
+      rules.includes(`Edit(${repoBGlob}/CLAUDE.md)`));
+    check("[worker] .claude/** is ALSO denied at B",
+      rules.includes(`Edit(${repoBGlob}/.claude/**)`));
+
+    const platformAtBoth = loomHomeWriteDenyRules({ role: "platform", sessionId: "s1", platformHomePaths: { repoPaths, vaultPath: project.vaultPath } });
+    check("[platform] neither A nor B is denied (platform stays exempt from the instruction registry at every rebound root)",
+      !platformAtBoth.some((r) => r.includes(repoAGlob) || r.includes(repoBGlob)));
+
+    db.close(); // release the sqlite handle before tmpHome cleanup tries to unlink loom.db
+  }
+}
+
 // --- the resume-doc ROTATION ARCHIVE (<name>.archive/) is untouched by either registry, for every role
 // — confirms the platform-lead resume-doc rotation stays writable (nothing here denies it in the first
 // place). NOT because only the daemon writes there (an agent can write a rotation archive too, per its
@@ -276,6 +444,34 @@ if (process.platform !== "win32") {
       written.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/CLAUDE.md)`));
   } finally {
     try { host.stop(sid, "hard"); } catch { /* best-effort cleanup */ }
+  }
+
+  // --- Card 00a999e8 round 3, BLOCKING FIX 2 (Code Review): WIRING proof — until now every
+  // platformHomePaths assertion called the PURE function directly; nothing exercised index.ts ->
+  // PtyHost -> createPty. Build a SEPARATE PtyHost with a real getPlatformHomePaths callback (the same
+  // constructor opt index.ts wires at boot) returning a rebound repoPath, and assert the rebound rule
+  // actually reaches the WRITTEN settings.json for a real worker spawn — not just the return value of
+  // loomHomeWriteDenyRules in isolation. ---
+  {
+    const { canonicalizeExistingPath } = await import("../dist/projects/repos.js");
+    const wiredReboundHome = mkdtempManaged("loom-hwd-wired-rebound-");
+    const wiredReboundReal = canonicalizeExistingPath(wiredReboundHome).replace(/\\/g, "/");
+    const wiredReboundGlob = toClaudeAbsoluteGlob(wiredReboundReal);
+    const wiredHost = new PtyHost(events, {
+      getPlatformHomePaths: () => ({ repoPaths: [wiredReboundHome], vaultPath: null }),
+    });
+    const wiredSid = "lhwd-real-worker-wired-rebind";
+    try {
+      wiredHost.spawn({ sessionId: wiredSid, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [] }, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "worker" });
+      check("(real, WIRED getPlatformHomePaths) host actually spawned a real process", wiredHost.isAlive(wiredSid));
+      const wiredWritten = readWrittenDeny(wiredSid);
+      check("(real, WIRED getPlatformHomePaths) WRITTEN settings.json denies CLAUDE.md at the REBOUND path — proves index.ts's callback shape reaches createPty's actual settings write, not just the pure function",
+        wiredWritten.includes(`Edit(${wiredReboundGlob}/CLAUDE.md)`));
+      check("(real, WIRED getPlatformHomePaths) WRITTEN settings.json ALSO still denies CLAUDE.md at LOOM_HOME_REAL (both locations)",
+        wiredWritten.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/CLAUDE.md)`));
+    } finally {
+      try { wiredHost.stop(wiredSid, "hard"); } catch { /* best-effort cleanup */ }
+    }
   }
 }
 

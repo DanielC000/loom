@@ -497,6 +497,19 @@ export interface LoomHomeWriteDenyEntry {
  *  this field). */
 export interface LoomHomeInstructionWriteDenyEntry extends LoomHomeWriteDenyEntry {
   exemptRoles: readonly SessionRole[];
+  /**
+   * Card 00a999e8: which of the reserved "Loom Platform" project's two bound paths a REBOUND home's own
+   * copy of this entry is rooted at, PER ENTRY — they can differ once rebound, and each entry's real
+   * reader follows only ONE of them. `"vaultPath"` for a note `resolvePlatformLeadResumeDocPath` resolves
+   * (the resume doc) — it is passed `project.vaultPath` explicitly (`sessions/service.ts`). `"repoPath"`
+   * for a file the harness itself reads relative to the session's spawn CWD (CLAUDE.md, `.claude/**`) —
+   * `startPlatformLead` pins `cwd: project.repoPath` (`sessions/service.ts`), and every resume/recycle
+   * reuses that SAME pinned `session.cwd`, never re-deriving it from the project row. Read by
+   * `loomHomeWriteDenyRules` to pick which of `LoomHomeDenyOptions.platformHomePaths`'s two fields applies
+   * to THIS entry — never used to pick a root for the LOOM_HOME_REAL copy, which every entry always gets
+   * regardless of this field.
+   */
+  platformRoot: "vaultPath" | "repoPath";
 }
 
 /**
@@ -564,9 +577,9 @@ export const LOOM_HOME_WRITE_DENY_REGISTRY: readonly LoomHomeWriteDenyEntry[] = 
  * verbatim). See record for the mid-segment-glob measurement and the resume-doc-archive exclusion.
  */
 export const LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY: readonly LoomHomeInstructionWriteDenyEntry[] = [
-  { relPath: "PLATFORM-LEAD-RESUME*.md", kind: "file", exemptRoles: ["platform"] },
-  { relPath: "CLAUDE.md", kind: "file", exemptRoles: ["platform"] }, // setup's own doctrine only ever seeds a CLAUDE.md for a USER project outside LOOM_HOME, never its own LOOM_HOME-rooted one — no exemption needed
-  { relPath: CLAUDE_DOCTRINE_DIR, kind: "dir", exemptRoles: ["platform"] }, // `pty/claude-dirname.ts`'s own constant, not a hand-written literal — see harness-adapter-claude-literal-guard.mjs's own allowlist discipline (card 2b099e48)
+  { relPath: "PLATFORM-LEAD-RESUME*.md", kind: "file", exemptRoles: ["platform"], platformRoot: "vaultPath" }, // resolvePlatformLeadResumeDocPath is passed project.vaultPath explicitly (sessions/service.ts)
+  { relPath: "CLAUDE.md", kind: "file", exemptRoles: ["platform"], platformRoot: "repoPath" }, // the harness reads CLAUDE.md relative to session.cwd, pinned to project.repoPath at spawn (startPlatformLead) — setup's own doctrine only ever seeds a CLAUDE.md for a USER project outside LOOM_HOME, never its own LOOM_HOME-rooted one, so no exemption needed
+  { relPath: CLAUDE_DOCTRINE_DIR, kind: "dir", exemptRoles: ["platform"], platformRoot: "repoPath" }, // `pty/claude-dirname.ts`'s own constant, not a hand-written literal — see harness-adapter-claude-literal-guard.mjs's own allowlist discipline (card 2b099e48); same cwd-rooted reasoning as CLAUDE.md above
 ];
 
 /**

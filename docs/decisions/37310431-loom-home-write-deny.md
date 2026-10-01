@@ -261,17 +261,65 @@ rooted path the guard's regex can never see. `daemon.pid` and `update-config.jso
 HAND for exactly this reason; a FUTURE such path needs the same manual treatment — the guard cannot catch
 it automatically.
 
-**The resume-doc deny covers LOOM_HOME only, not a rebound Platform home.**
-`platformLeadBaseResumeDocPath(homePath)` (and its lineage sibling) resolve against `project.vaultPath`
-for the reserved "Loom Platform" project, which is SEEDED to LOOM_HOME (`platform/seed.ts`) but can
-later be REBOUND to a different path. The instruction registry's `PLATFORM-LEAD-RESUME*.md` entry is
-keyed to `LOOM_HOME_REAL` specifically — a rebound Platform home's resume doc would then live OUTSIDE
-LOOM_HOME and escape this deny entirely, for every role. Tracked as a separate card; not fixed here.
+**CLOSED by card `00a999e8` (three rounds, the last two from Code Review): the instruction registry now
+covers a rebound Platform home, PER ENTRY (not via one shared root) and PER CANDIDATE (not via one path per
+entry).** `platformLeadBaseResumeDocPath(homePath)` (and its lineage sibling) resolve against
+`project.vaultPath`; `CLAUDE.md`/`.claude/**` are read by the harness itself relative to the SESSION'S OWN
+SPAWN CWD — `startPlatformLead` pins `cwd: project.repoPath` at a FRESH spawn, but `recyclePlatformLead`
+pins `cwd: old.cwd` and a resume reuses `session.cwd` unchanged (`sessions/service.ts`) — so that cwd is
+NEVER re-derived from the project row after spawn. Two different roots, and the repoPath one is NOT even
+single-valued over time.
+
+Round 1 of this fix rooted every instruction-registry entry at one shared path (the project's `vaultPath`
+alone) — Code Review caught that this left CLAUDE.md/`.claude/**`'s real root (`repoPath`) uncovered the
+instant a rebind actually split the two. Round 2 fixed that with a per-entry `platformRoot: "vaultPath" |
+"repoPath"` field (`paths.ts`) naming which of the Platform project's two bound paths each entry's own real
+reader follows, but still rooted `"repoPath"` at a SINGLE value (`project.repoPath`) — Code Review's second
+pass caught that this still missed a LIVE or still-resumable Lead session that was spawned/recycled BEFORE
+a rebind and is still reading its OLD `cwd`: `project.repoPath` alone only tells you what a FRESH spawn
+will use, not what an in-flight lineage is actually reading right now.
+
+**Round 3 (this revision): `platformHomePaths.repoPaths` is a SET, not one path.** The caller
+(`index.ts`'s `getPlatformHomePaths`) unions `project.repoPath` with `db.listSessionCwdsForProjectRole(
+projectId, "platform")` — the DISTINCT `cwd` of every NON-ARCHIVED, non-`"dead"` platform-role session of
+the project — in one callback, two DB reads. `loomHomeWriteDenyRules` (`pty/loom-home-deny.ts`) iterates
+every candidate in `repoPaths` for a `"repoPath"`-rooted entry (canonicalizing + comparing each against
+`LOOM_HOME_REAL` exactly as before), emitting a rule per distinct real root; `vaultPath` stays single-valued
+(the resume doc is always resolved FRESH against the project's current `vaultPath`, never pinned on a
+session row the way `cwd` is). When the Platform project was never seeded (LOOM_DEV off), or a candidate
+set is empty/every candidate equals LOOM_HOME_REAL, that entry's rebound pass is a pure no-op —
+byte-identical to before this card.
+
+**Accepted consequence, not special-cased (Code Review's ruling):** if `repoPath` is ever rebound to an
+ANCESTOR directory — e.g. the user's own home directory — every non-platform role gets
+`Edit(<that ancestor>/.claude/**)` (and the matching `CLAUDE.md` rule) denied. This is CORRECT, not
+over-broad: a Platform Lead spawned with that cwd genuinely reads `.claude/**`/`CLAUDE.md` from exactly
+that directory, so the deny is describing a real reader, however broad the directory. No carve-out is
+warranted — narrowing it would just reopen the same hole for that specific rebind shape.
+
+See `pty/loom-home-deny.ts`'s own doc on `LoomHomeDenyOptions.platformHomePaths`/`loomHomeWriteDenyRules`,
+`paths.ts`'s doc on `LoomHomeInstructionWriteDenyEntry.platformRoot`, and `db.ts`'s doc on
+`listSessionCwdsForProjectRole` for the mechanism; `test/loom-home-write-deny.mjs`'s "Card 00a999e8"
+section — including the SPLIT-rebind case (repoPath and vaultPath at two different, non-LOOM_HOME
+directories) and the DB-level "Lead cwd outlives a rebind" scenario (a live Lead session's `cwd` from
+BEFORE a rebind, plus the project's CURRENT `repoPath` from AFTER it, both independently denied; an
+archived session, a `resumability:"dead"` session, and a wrong-role session all confirmed to NOT
+contribute a candidate) — for the coverage proof, plus a dedicated WIRING proof (a real `PtyHost` built
+with an injected `getPlatformHomePaths`, spawned for real, asserting the rebound rule reaches the actual
+WRITTEN `settings.json` — not just the pure function's return value).
 
 `bin/service.mjs`'s `path.join(loomHome, "service")` dir (the Task Scheduler/launchd XML artifact,
 another `loomHome()`-parameter instance of the blind spot above) is DELIBERATELY left unregistered — the
 artifact is rewritten immediately before `schtasks`/`launchctl` consumes it, so there's no persistent
 window where a planted file there could matter. See the guard test's own GAPS header for the same note.
+
+**NOT closed here — a separate card (filed by the manager during this round's review): the instruction
+registry only covers CLAUDE.md/`.claude/**`/the resume doc AT the cwd/vaultPath it knows about, but the
+harness itself reads MORE than that.** Claude Code also loads `CLAUDE.md` from every ANCESTOR directory of
+the session's cwd (not just cwd itself), plus `CLAUDE.local.md` and `.claude/rules` at each of those
+levels. None of that extra surface is denied by this card's registry — only the exact cwd-rooted
+`CLAUDE.md`/`.claude/**` pair. An ancestor `CLAUDE.md` a Lead's cwd would pick up, or a `CLAUDE.local.md`/
+`.claude/rules` file anywhere in the chain, stays writable by every non-platform role today.
 
 ### Bash coverage caveat — re-measure on CLI upgrade
 
@@ -357,6 +405,19 @@ instance throughout), but is disclosed here rather than silently left. The fix: 
   otherwise plant instructions for a more-privileged future session to read; `setup` was exempted once
   already and that was the exact defect fix round 2 corrected. Widening the exemption re-opens that
   vector for whichever role is added.
+- Do not root every `LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY` entry's rebound-Platform-home copy at ONE
+  shared path (card `00a999e8`'s round 1 did exactly this, caught by Code Review before merge) — the
+  resume doc and CLAUDE.md/`.claude/**` have DIFFERENT real readers (`project.vaultPath` vs. the session's
+  spawn `cwd`, pinned to `project.repoPath`), and a rebind can split the two apart. Look up each entry's
+  own `platformRoot` field instead; a single shared root silently leaves one of the two readers' real
+  files uncovered the moment `repoPath` and `vaultPath` genuinely diverge.
+- Do not root a `"repoPath"`-tagged entry at `project.repoPath` ALONE, even with the per-entry
+  `platformRoot` split in place (card `00a999e8`'s round 2 did this, caught by a second Code Review pass)
+  — a Platform Lead session's `cwd` is pinned at spawn/recycle and NEVER re-derived from the project row,
+  so a LIVE or still-resumable lineage keeps reading its OLD `cwd` after `project.repoPath` is rebound
+  forward. `platformHomePaths.repoPaths` must stay a SET — `project.repoPath` unioned with
+  `db.listSessionCwdsForProjectRole(projectId, "platform")` — not a single current value. See the "Lead
+  cwd outlives a rebind" test scenario for the concrete failure this closes.
 - Do not cite Ruling D (rm/mv on a registered directory) as proof the `Edit(<path>/**)` deny rule itself
   covers directory-node deletion/rename — it has no no-deny control, and `auto` mode's own classifier
   independently refuses many destructive commands. See Ruling D's own "mechanism NOT attributed" note.
