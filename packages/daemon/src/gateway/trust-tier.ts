@@ -73,6 +73,15 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/api/projects/:id/vault" },
   { method: "GET", pattern: "/api/projects/:id/vault/file" },
   { method: "GET", pattern: "/api/projects/:id/vault/raw" },
+  // The Vault page's binary card sizes a file with a HEAD probe rather than downloading it (web
+  // `api.vaultRawHead`). Because `routeTier` is an EXACT {method, pattern} lookup, Fastify's auto-added
+  // HEAD sibling of the Tier-1 GET above was itself Tier-0, so every remote binary read "unknown size".
+  // Safe as a one-off: a HEAD returns the headers of a GET that is already Tier-1, and no body — strictly
+  // less than the admission it rides on. POST/PUT/DELETE/OPTIONS on this same path stay Tier-0.
+  //
+  // @decision f7525818 — admit THIS method+pattern only; never fold HEAD into GET inside routeTier, which
+  // would promote the auto-registered HEAD sibling of every Tier-1 route in one unreviewed edit.
+  { method: "HEAD", pattern: "/api/projects/:id/vault/raw" },
   // Requests inbox reads
   { method: "GET", pattern: "/api/questions" },
   { method: "GET", pattern: "/api/questions/:id" },

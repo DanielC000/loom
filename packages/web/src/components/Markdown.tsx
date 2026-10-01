@@ -1,4 +1,4 @@
-import { Children, cloneElement, createContext, isValidElement, useContext, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
+import { Children, cloneElement, createContext, isValidElement, useContext, useEffect, useMemo, useRef, useState, type ComponentType, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit } from "unist-util-visit";
@@ -227,25 +227,40 @@ function resolveRelative(href: string, currentPath: string, files: string[]): st
   return files.find((f) => base(f) === wanted) ?? null;
 }
 
-export default function Markdown({ source, files, currentPath = "", onOpen, assetSrc }: { source: string; files: string[]; currentPath?: string; onOpen: (path: string) => void; assetSrc?: (vaultPath: string) => string }) {
+export default function Markdown({ source, files, currentPath = "", onOpen, AssetImage }: { source: string; files: string[]; currentPath?: string; onOpen: (path: string) => void; AssetImage?: ComponentType<{ path: string; alt: string; className?: string }> }) {
   const { props, body } = splitFrontmatter(source);
   const transformed = transformWikilinks(body);
 
-  const components: Components = {
+  // `onOpen` is read through a ref so a caller passing a fresh arrow each render (the common case)
+  // cannot defeat the memo below. Assigned during render on purpose: a click handler must see the
+  // CURRENT callback, not last commit's.
+  const onOpenRef = useRef(onOpen);
+  onOpenRef.current = onOpen;
+
+  // MEMOISED, and it is load-bearing rather than tidiness: react-markdown uses each entry here as the
+  // ELEMENT TYPE, so rebuilding this object gives every rendered node a new type and React remounts the
+  // lot on any re-render of this component. That was invisible while an inline image was a plain
+  // `<img src>`, but `AssetImage` can fetch its own bytes (card f7525818) — a remount then re-fetches
+  // every image in the note on, say, each keystroke in an unrelated filter box elsewhere on the page.
+  // packages/web/e2e/vault-remote-assets.spec.ts pins that fetch count, so an unstable dep fails loudly.
+  const components: Components = useMemo(() => ({
     // Inline images: ![[image.png]] embeds (wikiembed: scheme) and standard ![](relative) images both
-    // resolve to a vault file, then to the raw endpoint via assetSrc. External http(s) images pass through.
+    // resolve to a vault file, then render through the caller's `AssetImage`. That is a COMPONENT, not a
+    // `(path) => string`, because resolving a vault asset can need an authenticated fetch on a remote
+    // origin (card f7525818) — a URL-returning callback cannot express that, a component can.
+    // External http(s) images pass through as a plain <img>.
     img({ src, alt }) {
       const s = typeof src === "string" ? src : "";
       const altText = typeof alt === "string" ? alt : "";
       if (s.startsWith("wikiembed:")) {
         const target = s.slice("wikiembed:".length);
         const path = resolveWiki(target, files);
-        if (path && assetSrc) return <img className="md-img" src={assetSrc(path)} alt={altText || baseName(path)} loading="lazy" />;
+        if (path && AssetImage) return <AssetImage className="md-img" path={path} alt={altText || baseName(path)} />;
         return <span className="md-broken" title="unresolved image">{altText || decodeURIComponent(target)}</span>;
       }
       if (isExternalHref(s)) return <img className="md-img" src={s} alt={altText} loading="lazy" />;
       const path = resolveRelative(s, currentPath, files);
-      if (path && assetSrc) return <img className="md-img" src={assetSrc(path)} alt={altText || baseName(path)} loading="lazy" />;
+      if (path && AssetImage) return <AssetImage className="md-img" path={path} alt={altText || baseName(path)} />;
       return <span className="md-broken" title="unresolved image">{altText || s}</span>;
     },
     a({ href, children }) {
@@ -255,7 +270,7 @@ export default function Markdown({ source, files, currentPath = "", onOpen, asse
         const path = resolveWiki(h.slice(h.indexOf(":") + 1), files);
         const cls = `${embed ? "md-embed" : "md-wikilink"}${path ? "" : " md-broken"}`;
         const label = embed ? <>⧉ {children}</> : children;
-        if (path) return <a className={cls} href="#" onClick={(e) => { e.preventDefault(); onOpen(path); }}>{label}</a>;
+        if (path) return <a className={cls} href="#" onClick={(e) => { e.preventDefault(); onOpenRef.current(path); }}>{label}</a>;
         return <span className={cls} title="unresolved link">{label}</span>;
       }
       // True external links (http/https/mailto/…) open normally in a new tab.
@@ -265,7 +280,7 @@ export default function Markdown({ source, files, currentPath = "", onOpen, asse
       // Otherwise it's a relative in-vault link: resolve it to a vault file and open it in the pane,
       // instead of letting the browser navigate the SPA to a dead `/<href>` route.
       const path = resolveRelative(h, currentPath, files);
-      if (path) return <a className="md-wikilink" href="#" onClick={(e) => { e.preventDefault(); onOpen(path); }}>{children}</a>;
+      if (path) return <a className="md-wikilink" href="#" onClick={(e) => { e.preventDefault(); onOpenRef.current(path); }}>{children}</a>;
       return <span className="md-broken" title="unresolved link">{children}</span>;
     },
     div({ className, children, ...rest }) {
@@ -290,7 +305,7 @@ export default function Markdown({ source, files, currentPath = "", onOpen, asse
       const level = head && head.type === "element" && /^h[1-6]$/.test(head.tagName) ? Number(head.tagName.slice(1)) : 1;
       return <CollapsibleSection level={level}>{children}</CollapsibleSection>;
     },
-  };
+  }), [files, currentPath, AssetImage]);
 
   return (
     <div className="loom-md">

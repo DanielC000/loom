@@ -101,9 +101,14 @@ FindMyWay.prototype.on = function capturingOn(...args) {
 
 /**
  * Registered {method, pattern} pairs the given find-my-way Router instance actually holds, deduped and
- * HEAD/OPTIONS/TRACE-filtered (Fastify auto-added siblings of GET, not distinct handlers — same reasoning
- * the onRequest hook itself doesn't special-case them: a HEAD probe of a Tier-1 GET is itself intended to
- * be Tier-1; a HEAD/OPTIONS of a Tier-0 route is intended to stay Tier-0). Uses `route.path` — NOT
+ * HEAD/OPTIONS/TRACE-filtered (Fastify auto-added siblings of GET, not distinct handlers).
+ *
+ * ⚠️ THIS FILTER USED TO CARRY A FALSE CLAIM — that "a HEAD probe of a Tier-1 GET is itself intended to be
+ * Tier-1". It never was: `routeTier` is an EXACT {method, pattern} lookup, so every auto-added HEAD was
+ * Tier-0 no matter what its GET was, and the comment is most of why card f7525818's real defect (a remote
+ * `HEAD /vault/raw` 403ing, so the Vault binary card always read "unknown size") survived review. HEAD is
+ * still filtered OUT here — the auto-added siblings genuinely are not distinct handlers to classify — but
+ * HEAD admissions are now pinned explicitly, in all three polarities, by check (1f) below. Uses `route.path` — NOT
  * `route.pattern`, which find-my-way mutates into its OWN internal tree-matching shorthand that strips
  * param names as it walks the string (e.g. "/hooks/:endpointPath" ends up as "/hooks/:") — `route.path` is
  * the literal, unmutated string passed to `.on()`, i.e. the real registered Fastify pattern.
@@ -236,6 +241,25 @@ try {
     [...EXPECTED_TIER_1].every((key) => LIVE_ROUTES.some(([m, p]) => `${m} ${p}` === key)));
   check("(1c) every EXPECTED_TIER_2 entry is actually a real LIVE registered route (no stale/typo'd allowlist entry)",
     [...EXPECTED_TIER_2].every((key) => LIVE_ROUTES.some(([m, p]) => `${m} ${p}` === key)));
+  // (1f) card f7525818 — the ONE deliberately-admitted HEAD. The Vault page sizes a binary with a HEAD
+  // probe instead of downloading it, so `HEAD /api/projects/:id/vault/raw` had to become Tier-1; nothing
+  // else did. These three polarities are the whole contract, and the middle one is what stops a future
+  // "simplification" of routeTier (fold HEAD into GET) from silently promoting every Tier-1 route's
+  // auto-registered HEAD sibling at once. The HEAD routes are filtered out of LIVE_ROUTES above, so this
+  // reads the captured router DIRECTLY — otherwise the admission would be asserted against nothing real.
+  // The classification half is pinned here; (3f) below drives the same three polarities as REAL requests
+  // through the live wall, which is also what proves the pattern string is the one Fastify registers.
+  {
+    const VAULT_RAW = "/api/projects/:id/vault/raw";
+    check("(1f) HEAD /api/projects/:id/vault/raw is Tier-1 — the probe behind the Vault binary card's size",
+      routeTier("HEAD", VAULT_RAW) === 1);
+    check("(1f) HEAD of ANOTHER Tier-1 GET is still Tier-0 — the admission is one exact {method,pattern}, never a blanket HEAD rule",
+      routeTier("HEAD", "/api/projects") === 0 && routeTier("HEAD", "/api/skills") === 0
+      && routeTier("HEAD", "/api/projects/:id/vault/file") === 0);
+    check("(1f) every OTHER method on the raw-vault path stays Tier-0 (the admission did not widen the route)",
+      ["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"].every((m) => routeTier(m, VAULT_RAW) === 0));
+  }
+
   check("(1d) the webhook-endpoints ADMIN surface (a writer, not the ingress route) stays Tier-0 (loopback-only)",
     routeTier("GET", "/api/webhook-endpoints") === 0 && routeTier("POST", "/api/webhook-endpoints") === 0
     && routeTier("DELETE", "/api/webhook-endpoints/:id") === 0 && routeTier("POST", "/api/webhook-endpoints/:id/enabled") === 0);
@@ -332,6 +356,38 @@ try {
   // A Tier-1 POST (answer/steer) behaves the same: blocked before the handler ever runs.
   const remoteInputNoToken = await appOn.inject({ method: "POST", url: "/api/sessions/nonexistent/input", remoteAddress: "203.0.113.5" });
   check("(3c) remote POST /api/sessions/:id/input (Tier-1) with NO token → 401", remoteInputNoToken.statusCode === 401);
+
+  // --- (3f) card f7525818: the ONE deliberately-admitted HEAD, driven as REAL requests through the wall.
+  // The Vault page sizes a binary with a HEAD probe rather than downloading it, so the auto-registered
+  // HEAD sibling of the Tier-1 `vault/raw` GET had to be allowlisted — and nothing else. These go through
+  // `inject`, not `routeTier` alone, because that is what proves the allowlist's pattern STRING is the one
+  // Fastify actually registers: a typo there would 401 here while a pure classification check passed.
+  {
+    const vaultDir = path.join(TMP, "tier-head-vault");
+    fs.mkdirSync(vaultDir, { recursive: true });
+    fs.writeFileSync(path.join(vaultDir, "blob.bin"), Buffer.alloc(4242, 7));
+    dbOn.insertProject({
+      id: "pHead", name: "Head", repoPath: TMP, vaultPath: vaultDir,
+      config: {}, createdAt: new Date().toISOString(), archivedAt: null,
+    });
+    const headRaw = (headers) => appOn.inject({ method: "HEAD", url: "/api/projects/pHead/vault/raw?path=blob.bin", remoteAddress: "203.0.113.5", headers });
+    const noToken = await headRaw({});
+    check("(3f) remote HEAD vault/raw with NO token → 401 (it is Tier-1, so a token is still required)", noToken.statusCode === 401);
+    const good = await headRaw({ authorization: `Bearer ${GOOD_TOKEN}` });
+    check(`(3f) remote HEAD vault/raw with the VALID token → 200 AND a real Content-Length (got ${good.statusCode}, content-length ${good.headers["content-length"]}) — the size the binary card used to show as "unknown"`,
+      good.statusCode === 200 && Number(good.headers["content-length"]) === 4242);
+    // THE NON-ADMISSION HALF, and why it is a refusal rather than an absence: /api/projects' own HEAD
+    // sibling is registered just as really (Fastify adds one per GET) — proven by the loopback control
+    // below returning 200 — yet a remote HEAD of it is still refused even WITH a valid token.
+    const otherHeadLoopback = await appOn.inject({ method: "HEAD", url: "/api/projects" });
+    check(`(3f-control) HEAD /api/projects IS a live registered route (loopback → ${otherHeadLoopback.statusCode}) — so the refusal below is a refusal, not a missing route`,
+      otherHeadLoopback.statusCode === 200);
+    const otherHeadRemote = await appOn.inject({ method: "HEAD", url: "/api/projects", remoteAddress: "203.0.113.5", headers: { authorization: `Bearer ${GOOD_TOKEN}` } });
+    check("(3f) remote HEAD of ANOTHER Tier-1 GET → still 403 even with a valid token (HEAD was not blanket-promoted)", otherHeadRemote.statusCode === 403);
+    // ...and the admission did not widen the raw-vault route itself to other methods.
+    const rawDelete = await appOn.inject({ method: "DELETE", url: "/api/projects/pHead/vault/raw?path=blob.bin", remoteAddress: "203.0.113.5", headers: { authorization: `Bearer ${GOOD_TOKEN}` } });
+    check("(3f) remote DELETE on the SAME raw-vault path with a valid token → 403 (only GET+HEAD were ever admitted)", rawDelete.statusCode === 403);
+  }
 
   // (card 77ade04c nit) an UNMATCHED route (no registered handler at all) never falls back to
   // classifying on the raw resolved URL text — it's Tier 0 by construction, 403, no crash.

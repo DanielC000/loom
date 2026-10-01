@@ -383,3 +383,40 @@ test("a hostile vault SVG downloads instead of scripting the daemon origin, and 
   expect(await page.evaluate(() => localStorage.getItem("loom.PWNED"))).toBeNull();
   expect(await page.evaluate(() => localStorage.getItem("loom.loopbackToken"))).toBe("SENTINEL-68bef69c");
 });
+
+// Card f7525818 made `Markdown`'s `components` map memoised (it is used as the ELEMENT TYPE for every
+// rendered node, so rebuilding it remounted them all — which now re-fetches an authenticated inline
+// image). Keeping that memo stable meant routing `onOpen` through a ref, since the caller passes a fresh
+// arrow each render. This pins the navigation that indirection runs through — the link path had no e2e
+// coverage before, which is the actual gap it closes.
+//
+// ⚠️ SCOPE, stated rather than implied: the second click does NOT discriminate a stale captured callback.
+// Vault.tsx's `openFile` closes only over `setFile`/`setExpanded`, both stable, so a ref frozen at first
+// render would behave identically today. The per-render assignment is defensive — it keeps the memo safe
+// for a future caller whose callback does close over changing state — and nothing here proves that half.
+test("an in-note [[wikilink]] opens the target note, and still works after the pane re-renders", async ({ page, loomDaemon }) => {
+  const targetBody = uniq("TARGET-ONLY-BODY");
+  const sourceBody = uniq("SOURCE-ONLY-BODY");
+  const { id } = await seedVaultProject(loomDaemon.baseURL, {
+    "Source.md": `# Source\n\n${sourceBody}\n\nGo to [[Target]].\n`,
+    "Target.md": `# Target\n\n${targetBody}\n`,
+  });
+  await pinActiveProject(page, id);
+  await page.goto(`${loomDaemon.baseURL}/vault`);
+
+  await treeRow(page, "Source.md").click();
+  await expect(page.getByText(sourceBody)).toBeVisible();
+
+  await page.locator("a.md-wikilink").filter({ hasText: "Target" }).click();
+  await expect(page.getByText(targetBody)).toBeVisible();
+  await expect(page.getByText(sourceBody)).toHaveCount(0);
+
+  // Back to Source, re-render the pane (typing in the filter re-renders the component that owns the
+  // viewer AND re-creates the `onOpen` arrow), then click the link again — a ref that had frozen the
+  // first render's callback would still work here, but one that never updated would not.
+  await treeRow(page, "Source.md").click();
+  await expect(page.getByText(sourceBody)).toBeVisible();
+  await page.getByPlaceholder("Filter files…").fill("Target");
+  await page.locator("a.md-wikilink").filter({ hasText: "Target" }).click();
+  await expect(page.getByText(targetBody)).toBeVisible();
+});

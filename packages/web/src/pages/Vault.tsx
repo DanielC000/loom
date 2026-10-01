@@ -4,6 +4,7 @@ import type { VaultEntry } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import Markdown, { CollapseContext } from "../components/Markdown";
+import { VaultDownloadLink, VaultImage, useVaultAsset } from "../components/VaultAsset";
 import DocFind from "../components/DocFind";
 import { Panel, Button, Input } from "../components/ui";
 import { errorText } from "../lib/loopbackCredential";
@@ -354,27 +355,28 @@ function ContentView({ projectId, path, kind, content, loading, files, onOpen }:
   projectId: string; path: string; kind: Kind; content: string | undefined; loading: boolean;
   files: string[]; onOpen: (p: string) => void;
 }) {
-  const rawUrl = api.vaultRawUrl(projectId, path);
-
+  // MEMOISED on projectId, not inlined: `AssetImage` is a COMPONENT TYPE, so a fresh arrow each render
+  // would be a new type each render — React unmounts and remounts every inline markdown image, and on a
+  // remote origin each remount re-fetches (and re-revokes) its blob. The identity has to be stable.
+  const AssetImage = useMemo(
+    () => function VaultAssetImage({ path: vaultPath, alt, className }: { path: string; alt: string; className?: string }) {
+      return <VaultImage projectId={projectId} path={vaultPath} alt={alt} className={className} />;
+    },
+    [projectId],
+  );
+  // Every raw-bytes consumer below goes through components/VaultAsset.tsx rather than pointing the
+  // browser at `api.vaultRawUrl` itself: that URL is only loadable as-is on loopback, because /vault/raw
+  // is Tier-1 (Bearer-only remotely) and a browser attaches nothing to an <img src>/<object data>/<a
+  // href>. See docs/decisions/f7525818-vault-raw-remote-auth.md.
   if (kind === "image") {
     return (
       <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 8, overflow: "auto" }}>
-        <img src={rawUrl} alt={path} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: radius.base, border: `1px solid ${color.border}`, background: color.panel2 }} />
+        <VaultImage projectId={projectId} path={path} alt={path} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: radius.base, border: `1px solid ${color.border}`, background: color.panel2 }} />
       </div>
     );
   }
-  if (kind === "pdf") {
-    // First-party bytes from our own daemon (nosniff + application/pdf). An <object> defers to the
-    // browser's native PDF viewer; a sandbox isn't practical here — it disables Chrome's built-in PDF
-    // plugin (blank/broken page) — so we rely on the trusted same-origin endpoint and a download fallback.
-    return (
-      <object data={rawUrl} type="application/pdf"
-        style={{ width: "100%", height: "100%", border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}>
-        <BinaryCard projectId={projectId} path={path} rawUrl={rawUrl} note="This browser can’t display PDFs inline." />
-      </object>
-    );
-  }
-  if (kind === "binary") return <BinaryCard projectId={projectId} path={path} rawUrl={rawUrl} />;
+  if (kind === "pdf") return <PdfView projectId={projectId} path={path} />;
+  if (kind === "binary") return <BinaryCard projectId={projectId} path={path} />;
 
   // md / text
   if (loading && content === undefined) return <p style={{ color: color.textMuted }}>…</p>;
@@ -386,15 +388,33 @@ function ContentView({ projectId, path, kind, content, loading, files, onOpen }:
         files={files}
         currentPath={path}
         onOpen={onOpen}
-        assetSrc={(vaultPath) => api.vaultRawUrl(projectId, vaultPath)}
+        AssetImage={AssetImage}
       />
     );
   }
   return <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 13, color: color.text }}>{content}</pre>;
 }
 
+// A PDF embed. `<object>` defers to the browser's native viewer, which needs a URL up front — so on a
+// remote origin (where the raw URL alone 401s) this waits for the authenticated blob before mounting it,
+// and shows the download card meanwhile. The daemon deliberately exempts application/pdf from the raw
+// route's CSP sandbox for the same reason the iframe `sandbox` attribute was never used here: a sandbox
+// disables Chrome's built-in PDF plugin (docs/decisions/68bef69c-vault-raw-csp.md).
+function PdfView({ projectId, path }: { projectId: string; path: string }) {
+  const asset = useVaultAsset(projectId, path, "view");
+  const fallback = <BinaryCard projectId={projectId} path={path} note="This browser can’t display PDFs inline." />;
+  if (asset.status === "error") return <BinaryCard projectId={projectId} path={path} note={`Couldn’t load this PDF: ${asset.message}`} />;
+  if (asset.status === "loading") return fallback;
+  return (
+    <object data={asset.url} type="application/pdf"
+      style={{ width: "100%", height: "100%", border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}>
+      {fallback}
+    </object>
+  );
+}
+
 // Opaque binary (no viewer): a clean card with size + download — never dump bytes as text.
-function BinaryCard({ projectId, path, rawUrl, note }: { projectId: string; path: string; rawUrl: string; note?: string }) {
+function BinaryCard({ projectId, path, note }: { projectId: string; path: string; note?: string }) {
   const head = useQuery({ queryKey: ["vaultHead", projectId, path], queryFn: () => api.vaultRawHead(projectId, path) });
   const name = path.split("/").pop() ?? path;
   const ext = extOf(path);
@@ -409,10 +429,7 @@ function BinaryCard({ projectId, path, rawUrl, note }: { projectId: string; path
         <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, marginBottom: 16 }}>
           {note ?? `Binary file${ext ? ` · .${ext}` : ""}`} · {head.isLoading ? "…" : humanSize(head.data?.size ?? null)}
         </div>
-        <a href={rawUrl} download={name} className="loom-btn loom-btn-primary"
-          style={{ display: "inline-block", textDecoration: "none", color: color.phosphor, border: `1px solid ${color.phosphor}`, borderRadius: radius.base, padding: "6px 14px", fontFamily: font.mono, fontSize: 12 }}>
-          Download file
-        </a>
+        <VaultDownloadLink projectId={projectId} path={path}>Download file</VaultDownloadLink>
       </div>
     </div>
   );

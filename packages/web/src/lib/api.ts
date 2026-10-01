@@ -622,10 +622,24 @@ export const api = {
   // attachment` for svg/html/xml) so an untrusted vault file can never script this origin — see
   // docs/decisions/68bef69c-vault-raw-csp.md. That is invisible to every consumer here (CSP applies to
   // documents, not <img> subresources), but it DOES mean these bytes can't be rendered as a document.
+  //
+  // ⚠️ ONLY LOADABLE AS-IS ON LOOPBACK. The route is Tier-1, i.e. Bearer-only on a remote origin, and a
+  // browser attaches nothing to an <img src>/<object data>/<a href>. Go through `components/VaultAsset.tsx`
+  // (which picks this or `vaultRawBlob` per origin), never this helper directly — card f7525818.
   vaultRawUrl: (projectId: string, path: string) =>
     `/api/projects/${projectId}/vault/raw?path=${encodeURIComponent(path)}`,
+  // The same bytes fetched THROUGH the api client, so `withGatewayAuth` can attach the credential a bare
+  // browser load cannot (card f7525818). The caller mints the object URL — and picks the blob's type
+  // itself (lib/vaultAsset.ts), because the daemon's CSP/Content-Disposition do NOT survive into one.
+  vaultRawBlob: async (projectId: string, path: string): Promise<{ blob: Blob; contentType: string | null }> => {
+    const url = `/api/projects/${projectId}/vault/raw?path=${encodeURIComponent(path)}`;
+    const r = await guardedFetch(url);
+    if (!r.ok) throw new Error(await errorMessageFrom(url, r));
+    return { blob: await r.blob(), contentType: r.headers.get("content-type") };
+  },
   // HEAD the raw endpoint for a binary file's size/content-type without downloading the bytes — for the
-  // "Binary file · <size> · Download" card. Returns nulls if the headers are absent.
+  // "Binary file · <size> · Download" card. Returns nulls if the headers are absent. The HEAD sibling of
+  // the GET above is separately allowlisted Tier-1 (gateway/trust-tier.ts) so this works remotely too.
   vaultRawHead: async (projectId: string, path: string): Promise<{ size: number | null; contentType: string | null }> => {
     const r = await guardedFetch(`/api/projects/${projectId}/vault/raw?path=${encodeURIComponent(path)}`, { method: "HEAD" });
     if (!r.ok) throw new Error(`vault/raw HEAD -> ${r.status}`);
