@@ -328,6 +328,23 @@ function persistDeferredStateBestEffort(
 }
 
 /**
+ * Re-read a task row immediately after a write that may have landed MORE than the caller's own patch
+ * described — a server-folded `body` (the released-deferral closure paragraph), the `version` bump that
+ * follows from it, a cleared `deferredUntilTaskId`/`deferredUntilEvent` — so the response reflects the
+ * ACTUAL post-persist row instead of a manually-overlaid pre-write snapshot that can silently drift from
+ * it (card 363f5c2d, M6/M7: the ack used to report the OLD version while the DB was already one ahead).
+ * ONE helper, shared by every write/read path that persists a deferral-release side effect:
+ * {@link updateProjectTask}'s manual `deferred:false` release, and the auto-release best-effort
+ * write-through ({@link persistDeferredStateBestEffort}, read by {@link listProjectTasks}/
+ * {@link getProjectTask}) — never per-site patching. Falls back to `fallback` only if the row was deleted
+ * concurrently between the write and this read; never throws.
+ * @decision 363f5c2d
+ */
+function rereadAfterPersist(db: Db, taskId: string, fallback: Task): Task {
+  return db.getTask(taskId) ?? fallback;
+}
+
+/**
  * `deferredReason` is cleared the moment a deferral ends — both on an explicit manual `deferred:false`
  * and on the designed `deferredUntilTaskId` auto-release path — and that clear is CORRECT. But the REASON
  * itself is a closure record, not disposable state, so it's folded into the card BODY first, as its own
@@ -545,18 +562,19 @@ export async function listProjectTasks(
     tasks.map(async (t) => {
       const merged = (await resolveMergedInfo(db, projectId, t, includeMerged)).merged;
       const { deferred, autoCleared, stuck, stuckChanged, mergedBlockers } = await resolveDeferredEffective(db, projectId, t, includeMerged);
-      persistDeferredStateBestEffort(db, t.id, { autoCleared, stuck, stuckChanged, mergedBlockers });
-      // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredStateBestEffort) —
-      // mirror that in THIS response too, so the read that reports the clear never echoes a stale
-      // non-null blocker id alongside deferred:false (card cf62c1ef).
+      // Card 363f5c2d (M7): a persist here can fold `deferredReason` into `body` and bump `version` — the
+      // SAME transition `persistDeferredStateBestEffort` itself gates on (autoCleared || stuckChanged), so
+      // re-read the row post-persist via rereadAfterPersist rather than echoing the pre-persist `t` the
+      // caller never actually sees landed (stale body/deferredAt/deferredReason/version/deferredUntilTaskId).
+      // Skipped when nothing was persisted — `t` is already accurate then, so there's nothing to re-read.
+      const persisted = autoCleared || stuckChanged;
+      if (persisted) persistDeferredStateBestEffort(db, t.id, { autoCleared, stuck, stuckChanged, mergedBlockers });
+      const base = persisted ? rereadAfterPersist(db, t.id, t) : t;
       // Card 634edd2b: `mergedVerification` destructured OUT of the spread and re-exposed as
       // `mergedVerificationAtMerge` — see TaskWithMerged's own doc for why the raw name is ambiguous
       // against the live `merged.verification` sitting right next to it.
-      const { mergedVerification, ...rest } = t;
-      return {
-        ...rest, deferred, deferredUntilTaskId: autoCleared ? null : t.deferredUntilTaskId, deferredStuck: stuck, merged,
-        mergedVerificationAtMerge: mergedVerification ?? null,
-      };
+      const { mergedVerification, ...rest } = base;
+      return { ...rest, deferred, deferredStuck: stuck, merged, mergedVerificationAtMerge: mergedVerification ?? null };
     }),
   );
   return includeBody ? withMerged : withMerged.map(toTaskSummary);
@@ -820,13 +838,16 @@ export async function getProjectTask(
   const merged = (await resolveMergedInfo(db, projectId, found, includeMerged)).merged;
   // Deferred auto-clear + stuck-visibility (card 793ac76d / 93669813) — see resolveDeferredEffective's own doc.
   const { deferred, autoCleared, stuck, stuckChanged, mergedBlockers } = await resolveDeferredEffective(db, projectId, found, includeMerged);
-  persistDeferredStateBestEffort(db, found.id, { autoCleared, stuck, stuckChanged, mergedBlockers });
-  // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredStateBestEffort) — mirror
-  // that here too, so this same read never echoes a stale non-null blocker id alongside deferred:false.
+  // Card 363f5c2d (M7): re-read post-persist — see listProjectTasks's own comment for why (a persist here
+  // can fold deferredReason into body and bump version; echoing pre-persist `found` would report those
+  // stale). Skipped when nothing was actually persisted.
+  const persisted = autoCleared || stuckChanged;
+  if (persisted) persistDeferredStateBestEffort(db, found.id, { autoCleared, stuck, stuckChanged, mergedBlockers });
+  const base = persisted ? rereadAfterPersist(db, found.id, found) : found;
   // Card 634edd2b: same rename as listProjectTasks — see TaskWithMerged's own doc.
-  const { mergedVerification, ...foundRest } = found;
+  const { mergedVerification, ...foundRest } = base;
   return {
-    ...foundRest, deferred, deferredUntilTaskId: autoCleared ? null : found.deferredUntilTaskId, deferredStuck: stuck, merged,
+    ...foundRest, deferred, deferredStuck: stuck, merged,
     mergedVerificationAtMerge: mergedVerification ?? null,
     ...buildRelationView(db, found), // card 3df86c87: parentId/parent/children/relations
     requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)),
@@ -1478,12 +1499,26 @@ export async function updateProjectTask(
   // server-computed addition, not caller-supplied content, so it must never trip the title/body
   // baseVersion gate a caller-supplied `body` would.
   let bodyFoldPatch: string | undefined;
+  // Card 363f5c2d (M6) — a manual `deferred:false` release must clear deferredUntilTaskId and
+  // deferredUntilEvent in the SAME write, mirroring cf62c1ef's auto-clear fix on the OTHER release path:
+  // leaving either set is the identical footgun (a stale deferredUntilTaskId silently re-arms and makes
+  // `isManualDeferral` below misread the NEXT `deferred:true` as route-(a), skipping the c90e9525
+  // reason-required guard entirely; a stale deferredUntilEvent keeps pointing at a trigger that no longer
+  // means anything once the card isn't deferred). Server-computed, merged into `dbPatch` only (never
+  // `patch`, same exclusion-from-`changed` convention as deferredAt/heldBy) — and only when the CALLER
+  // hasn't already told us what to do with the field in THIS SAME patch; an explicit simultaneous value is
+  // respected, never silently overridden.
+  // @decision 363f5c2d
+  let deferredUntilTaskIdPatch: string | string[] | null | undefined;
+  let deferredUntilEventPatch: DeferredUntilEvent | null | undefined;
   if (patch.deferred === false) {
     // Explicit manual clear — reset deferral provenance, mirrors heldBy resetting on a held clear below.
     // Un-deferring never needs a reason of its own — only a write that would LEAVE the card manually
     // deferred does (the guard above never reaches this branch, since `patch.deferred === false` short
     // circuits before it).
     deferredReasonPatch = null;
+    if (patch.deferredUntilTaskId === undefined) deferredUntilTaskIdPatch = null;
+    if (patch.deferredUntilEvent === undefined) deferredUntilEventPatch = null;
     // Code Review follow-up (1d27c3cd): `owned` was read at the TOP of this function, before the one
     // await this function can take (the repoKey retarget check above, when the SAME patch also touches
     // repoKey) — folding from `owned.deferredReason`/`owned.body` across that gap could fold a reason a
@@ -1594,7 +1629,13 @@ export async function updateProjectTask(
   // baseVersion here would mean a bare `{deferred:false}` — today's version-free contract — starts
   // demanding one whenever the card happens to carry a reason, which this card must not change. Same
   // residual risk persistDeferredStateBestEffort documents for its own fold.
-  const dbPatch = bodyFoldPatch !== undefined ? { ...dbPatch1, body: bodyFoldPatch } : dbPatch1;
+  const dbPatch2 = bodyFoldPatch !== undefined ? { ...dbPatch1, body: bodyFoldPatch } : dbPatch1;
+  // Card 363f5c2d (M6): same exclusion-from-`patch` reasoning as deferredAt/heldBy/bodyFoldPatch above —
+  // see the deferredUntilTaskIdPatch/deferredUntilEventPatch declaration for why these clear on a manual
+  // release. `applyBlocksPatch` (via db.updateTask's own deferredUntilTaskId handling) reaches these edges
+  // the same way an explicit `tasks_update({deferredUntilTaskId:null})` call already does — no new DB path.
+  const dbPatch3 = deferredUntilTaskIdPatch !== undefined ? { ...dbPatch2, deferredUntilTaskId: deferredUntilTaskIdPatch } : dbPatch2;
+  const dbPatch = deferredUntilEventPatch !== undefined ? { ...dbPatch3, deferredUntilEvent: deferredUntilEventPatch } : dbPatch3;
   // Destructive-body-truncation guard (whole-patch-reject like every guard above): `body` is a FULL
   // REPLACE with no undo — that is CORRECT, field-level PATCH semantics are not what's wrong here. What's
   // missing is friction in front of the one catastrophic shape: a substantial existing body reduced to a
@@ -1694,7 +1735,12 @@ export async function updateProjectTask(
     }
     updated = result.task;
   } else {
-    updated = { ...owned, ...dbPatch, updatedAt: new Date().toISOString() };
+    // Card 363f5c2d (M6): re-read post-write rather than overlaying `dbPatch` onto the pre-write `owned`
+    // snapshot — a field-only caller patch (e.g. {deferred:false}) can still carry a server-computed
+    // `body`/version-bumping write underneath it (the reason-fold above), which a manual overlay would
+    // silently miss. See rereadAfterPersist's own doc — the same helper the auto-release read paths
+    // (listProjectTasks/getProjectTask) use.
+    updated = rereadAfterPersist(db, owned.id, { ...owned, ...dbPatch, updatedAt: new Date().toISOString() });
   }
   if (plan) updated = { ...updated, parentId: db.getTask(owned.id)?.parentId ?? null };
   // Audit trail: a real clear just went through. Only reachable here for an AGENT-set hold — a
