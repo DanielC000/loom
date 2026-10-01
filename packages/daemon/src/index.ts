@@ -464,8 +464,10 @@ async function main(): Promise<void> {
     },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
     onExit: (sessionId, code, info) => {
-      db.setProcessState(sessionId, "exited");
-      db.setBusy(sessionId, false);
+      // Card cd390610: setProcessState/setBusy + clearing this recipient's own redrive-in-flight marks are
+      // grouped into ONE SessionService entry point (onPtyExit) — see that method's own doc — so a test can
+      // drive the real onExit-facing call rather than reaching into clearRedriveInFlightForExit directly.
+      sessions.onPtyExit(sessionId);
       // Read the exited row ONCE (null for non-DB shell terminals) — reused by the auto-archive
       // decision AND the transcript snapshot below. Best-effort: never disturb the exit path.
       let exited;

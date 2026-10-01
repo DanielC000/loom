@@ -2522,20 +2522,24 @@ export class SessionService {
    *  interaction with cap/admission. */
   private readonly gateIntents = new GateIntentRegistry();
   /**
-   * msgIds of durable queued messages whose RE-DRIVE enqueue is currently HELD in a recipient's pty FIFO
-   * — enqueued onto a now-live recipient but not yet drained, so the durable `session_message_queued`
-   * record is still unresolved. Guards against a SECOND re-drive of the same held message: the one-shot
-   * boot scan (recoverUndeliveredMessagesOnBoot) and the resume/live-flip re-drive
-   * (redriveUndeliveredMessagesForRecipient) both run on boot — without this, each would enqueue the SAME
-   * text onto the FIFO and the recipient would see it TWICE (onDeliver's delivered-marker idempotency
-   * stops double RESOLUTION, not double ENQUEUE). Cleared when the held entry finally drains
-   * (resolveQueuedMessage in the onDeliver wrapper). If the holding pty (or the whole daemon) dies before
-   * the entry drains, the mark is simply never set again in the next process: the durable record stays
-   * unresolved and the next daemon boot's scan re-drives it exactly once (same as the pre-fix baseline —
-   * an intra-process pty death just defers recovery to the next boot, it can't lose the message). In-memory
-   * + process-local; the durable delivered marker remains the cross-restart idempotency guard.
+   * msgId → recipientId for every durable queued message whose RE-DRIVE enqueue is currently HELD in that
+   * recipient's pty FIFO — enqueued onto a now-live recipient but not yet drained, so the durable
+   * `session_message_queued` record is still unresolved. Guards against a SECOND re-drive of the same
+   * held message: the one-shot boot scan (recoverUndeliveredMessagesOnBoot) and the resume/live-flip
+   * re-drive (redriveUndeliveredMessagesForRecipient) both run on boot — without this, each would enqueue
+   * the SAME text onto the FIFO and the recipient would see it TWICE (onDeliver's delivered-marker
+   * idempotency stops double RESOLUTION, not double ENQUEUE). Cleared when the held entry finally drains
+   * (resolveQueuedMessage in the onDeliver wrapper), or the instant the holding pty exits without ever
+   * draining it (see {@link clearRedriveInFlightForExit}, which scans this same map by recipientId — a
+   * single map rather than a Set plus a recipient-keyed companion index, so the two can never drift
+   * apart). In-memory + process-local either way; the durable delivered marker remains the cross-restart
+   * idempotency guard.
+   *
+   * @decision cd390610 — clear this recipient's marks on pty exit too, not only on drain; an exit never
+   * fires `onDeliver`, so without that cleanup a stale mark survives the dead pty and wrongly blocks every
+   * later same-process redrive attempt for that recipient.
    */
-  private readonly redriveInFlightMsgIds = new Set<string>();
+  private readonly redriveInFlightByMsgId = new Map<string, string>();
   /**
    * Codescape fleet-daemon wiring (card C1, epic `369dde3c`; P4 rewrite, card 088afc94): the
    * daemon-singleton supervisor handle, injected like every other boot-owned dependency here. P4's
@@ -3733,7 +3737,7 @@ export class SessionService {
     // Live-flip re-drive (card 225559e5): this recipient just transitioned to live, so re-drive any durable
     // queued messages addressed to it that the ONE-SHOT boot scan couldn't deliver because it wasn't live
     // when that scan ran (a later resume, a wake/crash-recovery resume, or a crash boot with no restart
-    // intent). Idempotent with the boot scan via redriveInFlightMsgIds + the durable delivered marker, so a
+    // intent). Idempotent with the boot scan via redriveInFlightByMsgId + the durable delivered marker, so a
     // boot that runs BOTH (resumeFleetOnBoot → resume() here, THEN recoverUndeliveredMessagesOnBoot) enqueues
     // each message exactly once. enqueueStdin is ready-gated, so the message holds until the resumed TUI boots.
     this.redriveUndeliveredMessagesForRecipient(session.id);
@@ -6063,12 +6067,57 @@ export class SessionService {
     return { reEnqueued, retired, senderNudges };
   }
 
+  /** Mark `msgId` in-flight for `recipientId` in {@link redriveInFlightByMsgId} — see that field's own doc. */
+  private markRedriveInFlight(recipientId: string, msgId: string): void {
+    this.redriveInFlightByMsgId.set(msgId, recipientId);
+  }
+
+  /** Clear `msgId`'s in-flight mark — the drain/undo counterpart of {@link markRedriveInFlight}. */
+  private clearRedriveInFlight(msgId: string): void {
+    this.redriveInFlightByMsgId.delete(msgId);
+  }
+
+  /**
+   * Clear every redrive-in-flight mark held for ONE recipient, at the instant its pty exits — card
+   * cd390610. Hooked from `PtyHostEvents.onExit` (index.ts), via {@link onPtyExit}, for every exit path
+   * (claude/codex, graceful/hard): a pty death never fires a held entry's `onDeliver` (host.ts's exit
+   * cleanup just empties `live.pending`), so without this a mark set by this recipient's own redrive
+   * would survive the dead pty and wrongly block every later same-process redrive attempt for it (notably
+   * its own resume/live-flip) — stranding the durable record unresolved and, via `workerReport`'s
+   * pending-direction guard, every `done` report from that recipient until the whole daemon restarts. A
+   * no-op for a recipient with nothing currently in-flight. Scans the whole map (recipientId is only the
+   * VALUE here, not a key) — cheap: the map only ever holds messages genuinely held awaiting drain across
+   * the whole fleet, never a large or unbounded population.
+   *
+   * @decision cd390610 — deliberately does NOT fire `onDeliver` or resolve the durable record itself;
+   * see the full record for why.
+   */
+  clearRedriveInFlightForExit(recipientId: string): void {
+    for (const [msgId, r] of this.redriveInFlightByMsgId) {
+      if (r === recipientId) this.redriveInFlightByMsgId.delete(msgId);
+    }
+  }
+
+  /**
+   * The minimal per-exit bookkeeping EVERY pty death needs (claude/codex, graceful/hard) — hooked from
+   * `PtyHostEvents.onExit` (index.ts) as its first act. Marks the row exited + not-busy (a hard stop
+   * fires no Stop hook, so busy would otherwise never clear) and clears this recipient's own
+   * redrive-in-flight marks ({@link clearRedriveInFlightForExit}, card cd390610). Grouped into one
+   * method — rather than left as separate statements in `index.ts` — so a test can drive the real
+   * onExit-facing entry point instead of reaching into `clearRedriveInFlightForExit` directly.
+   */
+  onPtyExit(sessionId: string): void {
+    this.db.setProcessState(sessionId, "exited");
+    this.db.setBusy(sessionId, false);
+    try { this.clearRedriveInFlightForExit(sessionId); } catch { /* never disturb the exit path */ }
+  }
+
   /**
    * Re-drive ONE still-undelivered durable `session_message_queued` event onto its recipient, idempotently.
    * The single per-message engine shared by the boot scan and the resume/live-flip path, so the two can
    * never double-deliver. Outcomes: "skip" (malformed), "retired" (recipient gone/recycled/archived),
    * "reEnqueued" (recipient live — re-enqueued with the same msgId), "stuck" (recipient exists but isn't
-   * live; caller decides what to do). Idempotent via the in-process {@link redriveInFlightMsgIds} guard
+   * live; caller decides what to do). Idempotent via the in-process {@link redriveInFlightByMsgId} guard
    * plus the durable delivered marker across restarts.
    * @decision bcaeab8d — the re-enqueued text is `framePossibleDuplicate`-tagged UNCONDITIONALLY: this is
    * Loom's only redelivery route with no in-process signal of a prior attempt, so it never silently guesses.
@@ -6080,7 +6129,7 @@ export class SessionService {
     if (!recipientId || !msgId || text === null) return "skip"; // malformed — can't act on it
     // A prior re-drive of this exact message is already HELD awaiting drain (this boot's other path, or a
     // near-simultaneous live-flip) → don't enqueue a second copy; its onDeliver will resolve the record.
-    if (this.redriveInFlightMsgIds.has(msgId)) return "reEnqueued";
+    if (this.redriveInFlightByMsgId.has(msgId)) return "reEnqueued";
     // Card 0f693dea CR follow-up: hoisted from further below (it only ever depended on `e`) so the two
     // EARLY resolveQueuedMessage calls (retired below) can stamp the same real originating sender the LATE
     // one (the live re-enqueue's own onDeliver, further down) already did — see resolveQueuedMessage's own
@@ -6120,7 +6169,7 @@ export class SessionService {
       // Re-enqueue with the SAME msgId so its drain resolves THIS queued event (no duplicate record). Mark
       // it in-flight FIRST so the overlapping path skips it; the onDeliver wrapper clears the mark AND
       // resolves the durable record the instant the held message is finally handed to the recipient.
-      this.redriveInFlightMsgIds.add(msgId);
+      this.markRedriveInFlight(recipientId, msgId);
       // @decision 129efe74 — read back kind/giveUpHeldUntil/rootMsgId/chainDepth from THIS record's own
       // persisted detail (never hardcode); a legacy pre-card row defaults to the exact old hardcoded
       // behavior.
@@ -6162,7 +6211,7 @@ export class SessionService {
       const redrivenText = framePossibleDuplicate(text, rootMsgId);
       const r = this.pty.enqueueStdin(
         recipientId, redrivenText, "system", (reason?: string) => {
-          this.redriveInFlightMsgIds.delete(msgId);
+          this.clearRedriveInFlight(msgId);
           this.resolveQueuedMessage(msgId, { recipientId, reason, sender });
         // Card e01687ea code-review follow-up: same wiring defect as enqueueDurableMessage, same fix — a
         // redrive dropped `sender` (hoisted above) entirely, hardcoding `senderId` undefined, so a
@@ -6190,7 +6239,7 @@ export class SessionService {
       }
       // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → not actually
       // enqueued; undo the in-flight mark and treat as stuck so a later live-flip can retry it.
-      this.redriveInFlightMsgIds.delete(msgId);
+      this.clearRedriveInFlight(msgId);
     }
     return "stuck"; // not live (exited / starting) or live-without-pty
   }
