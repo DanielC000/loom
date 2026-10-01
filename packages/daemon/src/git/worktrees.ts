@@ -3706,6 +3706,23 @@ export const STATIC_GUARD_REPO_PATHS = [
   // reduced/emit-compare path can reason about on its own, so a NEW unregistered call site could
   // otherwise take the reduced path and never trip a single check.
   "packages/daemon/test/loom-home-write-deny-registry-guard.mjs",
+  // Card 5df4e7d1 (from 3b4e2bbe): a corpus-wide readdirSync scan of packages/daemon/test/*.mjs asserting
+  // no file binds a hermetic port by passing hermeticPort()'s raw return into .listen() (the WinNAT/
+  // Hyper-V-reserved-range EACCES shape that redded b801bad0's 52-minute full gate) without ALSO importing
+  // one of the two sanctioned helpers (reserveHermeticPort()/listenHermetic()). Belongs here on the same
+  // ground as its corpus-wide-scan siblings above: a NEW test file reintroducing the raw bind is a
+  // source-TEXT property the reduced/emit-compare path cannot reason about (zero compiled/runtime-behavior
+  // change for a .mjs test file, which has no compile step at all), so it could otherwise take the reduced
+  // path and never trip a single check.
+  "packages/daemon/test/hermetic-port-listen-guard.mjs",
+  // Card 5df4e7d1 (from a6b1c4c7): a corpus-wide readdirSync scan of packages/daemon/test/*.mjs (a 35-site
+  // baseline) asserting no NEW `path.join(os.tmpdir(), <fully fixed literal>)` fixture ships — the same
+  // concurrent-collision shape that bit merge-commit-kill-confirm.mjs's makeRepo/makeWorktree. Same ground
+  // as clock-path-regression-guard.mjs immediately above (and hermetic-port-listen-guard.mjs just added):
+  // a NEW test file reintroducing a fixed-literal tmp path is a source-TEXT property the reduced/
+  // emit-compare path cannot reason about, so it could otherwise take the reduced path and never trip a
+  // single check.
+  "packages/daemon/test/fixed-tmpdir-literal-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run
@@ -4059,6 +4076,17 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
 export const CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/gate-runner-harness-marker-coupling.mjs",
   "packages/daemon/test/test-daemon-codex-real-spawn-preset.mjs",
+  // Card 5d4765b9: raw-reads real packages/daemon/scripts/test-daemon.mjs SOURCE directly (never dist/**
+  // — a .mjs script has no compile/emit step) and walks its STATIC relative imports, transitively through
+  // each local sibling, asserting every one is mirrored by writeRealTestDaemonScript's hand-maintained
+  // fixture file list (_emit-compare-fixtures.mjs). Belongs here on the SAME `changedScriptFiles` trigger
+  // as its two siblings immediately above, both of which already read this exact file: a NEW static
+  // import added to test-daemon.mjs (or a scripts/**-rooted sibling it statically imports) with no
+  // matching fixture-list entry is a source-TEXT property with zero compiled/runtime-behavior change the
+  // reduced/emit-compare path can reason about on its own (this is plain .mjs, not compiled .ts), so it
+  // could otherwise take the reduced path and never trip a single check — exactly the op a450e3dd / card
+  // fc53ea74 incident class this guard exists to catch.
+  "packages/daemon/test/test-daemon-fixture-import-guard.mjs",
 ];
 
 /** @decision fd0d34da — a coarse, PATH-FREE classification of WHY `notApplicable:true`, safe to leave
