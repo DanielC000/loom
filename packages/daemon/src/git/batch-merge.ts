@@ -1,6 +1,6 @@
 import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure } from "./bounded.js";
-import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken } from "./merge-quarantine.js";
+import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
 import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, type MergeEmptyKind } from "./worktrees.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
@@ -341,7 +341,7 @@ async function landBranchCommitsIndividually(
       // Round 4: even this best-effort abort quarantines the CANONICAL repo on an unconfirmed kill — an
       // orphaned abort could still be mutating the SAME worktree a later candidate is about to touch.
       if (treeDeathUnconfirmed(e)) {
-        raisedToken = enterMergeQuarantine(repoPath, branch, "batch rollback (cherry-pick --abort) could not be confirmed dead after a kill");
+        raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("batch rollback (cherry-pick --abort) could not be confirmed dead after a kill"));
         quarantinedByRollback = true; rollbackIssue = describeGitFailure(e).text; return;
       }
       /* otherwise best-effort, as before: expected when no cherry-pick is in progress */
@@ -351,7 +351,7 @@ async function landBranchCommitsIndividually(
     } catch (e) {
       if (e instanceof RepoQuarantinedError) { quarantinedByRollback = true; rollbackIssue = e.message; return; }
       if (treeDeathUnconfirmed(e)) {
-        raisedToken = enterMergeQuarantine(repoPath, branch, "batch rollback (reset --hard) could not be confirmed dead after a kill");
+        raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("batch rollback (reset --hard) could not be confirmed dead after a kill"));
         quarantinedByRollback = true; rollbackIssue = describeGitFailure(e).text; return;
       }
       // The failed reset only matters if there was something to roll back: a canonicalGit refusal thrown at the FIRST git call of a candidate changed nothing.
@@ -402,7 +402,7 @@ async function landBranchCommitsIndividually(
       // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill: rollback()'s own reset
       // --hard would race whatever might still be alive, never touch the worktree further in that case.
       if (treeDeathUnconfirmed(e)) {
-        raisedToken = enterMergeQuarantine(repoPath, branch, `cherry-pick of ${sha.slice(0, 7)} could not be confirmed dead after a kill`);
+        raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason(`cherry-pick of ${sha.slice(0, 7)} could not be confirmed dead after a kill`));
         return { ok: false, quarantined: true, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)}'s git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; the batch worktree may need manual inspection: ${(e as Error).message}` };
       }
       let conflicted = false;
@@ -469,7 +469,7 @@ async function landBranchCommitsIndividually(
       // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill, same reasoning as the
       // cherry-pick catch above.
       if (treeDeathUnconfirmed(e)) {
-        raisedToken = enterMergeQuarantine(repoPath, branch, `commit landing ${sha.slice(0, 7)} could not be confirmed dead after a kill`);
+        raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason(`commit landing ${sha.slice(0, 7)} could not be confirmed dead after a kill`));
         return { ok: false, quarantined: true, reason: `${branch}: commit failed landing ${sha.slice(0, 7)} — its git process tree could not be confirmed dead after a kill; refusing further cleanup to avoid racing it, the batch worktree may need manual inspection: ${(e as Error).message}` };
       }
       await rollback();
@@ -532,7 +532,7 @@ async function landBranchCommitsIndividually(
       //
       // @decision 24c0bdba (round 4, m-a) — fail CLOSED + QUARANTINE, same as every other mutating call.
       if (treeDeathUnconfirmed(e)) {
-        raisedToken = enterMergeQuarantine(repoPath, branch, `Loom-Worker-Base/PathSet amend for ${sha.slice(0, 7)} could not be confirmed dead after a kill`);
+        raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason(`Loom-Worker-Base/PathSet amend for ${sha.slice(0, 7)} could not be confirmed dead after a kill`));
         return { ok: false, quarantined: true, reason: `${branch}: Loom-Worker-Base/PathSet amend for ${sha.slice(0, 7)}'s git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; the batch worktree may need manual inspection: ${(e as Error).message}` };
       }
       // m2 (Code Review, card 24c0bdba): a hung post-commit hook can outlive this amend's own timeout
@@ -782,7 +782,7 @@ export async function fastForwardCanonicalMain(
       } catch (e) {
         if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: `fast-forward refused — canonical repo is quarantined: ${e.message}` };
         if (treeDeathUnconfirmed(e)) {
-          raisedToken = enterMergeQuarantine(repoPath, "(batch fast-forward)", "fast-forward merge could not be confirmed dead after a kill");
+          raisedToken = enterMergeQuarantine(repoPath, "(batch fast-forward)", unconfirmedKillReason("fast-forward merge could not be confirmed dead after a kill"));
           // @decision d8bb2074 — no HEAD re-read here (an unconfirmed kill means "touch nothing else");
           // name the already-known target sha so a reader knows main may already be there, not just stalled.
           return { ok: false, quarantined: true, reason: `fast-forward merge's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it (canonical main may already be at ${targetSha} if the merge itself landed before the kill); canonical repo may need manual inspection: ${(e as Error).message}` };

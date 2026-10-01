@@ -10,7 +10,7 @@ import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
-import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken } from "./merge-quarantine.js";
+import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
 import { isCodexDoctrinePath } from "../pty/codex-doctrine.js";
 import { checkTitleHtmlEntities, CONVENTIONAL_TYPES } from "../tasks/title-guard.js";
@@ -4016,6 +4016,13 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // shape (1) — comments can't land inside a string literal — but one non-immune check is enough to seat
   // the whole file here, same posture emit-compare-soundness-guard.mjs's own entry above documents.
   "packages/daemon/test/project-memory-control-chars.mjs",
+  // Card b966962b: section (1) reads the REAL git/worktrees.ts, git/batch-merge.ts and git/writer.ts
+  // SOURCE as text and pattern-matches each `enterMergeQuarantine(...)` call line for the
+  // `unconfirmedKillReason(...)` wrapper — a genuinely new read with no live twin to inherit immunity
+  // from, same posture emit-compare-soundness-guard.mjs's own entry above documents. tsc keeps comments,
+  // so a comment-only edit could in principle land a decoy "enterMergeQuarantine(" + "unconfirmedKillReason("
+  // pair in prose above a real bypassing call and mask it — belongs here on the same grounds.
+  "packages/daemon/test/quarantine-reason-windows-guidance.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its
@@ -5891,7 +5898,7 @@ async function mergeBranchLocked(
         if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message };
         // @decision 24c0bdba (round 4) — fail CLOSED + QUARANTINE on an unconfirmed tree-kill here too.
         if (treeDeathUnconfirmed(e)) {
-          raisedToken = enterMergeQuarantine(repoPath, branch, "in-progress-merge residue clear could not be confirmed dead after a kill", opId);
+          raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("in-progress-merge residue clear could not be confirmed dead after a kill"), opId);
           return { ok: false, reason: `in-progress-merge residue clear's process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${(e as Error).message}` };
         }
         // Surfaced explicitly rather than falling into the outer catch below, whose "no residue to clear"
@@ -5948,7 +5955,7 @@ async function mergeBranchLocked(
       // @decision 24c0bdba (round 4) — this IS itself a mutating canonical call; an unconfirmed kill of
       // ITS OWN child quarantines the repo too, the same as every other mutating call on this path.
       if (treeDeathUnconfirmed(e)) {
-        raisedToken = enterMergeQuarantine(repoPath, branch, `reset --hard (${context}) could not be confirmed dead after a kill`, opId);
+        raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason(`reset --hard (${context}) could not be confirmed dead after a kill`), opId);
         return `reset --hard (${context})'s process tree could not be confirmed dead after a kill — quarantining the repo; canonical repo may need manual inspection: ${(e as Error).message}`;
       }
       return `reset --hard (${context}) failed — canonical repo may have residue: ${(e as Error).message}`;
@@ -6032,7 +6039,7 @@ async function mergeBranchLocked(
       // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill: resetOrSkip's own
       // reset --hard would race whatever might still be alive, never touch the repo further in that case.
       if (treeDeathUnconfirmed(rawErrorObject)) {
-        raisedToken = enterMergeQuarantine(repoPath, branch, "git merge --squash could not be confirmed dead after a kill", opId);
+        raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("git merge --squash could not be confirmed dead after a kill"), opId);
         return {
           ok: false,
           reason: `git merge --squash's process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${rawErrorMessage}`,
@@ -6152,7 +6159,7 @@ async function mergeBranchLocked(
       // back unconfirmed (a descendant not reaped within grace) — fail CLOSED + QUARANTINE, never touch
       // the repo further, since resetOrSkip's `reset --hard` would race whatever might still be alive.
       if (treeDeathUnconfirmed(e)) {
-        raisedToken = enterMergeQuarantine(repoPath, branch, "squash commit could not be confirmed dead after a kill", opId);
+        raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("squash commit could not be confirmed dead after a kill"), opId);
         return {
           ok: false,
           reason: `squash commit's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${(e as Error).message}`,

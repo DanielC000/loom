@@ -10,7 +10,7 @@ import {
 } from "../vault/versioner.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
 import { withTimeout, boundedSimpleGit, scrubGitEnv, killableCanonicalRaw, treeDeathUnconfirmed } from "./bounded.js";
-import { enterMergeQuarantine, clearMergeQuarantineByToken } from "./merge-quarantine.js";
+import { enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 
 // The WRITE side of the project git view — sibling to reader.ts (which stays read-only introspection).
 // Like the vault writer (vault/writer.ts) and gateCommand, git writes are a TRUST-BOUNDARY surface:
@@ -315,7 +315,7 @@ export class GitWriter {
             await killableCanonicalRaw(this.repoPath, ["checkout", target], this.localMs, "git checkout", this.killableGitFactory(), nonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             if (treeDeathUnconfirmed(e)) {
-              raisedToken = enterMergeQuarantine(this.repoPath, target, `git checkout could not be confirmed dead after a kill: ${(e as Error).message}`);
+              raisedToken = enterMergeQuarantine(this.repoPath, target, unconfirmedKillReason(`git checkout could not be confirmed dead after a kill: ${(e as Error).message}`));
             }
             throw e;
           }
@@ -359,7 +359,7 @@ export class GitWriter {
             await killableCanonicalRaw(this.repoPath, ["checkout", "-b", target], this.localMs, "git checkout -b", this.killableGitFactory(), nonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             if (treeDeathUnconfirmed(e)) {
-              raisedToken = enterMergeQuarantine(this.repoPath, target, `git checkout -b could not be confirmed dead after a kill: ${(e as Error).message}`);
+              raisedToken = enterMergeQuarantine(this.repoPath, target, unconfirmedKillReason(`git checkout -b could not be confirmed dead after a kill: ${(e as Error).message}`));
             }
             throw e;
           }
@@ -430,7 +430,7 @@ export class GitWriter {
           };
           const quarantineOnUnconfirmedKill = (e: unknown, label: string): void => {
             if (treeDeathUnconfirmed(e)) {
-              raisedToken = enterMergeQuarantine(this.repoPath, "(GitWriter commit)", `${label} could not be confirmed dead after a kill: ${(e as Error).message}`);
+              raisedToken = enterMergeQuarantine(this.repoPath, "(GitWriter commit)", unconfirmedKillReason(`${label} could not be confirmed dead after a kill: ${(e as Error).message}`));
             }
           };
           try {

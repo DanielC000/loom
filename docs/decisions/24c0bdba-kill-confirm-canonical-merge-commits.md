@@ -123,10 +123,13 @@ days before this card) already decided, explicitly, that the canonical merge pat
 `.git`'s hooks/config, specifically so real projects' own commit hooks (husky, commitlint, git-lfs) keep
 firing on Loom's own squash/batch landings; blanking them here would reverse that decision, not just be
 neutral. The tree-kill closes the actual defect (an orphaned process corrupting a LATER merge) for any
-hook whose process tree can be confirmed dead within grace — which SIGKILL/`taskkill /T /F` make true for
-essentially every real hook — so there is no correctness reason to disable them; the narrow residual that
-remains (`treeDeathUnconfirmed`) fails CLOSED rather than silently corrupting anything, so it does not
-reopen the case for disabling hooks either. Only `attemptCodexAutoCommit` disables hooks
+hook whose process tree can be confirmed dead within grace — on POSIX, SIGKILL to the process group makes
+that true for essentially every real hook. **CORRECTED (card `b966962b`): on WINDOWS this is false for an
+ordinary `sh`-invoked hook, not just a deliberately double-forked escape** — see the Residuals entry below
+and `docs/decisions/b966962b-unconfirmed-kill-windows-msys-hook-guidance.md` for the verified mechanism.
+This does not reopen the case for disabling hooks: the narrow residual (`treeDeathUnconfirmed`) fails
+CLOSED rather than silently corrupting anything, whichever platform or hook shape triggers it. Only
+`attemptCodexAutoCommit` disables hooks
 (`core.hooksPath=os.devNull` + `--no-verify`), and for an unrelated reason: it protects the DAEMON from a
 worker-planted hook escalating during a commit the daemon makes into the WORKER's OWN worktree on the
 worker's behalf (a codex-sandbox workaround), not the canonical-repo trust boundary this card is about.
@@ -374,13 +377,22 @@ disk; a reboot re-quarantined both all over again) and GREEN after this fix.
 
 ## Residuals (accepted)
 
-- **A hook tail that BOTH detaches from its process tree AND holds the stdio pipe open indefinitely
-  gives no `close` signal on Windows at all.** Closing that structurally needs a Job Object (native
-  dependency, out of scope here) — the quarantine still fires (via `withTimeoutKillingChild`'s own
-  give-up path, now correctly tagged) and PROTECTS the repo, but it never auto-clears for this specific
-  shape; only a human, after verifying the repo by hand, can clear it — through the REST route (round 4),
-  never by restarting the daemon (a restart now RE-ARMS the same quarantine instead of lifting it). Filed
-  as a follow-up card for a Job Object (board card `1718416d`) — still open, accepted as-is.
+- **CORRECTED (card `b966962b`): the Windows gap is the COMMON case for an ordinary sh-based hook
+  (husky/lefthook/pre-commit), not a rare double-forked escape.** This section originally described the
+  only Windows residual as a hook tail that BOTH detaches from its process tree AND holds the stdio pipe
+  open indefinitely — a deliberately engineered escape. Verified FALSE as the whole story: a PLAIN,
+  un-engineered `#!/bin/sh\nsleep N` hook (no pipe, no backgrounding, no double-fork) is ALSO reproducibly
+  unconfirmable on Windows (card `755afc26`), and the broken link is one level deeper than previously
+  understood — the real Windows `ParentProcessId` for the MSYS-forked descendant (e.g. `sleep.exe`) does
+  not name its actual spawner at all, which rules out any PID/creation-time-walk or MSYS-`ps`-based fix,
+  not just `taskkill /T`'s own algorithm. Full mechanism + why enumeration can't close this:
+  `docs/decisions/b966962b-unconfirmed-kill-windows-msys-hook-guidance.md`. The quarantine still fires
+  (via `withTimeoutKillingChild`'s own give-up path, correctly tagged) and PROTECTS the repo for this case
+  exactly as for the double-forked one; only a human can clear it (REST route, round 4), never a restart.
+  The one approach that would structurally close this residual — a Job Object, native dependency, out of
+  scope here — is filed as its own card (`1718416d`), still open, accepted as-is; the quarantine reason
+  (`git/merge-quarantine.ts`'s `unconfirmedKillReason()`, card `b966962b`) now names this cause and a
+  concrete pre-clear check in every raise, rather than leaving a human to guess why.
 - **POSIX `setsid` escapes.** `spawnCanonicalGitTree`'s POSIX kill signals the process GROUP
   (`process.kill(-pid, SIGKILL)`) — a descendant that calls `setsid` (or is otherwise detached into its
   own session) leaves that group and is not reached. Same consequence as the Windows case above: the

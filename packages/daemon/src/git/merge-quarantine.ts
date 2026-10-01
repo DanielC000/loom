@@ -115,6 +115,35 @@ function deleteMergeQuarantineLatch(repoPath: string): void {
 }
 
 /**
+ * The Windows/MSYS-hook guidance appended to EVERY `enterMergeQuarantine` reason raised for an unconfirmed
+ * KILL — ONE shared string, never hand-copied per call site, so a wording change lands in one place and
+ * `test/quarantine-reason-windows-guidance.mjs` can assert every real call site carries it. Deliberately
+ * does NOT say the repo is "probably/very likely fine" — names a concrete check instead.
+ *
+ * @decision b966962b — do not re-attempt a PID/creation-time or MSYS-`ps`-based confirmation mechanism for
+ * this residual without reading the record first; both were verified non-viable on a real host.
+ */
+export const UNCONFIRMED_KILL_WINDOWS_GUIDANCE =
+  "on Windows this commonly happens with an ordinary sh-based hook (husky/lefthook/pre-commit) whose MSYS " +
+  "child process can't be confirmed dead; before clearing, check that no git/sh/hook process is still " +
+  "running for this repo (Git-for-Windows' bundled `usr/bin/ps.exe -W`, or Task Manager filtered by the " +
+  "hook's own tool name), then POST /internal/merge-quarantine/clear";
+
+/**
+ * Build an `enterMergeQuarantine` `reason` string for an UNCONFIRMED-KILL raise: `detail` (what actually
+ * failed, specific to the call site) plus the shared {@link UNCONFIRMED_KILL_WINDOWS_GUIDANCE} clause — the
+ * ONE place every such call site assembles this text, so the guidance can never drift between call sites or
+ * be silently omitted at a new one. Every `enterMergeQuarantine` call raised from a `treeDeathUnconfirmed`
+ * branch (`git/worktrees.ts`, `git/batch-merge.ts`, `git/writer.ts`) must route its `reason` through this —
+ * never hand-build an equivalent string. NOT for the boot-time corrupt-latch fail-closed path
+ * ({@link quarantineAllRegisteredFailClosed} below) — that cause has nothing to do with an unconfirmed kill
+ * or MSYS hooks, and naming this guidance there would be actively misleading.
+ */
+export function unconfirmedKillReason(detail: string): string {
+  return `${detail} — ${UNCONFIRMED_KILL_WINDOWS_GUIDANCE}`;
+}
+
+/**
  * Raise (or ADD ANOTHER outstanding raise to) the quarantine for `repoPath` — the canonical repo, ALWAYS
  * (see this module's own header doc for why a batch caller must resolve its canonical repoPath first,
  * never pass its own scratch worktree path). Round 7 (M1): if the repo is ALREADY quarantined, this APPENDS
