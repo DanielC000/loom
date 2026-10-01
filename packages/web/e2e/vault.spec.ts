@@ -20,7 +20,7 @@
 import { expect, test } from "./fixtures/daemon";
 import type { Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -166,6 +166,149 @@ test("the file filter narrows the tree to a matching note", async ({ page, loomD
   // Clearing the filter restores the full tree.
   await page.getByPlaceholder("Filter files…").fill("");
   await expect(treeRow(page, `${bravo}.md`)).toBeVisible();
+});
+
+// ── Edit gating + read errors (card 4bd4e4a6) ──────────────────────────────────
+// These three drive the DATA-LOSS path the viewer used to allow, and the error state it used to hide.
+//
+// The window: the file-content query uses `keepPreviousData`, so while a newly selected note loads, the
+// pane is still showing the PREVIOUS note's text. `VaultEditor` captures its initial text ONCE (a
+// `useState(content)` initializer) — so an editor opened inside that window captured the wrong note's
+// body, and Save wrote it over the newly selected path. Test 1 is the witness: it asserts the file ON
+// DISK, which is the only place the loss is actually visible. Test 2 is the control's own before/after.
+// Test 3 covers a note renamed out from under the viewer — a real 404, which used to render an endless
+// "…" because the query had no `isError` branch.
+//
+// Why `page.route` holds the fetch: on localhost the load window is a few milliseconds, so the bug is
+// real but hard to hit by hand. Holding exactly the one request widens it deterministically — no fixed
+// waits, and the held path is matched by name so the hold can never silently apply to the wrong file.
+
+// Hold the content fetch for ONE vault path until the returned function is called.
+async function holdVaultFileFetch(page: Page, relPath: string): Promise<() => void> {
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(
+    (url) => url.pathname.endsWith("/vault/file") && url.searchParams.get("path") === relPath,
+    async (route) => { await held; await route.continue(); },
+  );
+  return () => release();
+}
+
+const editButton = (page: Page) => page.getByRole("button", { name: "Edit", exact: true });
+
+// Seed two notes whose bodies share no text, so "which note's body is this?" is answerable from any
+// single string — on screen or on disk.
+async function seedTwoNotes(baseURL: string) {
+  const alphaName = `${uniq("Alpha")}.md`;
+  const bravoName = `${uniq("Bravo")}.md`;
+  const alphaOnly = uniq("ALPHA-ONLY-BODY");
+  const bravoOnly = uniq("BRAVO-ONLY-BODY");
+  const seeded = await seedVaultProject(baseURL, {
+    [alphaName]: `# Alpha\n\n${alphaOnly}\n`,
+    [bravoName]: `# Bravo\n\n${bravoOnly}\n`,
+  });
+  return { ...seeded, alphaName, bravoName, alphaOnly, bravoOnly };
+}
+
+test("a fast file switch can never seed the editor from the PREVIOUS note (no cross-file overwrite)", async ({ page, loomDaemon }) => {
+  // A failed save would pop the global mutation alert (main.tsx) and wedge the run — dismiss, never hang.
+  page.on("dialog", (d) => void d.dismiss());
+
+  const { id, vaultDir, alphaName, bravoName, alphaOnly, bravoOnly } = await seedTwoNotes(loomDaemon.baseURL);
+  await pinActiveProject(page, id);
+  const releaseBravo = await holdVaultFileFetch(page, bravoName);
+  await page.goto(`${loomDaemon.baseURL}/vault`);
+
+  // Load Alpha fully — this is the text `keepPreviousData` holds on screen through the next switch.
+  await treeRow(page, alphaName).click();
+  await expect(page.getByText(alphaOnly)).toBeVisible();
+
+  // Switch to Bravo. Its content fetch is held, so the pane still shows ALPHA's body under BRAVO's
+  // breadcrumb. Asserting that precondition is what makes the rest of this test mean anything.
+  await treeRow(page, bravoName).click();
+  await expect(page.getByText(alphaOnly)).toBeVisible();
+
+  // Try to open the editor inside that window. `force` because the fix DISABLES Edit here and a disabled
+  // <button> never fires a click — a genuine no-op. Before the fix it was enabled, and the textarea
+  // mounted holding ALPHA's body.
+  await editButton(page).click({ force: true });
+  releaseBravo();
+
+  // Settle into whichever state the UI chose — an editor opened (pre-fix) or Bravo's own body rendered
+  // (fixed). Exactly one of the two can be true, so this never needs a timed wait.
+  await expect(page.locator("textarea").or(page.getByText(bravoOnly)).first()).toBeVisible();
+  const seededFromStaleContent = (await page.locator("textarea").count()) > 0;
+
+  if (seededFromStaleContent) {
+    // The pre-fix path, driven to completion so the loss is OBSERVED and not merely argued: once Bravo's
+    // body lands, the editor's captured Alpha text reads as an unsaved edit, and Save writes it to
+    // Bravo's path.
+    const save = page.getByRole("button", { name: /^Sav/ });
+    await expect(save).toBeEnabled();
+    await save.click();
+    await expect(page.locator("textarea")).toHaveCount(0);
+  }
+
+  // THE WITNESS: Bravo's file on disk still holds Bravo's body, never Alpha's.
+  const onDisk = readFileSync(path.join(vaultDir, bravoName), "utf8");
+  expect(onDisk).toContain(bravoOnly);
+  expect(onDisk).not.toContain(alphaOnly);
+  expect(seededFromStaleContent, "Edit opened an editor seeded from the previously-viewed note").toBe(false);
+});
+
+test("Edit is disabled while the selected note's own content is still loading, and enabled once it lands", async ({ page, loomDaemon }) => {
+  const { id, alphaName, bravoName, alphaOnly, bravoOnly } = await seedTwoNotes(loomDaemon.baseURL);
+  await pinActiveProject(page, id);
+  const releaseBravo = await holdVaultFileFetch(page, bravoName);
+  await page.goto(`${loomDaemon.baseURL}/vault`);
+
+  // BEFORE: a fully loaded note is editable.
+  await treeRow(page, alphaName).click();
+  await expect(page.getByText(alphaOnly)).toBeVisible();
+  await expect(editButton(page)).toBeEnabled();
+
+  // GATED: the selection moved to Bravo but Bravo's own content has not arrived.
+  await treeRow(page, bravoName).click();
+  await expect(editButton(page)).toBeDisabled();
+  await expect(editButton(page)).toHaveAttribute("title", /loading/i);
+
+  // AFTER: its content lands and the control re-arms.
+  releaseBravo();
+  await expect(page.getByText(bravoOnly)).toBeVisible();
+  await expect(editButton(page)).toBeEnabled();
+});
+
+test("a note deleted out from under the viewer shows a read error with a working Retry, not an endless placeholder", async ({ page, loomDaemon }) => {
+  const { id, vaultDir, alphaName, bravoName, alphaOnly, bravoOnly } = await seedTwoNotes(loomDaemon.baseURL);
+  await pinActiveProject(page, id);
+  await page.goto(`${loomDaemon.baseURL}/vault`);
+
+  // Open Bravo first, so there IS previous content that `keepPreviousData` could otherwise leave on
+  // screen in place of the error.
+  await treeRow(page, bravoName).click();
+  await expect(page.getByText(bravoOnly)).toBeVisible();
+
+  // An agent renames/removes the note while its row is still in the (cached) tree.
+  const alphaAbs = path.join(vaultDir, alphaName);
+  const alphaBody = readFileSync(alphaAbs, "utf8");
+  rmSync(alphaAbs);
+
+  await treeRow(page, alphaName).click();
+
+  // The read failure is SHOWN — the daemon's own reason included — and the previous note's body is gone.
+  await expect(page.getByText("Unable to read this note")).toBeVisible();
+  await expect(page.getByText("file not found")).toBeVisible();
+  await expect(page.getByText(bravoOnly)).toHaveCount(0);
+  await expect(page.getByText("…", { exact: true })).toHaveCount(0);
+  // Nothing can be edited into a note that could not be read.
+  await expect(editButton(page)).toBeDisabled();
+
+  // Retry is a real control, not decoration: restore the note, retry, and the note renders.
+  writeFileSync(alphaAbs, alphaBody, "utf8");
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.getByText(alphaOnly)).toBeVisible();
+  await expect(page.getByText("Unable to read this note")).toHaveCount(0);
+  await expect(editButton(page)).toBeEnabled();
 });
 
 // ── Raw vault bytes are sandboxed (card 68bef69c, docs/decisions/68bef69c-vault-raw-csp.md) ─────────

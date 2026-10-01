@@ -609,8 +609,12 @@ export const api = {
   restoreSession: (id: string) => postErr<{ restored: string }>(`/api/sessions/${id}/restore`),
   deleteArchivedSession: (id: string) => delErr<{ deleted: string[] }>(`/api/sessions/${id}/archive`),
   vaultTree: (projectId: string) => get<VaultEntry[]>(`/api/projects/${projectId}/vault`),
+  // `getErr`, not `get`: the Vault page RENDERS this failure (card 4bd4e4a6 — a note an agent renamed
+  // out from under the viewer 404s), and the daemon's own `{ error: "file not found" }` says far more to
+  // the reader than an opaque `… -> 404`. The echoed `path` is load-bearing too — it is what lets the
+  // page prove a loaded body belongs to the file currently selected.
   vaultFile: (projectId: string, path: string) =>
-    get<{ path: string; content: string }>(`/api/projects/${projectId}/vault/file?path=${encodeURIComponent(path)}`),
+    getErr<{ path: string; content: string }>(`/api/projects/${projectId}/vault/file?path=${encodeURIComponent(path)}`),
   // Raw bytes of a vault file, served with a content-type by extension + X-Content-Type-Options: nosniff
   // (daemon `vault/raw`). Returns the URL string — used directly as an `<img>`/`<iframe>`/`<object>`/
   // download `src`/`href` (the vite dev proxy forwards /api to the live daemon); the browser fetches it.

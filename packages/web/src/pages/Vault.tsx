@@ -6,6 +6,7 @@ import { useActiveProject } from "../lib/activeProject";
 import Markdown, { CollapseContext } from "../components/Markdown";
 import DocFind from "../components/DocFind";
 import { Panel, Button, Input } from "../components/ui";
+import { errorText } from "../lib/loopbackCredential";
 import { color, font, radius } from "../theme";
 
 // Vault browser + file viewer/editor. The left pane is a real collapsible folder TREE built from the
@@ -123,7 +124,28 @@ export default function Vault() {
     queryFn: () => api.vaultFile(projectId, file),
     enabled: !!projectId && !!file && isTextual,
     placeholderData: keepPreviousData,
+    // A vault read is a local file read: a failure is a real answer ("renamed", "deleted", "no vault"),
+    // not a blip worth three backed-off retries before the reader is told anything. Fail fast and give
+    // them the explicit Retry in `ReadError` instead.
+    retry: false,
   });
+
+  // `loaded` is the body PROVEN to belong to the currently selected path. `keepPreviousData` deliberately
+  // holds the PREVIOUS note's text on screen while a newly selected one loads, so `content.data` can
+  // describe a DIFFERENT path than `file` — harmless for the viewer, catastrophic for the editor. Two
+  // independent checks, both failing CLOSED: react-query's own placeholder flag, and the daemon's echoed
+  // `path`, so identity is asserted rather than assumed.
+  //
+  // @decision 4bd4e4a6 — never let a write path read `content.data` directly instead of `loaded`. An
+  // editor opened mid-switch captured the previous note's body, and Save then overwrote the newly
+  // selected file with it.
+  const loaded =
+    content.data && !content.isPlaceholderData && content.data.path === file ? content.data : undefined;
+  const editDisabledReason = loaded
+    ? undefined
+    : content.isError
+      ? "This note could not be read."
+      : `Loading ${file}…`;
 
   const nodes = useMemo(() => buildTree(entries), [entries]);
   const fileList = useMemo(() => entries.filter((e) => e.type === "file").map((e) => e.path), [entries]);
@@ -197,15 +219,19 @@ export default function Vault() {
                   <Breadcrumb path={file} onDir={(d) => expandDirs([...ancestorDirs(d), d])} />
                   <span style={{ flex: 1 }} />
                   {isTextual && !editing && (
-                    <Button onClick={() => setEditing(true)} disabled={content.data?.content === undefined}>Edit</Button>
+                    <Button onClick={() => setEditing(true)} disabled={!loaded} title={editDisabledReason}>Edit</Button>
                   )}
                   <DeleteButton name={file} onDelete={() => remove.mutate(file)} deleting={remove.isPending} />
                 </div>
                 <div ref={docContainerRef} style={{ flex: 1, overflow: "auto", position: "relative" }}>
-                  {editing && isTextual ? (
-                    content.data?.content === undefined
+                  {isTextual && content.isError ? (
+                    <ReadError error={content.error} onRetry={() => void content.refetch()} retrying={content.isFetching} />
+                  ) : editing && isTextual ? (
+                    // `loaded`, never `content.data` — the fail-closed half of the gate above. A render
+                    // where the two disagree is a file switch in flight, so it waits rather than seeding.
+                    !loaded
                       ? <p style={{ color: color.textMuted }}>…</p>
-                      : <VaultEditor key={file} content={content.data.content}
+                      : <VaultEditor key={file} content={loaded.content}
                           onSave={(c) => save.mutate({ path: file, content: c })} saving={save.isPending}
                           onCancel={() => setEditing(false)} />
                   ) : (
@@ -387,6 +413,31 @@ function BinaryCard({ projectId, path, rawUrl, note }: { projectId: string; path
           style={{ display: "inline-block", textDecoration: "none", color: color.phosphor, border: `1px solid ${color.phosphor}`, borderRadius: radius.base, padding: "6px 14px", fontFamily: font.mono, fontSize: 12 }}>
           Download file
         </a>
+      </div>
+    </div>
+  );
+}
+
+// A vault read that FAILED — most often a note an agent renamed or deleted while its row sat in the
+// (cached) tree, which the daemon answers with a 404 + `{ error: "file not found" }`. Deliberately shaped
+// like BinaryCard above (same centred card, same type scale): a read that can't be satisfied is a state of
+// the pane, not an error bar bolted onto a half-rendered document. The daemon's own reason is shown
+// verbatim rather than paraphrased — it is the only part that says WHICH failure this was.
+function ReadError({ error, onRetry, retrying }: { error: unknown; onRetry: () => void; retrying: boolean }) {
+  return (
+    <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div style={{ textAlign: "center", border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2, padding: "28px 36px", maxWidth: 420 }}>
+        <svg width="34" height="34" viewBox="0 0 16 16" aria-hidden style={{ color: color.red, marginBottom: 10, opacity: 0.8 }}>
+          <circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" strokeWidth="1.1" />
+          <path d="M8 4.8 V8.9" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          <circle cx="8" cy="11.1" r="0.75" fill="currentColor" />
+        </svg>
+        <div style={{ fontFamily: font.mono, fontSize: 13, color: color.text, marginBottom: 6 }}>Unable to read this note</div>
+        <div style={{ fontFamily: font.mono, fontSize: 12, color: color.red, marginBottom: 6, wordBreak: "break-word" }}>{errorText(error)}</div>
+        <div style={{ fontFamily: font.mono, fontSize: 11.5, color: color.textMuted, marginBottom: 16, lineHeight: 1.6 }}>
+          It may have been renamed, moved, or deleted since this tree was loaded.
+        </div>
+        <Button variant="primary" disabled={retrying} onClick={onRetry}>{retrying ? "Retrying…" : "Retry"}</Button>
       </div>
     </div>
   );
