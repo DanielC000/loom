@@ -247,7 +247,10 @@ export function resolveMergeGateCadence(o: { mergeGate: "on" | "off"; mergeGateI
  * one is an owner decision, not a UI concern.
  */
 export const ORCHESTRATION_TIMEOUT_MS_BOUNDS = {
-  gateCommandTimeoutMs: { min: 1000, max: 3_600_000 },
+  // Raised 3_600_000 (60m) -> 7_200_000 (2h) by owner decision (request b09c77af, 2026-10-01): the full
+  // daemon suite had grown to sit at the old 60m ceiling (~54m at 3 lanes), so the owner chose a 75m
+  // project value — 4_500_000 — which needs headroom above it, not a ceiling flush against the new value.
+  gateCommandTimeoutMs: { min: 1000, max: 7_200_000 },
   deployCommandTimeoutMs: { min: 1000, max: 1_800_000 },
   alertWebhookTimeoutMs: { min: 500, max: 60_000 },
 } as const;

@@ -103,16 +103,16 @@ check("msRangeError accepts a fractional entry whose ROUNDED value sits exactly 
 
 check("msRangeError still catches a genuinely out-of-range entry, stated in the field's own unit", () => {
   assert.equal(
-    msRangeError("4000", "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs),
-    "must be between 1s and 3600s",
+    msRangeError("8000", "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs),
+    "must be between 1s and 7200s",
   );
   assert.equal(
     msRangeError("0.5", "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs),
-    "must be between 1s and 3600s",
+    "must be between 1s and 7200s",
   );
   // The raw millisecond figure never appears in the message — that is the whole point.
-  const msg = msRangeError("4000", "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs);
-  assert.equal(/3600000/.test(msg), false);
+  const msg = msRangeError("8000", "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs);
+  assert.equal(/7200000/.test(msg), false);
 });
 
 check("msRangeError reports nothing for blank, for no bounds, or for a non-numeric entry", () => {

@@ -104,7 +104,7 @@ for (const key of ["idleNudgeMinutes", "maxUnansweredNudges", "idleDefaultSnooze
 // 500–60000 (unchanged, still a plain literal); both `.int()`.
 {
   const GATE_MAX = ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs.max;
-  check("(sanity) gateCommandTimeoutMs ceiling is the owner-decided 60m bound (fc8aa167, 2026-09-16)", GATE_MAX === 3_600_000);
+  check("(sanity) gateCommandTimeoutMs ceiling is the owner-decided 2h bound (request b09c77af, 2026-10-01)", GATE_MAX === 7_200_000);
 
   check("gateCommandTimeoutMs:999 (<floor) rejected", validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 999 })).ok === false);
   check(`gateCommandTimeoutMs:${GATE_MAX + 1} (>ceiling) rejected`, validateProjectConfigOverride(orch({ gateCommandTimeoutMs: GATE_MAX + 1 })).ok === false);
@@ -185,6 +185,6 @@ for (const key of ["idleNudgeMinutes", "maxUnansweredNudges", "idleDefaultSnooze
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the project-config override schema bounds every orchestration numeric field (recycleAtContextRatio/emergencyRecycleAtContextRatio 0..1; caps int 1..100; minute fields/counter int ≥0; gateCommandTimeoutMs int 1000..3600000; alertWebhookTimeoutMs int 500..60000), rejects out-of-range/negative/non-integer values with a field-named reason on the human REST path, REJECTS the two HUMAN-only timeouts on the agent path (omitted), rejects a daemon-global `platform` key on BOTH project validators (.strict() unknown key), resolveConfig clamps an emergency floor below the ordinary ratio (never below 0-disabled) while passing an already-valid ordering through unchanged, bounds memory.budgetTokens to the live MEMORY_CONFIG_MAX ceiling on BOTH the human and agent paths without a second hardcoded literal, and keeps the existing .strict()/bounds guarantees intact."
+  ? "\n✅ ALL PASS — the project-config override schema bounds every orchestration numeric field (recycleAtContextRatio/emergencyRecycleAtContextRatio 0..1; caps int 1..100; minute fields/counter int ≥0; gateCommandTimeoutMs int 1000..7200000; alertWebhookTimeoutMs int 500..60000), rejects out-of-range/negative/non-integer values with a field-named reason on the human REST path, REJECTS the two HUMAN-only timeouts on the agent path (omitted), rejects a daemon-global `platform` key on BOTH project validators (.strict() unknown key), resolveConfig clamps an emergency floor below the ordinary ratio (never below 0-disabled) while passing an already-valid ordering through unchanged, bounds memory.budgetTokens to the live MEMORY_CONFIG_MAX ceiling on BOTH the human and agent paths without a second hardcoded literal, and keeps the existing .strict()/bounds guarantees intact."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
