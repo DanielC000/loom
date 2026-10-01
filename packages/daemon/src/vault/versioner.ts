@@ -9,6 +9,7 @@ import type { Db } from "../db.js";
 import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
 import { withTimeout, boundedSimpleGit, localReadGitEnv } from "../git/bounded.js";
+import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 
 /** Generic, non-personal identity used ONLY when the host has no git identity configured at all. */
 const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
@@ -476,6 +477,15 @@ export async function commitVault(
   }
   // else: no repo discoverable anywhere up the chain — vaultPath itself will BECOME the repo root below.
 
+  // @decision 8d49c36c — key this check on the CONFIRMED governing root (vaultPath, at this point), never
+  // a raw/possibly-nested caller argument; re-check again immediately before the commit call below; never
+  // route this through killableCanonicalRaw (drops this module's own VAULT_GIT_SAFETY_CONFIG hook guard).
+  const quarantineCheck = assertRepoNotQuarantined(vaultPath);
+  if (!quarantineCheck.ok) {
+    console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — ${quarantineCheck.reason}`);
+    return false;
+  }
+
   // Every remaining call operates on a CONFIRMED root (vaultPath) — pin GIT_DIR/GIT_WORK_TREE to it.
   const { git: pinnedGit } = boundedVaultGitAtConfirmedRoot(vaultPath, { ...deps, timeoutMs: cheapTimeoutMs });
   const { git: workGit } = boundedVaultGitAtConfirmedRoot(vaultPath, { ...deps, timeoutMs: workTreeTimeoutMs });
@@ -488,6 +498,24 @@ export async function commitVault(
   // `currentOp` tracking) — this is the section covering the actual named hang vector (add/status/commit).
   let currentOp: { label: string; timeoutMs: number } | undefined;
   try {
+    // @decision 8d49c36c — visibility only, never a refusal and never built further than a log line: this
+    // module's own `git add .` can sweep pre-staged residue into an unattended commit exactly like
+    // GitWriter.commit's `add -A` does, but nothing human reviews this path to warn structurally at.
+    if (isRepo) {
+      currentOp = { label: "git status (pre-add residue check)", timeoutMs: cheapTimeoutMs };
+      const preAddStatus = await withTimeout(pinnedGit.status(), cheapTimeoutMs, currentOp.label);
+      const preExistingResidue = preAddStatus.files
+        .filter((f) => f.index !== " " && f.index !== "?")
+        .map((f) => f.path);
+      if (preExistingResidue.length > 0) {
+        console.warn(
+          `[vault-versioner] ${vaultPath} commitVault: ${preExistingResidue.length} file(s) were already ` +
+          `staged before this auto-commit's own "git add ." ran and will be swept into it: ` +
+          `${preExistingResidue.join(", ")} — possibly an escaped descendant's residue from an earlier ` +
+          `quarantine (see git-writer.ts's commit() for the human-facing equivalent of this check).`,
+        );
+      }
+    }
     currentOp = { label: "git add .", timeoutMs: workTreeTimeoutMs };
     await withTimeout(workGit.add("."), workTreeTimeoutMs, currentOp.label);
     currentOp = { label: "git status", timeoutMs: cheapTimeoutMs };
@@ -501,7 +529,15 @@ export async function commitVault(
     currentOp = { label: "git commit", timeoutMs: workTreeTimeoutMs };
     // @decision ffe98495 — `--no-verify` on EVERY commit here, identity-fallback branch or not; belt-
     // and-suspenders on top of boundedVaultGit's hooksPath override (see that constant's own doc).
-    if (await hasConfiguredGitIdentity(pinnedGit, cheapTimeoutMs)) {
+    const identityConfigured = await hasConfiguredGitIdentity(pinnedGit, cheapTimeoutMs);
+    // @decision 8d49c36c — re-check right before the real commit call, AFTER hasConfiguredGitIdentity (its
+    // own `git config` subprocesses can take ~15s and would otherwise widen the window this check closes).
+    const recheck = assertRepoNotQuarantined(vaultPath);
+    if (!recheck.ok) {
+      console.warn(`[vault-versioner] ${vaultPath} skipping commitVault (quarantined mid-call, after add) — ${recheck.reason}`);
+      return false;
+    }
+    if (identityConfigured) {
       await withTimeout(workGit.raw(["commit", "--no-verify", "-m", message]), workTreeTimeoutMs, currentOp.label);
     } else {
       await withTimeout(workGit.raw([
@@ -928,6 +964,13 @@ export class VaultVersioner {
   flushSync(): boolean {
     if (this.externallyManaged) return false;
     if (isVaultAutoCommitPaused(this.commitPath)) return false;
+    // @decision 8d49c36c — `this.commitPath` is already the resolved governing root (set in `start()`);
+    // one check suffices here (unlike commitVault's add/commit split) since this is one synchronous burst.
+    const quarantineCheck = assertRepoNotQuarantined(this.commitPath);
+    if (!quarantineCheck.ok) {
+      console.warn(`[vault-versioner] ${this.commitPath} skipping shutdown flush — ${quarantineCheck.reason}`);
+      return false;
+    }
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
     // Tracks the call currently in flight so the `catch` below can name WHICH op timed out and at what
     // bound (card 816f0056 review round 2, finding 5) — `execSync`'s own timeout error just names the

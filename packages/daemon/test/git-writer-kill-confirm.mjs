@@ -166,6 +166,74 @@ check("[5] the commit actually landed", git("log", "--oneline").includes("test: 
 check("[5] the escaped descendant's own staged file rode along cleanly (no corruption, nothing lost)",
   git("show", "--stat", "HEAD").includes("fixedX.txt"));
 
+// ═══════════════════ [6] card 8d49c36c — the swept-in residue is now SURFACED, not silent ═══════════════════
+// Section [5]'s `third` already proved the escaped descendant's fixedX.txt "rode along cleanly" into a
+// legitimate commit — but before card 8d49c36c that was entirely invisible to the caller. Both a.txt
+// (staged by the FIRST, killed attempt's own `add -A`, section [1] — never cleared, since the retry in
+// section [3] was refused by the quarantine before touching the index at all) and fixedX.txt (the escaped
+// descendant's own orphaned `git add`) were ALREADY staged before `third`'s own `add -A` ran.
+check("[6] third's result names BOTH already-staged files in a structured `residue` field",
+  Array.isArray(third.residue) && third.residue.includes("fixedX.txt") && third.residue.includes("a.txt"));
+check("[6] third's `warning` text also mentions the residue count", typeof third.warning === "string" && /already staged/.test(third.warning));
+
+// ═══════════════════ [7] card 8d49c36c review — `paths`-scoped residue matches REAL git pathspec semantics ═══════════════════
+// Round-2 Code Review finding: the OLD hand-rolled prefix compare in `preExistingResidue`
+// (`p === sp || p.startsWith(sp+"/") || p.startsWith(sp+"\\")`) disagreed with git's own pathspec
+// matching. Reproduced: with `paths` of ["docs/"] (trailing slash), ["./docs"] (leading "./"), or
+// ["*.md"] (a glob), a pre-staged docs/sub/x.md got swept into the commit by the real
+// `add -A -- <paths>` call, but `residue` came back `undefined` for all three — the hand-rolled compare
+// didn't recognize ANY of them as matching "docs/sub/x.md" (verified: all three return `false`). Fixed by
+// computing residue via a REAL `git diff --cached --name-only -- <paths>` call instead of re-implementing
+// pathspec matching by hand. Each spelling also carries the existing no-false-positive controls: an
+// UNSTAGED tracked edit and a brand-new UNTRACKED file, both within the same pathspec scope, must NOT be
+// reported as residue (git's own `--cached` diff only ever lists what was already in the INDEX).
+{
+  const pathsRepo = path.join(root, "paths-repo");
+  fs.mkdirSync(pathsRepo);
+  const pgit = (...args) => execFileSync("git", args, { cwd: pathsRepo, stdio: ["ignore", "pipe", "pipe"] }).toString();
+  pgit("init", "-q");
+  pgit("config", "user.email", "paths-residue@loom");
+  pgit("config", "user.name", "paths-residue");
+  fs.mkdirSync(path.join(pathsRepo, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(pathsRepo, "docs", "tracked.md"), "tracked v0\n");
+  pgit("add", "docs/tracked.md");
+  pgit("commit", "-q", "-m", "init: seed docs/tracked.md");
+
+  const pathsWriter = new GitWriter(pathsRepo);
+  const spellings = [
+    { label: "trailing slash", paths: ["docs/"] },
+    { label: "leading ./", paths: ["./docs"] },
+    { label: "glob", paths: ["*.md"] },
+  ];
+  let i = 0;
+  for (const { label, paths } of spellings) {
+    i++;
+    // (a) pre-existing residue — staged BEFORE this call's own `add -A` runs.
+    fs.mkdirSync(path.join(pathsRepo, "docs", "sub"), { recursive: true });
+    fs.writeFileSync(path.join(pathsRepo, "docs", "sub", "x.md"), `pre-staged residue ${i}\n`);
+    pgit("add", "docs/sub/x.md");
+    // (b) unstaged tracked edit — modifies an already-tracked file WITHOUT staging it (no-false-positive control).
+    fs.writeFileSync(path.join(pathsRepo, "docs", "tracked.md"), `tracked v${i}\n`);
+    // (c) untracked file — brand-new, never staged (no-false-positive control).
+    const untrackedName = `untracked-${i}.md`;
+    fs.writeFileSync(path.join(pathsRepo, "docs", untrackedName), `untracked ${i}\n`);
+    // (d) the file this commit actually "asked for".
+    fs.writeFileSync(path.join(pathsRepo, "docs", "intended.md"), `intended ${i}\n`);
+
+    const result = await pathsWriter.commit(`test: paths-scoped commit (${label})`, { paths });
+    check(`[7] (${label}) commit succeeds`, result.ok === true);
+    check(`[7] (${label}) residue correctly names the pre-staged docs/sub/x.md`,
+      Array.isArray(result.residue) && result.residue.includes("docs/sub/x.md"));
+    check(`[7] (${label}) residue does NOT include the unstaged tracked edit (docs/tracked.md)`,
+      !result.residue || !result.residue.includes("docs/tracked.md"));
+    check(`[7] (${label}) residue does NOT include the untracked file (${untrackedName})`,
+      !result.residue || !result.residue.includes(untrackedName));
+    const stat = pgit("show", "--stat", "HEAD");
+    check(`[7] (${label}) every touched file still landed in the commit (nothing lost)`,
+      stat.includes("x.md") && stat.includes("tracked.md") && stat.includes(untrackedName) && stat.includes("intended.md"));
+  }
+}
+
 // The actual regression check for this card: every fixture above lives under a managed OS temp dir, so
 // the CWD itself (the checkout, or a merge gate's worktree) must show no new entries at all — the
 // pre-fix bug was section [0]'s bare relative `msRepoPath`, whose `pauseVaultAutoCommit` lease write
@@ -175,6 +243,6 @@ check(`[cwd] the test created no new entries in the CWD (before: [${cwdEntriesBe
   cwdEntriesAfter.length === cwdEntriesBefore.length && cwdEntriesAfter.every((e) => cwdEntriesBefore.includes(e)));
 
 console.log(failures === 0
-  ? "\nALL PASS — GitWriter.commit()/checkout()/createBranch() are kill-confirmed: a quarantine raised MID-SEQUENCE (between add and commit) is caught by the NEW per-call re-check (section [0]); an unconfirmed kill quarantines the canonical repo, and every later call on it (all three methods) refuses — via the pre-existing entry check — until the escaped descendant's own eventual exit lets the auto-clear fire."
+  ? "\nALL PASS — GitWriter.commit()/checkout()/createBranch() are kill-confirmed: a quarantine raised MID-SEQUENCE (between add and commit) is caught by the NEW per-call re-check (section [0]); an unconfirmed kill quarantines the canonical repo, and every later call on it (all three methods) refuses — via the pre-existing entry check — until the escaped descendant's own eventual exit lets the auto-clear fire; once cleared, a fresh commit surfaces any swept-in residue structurally (section [6]); `paths`-scoped residue now matches REAL git pathspec semantics across trailing-slash/./glob spellings, with no false positives on an unstaged edit or untracked file (section [7])."
   : `\n${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

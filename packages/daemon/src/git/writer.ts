@@ -389,7 +389,7 @@ export class GitWriter {
   async commit(
     message: string,
     opts?: { maxFileBytes?: number; paths?: string[] },
-  ): Promise<GitWriteResult<{ hash: string; warning?: string }>> {
+  ): Promise<GitWriteResult<{ hash: string; warning?: string; residue?: string[] }>> {
     if (!message?.trim()) return { ok: false, error: "commit message required" };
     // Card c77dda7d: `paths` narrows the commit to exactly those repo-relative paths (add -A -- <paths> +
     // commit -- <paths>), so an unrelated untracked file in the checkout is never swept in. Validated as
@@ -417,6 +417,10 @@ export class GitWriter {
           // Nothing staged AND nothing to stage → don't even attempt the commit (git would exit 1).
           const status = await withTimeout(git.status(), this.localMs, "git status");
           if (status.isClean()) return { ok: false, error: "nothing to commit (working tree clean)" };
+          // @decision 8d49c36c — captured BEFORE this call's own `add -A` runs: names anything already
+          // staged (e.g. an escaped descendant's orphaned residue from an earlier unconfirmed kill) that
+          // `add -A` is about to sweep in as if it were part of what the caller asked to commit.
+          const residue = await this.preExistingResidue(git, paths);
           // @decision d8bb2074 — `add -A` and `commit` both kill-confirmed (killableCanonicalRaw), each
           // re-checking quarantine immediately before it spawns: an UNLOCKED batch assembly elsewhere can
           // quarantine this repo between the two calls even though this whole sequence holds the lock.
@@ -452,13 +456,35 @@ export class GitWriter {
           const strippedWarning = stripped
             ? "Removed a Claude-Session: trailer from the commit message — this project's mainline commits don't carry harness attribution."
             : undefined;
-          const warning = [oversizedWarning, strippedWarning].filter((w): w is string => !!w).join(" ") || undefined;
-          return warning ? { ok: true, hash, warning } : { ok: true, hash };
+          const residueWarning = residue.length
+            ? `${residue.length} file(s) were already staged before this commit — not necessarily part of what you asked to commit: ${residue.join(", ")}.`
+            : undefined;
+          const warning = [oversizedWarning, strippedWarning, residueWarning].filter((w): w is string => !!w).join(" ") || undefined;
+          return {
+            ok: true, hash,
+            ...(warning ? { warning } : {}),
+            ...(residue.length ? { residue } : {}),
+          };
         }),
       );
     } catch (e) {
       return { ok: false, error: gitError(e) };
     }
+  }
+
+  /** Paths that were ALREADY staged before `commit()`'s own `add -A` call runs — content `add -A` is about
+   *  to sweep in that the caller never explicitly asked for. Scoped to `paths` when given via a REAL
+   *  `git diff --cached --name-only -- <paths>` pathspec match (unscoped, every already-staged file
+   *  counts) — never a hand-rolled prefix compare, which disagrees with git's own pathspec semantics (a
+   *  trailing slash, a leading `./`, or a glob like `*.md` all scope differently under git than under a
+   *  naive `startsWith`; card 8d49c36c review). */
+  private async preExistingResidue(git: WriterGit, paths?: string[]): Promise<string[]> {
+    const out = await withTimeout(
+      git.raw(["diff", "--cached", "--name-only", ...(paths ? ["--", ...paths] : [])]),
+      this.localMs,
+      "git diff --cached --name-only (pre-existing residue)",
+    );
+    return out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   }
 
   /** A human-readable warning naming any staged (non-deletion) file over `maxFileBytes`, or `undefined`
