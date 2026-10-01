@@ -370,6 +370,43 @@ export function foldReleasedDeferralIntoBody(body: string, reason: string, relea
 }
 
 /**
+ * Card 14c756df — the ONE shared release computation for a manual `deferred:false` un-defer, used by BOTH
+ * the agent-facing `updateProjectTask` below AND the human-only REST route (POST /api/tasks/:id,
+ * gateway/server.ts), so the two paths can't diverge on this again (363f5c2d's M6 fix only ever reached
+ * the MCP path, which is exactly the asymmetry this card closes).
+ *
+ * Only ever called when the caller has already confirmed `patch.deferred === false` — that's also the
+ * trigger for guards that live OUTSIDE this helper (e.g. c90e9525's manual-deferral-needs-a-reason check),
+ * so callers must still gate on it themselves rather than relying on this function to no-op otherwise.
+ *
+ * Mirrors the MCP path's own `freshForFold` re-fetch: reads the row FRESH, immediately before folding,
+ * rather than trusting `owned` (read earlier in the caller, possibly before an `await`) — closes the race
+ * where a concurrent write already cleared/changed `deferredReason`/`body` in between.
+ *
+ * @decision 1d27c3cd
+ */
+export function computeDeferralReleasePatch(
+  db: Db,
+  ownedId: string,
+  owned: Pick<Task, "deferredReason" | "body">,
+  patch: { deferredUntilTaskId?: string | string[] | null; deferredUntilEvent?: DeferredUntilEvent | null; body?: string },
+): {
+  deferredReasonPatch: null;
+  deferredUntilTaskIdPatch?: null;
+  deferredUntilEventPatch?: null;
+  bodyFoldPatch?: string;
+} {
+  const result: ReturnType<typeof computeDeferralReleasePatch> = { deferredReasonPatch: null };
+  if (patch.deferredUntilTaskId === undefined) result.deferredUntilTaskIdPatch = null;
+  if (patch.deferredUntilEvent === undefined) result.deferredUntilEventPatch = null;
+  const freshForFold = db.getTask(ownedId) ?? owned;
+  if (freshForFold.deferredReason) {
+    result.bodyFoldPatch = foldReleasedDeferralIntoBody(patch.body ?? freshForFold.body, freshForFold.deferredReason, new Date().toISOString());
+  }
+  return result;
+}
+
+/**
  * Backstop cap on a DEFAULT board read so a big board can't overflow the tool-result token cap with no
  * explicit limit — the EXACT sibling of DEFAULT_AGENT_SUMMARY_CAP (agentView) / DEFAULT_SESSION_SUMMARY_CAP
  * (sessionView). The CALLER applies it as the default `limit` (see server.ts tasks_list + platform
@@ -1515,20 +1552,13 @@ export async function updateProjectTask(
     // Explicit manual clear — reset deferral provenance, mirrors heldBy resetting on a held clear below.
     // Un-deferring never needs a reason of its own — only a write that would LEAVE the card manually
     // deferred does (the guard above never reaches this branch, since `patch.deferred === false` short
-    // circuits before it).
-    deferredReasonPatch = null;
-    if (patch.deferredUntilTaskId === undefined) deferredUntilTaskIdPatch = null;
-    if (patch.deferredUntilEvent === undefined) deferredUntilEventPatch = null;
-    // Code Review follow-up (1d27c3cd): `owned` was read at the TOP of this function, before the one
-    // await this function can take (the repoKey retarget check above, when the SAME patch also touches
-    // repoKey) — folding from `owned.deferredReason`/`owned.body` across that gap could fold a reason a
-    // concurrent write already cleared, or overwrite a concurrent body edit with a stale base. Re-fetch
-    // immediately before folding — same fix, same reasoning, as persistDeferredStateBestEffort below;
-    // this is the ordinary case's zero-await path defensively covering that one narrow combined-patch gap.
-    const freshForFold = db.getTask(owned.id) ?? owned;
-    if (freshForFold.deferredReason) {
-      bodyFoldPatch = foldReleasedDeferralIntoBody(patch.body ?? freshForFold.body, freshForFold.deferredReason, new Date().toISOString());
-    }
+    // circuits before it). Shared with the REST route (card 14c756df) via computeDeferralReleasePatch —
+    // see its own doc for the re-fetch-before-fold reasoning (1d27c3cd) this used to carry inline here.
+    const release = computeDeferralReleasePatch(db, owned.id, owned, patch);
+    deferredReasonPatch = release.deferredReasonPatch;
+    deferredUntilTaskIdPatch = release.deferredUntilTaskIdPatch;
+    deferredUntilEventPatch = release.deferredUntilEventPatch;
+    bodyFoldPatch = release.bodyFoldPatch;
   } else if (touchesDeferralFields && isManualDeferral) {
     const resultingReason = deferredReasonPatch !== undefined ? deferredReasonPatch : (owned.deferredReason ?? null);
     if (!resultingReason) {

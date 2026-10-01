@@ -27,7 +27,7 @@ import { filterRetainedWorktreesByProject, CodexForkUnsupportedError } from "../
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
-import { toBoardTasks, resolveMergedInfo } from "../mcp/tasks.js";
+import { toBoardTasks, resolveMergedInfo, computeDeferralReleasePatch } from "../mcp/tasks.js";
 import { boardRollup, buildRelationView, planTaskStructure, applyTaskPlan, resolveDeferralInput, hasStructureInput, type TaskStructureInput, type StructurePlan } from "../tasks/relations.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
@@ -5303,7 +5303,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // MCP task tools read/write, so UI and agent never diverge).
   app.post("/api/tasks/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey">> & { baseVersion?: number; deferredUntilTaskId?: string | string[] | null } & TaskStructureInput;
+    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "deferredReason" | "deferredAt" | "deferredUntilEvent">> & { baseVersion?: number; deferredUntilTaskId?: string | string[] | null } & TaskStructureInput;
     // Card 3df86c87: pull the parent/relation fields OUT of the raw body before it reaches db.updateTask —
     // parentId in particular must only ever be written through the validator (planTaskStructure/applyTaskPlan below, planned after this route's last await).
     const structure: TaskStructureInput = { parentId: b.parentId, blockedBy: b.blockedBy, blocks: b.blocks, related: b.related, discoveredFrom: b.discoveredFrom };
@@ -5394,6 +5394,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       plan = planned.plan;
     }
     if (deferral !== undefined) b.deferredUntilTaskId = deferral === null ? null : deferral.length === 1 ? deferral[0] : deferral;
+    // Card 14c756df — a manual `deferred:false` release through this human REST route must clear
+    // deferredUntilTaskId/deferredUntilEvent/deferredReason/deferredAt and fold any outgoing reason into
+    // body, exactly like the agent-facing MCP path does (363f5c2d's M6) — shared via
+    // computeDeferralReleasePatch so the two paths can't diverge on this again. Same convention as the MCP
+    // path: an explicit simultaneous value for deferredUntilTaskId/deferredUntilEvent in THIS SAME patch is
+    // respected, never silently overridden — only a field left untouched (undefined) gets force-cleared.
+    if (b.deferred === false) {
+      const release = computeDeferralReleasePatch(deps.db, existingTask.id, existingTask, { deferredUntilTaskId: rawDeferral, deferredUntilEvent: b.deferredUntilEvent, body: b.body });
+      b.deferredReason = release.deferredReasonPatch;
+      b.deferredAt = null;
+      if (release.deferredUntilTaskIdPatch !== undefined) b.deferredUntilTaskId = release.deferredUntilTaskIdPatch;
+      if (release.deferredUntilEventPatch !== undefined) b.deferredUntilEvent = release.deferredUntilEventPatch;
+      if (release.bodyFoldPatch !== undefined) b.body = release.bodyFoldPatch;
+    }
     // Row write + planned structure in ONE transaction (all or nothing).
     const outcome = deps.db.runInTransaction(() => {
       if (touchesContent && baseVersion !== undefined) {
