@@ -59,6 +59,7 @@ export default function Skills() {
   // conflict resolution. Mirrors `reset` — refresh the editor onto the merged content and remount it,
   // which also closes the resolver (the editor's local state resets on the key change).
   const adopt = useMutation({
+    meta: { inlineError: true },
     mutationFn: (content?: string) => api.adoptSkill(selected!, content),
     onSuccess: (r) => {
       qc.setQueryData(["skill", r.name], { name: r.name, content: r.content });
@@ -165,6 +166,7 @@ function SkillEditor({
 
   // Adopt step 1 — dry-run the merge. Clean → one-click adopt (empty body). Conflict → open the resolver.
   const preview = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.skillMergePreview(name),
     onSuccess: (p) => { if (p.clean) onAdopt(undefined); else setResolver(p); },
   });

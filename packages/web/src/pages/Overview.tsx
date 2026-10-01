@@ -26,7 +26,6 @@ import { MergeGateStrip, MergeGateAttention, mergeGateAttentionCount, useMergeGa
 import { HarnessMixProvider } from "../components/HarnessPicker";
 import { color, font, tone } from "../theme";
 import { RoleBadge } from "../lib/roleDisplay";
-import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 import { errorText } from "../lib/loopbackCredential";
 
 // PROJECT OVERVIEW — the project-scoped analog of the Platform page: one scrolling cockpit for the
@@ -339,6 +338,7 @@ function OtherAttentionList({ items }: { items: AttentionItem[] }) {
 function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRole | null; session?: SessionListItem }) {
   const qc = useQueryClient();
   const spawn = useMutation({
+    meta: { inlineError: true },
     mutationFn: (r?: "manager" | "plain") => api.startSession(agent.id, r),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
@@ -418,7 +418,7 @@ function FleetAccordion({ managers, workers, looseWorkers, archivedHidden }: {
   const end = useEndSession();
   const clearRl = useMutation({
     mutationFn: (id: string) => api.clearSessionRateLimit(id),
-    onSuccess: invalidate, onError: alertUnlessCredentialGuard,
+    onSuccess: invalidate,
   });
 
   // Build the SessionActions props for a row. Manual archive was removed (archiving is automatic on

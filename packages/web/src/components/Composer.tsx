@@ -48,6 +48,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
   const qc = useQueryClient();
   const send = useMutation({
+    meta: { inlineError: true },
     mutationFn: (t: string) => api.sendInput(sessionId, t),
     onSuccess: (r) => {
       // A QUEUED send shows NO caption: the "ledger bar" (SessionQueue) already surfaces every held

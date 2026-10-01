@@ -217,6 +217,7 @@ function SpawnShellModal({ onClose }: { onClose: () => void }) {
   useEffect(() => { if (!command && defaultShell.data?.command) setCommand(defaultShell.data.command); }, [defaultShell.data, command]);
 
   const create = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.createTerminal({
       projectId,
       command: command.trim() || undefined,

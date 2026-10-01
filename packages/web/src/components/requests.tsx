@@ -14,7 +14,6 @@ import {
   requestActionLabel, requestNeedsChip, requestAnswerBadge, requestHint, requestOutcome,
   requestProvenanceText,
 } from "../lib/questions";
-import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 
 // The REQUESTS INBOX (card 695ebab0 — the durable Requests object generalized from the decision inbox).
 // A manager/orchestrator asks the human NON-BLOCKING for one of four kinds of Request — decision · input ·
@@ -92,7 +91,6 @@ function NudgeMgrButton({ q }: { q: QuestionInboxItem }) {
   const nudge = useMutation({
     mutationFn: () => api.sendInput(q.sessionId, `[loom] Reminder: your request "${q.title}" was answered — pull it (question_pull) at that decision point.`),
     onSuccess: () => { setDone(true); window.setTimeout(() => setDone(false), 4000); },
-    onError: alertUnlessCredentialGuard,
   });
   return (
     <Button variant="default" disabled={!q.sessionLive || nudge.isPending}
@@ -117,7 +115,6 @@ function DismissButton({ q }: { q: QuestionInboxItem }) {
   const dismiss = useMutation({
     mutationFn: () => api.dismissQuestion(q.id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["openQuestions"] }),
-    onError: alertUnlessCredentialGuard,
   });
   return (
     <Button variant="ghost" disabled={dismiss.isPending}
@@ -503,7 +500,6 @@ function useAnswerMutation(id: string, mutationFn: () => Promise<unknown>) {
       qc.invalidateQueries({ queryKey: ["question", id] });
       qc.invalidateQueries({ queryKey: ["openQuestions"] });
     },
-    onError: alertUnlessCredentialGuard,
   });
 }
 

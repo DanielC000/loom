@@ -30,24 +30,28 @@ export default function Git() {
   const report = (ok: boolean, text: string) => setFeedback({ ok, text });
 
   const checkout = useMutation({
+    meta: { inlineError: true },
     mutationFn: (branch: string) => api.gitCheckout(projectId, branch),
     onSuccess: (r) => { refresh(); report(r.ok, r.ok ? `Switched to ${r.branch}` : (r.error ?? "checkout failed")); },
-    onError: (e) => report(false, String(e)),
+    onError: (e) => report(false, errorText(e)),
   });
   const createBranch = useMutation({
+    meta: { inlineError: true },
     mutationFn: (name: string) => api.gitCreateBranch(projectId, name),
     onSuccess: (r) => { refresh(); if (r.ok) setNewBranch(""); report(r.ok, r.ok ? `Created + switched to ${r.branch}` : (r.error ?? "create-branch failed")); },
-    onError: (e) => report(false, String(e)),
+    onError: (e) => report(false, errorText(e)),
   });
   const commit = useMutation({
+    meta: { inlineError: true },
     mutationFn: (msg: string) => api.gitCommit(projectId, msg),
     onSuccess: (r) => { refresh(); if (r.ok) setMessage(""); report(r.ok, r.ok ? `Committed ${r.hash?.slice(0, 7)}` : (r.error ?? "commit failed")); },
-    onError: (e) => report(false, String(e)),
+    onError: (e) => report(false, errorText(e)),
   });
   const push = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.gitPush(projectId),
     onSuccess: (r) => { refresh(); report(r.ok, r.ok ? `Pushed ${r.branch}` : (r.error ?? "push failed")); },
-    onError: (e) => report(false, String(e)),
+    onError: (e) => report(false, errorText(e)),
   });
   const busy = checkout.isPending || createBranch.isPending || commit.isPending || push.isPending;
 

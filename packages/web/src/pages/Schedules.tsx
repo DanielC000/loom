@@ -59,10 +59,12 @@ export default function Schedules() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["schedules"] });
   const create = useMutation({
+    meta: { inlineError: true },
     mutationFn: (b: { name: string; agentId: string; cron: string; enabled: boolean; prompt?: string }) => api.createSchedule(b),
     onSuccess: () => { invalidate(); setModal(null); },
   });
   const save = useMutation({
+    meta: { inlineError: true },
     mutationFn: (v: { id: string; patch: { name?: string; cron?: string; prompt?: string | null } }) => api.updateSchedule(v.id, v.patch),
     onSuccess: () => { invalidate(); setModal(null); },
   });

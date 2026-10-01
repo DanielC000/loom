@@ -11,6 +11,10 @@ import { isCredentialGuardMessage } from "./lib/loopbackCredential";
 // silently (a dead-looking button). One global handler covers every mutation; no per-call onError.
 // A mutation that renders its own inline error opts out of the blocking alert via `meta.inlineError`
 // (avoids a redundant + automation-wedging modal — e.g. Settings save).
+//
+// @decision ad42a127 — this handler is the ONLY place that may alert a mutation failure; an alerting
+// call-site `onError` shows a SECOND modal for the same failure (v5 runs both), and a mutation that
+// renders inline without `meta.inlineError` gives the user an inline message AND a modal.
 const queryClient = new QueryClient({
   mutationCache: new MutationCache({
     onError: (err, _vars, _ctx, mutation) => {

@@ -70,6 +70,7 @@ export default function Profiles() {
   // lands a conflict resolution. Mirrors `revert` — refresh the editor onto the merged fields and remount
   // it, which also closes the resolver (the editor's local state resets on the key change).
   const adopt = useMutation({
+    meta: { inlineError: true },
     mutationFn: (resolutions?: Record<string, ProfileFieldResolution>) => api.adoptProfile(selected!, resolutions),
     onSuccess: (p) => {
       qc.setQueryData(["profile", p.id], p);
@@ -178,6 +179,7 @@ function MarkitdownProvisioning() {
     refetchInterval: (query) => (query.state.data?.state === "installing" ? 2000 : false),
   });
   const retry = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.retryPythonProvisioning(),
     onSuccess: (s) => { qc.setQueryData(["pythonProvisioning"], s); qc.invalidateQueries({ queryKey: ["pythonProvisioning"] }); },
   });
@@ -293,6 +295,7 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
 
   // Adopt step 1 — dry-run the field-level merge. Clean → one-click adopt (no resolutions). Conflict → resolver.
   const preview = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.profileMergePreview(profile.id),
     onSuccess: (p) => { if (p.clean) onAdopt(undefined); else setResolver(p); },
   });

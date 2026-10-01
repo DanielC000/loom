@@ -41,7 +41,6 @@ import { HARNESS_TITLE, type Harness } from "../lib/harnessFields";
 import { MergeGateCadencePanel, cadenceDraftFrom, type CadenceDraft } from "../components/mergeGate";
 import { cadenceConfigWrite, intervalError } from "../lib/mergeGate";
 import { color, font, tone, type Tone } from "../theme";
-import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 import { errorText } from "../lib/loopbackCredential";
 
 // Project-scoped settings — edit the per-project config OVERRIDE (deep-partial of ResolvedConfig).
@@ -1603,10 +1602,12 @@ function ConnectionsPanel() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["connections"] });
   const create = useMutation({
+    meta: { inlineError: true },
     mutationFn: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null }) => api.createConnection(b),
     onSuccess: () => { setAdding(false); invalidate(); },
   });
   const createOAuth = useMutation({
+    meta: { inlineError: true },
     mutationFn: (b: { name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string; authUrl?: string; tokenUrl?: string; scopes?: string[]; projectId: string | null }) =>
       api.createOAuthConnection(b),
     onSuccess: () => { setAdding(false); invalidate(); },
@@ -1614,12 +1615,10 @@ function ConnectionsPanel() {
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteConnection(id),
     onSuccess: () => invalidate(),
-    onError: alertUnlessCredentialGuard,
   });
   const consent = useMutation({
     mutationFn: (id: string) => api.initiateOAuthConsent(id),
     onSuccess: (r) => { window.open(r.authUrl, "_blank", "noopener,noreferrer"); },
-    onError: alertUnlessCredentialGuard,
   });
 
   const rows = data ?? [];
@@ -1832,7 +1831,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
   const [localErr, setLocalErr] = useState<string | null>(null);
   // Card 1e8e9b1e (DoD-1): a live pre-save probe — the SonarQube branch of submit() calls this FIRST and
   // only proceeds to onSubmit (the real createConnection POST) once it resolves ok. Never persists anything.
-  const validateSonar = useMutation({ mutationFn: (b: { host: string; token: string }) => api.validateSonarQubeConnection(b) });
+  const validateSonar = useMutation({ meta: { inlineError: true }, mutationFn: (b: { host: string; token: string }) => api.validateSonarQubeConnection(b) });
 
   const submit = () => {
     setLocalErr(null);
@@ -2096,13 +2095,13 @@ function ProjectLinksPanel() {
   const [projectA, setProjectA] = useState("");
   const [projectB, setProjectB] = useState("");
   const create = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.createProjectLink({ projectA, projectB }),
     onSuccess: () => { setProjectA(""); setProjectB(""); invalidate(); },
   });
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteProjectLink(id),
     onSuccess: () => invalidate(),
-    onError: alertUnlessCredentialGuard,
   });
 
   const rows = data ?? [];
@@ -2266,6 +2265,7 @@ function NodeModulesReclaimPanel() {
   const chosen = entries.filter((e) => selected.includes(e.worktreePath));
 
   const reclaim = useMutation({
+    meta: { inlineError: true },
     // Same `minAgeHours` the listing above was read at: the POST re-derives eligibility at whatever
     // threshold it is handed, so sending a different one would make every requested path ineligible.
     mutationFn: () => api.reclaimNodeModules({ minAgeHours, worktreePaths: chosen.map((e) => e.worktreePath) }),
@@ -2482,10 +2482,12 @@ function PollJobsPanel() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["pollJobs"] });
   const create = useMutation({
+    meta: { inlineError: true },
     mutationFn: (b: Parameters<typeof api.createPollJob>[0]) => api.createPollJob(b),
     onSuccess: () => { setAdding(false); invalidate(); },
   });
   const update = useMutation({
+    meta: { inlineError: true },
     mutationFn: (v: { id: string; patch: Parameters<typeof api.updatePollJob>[1] }) => api.updatePollJob(v.id, v.patch),
     onSuccess: () => { setEditingId(null); invalidate(); },
   });
@@ -2494,12 +2496,10 @@ function PollJobsPanel() {
   const toggle = useMutation({
     mutationFn: (v: { id: string; enabled: boolean }) => api.updatePollJob(v.id, { enabled: v.enabled }),
     onSuccess: () => invalidate(),
-    onError: alertUnlessCredentialGuard,
   });
   const remove = useMutation({
     mutationFn: (id: string) => api.deletePollJob(id),
     onSuccess: () => invalidate(),
-    onError: alertUnlessCredentialGuard,
   });
 
   const rows = jobs.data ?? [];
@@ -2798,13 +2798,13 @@ function CapabilitiesPanel() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["capabilities"] });
   const create = useMutation({
+    meta: { inlineError: true },
     mutationFn: (b: Parameters<typeof api.createCapability>[0]) => api.createCapability(b),
     onSuccess: () => { setAdding(false); invalidate(); },
   });
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteCapability(id),
     onSuccess: () => invalidate(),
-    onError: alertUnlessCredentialGuard,
   });
 
   const rows = data ?? [];

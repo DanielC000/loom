@@ -307,6 +307,7 @@ function AuditorScheduleList({ auditorId }: { auditorId?: string }) {
   const [cron, setCron] = useState("0 9 * * *");
 
   const create = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.createSchedule({ agentId: auditorId!, cron: cron.trim(), enabled: true, kind: "auditor", name: "Platform Auditor" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
   });

@@ -5,7 +5,6 @@ import { api, workerDiffQuery } from "../lib/api";
 import { analyzeDiff, riskTone, type DiffAnalysis } from "../lib/diff";
 import { Panel, Button, Chip, Dot, SectionLabel } from "./ui";
 import { color, font, radius, tone } from "../theme";
-import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 
 // MISSION CONTROL CENTERPIECE — the review/merge gate as a fast-triage surface. Each worker branch
 // awaiting a human merge becomes a rich card: an auto-summary line, diff stats, a risk badge, and the
@@ -78,7 +77,6 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
   const merge = useMutation({
     mutationFn: () => api.mergeWorker(workerId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-    onError: alertUnlessCredentialGuard,
   });
 
   const accent = analysis?.highRisk ? color.red : analysis?.mediumRisk ? color.amber : color.phosphor;

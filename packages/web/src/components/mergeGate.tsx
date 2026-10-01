@@ -19,7 +19,7 @@ import { api } from "../lib/api";
 import { color, font, radius, tone as toneMap, type Tone } from "../theme";
 import { Badge, Button, Chip, Input, Meter, Segmented } from "./ui";
 import { AttentionRow } from "./fleet";
-import { alertUnlessCredentialGuard, errorText } from "../lib/loopbackCredential";
+import { errorText } from "../lib/loopbackCredential";
 import {
   ago, badgeForInterval, bisectLabel, cadenceConfigWrite, cadenceOf, gateFailureAttentionText,
   intervalError, intervalFieldOf, isEscalatedFailure, landingLabel, readMergeGate, RECENT_VERDICT_CAP,
@@ -287,7 +287,6 @@ export function MergeGateStrip({ projectId, override, gateCommand, multiRepo }: 
   const gateNext = useMutation({
     mutationFn: () => api.gateNextMerge(projectId!),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ["mergeGateStatus", projectId] }); },
-    onError: alertUnlessCredentialGuard,
   });
 
   // GRACEFUL DEGRADATION (DoD): a daemon without the merge-gate routes 404s, which api.mergeGateStatus

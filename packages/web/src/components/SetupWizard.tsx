@@ -94,6 +94,7 @@ function WizardBody({ onClose }: { onClose: () => void }) {
 
   // Escape closes the wizard from any step (except mid-apply, where it would strand the flow).
   const apply = useMutation({
+    meta: { inlineError: true },
     mutationFn: async (): Promise<{ projectId: string; projectName: string; result: TemplateApplyResult | null }> => {
       // "Create new" inits a real directory (host-write, confined to the sanctioned base); "Bind
       // existing" registers a project at the path the user already has on disk.

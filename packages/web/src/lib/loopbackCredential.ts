@@ -101,22 +101,6 @@ export function errorText(e: unknown): string | undefined {
 }
 
 /**
- * The shared `onError` for a mutation that alerts its raw message at its own call site, bypassing the
- * global handler in main.tsx. Byte-identical for every Error except the credential guard's, which the
- * banner owns. (A non-Error rejection is stringified here, where the old inline `(e as Error).message`
- * would have read `undefined` — a deliberate improvement, not a byte-identical case.)
- *
- * @decision 093981dd — a mutation that alerts at its own call site must use THIS, not `window.alert`
- * directly, or a token-less browser gets the daemon's unrunnable "see `loom open`" advice once per
- * control. Found by the live repro AFTER the global handler alone looked sufficient.
- */
-export function alertUnlessCredentialGuard(e: unknown): void {
-  const message = e instanceof Error ? e.message : String(e);
-  if (isCredentialGuardMessage(message)) return;
-  window.alert(message);
-}
-
-/**
  * Does a failed WebSocket tell us the same thing? A browser cannot read an upgrade's HTTP status, so this
  * INFERS the lock from the two facts it holds: the handshake itself was rejected (never reached `open`),
  * and this browser has no token at all.

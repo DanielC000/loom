@@ -274,10 +274,12 @@ function ProactiveHomeSection({ sessionId }: { sessionId: string }) {
     qc.invalidateQueries({ queryKey: ["companionConfigs"] });
   };
   const save = useMutation({
+    meta: { inlineError: true },
     mutationFn: (b: { channel: string; chatId: string }) => api.setCompanionHome(sessionId, b),
     onSuccess: () => { invalidate(); setEditing(false); },
   });
   const clear = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.clearCompanionHome(sessionId),
     onSuccess: invalidate,
   });
@@ -336,6 +338,7 @@ function VoiceProvisioningSection() {
   const qc = useQueryClient();
   const { data, isLoading, isError, error } = useQuery({ queryKey: ["platformConfig"], queryFn: api.getPlatformConfig });
   const save = useMutation({
+    meta: { inlineError: true },
     // Send ONLY this key (card 654869e2) — never the whole cached override spread back. The platform
     // PATCH leaves an omitted top-level key alone and SHALLOW-replaces a submitted one, so re-sending a
     // cached snapshot reverts every top-level scalar (schedulerEnabled / operatorEnabled /
@@ -632,6 +635,7 @@ function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onCh
   const set = <K extends keyof CompanionConfigForm>(k: K, v: CompanionConfigForm[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   const save = useMutation({
+    meta: { inlineError: true },
     mutationFn: (b: Record<string, unknown>) =>
       cfg ? api.updateCompanionConfig(companion.sessionId, b) : api.createCompanionConfig({ ...b, sessionId: companion.sessionId }),
     onSuccess: () => { onChanged(); setEditing(false); },
@@ -747,6 +751,7 @@ function ChannelRow({ sessionId, binding, onChanged }: { sessionId: string; bind
   const [confirm, setConfirm] = useState(false);
   const inApp = binding.channel === IN_APP_CHANNEL;
   const remove = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.deleteCompanionBinding(sessionId, binding.channel),
     onSuccess: () => { setConfirm(false); onChanged(); },
   });
@@ -797,6 +802,7 @@ function ConnectTelegram({ companion, onChanged }: { companion: CompanionRow; on
   const set = <K extends keyof CompanionTelegramForm>(k: K, v: CompanionTelegramForm[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   const connect = useMutation({
+    meta: { inlineError: true },
     // Two ordered writes: config first (token at rest), then the authoritative binding. If the binding POST
     // fails the token is already stored (masked) — the user can retry Connect; we never leave a half state
     // silently (the error surfaces). The config uses PUT when a row exists (the common in-app case), else POST.
@@ -862,6 +868,7 @@ function AdvancedAddBinding({ companion, onChanged }: { companion: CompanionRow;
   const [localErr, setLocalErr] = useState<string | null>(null);
 
   const createBinding = useMutation({
+    meta: { inlineError: true },
     mutationFn: (b: { sessionId: string; channel: string; chatId: string; scope: "dm" | "group" }) => api.createCompanionBinding(b),
     onSuccess: () => { onChanged(); setOpen(false); setChatId(""); },
   });
@@ -916,10 +923,11 @@ function AllowedSenders({ sessionId, channel }: { sessionId: string; channel: st
   const invalidate = () => qc.invalidateQueries({ queryKey: ["companionSenders", sessionId] });
 
   const add = useMutation({
+    meta: { inlineError: true },
     mutationFn: (b: { sessionId: string; channel: string; senderId: string; label?: string | null }) => api.addCompanionAllowedSender(b),
     onSuccess: () => { invalidate(); setSenderId(""); setLabel(""); },
   });
-  const remove = useMutation({ mutationFn: (id: string) => api.removeCompanionAllowedSender(id), onSuccess: invalidate });
+  const remove = useMutation({ meta: { inlineError: true }, mutationFn: (id: string) => api.removeCompanionAllowedSender(id), onSuccess: invalidate });
 
   const submit = () => {
     setLocalErr(null);
@@ -979,6 +987,7 @@ function PersonaSection({ sessionId }: { sessionId: string }) {
   const [showBrief, setShowBrief] = useState(false);
 
   const save = useMutation({
+    meta: { inlineError: true },
     mutationFn: (startupPrompt: string) => api.updateCompanionPrompt(sessionId, startupPrompt),
     onSuccess: (r) => { qc.setQueryData(["companionPrompt", sessionId], r); setEditing(false); setLocalErr(null); },
   });
@@ -1056,6 +1065,7 @@ function SkillsSection({ sessionId }: { sessionId: string }) {
   const skills = q.data ?? [];
 
   const del = useMutation({
+    meta: { inlineError: true },
     mutationFn: (name: string) => api.deleteCompanionSkill(sessionId, name),
     onSuccess: (r) => { qc.setQueryData(["companionSkills", sessionId], r.skills); },
   });
@@ -1129,6 +1139,7 @@ function MemorySection({ sessionId }: { sessionId: string }) {
   const memories = q.data ?? [];
 
   const del = useMutation({
+    meta: { inlineError: true },
     mutationFn: (name: string) => api.deleteCompanionMemory(sessionId, name),
     onSuccess: (r) => { qc.setQueryData(["companionMemories", sessionId], r.memories); },
   });
@@ -1203,6 +1214,7 @@ function RemindersSection({ sessionId }: { sessionId: string }) {
   const reminders = q.data ?? [];
 
   const del = useMutation({
+    meta: { inlineError: true },
     mutationFn: (id: string) => api.deleteCompanionReminder(sessionId, id),
     onSuccess: (r) => { qc.setQueryData(["companionReminders", sessionId], r.reminders); },
   });
@@ -1288,6 +1300,7 @@ function RestrictToolsSection({ sessionId }: { sessionId: string }) {
   const [confirmRestart, setConfirmRestart] = useState(false);
 
   const save = useMutation({
+    meta: { inlineError: true },
     mutationFn: (restrictedTools: boolean) => api.updateCompanionRestrictedTools(sessionId, restrictedTools),
     onSuccess: (r) => {
       qc.setQueryData(["companionRestrictedTools", sessionId], r);
@@ -1296,6 +1309,7 @@ function RestrictToolsSection({ sessionId }: { sessionId: string }) {
   });
 
   const restart = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => restartCompanionSession(sessionId),
     onSuccess: () => {
       setNeedsRestart(false);
@@ -1411,6 +1425,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
   const [ack, setAck] = useState(false);
 
   const setLead = useMutation({
+    meta: { inlineError: true },
     mutationFn: (on: boolean) => api.setCompanionLeadMode(sessionId, on),
     onSuccess: () => {
       setEnabling(false);
@@ -1600,6 +1615,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
   const onGrantMutated = (appliesLive: boolean) => { if (!appliesLive) setPendingApply(true); };
 
   const respawn = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.upgradeCompanionSession(sessionId),
     onSuccess: () => {
       setPendingApply(false);
@@ -1838,11 +1854,13 @@ function LeverCard({ sessionId, meta, grants, projects, onMutated }: {
   const invalidate = () => qc.invalidateQueries({ queryKey: ["companionGrants", sessionId] });
 
   const upsert = useMutation({
+    meta: { inlineError: true },
     mutationFn: (b: { projectId: string | null; mode: GrantMode; config: Record<string, unknown> }) =>
       api.upsertCompanionGrant(sessionId, { capability: meta.slug, projectId: b.projectId, mode: b.mode, config: b.config }),
     onSuccess: () => { invalidate(); onMutated(meta.appliesLive); },
   });
   const remove = useMutation({
+    meta: { inlineError: true },
     mutationFn: (projectId: string | null) => api.deleteCompanionGrant(sessionId, meta.slug, projectId),
     onSuccess: () => { invalidate(); onMutated(meta.appliesLive); },
   });
@@ -2206,6 +2224,7 @@ function PairingSection({ sessionId }: { sessionId: string }) {
   const [minted, setMinted] = useState<{ code: string; expiresAt: string } | null>(null);
 
   const mint = useMutation({
+    meta: { inlineError: true },
     mutationFn: (b: { sessionId: string; grantType: "dm-bind" | "group-sender" }) => api.mintCompanionPairing(b),
     onSuccess: (res) => setMinted({ code: res.code, expiresAt: res.expiresAt }),
   });
@@ -2285,6 +2304,7 @@ function DeleteCompanionSection({ companion, label, onDeleted }: { companion: Co
   const envPinned = companion.config?.envPinned ?? false;
 
   const remove = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.deleteCompanionConfig(companion.sessionId),
     onSuccess: onDeleted,
   });

@@ -9,7 +9,6 @@ import { Panel, Button, Input, SectionLabel, StatusPill, Chip, Badge } from "../
 import { color, font, tone } from "../theme";
 import { roleDisplay } from "../lib/roleDisplay";
 import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
-import { alertUnlessCredentialGuard } from "../lib/loopbackCredential";
 
 // Per-project Archive: every STOPPED session of the header's active project (sessions auto-archive on
 // exit, so Archive = all stopped sessions). Structured as a searchable manager → worker fold-out tree:
@@ -70,12 +69,10 @@ export default function Archive() {
   const restore = useMutation({
     mutationFn: (id: string) => api.restoreSession(id),
     onSuccess: invalidate,
-    onError: alertUnlessCredentialGuard,
   });
   const del = useMutation({
     mutationFn: (id: string) => api.deleteArchivedSession(id),
     onSuccess: (_r, id) => { if (sessionId === id) setSessionId(null); invalidate(); },
-    onError: alertUnlessCredentialGuard,
   });
 
   const rows = useMemo(() => archived.data?.pages.flatMap((p) => p.items) ?? [], [archived.data]);

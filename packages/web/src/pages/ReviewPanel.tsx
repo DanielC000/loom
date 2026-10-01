@@ -36,6 +36,7 @@ function ReviewPanelInner({ workerId }: { workerId: string }) {
   const diff = useQuery({ ...workerDiffQuery(workerId), enabled: !!workerId });
 
   const merge = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.mergeWorker(workerId),
     // `pending` (merged:null, card 361520a0 Half Four) means the gate is STILL running — checked BEFORE
     // `r.merged` below, which used to read the pending case's `false` as a genuine rejection and show

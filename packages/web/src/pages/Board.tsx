@@ -106,6 +106,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   // drawer + refetch the board. On the server's live-session guard 400, delErr throws the reason — leave
   // the drawer open and surface `del.error` to the user instead of silently closing.
   const del = useMutation({
+    meta: { inlineError: true },
     mutationFn: (id: string) => api.deleteTask(id),
     onSuccess: () => { setOpenTaskId(null); qc.invalidateQueries({ queryKey: ["board", projectId] }); },
   });

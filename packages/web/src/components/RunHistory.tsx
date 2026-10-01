@@ -108,6 +108,7 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
   // resume); surface the server's error inline if a "resumable"/"unknown" row still turns out unresumable.
   const canResume = canResumeSession(run);
   const resumeM = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.resumeSession(run.id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["allSessions"] });

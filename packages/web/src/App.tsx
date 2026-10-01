@@ -37,6 +37,7 @@ function UpdateBanner() {
   useEffect(() => { setDismissed(latest ? localStorage.getItem(`loom.updateDismissed.${latest}`) === "1" : false); }, [latest]);
 
   const mut = useMutation({
+    meta: { inlineError: true },
     mutationFn: api.triggerUpdate,
     // A 202 ack (the daemon defers the spawn 50ms, so the response flushes first) means the update is
     // underway → show the reconnect notice. A genuine failure (e.g. 409 on a source daemon, or a 5xx)

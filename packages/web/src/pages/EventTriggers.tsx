@@ -55,10 +55,12 @@ export default function EventTriggers() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["eventTriggers"] });
   const create = useMutation({
+    meta: { inlineError: true },
     mutationFn: api.createEventTrigger,
     onSuccess: () => { invalidate(); setModal(null); },
   });
   const save = useMutation({
+    meta: { inlineError: true },
     mutationFn: (v: { id: string; patch: Parameters<typeof api.updateEventTrigger>[1] }) => api.updateEventTrigger(v.id, v.patch),
     onSuccess: () => { invalidate(); setModal(null); },
   });
