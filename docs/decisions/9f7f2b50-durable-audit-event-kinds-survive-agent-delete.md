@@ -40,7 +40,9 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
   `build_gate_single_file_retry_attempt` (card 2ec00f6a — attempt 1's own verdict, written before the
   retry re-queues; the only durable record of attempt 1 while the retry waits),
   `merge_request`, `merge_done`, `merge_rejected`, `merge_cancelled`, `batch_merge_forfeited`,
-  `kill_switch`.
+  `batch_merge_branch_diverted`, `batch_merge_ff_unverified` (card b801bad0, fix round — a security-
+  relevant refusal/unverified-landing outcome on the batch fast-forward; a human reading it later, after
+  the manager/workers involved are long gone, is the whole point), `kill_switch`.
 - **Incident / forensic record** (each one's own comment says it previously left no trace, or is the
   only record of an abnormal outcome): `session_died`, `session_recovery_abandoned`,
   `worker_report_undelivered`, `worker_exited_without_report`, `manager_exited_with_live_workers`,

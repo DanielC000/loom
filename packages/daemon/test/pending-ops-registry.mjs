@@ -1035,6 +1035,59 @@ const classifyWithCancel = (outcome) => (!outcome.ok ? "failed" : outcome.value.
   }
 }
 
+// Card b801bad0 (fix round 4), DoD item 1's "or at least a classifyOutcome unit assertion" alternative for
+// `"ff-unverified"` — `mergeBatchTracked`'s own `classifyOutcome` (sessions/service.ts) classifies a batch
+// result's `.branchDiverted`/`.unverified` fields into the literal outcome strings `"branch-diverted"`/
+// `"ff-unverified"`, both members of `NEVER_CACHED_OUTCOMES`. batch-merge-diverted-not-cached.mjs already
+// proves the real end-to-end behavior for `"branch-diverted"` (REAL git, a genuine re-fire); this block
+// proves the SAME registry-level property directly for BOTH outcome strings, using a classifyOutcome
+// shaped exactly like the real one — so a future edit that narrows `NEVER_CACHED_OUTCOMES` to drop either
+// string, or that reclassifies either shape into something cacheable, is caught here too, without needing
+// a real repo for the "ff-unverified" half (no production seam below `mergeBatchTracked` itself can reach
+// that outcome from a hermetic, no-git test — see batch-merge-ff-unverified-no-fallback.mjs's own header).
+{
+  // Mirrors mergeBatchTracked's real classifyOutcome lambda (sessions/service.ts) exactly on the two
+  // fields this test cares about.
+  const classifyBatch = (outcome) => (!outcome.ok ? "unknown" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.ok ? "landed" : "rejected");
+  const batchOpts = { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "heads-AAA", classifyOutcome: classifyBatch };
+
+  // (bd1) "branch-diverted" — a re-call under the SAME identity, LONG AFTER the TTL'd display window
+  // (never-expiring map, same as every other NEVER_CACHED_OUTCOMES member), must mint a genuinely fresh op.
+  {
+    const reg = new PendingOpRegistry();
+    let calls = 0;
+    const r1 = await reg.attach("bd1", "merge", "mgr1", 200, async () => { calls++; return { ok: false, branchDiverted: true, reason: "canonical diverted" }; }, undefined, batchOpts);
+    check("(bd1 precondition) first call ran once, classified branch-diverted", calls === 1 && r1.value.branchDiverted === true);
+    await waitUntil(() => reg.peek("bd1") === undefined, { label: "bd1 TTL'd display view expired" });
+    const r2 = await reg.attach("bd1", "merge", "mgr1", 200, async () => { calls++; return { ok: true, landed: ["x"] }; }, undefined, batchOpts);
+    check("(bd1) \"branch-diverted\" is NEVER cached: a same-identity re-call LONG after the window still re-runs for real", calls === 2 && r2.value.ok === true && r2.cacheHit === undefined);
+  }
+
+  // (bd2) "ff-unverified" — same shape, the sibling outcome.
+  {
+    const reg = new PendingOpRegistry();
+    let calls = 0;
+    const r1 = await reg.attach("bd2", "merge", "mgr1", 200, async () => { calls++; return { ok: false, unverified: true, reason: "post-ff re-read failed" }; }, undefined, batchOpts);
+    check("(bd2 precondition) first call ran once, classified ff-unverified", calls === 1 && r1.value.unverified === true);
+    await waitUntil(() => reg.peek("bd2") === undefined, { label: "bd2 TTL'd display view expired" });
+    const r2 = await reg.attach("bd2", "merge", "mgr1", 200, async () => { calls++; return { ok: true, landed: ["x"] }; }, undefined, batchOpts);
+    check("(bd2) \"ff-unverified\" is NEVER cached: a same-identity re-call LONG after the window still re-runs for real", calls === 2 && r2.value.ok === true && r2.cacheHit === undefined);
+  }
+
+  // (bd3) NEGATIVE CONTROL, proving (bd1)/(bd2) aren't vacuously green because NOTHING ever caches under
+  // `classifyBatch`: an ORDINARY "rejected" outcome (classified outcome string NOT in NEVER_CACHED_OUTCOMES)
+  // under the identical harness/opts DOES cache and replay, same as cv4's rejection case above.
+  {
+    const reg = new PendingOpRegistry();
+    let calls = 0;
+    const r1 = await reg.attach("bd3", "merge", "mgr1", 200, async () => { calls++; return { ok: false, reason: "plain gate rejection" }; }, undefined, batchOpts);
+    check("(bd3 precondition) first call ran once, classified rejected (not a NEVER_CACHED_OUTCOMES member)", calls === 1 && r1.value.ok === false);
+    await waitUntil(() => reg.peek("bd3") === undefined, { label: "bd3 TTL'd display view expired" });
+    const r2 = await reg.attach("bd3", "merge", "mgr1", 200, async () => { calls++; return { ok: true, landed: ["x"] }; }, undefined, batchOpts);
+    check("(bd3 negative control) an ordinary rejection IS cached/replayed under this harness — (bd1)/(bd2) are discriminating, not vacuous", calls === 1 && r2.value.ok === false && r2.cacheHit !== undefined);
+  }
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), onSurfacedPending (card edc1ec12) fires synchronously and strictly BEFORE any possible settle for the same op — even under the tightest possible race — fires once per call that observes 'still pending', and never fires on the fast path, an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers, (card 79b0ee52) opts.isRetainedResultUsable rejects a retained value the predicate marks unusable (mints a genuinely fresh op instead of re-serving it) while still serving a USABLE retained value with no second invocation and never letting two concurrent rejecting callers mint two concurrent real ops for the same key, and (card e3e40167) opts.onOpMinted fires exactly once per genuinely fresh entry — fast OR slow path, BEFORE run() ever executes, never on a retry or a retained-cache hit — while opts.onSettle fires for EVERY genuine settle (fast or surfaced-pending, unlike onSettledAfterPending which is surfaced-pending-only), strictly BEFORE onSettledAfterPending in the same callback, with the same identity-guard protection against a clobbered/evicted op's late settle. CARD 4aedde84: a settled result served from EITHER cache read (the never-expiring until-superseded map, or the TTL'd retained map) now carries a POSITIVE `cacheHit` field (with the identity it was validated against, when known) instead of leaving the caller to infer a cache hit from freshMint's absence — mutually exclusive with freshMint by construction, absent entirely from the pending shape (a cache hit can never occur on that branch)."
   : `\n❌ ${failures} FAILURE(S).`);

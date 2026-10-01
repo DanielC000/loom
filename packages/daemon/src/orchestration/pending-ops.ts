@@ -27,8 +27,11 @@ export type PendingOpOutcome = string;
  *  describes files matching no commit, so a ref-keyed identity can't vouch for it: never cache or replay it.
  *  @decision 13571c71 — "post-gate-error": a batch step AFTER a passing gate threw, so the outcome is UNKNOWN (main may or may not have moved): never replay it, a re-call must re-mint and re-derive from real git.
  *  @decision fb525c31 — "squash-refused": a refusal about the CANONICAL CHECKOUT's state (or a post-gate squash failure), not the branch; cleaning the checkout moves no identity, so a cached replay would be stale. Never cache or replay it.
- *  @decision 975c774b — likewise "gate-tip-moved": a PASS refused because the branch moved after the gate spawned, or (card 94c28d2a, `gateRoundTripFail`) a FAIL earned on a run whose tip left the gated commit and came back. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error"]);
+ *  @decision 975c774b — likewise "gate-tip-moved": a PASS refused because the branch moved after the gate spawned, or (card 94c28d2a, `gateRoundTripFail`) a FAIL earned on a run whose tip left the gated commit and came back.
+ *  @decision b801bad0 — "branch-diverted"/"ff-unverified": a batch fast-forward refusal describing the
+ *  CANONICAL CHECKOUT at fast-forward time, not the resolved candidate branches — like "squash-refused", a
+ *  branch-keyed cache key can't see a restored checkout, so a cached replay would be stale. Never cache either. */
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "ff-unverified"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

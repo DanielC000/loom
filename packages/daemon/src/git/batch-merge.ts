@@ -3,6 +3,7 @@ import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, 
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
 import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, type MergeEmptyKind } from "./worktrees.js";
+import { readHeadShaAndBranch } from "./mainline-watch.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 import { mergeCommitBlocksLinearization, MAX_MERGE_COMMITS_CHECKED } from "./merge-linearization.js";
 import { isMergeGateRed } from "../orchestration/gate-semaphore.js";
@@ -47,6 +48,14 @@ const GIT_OP_TIMEOUT_MS = 15_000;
 export interface BatchGitDeps {
   timeoutMs?: number;
   gitFactory?: (repoPath: string, timeoutMs: number) => Pick<SimpleGit, "raw">;
+  /** Card b801bad0 — the branch canonical HEAD was checked out on when `baseMainSha` (the batch's cut
+   *  point) was resolved, passed through to {@link fastForwardCanonicalMain} so it can refuse a fast-forward
+   *  that would land on a DIFFERENT branch (e.g. a `GitWriter.createBranch()` checkout that diverted the
+   *  canonical checkout while this batch's gate was running — the sha-only forfeit check can't see this,
+   *  since a fresh `checkout -b` moves to a branch pointing at the SAME commit). Optional: a caller that
+   *  passes none keeps today's behavior (sha-only verification), mirroring `mergeBranchLocked`'s own
+   *  optional `expectedBranchTip`. */
+  expectedBaseBranch?: string;
 }
 
 function boundedGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
@@ -729,6 +738,26 @@ export interface FastForwardResult {
    *  outcome (that would be a further canonical-mutating attempt against a quarantined repo) — abort and
    *  leave the batch worktree for a human, exactly like an assembly-time quarantine. */
   quarantined?: boolean;
+  /** Card b801bad0 — true iff refused because the canonical checkout is not on the expected mainline
+   *  branch, either BEFORE the fast-forward (a checkout diverted the repo while this batch's gate was
+   *  running) or AFTER it (the `--ff-only` landed, but not on the branch this batch believes it advanced) —
+   *  only set when the caller passed `expectedBaseBranch` (see {@link BatchGitDeps}). Distinct from
+   *  `forfeited`: the sha-forfeit check alone cannot see a same-commit branch divert. */
+  branchDiverted?: boolean;
+  /** Card b801bad0 (fix round, Code Review MINOR 2) — true iff the POST-ff RE-READ itself could not be
+   *  completed (e.g. a transient timeout) after an apparently-successful `--ff-only`. Distinct from a
+   *  CONFIRMED `branchDiverted`: a failed re-read proves nothing either way — the `--ff-only` call itself
+   *  did not throw, so the landing most likely DID happen, it just could not be verified. The caller must
+   *  treat this like `branchDiverted` for the purpose of NOT running a per-candidate fallback (a fallback
+   *  squash risks a second, divergent landing on top of content that's probably already on main), but
+   *  should record and surface it as a DISTINCT, less alarming outcome — a human can confirm with a plain
+   *  `git log` rather than treating it as a confirmed security-relevant divert. */
+  unverified?: boolean;
+  /** Card b801bad0 (fix round) — the branch canonical was actually found checked out on when a
+   *  `branchDiverted` outcome was detected (pre- or post-ff); `null` when detached. Absent (never) on
+   *  `unverified`, since that outcome is specifically the case where this could not be read. Lets the
+   *  caller's durable event/typed field name both sides of the divert without re-parsing `reason` text. */
+  observedBranch?: string | null;
 }
 
 /**
@@ -752,18 +781,29 @@ export async function fastForwardCanonicalMain(
   try {
     return await withCanonicalIndexLock(repoPath, async () => {
       const { git, timeoutMs } = boundedGit(repoPath, deps);
-      let currentMainSha: string;
-      try {
-        currentMainSha = (await withTimeout(
-          git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, batch fast-forward check)",
-        )).trim();
-      } catch (e) {
-        return { ok: false, reason: `failed to read canonical HEAD: ${(e as Error).message}` };
-      }
+      // @decision b801bad0 — ONE spawn for BOTH the forfeit sha-check and (when pinned) the branch divert
+      // pre-check: `readHeadShaAndBranch` (git/mainline-watch.ts), not two separate rev-parse/symbolic-ref
+      // calls — see that function's own doc for the exact invocation and why flag order matters here.
+      const entry = await readHeadShaAndBranch(git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, batch fast-forward check)");
+      if (!entry) return { ok: false, reason: "failed to read canonical HEAD (and checked-out branch)" };
+      const currentMainSha = entry.sha;
       if (currentMainSha !== expectedBaseSha) {
         return {
           ok: false, forfeited: true, currentMainSha,
           reason: `canonical main advanced (now ${currentMainSha}) since this batch was cut from ${expectedBaseSha} — this batch's gate never validated main's current tree; falling back to a per-branch re-gate`,
+        };
+      }
+      // Pin the checked-out BRANCH too, not just the sha: a same-commit checkout divert (e.g.
+      // GitWriter.createBranch()) defeats the sha-only forfeit check above. Optional: a caller passing no
+      // `expectedBaseBranch` keeps today's sha-only behavior.
+      if (deps.expectedBaseBranch !== undefined && entry.branch !== deps.expectedBaseBranch) {
+        return {
+          ok: false, branchDiverted: true, observedBranch: entry.branch,
+          // Card b801bad0 (fix round 3) — NEVER "falling back to a per-branch re-gate" here: unlike an
+          // ordinary forfeit (above), a branchDiverted refusal runs NO per-candidate fallback at all (the
+          // solo path pins only a sha, never a branch, and would risk landing onto this same stray branch)
+          // — see the caller's own `result.branchDiverted` handling, sessions/service.ts.
+          reason: `canonical repo is checked out on "${entry.branch ?? "(detached)"}", not the expected mainline branch "${deps.expectedBaseBranch}" — something diverted the checkout since this batch was cut`,
         };
       }
       if (targetSha === expectedBaseSha) return { ok: true }; // nothing landed on top — no-op fast-forward
@@ -773,6 +813,25 @@ export async function fastForwardCanonicalMain(
       let raisedToken: string | undefined;
       const onTreeDeathSettled = (confirmed: boolean): void => {
         if (confirmed && raisedToken) clearMergeQuarantineByToken(repoPath, raisedToken);
+      };
+      // @decision b801bad0 — verify the LANDED RESULT after an apparently-successful ff-only (ONE spawn,
+      // same helper as above); refuse on a mismatch rather than report ok:true. Gated ENTIRELY on
+      // `expectedBaseBranch` — unset pays nothing extra here, mirroring `expectedBranchTip`'s contract.
+      const verifyLanded = async (): Promise<FastForwardResult> => {
+        if (deps.expectedBaseBranch === undefined) return { ok: true };
+        const post = await readHeadShaAndBranch(git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, post-ff verify)");
+        // Card b801bad0 (fix round, Code Review MINOR 2) — a failed RE-READ is NOT a confirmed divert: the
+        // `--ff-only` call above did not throw, so the landing most likely happened and this is only a
+        // verification failure. Typed distinctly (`unverified`, never `branchDiverted`) so the caller can
+        // treat it as "probably landed, could not confirm" rather than a security-relevant divert.
+        if (!post) return { ok: false, unverified: true, reason: "fast-forward appeared to succeed but canonical HEAD (and checked-out branch) could not be re-read to verify — the landing likely happened but could not be confirmed" };
+        if (post.sha !== targetSha) {
+          return { ok: false, branchDiverted: true, observedBranch: post.branch, reason: `fast-forward appeared to succeed but canonical HEAD reads ${post.sha}, not the expected ${targetSha} — refusing to report success` };
+        }
+        if (post.branch !== deps.expectedBaseBranch) {
+          return { ok: false, branchDiverted: true, observedBranch: post.branch, reason: `fast-forward landed on "${post.branch ?? "(detached)"}", not the expected mainline branch "${deps.expectedBaseBranch}" — refusing to report success` };
+        }
+        return { ok: true };
       };
       try {
         await killableCanonicalRaw(
@@ -793,10 +852,10 @@ export async function fastForwardCanonicalMain(
         try {
           headAfterFailure = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-ff-failure verify)")).trim();
         } catch { /* unknown — fall through to the ordinary failure below */ }
-        if (headAfterFailure === targetSha) return { ok: true };
+        if (headAfterFailure === targetSha) return await verifyLanded();
         return { ok: false, reason: `fast-forward failed: ${(e as Error).message}` };
       }
-      return { ok: true };
+      return await verifyLanded();
     });
   } catch (e) {
     if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
@@ -859,6 +918,16 @@ export interface RunBatchedMergeResult {
   /** @decision 13571c71 — mirrors `BatchGateResult.cancelled`; never also `gateFailed`. */
   cancelled?: boolean;
   forfeited?: boolean;
+  /** Card b801bad0 — mirrors {@link FastForwardResult.branchDiverted}: the fast-forward refused because the
+   *  canonical checkout was not on the expected mainline branch, either before or after the `--ff-only`. */
+  branchDiverted?: boolean;
+  /** Card b801bad0 (fix round) — mirrors {@link FastForwardResult.unverified}: the POST-ff re-read itself
+   *  failed, so the landing's actual outcome is unknown — distinct from a confirmed `branchDiverted`. */
+  unverified?: boolean;
+  /** Card b801bad0 (fix round) — mirrors {@link FastForwardResult.observedBranch}: the branch canonical was
+   *  actually found checked out on when `branchDiverted` fired. Absent on `unverified` (that outcome is
+   *  specifically the case where this could not be read). */
+  observedBranch?: string | null;
   reason?: string;
   gateDetail?: BatchGateResult;
   /** Set iff `forfeited` is true — the canonical HEAD `fastForwardCanonicalMain` observed instead of
@@ -945,7 +1014,9 @@ export async function runBatchedMerge(
   if (!ff.ok) {
     return {
       ok: false, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate,
-      forfeited: !!ff.forfeited, reason: ff.reason, currentMainSha: ff.currentMainSha, ...(ff.quarantined ? { quarantined: true } : {}),
+      forfeited: !!ff.forfeited, reason: ff.reason, currentMainSha: ff.currentMainSha,
+      ...(ff.quarantined ? { quarantined: true } : {}), ...(ff.branchDiverted ? { branchDiverted: true } : {}),
+      ...(ff.unverified ? { unverified: true } : {}), ...(ff.observedBranch !== undefined ? { observedBranch: ff.observedBranch } : {}),
     };
   }
   return { ok: true, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate };

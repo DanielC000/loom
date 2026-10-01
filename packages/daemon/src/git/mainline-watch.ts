@@ -1,3 +1,4 @@
+import type { SimpleGit } from "simple-git";
 import { canonicalGit, localReadGitEnv } from "./bounded.js";
 import { parseLoomTrailerBlock } from "./worktrees.js";
 
@@ -128,14 +129,43 @@ export class MainlineDeadlineError extends Error {
   constructor(what: string) { super(`mainline check deadline exceeded (${what})`); this.name = "MainlineDeadlineError"; }
 }
 
+/**
+ * Card b801bad0 — PURE parse of `git rev-parse HEAD --symbolic-full-name HEAD`'s two-line output (verified
+ * directly: `--symbolic-full-name` applies to args positionally, not invocation-wide, so the FIRST `HEAD`
+ * — before the flag — still resolves to the raw sha; the manager's own first-suggested invocation,
+ * `--symbolic-full-name HEAD HEAD`, does NOT work — confirmed it prints the symbolic form TWICE, since the
+ * flag, appearing before both args, governs both). Line 1 is always the sha; line 2 is either
+ * `refs/heads/<branch>` or the literal `HEAD` (git's own documented fallback when nothing nameable
+ * resolves — covers detached HEAD). Fails CLOSED (returns `null`) on anything else: wrong line count, an
+ * unparseable sha, or a non-`refs/heads/` second line (defensive — never observed for a HEAD resolution,
+ * but this function never guesses).
+ */
+export function parseHeadShaAndBranch(output: string): { sha: string; branch: string | null } | null {
+  const lines = output.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  if (lines.length !== 2) return null;
+  const sha = lines[0]!, ref = lines[1]!;
+  if (!/^[0-9a-f]{40,64}$/.test(sha)) return null;
+  if (ref === "HEAD") return { sha, branch: null }; // detached — git's own fallback, never a guess
+  if (!ref.startsWith("refs/heads/")) return null; // some other non-branch ref — fail closed
+  const branch = ref.slice("refs/heads/".length);
+  return branch ? { sha, branch } : null;
+}
+
+/** ONE spawn (card b801bad0 — down from two): `git rev-parse HEAD --symbolic-full-name HEAD`, parsed by
+ *  {@link parseHeadShaAndBranch}. Never throws — any spawn failure or unparseable output returns `null`. */
+export async function readHeadShaAndBranch(
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, what: string,
+): Promise<{ sha: string; branch: string | null } | null> {
+  try {
+    const out = await withTimeout(git.raw(["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"]), timeoutMs, what);
+    return parseHeadShaAndBranch(out);
+  } catch { return null; }
+}
+
 /** The canonical checkout's current branch + tip. `null` when detached/unborn (nothing to watch). */
 export async function readMainlineHead(repoPath: string, timeoutMs: number): Promise<{ branch: string; tip: string } | null> {
-  const git = canonicalGit(repoPath, timeoutMs);
-  let branch: string;
-  try { branch = (await withTimeout(git.raw(["symbolic-ref", "--short", "-q", "HEAD"]), timeoutMs, "git symbolic-ref HEAD")).trim(); } catch { return null; }
-  if (!branch) return null;
-  const tip = (await withTimeout(git.raw(["rev-parse", "--verify", `refs/heads/${branch}`]), timeoutMs, "git rev-parse")).trim();
-  return /^[0-9a-f]{40,64}$/.test(tip) ? { branch, tip } : null;
+  const r = await readHeadShaAndBranch(canonicalGit(repoPath, timeoutMs), timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD");
+  return r?.branch ? { branch: r.branch, tip: r.sha } : null;
 }
 
 /**

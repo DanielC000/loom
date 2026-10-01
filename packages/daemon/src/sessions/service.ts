@@ -23,7 +23,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
-import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
+import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
@@ -593,6 +593,18 @@ type MergeBatchResult = {
    *  no-start shape as `cancelled`), and the batch worktree was left on disk for a human, never removed.
    *  Absent on every other outcome. */
   quarantined?: boolean;
+  /** Card b801bad0 (fix round) — the fast-forward refused because canonical mainline's checkout was not
+   *  on the expected branch, either before or after the `--ff-only` (see `FastForwardResult.branchDiverted`,
+   *  git/batch-merge.ts). Like `quarantined`/`cancelled`, no per-candidate fallback was started — `fallback`
+   *  lists each candidate as `started:false` — and a durable `batch_merge_branch_diverted` event is filed.
+   *  Absent on every other outcome. */
+  branchDiverted?: boolean;
+  /** Card b801bad0 (fix round) — the fast-forward's `--ff-only` call did not throw, but the POST-ff
+   *  re-read that confirms WHERE it landed could not be completed (see `FastForwardResult.unverified`) —
+   *  distinct from a confirmed `branchDiverted`: the landing most likely happened, it just could not be
+   *  verified. No per-candidate fallback was started either (same reasoning as `branchDiverted`), and a
+   *  durable `batch_merge_ff_unverified` event is filed. Absent on every other outcome. */
+  unverified?: boolean;
   /** Card 6cc803b2 — phase instrumentation: the two phases (of the five this card measures) that are
    *  only ever known inside {@link SessionService.mergeBatchTracked}'s own `run` closure, once
    *  {@link runBatchedMerge} has resolved — the batch-worktree cut (before any gate is even considered)
@@ -2306,6 +2318,16 @@ export class SessionService {
    *  real production window. */
   private readonly spawnOpRetainMs: number;
   private readonly heldProbeGitFactory?: BoundedGitDeps["gitFactory"];
+  /** TEST SEAM (card b801bad0, fix round 3): git factory threaded into `runBatchedMerge`'s own `deps.gitFactory`
+   *  — i.e. it replaces `runBatchedMerge`'s WHOLE git surface (assembly's cherry-pick/reset/commit calls too,
+   *  `git/batch-merge.ts`'s own `deps.gitFactory` reads), never just the fast-forward in isolation. Named for
+   *  its one USE so far: a hermetic test drives a REAL `mergeBatchTracked` batch through a FAKE post-ff
+   *  re-read failure (the `unverified` outcome), the one branch no production seam can otherwise reach from
+   *  this level (see batch-merge-ff-unverified-no-fallback.mjs) — by proxying every other call through to the
+   *  real `boundedSimpleGit` and intercepting only the one it targets, not because the seam itself is scoped
+   *  to the ff. `undefined` in every existing test constructor ⇒ `runBatchedMerge`'s own default (real
+   *  `canonicalGit`), byte-identical to before this seam existed. */
+  private readonly batchFfGitFactory?: BatchGitDeps["gitFactory"];
   /** Public read of {@link spawnOpRetainMs} in whole minutes — lets `worker_spawn`'s own pending-note/
    *  description text (mcp/orchestration.ts) state the REAL configured window instead of a hardcoded
    *  copy that could drift from {@link SPAWN_OP_RETAIN_MS} on a future change to either. Rounds to the
@@ -2584,6 +2606,9 @@ export class SessionService {
       spawnOpRetainMs?: number;
       /** TEST SEAM (card 42daa283): git factory for the hold's release check (`isBranchHeld`'s landed-trailer read) only. */
       heldProbeGitFactory?: BoundedGitDeps["gitFactory"];
+      /** TEST SEAM (card b801bad0, fix round 3): git factory for `runBatchedMerge`'s WHOLE git surface
+       *  (assembly AND the fast-forward), not the fast-forward alone — see the field's own doc. */
+      batchFfGitFactory?: BatchGitDeps["gitFactory"];
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
@@ -2598,6 +2623,7 @@ export class SessionService {
     this.syncAttachBudgetMs = opts?.syncAttachBudgetMs ?? SYNC_ATTACH_BUDGET_MS;
     this.finalizeWorkerDeathPolls = opts?.finalizeWorkerDeathPolls ?? 50;
     this.spawnOpRetainMs = opts?.spawnOpRetainMs ?? SPAWN_OP_RETAIN_MS;
+    this.batchFfGitFactory = opts?.batchFfGitFactory;
     this.heldProbeGitFactory = opts?.heldProbeGitFactory;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
@@ -4400,12 +4426,19 @@ export class SessionService {
      *  alongside a batch "pass" verdict, whether the gate (and any retry) passing actually resulted in the
      *  assembled branches landing on main. Written UNCONDITIONALLY whenever this verdict is a batch pass —
      *  a stored `false` is a MEASURED NEGATIVE (mirroring `retryPassed`/`transientRetried`'s own
-     *  present-with-false convention), covering BOTH real `ok:false` shapes reachable on an already-passed
-     *  batch gate: a fast-forward forfeit (canonical main advanced mid-gate) or a post-gate HEAD-read
-     *  failure — see `MergeBatchResult.retryWarning`'s own three-case doc for the identical enumeration.
-     *  `retryWarning` below omits its "ALL N land" batch clause — WITHOUT touching `batchBranchCount`
-     *  itself — exactly when this reads `false`. `undefined` on a non-batch row, a "fail"/"cancelled"/
-     *  "error" verdict kind, or a row that predates this field. */
+     *  present-with-false convention), covering the `ok:false` shapes reachable on an already-passed batch
+     *  gate where the landing is CONFIRMED not to have happened as claimed: a fast-forward forfeit
+     *  (canonical main advanced mid-gate) or a confirmed branch divert (canonical checked out somewhere
+     *  other than mainline) — see `MergeBatchResult.retryWarning`'s own three-case doc for the identical
+     *  enumeration. `retryWarning` below omits its "ALL N land" batch clause — WITHOUT touching
+     *  `batchBranchCount` itself — exactly when this reads `false`.
+     *  `undefined` carries a THIRD, distinct meaning here (card b801bad0 fix round 4), alongside the usual
+     *  "non-batch row"/"predates this field" ones: a batch "pass" whose fast-forward genuinely landed but
+     *  whose POST-landing re-read failed, so the landing could not be VERIFIED either way (`result.unverified`,
+     *  git/batch-merge.ts) — set here at line ~17664 as `result.unverified ? undefined : result.ok`. Never
+     *  read this `undefined` as "nothing to report" on a batch pass row; check `reason`/the durable
+     *  `batch_merge_ff_unverified` event instead. On a non-batch row, a "fail"/"cancelled"/"error" verdict
+     *  kind, or a row that predates this field, `undefined` means only that. */
     batchLanded?: boolean;
     /** Card a0d1165c, sibling of `retriedFile`/`retryPassed`/`retryWarning` immediately above — the SAME
      *  durable exposure for the OTHER retry that can produce a `passed:true` settled merge, the
@@ -17067,9 +17100,10 @@ export class SessionService {
     //  (~25 min), so the owner may have recycled meanwhile; resolve each candidate's CURRENT owner (strictly:
     //  the original manager or a `recycled_from` descendant of it) instead of passing the captured id to the
     //  ownership-checked confirm, and report a candidate that could not be started as `started:false`.
-    const runFallback = async (list: { workerSessionId: string; reason: string; decision?: MergeGateDecision }[], batchOpId?: string, reservations?: Map<string, { release: (n?: number) => void }>, noStart = false): Promise<{ workerSessionId: string; reason: string; started?: boolean }[]> => {
-      // @decision 13571c71 — `noStart` (a CANCELLED batch) reports every candidate through this same path with its OWN reason + this suffix, and starts nothing.
-      const tail = noStart ? " (batch cancelled — not started)" : "";
+    const runFallback = async (list: { workerSessionId: string; reason: string; decision?: MergeGateDecision }[], batchOpId?: string, reservations?: Map<string, { release: (n?: number) => void }>, noStart: boolean | string = false): Promise<{ workerSessionId: string; reason: string; started?: boolean }[]> => {
+      // @decision 13571c71 — `noStart` reports every candidate through this same path with its OWN reason + this suffix, and starts nothing.
+      // Card b801bad0 — `noStart` also accepts a STRING, an outcome-specific tail (branchDiverted's/unverified's own manager guidance) in place of the generic "batch cancelled" wording every no-start outcome used to carry regardless of which one applied.
+      const tail = noStart ? ` (${typeof noStart === "string" ? noStart : "batch cancelled — not started"})` : "";
       const out: { workerSessionId: string; reason: string; started?: boolean }[] = [];
       const heldReason = (h: { branch: string; assembledTip: string | null; liveTip: string | null; phase: BranchAdvancedDuringGate["phase"]; gitUnverified: boolean; solo?: boolean }) =>
         h.gitUnverified
@@ -17253,7 +17287,30 @@ export class SessionService {
           projectId: finalProjectId, taskId: null, branch: null, startedAt: opMintedAt,
           state: "pending", surfacedPending: false,
         });
-        const baseMainSha = (await resolveGitRef(finalRepoPath, "HEAD", { timeoutMs: this.gitOpMs })) ?? "";
+        // Card b801bad0 — also pin the BRANCH canonical HEAD is checked out on right now (not just its
+        // sha), so `fastForwardCanonicalMain` can refuse a fast-forward that lands on a different branch
+        // (e.g. a same-commit `GitWriter.createBranch()` checkout) — see that function's own doc.
+        const baseMainHead = await readMainlineHead(finalRepoPath, this.mainlineGitMs()).catch(() => null);
+        const baseMainSha = baseMainHead?.tip ?? ((await resolveGitRef(finalRepoPath, "HEAD", { timeoutMs: this.gitOpMs })) ?? "");
+        // Card b801bad0 (fix round 3) — REVERTED: a prior round of this fix preferred the STORED mainline
+        // watermark over this LIVE read for the branch half of the pin (catching a divert that predates the
+        // cut, at the cost of the self-defeating case where the live read alone would have agreed with
+        // itself). That preference is undone here: `checkMainlineMove` (below) re-stamps the watermark to
+        // WHATEVER branch is currently checked out on any branch CHANGE, silently, including the very stray
+        // branch a batch's own divert refusal just correctly caught mid-run (it runs AFTER the gate closure
+        // but BEFORE this batch's own fast-forward — see its call site, below) — so a watermark-preferred
+        // pin lasts exactly one batch: the NEXT batch's cut reads the now-corrupted watermark and either
+        // spuriously refuses (canonical is actually back on mainline, pin says stray) or fast-forwards onto
+        // the stray branch (canonical is still diverted, pin now agrees with it). Card 2a6a292a owns closing
+        // that re-stamp gap; the watermark-preferred pin belongs back here only once it does. Pin from the
+        // live read alone — the branch canonical was checked out on right now, at cut time — and LOG (never
+        // silently degrade to an unpinned, sha-only batch) when it is unavailable (detached HEAD / a read
+        // failure).
+        const expectedBaseBranch = baseMainHead?.branch;
+        if (expectedBaseBranch === undefined) {
+          // eslint-disable-next-line no-console
+          console.warn(`[merge-batch] no mainline branch available to pin for ${finalRepoPath} (repoKey ${batchRepoKey}) — canonical HEAD is detached/unreadable; this batch's fast-forward runs WITHOUT a branch-divert check (the sha-only forfeit check still applies)`);
+        }
         let batchWorktreePath: string | undefined;
         // Round 4, Code Review b2ebf41f (ruling 1c): set from `result.quarantined` once `runBatchedMerge`
         // returns — read by the outer `finally` below, which must NOT remove a quarantined batch worktree
@@ -17569,7 +17626,7 @@ export class SessionService {
           //  scoped to end at the squash, not the outer `finally` (finalize never moves main's HEAD).
           let result: Awaited<ReturnType<typeof runBatchedMerge>>;
           try {
-            result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
+            result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs, expectedBaseBranch, gitFactory: this.batchFfGitFactory });
             batchQuarantined = !!result.quarantined; // round 4: read by the outer `finally`'s worktree-removal guard
             // @decision 92eeb319 — see `onSettle`
             if (!batchGateRan && result.landed.length === 0) batchAllDropped = true;
@@ -17611,8 +17668,12 @@ export class SessionService {
           // `formatRetryAlsoFailedWarning`'s OWN batch clause is correctly worded off `batchBranchCount`
           // regardless (Code Review finding [4]: that field is genuinely WANTED, unmodified, on a rejection
           // — never a harmless-no-op argument to lean on for widening this guard later).
+
+          // Card b801bad0 (fix round 3) — `unverified` is the ONE `!result.ok` outcome where `false` would be
+          // a false claim: the `--ff-only` did not throw (the landing most likely DID happen), only the
+          // post-ff re-read failed — mirrors `postGateThrow`'s own `landedKnown === undefined` ("can't tell").
           if (batchGateVerdict?.kind === "pass" && batchGateVerdict.payload) {
-            batchGateVerdict.payload.batchLanded = result.ok;
+            batchGateVerdict.payload.batchLanded = result.unverified ? undefined : result.ok;
           }
 
           // @decision bc2240d7 — record every candidate drop durably + in the log, keyed by this batch's opId,
@@ -17665,6 +17726,64 @@ export class SessionService {
               ...strandedFallback,
             ], opId, undefined, true);
             return { ok: false, opId, landed: [], fallback: notStarted, quarantined: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
+          }
+          if (result.branchDiverted) {
+            // MAJOR fix (Code Review, fix round for card b801bad0): a branchDiverted refusal must NOT fall
+            // into the ordinary per-candidate solo fallback below. The solo path (mergeBranchLocked,
+            // git/worktrees.ts) pins only the SHA via its own `expectedBranchTip`, never the checked-out
+            // branch — so after this refusal, each fallback's own squash would land onto the SAME stray
+            // branch `fastForwardCanonicalMain` just refused to advance onto, and (via
+            // `findLandedSquashCommit`'s own ALREADY_MERGED detection) a later confirm could even find this
+            // batch's own content already sitting there and finalize the card as merged, though mainline
+            // never got it. Treated exactly like `quarantined`/`cancelled` above: report every candidate as
+            // not landed, start nothing, surface it loudly via a durable event.
+            evtBatch("batch_merge_branch_diverted", {
+              repoPath: finalRepoPath, expectedBranch: expectedBaseBranch ?? null, observedBranch: result.observedBranch ?? null,
+              baseMainSha, reason: result.reason, fastForwardMs: result.fastForwardMs,
+            });
+            // Card b801bad0 (fix round 3) — the dedicated manager guidance for this outcome, naming the
+            // actual observed/expected branch rather than the generic "batch cancelled" wording.
+            // Card b801bad0 (fix round 4) — `observedBranch === expectedBaseBranch` is the ONE shape
+            // `verifyLanded`'s POST-ff sha re-read can produce (git/batch-merge.ts ~828): the checkout is
+            // genuinely on the right branch, only the sha mismatches — i.e. something else advanced
+            // mainline past this batch's own fast-forward target. "restore the checkout" is actively wrong
+            // guidance there (there is nothing to restore); every OTHER divert shape (the pre-ff pin, or
+            // verifyLanded's branch-mismatch case) really is a stray checkout to restore.
+            const divertTail = result.observedBranch !== undefined && result.observedBranch === expectedBaseBranch
+              ? `mainline moved past the batch's own fast-forward target (canonical is on the expected branch "${expectedBaseBranch}", but not at the expected sha) — the landing could not be confirmed; check git log on ${expectedBaseBranch} BEFORE any worker_merge_confirm`
+              : `canonical checkout is on "${result.observedBranch ?? "(detached)"}", expected "${expectedBaseBranch ?? "?"}": restore it BEFORE any worker_merge_confirm; a solo confirm now would land off mainline`;
+            const notStarted = await runFallback([
+              ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "the canonical mainline checkout diverted to an unexpected branch" })),
+              ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+              ...strandedFallback,
+            ], opId, undefined, divertTail);
+            return { ok: false, opId, landed: [], fallback: notStarted, branchDiverted: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
+          }
+          if (result.unverified) {
+            // MINOR 2 fix (Code Review): a failed POST-ff RE-READ is NOT a confirmed divert — the
+            // `--ff-only` call itself did not throw, so the landing most likely DID happen; a per-candidate
+            // fallback here risks a second, divergent landing on top of content that's probably already on
+            // main (same reasoning as `branchDiverted` above, so no fallback either), but this is a
+            // DISTINCT, less alarming outcome — record it durably and let a human confirm with a plain
+            // `git log` rather than treating it as a confirmed security-relevant divert. The next landing's
+            // own `checkMainlineMove` self-corrects regardless of whether this landed (it reads main's live
+            // tip directly, not this result) — see mainline-watch-ff-unverified.mjs.
+            evtBatch("batch_merge_ff_unverified", {
+              repoPath: finalRepoPath, expectedBranch: expectedBaseBranch ?? null, targetSha: result.batchHeadSha ?? null,
+              baseMainSha, reason: result.reason, fastForwardMs: result.fastForwardMs,
+            });
+            // Card b801bad0 (fix round 3) — the dedicated manager guidance for this outcome: the landing
+            // most likely happened, so the next step is CONFIRMING it, not restoring anything.
+            // Card b801bad0 (fix round 4) — also name the checkout check: an unverified post-ff re-read
+            // means canonical's OWN branch is unconfirmed too, not just the landing — a solo
+            // worker_merge_confirm on a checkout that quietly diverted meanwhile would land off mainline.
+            const unverifiedTail = `the batch MAY have landed: check git log on ${expectedBaseBranch ?? "mainline"}; once confirmed, worker_merge_confirm finalizes each via ALREADY_MERGED — and confirm canonical is checked out on ${expectedBaseBranch ?? "mainline"} before any worker_merge_confirm`;
+            const notStarted = await runFallback([
+              ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "the batch fast-forward's landed result could not be verified" })),
+              ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+              ...strandedFallback,
+            ], opId, undefined, unverifiedTail);
+            return { ok: false, opId, landed: [], fallback: notStarted, unverified: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
           if (!result.ok) {
             const fallback = await runFallback([
@@ -17904,6 +18023,14 @@ export class SessionService {
           ? `[loom:merge-batch-unknown] merge_batch [op ${opId}] errored AFTER its gate passed — ${outcome.value.reason ?? "see fallback"}. ${fallbackSummary(outcome.value)}`
           : outcome.value.cancelled
           ? `[loom:merge-batch-cancelled] merge_batch [op ${opId}] was cancelled before its gate ran (${outcome.value.reason ?? "cancelled"}). This is NOT a failure — no verdict was reached and NOTHING was started: no candidate was routed to an individual worker_merge_confirm. Re-run merge_batch if you still want it.`
+          // Card b801bad0 (fix round 3) — dedicated branches, never the generic "landed nothing" wording
+          // below: both carry their own manager guidance (see runFallback's own matching tail, above).
+          : outcome.value.branchDiverted
+          ? `[loom:merge-batch-diverted] merge_batch [op ${opId}] refused: ${outcome.value.reason ?? "canonical checkout diverted to an unexpected branch"}. Restore the canonical checkout to the expected mainline branch BEFORE any worker_merge_confirm — a solo confirm now would land off mainline. NOTHING was started: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
+          : outcome.value.unverified
+          // Card b801bad0 (fix round 4) — also name the checkout check, mirroring the runFallback tail
+          // above: an unverified post-ff re-read leaves canonical's OWN branch unconfirmed too.
+          ? `[loom:merge-batch-unverified] merge_batch [op ${opId}]: ${outcome.value.reason ?? "the batch fast-forward's landed result could not be verified"}. The batch MAY have landed: check git log on the mainline branch; once confirmed, worker_merge_confirm finalizes each candidate via ALREADY_MERGED — and confirm canonical is checked out on the mainline branch before any worker_merge_confirm. NOTHING further was started: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
           : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`;
         try {
           // Card 791def40: fresh read, mirroring the solo-merge settle nudge (confirmWorkerMergeTracked's
@@ -17964,7 +18091,12 @@ export class SessionService {
         identityOptional: batchAlreadyFinished,
         // CANCELLED-VETO CLASSIFICATION (card cf803152 finding [2]; card 13571c71): a cancelled batch is a normal resolved value carrying
         // the explicit `cancelled` field (set at the `GateCancelledError` catch above) — never a sniff of `reason` text.
-        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.ok ? "landed" : "rejected"),
+        // Card b801bad0 (fix round 3) — `branchDiverted`/`unverified` are classified distinctly from an
+        // ordinary gate `"rejected"`, and both are in `NEVER_CACHED_OUTCOMES` (pending-ops.ts): neither
+        // describes the resolved candidate branches at all (they are facts about the CANONICAL CHECKOUT at
+        // fast-forward time), so a cached replay would be stale the moment a human restores the checkout —
+        // exactly the `"squash-refused"` reasoning that const's own doc already states for the solo path.
+        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.ok ? "landed" : "rejected"),
         // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
         //  settled, never the gate's own inner resolve.
         //

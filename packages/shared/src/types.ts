@@ -1619,6 +1619,22 @@ export type OrchestrationEventKind =
   //  it's the ONE failure mode batching makes strictly worse (up to K branches' gates wasted, not
   //  just 1). Never emit `currentMainSha` as null/"undefined" when absent — omit the key.
   | "batch_merge_forfeited"
+  // Card b801bad0 (fix round) — the batch fast-forward refused because canonical mainline's CHECKOUT was
+  // not on the expected branch, either BEFORE the `--ff-only` (a checkout diverted the repo while the
+  // batch's own gate was running) or AFTER an apparently-successful one (landed, but not on the branch the
+  // batch believed it advanced) — see `FastForwardResult.branchDiverted`'s own doc, git/batch-merge.ts.
+  // Distinct from `batch_merge_forfeited`: a sha-only forfeit check cannot see a same-commit branch divert.
+  // Filed under the confirming MANAGER; `detail` carries { opId, repoPath, expectedBranch, observedBranch,
+  // baseMainSha, reason, fastForwardMs, branches }. Like a forfeit/quarantine, NO per-candidate fallback
+  // runs for this outcome — see `mergeBatchTracked`'s own handling.
+  | "batch_merge_branch_diverted"
+  // Card b801bad0 (fix round) — the batch fast-forward's `--ff-only` call did not throw, but the POST-ff
+  // re-read that confirms WHERE it landed could not be completed (e.g. a transient timeout) — see
+  // `FastForwardResult.unverified`'s own doc, git/batch-merge.ts. Distinct from `batch_merge_branch_diverted`:
+  // this is NOT a confirmed divert — the landing most likely happened, it just could not be verified. Filed
+  // under the confirming MANAGER; `detail` carries { opId, repoPath, expectedBranch, targetSha, baseMainSha,
+  // reason, fastForwardMs, branches }. Like `batch_merge_branch_diverted`, no per-candidate fallback runs.
+  | "batch_merge_ff_unverified"
   // One candidate DROPPED from a merge_batch (conflict, non-linearizable merge commit, empty diff, ...) —
   // filed per drop, even when the batch never reaches its gate. `detail` carries { opId, branch, reason,
   // conflict, branches }; the drop reason is otherwise only in the (bounded) nudge. Card bc2240d7.
@@ -1706,7 +1722,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true,
-  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
+  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true,
   codex_auto_commit: true,
