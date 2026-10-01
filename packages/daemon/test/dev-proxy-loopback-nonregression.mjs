@@ -13,13 +13,11 @@ import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
-import { hermeticPort } from "./_hermetic-port.mjs";
+import { listenHermetic } from "./_hermetic-port.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMP = mkdtempManaged("loom-devproxy-");
 process.env.LOOM_HOME = TMP;
-const DAEMON_PORT = hermeticPort();
-process.env.LOOM_PORT = String(DAEMON_PORT); // read by packages/web/vite.config.ts at config-load time
 const sandboxHome = path.join(TMP, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;
@@ -43,7 +41,9 @@ const app = await buildServer({
   db, pty: stub, sessions: { killAllWorkers: () => 0 }, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub,
   setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, requestShutdown: () => {},
 });
-await app.listen({ port: DAEMON_PORT, host: "127.0.0.1" });
+// listenHermetic finalizes LOOM_PORT (read by packages/web/vite.config.ts at config-load time, i.e.
+// each startVite() call below) to whichever port actually ends up bound.
+const DAEMON_PORT = await listenHermetic(app);
 
 const servers = [];
 const startVite = async (extraProxy) => {

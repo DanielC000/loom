@@ -89,7 +89,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempManaged, registerForCleanup, finishAndExit, useOwnLoomHome } from "./_tmp-fixture.mjs";
-import { hermeticPort } from "./_hermetic-port.mjs";
+import { reserveHermeticPort } from "./_hermetic-port.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -111,7 +111,10 @@ try {
 }
 
 useOwnLoomHome("loom-home-deny-real-");
-process.env.LOOM_PORT = String(hermeticPort());
+// reserveHermeticPort (not the plain pid-derived hermeticPort()) — this file imports PtyHost BEFORE its
+// server/listen() exist, so the port must be FINAL here. See disallow-harness-scheduling-tools-real-
+// spawn.mjs's own copy of this note / _hermetic-port.mjs's listenHermetic doc comment.
+process.env.LOOM_PORT = String(await reserveHermeticPort());
 requireHermeticEnv({ port: true });
 
 const { ensureDirs, LOOM_HOME, SETTINGS_DIR, SKILLS_DIR, LOGS_DIR, SKILL_BASE_DIR, WORKSPACE_ROOT, sessionScratchDir } = await import("../dist/paths.js");

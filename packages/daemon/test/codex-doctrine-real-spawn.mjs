@@ -37,7 +37,7 @@ import { promisify } from "node:util";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { waitUntil } from "./_wait.mjs";
-import { hermeticPort } from "./_hermetic-port.mjs";
+import { hermeticPort, listenHermetic } from "./_hermetic-port.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -93,20 +93,12 @@ const app = await buildServer({
   orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, operatorMcp: stub, runMcp: stub,
   control: stub, usageStatus: stub, requestShutdown: () => {},
 });
-let listenErr;
-for (let attempt = 0; attempt < 5; attempt++) {
-  const candidate = attempt === 0 ? Number(process.env.LOOM_PORT) : 40000 + Math.floor(Math.random() * 20000);
-  process.env.LOOM_PORT = String(candidate);
-  try {
-    await app.listen({ port: candidate, host: "127.0.0.1" });
-    listenErr = null;
-    break;
-  } catch (e) {
-    listenErr = e;
-    console.log(`[warn] listen(${candidate}) failed (${e.code}) — retrying with a different port`);
-  }
-}
-if (listenErr) throw listenErr;
+// Windows reserves arbitrary port ranges (Hyper-V/WSL `netsh` exclusions) that a plain hermeticPort() pick
+// can land on (EACCES, not EADDRINUSE) — listenHermetic reserves each candidate via a real OS `:0` bind
+// first (structurally outside any reserved range) rather than guessing, and retries on top of that for the
+// residual EADDRINUSE race. LOOM_PORT is re-set on each attempt since downstream PORT-sensitive imports
+// (below) only happen once this resolves.
+await listenHermetic(app);
 
 // NOW safe to import — LOOM_PORT reflects the port actually bound above.
 const { PtyHost } = await import("../dist/pty/host.js");

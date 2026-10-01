@@ -90,7 +90,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempManaged, registerForCleanup, finishAndExit } from "./_tmp-fixture.mjs";
-import { hermeticPort } from "./_hermetic-port.mjs";
+import { reserveHermeticPort } from "./_hermetic-port.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -118,7 +118,11 @@ const TMP = mkdtempManaged("loom-harness-sched-real-");
 fs.mkdirSync(path.join(TMP, "logs"), { recursive: true });
 fs.mkdirSync(path.join(TMP, "tmp", "settings"), { recursive: true });
 process.env.LOOM_HOME = TMP;
-process.env.LOOM_PORT = String(hermeticPort());
+// reserveHermeticPort (not the plain pid-derived hermeticPort()) — this file imports PtyHost BEFORE its
+// server/listen() exist (see the ordering note below), so the port must be FINAL here, not merely a
+// placeholder a later retry could still change. See _hermetic-port.mjs's own listenHermetic doc comment
+// for why this file can't use that helper at the .listen() call site instead.
+process.env.LOOM_PORT = String(await reserveHermeticPort());
 requireHermeticEnv({ port: true });
 
 // IMPORTANT ORDERING (mirrors codex-mcp-reachability-real-spawn.mjs's own note): Db/buildServer/
