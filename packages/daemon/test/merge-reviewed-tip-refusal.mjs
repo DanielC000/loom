@@ -37,15 +37,31 @@ const git = (cwd, args) => execSync(`git ${args}`, { cwd, encoding: "utf8", stdi
 const onMain = (repo, file) => { try { git(repo, `cat-file -e HEAD:${file}`); return true; } catch { return false; } };
 const dbs = [];
 
+// Card 8b5e002d: 15 of world()'s 17 callers pass no `baseFiles` — a real `git init` is ~300-450ms of real
+// subprocess spawn on Windows (measured); a plain recursive filesystem copy of an already-built template
+// needs none (measured ~6x faster for this fixture shape). Built once, reused via fs.cpSync for every
+// no-baseFiles call; the 2 callers with their own baseFiles keep the original real-git-init path.
+const WORLD_TEMPLATE = path.join(os.tmpdir(), `loom-mrt-tmpl-${sfx}`);
+registerForCleanup(WORLD_TEMPLATE);
+fs.mkdirSync(WORLD_TEMPLATE, { recursive: true });
+fs.writeFileSync(path.join(WORLD_TEMPLATE, "README.md"), "# mrt\n");
+execSync(`git init -q && git config user.email mrt@loom && git config user.name mrt`, { cwd: WORLD_TEMPLATE });
+commitAll(WORLD_TEMPLATE, "init", GIT_ID);
+
 // opts.gateBody: the gate command's script body (default: pass). opts.mergeGate: the project's orchestration.mergeGate ("off" ⇒ the gate-off fallback path).
 async function world(tag, labels, opts = {}) {
   const repo = path.join(os.tmpdir(), `loom-mrt-${tag}-${sfx}`);
-  fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo);
-  fs.writeFileSync(path.join(repo, "README.md"), "# mrt\n");
-  for (const [f, c] of Object.entries(opts.baseFiles ?? {})) fs.writeFileSync(path.join(repo, f), c);
-  execSync(`git init -q && git config user.email mrt@loom && git config user.name mrt`, { cwd: repo });
-  commitAll(repo, "init", GIT_ID);
+  const hasBaseFiles = Object.keys(opts.baseFiles ?? {}).length > 0;
+  if (hasBaseFiles) {
+    fs.mkdirSync(repo, { recursive: true });
+    fs.writeFileSync(path.join(repo, "README.md"), "# mrt\n");
+    for (const [f, c] of Object.entries(opts.baseFiles)) fs.writeFileSync(path.join(repo, f), c);
+    execSync(`git init -q && git config user.email mrt@loom && git config user.name mrt`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
+  } else {
+    fs.cpSync(WORLD_TEMPLATE, repo, { recursive: true });
+  }
   const projId = `mrt-proj-${tag}-${sfx}`, agentId = `mrt-agent-${tag}-${sfx}`, mgrId = `mrt-mgr-${tag}-${sfx}`;
   const script = path.join(os.tmpdir(), `loom-mrt-gate-${tag}-${sfx}.mjs`);
   registerForCleanup(script);

@@ -81,14 +81,41 @@ function plantDriver(repo, wt, kind, cmd, tag) {
   }
 }
 
+// Card 8b5e002d: `world()`'s baseline (README.md + f.txt=BASE, one commit) is byte-identical across
+// EVERY call — a real `git init` is ~300-450ms of real subprocess spawn on Windows (measured); a plain
+// recursive filesystem copy of an already-built template needs none (measured ~6x faster for this
+// fixture shape). Built once, reused via fs.cpSync for every world() call.
+const WORLD_TEMPLATE = path.join(os.tmpdir(), `loom-cgi-world-tmpl-${sfx}`);
+registerForCleanup(WORLD_TEMPLATE);
+fs.mkdirSync(WORLD_TEMPLATE, { recursive: true });
+fs.writeFileSync(path.join(WORLD_TEMPLATE, "README.md"), "# cgi\n");
+fs.writeFileSync(path.join(WORLD_TEMPLATE, "f.txt"), BASE);
+execSync(`git init -q && git config user.email cgi@loom && git config user.name cgi`, { cwd: WORLD_TEMPLATE });
+commitAll(WORLD_TEMPLATE, "init", GIT_ID);
+
+// Card 8b5e002d: same template-copy speedup, for the (round 4)/(round 5) "base + side branch + main edit"
+// shape — `mkMergeRepo` and (round 5)'s own identically-shaped `mkRepo` both build this SAME 3-commit,
+// 2-branch history on every call (the `tag` only names the directory, never the content), so one real
+// build serves both blocks' ~11 combined calls via fs.cpSync.
+const MERGE_TEMPLATE = path.join(os.tmpdir(), `loom-cgi-merge-tmpl-${sfx}`);
+registerForCleanup(MERGE_TEMPLATE);
+fs.mkdirSync(MERGE_TEMPLATE, { recursive: true });
+execSync(`git init -q -b main && git config user.email cgi@loom && git config user.name cgi`, { cwd: MERGE_TEMPLATE });
+fs.writeFileSync(path.join(MERGE_TEMPLATE, "f.txt"), BASE); commitAll(MERGE_TEMPLATE, "base", GIT_ID);
+execSync("git checkout -q -b side", { cwd: MERGE_TEMPLATE });
+fs.writeFileSync(path.join(MERGE_TEMPLATE, "f.txt"), BASE.replace("b\n", "B-side\n")); commitAll(MERGE_TEMPLATE, "side", GIT_ID);
+execSync("git checkout -q main", { cwd: MERGE_TEMPLATE });
+fs.writeFileSync(path.join(MERGE_TEMPLATE, "f.txt"), BASE.replace("d\n", "D-main\n")); commitAll(MERGE_TEMPLATE, "main", GIT_ID);
+function cloneMergeTemplate(repo) {
+  registerForCleanup(repo);
+  fs.cpSync(MERGE_TEMPLATE, repo, { recursive: true });
+  return repo;
+}
+
 async function world(tag, opts = {}) {
   const repo = path.join(os.tmpdir(), `loom-cgi-${tag}-${sfx}`);
-  fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo);
-  fs.writeFileSync(path.join(repo, "README.md"), "# cgi\n");
-  fs.writeFileSync(path.join(repo, "f.txt"), BASE);
-  execSync(`git init -q && git config user.email cgi@loom && git config user.name cgi`, { cwd: repo });
-  commitAll(repo, "init", GIT_ID);
+  fs.cpSync(WORLD_TEMPLATE, repo, { recursive: true });
   const projId = `cgi-proj-${tag}-${sfx}`, agentId = `cgi-agent-${tag}-${sfx}`, mgrId = `cgi-mgr-${tag}-${sfx}`;
   const script = path.join(os.tmpdir(), `loom-cgi-gate-${tag}-${sfx}.mjs`);
   registerForCleanup(script);
@@ -261,12 +288,18 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
 
 // ── (rollback) a batch rollback that ITSELF fails must surface (not vanish); a refusal that changed nothing must NOT read as a rollback alarm.
 {
+  // Card 8b5e002d: same template-copy speedup as world() above — rbWorld's baseline (f.txt=BASE, one
+  // commit, no README) is identical across its 3 callers.
+  const RB_TEMPLATE = path.join(os.tmpdir(), `loom-cgi-rb-tmpl-${sfx}`);
+  registerForCleanup(RB_TEMPLATE);
+  fs.mkdirSync(RB_TEMPLATE, { recursive: true });
+  fs.writeFileSync(path.join(RB_TEMPLATE, "f.txt"), BASE);
+  execSync(`git init -q && git config user.email cgi@loom && git config user.name cgi`, { cwd: RB_TEMPLATE });
+  commitAll(RB_TEMPLATE, "init", GIT_ID);
   const rbWorld = async (tag) => {
     const repo = path.join(os.tmpdir(), `loom-cgi-rb-${tag}-${sfx}`);
-    fs.mkdirSync(repo, { recursive: true }); registerForCleanup(repo);
-    fs.writeFileSync(path.join(repo, "f.txt"), BASE);
-    execSync(`git init -q && git config user.email cgi@loom && git config user.name cgi`, { cwd: repo });
-    commitAll(repo, "init", GIT_ID);
+    registerForCleanup(repo);
+    fs.cpSync(RB_TEMPLATE, repo, { recursive: true });
     const { worktreePath, branch } = await createWorktree(repo, `cgi-rb-proj-${tag}-${sfx}`, `cgi-rb-task-${tag}-${sfx}`);
     registerForCleanup(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "f.txt"), BASE.replace("b\n", "B-worker\n"));
@@ -346,17 +379,7 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
 // ── (round 4) the post-check is the SELF-SUFFICIENT invariant: it reads the config the REAL call sees and fails closed on anything it cannot prove empty.
 {
   // A repo where `merge-tree --write-tree main side` needs a content merge of f.txt (so a planted driver would run).
-  const mkMergeRepo = (tag) => {
-    const repo = path.join(os.tmpdir(), `loom-cgi-r4-${tag}-${sfx}`);
-    fs.mkdirSync(repo, { recursive: true }); registerForCleanup(repo);
-    execSync(`git init -q -b main && git config user.email cgi@loom && git config user.name cgi`, { cwd: repo });
-    fs.writeFileSync(path.join(repo, "f.txt"), BASE); commitAll(repo, "base", GIT_ID);
-    execSync("git checkout -q -b side", { cwd: repo });
-    fs.writeFileSync(path.join(repo, "f.txt"), BASE.replace("b\n", "B-side\n")); commitAll(repo, "side", GIT_ID);
-    execSync("git checkout -q main", { cwd: repo });
-    fs.writeFileSync(path.join(repo, "f.txt"), BASE.replace("d\n", "D-main\n")); commitAll(repo, "main", GIT_ID);
-    return repo;
-  };
+  const mkMergeRepo = (tag) => cloneMergeTemplate(path.join(os.tmpdir(), `loom-cgi-r4-${tag}-${sfx}`));
   const mergeTree = ["merge-tree", "--write-tree", "main", "side"];
   const unwrapped = (repo) => boundedSimpleGit(repo, 15_000, undefined, undefined, { allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
 
@@ -477,17 +500,7 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
 
 // ── (round 5) locale, ambient-env and globals-wiring pins.
 {
-  const mkRepo = (tag) => {
-    const repo = path.join(os.tmpdir(), `loom-cgi-r5-${tag}-${sfx}`);
-    fs.mkdirSync(repo, { recursive: true }); registerForCleanup(repo);
-    execSync(`git init -q -b main && git config user.email cgi@loom && git config user.name cgi`, { cwd: repo });
-    fs.writeFileSync(path.join(repo, "f.txt"), BASE); commitAll(repo, "base", GIT_ID);
-    execSync("git checkout -q -b side", { cwd: repo });
-    fs.writeFileSync(path.join(repo, "f.txt"), BASE.replace("b\n", "B-side\n")); commitAll(repo, "side", GIT_ID);
-    execSync("git checkout -q main", { cwd: repo });
-    fs.writeFileSync(path.join(repo, "f.txt"), BASE.replace("d\n", "D-main\n")); commitAll(repo, "main", GIT_ID);
-    return repo;
-  };
+  const mkRepo = (tag) => cloneMergeTemplate(path.join(os.tmpdir(), `loom-cgi-r5-${tag}-${sfx}`));
   const mergeTree = ["merge-tree", "--write-tree", "main", "side"];
   const unwrapped = (repo) => boundedSimpleGit(repo, 15_000, undefined, undefined, { allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
 

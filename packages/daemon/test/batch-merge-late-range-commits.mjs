@@ -38,15 +38,31 @@ const git = (cwd, args) => execSync(`git ${args}`, { cwd, encoding: "utf8", stdi
 const noReap = async () => ({ killedPids: [] });
 const dbs = [];
 
+// Card 8b5e002d: every scenario but (ou) starts from the IDENTICAL baseline (just README.md) — a real
+// `git init` is ~300-450ms of real subprocess spawn on Windows (measured); a plain recursive filesystem
+// copy of an already-built template needs none (measured ~6x faster for this fixture shape). Built once,
+// reused via fs.cpSync for every no-extra-files scenario; (ou)'s own extra initFiles keep the original
+// real-git-init path unchanged, since its baseline content genuinely differs.
+const TEMPLATE_REPO = path.join(os.tmpdir(), `loom-bmlc-tmpl-${sfx}`);
+registerForCleanup(TEMPLATE_REPO);
+fs.mkdirSync(TEMPLATE_REPO, { recursive: true });
+fs.writeFileSync(path.join(TEMPLATE_REPO, "README.md"), "# bmlc\n");
+execSync(`git init -q && git config user.email bmlc@loom && git config user.name bmlc`, { cwd: TEMPLATE_REPO });
+commitAll(TEMPLATE_REPO, "init", GIT_ID);
+
 // preMain: a commit landed on main AFTER the branches are cut and BEFORE the batch runs (M0 in the (m0) scenario).
 async function setup(tag, preMain, initFiles = {}) {
   const repo = path.join(os.tmpdir(), `loom-bmlc-${tag}-${sfx}`);
-  fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo);
-  fs.writeFileSync(path.join(repo, "README.md"), "# bmlc\n");
-  for (const [f, c] of Object.entries(initFiles)) fs.writeFileSync(path.join(repo, f), c);
-  execSync(`git init -q && git config user.email bmlc@loom && git config user.name bmlc`, { cwd: repo });
-  commitAll(repo, "init", GIT_ID);
+  if (Object.keys(initFiles).length === 0) {
+    fs.cpSync(TEMPLATE_REPO, repo, { recursive: true });
+  } else {
+    fs.mkdirSync(repo, { recursive: true });
+    fs.writeFileSync(path.join(repo, "README.md"), "# bmlc\n");
+    for (const [f, c] of Object.entries(initFiles)) fs.writeFileSync(path.join(repo, f), c);
+    execSync(`git init -q && git config user.email bmlc@loom && git config user.name bmlc`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
+  }
   const projId = `bmlc-proj-${tag}-${sfx}`, agentId = `bmlc-agent-${tag}-${sfx}`, mgrId = `bmlc-mgr-${tag}-${sfx}`;
   const cut = async (label, files) => {
     const taskId = `bmlc-task-${tag}-${label}-${sfx}`;
