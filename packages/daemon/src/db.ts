@@ -3814,11 +3814,18 @@ export class Db {
       ).run(nowMs, input.senderId, input.codeId);
       if (input.expectedGrantType === "dm-bind") {
         // SILENT-TAKEOVER REFUSAL: a dm-bind code must never rebind/repurpose a session that is ALREADY
-        // bound to a DIFFERENT chat — that would silently lock out its current owner. Refuse conservatively
-        // (same no-oracle reject, code UNCONSUMED, NO counter bump — the secret was valid, this is a safety
-        // refusal not a guess); the human clears the old binding via the REST admin first to move it. A
-        // no-existing-binding or an exact-same-chat re-pair (idempotent) is allowed through.
-        const prior = this.db.prepare("SELECT chat_id FROM companion_bindings WHERE session_id = ?").get(sessionId) as Row | undefined;
+        // bound to a DIFFERENT chat ON THE SAME CHANNEL being redeemed — that would silently lock out its
+        // current owner. Refuse conservatively (same no-oracle reject, code UNCONSUMED, NO counter bump —
+        // the secret was valid, this is a safety refusal not a guess); the human clears the old binding via
+        // the REST admin first to move it. A no-existing-binding-on-this-channel or an exact-same-chat
+        // re-pair (idempotent) is allowed through. Scoped to `input.channel` (card 4c9ef86d) — the table is
+        // multi-channel (companion_bindings' own `idx_companion_bindings_session_channel` unique index is
+        // (session_id, channel)), and provisioning always writes an in-app binding (chatId = sessionId), so
+        // an UNSCOPED lookup here always found that row and silently rejected every Telegram dm-bind on a
+        // provisioned companion. A takeover on a DIFFERENT channel from the one already bound is not a
+        // takeover at all — it's a session acquiring a second route — so it must stay allowed through.
+        const prior = this.db.prepare("SELECT chat_id FROM companion_bindings WHERE session_id = ? AND channel = ?")
+          .get(sessionId, input.channel) as Row | undefined;
         if (prior && (prior.chat_id as string) !== input.chatId) return { outcome: "rejected" };
         let binding;
         try {

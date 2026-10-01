@@ -42,6 +42,7 @@ const { createDbCompanionAuth } = await import("../dist/companion/auth.js");
 const { createDbCompanionPairing } = await import("../dist/companion/pairing.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { normalizeTelegramMessage } = await import("../dist/companion/telegram.js");
+const { IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
 
 const TTL_MS = 10 * 60_000;
 const LOCKOUT_MS = 15 * 60_000;
@@ -283,6 +284,25 @@ try {
     const rSame = redeemDm(cB.code, "810810007", "owner");
     check("re-pair: an exact-same-chat re-pair succeeds (idempotent)", rSame.outcome === "bound" && rSame.chatId === "810810007");
     check("re-pair: the binding is unchanged + the code consumed", db.listCompanionBindings().find((b) => b.sessionId === "sess-B")?.chatId === "810810007" && db.getPairingCodeById(cB.codeId)?.consumed_at != null);
+
+    // (c) Multi-channel: a PROVISIONED companion (in-app binding, chatId == sessionId — mirrors server.ts's
+    // provisioning write) still accepts a Telegram dm-bind. The takeover check must be scoped to the
+    // REDEEMING channel, not every channel the session has ever bound (card 4c9ef86d — RED on pre-fix code:
+    // an unscoped lookup always found the in-app row and rejected every Telegram dm-bind for ANY provisioned
+    // companion, breaking pairing entirely).
+    db.upsertCompanionBinding({ sessionId: "sess-C", channel: IN_APP_CHANNEL, chatId: "sess-C", scope: "dm" });
+    const cC = db.mintPairingCode({ sessionId: "sess-C", channel: "telegram", grantType: "dm-bind", ttlMs: TTL_MS }, NOW);
+    const rCrossChannel = redeemDm(cC.code, "810810008", "newowner");
+    check("multi-channel: a Telegram dm-bind on an in-app-provisioned session SUCCEEDS", rCrossChannel.outcome === "bound" && rCrossChannel.chatId === "810810008");
+    check("multi-channel: the in-app binding is UNCHANGED", db.listCompanionBindings().find((b) => b.sessionId === "sess-C" && b.channel === IN_APP_CHANNEL)?.chatId === "sess-C");
+    check("multi-channel: the new telegram binding was created alongside it", db.listCompanionBindings().find((b) => b.sessionId === "sess-C" && b.channel === "telegram")?.chatId === "810810008");
+
+    // (d) Channel-scoping must not weaken same-channel protection: a SECOND telegram chat for the same
+    // session (already bound on telegram from (c)) is still a genuine same-channel takeover and refused.
+    const cC2 = db.mintPairingCode({ sessionId: "sess-C", channel: "telegram", grantType: "dm-bind", ttlMs: TTL_MS }, NOW);
+    const rSameChannelTakeover = redeemDm(cC2.code, "810810009", "mallory2");
+    check("multi-channel: a SECOND telegram chat for the same session is still a takeover and REFUSED", rSameChannelTakeover.outcome === "rejected");
+    check("multi-channel: the telegram binding is unchanged after the refused takeover", db.listCompanionBindings().find((b) => b.sessionId === "sess-C" && b.channel === "telegram")?.chatId === "810810008");
 
     db.close();
   }

@@ -322,10 +322,13 @@ export class ChatGateway {
         this.closeTrustWindow?.(red.binding.sessionId);
         // card d3f9b4d2 Minor 1: reconcile after every binding mutation, not just REST writes — a home/
         // reminder can still name a chat this channel previously pointed at. In practice this redemption
-        // path only ever reaches a FIRST bind for this session, or an idempotent re-pair to the SAME
-        // chatId: db.ts's upsertCompanionBinding dm-bind handler (SILENT-TAKEOVER REFUSAL) refuses any
-        // redemption that would repoint an ALREADY-bound session at a DIFFERENT chatId, so this call never
-        // actually sees a reroute to reconcile against — it's still here for defense in depth and to stay
+        // path only ever reaches a FIRST bind FOR THE REDEEMED CHANNEL (which may be this session's first
+        // binding on ANY channel, or an additional channel added alongside an existing one — e.g. a
+        // Telegram dm-bind on a session that already has its in-app binding), or an idempotent re-pair to
+        // the SAME chatId: db.ts's upsertCompanionBinding dm-bind handler (SILENT-TAKEOVER REFUSAL, card
+        // 4c9ef86d) refuses any redemption that would repoint an already-bound session at a DIFFERENT
+        // chatId ON THAT SAME CHANNEL, so this call never actually sees an existing route REROUTED to
+        // reconcile against (only ever a route ADDED) — it's still here for defense in depth and to stay
         // identical to every other binding-mutation call site. Wrapped in try/catch, like
         // flagNonPrivateBinding's own call site above, so a reconcile failure can never drop the PAIRED ack
         // that follows.

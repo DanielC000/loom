@@ -215,8 +215,10 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // Outbound-suppression persistence (card 7578dea2): see ChatGateway's flagNonPrivateBinding doc.
   const flagNonPrivateBinding = (b: SessionBinding) => db.flagCompanionBindingNonPrivate(b.sessionId, b.channel);
   // card d3f9b4d2 Minor 1: see ChatGateway's reconcileBindingChange call site for why this only ever
-  // reconciles a FIRST dm-bind pair (or an idempotent same-chat re-pair) — db.ts's own takeover check
-  // already refuses a redemption that would repoint an already-bound session at a different chatId.
+  // reconciles a FIRST dm-bind pair for the redeemed channel (or an idempotent same-chat re-pair) — db.ts's
+  // own takeover check (card 4c9ef86d) already refuses a redemption that would repoint an already-bound
+  // session at a different chatId on that SAME channel, but allows a different channel's first bind
+  // through, so this never sees an existing route reconciled away, only a new one added.
   const reconcileBindingChange = (sessionId: string) => reconcileCompanionBindingRoutes(db, sessionId);
   const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow, onReplyDelivered, flagNonPrivateBinding, reconcileBindingChange);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
