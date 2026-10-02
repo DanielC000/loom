@@ -2939,6 +2939,17 @@ interface Live {
   lastPromptSenderId: string | null;
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
   startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
+  // Card 850eb55c (round 2): true from the moment the SessionStart handler hands the boot permission-mode
+  // cycle to `cycleToMode` until that cycle's own `onDone` fires — i.e. genuinely "Shift+Tab presses /
+  // footer reads are in flight for THIS pty right now". Gates every kickoff-delivery write path
+  // (`drainPending`, `enqueueStdin`'s immediate-submit conjunction, `scheduleKickoffGuarantee`'s own direct
+  // submit() gate — the same three sites `isBlockedOnUnresolvedBootDialog` already gates) so a write can
+  // never interleave with the cycle's own keystrokes/footer reads. Needed because `isBlockedOnUnresolvedBootDialog`
+  // itself goes false the instant SessionStart fires (sessionStartObserved flips true at the top of that
+  // case, before the cycle even starts) — without this separate flag, nothing would hold a write for the
+  // cycle's own (asynchronous, multi-tick) duration. Always false outside a boot cycle (shell/canned kinds
+  // never cycle at all — seeded false and never flipped).
+  startupCycleInFlight: boolean;
   // Serializes every cycleToMode() invocation for THIS session (the boot convergence, the plan
   // auto-heal, and any manager-driven worker_set_mode override) onto one queue, so no two ever press
   // Shift+Tab or read the footer concurrently — see cycleToMode's doc comment (card 9c03f5a6: an
@@ -4868,6 +4879,7 @@ export class PtyHost {
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
+      startupCycleInFlight: false,
       sessionStartObserved: false,
       anyHookObserved: false,
       modeCycleChain: Promise.resolve(),
@@ -4895,6 +4907,16 @@ export class PtyHost {
     pty.onData((d) => {
       const buf = Buffer.from(d, "utf-8");
       live.lastOutputAt = Date.now(); // engine is producing → not stuck (feeds the BUSY_STALE_MS heal)
+      // Card 01160ae3: feed the boot-dialog-stuck scan for the WHOLE pre-SessionStart window — gated on
+      // `dialogStuckTimer` being armed (i.e. this is an unattended-role session the detector watches at
+      // all), never on `mcpPromptHandled`/`sessionStartObserved` directly, so a DIFFERENT dialog appearing
+      // after the MCP-prompt scan below already fired is still visible when the timer checks it. Fed
+      // BEFORE the MCP-prompt branch below (Card 850eb55c, round 3, item 1) so that branch's own clear of
+      // this SAME buffer, when it fires on this SAME chunk `d`, is not immediately re-appended right back
+      // by this feed running afterward in the same callback invocation.
+      if (live.dialogStuckTimer) {
+        live.dialogStuckScan = (live.dialogStuckScan + d).slice(-8192);
+      }
       // A per-project "N new MCP servers found — enable?" prompt (e.g. docker/sentry, inherited from
       // ~/.mcp.json up-tree) can block the unattended boot BEFORE SessionStart. The PRIMARY fix now
       // pre-decides those servers in ~/.claude.json (ensureTrusted → disabledMcpjsonServers) so the
@@ -4908,6 +4930,21 @@ export class PtyHost {
         if (/MCPserver/i.test(flat) && /rejectall/i.test(flat)) {
           live.mcpPromptHandled = true;
           live.bootScan = "";
+          // Card 850eb55c (round 2, item 3; round 3, item 1): `dialogStuckScan` is a SEPARATE cumulative
+          // buffer (fed unconditionally whenever `dialogStuckTimer` is armed — see its own feed site
+          // above, now ordered BEFORE this branch so this clear is not immediately undone by that feed
+          // re-appending the SAME chunk `d` within this SAME callback invocation) that
+          // `detectBlockingDialogSignature` also matches against the SAME "MCPserver"+"rejectall" text
+          // (its "mcp-server-enable" signature) — without this clear, the dialog Loom JUST dismissed below
+          // would keep reading as "still stuck" for the rest of the 8192-char rolling window, holding
+          // kickoff delivery (`isBlockedOnUnresolvedBootDialog`) against a dialog that is no longer on
+          // screen. Clear it here, the one case where Loom itself KNOWS it just resolved a recognized
+          // dialog — mirrors `bootScan`'s own clear immediately above. The other two known signatures
+          // (external-imports/workspace-trust) are pre-declined/pre-trusted BEFORE spawn (ensureTrusted)
+          // and have no in-session dismiss action of Loom's own to key a clear off, so they are
+          // deliberately NOT given an equivalent reset here — only a genuinely resolved SessionStart (or
+          // anyHookObserved) clears those, same as before.
+          live.dialogStuckScan = "";
           // eslint-disable-next-line no-console
           console.log(`[pty] ${opts.sessionId} dismissing plugin-MCP enable-prompt (Esc = reject all)`);
           // Card ac20c8e7 (bb3d9005 residual ①): boot-time write timer gated on `alive` alone used to be
@@ -4915,15 +4952,17 @@ export class PtyHost {
           // doc) — a kill() landing between the MCP-prompt detection and this 300ms timer would let this
           // write reach an already-destroyed socket. `!live.killed` closes it, same as every other write
           // gate bb3d9005 fixed.
-          setTimeout(() => { if (live.alive && !live.killed) this.ptyWrite(opts.sessionId, live, ESC_KEY, "esc-mcp-dismiss"); }, 300);
+          setTimeout(() => {
+            if (live.alive && !live.killed) this.ptyWrite(opts.sessionId, live, ESC_KEY, "esc-mcp-dismiss");
+            // Card 850eb55c (round 3, item 1): the dialog can still repaint onto the screen for up to this
+            // whole 300ms wait before Esc actually dismisses it — any chunk the engine emits in that window
+            // (still showing "MCPserver"+"rejectall", e.g. a redraw) re-feeds `dialogStuckScan` above and
+            // would otherwise leave the hold engaged even after Loom's own dismissal has landed. Clear it
+            // again here, after the write, so repaint residue accumulated during the wait doesn't outlive
+            // the dismissal.
+            live.dialogStuckScan = "";
+          }, 300);
         }
-      }
-      // Card 01160ae3: feed the boot-dialog-stuck scan for the WHOLE pre-SessionStart window — gated on
-      // `dialogStuckTimer` being armed (i.e. this is an unattended-role session the detector watches at
-      // all), never on `mcpPromptHandled`/`sessionStartObserved` directly, so a DIFFERENT dialog appearing
-      // after the MCP-prompt scan above already fired is still visible when the timer checks it.
-      if (live.dialogStuckTimer) {
-        live.dialogStuckScan = (live.dialogStuckScan + d).slice(-8192);
       }
       // Resuming a large/old session shows a "resume from summary / as-is" gate BEFORE SessionStart
       // whose DEFAULT (option 1) summarizes — silently compacting away the manager's full context — and
@@ -5066,11 +5105,13 @@ export class PtyHost {
         if (!l) return;
         l.dialogStuckTimer = null; // nulled first, mirrors onCodexBootStuck's own one-shot pattern
         // Card 01160ae3 (Code Review round 2): also bail when the engine is clearly past boot even though
-        // `sessionStartObserved` itself is somehow still false — `firstTurnStarted` (UserPromptSubmit) and
-        // `anyHookObserved` (ANY hook at all) are both strictly later than SessionStart, so either one
-        // being true means SessionStart was merely missed (the READY_FALLBACK case), not that the session
-        // is genuinely stuck on a dialog.
-        if (!l.alive || l.sessionStartObserved || l.firstTurnStarted || l.anyHookObserved) return; // already resolved (or the session died) — nothing to report
+        // `sessionStartObserved` itself is somehow still false — `anyHookObserved` (ANY hook at all,
+        // including UserPromptSubmit) being true means SessionStart was merely missed (the READY_FALLBACK
+        // case), not that the session is genuinely stuck on a dialog. `firstTurnStarted` is deliberately
+        // NOT checked separately (card 850eb55c nitpick): deliverHook sets `anyHookObserved` unconditionally
+        // for EVERY hook, including the very UserPromptSubmit that flips `firstTurnStarted`, so the latter
+        // can never be true while the former is false — a redundant disjunct, not a second condition.
+        if (!l.alive || l.sessionStartObserved || l.anyHookObserved) return; // already resolved (or the session died) — nothing to report
         const signatureName = detectBlockingDialogSignature(collapseBoot(l.dialogStuckScan));
         // eslint-disable-next-line no-console
         console.error(`[claude-boot-dialog-stuck] ${opts.sessionId} SessionStart never observed after ${CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS}ms — signature=${signatureName ?? "none recognized"}. Manager intervention may be needed.`);
@@ -5146,7 +5187,7 @@ export class PtyHost {
       lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       unrecognizedMismatchTimestamps: [], unrecognizedMismatchCooldownUntil: null,
       lastPasteTripwireGiveUp: null,
-      startupModeCycles: 0, startupCyclesDone: true,
+      startupModeCycles: 0, startupCyclesDone: true, startupCycleInFlight: false, // a shell never cycles a permission mode — never flipped
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
       dialogStuckScan: "", dialogStuckTimer: null, // never armed for a shell — see its own call site (claude path only)
@@ -6359,7 +6400,7 @@ export class PtyHost {
       lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       unrecognizedMismatchTimestamps: [], unrecognizedMismatchCooldownUntil: null,
       lastPasteTripwireGiveUp: null,
-      startupModeCycles: 0, startupCyclesDone: true,
+      startupModeCycles: 0, startupCyclesDone: true, startupCycleInFlight: false, // a canned entry never cycles a permission mode — never flipped
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
       dialogStuckScan: "", dialogStuckTimer: null, // never armed for a canned entry — see its own call site (claude path only)
@@ -7020,6 +7061,10 @@ export class PtyHost {
             const newFallbackTimer = setTimeout(() => {
               const l = this.live.get(sessionId);
               if (l?.alive && !l.ready) {
+                // @decision 850eb55c — this timer doubles as the absolute-ceiling backstop; clear
+                // `startupCycleInFlight` here too, or a still-running cycle hostages the kickoff right back
+                // behind the SAME budget this ceiling exists to bypass. See record.
+                l.startupCycleInFlight = false;
                 console.log(`[pty] ${sessionId} mode-cycle fallback (still not ready ${boundedDelay}ms after SessionStart) — marking ready`);
                 this.markReady(sessionId);
               }
@@ -7027,12 +7072,19 @@ export class PtyHost {
             const oldFallbackTimer = live.readyFallbackTimer;
             live.readyFallbackTimer = newFallbackTimer;
             if (oldFallbackTimer) clearTimeout(oldFallbackTimer);
-            this.cycleToMode(sessionId, target, () => this.markReady(sessionId));
+            // @decision 850eb55c — `startupCycleInFlight` brackets the cycle itself (set true here, cleared
+            // in onDone BEFORE releasing) so no write path can interleave with its Shift+Tab/footer reads.
+            live.startupCycleInFlight = true;
+            this.cycleToMode(sessionId, target, () => {
+              const l = this.live.get(sessionId);
+              if (l) l.startupCycleInFlight = false;
+              this.releaseBootModeCycle(sessionId);
+            });
           } else {
-            this.markReady(sessionId);
+            this.releaseBootModeCycle(sessionId);
           }
         } else {
-          this.markReady(sessionId); // idempotent: a repeat SessionStart still ensures readiness
+          this.releaseBootModeCycle(sessionId); // idempotent: a repeat SessionStart still ensures readiness/drains
         }
         break;
       case "UserPromptSubmit": {
@@ -8289,7 +8341,13 @@ export class PtyHost {
     // dirty"), and the first pass at this card wired the hold into only one of the two, leaving a message
     // that ARRIVES during the unconfirmed gap (rather than being already queued) able to race straight
     // into a composer claude may still be transitioning out of.
-    if (live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !this.deferForHumanDraft(live) && !stillGiveUpHeld && !this.isHumanSubmitHeld(live)) {
+    // Card 850eb55c: same sibling relationship applies to the dialog-stuck hold — `healIfStuck` just above
+    // runs on EVERY call here, not only via reconcile()'s periodic tick, so a kickoff enqueued by
+    // scheduleKickoffGuarantee's own gated branch (BECAUSE it's stuck on a dialog) can reach THIS gate with
+    // `live.busy` freshly cleared by that same `healIfStuck` call, moments after enqueueing — without this
+    // check, that clears the path to an immediate direct submit() here, defeating the hold entirely.
+    // Card 850eb55c (round 2): same sibling relationship, now also vs `Live.startupCycleInFlight`'s own doc.
+    if (live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !this.deferForHumanDraft(live) && !stillGiveUpHeld && !this.isHumanSubmitHeld(live) && !this.isBlockedOnUnresolvedBootDialog(live) && !live.startupCycleInFlight) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
       // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
@@ -9115,6 +9173,39 @@ export class PtyHost {
   }
 
   /**
+   * Card 850eb55c: whether `live` has observed SessionStart, or any hook at all (`Live.anyHookObserved`
+   * — see its own doc for why that weaker OR already proves "past boot"). The ONE shared predicate behind
+   * both `isBlockedOnUnresolvedBootDialog` below and the public `hasObservedSessionStartOrAnyHook`
+   * (round 2 item 2: previously `isBlockedOnUnresolvedBootDialog` released on `sessionStartObserved`
+   * ALONE, so a session whose SessionStart was genuinely missed — but some OTHER hook already proved it
+   * past boot, the exact case the boot-dialog-stuck DETECTOR already stands down for — would hold a
+   * kickoff forever while the detector stayed silent about it; a single predicate keeps the two in sync).
+   */
+  private isPastBoot(live: Live): boolean {
+    return live.sessionStartObserved || live.anyHookObserved;
+  }
+
+  /**
+   * Card 850eb55c: true while this session is still pre-boot (see `isPastBoot`) AND currently showing a
+   * recognized blocking-dialog signature (card 01160ae3's `detectBlockingDialogSignature`/`collapseBoot`
+   * — reused verbatim, no second matcher), for a LOOM_DRIVEN_ROLES session — the same role gate the
+   * boot-dialog-stuck detector itself uses, since those are the only roles with nobody watching a live
+   * terminal who'd otherwise notice. Gates all three kickoff-delivery write paths
+   * (`scheduleKickoffGuarantee`'s direct submit(), `enqueueStdin`'s own immediate-submit conjunction, and
+   * this general queued-turn drain) so none of them ever types a turn + its terminating Enter into a
+   * dialog whose highlighted option nobody has reviewed — the READY_FALLBACK "missed hook" assumption is
+   * wrong exactly when this is true. HOLDS, never drops: the instant SessionStart genuinely fires,
+   * `sessionStartObserved` flips true and `dialogStuckScan` is cleared (see the `SessionStart` hook case),
+   * so this reads false again and `releaseBootModeCycle`'s own drain (or, failing that, reconcile()'s
+   * periodic tick) delivers whatever was held.
+   */
+  private isBlockedOnUnresolvedBootDialog(live: Live): boolean {
+    return !this.isPastBoot(live)
+      && !!live.role && (LOOM_DRIVEN_ROLES as readonly string[]).includes(live.role)
+      && detectBlockingDialogSignature(collapseBoot(live.dialogStuckScan)) !== null;
+  }
+
+  /**
    * Deliver queued messages when it's safe (idle + composer free). Shared by Stop + reconcile + the
    * markReady / box-free transitions.
    *
@@ -9147,8 +9238,7 @@ export class PtyHost {
    *
    * @decision 73d5c34a — a still-`isGiveUpHeld` entry (see that method) is skipped as this drain's head
    * candidate and stays in `pending`, untouched, so one held entry can never stall unrelated queued
-   * messages behind it; if EVERY pending entry is held, this call is a no-op until a hook purges the hold
-   * or `GIVE_UP_HOLD_MS` expires.
+   * messages behind it; a fully-held queue is a no-op until a hook purges the hold or it expires.
    */
   private drainPending(sessionId: string): void {
     const live = this.live.get(sessionId);
@@ -9158,6 +9248,14 @@ export class PtyHost {
     // each Ctrl-C just interrupts the freshly-drained turn, so it takes N escalating clicks to land).
     // stop() also clears the queue, so this is belt-and-suspenders for a late enqueue during the stop.
     if (live.stopping) return;
+    // Card 850eb55c: still pre-boot and stuck on a recognized blocking dialog → do NOT drain. See
+    // `isBlockedOnUnresolvedBootDialog`'s own doc.
+    if (this.isBlockedOnUnresolvedBootDialog(live)) return;
+    // Card 850eb55c (round 2, item 1): the boot permission-mode cycle itself is mid-flight (Shift+Tab
+    // presses / footer reads in progress on this SAME pty) → do NOT drain. See `Live.startupCycleInFlight`'s
+    // own doc — `isBlockedOnUnresolvedBootDialog` above already reads false by the time this is ever true
+    // (SessionStart flips `sessionStartObserved` before the cycle starts), so this is a SEPARATE hold.
+    if (live.startupCycleInFlight) return;
     // PARKED on a usage cap → do NOT drain. The turn died on the rate limit and the pty is held alive for
     // resumeAfterRateLimit to replay lastPrompt; draining here would submit() pending into the still-capped
     // account and OVERWRITE lastPrompt, so the agent would resume with the wrong content and never finish
@@ -11011,6 +11109,18 @@ export class PtyHost {
   }
 
   /**
+   * @decision 850eb55c — the SessionStart case's own convergence callback. Never call `markReady` again
+   * directly from there — its own-once guard silently no-ops once `READY_FALLBACK_MS` already latched
+   * `ready` first, stranding a held kickoff behind `reconcile()`'s slow + race-prone backstop. See record.
+   */
+  private releaseBootModeCycle(sessionId: string): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return;
+    if (!live.ready) { this.markReady(sessionId); return; }
+    this.drainPending(sessionId);
+  }
+
+  /**
    * Mark a (re)spawned session READY: its TUI has booted and (on resume) the permission-mode cycles
    * have landed, so injected turns are safe to submit. Releases anything queued during boot — e.g. the
    * daemon-restart continuation nudge that boot-recovery enqueues right after resume(), before the
@@ -11145,9 +11255,19 @@ export class PtyHost {
         // queued copy plus resumeAfterRateLimit's own independent replay) rather than lose it; tolerated
         // as strictly better than the pre-fix interleave, and too rare to special-case further.
         const submitOutstanding = l.submitGeneration > 0 && !l.enterConfirmed;
-        if (submitOutstanding || l.stopping || l.drainHeld || l.rateLimited) {
+        // Card 850eb55c: also defer — never submit() directly — while this session is still pre-
+        // SessionStart and showing a recognized blocking-dialog signature (card 01160ae3's detector); the
+        // READY_FALLBACK "missed hook" assumption this function's own kickoff exists to serve is wrong
+        // exactly when this is true, and typing the kickoff + its terminating Enter into that dialog can
+        // select/confirm an option nobody reviewed. See `isBlockedOnUnresolvedBootDialog`'s own doc for
+        // why this is a HOLD, not a drop — the queued copy below drains normally once SessionStart fires.
+        const dialogStuck = this.isBlockedOnUnresolvedBootDialog(l);
+        // Card 850eb55c (round 2): also defer while the boot mode-cycle itself is mid-flight — see
+        // `Live.startupCycleInFlight`'s own doc; `dialogStuck` above already reads false by the time the
+        // cycle is running (SessionStart flips `sessionStartObserved` before the cycle starts).
+        if (submitOutstanding || l.stopping || l.drainHeld || l.rateLimited || dialogStuck || l.startupCycleInFlight) {
           // eslint-disable-next-line no-console
-          console.log(`[pty] ${sessionId} ready with no turn started, but unsafe to write directly (submitOutstanding=${submitOutstanding} stopping=${l.stopping} drainHeld=${l.drainHeld} rateLimited=${l.rateLimited}) — queuing the kickoff for atomic delivery instead of racing an in-flight write`);
+          console.log(`[pty] ${sessionId} ready with no turn started, but unsafe to write directly (submitOutstanding=${submitOutstanding} stopping=${l.stopping} drainHeld=${l.drainHeld} rateLimited=${l.rateLimited} dialogStuck=${dialogStuck} startupCycleInFlight=${l.startupCycleInFlight}) — queuing the kickoff for atomic delivery instead of racing an in-flight write`);
           this.enqueueStdin(sessionId, kickoff, "system", undefined, undefined, "agent");
           return;
         }
@@ -12011,6 +12131,38 @@ export class PtyHost {
    *  correct read for that case too. */
   hasFirstTurnStarted(sessionId: string): boolean {
     return this.findAnyLive(sessionId)?.firstTurnStarted ?? false;
+  }
+
+  /**
+   * Card 850eb55c: whether `sessionId` has observed SessionStart, or any hook at all (`Live.anyHookObserved`
+   * — see its own doc for why that weaker OR already proves "past boot"). Lets a PARENT-targeted nudge
+   * (e.g. `handleClaudeBootDialogStuck`) avoid typing into a parent itself still stuck pre-SessionStart on
+   * the SAME repo-keyed dialog — the self-nudge hazard `docs/decisions/01160ae3-no-self-nudge-to-stuck-
+   * session.md` prohibits, extended to a possibly-also-stuck recipient. `Live`-only (claude) — a
+   * manager/platform-lead is never codex today — so an unknown/dead/non-claude sessionId reads `false`,
+   * the conservative "don't nudge" default.
+   */
+  hasObservedSessionStartOrAnyHook(sessionId: string): boolean {
+    const live = this.live.get(sessionId);
+    return !!live && this.isPastBoot(live);
+  }
+
+  /**
+   * Card 850eb55c (round 2, item 5): whether `sessionId` is a CURRENTLY LIVE claude session that has NOT
+   * yet observed SessionStart or any hook — i.e. genuinely live and still mid-boot, the one state where a
+   * nudge typed into it risks landing in a dialog (see `hasObservedSessionStartOrAnyHook`'s own doc on the
+   * self-nudge hazard this protects against). Checks `live.alive`, NOT just presence in `this.live` — a
+   * claude session's own entry is NEVER removed from that map on exit (see `onExit`'s own "dead-but-
+   * present" comment), so an UNKNOWN id (never spawned at all) and a DEAD-BUT-MAPPED one (exited, still
+   * sitting in the map with `alive:false`) must BOTH read `false` here, the same as each other — neither
+   * has a live pty to type into, so neither is the hazard this predicate exists to catch. A caller must
+   * not suppress a durable enqueue on this alone — `handleClaudeBootDialogStuck` (sessions/service.ts) is
+   * the caller this exists for; see its own doc for why an absent/dead parent must still go through the
+   * ordinary durable enqueue path.
+   */
+  isLiveAndPreBoot(sessionId: string): boolean {
+    const live = this.live.get(sessionId);
+    return !!live?.alive && !this.isPastBoot(live);
   }
 
   /**

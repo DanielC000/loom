@@ -9326,18 +9326,30 @@ export class SessionService {
    *
    * @decision 01160ae3 — never enqueue a nudge to the stuck session itself; it would be typed into the
    * live dialog and its Enter would confirm the dialog's highlighted option. Notify the PARENT only.
+   *
+   * Card 850eb55c: the PARENT can share this exact hazard — a manager stuck pre-SessionStart on the SAME
+   * repo-keyed dialog (workspace-trust/external-imports, which manager and worker share) has nobody
+   * watching its own dialog either (managers aren't in LOOM_DRIVEN_ROLES, so nothing else detects it), so
+   * only suppress the nudge when the parent is itself LIVE and pre-boot (`isLiveAndPreBoot`) — a real pty
+   * that might be sitting on the SAME live dialog right now. An ABSENT parent (not currently live at all —
+   * e.g. not yet re-spawned after a restart) has no live pty to type into, so it is NOT this hazard: round
+   * 2 (item 5) restores the ordinary durable `enqueueSystemNudge` path for that case (it persists
+   * regardless of liveness and redrives once the parent comes back), rather than silently dropping it the
+   * way treating "unknown" the same as "live and stuck" previously did.
    */
   handleClaudeBootDialogStuck(sessionId: string, info: { timeoutMs: number; signatureName: string | null; role: SessionRole | null }): void {
     const s = this.db.getSession(sessionId);
     const sigLabel = info.signatureName ?? "none recognized";
+    const parentLiveAndPreBoot = !!s?.parentSessionId && this.pty.isLiveAndPreBoot(s.parentSessionId);
+    const parentNudged = !!s?.parentSessionId && !parentLiveAndPreBoot;
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
       workerSessionId: sessionId, taskId: s?.taskId ?? null,
-      kind: "claude_boot_dialog_stuck", detail: { timeoutMs: info.timeoutMs, signatureName: info.signatureName, role: info.role },
+      kind: "claude_boot_dialog_stuck", detail: { timeoutMs: info.timeoutMs, signatureName: info.signatureName, role: info.role, parentNudged },
     });
-    if (s?.parentSessionId) {
-      const senderMsg = `[loom:claude-boot-dialog-stuck] your ${info.role ?? "unattended"} session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} never reached SessionStart within ${info.timeoutMs}ms — possible blocking CLI dialog (${sigLabel}). It will not resolve on its own; check the session's live screen and, if it's genuinely stuck on a dialog, worker_stop + respawn.`;
-      this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
+    if (parentNudged) {
+      const senderMsg = `[loom:claude-boot-dialog-stuck] your ${info.role ?? "unattended"} session ${sessionId}${s?.taskId ? ` (task ${s.taskId})` : ""} never reached SessionStart within ${info.timeoutMs}ms — possible blocking CLI dialog (${sigLabel}). It will not resolve on its own; check the session's live screen and, if it's genuinely stuck on a dialog, worker_stop + respawn.`;
+      this.enqueueSystemNudge(s!.parentSessionId!, senderMsg, { kind: "warning", taskId: s?.taskId ?? null });
     }
   }
 

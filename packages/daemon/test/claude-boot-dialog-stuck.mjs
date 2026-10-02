@@ -215,11 +215,41 @@ try {
   const nulledJ = await waitUntil(() => host.live.get(J)?.dialogStuckTimer === null, 3000);
   check("9: (setup) the real timer fired (nulled itself) for J", nulledJ);
   check("9: anyHookObserved true (a non-SessionStart hook) ⇒ no stuck event either", stuckEvents.filter((e) => e.sessionId === J).length === 0);
+
+  // ============ 10) Card 850eb55c (round 3, item 1): the MCP-prompt Esc-dismiss's OWN `dialogStuckScan` ====
+  // ============      clear must survive being fed as ONE SINGLE CHUNK in the SAME onData callback — on =====
+  // ============      448cf361 the clear ran BEFORE the unconditional dialogStuckTimer-gated feed in that ===
+  // ============      SAME callback, so the triggering chunk was immediately re-appended right back, =======
+  // ============      leaving the hold engaged even though Loom itself had JUST dismissed the dialog. Also ==
+  // ============      covers REPAINT RESIDUE: a chunk re-showing the same dialog text during the 300ms wait =
+  // ============      before the scheduled Esc keystroke actually fires must not leave the hold engaged =====
+  // ============      past that dismissal either. Asserted directly on `detectBlockingDialogSignature( =======
+  // ============      collapseBoot(dialogStuckScan))` — the SAME expression `isBlockedOnUnresolvedBootDialog`
+  // ============      (private, not exported) computes — rather than re-deriving a second check. ============
+  const K = "sess-mcp-prompt-single-chunk-K";
+  const fk = spawnOne(K, "worker");
+  const MCP_PROMPT_TEXT = "2 new MCP servers found\n❯ Enable\n  Reject all";
+  check("10: (setup) the signature is recognized when fed in isolation (positive control for the assertions below)",
+    detectBlockingDialogSignature(collapseBoot(MCP_PROMPT_TEXT)) === "mcp-server-enable");
+  fk.feed(MCP_PROMPT_TEXT); // ONE single chunk — the exact shape 448cf361 mishandled (clear-then-re-feed)
+  check("10: mcpPromptHandled flips true and the Esc dismiss is scheduled", host.live.get(K).mcpPromptHandled === true);
+  check("10: the hold releases IMMEDIATELY (synchronously, same tick) — dialogStuckScan no longer matches any known signature right after Loom's own clear",
+    detectBlockingDialogSignature(collapseBoot(host.live.get(K).dialogStuckScan)) === null);
+
+  // Repaint residue: the terminal redraws the SAME dialog text again during the 300ms wait before the
+  // scheduled Esc keystroke actually fires (mcpPromptHandled is already true, so this does NOT re-trigger
+  // the detection branch — only the unconditional dialogStuckTimer-gated feed runs for it).
+  fk.feed(MCP_PROMPT_TEXT);
+  check("10: (setup) the repaint DOES re-populate the scan (proves this isn't a vacuous scenario)",
+    detectBlockingDialogSignature(collapseBoot(host.live.get(K).dialogStuckScan)) === "mcp-server-enable");
+  const residueCleared = await waitUntil(() => detectBlockingDialogSignature(collapseBoot(host.live.get(K)?.dialogStuckScan ?? "")) === null, 1000);
+  check("10: once the scheduled Esc write actually fires (~300ms later), the scan is cleared again — repaint residue does not outlive the dismissal", residueCleared);
 } finally {
   for (const id of [
     "sess-dialog-stuck-A", "sess-slow-healthy-B", "sess-late-sessionstart-C", "sess-manager-not-gated-D",
     "sess-plain-not-gated-E", "sess-resume-rearms-F", "sess-overwrite-resume-G", "sess-dies-before-sessionstart-H",
     "sess-first-turn-started-no-sessionstart-I", "sess-any-hook-observed-no-sessionstart-J",
+    "sess-mcp-prompt-single-chunk-K",
   ]) {
     try { host.stop(id, "hard"); } catch { /* ignore */ }
   }
@@ -227,6 +257,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — claude boot-dialog-stuck detector fires once (named signature, no screen content) for an unattended spawn that never reaches SessionStart; never fires for a slow-but-healthy boot or a late SessionStart after the alarm; role-gated to LOOM_DRIVEN_ROLES; re-arms on resume; the overwrite-on-resume and onExit timer clears hold under real timing; and the fire-time bail suppresses the alarm whenever firstTurnStarted or any other hook proves the engine is past boot."
+  ? "\n✅ ALL PASS — claude boot-dialog-stuck detector fires once (named signature, no screen content) for an unattended spawn that never reaches SessionStart; never fires for a slow-but-healthy boot or a late SessionStart after the alarm; role-gated to LOOM_DRIVEN_ROLES; re-arms on resume; the overwrite-on-resume and onExit timer clears hold under real timing; the fire-time bail suppresses the alarm whenever firstTurnStarted or any other hook proves the engine is past boot; and (round 3) the MCP-prompt Esc-dismiss's own dialogStuckScan clear survives being fed as a single chunk in the same onData callback, and repaint residue during the 300ms pre-Esc wait does not outlive the dismissal."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

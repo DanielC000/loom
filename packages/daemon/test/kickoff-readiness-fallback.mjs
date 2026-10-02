@@ -12,6 +12,23 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // logLandedMode's gate settles) → scheduleKickoffGuarantee — exactly once, with the same give-up/requeue
 // protection (task 15/this same card) as the SessionStart-driven path.
 //
+// Card 850eb55c, scenario (3): the OTHER way READY_FALLBACK can fire without SessionStart — a session
+// genuinely STUCK on a blocking boot dialog (card 01160ae3), not merely slow. Proves neither
+// scheduleKickoffGuarantee's direct submit() NOR drainPending's queued-entry path ever writes into that
+// dialog, for a LOOM_DRIVEN_ROLES session, for as long as the dialog signature is on screen — and that
+// delivery proceeds normally, exactly once, the instant SessionStart actually resolves it. Two controls:
+// the SAME role with no dialog (unchanged), and the SAME dialog with a role the detector doesn't watch
+// (unchanged — the intended scope, matching LOOM_DRIVEN_ROLES exactly).
+//
+// Card 850eb55c, scenario (4) (round 2, item 1): a Code Review finding on scenario (3) itself — the hold
+// had no STRUCTURAL release. Once `ready` is latched by the fallback, a late SessionStart's own
+// `cycleToMode(…, () => this.markReady(sessionId))` used to hit markReady's own once-only guard and
+// silently no-op, leaving `reconcile()`'s periodic tick as the ONLY thing that ever drained the held
+// kickoff — slow, and racy against the cycle's own still-converging Shift+Tabs. This scenario reaches the
+// SAME dialog-held starting point as (3), but with a REAL mode cycle (startupModeCycles > 0) on the far
+// side of SessionStart, and proves delivery now happens directly off the cycle's own onDone — promptly,
+// strictly after the last Shift+Tab — with `host.reconcile()` never called anywhere in the scenario.
+//
 // HERMETIC, claude-free — a fake pty (mirrors worker-kickoff-guarantee.mjs).
 //
 // RUN: pnpm build (from packages/daemon) then `node test/kickoff-readiness-fallback.mjs`.
@@ -36,22 +53,45 @@ process.env.LOOM_MODE_LOG_POLL_MS = "5";
 // writes a bracket-paste marker, so a window that ever reached this timeout could misread an unrelated
 // retry as a repeated kickoff delivery. See NO_REPEAT_WINDOW_MS's own comment below.
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = "5000";
+// Card 850eb55c, scenario (3) only: a kickoff held behind a stuck dialog never goes through submit() at
+// all (by design — see isBlockedOnUnresolvedBootDialog's own doc), so unlike every other scenario in this
+// file, nothing ever clears `live.busy` for it except healIfStuck's short pre-first-turn stale window
+// (FIRST_TURN_STALE_MS) — the periodic reconcile() backstop drainPending's own doc names. Pinned short
+// (comfortably above READY_FALLBACK_MS=30 above) so (3)'s post-SessionStart delivery doesn't need to wait
+// out the real 30s production default.
+process.env.LOOM_FIRST_TURN_STALE_MS = "100";
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const PASTE_START = "\x1b[200~";
+// Card 850eb55c (round 2, item 1): footer-cycling constants, mirrors pty-ready-fallback-race.mjs's own
+// (the SAME real cycleToMode primitive, just reached via a different trigger — a LATE SessionStart arriving
+// after READY_FALLBACK already latched `ready`, instead of a tight spawn-vs-SessionStart timing race).
+const SHIFT_TAB = "\x1b[Z";
+const ACCEPT_EDITS_FOOTER = "accept edits on (shift+tab to cycle)";
+const PLAN_FOOTER = "plan mode on (shift+tab to cycle)";
+const AUTO_FOOTER = "auto mode on (shift+tab to cycle)";
+// Card 850eb55c, scenario (3)/(4): a recognized blocking-dialog signature (external-imports) — hoisted to
+// module scope since (4) (round 2) needs the SAME text (3) already uses, in a separate block.
+const DIALOG_TEXT = "Allow external CLAUDE.md file imports?\n❯ No, disable external imports\n  Yes, allow external imports\nEnter to confirm · Esc to cancel";
 
 const fakes = [];
 // Extends the shared seam (tracked onExit callback, a real kill()) rather than a local fake — see
 // _seam-host-fixture.mjs's own doc for why a locally-discarded onExit is a real defect class (card
 // c54d1ea0), not just a style nit. Adds write-capture on top, same pattern pty-restart-nudge-atomicity.mjs
-// already uses.
+// already uses. Card 850eb55c: ALSO captures onData → feed() (mirrors claude-boot-dialog-stuck.mjs /
+// worker-kickoff-guarantee.mjs's own combined fixture), so scenario (3) can simulate a dialog screen.
 class TestPtyHost extends createSeamHost(PtyHost) {
   createPty(opts) {
     const base = super.createPty(opts);
     const writes = [];
-    const fake = { ...base, write: (d) => writes.push(d), writes };
+    let dataCb = null;
+    const fake = {
+      ...base, write: (d) => writes.push(d),
+      onData: (cb) => { dataCb = cb; return { dispose() {} }; },
+      writes, feed: (s) => { if (dataCb) dataCb(s); },
+    };
     fakes.push(fake);
     return fake;
   }
@@ -64,6 +104,7 @@ const events = {
 const host = new TestPtyHost(events);
 const writtenOf = (fake) => fake.writes.join("");
 const countIn = (fake, marker) => writtenOf(fake).split(marker).length - 1;
+const countShiftTabs = (fake) => fake.writes.filter((w) => w === SHIFT_TAB).length;
 
 // windowMs shared by every negative check below — derived from the pinned LOOM_SUBMIT_VERIFY_TIMEOUT_MS
 // (5000ms) above: comfortably (25x) under it, so sendEnterAndVerify's give-up/reassert-paste retry can
@@ -179,12 +220,289 @@ try {
     check("(2) resume path via the fallback: NEVER delivers (no kickoff was ever passed)", neverDelivered2);
     try { host.stop(B, "hard"); } catch { /* ignore */ }
   }
+
+  // ============ (3) Card 850eb55c: a LOOM_DRIVEN-role session stuck on a recognized boot dialog pre- =====
+  // ============     SessionStart HOLDS delivery (never drops it), on BOTH the scheduleKickoffGuarantee ===
+  // ============     direct-submit path (3a/3b, session C) AND drainPending's own queued-entry path =======
+  // ============     (3a'/3b', session F, isolated with NO startupPrompt so it can't also exercise C's =====
+  // ============     path) — and delivers normally, exactly once, the moment SessionStart actually =========
+  // ============     resolves the dialog. Two controls: (3c) same role, no dialog — unchanged; (3d) same ===
+  // ============     dialog, a role the detector does not watch — unchanged (the INTENDED scope: this =====
+  // ============     gate, like card 01160ae3's detector, is scoped to LOOM_DRIVEN_ROLES only — a human- ===
+  // ============     driven manager's own boot is a NOTIFICATION-recipient concern (card 850eb55c item =====
+  // ============     2, sessions/service.ts), not a kickoff-delivery subject). =============================
+  {
+    // ---- (3a)/(3b): scheduleKickoffGuarantee's own direct-submit path, gated -------------------------
+    const C = "fallback-C-dialog-stuck";
+    const KICKOFF3 = "orchestrate task via the readiness fallback — stuck behind a blocking CLI dialog";
+    host.spawn({
+      sessionId: C, cwd: tmpHome, startupPrompt: KICKOFF3, role: "worker",
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    host.markMcpSeen(C); // "worker" mounts loom-orchestration MCP (usesOrchestrationMcp) — scheduleKickoffGuarantee gates its own proceed() on waitForMcpSeen; resolve it instantly rather than waiting out MCP_READY_TIMEOUT_MS
+    const fc = fakes[fakes.length - 1];
+    fc.feed(DIALOG_TEXT); // the boot scan now shows a recognized blocking-dialog signature, BEFORE ready
+
+    await waitUntil(() => host.hasReachedReady(C), { label: "(3a) READY_FALLBACK_MS still marks the session ready despite the dialog", timeoutMs: 5000 });
+    const noWriteC = await assertNeverWithControl({
+      label: "(3a) nothing written to the pty while stuck pre-SessionStart on a recognized dialog",
+      check: () => countIn(fc, PASTE_START) >= 1,
+      windowMs: NEGATIVE_WINDOW_MS,
+      positiveControl: async () => {
+        const { id, fake } = await spawnControlDelivery("(3a) dialog-stuck positive control");
+        const went = await observeOnce({ check: () => countIn(fake, PASTE_START) >= 1, windowMs: NEGATIVE_WINDOW_MS });
+        try { host.stop(id, "hard"); } catch { /* ignore */ }
+        return went;
+      },
+    });
+    check("(3a) ready, but NOTHING written for the kickoff while stuck on the dialog (scheduleKickoffGuarantee's direct submit is held)", noWriteC);
+
+    host.deliverHook(C, { hook_event_name: "SessionStart", session_id: "eng-C" }); // the dialog resolves
+    // Nothing auto-redrains this: scheduleKickoffGuarantee's own gated branch routed the kickoff through
+    // enqueueStdin, whose own immediate-submit gate also required `!live.busy` — and `live.busy` has been
+    // true since spawn (the optimistic startupPrompt set) with NO submit() ever run to clear it via the
+    // usual Stop/give-up paths. The ONLY thing that clears it here is healIfStuck's short pre-first-turn
+    // stale window, fired by the periodic reconcile() tick — simulated by polling it directly below
+    // (a real production tick, not a fixed sleep: this stops the INSTANT delivery is observed).
+    await waitUntil(() => { host.reconcile(); return countIn(fc, PASTE_START) >= 1; },
+      { label: "(3b) delivery proceeds once SessionStart resolves the dialog (via the reconcile() backstop)", timeoutMs: 3000 });
+    check("(3b) exactly ONE kickoff delivery once SessionStart resolves the dialog", countIn(fc, PASTE_START) === 1);
+    check("(3b) the delivered text is the ORIGINAL kickoff", writtenOf(fc).includes(KICKOFF3));
+    try { host.stop(C, "hard"); } catch { /* ignore */ }
+
+    // ---- (3a')/(3b'): drainPending's OWN queued-entry path, gated — isolated from scheduleKickoffGuarantee
+    // ---- entirely (no startupPrompt ⇒ kickoff stays null ⇒ scheduleKickoffGuarantee never even runs; and
+    // ---- live.busy is never optimistically set, so delivery here needs no heal-cycle wait at all) --------
+    const F = "fallback-F-dialog-stuck-drain";
+    host.spawn({
+      sessionId: F, cwd: tmpHome, role: "worker",
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    const ff = fakes[fakes.length - 1];
+    ff.feed(DIALOG_TEXT);
+    const QUEUED_ENTRY = "a queued nudge sitting behind the same stuck dialog";
+    host.enqueueStdin(F, QUEUED_ENTRY, "system", undefined, undefined, "agent"); // pre-ready ⇒ lands in live.pending via enqueueStdin's own held branch
+
+    await waitUntil(() => host.hasReachedReady(F), { label: "(3a') READY_FALLBACK_MS still marks the session ready despite the dialog", timeoutMs: 5000 });
+    const noWriteF = await assertNeverWithControl({
+      label: "(3a') drainPending itself never delivers a queued entry while stuck on the dialog",
+      check: () => countIn(ff, PASTE_START) >= 1,
+      windowMs: NEGATIVE_WINDOW_MS,
+      positiveControl: async () => {
+        const { id, fake } = await spawnControlDelivery("(3a') dialog-stuck drain positive control");
+        const went = await observeOnce({ check: () => countIn(fake, PASTE_START) >= 1, windowMs: NEGATIVE_WINDOW_MS });
+        try { host.stop(id, "hard"); } catch { /* ignore */ }
+        return went;
+      },
+    });
+    check("(3a') ready, but the queued entry is NEVER drained while stuck on the dialog (drainPending's own queued path is held)", noWriteF);
+    check("(3a') the queued entry's text never landed either", !writtenOf(ff).includes(QUEUED_ENTRY));
+
+    host.deliverHook(F, { hook_event_name: "SessionStart", session_id: "eng-F" }); // the dialog resolves
+    host.reconcile(); // the production periodic backstop — live.busy was never set here, so one tick suffices
+    await waitUntil(() => countIn(ff, PASTE_START) >= 1, { label: "(3b') the queued entry delivers once SessionStart resolves the dialog", timeoutMs: 3000 });
+    check("(3b') exactly ONE delivery of the queued entry once SessionStart resolves the dialog", countIn(ff, PASTE_START) === 1);
+    check("(3b') the delivered text is the ORIGINAL queued entry", writtenOf(ff).includes(QUEUED_ENTRY));
+    try { host.stop(F, "hard"); } catch { /* ignore */ }
+
+    // ---- (3c) control: SAME role, NO dialog signature — the fallback still delivers exactly like (1) ----
+    const D = "fallback-D-no-dialog-control";
+    const KICKOFF3C = "orchestrate task via the readiness fallback — same role, no dialog this time";
+    host.spawn({
+      sessionId: D, cwd: tmpHome, startupPrompt: KICKOFF3C, role: "worker",
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    host.markMcpSeen(D);
+    const fd = fakes[fakes.length - 1];
+    // Deliberately no fd.feed() call — nothing resembling a dialog is ever shown.
+    await waitUntil(() => countIn(fd, PASTE_START) === 1, { label: "(3c) control: same LOOM_DRIVEN role, no dialog — delivers via the fallback unchanged", timeoutMs: 5000 });
+    check("(3c) control: a LOOM_DRIVEN role with NO dialog signature still gets its kickoff delivered via the fallback", countIn(fd, PASTE_START) === 1);
+    check("(3c) control: the delivered text is the ORIGINAL kickoff", writtenOf(fd).includes(KICKOFF3C));
+    try { host.stop(D, "hard"); } catch { /* ignore */ }
+
+    // ---- (3d) control: the SAME dialog, but a role the detector does not watch — INTENDED SCOPE: --------
+    // ---- unchanged, exactly like pre-fix behaviour. "manager" is not in LOOM_DRIVEN_ROLES (card ----------
+    // ---- 01160ae3's own role gate, reused verbatim by isBlockedOnUnresolvedBootDialog) — a human-driven -
+    // ---- manager has someone to notice/intervene on its own boot; card 850eb55c item 2 separately --------
+    // ---- protects a manager as a NOTIFICATION recipient (handleClaudeBootDialogStuck), not as a ----------
+    // ---- kickoff-delivery subject, which is a DIFFERENT mechanism than this gate. -----------------------
+    const E = "fallback-E-manager-role-control";
+    const KICKOFF3D = "manager kickoff via the readiness fallback — dialog on screen, role out of scope";
+    host.spawn({
+      sessionId: E, cwd: tmpHome, startupPrompt: KICKOFF3D, role: "manager",
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    host.markMcpSeen(E); // "manager" also mounts loom-orchestration MCP (usesOrchestrationMcp)
+    const fe = fakes[fakes.length - 1];
+    fe.feed(DIALOG_TEXT); // the SAME dialog signature — but "manager" is not in LOOM_DRIVEN_ROLES
+    await waitUntil(() => countIn(fe, PASTE_START) === 1, { label: "(3d) control: a non-LOOM_DRIVEN role delivers via the fallback unchanged, even with the dialog on screen", timeoutMs: 5000 });
+    check("(3d) control: a non-LOOM_DRIVEN role (manager) is NOT held by this gate — same dialog, unchanged (intended scope)", countIn(fe, PASTE_START) === 1);
+    check("(3d) control: the delivered text is the ORIGINAL kickoff", writtenOf(fe).includes(KICKOFF3D));
+    try { host.stop(E, "hard"); } catch { /* ignore */ }
+  }
+
+  // ============ (4) Card 850eb55c round 2 (item 1): READY_FALLBACK_MS latches `ready` FIRST (behind a =====
+  // ============     dialog hold — deterministic, same mechanism as (3)), THEN a LATE SessionStart arrives ==
+  // ============     and drives a REAL boot mode-cycle (startupModeCycles > 0, unlike (3)'s 0). Proves the ==
+  // ============     structural release fixed in this round: the kickoff is held through the WHOLE cycle ===
+  // ============     (never raced in mid-settle/mid-Shift+Tab) and then delivered directly from the =========
+  // ============     cycle's own onDone (`releaseBootModeCycle`) — NEVER via `host.reconcile()`, which this =
+  // ============     scenario deliberately never calls even once (the daemon's own periodic reconcile() is ==
+  // ============     wired in index.ts, not PtyHost's constructor, so nothing else can drain it either). ====
+  // ============     RED on f53be62e (round 3, item 3 — corrected): pre-round-2, the LATE SessionStart's ===
+  // ============     own `cycleToMode(…, () => this.markReady(sessionId))` DOES hit markReady's `live.ready`=
+  // ============     guard and silently no-op once its cycle finishes — but that is NOT why this scenario ===
+  // ============     goes red. The ORIGINAL scheduleKickoffGuarantee call, armed by the EARLIER markReady ===
+  // ============     that READY_FALLBACK_MS itself triggered, is a SEPARATE, already-in-flight setTimeout ===
+  // ============     chain (its own logLandedMode poll-and-settle). By the time THAT chain's `proceed()` ====
+  // ============     finally runs, SessionStart has already set `sessionStartObserved`, so ==================
+  // ============     `isBlockedOnUnresolvedBootDialog` already reads false — and, with no =====================
+  // ============     `startupCycleInFlight` gate existing pre-round-2, nothing else holds it: it falls =======
+  // ============     straight through to a DIRECT submit(), landing the kickoff MID-CYCLE, before the ========
+  // ============     cycle's own first Shift+Tab. So 4b/4c/4d/4f (nothing written during the cycle / before =
+  // ============     each Shift+Tab / ordering strictly after the last one) are RED on this PREMATURE =========
+  // ============     delivery — 4e ("delivered exactly once, promptly") still PASSES on old code, since the ==
+  // ============     kickoff genuinely IS delivered, just too early — exactly the hazard `startupCycleInFlight`
+  // ============     (this round's own guard) closes. =============================================================
+  {
+    const G = "fallback-G-dialog-stuck-mode-cycle";
+    const KICKOFF4 = "orchestrate task via the readiness fallback — dialog-held, then a real mode cycle";
+    host.spawn({
+      sessionId: G, cwd: tmpHome, startupPrompt: KICKOFF4, role: "worker",
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 2 }, // → target "auto"
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    host.markMcpSeen(G); // "worker" mounts loom-orchestration MCP — see (3)'s own comment on C
+    const fg = fakes[fakes.length - 1];
+    fg.feed(DIALOG_TEXT); // forces isBlockedOnUnresolvedBootDialog deterministically, same as (3)
+
+    await waitUntil(() => host.hasReachedReady(G), { label: "(4a) READY_FALLBACK_MS marks ready despite the dialog, before SessionStart ever fires", timeoutMs: 5000 });
+    check("(4a) nothing written yet — ready, but held behind the dialog, no cycle started", countIn(fg, PASTE_START) === 0 && countShiftTabs(fg) === 0);
+
+    // SessionStart arrives LATE (ready already latched). Dialog resolves (sessionStartObserved flips,
+    // dialogStuckScan clears) — but startupModeCycles=2 means a REAL cycle now starts, and
+    // `startupCycleInFlight` must hold the kickoff through it (isBlockedOnUnresolvedBootDialog alone
+    // already reads false the instant this hook runs, so it can no longer explain any further hold).
+    host.deliverHook(G, { hook_event_name: "SessionStart", session_id: "eng-G" });
+
+    const noWriteDuringCycle = await assertNeverWithControl({
+      label: "(4b) nothing written while the mode cycle itself is mid-flight (startupCycleInFlight holds it)",
+      check: () => countIn(fg, PASTE_START) >= 1,
+      windowMs: NEGATIVE_WINDOW_MS,
+      positiveControl: async () => {
+        const { id, fake } = await spawnControlDelivery("(4b) mode-cycle-in-flight positive control");
+        const went = await observeOnce({ check: () => countIn(fake, PASTE_START) >= 1, windowMs: NEGATIVE_WINDOW_MS });
+        try { host.stop(id, "hard"); } catch { /* ignore */ }
+        return went;
+      },
+    });
+    check("(4b) ready, SessionStart fired, but NOTHING written while the cycle is still converging", noWriteDuringCycle);
+
+    // Drive the cycle to its target — same footer-feed recipe as pty-ready-fallback-race.mjs.
+    fg.feed(ACCEPT_EDITS_FOOTER);
+    check("(4c) cycle's 1st Shift+Tab issued once settle completes",
+      await waitUntil(() => countShiftTabs(fg) === 1, { timeoutMs: 2000, label: "(4c) 1st Shift+Tab" }));
+    check("(4c) STILL nothing delivered after the 1st Shift+Tab alone", countIn(fg, PASTE_START) === 0);
+    fg.feed(PLAN_FOOTER);
+    check("(4d) cycle's 2nd (final) Shift+Tab issued",
+      await waitUntil(() => countShiftTabs(fg) === 2, { timeoutMs: 2000, label: "(4d) 2nd Shift+Tab" }));
+    check("(4d) STILL nothing delivered immediately after the 2nd Shift+Tab is WRITTEN (not yet confirmed via the footer)", countIn(fg, PASTE_START) === 0);
+    fg.feed(AUTO_FOOTER); // confirms the 2nd Shift+Tab landed — the cycle reaches its target here
+
+    // THE CORE CLAIM: delivery proceeds PROMPTLY (a short, bounded wait — no reconcile() tick, production
+    // or otherwise, is ever invoked anywhere in this scenario) directly off the cycle's own onDone.
+    check("(4e) kickoff delivered exactly once, promptly, with NO call to host.reconcile() anywhere in this scenario",
+      await waitUntil(() => countIn(fg, PASTE_START) === 1, { timeoutMs: 2000, label: "(4e) kickoff delivered via releaseBootModeCycle's direct drain" }));
+    check("(4e) the delivered text is the ORIGINAL kickoff", writtenOf(fg).includes(KICKOFF4));
+
+    // ORDERING: the kickoff's own paste-start marker must appear AFTER the LAST Shift+Tab in the real
+    // write sequence — never interleaved mid-cycle (the frame-splice class this whole mechanism guards).
+    const lastShiftTabIdx = fg.writes.lastIndexOf(SHIFT_TAB);
+    const firstPasteIdx = fg.writes.indexOf(PASTE_START);
+    check("(4f) the kickoff's paste-start marker is strictly AFTER the cycle's last Shift+Tab in write order",
+      lastShiftTabIdx !== -1 && firstPasteIdx !== -1 && firstPasteIdx > lastShiftTabIdx);
+    try { host.stop(G, "hard"); } catch { /* ignore */ }
+  }
+
+  // ============ (4') Card 850eb55c (round 3, item 2): drainPending's OWN `startupCycleInFlight` guard =====
+  // ============     (host.ts ~9244) — isolated from scheduleKickoffGuarantee's own direct-submit check ====
+  // ============     (scenario (4) above never actually exercises THIS one line: nothing there ever clears ==
+  // ============     `live.busy` WHILE the cycle is mid-flight, so drainPending's own startupCycleInFlight ==
+  // ============     check never gets a chance to matter there — disabling just that line still leaves (4) =
+  // ============     green). Clears busy via healIfStuck's FIRST_TURN_STALE_MS window (the SAME mechanism ===
+  // ============     scenario (3) relies on) WHILE still pre-SessionStart, so the clear itself is routed, ===
+  // ============     correctly, through isBlockedOnUnresolvedBootDialog's OWN hold, not this one — THEN =====
+  // ============     delivers SessionStart (starting the real cycle) with the kickoff ALREADY queued in =====
+  // ============     `live.pending` and busy ALREADY false, and calls `host.reconcile()` BETWEEN the ========
+  // ============     cycle's two Shift+Tabs — the one moment where nothing but `startupCycleInFlight` =======
+  // ============     stands between the queued entry and a mid-cycle paste. =================================
+  {
+    const H = "fallback-H-drainpending-cycle-guard";
+    const KICKOFF_H = "orchestrate task via the readiness fallback — drainPending's own cycle-in-flight guard";
+    host.spawn({
+      sessionId: H, cwd: tmpHome, startupPrompt: KICKOFF_H, role: "worker",
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 2 }, // → target "auto"
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    host.markMcpSeen(H); // "worker" mounts loom-orchestration MCP — see (3)'s own comment on C
+    const fh = fakes[fakes.length - 1];
+    fh.feed(DIALOG_TEXT); // forces isBlockedOnUnresolvedBootDialog deterministically, same as (3)/(4)
+
+    await waitUntil(() => host.hasReachedReady(H), { label: "(4'a) READY_FALLBACK_MS marks ready despite the dialog", timeoutMs: 5000 });
+    check("(4'a) nothing written yet — ready, held behind the dialog, no cycle started", countIn(fh, PASTE_START) === 0 && countShiftTabs(fh) === 0);
+
+    // Wait for the OBSERVABLE precondition this scenario actually needs: scheduleKickoffGuarantee's own
+    // gated branch (held by isBlockedOnUnresolvedBootDialog) has routed the kickoff into `live.pending` —
+    // never a blind sleep guessing at logLandedMode's own settle timing.
+    await waitUntil(() => (host.live.get(H)?.pending?.length ?? 0) > 0,
+      { label: "(4'a') the kickoff has been queued behind the dialog (scheduleKickoffGuarantee's own held branch)", timeoutMs: 3000 });
+
+    // Clear `busy` via healIfStuck's own FIRST_TURN_STALE_MS window, STILL pre-SessionStart — the SAME
+    // mechanism scenario (3) relies on. Polls host.reconcile() (the production periodic tick, called
+    // directly — never a blind sleep) until busy actually flips, an observable event.
+    await waitUntil(() => { host.reconcile(); return host.live.get(H)?.busy === false; },
+      { label: "(4'b) busy cleared pre-SessionStart via healIfStuck's FIRST_TURN_STALE_MS window", timeoutMs: 3000 });
+    check("(4'b) still nothing written — busy cleared, but still held by isBlockedOnUnresolvedBootDialog (dialog still on screen, SessionStart not yet observed)", countIn(fh, PASTE_START) === 0);
+
+    host.deliverHook(H, { hook_event_name: "SessionStart", session_id: "eng-H" }); // the dialog resolves; the real mode cycle starts
+    check("(4'c) nothing written the instant SessionStart fires — the cycle has not pressed its first Shift+Tab yet", countIn(fh, PASTE_START) === 0 && countShiftTabs(fh) === 0);
+
+    fh.feed(ACCEPT_EDITS_FOOTER);
+    check("(4'd) cycle's 1st Shift+Tab issued", await waitUntil(() => countShiftTabs(fh) === 1, { timeoutMs: 2000, label: "(4'd) 1st Shift+Tab" }));
+
+    // THE CORE CLAIM: between the two Shift+Tabs — busy already false, dialog already resolved, the
+    // kickoff already sitting in `live.pending` — the ONLY thing left holding drainPending's own drain is
+    // `Live.startupCycleInFlight`. Calling reconcile() HERE is the one place that guard, specifically, is
+    // ever exercised: disabling it alone (nothing else touched) delivers the paste right here, before the
+    // 2nd Shift+Tab, which the (4'e) check below catches.
+    host.reconcile();
+    check("(4'e) STILL nothing written between the two Shift+Tabs (drainPending's own startupCycleInFlight guard holds it)", countIn(fh, PASTE_START) === 0);
+
+    fh.feed(PLAN_FOOTER);
+    check("(4'f) cycle's 2nd (final) Shift+Tab issued", await waitUntil(() => countShiftTabs(fh) === 2, { timeoutMs: 2000, label: "(4'f) 2nd Shift+Tab" }));
+    check("(4'f) STILL nothing delivered immediately after the 2nd Shift+Tab is WRITTEN (not yet confirmed via the footer)", countIn(fh, PASTE_START) === 0);
+    fh.feed(AUTO_FOOTER); // confirms the 2nd Shift+Tab landed — the cycle reaches its target here
+
+    check("(4'g) kickoff delivered exactly once, promptly, off the cycle's own onDone",
+      await waitUntil(() => countIn(fh, PASTE_START) === 1, { timeoutMs: 2000, label: "(4'g) kickoff delivered via releaseBootModeCycle's direct drain" }));
+    check("(4'g) the delivered text is the ORIGINAL kickoff", writtenOf(fh).includes(KICKOFF_H));
+
+    const lastShiftTabIdxH = fh.writes.lastIndexOf(SHIFT_TAB);
+    const firstPasteIdxH = fh.writes.indexOf(PASTE_START);
+    check("(4'h) the kickoff's paste-start marker is strictly AFTER the cycle's last Shift+Tab in write order",
+      lastShiftTabIdxH !== -1 && firstPasteIdxH !== -1 && firstPasteIdxH > lastShiftTabIdxH);
+    try { host.stop(H, "hard"); } catch { /* ignore */ }
+  }
 } finally {
-  for (const id of ["fallback-A", "fallback-B"]) { try { host.stop(id, "hard"); } catch { /* ignore */ } }
+  for (const id of ["fallback-A", "fallback-B", "fallback-C-dialog-stuck", "fallback-D-no-dialog-control", "fallback-E-manager-role-control", "fallback-F-dialog-stuck-drain", "fallback-G-dialog-stuck-mode-cycle", "fallback-H-drainpending-cycle-guard"]) { try { host.stop(id, "hard"); } catch { /* ignore */ } }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a fresh spawn whose SessionStart hook is NEVER delivered still gets its kickoff delivered exactly once, via READY_FALLBACK_MS's own markReady call chaining into the same logLandedMode-gated scheduleKickoffGuarantee delivery the SessionStart-driven path uses; resume (no startupPrompt) stays a byte-identical no-op through this path too."
+  ? "\n✅ ALL PASS — a fresh spawn whose SessionStart hook is NEVER delivered still gets its kickoff delivered exactly once, via READY_FALLBACK_MS's own markReady call chaining into the same logLandedMode-gated scheduleKickoffGuarantee delivery the SessionStart-driven path uses; resume (no startupPrompt) stays a byte-identical no-op through this path too; (card 850eb55c) a LOOM_DRIVEN-role session stuck on a recognized boot dialog pre-SessionStart has BOTH delivery paths (scheduleKickoffGuarantee's direct submit, drainPending's own queued-entry path) held — never dropped — until SessionStart actually resolves the dialog, while the same role with no dialog and a non-LOOM_DRIVEN role with the same dialog both stay unchanged; (round 2) when SessionStart arrives LATE (ready already latched by the fallback) and drives a REAL boot mode-cycle, the kickoff is held through the whole cycle and delivered PROMPTLY, strictly after the cycle's last Shift+Tab, straight off the cycle's own onDone — never via host.reconcile(), which this file never once calls in that scenario; and (round 3) drainPending's OWN startupCycleInFlight guard, isolated from scheduleKickoffGuarantee's own check, also holds a queued entry through a reconcile() call fired BETWEEN the cycle's two Shift+Tabs, with busy already cleared and the dialog already resolved."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
