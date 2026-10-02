@@ -43,13 +43,25 @@ function isRefusedVaultSegment(segment: string): boolean {
   return VAULT_CONTROL_DIR_NAMES.some((name) => lower === name);
 }
 
+/** Resolve `p` through the OS's NATIVE realpath (resolves a junction/symlink AND an 8.3 short-name
+ *  alias Node's own JS-level `fs.realpathSync` doesn't normalize — same technique as `f9360c84`'s
+ *  `isLoomHomeOrAncestor` in versioner.ts). `p` is always confirmed to exist by the caller before this
+ *  runs, so no non-existent-path fallback is needed here (unlike that sibling helper). */
+function realpathNative(p: string): string {
+  try { return fs.realpathSync.native(p); } catch { return fs.realpathSync(p); }
+}
+
 /**
  * Resolve a UI-supplied relative path to an absolute path that is PROVABLY inside the vault root,
- * or null if it escapes (`..`, an absolute path, or a symlinked ancestor pointing outside), touches a
- * control directory or an outright-refused segment shape (see {@link isRefusedVaultSegment}), or resolves
- * through the vault's own `.git`.
+ * or null if it escapes (`..`, an absolute path, a symlinked ancestor pointing outside, or the final
+ * target ITSELF being a symlink/junction), touches a control directory or an outright-refused segment
+ * shape (see {@link isRefusedVaultSegment}), or resolves through the vault's own `.git`.
  * The lexical check rejects `..`/absolute escapes; the realpath check on the deepest existing
  * ancestor rejects an in-vault symlink/junction whose real target is outside the vault (or inside its `.git`).
+ *
+ * @decision af1e0eb4 — never swap the final-target `lstat` check below for `fs.existsSync`: a DANGLING
+ *  symlink/junction makes `existsSync` report "doesn't exist", which previously let this function hand
+ *  back the dangling link's own path as a "safe" target it never actually inspected.
  */
 function resolveInVault(vaultPath: string, relPath: string): string | null {
   // Defense-in-depth: reject any backslash in the relative path on EVERY platform. On POSIX `\` is a
@@ -73,6 +85,13 @@ function resolveInVault(vaultPath: string, relPath: string): string | null {
   // proved `target` is confined to it — so let the caller create it (writeVaultFile/createVaultFile
   // mkdir the parent chain before writing). This is NOT a traversal case; it's just an uncreated root.
   if (!fs.existsSync(root)) return target;
+  // Final-target guard (see the @decision above): lstat the target ITSELF — never existsSync, which
+  // follows the link and is blind to a dangling one — and refuse outright if it's a symlink/junction,
+  // live or dangling. An ENOENT here means the target doesn't exist at all (ordinary create) and falls
+  // through to the walk-up below unchanged.
+  try {
+    if (fs.lstatSync(target).isSymbolicLink()) return null;
+  } catch { /* ENOENT: no filesystem entry at all here — fine, it's a normal create */ }
   // Symlink guard: the target may not exist yet (create/write), so walk up to the deepest existing
   // ancestor and confirm its REAL path is still within the real vault root, and outside the vault's own
   // `.git` (a pre-existing symlink/junction, planted by some other means, could resolve into `.git` while
@@ -81,7 +100,7 @@ function resolveInVault(vaultPath: string, relPath: string): string | null {
   // @decision ffe98495 — never drop the `.git`-realpath check below; it is defense in depth on top of
   // the segment-name refusal above, not a replacement for it.
   try {
-    const realRoot = fs.realpathSync(root);
+    const realRoot = realpathNative(root);
     const realGitDir = path.join(realRoot, ".git");
     let probe = target;
     while (!fs.existsSync(probe)) {
@@ -89,7 +108,7 @@ function resolveInVault(vaultPath: string, relPath: string): string | null {
       if (parent === probe) break; // reached a filesystem root without finding an existing ancestor
       probe = parent;
     }
-    const realProbe = fs.realpathSync(probe);
+    const realProbe = realpathNative(probe);
     if (realProbe !== realRoot && !realProbe.startsWith(realRoot + path.sep)) return null;
     if (realProbe === realGitDir || realProbe.startsWith(realGitDir + path.sep)) return null;
   } catch { return null; } // unreadable root/ancestor → reject
