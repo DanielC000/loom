@@ -2264,7 +2264,7 @@ export type QueuedMessageKind = "warning" | "agent";
  * different value between `drainPending`'s real write and `requeueGiveUpOrigin`'s later reconstruction,
  * silently breaking the late-confirmation content-match/purge mechanism.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number; resolveTailAtDelivery?: () => string | undefined; resolvedTailReady?: boolean; resolvedTail?: string };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; ownerTextSeq?: number; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number; resolveTailAtDelivery?: () => string | undefined; resolvedTailReady?: boolean; resolvedTail?: string };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -2355,6 +2355,12 @@ export type EnqueueStdinTail = {
   captureMintGen?: boolean;
   /** See `QueuedMessage.resolveTailAtDelivery`'s own doc. No positional legacy form — options-object only. */
   resolveTailAtDelivery?: () => string | undefined;
+  /**
+   * @decision 2400d0bc — a monotonic per-session sequence marking WHEN `ownerText` was captured. Do not
+   * mint a fresh one for an entry re-attributing an EARLIER turn (a rate-limit replay) — that outranks a
+   * race-discard marker set in between and wrongly clears it.
+   */
+  ownerTextSeq?: number;
 };
 /**
  * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
@@ -2660,6 +2666,14 @@ interface Live {
   // discarded by the submitWasOutstanding race below; never widen this to carry content.
   raceDiscardedOwnerSubmitAt: number | null;
   raceDiscardedOwnerSubmitGen: number | null;
+  // @decision 2400d0bc — the `ownerAttributionSeq` rank stamped alongside `raceDiscardedOwnerSubmitAt`, so
+  // `attributeOwnerText` compares by RANK, never wall-clock time (millisecond ties are routine under fast,
+  // synchronous execution).
+  raceDiscardedOwnerSubmitSeq: number | null;
+  // @decision 2400d0bc — a per-session monotonic counter, incremented once per genuine owner-text capture
+  // or race-discard event; the ONLY source of `ownerTextSeq`/`lastPromptOwnerTextSeq`/
+  // `raceDiscardedOwnerSubmitSeq`. Never read directly for anything but minting the next rank.
+  ownerAttributionSeq: number;
   // True once ANY turn has ever started for this session (the first UserPromptSubmit hook observed).
   // Gates the fresh-spawn kickoff guarantee (scheduleKickoffGuarantee) and healIfStuck's short pre-first-
   // turn stale window (FIRST_TURN_STALE_MS) — see both for why "never started a turn" needs distinct
@@ -2805,6 +2819,10 @@ interface Live {
   // mirrors lastPromptRoute so a rate-limit-killed companion turn replays with its attestation intact.
   activeTurnOwnerText: string | null;
   lastPromptOwnerText: string | null;
+  // @decision 2400d0bc — monotonic capture-order seq of `lastPromptOwnerText` (see `ownerAttributionSeq`),
+  // set ONLY by `attributeOwnerText` (never re-minted at replay) so `resumeAfterRateLimit` can hand its
+  // true original rank to a replay.
+  lastPromptOwnerTextSeq: number | null;
   // @decision 2b26035c — Primitive A widening: recentOwnerTurns retains only real, authenticated ownerText
   // (never a proactive/system turn), and a match here never substitutes for the committing turn's own
   // owner-auth + confirm round-trip. See 2b26035c's record, "Decision B" section.
@@ -4743,6 +4761,8 @@ export class PtyHost {
       pendingRawOwnerSubmitAt: null,
       raceDiscardedOwnerSubmitAt: null,
       raceDiscardedOwnerSubmitGen: null,
+      raceDiscardedOwnerSubmitSeq: null,
+      ownerAttributionSeq: 0,
       firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
       enterConfirmed: true, // no submit() outstanding yet — nothing has called submit() for this pty at spawn time — see submit()'s reset
       submitGeneration: 0,
@@ -4758,6 +4778,7 @@ export class PtyHost {
       lastPromptRoute: null,
       activeTurnOwnerText: null,
       lastPromptOwnerText: null,
+      lastPromptOwnerTextSeq: null,
       recentOwnerTurns: [],
       recentWrittenTurns: [],
       recentReportedTurns: [],
@@ -4986,7 +5007,7 @@ export class PtyHost {
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
-      raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null,
+      raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null, raceDiscardedOwnerSubmitSeq: null, ownerAttributionSeq: 0,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
@@ -4999,7 +5020,7 @@ export class PtyHost {
       ambiguousDispatches: new Map(),
       retiredGiveUpSignatures: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
-      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
+      activeTurnOwnerText: null, lastPromptOwnerText: null, lastPromptOwnerTextSeq: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
@@ -6185,7 +6206,7 @@ export class PtyHost {
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
-      raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null,
+      raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null, raceDiscardedOwnerSubmitSeq: null, ownerAttributionSeq: 0,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
@@ -6198,7 +6219,7 @@ export class PtyHost {
       ambiguousDispatches: new Map(),
       retiredGiveUpSignatures: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
-      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
+      activeTurnOwnerText: null, lastPromptOwnerText: null, lastPromptOwnerTextSeq: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
@@ -6919,6 +6940,8 @@ export class PtyHost {
             // question_resolve's fallback can refuse instead of quoting a stale earlier owner turn.
             live.raceDiscardedOwnerSubmitAt = Date.now();
             live.raceDiscardedOwnerSubmitGen = live.submitGeneration;
+            // @decision 2400d0bc — the ordering rank attributeOwnerText compares against.
+            live.raceDiscardedOwnerSubmitSeq = this.nextOwnerAttributionSeq(live);
           }
           live.pendingRawOwnerSubmit = null;
           live.pendingRawOwnerSubmitAt = null;
@@ -8044,6 +8067,9 @@ export class PtyHost {
     const captureMintGen = isTailObject ? tailOrGiveUpHeldUntil.captureMintGen === true : false;
     // `resolveTailAtDelivery` has NO positional legacy form (see EnqueueStdinTail's own doc) — options-object only.
     const resolveTailAtDelivery = isTailObject ? tailOrGiveUpHeldUntil.resolveTailAtDelivery : undefined;
+    // `ownerTextSeq` has NO positional legacy form (options-object only, like `resolveTailAtDelivery`) —
+    // read here, resolved into a real rank just below once `live` (and its counter) is in hand.
+    const ownerTextSeqOverride = isTailObject ? tailOrGiveUpHeldUntil.ownerTextSeq : undefined;
     // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #3(c)/#5: dispatch to codex's OWN,
     // simpler push+drain path BEFORE any of the claude-specific machinery below runs (`this.live.get`
     // would return undefined for a codex sessionId anyway — WITHOUT this branch that would silently
@@ -8065,6 +8091,11 @@ export class PtyHost {
     // @decision 710a34fa — a host shell takes ONLY raw writeStdin over the loopback /ws/term; the programmatic
     // turn path (bracketed paste + Enter) refuses it structurally, whatever route or tier reached here.
     if (live.kind === "shell") return { delivered: false, reason: "shell-terminal", queued: false, deliveryState: "dropped" };
+    // @decision 2400d0bc — resolved HERE (not above) so a fresh mint reads `live`'s own counter; an
+    // explicit override (resumeAfterRateLimit's replay) is threaded through unchanged instead.
+    const ownerTextSeq: number | undefined = ownerText === undefined
+      ? undefined
+      : ownerTextSeqOverride ?? this.nextOwnerAttributionSeq(live);
     // @decision 21a281b6 — captureMintGen must stay a strict, EXPLICIT opt-in, never a
     // `mintedAtWallClock`-presence fallback:
     //
@@ -8134,7 +8165,7 @@ export class PtyHost {
         // same function the drain path uses, so there is exactly one place this logic lives. In practice
         // this is a no-op for the immediate path (nothing has run yet to make it stale), but it stays
         // correct rather than assumed.
-        const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}) };
+        const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}), ...(ownerTextSeq !== undefined ? { ownerTextSeq } : {}) };
         this.submit(sessionId, joinSubmittedText([entry], live.submitGeneration), route, ownerText, proactive, senderId, "immediate", [entry]);
       }
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
@@ -8165,7 +8196,7 @@ export class PtyHost {
       const id = randomUUID();
       // `mintedAtGen` rides along PRISTINE (card 4af5aefa) — annotated fresh at actual drain time
       // (`joinSubmittedText`, called from `drainPending`), never baked in here.
-      const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}) };
+      const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}), ...(ownerTextSeq !== undefined ? { ownerTextSeq } : {}) };
       // @decision eac3464d — a SAME-SENDER agent-kind arrival reorders to land right after that
       // sender's own last (eligible) queued entry, never the FIFO tail, so same-sender coalescing has
       // something adjacent to work with; NEVER past a give-up-held or giveUpGen-tagged entry.
@@ -9185,19 +9216,37 @@ export class PtyHost {
    * ("no owner text this turn") case is handled by each CALLER, not this helper, matching submit()'s prior
    * inline shape exactly (byte-identical behavior for the composer/companion path this factors out of).
    */
-  private attributeOwnerText(live: Live, ownerText: string): void {
+  /** @decision 2400d0bc — the ONLY minter of `Live.ownerAttributionSeq`; every rank comparison this card
+   *  introduces (`lastPromptOwnerTextSeq`/`QueuedMessage.ownerTextSeq`/`raceDiscardedOwnerSubmitSeq`) comes
+   *  from this one counter, so they're always comparable regardless of wall-clock resolution. */
+  private nextOwnerAttributionSeq(live: Live): number {
+    return ++live.ownerAttributionSeq;
+  }
+
+  /**
+   * @decision 2400d0bc — `capturedSeq` is the RANK (never wall-clock) at which `ownerText` was genuinely
+   * authored; defaults to a freshly-minted one (an ordinary, non-replay attribution). Does not clear the
+   * race-discard marker for a `capturedSeq` that is not strictly newer than it.
+   */
+  private attributeOwnerText(live: Live, ownerText: string, capturedSeq?: number): void {
+    const seq = capturedSeq ?? this.nextOwnerAttributionSeq(live);
     live.activeTurnOwnerText = ownerText;
     live.lastPromptOwnerText = ownerText;
+    live.lastPromptOwnerTextSeq = seq;
     // NEVER cleared at Stop — persists across the turn boundary so a later turn's lever call can still see it.
     live.recentOwnerTurns.unshift(ownerText);
     if (live.recentOwnerTurns.length > RECENT_OWNER_TURNS_WINDOW) live.recentOwnerTurns.length = RECENT_OWNER_TURNS_WINDOW;
     // @decision d326c3c2 — a genuine owner turn just landed in recentOwnerTurns, so any earlier
     // race-discard marker no longer describes "the most recent owner turn is missing" — clear it.
-    live.raceDiscardedOwnerSubmitAt = null;
-    live.raceDiscardedOwnerSubmitGen = null;
+    // @decision 2400d0bc — ONLY when this attribution OUTRANKS the marker (see this method's own doc).
+    if (live.raceDiscardedOwnerSubmitSeq === null || seq > live.raceDiscardedOwnerSubmitSeq) {
+      live.raceDiscardedOwnerSubmitAt = null;
+      live.raceDiscardedOwnerSubmitGen = null;
+      live.raceDiscardedOwnerSubmitSeq = null;
+    }
   }
 
-  private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue", origin?: QueuedMessage[]): void {
+  private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue", origin?: QueuedMessage[], ownerTextSeq?: number): void {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.kind === "shell") return; // @decision 710a34fa — never a programmatic turn into a host shell
 
@@ -9275,13 +9324,14 @@ export class PtyHost {
         let attributedAny = false;
         for (const m of origin) {
           if (m.ownerText !== undefined) {
-            this.attributeOwnerText(live, m.ownerText);
+            this.attributeOwnerText(live, m.ownerText, m.ownerTextSeq);
             attributedAny = true;
           }
         }
         if (!attributedAny) {
           live.activeTurnOwnerText = null;
           live.lastPromptOwnerText = null;
+          live.lastPromptOwnerTextSeq = null;
         }
       } else {
         // Fail CLOSED: a multi-sender batch cannot attest any one member's owner text under another
@@ -9289,12 +9339,14 @@ export class PtyHost {
         // (the exact split that let a coalesced turn's sender key and owner text disagree).
         live.activeTurnOwnerText = null;
         live.lastPromptOwnerText = null;
+        live.lastPromptOwnerTextSeq = null;
       }
     } else if (ownerText !== undefined) {
-      this.attributeOwnerText(live, ownerText);
+      this.attributeOwnerText(live, ownerText, ownerTextSeq);
     } else {
       live.activeTurnOwnerText = null;
       live.lastPromptOwnerText = null;
+      live.lastPromptOwnerTextSeq = null;
     }
     // Companion Trust Window: pin whatever real sender id this submit carries (see Live.activeTurnSenderId's
     // own doc — card e01687ea correction: this is now populated for ANY caller threading a real senderId
@@ -10555,9 +10607,12 @@ export class PtyHost {
     if (live.lastPrompt != null && !live.busy) {
       const blocked = live.stopping || live.drainHeld;
       if (blocked) {
-        this.enqueueStdin(sessionId, live.lastPrompt, "system", undefined, live.lastPromptRoute ?? undefined, "agent", undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId);
+        // @decision 2400d0bc — pass the ORIGINAL `lastPromptOwnerTextSeq` through the tail object so the
+        // held-and-later-drained replay re-attributes with its true (pre-race) rank, not a fresh one
+        // minted at drain time.
+        this.enqueueStdin(sessionId, live.lastPrompt, "system", undefined, live.lastPromptRoute ?? undefined, "agent", undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, { ownerTextSeq: live.lastPromptOwnerTextSeq ?? undefined });
       } else {
-        this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, "rate-limit-replay");
+        this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, "rate-limit-replay", undefined, live.lastPromptOwnerTextSeq ?? undefined);
       }
     }
     return true;

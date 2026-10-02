@@ -316,6 +316,67 @@ try {
     check("18: ONLY that genuine attribution clears the marker", host.hasRaceDiscardedOwnerSubmit(sid) === false);
   }
 
+  // ===== 19. Card 2400d0bc: a RATE-LIMIT REPLAY of the PRE-race owner turn must NOT clear the marker.
+  // Walk (the exact path from the card): owner turn X submitted (Enter outstanding) -> a raw line R races
+  // in and is discarded (marker set, AFTER X's own attribution already happened) -> X dies to a rate limit
+  // and parks -> resumeAfterRateLimit replays X via lastPromptOwnerText. X's replay re-attributes the SAME
+  // (older) owner text the marker already postdates — it must not look "newer" just because the replay
+  // happens to run after the race. =====
+  {
+    const sid = newSession("S"); SIDS.push(sid);
+    const ownerBody = "approve the deploy";
+    host.enqueueStdin(sid, ownerBody, "system", undefined, IN_APP, "agent", undefined, ownerBody); // X: owner turn, Enter outstanding
+    check("19: X attests before the race", host.getActiveTurnOwnerText(sid) === ownerBody);
+    host.writeStdin(sid, "raced human line\r"); // R races in before X's own confirming hook
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" }); // confirms X's Enter, discards R, sets the marker
+    check("19: marker set after the race", host.hasRaceDiscardedOwnerSubmit(sid) === true);
+    check("19: X's own attribution is untouched by the discard", host.getActiveTurnOwnerText(sid) === ownerBody);
+    host.deliverHook(sid, { hook_event_name: "StopFailure", error: "rate_limit" }); // X dies to a rate limit and parks
+    check("19: parked — active cleared, marker survives", host.getActiveTurnOwnerText(sid) === null);
+    check("19: marker still set while parked", host.hasRaceDiscardedOwnerSubmit(sid) === true);
+    const resumed = host.resumeAfterRateLimit(sid); // replays X
+    check("19: resume succeeded", resumed === true);
+    check("19: the replay re-attests X", host.getActiveTurnOwnerText(sid) === ownerBody);
+    check("19: the replay of the PRE-race turn must NOT clear the marker", host.hasRaceDiscardedOwnerSubmit(sid) === true);
+    stop(sid); // end the replayed turn
+    check("19: after Stop, active clears again and the marker is STILL set — question_resolve's fallback must refuse, not quote X", host.getActiveTurnOwnerText(sid) === null && host.hasRaceDiscardedOwnerSubmit(sid) === true);
+  }
+
+  // ===== 20. Card 2400d0bc, the MILDER queued-composer variant: an owner composer entry Y enqueued
+  // (held, because the session is busy) BEFORE R races in, but DRAINED (as its own turn) AFTER the race
+  // sets the marker. Y predates the race just as much as X did in test 19 — draining it late must not
+  // clear the marker either. =====
+  {
+    const sid = newSession("T"); SIDS.push(sid);
+    host.enqueueStdin(sid, "[loom:worker-report] done", "system", undefined, undefined, "agent"); // X: non-owner turn, Enter outstanding (arms busy)
+    const ownerBody = "ship it";
+    const r1 = host.enqueueStdin(sid, ownerBody, "system", undefined, IN_APP, "agent", undefined, ownerBody); // Y: queued WHILE busy, captured BEFORE the race
+    check("20: Y is held (queued) while X is outstanding", r1.delivered === false);
+    check("20: no attestation yet — X hasn't ended, Y hasn't drained", host.getActiveTurnOwnerText(sid) === null);
+    host.writeStdin(sid, "raced human line\r"); // R races in before X's own confirming hook — AFTER Y was already queued
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" }); // confirms X's Enter, discards R, sets the marker
+    check("20: marker set after the race", host.hasRaceDiscardedOwnerSubmit(sid) === true);
+    stop(sid); // ends X's turn -> drains Y as its own turn
+    check("20: Y drains and attests", host.getActiveTurnOwnerText(sid) === ownerBody);
+    check("20: Y predates the race (queued before R arrived) — draining it late must NOT clear the marker", host.hasRaceDiscardedOwnerSubmit(sid) === true);
+  }
+
+  // ===== 21. POSITIVE CONTROL for card 2400d0bc: a genuinely NEWER owner attribution, via the origin-array
+  // path (not the raw-terminal default-seq path tests 17/18 already cover), still clears the marker — the
+  // ordering check is not a blanket "never clear again" regression. =====
+  {
+    const sid = newSession("U"); SIDS.push(sid);
+    host.enqueueStdin(sid, "[loom:worker-report] done", "system", undefined, undefined, "agent");
+    host.writeStdin(sid, "raced human line\r");
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" });
+    check("21: marker set after the race", host.hasRaceDiscardedOwnerSubmit(sid) === true);
+    stop(sid); // ends that turn
+    const fresh = "go ahead, ship it";
+    host.enqueueStdin(sid, fresh, "system", undefined, IN_APP, "agent", undefined, fresh); // a genuinely NEW owner turn, submitted (not replayed) AFTER the race — immediate path, origin-array attribution
+    check("21: the fresh owner turn attests", host.getActiveTurnOwnerText(sid) === fresh);
+    check("21: a genuinely NEWER owner attribution (origin-array path) still clears the marker", host.hasRaceDiscardedOwnerSubmit(sid) === false);
+  }
+
   await sleep(200); // let async paste-ends/Enters flush before teardown
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
@@ -323,6 +384,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — getActiveTurnOwnerText attests the literal owner bytes of an owner-authored turn, stays null for a proactive/system turn, and is cleared at turn end (never inherited by a later turn); getRecentOwnerTurns (card 2b26035c widening) retains a bounded, most-recent-first window of the SAME server-attested owner bytes that survives Stop, never admits a non-owner-authored turn, and evicts an old-enough entry once the window fills. Card b4b9b707: a raw-terminal (/ws/term) Enter-submit ALSO attests ownerText via the SAME writer, a Loom-originated submit() racing in before the correlating hook ALWAYS wins (never fabricates), a consumed attestation never leaks to a later turn, and a stale never-consumed draft is TTL-discarded rather than misattributed. Card fca6af6d (the REVERSE-order race): a raw line that races in BEHIND an already-outstanding submit() — before that submit's own confirming hook fires — is likewise never attributed to the submit-originated turn, while a genuine raw-terminal Enter with no submit outstanding still attests correctly (the enterConfirmed-captured-before-hook discriminator). Card d326c3c2: that SAME race ALSO sets a timestamp/gen-only race-discard marker (hasRaceDiscardedOwnerSubmit) — the signal question_resolve's fallback needs to refuse instead of quoting a stale earlier owner turn — which SURVIVES any number of unrelated submit()s (Code Review correction: an earlier gen-advance clear reopened the exact bug this card fixes) and clears ONLY the instant a genuine owner turn is actually attributed."
+  ? "\n✅ ALL PASS — getActiveTurnOwnerText attests the literal owner bytes of an owner-authored turn, stays null for a proactive/system turn, and is cleared at turn end (never inherited by a later turn); getRecentOwnerTurns (card 2b26035c widening) retains a bounded, most-recent-first window of the SAME server-attested owner bytes that survives Stop, never admits a non-owner-authored turn, and evicts an old-enough entry once the window fills. Card b4b9b707: a raw-terminal (/ws/term) Enter-submit ALSO attests ownerText via the SAME writer, a Loom-originated submit() racing in before the correlating hook ALWAYS wins (never fabricates), a consumed attestation never leaks to a later turn, and a stale never-consumed draft is TTL-discarded rather than misattributed. Card fca6af6d (the REVERSE-order race): a raw line that races in BEHIND an already-outstanding submit() — before that submit's own confirming hook fires — is likewise never attributed to the submit-originated turn, while a genuine raw-terminal Enter with no submit outstanding still attests correctly (the enterConfirmed-captured-before-hook discriminator). Card d326c3c2: that SAME race ALSO sets a timestamp/gen-only race-discard marker (hasRaceDiscardedOwnerSubmit) — the signal question_resolve's fallback needs to refuse instead of quoting a stale earlier owner turn — which SURVIVES any number of unrelated submit()s (Code Review correction: an earlier gen-advance clear reopened the exact bug this card fixes) and clears ONLY the instant a genuine owner turn is actually attributed. Card 2400d0bc: neither a rate-limit REPLAY of the pre-race owner turn nor a queued composer entry that was enqueued before the race but DRAINS after it may clear the marker either — both carry their true (older) rank via a monotonic per-session sequence, never wall-clock time, while a genuinely newer owner attribution (via the same origin-array path) still clears it correctly."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
