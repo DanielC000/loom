@@ -18,7 +18,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import {
   ensureTrusted, discoverProjectMcpServerNames, claudeCliProjectKey,
-  __setGitMainCheckoutRootResolverForTest,
+  __setGitMainCheckoutRootResolverForTest, __setOpenSyncForTest,
 } from "../dist/pty/claude-config.js";
 
 let failures = 0;
@@ -227,6 +227,11 @@ try {
     // taken). Under the OLD two-flag isTrusted this fixture could NEVER reach the fast path (onboarding is
     // never present on a real entry), so it would have rewritten the file on every single call forever —
     // this is the dead-fast-path perf claim from card 17237fba's own body, proven directly.
+    // "No lock taken" is asserted via the __setOpenSyncForTest seam (withTrustLock's lock-acquire is the
+    // ONLY call to this fn) rather than inferred from byte-identity alone — byte-identity alone proves
+    // the FILE wasn't rewritten, not that the lock-acquiring path was never entered; this call-count is
+    // what actually goes RED if the outer lock-free fast path (the isFullyDecided short-circuit before
+    // withTrustLock, above) is ever removed (card 6f52c3f5).
     const fullyStrippedDir = path.join(eiHome, "fully-stripped");
     fs.mkdirSync(fullyStrippedDir, { recursive: true });
     ownDirs.push(fullyStrippedDir);
@@ -237,9 +242,14 @@ try {
     };
     fs.writeFileSync(eiJson, JSON.stringify(cfg5a3, null, 2));
     const beforeFullyStripped = fs.readFileSync(eiJson);
+    let fullyStrippedOpenCalls = 0;
+    __setOpenSyncForTest((p, flags) => { fullyStrippedOpenCalls++; return fs.openSync(p, flags); });
     ensureTrusted(fullyStrippedDir);
+    __setOpenSyncForTest();
     check("ensureTrusted → trusted + import-decided entry with NO onboarding flag is a pure no-op (fast path now engages)",
       fs.readFileSync(eiJson).equals(beforeFullyStripped));
+    check("ensureTrusted → the fast path never opens the .loom-lock file at all (0 openSync calls)",
+      fullyStrippedOpenCalls === 0);
 
     // 5b. Never overwrite an EXISTING explicit approval — a human clicked "Yes, allow external imports"
     // for their own folder; Loom must never silently revoke that.

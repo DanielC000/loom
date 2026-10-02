@@ -28,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
-const { canonicalRepoLockKey, resolveGitToplevelSync } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
+const { canonicalRepoLockKey, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 const { mergeBranch } = await import(pathToFileURL(path.join(distGitDir, "worktrees.js")).href);
 const { GitWriter } = await import(pathToFileURL(path.join(distGitDir, "writer.js")).href);
 
@@ -103,6 +103,39 @@ try {
     const wtSubdir = path.join(wtPath, "deep", "inside");
     fs.mkdirSync(wtSubdir, { recursive: true });
     check("(unit) a subdir INSIDE a linked worktree resolves up to the worktree's own root (not the main repo)", resolveGitToplevelSync(wtSubdir) === fs.realpathSync.native(wtPath));
+
+    // Card 6f52c3f5 (Code Review 24e5a263 of 17237fba) — resolveGitMainCheckoutRootSync's extra guard:
+    // when the worktree's `commondir` indirection resolves to a directory whose basename ISN'T ".git" but
+    // which itself contains a real NESTED ".git" (the indirection landed on an ordinary working-tree
+    // root, not a true independent common git dir), it must return the WORKTREE's own toplevel instead of
+    // that misresolved path — mirrors the CLI's own extra check on this branch. Plain `git worktree add`
+    // never actually produces this layout (a real bare/`--separate-git-dir` common dir never contains its
+    // own nested `.git`), so this fixture manually rewrites a REAL worktree's `commondir` file one level
+    // further up than git itself would ever write it — at the fixture repo's own root, which DOES have
+    // its own `.git` directory — the near-nil-exposure layout cited in the review.
+    const mcRepo = path.join(os.tmpdir(), `loom-rlst-mc-repo-${sfx}`);
+    fs.mkdirSync(mcRepo, { recursive: true });
+    tmpDirs.push(mcRepo);
+    fs.writeFileSync(path.join(mcRepo, "f.txt"), "f\n");
+    execSync(`git init -q && git config user.email rlst@loom && git config user.name rlst && git add -A && git ${GIT_ID} commit -q -m init`, { cwd: mcRepo });
+    const mcWt = path.join(os.tmpdir(), `loom-rlst-mc-wt-${sfx}`);
+    execSync(`git worktree add -q -b mc-branch-${sfx} "${mcWt}"`, { cwd: mcRepo });
+    tmpDirs.push(mcWt);
+    const mcPointer = fs.readFileSync(path.join(mcWt, ".git"), "utf8");
+    const mcPrivateDir = mcPointer.match(/^gitdir:\s*(.+?)\s*$/m)[1];
+    const mcCommondirFile = path.join(mcPrivateDir, "commondir");
+    const realCommondirRaw = fs.readFileSync(mcCommondirFile, "utf8").trim();
+    const mcRepoReal = fs.realpathSync.native(mcRepo);
+    check("(unit) sanity: this fixture's REAL (un-rewritten) commondir resolves to the repo's real `.git` dir",
+      path.resolve(mcPrivateDir, realCommondirRaw) === path.join(mcRepoReal, ".git"));
+    // Rewrite it to point ONE directory further up than git itself resolved — at `mcRepo` itself, which
+    // (unlike a true bare/separate-gitdir common dir) DOES have its own nested `.git`.
+    const oneLevelUp = `${realCommondirRaw}/..`;
+    fs.writeFileSync(mcCommondirFile, `${oneLevelUp}\n`);
+    check("(unit) fixture precondition: the rewritten commondir now resolves to the repo root — basename NOT \".git\", but it has its own nested \".git\"",
+      path.resolve(mcPrivateDir, oneLevelUp) === mcRepoReal && fs.existsSync(path.join(mcRepoReal, ".git")));
+    check("(unit) resolveGitMainCheckoutRootSync returns the WORKTREE's own toplevel, not the misresolved commondir",
+      resolveGitMainCheckoutRootSync(mcWt) === fs.realpathSync.native(mcWt));
 
     // A path that doesn't exist on disk at all — best-effort fallback, must never throw.
     const ghost = path.join(os.tmpdir(), `loom-rlst-ghost-${sfx}`);

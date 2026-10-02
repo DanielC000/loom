@@ -117,19 +117,24 @@ export function canonicalRepoLockKey(repoPath: string): string {
  * dir and that dir's `commondir` file (mirrors `git rev-parse --git-common-dir`, same resolution
  * `skills/inject.ts`'s local `resolveGitCommonDir` already performs for a different purpose) to the shared
  * common `.git` path. If that common path's basename IS `.git`, return ITS PARENT (the ordinary
- * `<repo>/.git/worktrees/<name>` layout) — otherwise return the common path ITSELF (a bare repo or a
- * `--separate-git-dir` repo, whose git directory can be named anything). This mirrors the installed
- * `claude` CLI's own equivalent branch (`he(c)!==".git" ? c : dirname(c)` in its decompiled bundle — card
- * `17237fba`, which fixed this function after finding it unconditionally returned the parent instead);
- * see docs/decisions/37310431-loom-home-write-deny.md § "ROUND 2 FIX" for the citation. The CLI's own walk
- * additionally verifies the private worktree dir sits directly under `<commondir>/worktrees` and that its
- * own `gitdir` file points back to this exact `.git` file before trusting the indirection at all — this
- * function does not replicate that structural cross-check; a layout that fails it is not specially
- * detected here, unlike in the CLI. Any failure following the indirection (malformed pointer,
- * missing/unreadable `commondir` — e.g. a submodule, which has no `commondir` file at all) falls back to
- * the toplevel itself rather than throwing; a caller on the spawn hot path (`claudeCliProjectKey` in
- * `pty/claude-config.ts`) must still fall back further, to its own plain non-git key, on any error
- * escaping this function entirely.
+ * `<repo>/.git/worktrees/<name>` layout). Otherwise — a bare repo or a `--separate-git-dir` repo, whose
+ * git directory can be named anything — return the common path ITSELF, UNLESS `<commonDir>/.git` itself
+ * exists, in which case return the WORKTREE's own toplevel instead (the common-dir indirection landed on
+ * an ordinary working-tree root, not a true independent git dir). This mirrors the installed `claude`
+ * CLI's own equivalent branch (`he(c)!==".git" ? (Ne(_(c,".git"),c) ? e : Nn(c)) : dirname(c)` in its
+ * decompiled bundle — card `17237fba` fixed the basename branch after finding it unconditionally returned
+ * the parent instead; card `6f52c3f5` (Code Review `24e5a263`) added the `<commonDir>/.git` guard, whose
+ * triggering layout could not be reproduced via plain `git` commands — see
+ * `test/repo-lock-subdir-toplevel.mjs`'s own fixture comment for the manually-crafted `commondir` pointer
+ * used to exercise it); see docs/decisions/37310431-loom-home-write-deny.md § "ROUND 2 FIX" for the
+ * citation. The CLI's own walk additionally verifies the private worktree dir sits directly under
+ * `<commondir>/worktrees` and that its own `gitdir` file points back to this exact `.git` file before
+ * trusting the indirection at all — this function does not replicate that structural cross-check; a
+ * layout that fails it is not specially detected here, unlike in the CLI. Any failure following the
+ * indirection (malformed pointer, missing/unreadable `commondir` — e.g. a submodule, which has no
+ * `commondir` file at all) falls back to the toplevel itself rather than throwing; a caller on the spawn
+ * hot path (`claudeCliProjectKey` in `pty/claude-config.ts`) must still fall back further, to its own
+ * plain non-git key, on any error escaping this function entirely.
  *
  * SYNCHRONOUS, no subprocess — same posture as {@link resolveGitToplevelSync}: never thread
  * GIT_DIR/GIT_CEILING_DIRECTORIES/safe.directory through here, and never add a cache without re-reading
@@ -153,7 +158,15 @@ export function resolveGitMainCheckoutRootSync(bp: string): string | null {
   try { commondirRaw = fs.readFileSync(path.join(privateDir, "commondir"), "utf8").trim(); }
   catch { return toplevel; } // e.g. a submodule pointer — no commondir file; fall back to its own toplevel
   const commonDir = path.resolve(privateDir, commondirRaw);
-  return path.basename(commonDir) === ".git" ? path.dirname(commonDir) : commonDir;
+  if (path.basename(commonDir) === ".git") return path.dirname(commonDir);
+  // Not a `.git`-named common dir (bare repo / `--separate-git-dir`, normally returned as-is below) —
+  // UNLESS `commonDir` itself turns out to contain its OWN nested `.git` entry, meaning the indirection
+  // actually landed on an ordinary working-tree root rather than a true independent git dir. Mirrors the
+  // CLI's own extra guard on this branch (`he(c)!==".git" ? (Ne(_(c,".git"),c) ? e : Nn(c)) : ...` in its
+  // decompiled bundle — card `6f52c3f5`, Code Review `24e5a263` of `17237fba`): in that layout it returns
+  // the WORKTREE's own toplevel, not the (mis-resolved) common dir.
+  if (fs.existsSync(path.join(commonDir, ".git"))) return toplevel;
+  return commonDir;
 }
 
 /**

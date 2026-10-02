@@ -321,10 +321,14 @@ function withTrustLock(lockPath: string, fn: () => void): void {
 /**
  * Pre-clear the things that block an unattended spawned `claude` from reaching SessionStart:
  *
- *  1. The workspace-trust dialog ("Is this a project you trust?") — exactly what clicking
- *     "Yes, I trust this folder" persists ({hasTrustDialogAccepted, hasCompletedProjectOnboarding}),
- *     persisted into .claude.json under projects[<abs path, forward slashes>] — `key` below, the plain
- *     cwd-resolved path. Unchanged keying (card 17237fba owns revisiting this; out of scope here).
+ *  1. The workspace-trust dialog ("Is this a project you trust?") — the CLI's own trust writer, on
+ *     clicking "Yes, I trust this folder", persists ONLY `hasTrustDialogAccepted:true` (per `isTrusted`'s
+ *     own card-17237fba doc above — `hasCompletedProjectOnboarding` is stripped from every project entry
+ *     on every CLI save, so it's never a real persisted signal). Loom's own write below still sets BOTH
+ *     flags unconditionally (the second is inert but harmless, and several tests assert its presence
+ *     post-write — card `6f52c3f5`), persisted into .claude.json under projects[<abs path, forward
+ *     slashes>] — `key` below, the plain cwd-resolved path. Unchanged keying (card 17237fba owns
+ *     revisiting this; out of scope here).
  *  2. The per-project "N new MCP servers found in this project — enable?" prompt. The CLI walks UP
  *     the tree from cwd reading every `.mcp.json`; since worktrees live under home it reaches
  *     `~/.mcp.json` and prompts for those servers (docker/sentry on this host). We discover those

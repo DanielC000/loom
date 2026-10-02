@@ -488,7 +488,13 @@ dir's `commondir` file (mirroring `git rev-parse --git-common-dir`) to the share
 ITS PARENT when that common dir's basename is `.git` (the ordinary layout), or the common dir ITSELF
 otherwise (a bare/`--separate-git-dir` repo, whose common dir need not be named `.git` at all — this
 mirrors the CLI's own `he(c)!==".git"` branch, confirmed by the same bundle decompilation; card `17237fba`
-fixed Loom's resolver to match after it was found unconditionally returning the parent). A non-git `dir`
+fixed Loom's resolver to match after it was found unconditionally returning the parent), UNLESS
+`<commonDir>/.git` itself exists, in which case it returns the WORKTREE's own toplevel instead — card
+`6f52c3f5` (Code Review `24e5a263`) added this nested guard, mirroring the CLI's own
+`Ne(_(c,".git"),c) ? e : Nn(c)` sub-branch; its triggering real-git layout could not be reproduced via
+plain `git` commands (near-nil exposure), so the hermetic coverage uses a manually-crafted `commondir`
+pointer atop a real worktree fixture rather than a layout `git worktree add` itself ever produces — see
+`test/repo-lock-subdir-toplevel.mjs`'s own fixture comment. A non-git `dir`
 returns `null`, and `claudeCliProjectKey` falls back to the PLAIN `path.resolve` key in that case (the
 CLI's own `?? cwd`), with NO case-folding there. **⚠️ For a GIT `dir`, this is NOT true**: the ancestor walk
 realpaths via `fs.realpathSync.native`, which canonicalizes drive-letter/8.3 casing on Windows, unlike the
