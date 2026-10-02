@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { spawn, execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import type { SessionRole } from "@loom/shared";
@@ -11,6 +12,7 @@ import type { CapQueuedSpawn } from "./cap-queue.js";
 import { boundedSimpleGit } from "../git/bounded.js";
 import { readBuildInfo } from "../deploy-staleness.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
+import { killGateProcessTree } from "./gate-runner.js";
 
 const require = createRequire(import.meta.url);
 
@@ -35,6 +37,18 @@ function turboBin(): string {
  *     (and its live workers) back and tell it the merged code is now live.
  * Only valid under the supervisor (LOOM_SUPERVISED=1) — otherwise nothing relaunches the daemon.
  */
+
+/** What {@link SessionService.requestDaemonRestart} (sessions/service.ts) resolves — named here (the
+ * module that owns the build it wraps) so its own single-flight state (card 8e84e4a6) can type its
+ * shared in-flight promise without repeating this shape inline. */
+export interface RequestDaemonRestartResult {
+  restarting: boolean;
+  error?: string;
+  supervisorChanged?: boolean;
+  supervisorCheckFailed?: boolean;
+  supervisorWarning?: string;
+  mergeDangerWait?: { waitedMs: number; windowsActive: number };
+}
 
 /** Exit code that asks the supervisor to rebuild + relaunch. MUST match scripts/daemon-supervisor.mjs. */
 export const RESTART_EXIT_CODE = 75;
@@ -662,18 +676,44 @@ export function deployBuildSteps(root: string): BuildStep[] {
 }
 
 /** Real, bounded, never-throws runner for one {@link BuildStep}. Resolves {code, out}; a spawn error or
- * timeout-kill resolves as a non-zero code (never rejects), so buildDaemon's loop stays simple. */
-function runBuildStep(step: BuildStep, cwd: string): Promise<{ code: number; out: string }> {
+ * timeout-kill resolves as a non-zero code (never rejects), so buildDaemon's loop stays simple.
+ *
+ * Card 8e84e4a6: a timeout kills the whole process TREE via {@link killGateProcessTree} — the SAME
+ * helper `gate-runner.ts`'s `runGateStep` uses, never a second copy — not just this top-level `child`
+ * (see that helper's own decision record for why a bare `child.kill()` is insufficient). On POSIX that
+ * requires spawning with `detached:true` (mirrors `runGateStep`'s own spawn) so `child.pid` is the
+ * process GROUP id; harmless on win32 (its tree-kill goes through `taskkill /T`).
+ *
+ * Exported (mirrors `gate-runner.ts`'s own `runGateStep` export) so a hermetic test can drive it
+ * directly with a REAL spawn + REAL timeout to prove the tree-kill, without going through the full
+ * deployBuildSteps/BuildDeps.runStep indirection. */
+export function runBuildStep(step: BuildStep, cwd: string): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
     let out = "";
     const cap = (b: Buffer) => { out += b.toString(); if (out.length > 8000) out = out.slice(-8000); };
+    // Card 8e84e4a6 Code Review: on POSIX, a `detached:true` child is in its OWN process group, so it does
+    // NOT receive a Ctrl-C (SIGINT) at the terminal, nor any signal the daemon itself gets on exit — it
+    // only ever dies via the explicit `killGateProcessTree` call below. Matches `runGateStep`'s own
+    // accepted posture (gate-runner.ts) — not a new tradeoff introduced here.
+    const detached = process.platform !== "win32";
     const child = step.shell
-      ? spawn(step.command, { cwd, shell: true, env: { ...process.env, CI: "1" } })
-      : spawn(step.command, step.args, { cwd });
+      ? spawn(step.command, { cwd, shell: true, env: { ...process.env, CI: "1" }, detached })
+      : spawn(step.command, step.args, { cwd, detached });
     let settled = false;
     const done = (r: { code: number; out: string }) => { if (settled) return; settled = true; if (timer) clearTimeout(timer); resolve(r); };
     const timer = step.timeoutMs > 0
-      ? setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already gone */ } done({ code: 1, out: `${out}\n(${step.label} exceeded ${step.timeoutMs}ms — killed)` }); }, step.timeoutMs)
+      ? setTimeout(() => {
+          // Claim resolution IMMEDIATELY, synchronously — BEFORE the async tree-kill below — mirrors
+          // gate-runner.ts's own `onTimeout`: killGateProcessTree is a real async OS-process wait, and
+          // the child's own `close` event (which the forced kill is about to trigger) would otherwise be
+          // free to race past this and settle via `done()` first, silently dropping the "exceeded …ms —
+          // killed" diagnostic in favor of a plain exit code.
+          if (settled) return;
+          settled = true;
+          void killGateProcessTree(child).finally(() => {
+            resolve({ code: 1, out: `${out}\n(${step.label} exceeded ${step.timeoutMs}ms — killed)` });
+          });
+        }, step.timeoutMs)
       : undefined;
     child.stdout?.on("data", cap);
     child.stderr?.on("data", cap);
@@ -690,6 +730,10 @@ export interface BuildDeps {
   /** Test-only repo-root override, so a hermetic test can point the snapshot/restore logic below (and the
    * build steps' cwd) at an isolated temp dir instead of the real checkout. Defaults to {@link repoRoot}. */
   root?: string;
+  /** Card 8e84e4a6: unique id for THIS deploy attempt's own web-dist backup directory (see
+   * {@link webDistBackupDir}) — defaults to a fresh `randomUUID()` per {@link buildDaemon} call when
+   * omitted. A hermetic test passes a fixed value to assert the exact path; production never does. */
+  attemptId?: string;
 }
 
 /** packages/web/dist, relative to the repo root — the one directory the deploy build can actually wipe
@@ -697,15 +741,67 @@ export interface BuildDeps {
  * only this path, not packages/daemon/dist or packages/shared/dist, needs protecting. */
 const WEB_DIST_REL = path.join("packages", "web", "dist");
 
+/** The parent directory every deploy attempt's own {@link webDistBackupDir} lives under. */
+function webDistBackupParentDir(): string {
+  return path.join(LOOM_HOME, "deploy-backup");
+}
+
 /**
- * Where a deploy's pre-build packages/web/dist snapshot lives — under LOOM_HOME (same home as
+ * Where ONE deploy attempt's pre-build packages/web/dist snapshot lives — under LOOM_HOME (same home as
  * restart-intent.json), never inside the repo tree, so it can't collide with anything turbo/vite reads
- * or writes. A FIXED path, overwritten (never accumulated) by every deploy attempt that reaches the
- * build step — see {@link snapshotWebDist} for why that's also what makes an interrupted deploy
- * self-healing without any extra recovery code.
+ * or writes. Card 8e84e4a6: keyed by `attemptId` (never a fixed path) — two deploy attempts running
+ * concurrently (the exact overlap a process-wide single-flight at the `requestDaemonRestart` call site
+ * is meant to prevent, but this is the independent, defense-in-depth fix for the snapshot itself) can no
+ * longer step on each other's backup: attempt B's `rmSync`+copy can no longer capture attempt A's
+ * mid-build wiped dist, which previously meant A's own failure would restore a broken UI.
  */
-function webDistBackupDir(): string {
-  return path.join(LOOM_HOME, "deploy-backup", "web-dist");
+export function webDistBackupDir(attemptId: string): string {
+  return path.join(webDistBackupParentDir(), `web-dist-${attemptId}`);
+}
+
+/** The name legacy (pre-card-8e84e4a6) code always used for its ONE fixed backup dir — never written by
+ * current code, but still swept (see {@link sweepStaleWebDistBackups}) so an orphan left behind by an
+ * older daemon binary doesn't linger forever across an upgrade. */
+const LEGACY_WEB_DIST_BACKUP_NAME = "web-dist";
+
+/**
+ * Code Review (card 8e84e4a6): how old a backup dir must be before {@link sweepStaleWebDistBackups} will
+ * remove it. LOOM_HOME (and so this sweep's own target dir) can be shared by MORE THAN ONE live daemon
+ * process — two self-hosted instances, or a dev + a stable daemon pointed at the same home — so a bare
+ * "not MY attemptId" check is not enough: another daemon's own IN-PROGRESS attempt would also fail that
+ * check and get swept out from under it. Age is the only signal available without threading a live-pid
+ * check across processes (the simpler of the two remedies Code Review offered). A real deploy's own
+ * install step is bounded by {@link DEPLOY_INSTALL_TIMEOUT_MS} (~3 min) and its build step, though
+ * UNBOUNDED in principle, realistically finishes in minutes — 2 hours is generously past either, so
+ * anything still present at that age is either truly orphaned (a crashed attempt) or so anomalously stuck
+ * that leaving its backup in place serves no one either.
+ */
+const STALE_WEB_DIST_BACKUP_AGE_MS = 2 * 60 * 60 * 1000;
+
+/** Best-effort sweep of every OTHER sufficiently-OLD backup dir under {@link webDistBackupParentDir} —
+ * orphaned residue from a deploy that crashed before reaching {@link discardWebDistBackup}/
+ * {@link restoreWebDist}, or (see {@link LEGACY_WEB_DIST_BACKUP_NAME}) a pre-upgrade daemon's one fixed
+ * dir. Never touches `exceptAttemptId`'s own dir (the one this call is about to create/use), and never
+ * touches anything younger than {@link STALE_WEB_DIST_BACKUP_AGE_MS} — see that constant's own doc for
+ * why age, not identity alone, is what gates a removal (another live daemon sharing this LOOM_HOME may
+ * own a dir that isn't `exceptAttemptId` but is still genuinely in use). A `statSync` failure on one
+ * entry (e.g. a concurrent delete by the other daemon this sweep is already trying not to disturb) just
+ * skips that one entry rather than aborting the whole sweep. */
+function sweepStaleWebDistBackups(exceptAttemptId: string): void {
+  const dir = webDistBackupParentDir();
+  let entries: string[];
+  try { entries = fs.readdirSync(dir); } catch { return; } // nothing to sweep (dir absent)
+  const keep = `web-dist-${exceptAttemptId}`;
+  const now = Date.now();
+  for (const name of entries) {
+    if (name !== LEGACY_WEB_DIST_BACKUP_NAME && !name.startsWith("web-dist-")) continue;
+    if (name === keep) continue;
+    const full = path.join(dir, name);
+    let mtimeMs: number;
+    try { mtimeMs = fs.statSync(full).mtimeMs; } catch { continue; } // gone already, or unreadable — skip
+    if (now - mtimeMs < STALE_WEB_DIST_BACKUP_AGE_MS) continue; // too young to be confident it's orphaned
+    try { fs.rmSync(full, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
 }
 
 /**
@@ -715,35 +811,49 @@ function webDistBackupDir(): string {
  * past its own call site (wrapped in try/catch by {@link buildDaemon}) — a snapshot failure must never
  * block the deploy itself, only leave that one deploy unprotected.
  *
+ * Returns `true` iff a real backup was actually written (dist pre-existed), `false` when there was
+ * nothing to protect (e.g. a brand-new checkout's first deploy) — {@link buildDaemon} carries this
+ * through to {@link restoreWebDist} so a genuinely MISSING snapshot at restore time (one that WAS taken
+ * but is gone by the time it's needed — Code Review, card 8e84e4a6) can be told apart from the ordinary,
+ * expected "there was never one" case.
+ *
  * @decision 0eb97fa1 — turbo's `clean` task wipes dist before EITHER a real build or a cache-hit
  * restore, so a failed deploy can leave the daemon serving a broken/missing UI; do NOT "fix" this by
  * removing/weakening `clean` — this snapshot/restore pair is the deliberate fix instead.
  */
-function snapshotWebDist(root: string): void {
-  const backup = webDistBackupDir();
-  fs.rmSync(backup, { recursive: true, force: true }); // drop any orphaned backup from a crashed prior attempt
+function snapshotWebDist(root: string, attemptId: string): boolean {
+  sweepStaleWebDistBackups(attemptId); // drop any sufficiently-old orphaned backup(s)
+  const backup = webDistBackupDir(attemptId);
+  fs.rmSync(backup, { recursive: true, force: true }); // this attempt's own dir should be empty, but be sure
   const dist = path.join(root, WEB_DIST_REL);
-  if (!fs.existsSync(dist)) return; // nothing pre-existing to protect (e.g. a brand-new checkout's first deploy)
+  if (!fs.existsSync(dist)) return false; // nothing pre-existing to protect (e.g. a brand-new checkout's first deploy)
   copyDirAtomic(dist, backup);
+  return true;
 }
 
 /**
  * Roll packages/web/dist back to its pre-build snapshot after a failed deploy build, then discard the
- * (now-consumed) snapshot. No-ops if no snapshot was taken (dist didn't exist pre-deploy — nothing to
- * roll back to, so a failed very-first deploy behaves exactly as it did before this fix). Best-effort:
- * never throws past its own call site — a restore failure must never mask the real build error.
+ * (now-consumed) snapshot. `snapshotWasTaken` is {@link snapshotWebDist}'s own return value for THIS
+ * attempt — lets this function distinguish two outwardly-identical "nothing to restore" states: the
+ * ORDINARY one (no snapshot was ever taken because dist didn't exist pre-deploy — `restored:false,
+ * missingUnexpectedly:false`, behaves exactly as before this field existed) from the ANOMALOUS one (a
+ * snapshot WAS taken but is gone by restore time — e.g. external interference, or a sweep bug —
+ * `missingUnexpectedly:true`), so {@link buildDaemon} can surface the latter as a real warning instead of
+ * silently treating it as the former. Best-effort: never throws past its own call site — a restore
+ * failure must never mask the real build error.
  */
-function restoreWebDist(root: string): void {
-  const backup = webDistBackupDir();
-  if (!fs.existsSync(backup)) return;
+function restoreWebDist(root: string, attemptId: string, snapshotWasTaken: boolean): { restored: boolean; missingUnexpectedly: boolean } {
+  const backup = webDistBackupDir(attemptId);
+  if (!fs.existsSync(backup)) return { restored: false, missingUnexpectedly: snapshotWasTaken };
   copyDirAtomic(backup, path.join(root, WEB_DIST_REL));
   fs.rmSync(backup, { recursive: true, force: true });
+  return { restored: true, missingUnexpectedly: false };
 }
 
 /** Discard the pre-build snapshot after a successful deploy — the freshly-built dist is what needs
  * protecting NEXT time, so the old snapshot must not linger and bloat disk. Best-effort. */
-function discardWebDistBackup(): void {
-  fs.rmSync(webDistBackupDir(), { recursive: true, force: true });
+function discardWebDistBackup(attemptId: string): void {
+  fs.rmSync(webDistBackupDir(attemptId), { recursive: true, force: true });
 }
 
 /**
@@ -778,6 +888,7 @@ function copyDirAtomic(src: string, dest: string): void {
 export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail: string; deploySha?: string | null }> {
   const root = deps.root ?? repoRoot();
   const run = deps.runStep ?? runBuildStep;
+  const attemptId = deps.attemptId ?? randomUUID();
   return (async () => {
     // @decision bde5d1fe (item 4) — refuse BEFORE an install+build cycle on a QUARANTINED checkout: an
     // orphaned process that could not be confirmed dead may still be rewriting files in `root`, so
@@ -787,9 +898,13 @@ export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail:
       return { code: 1, tail: `deploy build refused — ${quarantineCheck.reason}` };
     }
     let lastOut = "";
+    // Card 8e84e4a6 Code Review: whether THIS attempt's own snapshotWebDist actually wrote a backup —
+    // threaded into restoreWebDist so it can tell "no snapshot was ever taken" (ordinary) apart from "one
+    // WAS taken but is gone by restore time" (anomalous — see restoreWebDist's own doc).
+    let distWasBackedUp = false;
     for (const step of deployBuildSteps(root)) {
       if (step.label === "build") {
-        try { snapshotWebDist(root); }
+        try { distWasBackedUp = snapshotWebDist(root, attemptId); }
         catch (e) { console.log(`[restart] pre-build dist snapshot failed (deploy continues unprotected): ${e instanceof Error ? e.message : String(e)}`); }
       }
       const r = await run(step, root);
@@ -797,8 +912,12 @@ export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail:
       if (r.code === 0) continue;
       let restoreNote = "";
       if (step.label === "build") {
-        try { restoreWebDist(root); }
-        catch (e) {
+        try {
+          const { missingUnexpectedly } = restoreWebDist(root, attemptId, distWasBackedUp);
+          if (missingUnexpectedly) {
+            restoreNote = "\n(warning: a pre-build packages/web/dist snapshot WAS taken for this attempt but is no longer present at restore time — the previously-served UI may now be missing; the next successful deploy will rebuild it fresh.)";
+          }
+        } catch (e) {
           restoreNote = `\n(warning: could not restore the pre-deploy packages/web/dist snapshot — ${e instanceof Error ? e.message : String(e)}. The previously-served UI may now be missing; the next successful deploy will rebuild it fresh.)`;
         }
       }
@@ -812,7 +931,7 @@ export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail:
         : "";
       return { code: r.code, tail: `daemon ${step.label} FAILED (code=${r.code})\ncmd: ${cmdStr}\ncwd: ${root}${hint}${restoreNote}\n${captured}`.trim() };
     }
-    try { discardWebDistBackup(); }
+    try { discardWebDistBackup(attemptId); }
     catch (e) { console.log(`[restart] post-deploy snapshot cleanup failed (harmless): ${e instanceof Error ? e.message : String(e)}`); }
     const deploySha = readBuildInfo(path.join(root, "packages", "daemon", "dist")).sha;
     return { code: 0, tail: lastOut.trim().slice(-1500), deploySha };

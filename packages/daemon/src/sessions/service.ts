@@ -58,7 +58,7 @@ import type { CodescapeSupervisor } from "../codescape/supervisor.js";
 import { resolveCodescapeLastIngested } from "../codescape/manifest.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
-import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult } from "../orchestration/restart.js";
+import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult, type RequestDaemonRestartResult } from "../orchestration/restart.js";
 import { currentDeployStaleness } from "../served-status.js";
 import { advisoryBuildStamp, type DeployStalenessResult } from "../deploy-staleness.js";
 import { computeWakeImpact } from "../orchestration/wake-impact.js";
@@ -2590,6 +2590,19 @@ export class SessionService {
    * every existing test constructor) ⇒ `this.shutdownCleanup?.()`, never a bare call.
    */
   private shutdownCleanup: (() => void) | undefined;
+  /**
+   * Card 8e84e4a6: process-wide single-flight for {@link requestDaemonRestart}'s build-and-exit
+   * sequence. Two overlapping calls (two managers, Lead + manager, or an MCP client retrying mid-build)
+   * used to each run their own `buildDaemon()` against the SAME main checkout concurrently — stepping on
+   * the (then-fixed-path) web-dist snapshot, racing the restart-intent write, and letting the first green
+   * build exit while the second's install/build children were still mutating the tree. A second call
+   * ATTACHES to this in-flight attempt (awaits the SAME promise) instead of starting a second real
+   * build; `notes` accumulates every attached caller's own `reason` so the eventual restart intent (and
+   * the requester's resume nudge) can name all of them, not just whichever call happened to mint the
+   * attempt. Cleared the instant the in-flight promise settles — the build/refusal paths below all
+   * resolve normally (never reject) — so the next genuinely fresh call starts its own attempt.
+   */
+  private inFlightRestart: { promise: Promise<RequestDaemonRestartResult>; notes: { sessionId: string; reason: string }[] } | null = null;
   constructor(
     private db: Db, private pty: PtyHost, private control: OrchestrationControl,
     opts?: {
@@ -4038,7 +4051,7 @@ export class SessionService {
   async requestDaemonRestart(
     callerSessionId: string, reason: string,
     deps: { buildDeps?: BuildDeps; exit?: (code: number) => void; mergeDangerGraceMs?: number; isSupervisorAlive?: () => Promise<SupervisorLivenessResult> } = {},
-  ): Promise<{ restarting: boolean; error?: string; supervisorChanged?: boolean; supervisorCheckFailed?: boolean; supervisorWarning?: string; mergeDangerWait?: { waitedMs: number; windowsActive: number } }> {
+  ): Promise<RequestDaemonRestartResult> {
     const caller = this.db.getSession(callerSessionId);
     if (!caller || (caller.role !== "manager" && caller.role !== "platform")) {
       throw new Error("only a manager or the platform Lead can restart the daemon");
@@ -4046,6 +4059,34 @@ export class SessionService {
     if (!isSupervised()) {
       return { restarting: false, error: "daemon is not running under the restart supervisor (pnpm daemon:stable) — cannot self-restart. Flag that the human must restart for your merged code to go live." };
     }
+    // Card 8e84e4a6: a second overlapping call ATTACHES to an already-in-flight build/restart attempt
+    // (awaits the SAME promise) rather than racing it with a second real buildDaemon() — see
+    // `inFlightRestart`'s own field doc for the corruption this prevents. Its own `reason` is folded into
+    // the eventual restart-intent text (see `combinedReason` below) so it isn't silently lost — UNLESS it
+    // arrives after `writeRestartIntent` has already run (a narrow window once the build itself has
+    // finished): Code Review correctly flagged that a note landing there can no longer reach the intent's
+    // text. That caller's own SESSION is still captured into the fleet-wide `resume` set regardless of
+    // when it attaches (the capture reads the live DB, not `restartNotes`, and this session was already
+    // live before the capture ran) — so it is NOT silently dropped from the restart, only its freeform
+    // reason TEXT may not appear in the intent/nudge if it arrives this late. Not worth closing: the
+    // window is the gap between the build settling and one more synchronous `writeRestartIntent` call,
+    // and the caller's own `requestDaemonRestart` result still correctly reports `restarting:true`.
+    if (this.inFlightRestart) {
+      this.inFlightRestart.notes.push({ sessionId: callerSessionId, reason });
+      return this.inFlightRestart.promise;
+    }
+    const restartNotes: { sessionId: string; reason: string }[] = [{ sessionId: callerSessionId, reason }];
+    const attempt = (async (): Promise<RequestDaemonRestartResult> => {
+    // Code Review (card 8e84e4a6), CRITICAL: this whole body MUST NEVER REJECT. `inFlightRestart.promise`
+    // is this exact promise, shared with every attached caller — an unhandled rejection anywhere in this
+    // daemon process is turned into `process.exit(1)` by crashlog.ts's top-level handler (NOT the restart
+    // sentinel RESTART_EXIT_CODE), so the supervisor would NOT relaunch and the whole fleet would stay
+    // down. None of `writeRestartIntent` (→ writeJsonAtomic, can throw ENOSPC/EACCES/EPERM),
+    // `liveFleetResumeSet`, `this.capQueue.listByManager`, `this.pty.getPersistablePendingSnapshot`, or the
+    // various `this.db.*` reads below are guaranteed not to throw — wrap the whole thing and degrade to an
+    // ordinary `{restarting:false, error}` result on any of them, exactly like the already-handled
+    // build-failure/supervisor-refusal branches below.
+    try {
     // Card 83718377: isSupervised() above only proves this PROCESS was spawned under the supervisor —
     // it stays true forever even after the supervisor itself has died (env vars don't un-set
     // themselves). Re-derive RIGHT NOW, from the live OS process table, whether a real
@@ -4156,8 +4197,15 @@ export class SessionService {
     // to resume. Best-effort + never-throws; runs synchronously BEFORE the intent write so it can never
     // delay or clobber it.
     this.snapshotAllLive();
+    // Card 8e84e4a6: fold in every OTHER caller's own `reason` that attached to this same in-flight
+    // attempt while the build/checks above were running (see `restartNotes` + `inFlightRestart`'s field
+    // doc) — read here, as late as possible before the intent is written, so a caller that attached
+    // during the (often minutes-long) build is still captured rather than silently dropped.
+    const combinedReason = restartNotes.length > 1
+      ? `${restartNotes[0]!.reason}\n\n(this restart also serves ${restartNotes.length - 1} other overlapping daemon_restart call(s) received while the build was in flight:\n${restartNotes.slice(1).map((n) => `- session ${n.sessionId}: ${n.reason}`).join("\n")})`
+      : restartNotes[0]!.reason;
     writeRestartIntent({
-      reason,
+      reason: combinedReason,
       managerSessionId: callerSessionId,
       resume,
       requestedAt: new Date().toISOString(),
@@ -4222,8 +4270,47 @@ export class SessionService {
     // future edit to the registered cleanup can't turn a restart into a non-relaunching crash" true by
     // construction, matching the reasoning flushVaultsAndStopCodescape's own doc already gives for why
     // ITS internal codescapeSupervisor.stop() call is guarded the same way.
-    setTimeout(() => { try { cleanup?.(); } catch { /* never block the restart exit */ } exit(RESTART_EXIT_CODE); }, 300);
+    setTimeout(() => {
+      try { cleanup?.(); } catch { /* never block the restart exit */ }
+      exit(RESTART_EXIT_CODE);
+      // Card 8e84e4a6 Code Review MINOR 1: the single-flight lock stays LATCHED (see the clearing logic
+      // below `attempt`'s own closing `})()`) until the point the exit has actually been INVOKED, not
+      // merely until this promise resolved — closing the "late caller starts a competing build in the
+      // exit window" gap. In production `exit` IS `process.exit`, which never returns, so this line is
+      // moot there (a fresh process — and a fresh, unset `inFlightRestart` field — follows). It only ever
+      // actually runs under a hermetic test's captured/stubbed `exit` callback, which is also exactly what
+      // lets a test drive a SECOND, genuinely fresh `requestDaemonRestart` call after simulating one
+      // restart, the same way the real daemon would after actually relaunching.
+      if (this.inFlightRestart?.promise === attempt) this.inFlightRestart = null;
+    }, 300);
     return { restarting: true, ...supervisorResponseFields, mergeDangerWait };
+    } catch (err) {
+      // Code Review (card 8e84e4a6), CRITICAL: the catch-all for the try{} opened above — see its own
+      // comment for why this body must never let an exception escape as a rejection of `attempt`.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[restart] daemon_restart attempt threw unexpectedly — NOT restarting (the daemon stays up, no exit scheduled)`, err);
+      return { restarting: false, error: `daemon_restart failed unexpectedly before completing — NOT restarting (your code stays un-deployed but the daemon stays up). ${message}` };
+    }
+    })();
+    this.inFlightRestart = { promise: attempt, notes: restartNotes };
+    // Card 8e84e4a6 Code Review, MINOR 1: stay LATCHED through a `restarting:true` result — the process
+    // is still going to exit ~300ms (plus whatever the merge-danger wait took) after this promise
+    // resolves, and a late caller slipping in during that window would start a genuinely NEW,
+    // uncoordinated build against a checkout that's about to vanish under it. Only a definitive
+    // `restarting:false` (a refusal, or the CRITICAL fix's own catch-all above) clears the lock, so the
+    // NEXT fresh call can proceed. `.then(onSettle, onSettle)` — never `.finally()` — is deliberate: unlike
+    // `.finally`, a `.then` rejection handler that does not itself rethrow SWALLOWS the original rejection
+    // in the derived promise it returns, which is exactly what keeps this `void`-discarded chain from ever
+    // becoming an unhandled rejection even if `attempt` somehow still threw past its own try/catch.
+    const onAttemptSettle = (value: RequestDaemonRestartResult | undefined, err: unknown): void => {
+      if (value?.restarting) return;
+      if (this.inFlightRestart?.promise === attempt) this.inFlightRestart = null;
+      if (err !== undefined) {
+        console.error(`[restart] an in-flight daemon_restart attempt rejected despite its own try/catch — clearing the single-flight lock so a retry can proceed`, err);
+      }
+    };
+    void attempt.then((v) => onAttemptSettle(v, undefined), (e) => onAttemptSettle(undefined, e));
+    return attempt;
   }
 
   // ⚠️ TRUST BOUNDARY — HOST RCE BY DESIGN, same posture as confirmWorkerMerge's gateCommand: deployCommand
