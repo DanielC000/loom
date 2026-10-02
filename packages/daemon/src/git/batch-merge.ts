@@ -194,6 +194,65 @@ interface LandResult {
 }
 
 /**
+ * Whether the just-landed tree (`landedSha`) equals the EXPECTED 3-way merge of `batchHeadBefore` (the
+ * batch's own state just before this candidate landed) and `branchTip` (the candidate's own reviewed
+ * tip) — i.e. exactly what the SOLO squash path lands, since `merge-tree`'s own merge-base inference
+ * resolves to the branch's last-merged main, the same ancestor the solo path's union-forward used.
+ * `{conflict:true}`/`{error}` (fail closed, same "drop, don't fail" posture as every other check in this
+ * function) when the 3-way merge itself can't be computed; otherwise the up-to-5 differing paths (empty
+ * means a match).
+ *
+ * @decision bc2240d7 (round 2, card f01c219d) — a 3-way merge-tree comparison, not a per-touched-path
+ * diff against the raw branchTip: the old check false-dropped a branch on an unrelated main advance and
+ * false-negatived a branch-side merge resolution. Do not narrow this back to per-touched-path diffing.
+ *
+ * `git merge-tree --write-tree <A> <B>` exits 1 on a conflict WITHOUT throwing through simple-git (the
+ * same non-zero-exit-reads-as-success gotcha this file's other checks already work around): the
+ * resulting tree oid is the first line regardless of exit status, with conflict info following it on a
+ * real conflict — so anything but exactly one oid line means a conflict, never a clean merge. Mirrors
+ * `verifyReviewedTipChain`'s identical reading of this same command (`worktrees.ts`). Needs git >= 2.38
+ * (introduced `--write-tree`; the owner's host is 2.47, CI is `ubuntu-latest` — both well above the
+ * floor); an older git's "unknown option" error is a real git error here, already fails closed below.
+ */
+async function landedTreeDivergesFromExpected(
+  git: Pick<SimpleGit, "raw">, batchHeadBefore: string, branchTip: string, landedSha: string, timeoutMs: number,
+): Promise<{ paths: string[]; conflict?: undefined; error?: undefined } | { paths?: undefined; conflict: true; error?: undefined } | { paths?: undefined; conflict?: undefined; error: string }> {
+  let mergeTreeOut: string[];
+  try {
+    mergeTreeOut = (await withTimeout(
+      git.raw(["merge-tree", "--write-tree", batchHeadBefore, branchTip]),
+      timeoutMs, "git merge-tree --write-tree (batch land, content-check)",
+    )).trim().split(/\r?\n/).filter(Boolean);
+  } catch (e) {
+    return { error: (e as Error).message };
+  }
+  if (mergeTreeOut.length !== 1 || !/^[0-9a-f]{40,64}$/.test(mergeTreeOut[0]!)) return { conflict: true };
+  const expectedTree = mergeTreeOut[0]!;
+  let landedTree: string;
+  try {
+    landedTree = (await withTimeout(
+      git.raw(["rev-parse", `${landedSha}^{tree}`]), timeoutMs, "git rev-parse tree (batch land, content-check)",
+    )).trim();
+  } catch (e) {
+    return { error: (e as Error).message };
+  }
+  if (landedTree === expectedTree) return { paths: [] };
+  // Plain `git diff` (no `--exit-code`) always exits 0 on success regardless of whether it found
+  // differences, so this read has no exit-code gotcha to work around — unlike the `--quiet`/
+  // `--is-ancestor` forms elsewhere in this file.
+  let out: string;
+  try {
+    out = await withTimeout(
+      git.raw(["diff", "--name-only", expectedTree, landedTree]),
+      timeoutMs, "git diff --name-only (batch land, content-check)",
+    );
+  } catch (e) {
+    return { error: (e as Error).message };
+  }
+  return { paths: [...new Set(out.split("\n").map((s) => s.trim()).filter(Boolean))] };
+}
+
+/**
  * Land ONE candidate branch's own commits, INDIVIDUALLY, onto `batchWorktreePath`'s current HEAD — the
  * per-branch assembly step card 6801c0a1 rewrote (see this file's own header doc for the full rationale).
  *
@@ -576,13 +635,40 @@ async function landBranchCommitsIndividually(
       `of ${branch}'s own commit(s) before landing — this project's mainline commits don't carry harness attribution`);
   }
 
+  let landedSha: string;
+  let landedSubject: string;
   try {
-    const landedSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, post-commit)")).trim();
-    const landedSubject = (await withTimeout(git.raw(["log", "-1", "--format=%s"]), timeoutMs, "git log -1 subject (batch land)")).trim();
-    return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount, pathSetStamped, branchTip };
+    landedSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, post-commit)")).trim();
+    landedSubject = (await withTimeout(git.raw(["log", "-1", "--format=%s"]), timeoutMs, "git log -1 subject (batch land)")).trim();
   } catch (e) {
     return { ok: false, reason: `${branch}: landed but failed to read the result: ${(e as Error).message}` };
   }
+
+  // @decision bc2240d7 (round 2, card f01c219d) — runs UNCONDITIONALLY (no `mergeShas.length > 0` gate):
+  // the 3-way merge absorbs an ordinary rename-following cherry-pick (batch-merge-robustness.mjs (7e))
+  // without mistaking it for a divergence. Do not reintroduce the gate without re-proving (7e) RED first.
+  {
+    const divergence = await landedTreeDivergesFromExpected(git, batchHeadBefore, branchTip, landedSha, timeoutMs);
+    if (divergence.error !== undefined) {
+      await rollback();
+      return fail({ ok: false, reason: `${branch}: failed to content-check the landed result against its reviewed tip ${branchTip.slice(0, 7)}: ${divergence.error}` });
+    }
+    if (divergence.conflict) {
+      await rollback();
+      return fail({ ok: false, reason: `${branch}: a 3-way merge of the batch against its reviewed tip ${branchTip.slice(0, 7)} conflicts — rebase onto main` });
+    }
+    if (divergence.paths.length > 0) {
+      await rollback();
+      const shown = divergence.paths.slice(0, 5).join(", ");
+      return fail({
+        ok: false,
+        reason: `${branch}: landed content diverges from the expected merge of its reviewed tip ${branchTip.slice(0, 7)} on ${divergence.paths.length} path(s) (${shown}${divergence.paths.length > 5 ? ", …" : ""}) — ` +
+          "a merge commit in its range may have reverted content that a non-merge commit then re-landed; dropping this branch",
+      });
+    }
+  }
+
+  return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount, pathSetStamped, branchTip };
 }
 
 /**
