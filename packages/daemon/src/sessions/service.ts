@@ -3890,7 +3890,6 @@ export class SessionService {
       // roles either (startAuditor/startWorkspaceAuditor/startSetup all pass the bare agent prompt).
       startupPrompt = (warmup ? warmup + "\n\n---\n" : "") + notice;
     }
-    this.db.setSessionHarness(session.id, undefined);
     this.db.setProcessState(session.id, "live");
     try {
       this.pty.spawn({
@@ -3919,6 +3918,10 @@ export class SessionService {
       this.reconcileFailedSpawn(session.id, e);
       throw e;
     }
+    // @decision aa82caed — flip the harness ONLY now, after pty.spawn returned without throwing, never
+    // before it: a throw above leaves this row's harness still "codex", so the next resume() re-enters
+    // this redirect from scratch instead of a harness/engine-id mismatch sweepDeadSessions marks dead.
+    this.db.setSessionHarness(session.id, undefined);
     this.recordHarnessRoleForced(session, session.id, forcedDetail, "resume");
     return { ...session, harness: undefined, processState: "live", busy: false };
   }

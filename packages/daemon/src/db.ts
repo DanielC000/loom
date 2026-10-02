@@ -5752,12 +5752,12 @@ export class Db {
     this.notifySessionChanged(id);
   }
   /**
-   * @decision 7955458e — the ONE deliberate exception to harness being WRITE-ONCE-AT-INSERT (every other
-   * path mints a fresh row instead, per 8d4b4433): `resume()`'s ruling-1(b) in-place forced-claude
-   * correction. Do not call this from any other path — see the card's decision record for the full why.
+   * @decision aa82caed — the ONE deliberate exception to harness being WRITE-ONCE-AT-INSERT. Call ONLY
+   * from `resumeForcedRoleAsFreshClaude`, ONLY after its `pty.spawn` returns without throwing — calling
+   * it earlier, or from any other path, reopens the dead-manager strand this card closed.
    */
   setSessionHarness(id: string, harness: "claude" | "codex" | undefined): void {
-    this.db.prepare("UPDATE sessions SET harness = ? WHERE id = ?").run(harness ?? null, id);
+    this.db.prepare("UPDATE sessions SET harness = ?, engine_session_id = NULL WHERE id = ?").run(harness ?? null, id);
     this.notifySessionChanged(id);
   }
   /** @decision 5a56bb0a — atomic: archiveSession + setResumability("dead") + the retirement marker event,
