@@ -354,9 +354,67 @@ OPEN, deliberately NOT built here, pending an owner decision (`d332c969` questio
 Not Loom's to close without that decision: the managed-policy `CLAUDE.md`
 (`/Library/Application Support/ClaudeCode/CLAUDE.md`, `/etc/claude-code/CLAUDE.md`,
 `C:\Program Files\ClaudeCode\CLAUDE.md`) requires OS-admin/root to write, which no Loom agent role runs
-with — low real risk, not tracked as a gap here. The external-`@import`-approval-dialog interaction with
-an unattended Loom-driven spawn (fail-closed vs. hang) is unmeasured — tracked as a follow-up card, not a
-registry gap.
+with — low real risk, not tracked as a gap here.
+
+### MEASURED (card `b180791a`): the external-`@import`-approval dialog HANGS an unattended spawn — availability risk CONFIRMED, not fail-closed
+
+The question this section used to leave open — does the CLI's external-import approval dialog
+fail-closed (import silently skipped) or hang an unattended, Loom-driven spawn — is now measured, not
+open. **Result: it hangs.** Real-spawn proof: `test/claude-md-external-import-dialog-real-spawn.mjs`
+(MANUAL-ONLY, same posture as this card's other real-spawn files).
+
+**Setup:** a fresh, throwaway `LOOM_HOME` + two fresh throwaway cwds, real worker-role spawn (the same
+`--disallowedTools AskUserQuestion ExitPlanMode EnterPlanMode …` argv every unattended Loom role gets).
+`covered`'s project `CLAUDE.md` contains `@../external-outside-cwd/note.md` — a relative import that
+resolves OUTSIDE `covered`'s own cwd, the exact "external" shape the CLI's own docs define. `control`'s
+`CLAUDE.md` mentions the identical path in prose, with no leading `@` (matched no-import control, same
+shape/size, isolating the import mechanism as the only difference).
+
+**Measured (claude-cli 2.1.287, Windows, worker role, `acceptEdits` mode):**
+- `control` (no import): real SessionStart hook fired, a submitted turn went busy and back to idle
+  (Stop fired) in ~3s. Normal completion — establishes this host's real baseline latency for the run.
+- `covered` (external import): the real SessionStart hook **never fired**, even after a 60s bounded poll
+  — i.e. the dialog blocks the CLI before Loom's own hook wiring ever sees the session start, not merely
+  before the first turn. A further 120s bounded poll on the busy/idle signal (in case SessionStart was
+  merely slow) also never resolved. Captured raw terminal screen (ANSI-stripped) shows the dialog
+  verbatim: *"Allow external CLAUDE.md file imports? This project's CLAUDE.md or .claude/rules imports
+  files outside the current working directory. Never allow this for third-party repositories. External
+  imports: `<path>\external-outside-cwd\note.md` … ❯ No, disable external imports / Yes, allow external
+  imports / Enter to confirm · Esc to cancel"* — a genuine interactive TUI prompt, waiting on a keypress
+  nobody unattended ever sends.
+
+**This is the SAME dialog family `pty/claude-config.ts`'s `ensureTrusted` already pre-clears two
+instances of** (the workspace-trust dialog and the per-project MCP-server-enable prompt — see that
+function's own doc comment, which literally says those two "block an unattended spawned `claude` from
+reaching SessionStart" if left unanswered). `ensureTrusted` does **not** pre-clear this third one. Checked
+the real `~/.claude.json` project entry for the hung `covered` cwd after the run: it carries only
+`hasTrustDialogAccepted`/`enabledMcpjsonServers` (what `ensureTrusted` already writes) — no third
+decided-flag for external imports exists yet, so there's nothing for `ensureTrusted` to also set without a
+small follow-up investigation to identify the real persisted-decision schema (the same kind of reverse-
+engineering `discoverProjectMcpServerNames`/`disabledMcpjsonServers` already did for the MCP-prompt case,
+item 2 above) — not done here; this card's scope was to measure the outcome, not build the fix.
+
+**Which roles are exposed:** every unattended Loom-driven role — worker, setup, auditor,
+workspace-auditor, manager, and (`LOOM_DEV`-gated) platform — spawns with no human on stdin, and this
+dialog is a native CLI TUI prompt entirely independent of `--disallowedTools` (it isn't one of the
+MCP-adjacent human-prompt tools that flag denies; it's a memory-loading-time trust gate keyed on cwd).
+Only this file's `worker` role was actually spawned — the mechanism is structurally role-independent (it
+fires on ANY external import at ANY cwd, before role-specific tool wiring is even relevant), so the result
+generalizes to every other unattended role without re-spawning each one; a `plain`/human-interactive
+session is the one case genuinely unaffected, since a human is actually present to answer the dialog.
+Any instruction file a more-privileged future session reads — a Lead's `CLAUDE.md`, a manager's project
+`CLAUDE.md`/`.claude/rules`, a worker's project `CLAUDE.md` — that contains (or is edited by anyone, not
+just an attacker, to contain) an external `@import` can wedge that spawn indefinitely: no turn, no
+`worker_report`/`done`/`blocked`, nothing — it just sits there consuming a concurrency slot until a human
+notices and hard-kills it. This is a genuine availability risk, not merely a theoretical one.
+
+**Proposed fix (NOT built here — card `b180791a`'s own DoD is measure-and-report, not implement):**
+pre-decide this dialog the same way `ensureTrusted` already pre-decides the other two — once a follow-up
+investigation identifies the actual persisted-decision key(s) `~/.claude.json`'s project entry uses once a
+human answers the dialog once (by observing a real interactive accept/decline and diffing the config,
+the same technique `disabledMcpjsonServers` discovery already used). Until that lands, this is an open
+availability gap, not a registry gap — tracked here, not re-opened as a new card by this note (file a new
+one if picking this up later; do not silently fix it as a drive-by).
 
 ### Bash coverage caveat — re-measure on CLI upgrade
 
@@ -469,6 +527,10 @@ instance throughout), but is disclosed here rather than silently left. The fix: 
 - Do not claim `python -c`/node-subprocess file I/O is covered by the Bash-write classifier — it is
   structurally NOT, by construction (the classifier inspects command TEXT, never what a subprocess does
   once it starts). See the corrected "Bash coverage caveat" above.
+- Do not claim the external-`@import`-approval dialog fail-closes for an unattended spawn — it was
+  OPEN/unmeasured until card `b180791a`; measured result (claude-cli 2.1.287) is that it **hangs** the
+  spawn indefinitely (blocks before SessionStart even fires), not a silent skip. See the "MEASURED (card
+  `b180791a`)" section above before asserting either outcome from memory.
 
 ## Source
 
@@ -494,3 +556,10 @@ mirroring the existing `CLAUDE.md`/`.claude/**` entries in `loom-home-write-deny
 Investigation: the worker's `worker_report` for card `d332c969`, cross-checked against the installed
 `claude` CLI's own bundled doctrine text (its `prompt-audit` skill strings and `InstructionsLoaded`-hook
 schema) and the live docs at code.claude.com/docs/en/memory.
+
+Card `b180791a` (investigate-first, this revision): measured the external-`@import`-approval-dialog
+question the "Not closed here" section used to leave open — see "MEASURED (card `b180791a`)" above for
+the finding (hangs, not fail-closed) and the proposed-but-not-built fix.
+Test: `test/claude-md-external-import-dialog-real-spawn.mjs` (MANUAL-ONLY real-spawn measurement, in
+`NOT_HERMETIC`). Investigation: the worker's `worker_report` for card `b180791a`, cross-checked against
+the live docs at code.claude.com/docs/en/memory ("Import additional files").

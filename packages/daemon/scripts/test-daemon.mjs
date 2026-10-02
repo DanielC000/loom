@@ -437,6 +437,11 @@ export const NOT_HERMETIC = new Set([
   "loom-home-write-deny-real-spawn", // card 37310431: same cost/flake rationale as
   // disallow-harness-scheduling-tools-real-spawn above (one real, authenticated `claude` process, one real
   // model turn) — proof-once, manual-only, not scheduled. Run manually per its own header comment.
+  "claude-md-external-import-dialog-real-spawn", // card b180791a: same cost/flake rationale as the two
+  // entries above (two real, authenticated `claude` processes, two real model turns, each with a bounded
+  // 60s+120s poll budget — materially longer wall-clock than the other real-spawn files) — proof-once,
+  // manual-only, not scheduled. Run manually per its own header comment; re-run after a `claude` CLI
+  // upgrade, same re-measure posture as every other real-spawn file in this list.
 ]);
 
 // Directories that are established non-test containers under test/ — never descended into by the
