@@ -960,6 +960,7 @@ const TEST_TIMEOUT_OVERRIDES = {
   "emit-compare-gate-scope": 300_000, // card a9119abf: n=7, max pass 101,446ms, 1 kill; 2.96x margin.
   "merge-confirm-verdict-cache": 300_000, // card a9119abf: n=7, median 67s, max pass 75,533ms, 1 kill at 120s (a 1.6x-of-max tail spike, not a steady cost); 3.97x margin at the max pass.
   "merge-gate-single-file-retry": 300_000, // card a9119abf: n=7, max pass 108,722ms, 0 kills — included on the >=108,000ms cutoff alone; 2.76x margin.
+  "merge-confirm-verdict-cache-retry-links": 220_000, // card 6184e67b: unlike its git-heavy siblings above (e.g. merge-confirm-verdict-cache), this file carried no override and was SIGTERM-killed at exactly the 120,000ms blanket ceiling (120,048ms, op 96c34be6, a real full gate run, 2026-10-01T20:33Z). Per-file history (~/.loom/gate-timing/daemon-per-file-timing.ndjson), n=14 (2026-10-01->2026-10-02, one host): 13 passes 51,147-85,537ms (median 59,511ms, max pass 85,537ms), that 1 SIGTERM kill (censored, true cost unknown). 220k gives ~2.57x margin at the observed max pass.
 };
 // Card fc53ea74: codex-doctrine-real-spawn's own 300_000 override moved to
 // `_codex-real-spawn-lock.mjs`'s `CODEX_OWN_WORK_BUDGET_MS` (that file's own doc carries card 3791b14e's
