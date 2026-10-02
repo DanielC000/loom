@@ -141,10 +141,22 @@ export function isCodexModelLoaded(screen: string): boolean {
  * spawn shares the SAME per-session `mcpToken` — codex's config loader REJECTS a literal `bearer_token`
  * value at load time ("uses unsupported `bearer_token`; set `bearer_token_env_var`", confirmed against
  * the real installed codex CLI's own rejection string), so the token's VALUE must ride the process's own
- * env instead of its `-c`/TOML config — `createCodexPty` sets `env[CODEX_MCP_TOKEN_ENV_VAR] = mcpToken`,
+ * env instead of its `-c`/TOML config — `createCodexPty` sets `env[MCP_TOKEN_ENV_VAR] = mcpToken`,
  * this module only ever emits the pointer (the env var's NAME), never the value.
+ *
+ * Card a50b8afd generalized this from codex-only to harness-shared, but ONLY on win32: `host.ts`'s
+ * `buildMcpServers`/`createPty` put this placeholder-plus-env pattern on claude's own mounts there too,
+ * gated by `mcpTokenRidesEnv()`. On POSIX, claude's mounts carry the LITERAL mcpToken value instead — Code
+ * Review ruling: putting it in env on POSIX is reachable via ordinary Bash (`/proc/<pid>/environ`/`ps
+ * eww`), strictly worse than the file's own short pre-markReady window. codex itself is unaffected either
+ * way — its config loader rejects a literal value outright, so it always uses this pattern, unconditional
+ * on platform (see record for why that is itself a known, accepted, pre-existing POSIX exposure).
+ *
+ * @decision a50b8afd — never claim this env-var-pointer pattern applies to EVERY harness on EVERY
+ * platform; see `mcpTokenRidesEnv`'s own doc (claude-settings.ts) for which platform+harness combination
+ * actually uses it. See record.
  */
-export const CODEX_MCP_TOKEN_ENV_VAR = "LOOM_MCP_TOKEN";
+export const MCP_TOKEN_ENV_VAR = "LOOM_MCP_TOKEN";
 
 /**
  * Translate an already-built `mcpServers` map (the SAME shape `pty/host.ts#buildMcpServers` returns for
@@ -161,7 +173,10 @@ export const CODEX_MCP_TOKEN_ENV_VAR = "LOOM_MCP_TOKEN";
  *
  * Card 280b1e44: an entry carrying `headers.Authorization` matching `/^Bearer /i` ALSO emits `-c
  * mcp_servers.<id>.bearer_token_env_var=LOOM_MCP_TOKEN` — the pointer only; see {@link
- * CODEX_MCP_TOKEN_ENV_VAR}'s own doc for why the value itself never appears here or on any argv.
+ * MCP_TOKEN_ENV_VAR}'s own doc for why the value itself never appears here or on any argv. Card a50b8afd:
+ * the matched header value may be EITHER the win32 placeholder (`Bearer ${LOOM_MCP_TOKEN}`) or, on POSIX,
+ * the real literal token (`mcpTokenRidesEnv()`-gated — see that function's own doc) — the regex only ever
+ * needs non-empty "Bearer <something>" shape, so this translation is unaffected by which one it is.
  */
 export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>, opts?: { autoApproveServerIds?: ReadonlySet<string> }): string[] {
   const args: string[] = [];
@@ -180,7 +195,7 @@ export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>, opts?
     }
     const auth = headers?.Authorization;
     if (typeof auth === "string" && /^Bearer\s+\S/i.test(auth)) {
-      args.push("-c", `mcp_servers.${id}.bearer_token_env_var=${CODEX_MCP_TOKEN_ENV_VAR}`);
+      args.push("-c", `mcp_servers.${id}.bearer_token_env_var=${MCP_TOKEN_ENV_VAR}`);
     }
   }
   return args;

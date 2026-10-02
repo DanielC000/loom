@@ -291,7 +291,7 @@ export function writeSessionSettings(
   // Card ea2fbcca DoD item 1: validate BEFORE this reaches disk. See assertValidHooksShape's own doc for
   // the shape asserted and the deliberate fail-loud-and-refuse posture.
   assertValidHooksShape(hooks, `writeSessionSettings(${sessionId}) pre-write`);
-  const file = path.join(SETTINGS_DIR, `${sessionId}.json`);
+  const file = sessionSettingsPath(sessionId);
   const tmp = `${file}.tmp`;
   // 0600 at create, mirroring writeSessionMcpConfig's own discipline now that this file carries a
   // credential (the hook token, baked into the relay command above) — best-effort on win32 (a no-op;
@@ -328,7 +328,11 @@ export function sessionMcpConfigPath(sessionId: string): string {
  * lifecycle + atomic tmp+rename as writeSessionSettings above — rewritten on every respawn since createPty
  * rebuilds the map fresh each time. 0600 at create (`{mode}`) + a best-effort chmodSync belt-and-suspenders
  * (mirrors keys/envelope.ts; a no-op on win32, where POSIX modes don't apply — NTFS ACLs are out of scope
- * for this fix).
+ * for this fix). Card a50b8afd: on win32 (`mcpTokenRidesEnv()` true), the mcpToken header is a
+ * `${LOOM_MCP_TOKEN}` placeholder by the time it reaches here, never a secret value. On POSIX it is STILL
+ * the literal value (Code Review ruling: putting it in env on POSIX is reachable via ordinary Bash,
+ * `/proc/<pid>/environ`/`ps eww` — strictly worse than this file's own short pre-markReady window) — this
+ * file's 0600 mode matters there exactly as it always did.
  */
 export function writeSessionMcpConfig(sessionId: string, mcpServers: Record<string, unknown>): string {
   const file = sessionMcpConfigPath(sessionId);
@@ -356,11 +360,61 @@ export function unlinkSessionMcpConfig(sessionId: string): void {
   try { fs.unlinkSync(sessionMcpConfigPath(sessionId)); } catch { /* no such file (e.g. a codex spawn, which never writes one) */ }
 }
 
+/** Card a50b8afd: the ONE place that constructs a session's `--settings` file path — mirrors
+ *  `sessionMcpConfigPath`'s own doc; every reader (writeSessionSettings, unlinkSessionSettings, host.ts's
+ *  markReady/onExit cleanup, the boot sweep in mcp-config-gc.ts) derives it from here. */
+export function sessionSettingsPath(sessionId: string): string {
+  return path.join(SETTINGS_DIR, `${sessionId}.json`);
+}
+
+/**
+ * Best-effort unlink of a session's `--settings` file (hook token + permission policy — see
+ * `sessionSettingsPath`). Safe to call even when no such file exists. Unlike `unlinkSessionMcpConfig`,
+ * EVERY real claude spawn unconditionally writes this file (never conditional on a capability secret), so
+ * there is no "stale file from a prior differently-shaped spawn" case to clean up in createPty — three
+ * call sites instead: createPty's own throw-cleanup (a spawn that dies before a `Live` exists), `markReady`
+ * (host.ts — ONLY when `live.sessionStartObserved` is true; see that field's own doc for why markReady can
+ * be reached with SessionStart never having fired, and docs/decisions/a50b8afd-settings-dir-secret-lifecycle.md
+ * for the live verification that deletion is safe once SessionStart HAS fired), and the pty `onExit`
+ * handler (unconditional backstop for a session that crashes before ready, or exits for any other reason).
+ * A hard daemon crash that skips all three is caught by the boot sweep in `pty/mcp-config-gc.ts`.
+ *
+ * @decision a50b8afd — before this card, NOTHING ever unlinked this file; it persisted forever, past
+ * archive and daemon restarts, readable by any session with no SETTINGS_DIR deny (e.g. codex). See record.
+ */
+export function unlinkSessionSettings(sessionId: string): void {
+  try { fs.unlinkSync(sessionSettingsPath(sessionId)); } catch { /* no such file */ }
+}
+
+/**
+ * Card a50b8afd, Code Review ruling (platform split): on win32, reading another process's own env
+ * requires a deliberate PEB read — the mcpToken-as-`${VAR}`-placeholder-plus-process-env pattern is a real
+ * improvement there. On POSIX, a same-UID shell can read another process's env with ORDINARY Bash
+ * (`/proc/<pid>/environ` on Linux, `ps eww` on macOS) — codex's sandbox does not block this — so putting
+ * the token in env on POSIX would be STRICTLY WORSE than the pre-card literal-value-in-file exposure (a
+ * short pre-markReady window, per `ed0757d6`): it would trade that short window for the token's ENTIRE
+ * session lifetime, readable with tools already in common use. So: win32 gets the placeholder-plus-env
+ * pattern; POSIX keeps the literal value in the mcp-config FILE (unchanged from pre-card, still cleared at
+ * markReady) and never puts the token in env. Platform-injectable (the optional param) so a test can force
+ * either branch on any host. See docs/decisions/a50b8afd-settings-dir-secret-lifecycle.md for the full
+ * platform-by-platform residual-ceiling writeup.
+ *
+ * @decision a50b8afd — never set `env[MCP_TOKEN_ENV_VAR]` for claude on a platform where this returns
+ * false; that would reintroduce the exact whole-session POSIX exposure this split exists to avoid.
+ */
+export function mcpTokenRidesEnv(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32";
+}
+
 /**
  * SETTINGS_DIR (`<LOOM_HOME>/tmp/settings/`) holds every session's `--settings` file (a hook token) and,
- * for a capability-secret-bearing spawn, the plaintext connection secret in its `--mcp-config` file.
- * Glob-style, absolute (SETTINGS_DIR is not guaranteed to live under the engine's own homedir), forward-
- * slashed to match the CLI's gitignore-style deny syntax on Windows.
+ * for a capability-secret-bearing spawn, its `--mcp-config` file. Card a50b8afd: on win32, that mcp-config
+ * file no longer carries the mcpToken as a secret VALUE in plaintext (see `writeSessionMcpConfig`'s
+ * updated doc) — only the `${LOOM_MCP_TOKEN}` env-var-name placeholder; the real value rides the spawned
+ * process's own env instead. On POSIX, the literal mcpToken value still rides this file, unchanged from
+ * before this card (see `mcpTokenRidesEnv`'s own doc for why). Glob-style, absolute (SETTINGS_DIR is not
+ * guaranteed to live under the engine's own homedir), forward-slashed to match the CLI's gitignore-style
+ * deny syntax on Windows.
  *
  * @decision ed0757d6 — see record for the read-bypass this closes and why it was previously uncovered.
  */

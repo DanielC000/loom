@@ -1,5 +1,14 @@
 # ed0757d6 — the per-session `--mcp-config` secret file gets a lifecycle, and SETTINGS_DIR gets a read deny
 
+**Card `a50b8afd` (2026-10-02) builds directly on this record** — it (1) stops the per-session `mcpToken`
+from ever appearing as a literal value in the mcp-config file at all (an `${VAR}` env-placeholder instead,
+mirroring codex's pre-existing `bearer_token_env_var` pattern), and (2) gives the SIBLING `--settings` file
+(`<sid>.json`, the hook token — never lifecycled before `a50b8afd`, unlike this file) the exact same
+delete-on-markReady/onExit/boot-sweep shape this record established. See
+`docs/decisions/a50b8afd-settings-dir-secret-lifecycle.md` for the live verification (claude 2.1.287) that
+motivated and validated both changes, and for the residual ceiling stated plainly (the pre-markReady
+window; same-OS-user process-env introspection).
+
 ## Background
 
 `writeSessionMcpConfig` (`pty/claude-settings.ts`) writes a DECRYPTED capability connection secret in

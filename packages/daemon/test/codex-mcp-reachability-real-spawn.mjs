@@ -44,7 +44,7 @@ const codexBin = resolveExecutable(process.env.LOOM_CODEX_BIN || "codex");
 // real space, strips other CSI/OSC sequences) before matching — see codex-doctrine.ts#normalizeCodexScreenText
 // for the general (not hardcoded-to-one-variant) normalization and codex-host-decisions.mjs for its own
 // unit coverage against a real captured specimen.
-const { isTrustDialogPrompt, trustDialogAnswer, CODEX_MCP_TOKEN_ENV_VAR } = await import("../dist/pty/codex-host.js");
+const { isTrustDialogPrompt, trustDialogAnswer, MCP_TOKEN_ENV_VAR: CODEX_MCP_TOKEN_ENV_VAR } = await import("../dist/pty/codex-host.js");
 
 // --- Graceful skip: this test needs a REAL, authenticated codex install; no fixture can stand in for a
 // real MCP client's wire behavior. ------------------------------------------------------------------

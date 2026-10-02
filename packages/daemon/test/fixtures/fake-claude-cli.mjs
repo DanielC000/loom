@@ -45,6 +45,15 @@ if (!outputFile) {
   process.exit(1);
 }
 
+// Card a50b8afd: ADDITIVE-WHEN-ABSENT — every other test using this fixture never sets this var, so this
+// is a no-op for them. Dumps this process's OWN LOOM_MCP_TOKEN env value (never argv, never stdin — the
+// real claude process's actual environment block) so a test can assert the real spawn env carries the
+// per-session mcpToken, proving the mcp-config.json FILE's own placeholder is backed by a real value
+// somewhere other than the file itself.
+if (process.env.FIXTURE_ENV_DUMP_FILE) {
+  fs.writeFileSync(process.env.FIXTURE_ENV_DUMP_FILE, JSON.stringify({ LOOM_MCP_TOKEN: process.env.LOOM_MCP_TOKEN ?? null }));
+}
+
 // A real spawn's argv is all FLAGS (--settings, --permission-mode, --strict-mcp-config, etc.) — that's
 // expected and fine. What must NEVER appear is the OLD positional-prompt shape: a `--` end-of-options
 // separator followed by the prompt text (buildSpawnArgs' pre-0050a17e contract). Its absence is the

@@ -12,7 +12,7 @@ import { resolveProfileCapabilities, usesOrchestrationMcp } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
-import { writeSessionSettings, writeSessionMcpConfig, unlinkSessionMcpConfig, withSettingsDirDenyForSpawn, toCliPermissionMode, type CliPermissionMode } from "./claude-settings.js";
+import { writeSessionSettings, writeSessionMcpConfig, unlinkSessionMcpConfig, unlinkSessionSettings, mcpTokenRidesEnv, withSettingsDirDenyForSpawn, toCliPermissionMode, type CliPermissionMode } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
 import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, LOOM_PLATFORM_SERVER_ID, LOOM_AUDIT_SERVER_ID, LOOM_USER_AUDIT_SERVER_ID, LOOM_SETUP_SERVER_ID, LOOM_OPERATOR_SERVER_ID, LOOM_RUN_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tracker.js";
@@ -36,7 +36,7 @@ import { stripEscapeAndControlChars } from "../security/control-chars.js";
  */
 export const CODEX_CODESCAPE_REASON = `codescape is enabled for this project but codex has no per-tool allow/disallow mechanism to pair with its write-tool restriction — never mounted for this harness, use harness "claude" for codescape access`;
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine, withCodexRoleDoctrine } from "./codex-doctrine.js";
-import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail, CODEX_MCP_TOKEN_ENV_VAR } from "./codex-host.js";
+import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail, MCP_TOKEN_ENV_VAR } from "./codex-host.js";
 import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
 
 /** @decision 702f2197 — the ONLY server ids passed as `mcpServersToCodexArgs`'s `autoApproveServerIds` at
@@ -1753,19 +1753,41 @@ export function buildMcpServers(o: {
    */
   integrationPaths?: { codescape?: string };
   /** Card 280b1e44: this spawn's per-session MCP credential (Live.mcpToken/CodexLive.mcpToken — minted
-   *  once in spawn()/spawnCodex, threaded here by the SAME call). Added as an `Authorization: Bearer
-   *  <mcpToken>` header on EVERY first-party `{type:"http"}` mount this function builds (the 8 routes
-   *  gateway/server.ts's onRequest hook authenticates) — NEVER on codescape's HTTP mount (a different
-   *  service, out of this card's scope) or a capability-catalog/playwright/markitdown mount (their own
-   *  transport/auth, unrelated). Undefined/omitted ⇒ byte-identical to before this option existed (no
-   *  `headers` field at all) — the ONLY reason this stays optional is the test-only createPty override
-   *  population (see that method's own doc); every real spawn always passes one.
+   *  once in spawn()/spawnCodex, threaded here by the SAME call). Added as an `Authorization` header on
+   *  EVERY first-party `{type:"http"}` mount this function builds (the 8 routes gateway/server.ts's
+   *  onRequest hook authenticates) — NEVER on codescape's HTTP mount (a different service, out of this
+   *  card's scope) or a capability-catalog/playwright/markitdown mount (their own transport/auth,
+   *  unrelated). Undefined/omitted ⇒ byte-identical to before this option existed (no `headers` field at
+   *  all) — the ONLY reason this stays optional is the test-only createPty override population (see that
+   *  method's own doc); every real spawn always passes one.
+   *
+   * @decision a50b8afd — the header VALUE this becomes (placeholder vs literal) is decided PER PLATFORM by
+   * {@link mcpTokenRidesEnv} (see `mcpTokenRidesEnv`'s own doc, claude-settings.ts, for why) — never emit
+   * the placeholder on a platform where the caller hasn't ALSO set the real value on the spawned env.
    */
   mcpToken?: string;
+  /**
+   * Card a50b8afd: the resolved {@link mcpTokenRidesEnv} decision for THIS spawn, threaded in by the
+   * caller rather than re-derived here — `createPty` computes it once and uses the SAME value both for
+   * this header decision and for whether it sets `env[MCP_TOKEN_ENV_VAR]`, so the two can never disagree.
+   * Platform-injectable for tests via `mcpTokenRidesEnv(platform)`'s own optional param — this field just
+   * takes whatever boolean that call already resolved to. Omitted ⇒ defaults to the REAL host platform
+   * (`mcpTokenRidesEnv()`), so a caller that doesn't thread it (e.g. createCodexPty, which doesn't care —
+   * codex's own translation only checks the header's SHAPE, never its value) still gets correct behavior.
+   */
+  mcpTokenRidesEnv?: boolean;
 }): Record<string, unknown> {
   // Card 280b1e44: built ONCE, spread onto every first-party mount below (including the `run` early
   // return). `undefined` when no token was passed ⇒ every entry stays byte-identical (no `headers` key).
-  const authHeaders = o.mcpToken ? { headers: { Authorization: `Bearer ${o.mcpToken}` } } : {};
+  // Card a50b8afd: on win32 the value is a PLACEHOLDER, `Bearer ${LOOM_MCP_TOKEN}` — claude's
+  // `--mcp-config` loader expands `${VAR}` from the spawned process's OWN env at startup, so the literal
+  // value never lands in the on-disk mcp-config.json file there. On POSIX the value is the literal token,
+  // UNCHANGED from pre-card behavior (see mcpTokenRidesEnv's own doc for why). Codex's own translation
+  // (mcpServersToCodexArgs) only checks this header's SHAPE, never its content, so either form works for it.
+  const ridesEnv = o.mcpTokenRidesEnv ?? mcpTokenRidesEnv();
+  const authHeaders = o.mcpToken
+    ? { headers: { Authorization: ridesEnv ? `Bearer \${${MCP_TOKEN_ENV_VAR}}` : `Bearer ${o.mcpToken}` } }
+    : {};
   // Agent Runs R2: a `run` session gets ONLY the restricted run surface — NOT even loom-tasks. This is
   // the one path that does not mount loom-tasks (every other role layers ON TOP of it). The early return
   // keeps every non-run spawn byte-identical to today (a run is the only role that reaches this branch).
@@ -1935,6 +1957,21 @@ export function buildMcpServers(o: {
     // !isLoomDev(): silent skip — the "missing" reason is the gate itself.
   }
   return mcpServers;
+}
+
+/**
+ * Card a50b8afd, Code Review round 3: the ONE place that applies the platform-split mcpToken env
+ * decision — pure and exported so a test can assert BOTH outcomes directly, on any host, with no spawn at
+ * all: `ridesEnv:false` must set NOTHING, `ridesEnv:true` must set the real value. `createPty` calls this
+ * (never inlines the conditional itself) specifically so a reviewer reverting the CALL SITE back to an
+ * unconditional assignment is a visible, reviewable diff against a named, single-purpose function, not an
+ * easy-to-miss one-line edit buried in a long method.
+ *
+ * @decision a50b8afd — never inline this conditional at the call site again; a bare `if (mcpToken &&
+ * tokenRidesEnv) env[...] = mcpToken` one-liner is exactly what regressed, twice, before this extraction.
+ */
+export function applyMcpTokenEnv(env: Record<string, string>, mcpToken: string | undefined, ridesEnv: boolean): void {
+  if (mcpToken && ridesEnv) env[MCP_TOKEN_ENV_VAR] = mcpToken;
 }
 
 /** Card C2 + card 5a7491d3 — `--allowedTools` for a mounted Codescape MCP: ONLY the 9 read tools, NEVER
@@ -2381,15 +2418,21 @@ interface Live {
   // authenticates the `claude` process's own MCP client against the gateway's `/mcp*` routes (verified via
   // `verifyMcpToken`), never the hook relay. Deliberately never reuses hookToken's value — a leaked hook
   // token must never also grant MCP tool access, and vice versa. Rides `buildMcpServers`' `headers` field
-  // on the 8 first-party HTTP mounts (an `Authorization: Bearer <mcpToken>` header), delivered to the
-  // `claude` process via the per-session `--mcp-config` FILE (never argv — see writeSessionMcpConfig).
-  // Same "does not achieve isolation" ceiling as hookToken: a co-resident reader of THIS session's own
-  // mcp-config file can still extract it. What it buys: an id being PUBLIC (listable via GET /api/sessions)
-  // no longer doubles as a credential — a caller must additionally read this session's OWN secret file to
-  // reach its MCP surface at all. Empty string for shell/canned kinds (mirrors hookToken's own convention
-  // — neither ever mounts an MCP server, so an unused "" here is harmless and verifyMcpToken's own
+  // on the 8 first-party HTTP mounts, delivered to the `claude` process via the per-session `--mcp-config`
+  // FILE (never argv — see writeSessionMcpConfig).
+  //
+  // @decision a50b8afd — on win32 only, that file carries the `${LOOM_MCP_TOKEN}` placeholder instead of
+  // this value, which `createPty` sets via `env[MCP_TOKEN_ENV_VAR]` on the spawned process. On POSIX the
+  // file still carries this literal value (Code Review ruling — see mcpTokenRidesEnv's own doc).
+  //
+  // Empty string for shell/canned kinds (mirrors hookToken's own convention — neither ever mounts an MCP
+  // server, so an unused "" here is harmless and verifyMcpToken's own
   // `token.length > 0` guard already rejects an empty presented token the same as a missing one).
   mcpToken: string;
+  /** @decision a50b8afd — set true ONLY as the first statement inside deliverHook's SessionStart case,
+   *  never inferred from `engineSessionId`/`startupCyclesDone` (both can already be populated at spawn
+   *  time for a resume/fork, before THIS attempt's own SessionStart has fired). See record. */
+  sessionStartObserved: boolean;
   engineSessionId: string | null;
   ring: { chunks: Buffer[]; bytes: number };
   subscribers: Set<Subscriber>;
@@ -3802,7 +3845,12 @@ export function buildSpawnEnv(
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(processEnv)) {
-    if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
+    // Card a50b8afd: scrub any LOOM_MCP_TOKEN inherited from the DAEMON's own process env — the only
+    // legitimate source of this value is the explicit, per-spawn mint-and-assign line in createPty/
+    // createCodexPty, which runs AFTER this function returns. Without this, a stray inherited value would
+    // flow straight through on any path that line doesn't reach (e.g. POSIX claude, where tokenRidesEnv is
+    // false and the mint-and-assign line never fires at all).
+    if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_") || k === MCP_TOKEN_ENV_VAR) continue;
     if (v !== undefined) env[k] = v;
   }
   // Git-safety vars for the unattended worker pty (close the "git blocks the pty" wedge class). Set
@@ -4697,6 +4745,7 @@ export class PtyHost {
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
+      sessionStartObserved: false,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: false,
       bootScan: "",
@@ -4830,6 +4879,10 @@ export class PtyHost {
       // too), this is no longer the rare-case no-op it was when only a capability secret triggered the
       // file form — it deletes a real file on essentially every exit today. Fires on EVERY exit path.
       unlinkSessionMcpConfig(opts.sessionId);
+      // Card a50b8afd: the SAME unconditional backstop, for the `--settings` file (see markReady's own
+      // call site for the live-verified "safe to delete once booted" reasoning) — a session that crashes
+      // before `ready` never gets markReady's own unlink, so this is its only cleanup.
+      unlinkSessionSettings(opts.sessionId);
       // Card 7d58a1aa: pid= added so this line joins by pid against the async `[pty-reap]` outcome
       // log above, without threading sessionId through reapOrphanedDescendants's own signature.
       // eslint-disable-next-line no-console
@@ -4889,6 +4942,7 @@ export class PtyHost {
       geometry: opts.geometry,
       hookToken: "", // a shell has no hook relay; unreachable anyway (deliverHook/verifyHookToken gate on kind==="claude")
       mcpToken: "", // a shell mounts no MCP server; unreachable anyway (verifyMcpToken's own gate never matches "")
+      sessionStartObserved: true, // a shell never reaches deliverHook/markReady at all; inert placeholder
       engineSessionId: null,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
@@ -5021,9 +5075,9 @@ export class PtyHost {
     }
     // Card 280b1e44: the per-session mcpToken's VALUE rides ONLY the codex process's own env (never a
     // `-c`/argv value — codex's config loader rejects a literal `bearer_token`, see
-    // CODEX_MCP_TOKEN_ENV_VAR's own doc); `mcpServersToCodexArgs` below emits the matching `-c
+    // MCP_TOKEN_ENV_VAR's own doc); `mcpServersToCodexArgs` below emits the matching `-c
     // bearer_token_env_var=` pointer for every mount carrying an Authorization header.
-    if (mcpToken) env[CODEX_MCP_TOKEN_ENV_VAR] = mcpToken;
+    if (mcpToken) env[MCP_TOKEN_ENV_VAR] = mcpToken;
     const scratchDir = sessionScratchDir(opts.sessionId);
     try { fs.mkdirSync(scratchDir, { recursive: true }); } catch { /* best-effort; never block spawn */ }
     Object.assign(env, scratchDirEnv(opts.sessionId));
@@ -6086,6 +6140,7 @@ export class PtyHost {
       role: null, // a canned entry has no role; unreachable anyway (modeLogged:true skips the auto-heal read)
       hookToken: "", // a canned entry has no hook relay; unreachable anyway (deliverHook/verifyHookToken gate on kind==="claude")
       mcpToken: "", // a canned entry mounts no MCP server; unreachable anyway (verifyMcpToken's own gate never matches "")
+      sessionStartObserved: true, // a canned entry never reaches deliverHook/markReady at all; inert placeholder
       engineSessionId: null,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
@@ -6181,8 +6236,13 @@ export class PtyHost {
    */
   protected createShellPty(opts: { id: string; cwd: string; command: string; args: string[]; geometry: PtyGeometry }): IPty {
     const bin = resolveExecutable(opts.command);
+    // Card a50b8afd: the ONE exception to "inherits wholesale" above — MCP_TOKEN_ENV_VAR is still scrubbed,
+    // same as buildSpawnEnv's own scrub. A shell has no business inheriting ANY session's mcpToken.
     const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+    for (const [k, v] of Object.entries(process.env)) {
+      if (k === MCP_TOKEN_ENV_VAR) continue;
+      if (v !== undefined) env[k] = v;
+    }
     // eslint-disable-next-line no-console
     console.log(`[pty] spawnShell ${opts.id} bin=${bin} cwd=${opts.cwd}`);
     // Card 03016805: useConptyDll is a NO-OP on non-Windows and, on Windows, a no-op unless
@@ -6212,6 +6272,21 @@ export class PtyHost {
    */
   protected reapExitedDescendants(rootPid: number): void {
     reapOrphanedDescendants(rootPid);
+  }
+
+  /**
+   * Card a50b8afd, Code Review round 3: the ONE seam `createPty` consults for the platform-split mcpToken
+   * decision — never the bare `mcpTokenRidesEnv()` function call directly at the call site. Defaults to
+   * the real function (real `process.platform`). A test subclasses PtyHost and overrides this to force
+   * EITHER branch through a REAL spawn, on ANY host — e.g. `return false` to exercise the POSIX branch on
+   * a win32 dev box — so a regression at the ACTUAL call site (not just in the pure helper the decision
+   * feeds) is caught: reverting the env-assignment below back to unconditional would make an override of
+   * `false` here still observe the token landing in env, which no PREVIOUSLY existing test could catch
+   * (every real-spawn test only ever exercised this host's own real platform, win32, where `true` was
+   * already the correct answer either way).
+   */
+  protected resolveMcpTokenRidesEnv(): boolean {
+    return mcpTokenRidesEnv();
   }
 
   /**
@@ -6303,6 +6378,12 @@ export class PtyHost {
     // tool allowlist off the actual mount decision, rather than re-deriving the same isLoomDev()/port/
     // project-enabled condition a second time here.
     const codescapeState = this.getCodescapeSupervisorState();
+    // Card a50b8afd: computed ONCE here (via the injectable `this.resolveMcpTokenRidesEnv()` seam, never
+    // the bare `mcpTokenRidesEnv()` call directly — see that method's own doc for why a test needs this to
+    // be overridable) and reused below for the env-setting line too, so the header decision (what
+    // buildMcpServers writes into mcp-config.json) and the env decision (what createPty actually sets on
+    // the spawned process) can never disagree about which platform branch applies.
+    const tokenRidesEnv = this.resolveMcpTokenRidesEnv();
     const mcpServers = buildMcpServers({
       sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,
       pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER,
@@ -6311,6 +6392,7 @@ export class PtyHost {
       repoPath: opts.repoPath, worktreeId: opts.worktreeId,
       codescapePort: codescapeState.port, codescapeResolveProjectId: codescapeState.resolveProjectId,
       mcpToken, // card 280b1e44: adds Authorization: Bearer headers to the 8 first-party mounts only
+      mcpTokenRidesEnv: tokenRidesEnv, // card a50b8afd: platform-split placeholder-vs-literal decision
       integrationPaths: this.getIntegrationPaths(),
     });
     // Card C2: the Codescape MCP tools ALSO need allowlisting (acceptEdits doesn't auto-approve MCP tools —
@@ -6372,6 +6454,18 @@ export class PtyHost {
     // checkout and would disagree with what decision-records.mjs itself checks at runtime (it walks up
     // from the session's own cwd). See writeSessionSettings's own doc for the staleness window this implies.
     const settingsPath = writeSessionSettings(opts.sessionId, { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath, opts.cwd, opts.docLint);
+    // Card ed0757d6 Code Review fix, WIDENED by card a50b8afd's own Code Review: everything from HERE
+    // (not just from the eventual node-pty spawn call) can throw — in particular `writeSessionMcpConfig`
+    // below (a Windows renameSync EPERM, a real documented footgun) — and a throw anywhere in this whole
+    // region means `spawn()`'s caller never gets a `pty` back, so NO `Live` entry is ever constructed for
+    // this attempt. That's exactly the gap `unlinkSessionMcpConfig`/`unlinkSessionSettings`'s other call
+    // sites (markReady, pty onExit) all rely on a `Live` existing to reach — none of them would ever run,
+    // and the just-written settings.json (ALREADY on disk by this point) would leak until the next boot
+    // sweep. The try block previously opened AFTER the mcp-config write below, which left exactly that
+    // write's own throw uncaught here. try/catch/RE-THROW (never `finally`, which would also fire — and
+    // wrongly delete the file — on the ordinary SUCCESS path, where markReady/onExit are the correct
+    // deleters): unlink only on the throw path, then propagate the original error unchanged.
+    try {
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
     // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
     // the curated dangerous native tools when this session's Profile set restrictedTools (Companion
@@ -6406,18 +6500,12 @@ export class PtyHost {
     // same sessionId left behind (rotation/connection-deletion/capability-removal all land here) — best
     // effort, a no-op in the common case where none exists. See unlinkSessionMcpConfig's own doc for the
     // other two cleanup sites (markReady, pty onExit) and the boot sweep backstop.
-    const mcpConfigPath = capabilitySecrets.length
+    //
+    // @decision a50b8afd — never let a real mcpToken skip file mode on the theory that its placeholder
+    // text "doesn't look secret-shaped" to collectMcpEnvSecrets — `|| !!mcpToken` forces it explicitly.
+    const mcpConfigPath = (capabilitySecrets.length > 0 || !!mcpToken)
       ? writeSessionMcpConfig(opts.sessionId, mcpServers)
       : (unlinkSessionMcpConfig(opts.sessionId), undefined);
-    // Card ed0757d6 Code Review fix: everything from here to the real node-pty spawn below can THROW
-    // (the Windows argv preflight, node-pty's own spawn call) — and a throw here means `spawn()`'s caller
-    // never gets a `pty` back, so NO `Live` entry is ever constructed for this attempt. That's exactly the
-    // gap `unlinkSessionMcpConfig`'s other call sites (markReady, pty onExit) all rely on a `Live`
-    // existing to reach — none of them would ever run, and the just-written secret file would leak on disk
-    // until the next boot sweep. try/catch/RE-THROW (never `finally`, which would also fire — and wrongly
-    // delete the file — on the ordinary SUCCESS path, where markReady/onExit are the correct deleters):
-    // unlink only on the throw path, then propagate the original error unchanged.
-    try {
     // Card 51926260 — `bootMode` (computed above, before writeSessionSettings) is reused here VERBATIM as
     // the `--permission-mode` flag value: booting DIRECTLY at the session's actual target mode, instead of
     // always booting at `acceptEdits` and Shift+Tab-climbing to the target afterward. The old
@@ -6454,6 +6542,7 @@ export class PtyHost {
     // merge spreads FIRST so a deliberate opts.sessionEnv entry always wins on a name collision.
     const credentialEnv = opts.projectId ? this.resolveCredentialSessionEnv(opts.projectId) : {};
     const env = buildSpawnEnv(process.env, { ...credentialEnv, ...opts.sessionEnv }, opts.cwd);
+    applyMcpTokenEnv(env, mcpToken, tokenRidesEnv);
     // Obsidian auto-start: when the resolved config turned it on (LOOM_OBSIDIAN_AUTOSTART rode in via
     // sessionEnv → obsidianSessionEnv), hand the vault preflight helper its ABSOLUTE path so a vault skill
     // can `node "$LOOM_OBSIDIAN_PREFLIGHT"`. The asset path is daemon-side (not knowable in browser-pure
@@ -6497,6 +6586,10 @@ export class PtyHost {
     return pty;
     } catch (e) {
       unlinkSessionMcpConfig(opts.sessionId);
+      // Card a50b8afd: same reasoning as the mcp-config unlink just above — a throw here (e.g. the
+      // Windows argv preflight) means no `Live` entry is ever created, so neither markReady nor onExit
+      // would ever reach this just-written settings.json otherwise.
+      unlinkSessionSettings(opts.sessionId);
       throw e;
     }
   }
@@ -6637,6 +6730,14 @@ export class PtyHost {
         break;
       }
       case "SessionStart":
+        // @decision a50b8afd — set FIRST, unconditionally, every time this case runs (including a
+        // same-process re-fire — see the rotation comment below): markReady reads this to know whether
+        // it's safe to unlink `--settings`. See record.
+        live.sessionStartObserved = true;
+        // @decision a50b8afd — the late-SessionStart linger: if markReady already ran via the readiness
+        // fallback (before SessionStart fired), its own `live.ready` guard means it never runs again, so
+        // unlink HERE or the file lingers for the rest of the session. See record.
+        if (live.ready) unlinkSessionSettings(sessionId);
         // SessionStart only fires once boot is past the (now-dismissed) MCP prompt — stop scanning.
         live.mcpPromptHandled = true; live.bootScan = "";
         // Capture the engine session id — and track a ROTATION. Card 7c1fc117 (confirmed via a real
@@ -10654,6 +10755,10 @@ export class PtyHost {
     // (resume/fork/recycle) rewrites the file fresh at ITS OWN spawn before its own next `ready`, so
     // deleting here never starves a later respawn.
     unlinkSessionMcpConfig(sessionId);
+    // @decision a50b8afd — ONLY when SessionStart was actually observed: markReady can also be reached via
+    // the spawn-armed readiness-fallback timer with NO SessionStart ever firing, where deleting `--settings`
+    // risks a CLI that hasn't parsed it yet ("Settings file not found", fatal). See record.
+    if (live.sessionStartObserved) unlinkSessionSettings(sessionId);
     // @decision 25813ecc — capture the kickoff from `live.startupPrompt`, never `live.lastPrompt`, before
     // `drainPending` runs: `drainPending`'s own `submit()` calls unconditionally overwrite `lastPrompt`,
     // so reading it after the drain silently substitutes the drained message for the real kickoff.
