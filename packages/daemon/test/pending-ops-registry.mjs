@@ -648,6 +648,122 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(onSettle clobber-guard) the ORPHAN's late settle never fires onSettle against the successor's key — still exactly 1 call", settleCalls.length === 1);
 }
 
+// --- card 396d6602: a throwing onOpMinted must roll back the just-minted entry (never leave a zombie
+// "running" op that can never settle) and rethrow so the caller sees the failure; a throwing onSettle must
+// never corrupt the op's own verdict or reject the fast-path settle race — see
+// docs/decisions/396d6602-pending-op-mint-and-settle-hook-failure-isolation.md. ---
+
+// THE BUG, reproduced directly: a throwing onOpMinted must reject attach() and leave NO entry behind — on
+// the OLD code this entry stayed registered forever as "running" with an already-resolved `settle`, so a
+// re-attach would see "still running" and never observe a settle (the exact "entry stuck running, re-attach
+// gets the never-settling op" shape the card names).
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const mintErr = new Error("tombstone insert failed (SQLITE_BUSY)");
+  let threw;
+  try {
+    await reg.attach("mintfail1", "gate", "mgr1", 200, async () => { calls++; return { ok: true }; }, undefined, {
+      onOpMinted: () => { throw mintErr; },
+    });
+  } catch (e) { threw = e; }
+  check("(onOpMinted throw) attach() rethrows the mint hook's own error", threw === mintErr);
+  check("(onOpMinted throw) run() was NEVER invoked — the op never really started", calls === 0);
+  check("(onOpMinted throw) the entry is rolled back — no zombie 'running' op left behind", reg.peek("mintfail1") === undefined);
+}
+
+// THE FIX'S OWN REQUIREMENT: "make the caller's re-call able to start fresh" — a re-call under the SAME
+// key after a throwing onOpMinted must mint a genuinely fresh op (run() actually invoked), not attach to a
+// never-settling zombie.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  let mintAttempts = 0;
+  const run = async () => { calls++; return { done: true }; };
+  try {
+    await reg.attach("mintfail2", "gate", "mgr1", 200, run, undefined, {
+      onOpMinted: () => { mintAttempts++; throw new Error("first mint fails"); },
+    });
+  } catch { /* expected — asserted above */ }
+  const r2 = await reg.attach("mintfail2", "gate", "mgr1", 200, run, undefined, {
+    onOpMinted: () => { mintAttempts++; },
+  });
+  check("(onOpMinted throw, re-call) the re-call mints a genuinely FRESH op — run() actually invoked, not attached to a zombie", calls === 1 && r2.settled === true && r2.ok === true && r2.value.done === true);
+  check("(onOpMinted throw, re-call) onOpMinted was attempted on BOTH calls — the first throw didn't poison the key forever", mintAttempts === 2);
+}
+
+// A throwing onSettle must not change the op's VERDICT: the fast-path attach() call must still resolve
+// (never reject) with the op's real ok:true outcome, despite the hook throwing.
+{
+  const reg = new PendingOpRegistry();
+  const r = await reg.attach("settlefail1", "gate", "mgr1", 200, async () => ({ passed: true }), undefined, {
+    onSettle: () => { throw new Error("tombstone settle write failed"); },
+  });
+  check("(onSettle throw, ok:true) attach() still resolves (never rejects) with the op's real verdict despite the throwing hook", r.settled === true && r.ok === true && r.value.passed === true);
+}
+
+// Same property on the ok:false (rejected op) side — a throwing onSettle must not mask or replace the
+// REAL error the op itself threw.
+{
+  class MarkerError extends Error { constructor(m) { super(m); this.marker = true; } }
+  const reg = new PendingOpRegistry();
+  const r = await reg.attach("settlefail2", "gate", "mgr1", 200, async () => { throw new MarkerError("real failure"); }, undefined, {
+    onSettle: () => { throw new Error("tombstone settle write failed"); },
+  });
+  check("(onSettle throw, ok:false) attach() still resolves with the op's REAL error, unaffected by the throwing hook", r.settled === true && r.ok === false && r.error instanceof MarkerError && r.error.marker === true);
+}
+
+// A throwing onSettle must not "reject the fast-path race" for a CONCURRENT waiter either — a second
+// attach() call racing the SAME in-flight op's `settle` promise must also see a resolved (not rejected) op.
+{
+  const reg = new PendingOpRegistry();
+  let resolveSlow;
+  const slow = () => new Promise((resolve) => { resolveSlow = resolve; });
+  const p1 = reg.attach("settlefail3", "gate", "mgr1", 500, slow, undefined, { onSettle: () => { throw new Error("tombstone settle write failed"); } });
+  const p2 = reg.attach("settlefail3", "gate", "mgr1", 500, slow, undefined, {}); // fired before p1 is awaited — no interleaving gap, mirrors the "genuinely CONCURRENT retry-attach" block above
+  resolveSlow({ passed: true });
+  const [r1, r2] = await Promise.all([p1, p2]);
+  check("(onSettle throw, concurrent race) BOTH the minting call and a concurrent attacher resolve cleanly, neither rejects", r1.settled === true && r1.ok === true && r2.settled === true && r2.ok === true && r2.value.passed === true);
+}
+
+// A throwing onSettle must not skip onSettledAfterPending — the ONLY delivery path for a caller already
+// told "pending", with no other way to ever learn the outcome.
+{
+  const reg = new PendingOpRegistry();
+  let resolveSlow;
+  const slow = () => new Promise((resolve) => { resolveSlow = resolve; });
+  let afterPendingOutcome;
+  const pending = await reg.attach("settlefail4", "gate", "mgr1", 20, slow, (outcome) => { afterPendingOutcome = outcome; }, {
+    onSettle: () => { throw new Error("tombstone settle write failed"); },
+  });
+  check("(onSettle throw, surfaced-pending precondition) degraded to pending as expected", pending.settled === false);
+  resolveSlow({ passed: true });
+  await waitUntil(() => afterPendingOutcome !== undefined, { label: "settlefail4 onSettledAfterPending fired despite the throwing onSettle hook" });
+  check("(onSettle throw) onSettledAfterPending STILL fires despite the throwing onSettle hook", afterPendingOutcome?.ok === true && afterPendingOutcome.value.passed === true);
+}
+
+// A throwing onSettledAfterPending ITSELF (independent of onSettle — Code Review follow-up) must not
+// reject fresh.settle either — it fires from the IDENTICAL settle callback, right after onSettle, and
+// is the ONLY delivery path for a caller already told "pending". `waitBriefly()` races the SAME
+// `fresh.settle` promise the fast-path attach() call races — if the throw rejected it, this would
+// reject too instead of resolving once the op genuinely settles.
+{
+  const reg = new PendingOpRegistry();
+  let resolveSlow;
+  const slow = () => new Promise((resolve) => { resolveSlow = resolve; });
+  const pending = await reg.attach("afterpendingfail1", "gate", "mgr1", 20, slow, () => { throw new Error("completion push failed"); });
+  check("(onSettledAfterPending throw, precondition) degraded to pending as expected", pending.settled === false);
+  resolveSlow({ passed: true });
+  let waitBrieflyThrew = false;
+  let waitBrieflyResult;
+  try {
+    waitBrieflyResult = await reg.waitBriefly("afterpendingfail1", 200);
+  } catch {
+    waitBrieflyThrew = true;
+  }
+  check("(onSettledAfterPending throw) a concurrent waitBriefly() racing the same settle never rejects — resolves true once the op actually settles", waitBrieflyThrew === false && waitBrieflyResult === true);
+}
+
 // --- DURABLE VERDICT, UNTIL SUPERSEDED (card 1555e361 — the merge-gate re-call trap): opts.
 // retainVerdictUntilSuperseded closes the accidental-re-mint hazard a TTL-bounded retained cache created —
 // a poll landing AFTER retainMs (which a poll, by nature, usually does) used to fall through and re-invoke

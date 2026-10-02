@@ -19078,8 +19078,20 @@ export class SessionService {
         // @decision 9f6598dd — derives and persists a verdict on EVERY genuine settle; previously this
         // called `settlePendingGateOp` with no verdict, leaving a settled tombstone row with no
         // extended/duration/outcome at all.
+        // @decision 396d6602 — a throwing derive/write here must not leave the row 'pending' forever (a
+        // false "no verdict was ever reached" at the next boot's reconcileOrphanedGateOps for an op that
+        // actually settled) — fall back to a verdict-less settle so the row always leaves 'pending'.
         onSettle: (outcome, opId) => {
-          this.db.settlePendingGateOp(opId, deriveMergeGateVerdict(outcome, opStartedAt));
+          try {
+            this.db.settlePendingGateOp(opId, deriveMergeGateVerdict(outcome, opStartedAt));
+          } catch (err) {
+            console.error(`[pending-ops] onSettle verdict write failed for opId=${opId} (merge) — falling back to a verdict-less settle`, err);
+            try {
+              this.db.settlePendingGateOp(opId);
+            } catch (err2) {
+              console.error(`[pending-ops] fallback verdict-less settle ALSO failed for opId=${opId} (merge) — row may remain 'pending'`, err2);
+            }
+          }
           pruneGateSpillsClassified(this.db);
         },
       },
@@ -19814,8 +19826,19 @@ export class SessionService {
         // Card 4c5bf820: also PERSISTS the terminal verdict onto the same tombstone row, so `gate_status`
         // can read it back without the completion nudge above being the only carrier — see
         // `deriveWorkerGateVerdict`'s own doc for the four outcome shapes and what each one records.
+        // @decision 396d6602 — same fallback as the merge hook's onSettle: a throwing derive/write must
+        // not leave this row 'pending' forever.
         onSettle: (outcome, opId) => {
-          this.db.settlePendingGateOp(opId, deriveWorkerGateVerdict(outcome));
+          try {
+            this.db.settlePendingGateOp(opId, deriveWorkerGateVerdict(outcome));
+          } catch (err) {
+            console.error(`[pending-ops] onSettle verdict write failed for opId=${opId} (gate) — falling back to a verdict-less settle`, err);
+            try {
+              this.db.settlePendingGateOp(opId);
+            } catch (err2) {
+              console.error(`[pending-ops] fallback verdict-less settle ALSO failed for opId=${opId} (gate) — row may remain 'pending'`, err2);
+            }
+          }
           pruneGateSpillsClassified(this.db);
         },
       },

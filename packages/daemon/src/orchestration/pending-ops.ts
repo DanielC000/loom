@@ -661,7 +661,14 @@ export class PendingOpRegistry {
       // MINT HOOK (card e3e40167): fires here, synchronously, before `run()` is ever invoked — see
       // `opts.onOpMinted`'s own doc for why this must be unconditional (not gated on surfacedPending like
       // onSurfacedPending below) and why it fires for every fresh entry, not just this one branch's own.
-      opts?.onOpMinted?.(fresh.opId);
+      // @decision 396d6602 — never leave a throwing onOpMinted's entry registered: roll it back before
+      // rethrowing, or the key is stuck "running" forever with no run() to ever settle it.
+      try {
+        opts?.onOpMinted?.(fresh.opId);
+      } catch (mintErr) {
+        if (this.entries.get(key) === fresh) this.entries.delete(key);
+        throw mintErr;
+      }
       // IDENTITY-GUARDED delete (card 27ea069e CR finding): a bare `this.entries.delete(key)` here was
       // safe ONLY under the old invariant that a new entry could never be created under `key` while an
       // older one for that same key was still settling — evictDeadOwner breaks that invariant on purpose
@@ -699,8 +706,22 @@ export class PendingOpRegistry {
             // no classifyOutcome at all) is unaffected — byte-identical to the unconditional write this line
             // used to be.
             if (opts?.retainVerdictUntilSuperseded && !NEVER_CACHED_OUTCOMES.has(fresh.outcome ?? "")) this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: true, value }, identity: settledIdentity });
-            opts?.onSettle?.({ ok: true, value }, fresh.opId);
-            if (fresh.surfacedPending) onSettledAfterPending?.({ ok: true, value }, fresh.opId);
+            // @decision 396d6602 — never let a throwing onSettle reject this settle chain or skip the
+            // delivery below: the verdict above is already final, log it loudly and move on.
+            try {
+              opts?.onSettle?.({ ok: true, value }, fresh.opId);
+            } catch (onSettleErr) {
+              console.error(`[pending-ops] onSettle threw for key=${key} opId=${fresh.opId} (op settled ok:true) — ignoring`, onSettleErr);
+            }
+            // @decision 396d6602 — same isolation, one hook further: a throwing onSettledAfterPending must
+            // not reject this settle chain either.
+            if (fresh.surfacedPending) {
+              try {
+                onSettledAfterPending?.({ ok: true, value }, fresh.opId);
+              } catch (afterPendingErr) {
+                console.error(`[pending-ops] onSettledAfterPending threw for key=${key} opId=${fresh.opId} (op settled ok:true) — ignoring`, afterPendingErr);
+              }
+            }
           }
         },
         (err) => {
@@ -713,8 +734,22 @@ export class PendingOpRegistry {
             // `NEVER_CACHED_OUTCOMES` veto — a thrown error CAN classify into a veto'd shape (card
             // 6325bc74: an ownership-refusal throw classifies as "not-your-worker" and is excluded here).
             if (opts?.retainVerdictUntilSuperseded && !NEVER_CACHED_OUTCOMES.has(fresh.outcome ?? "")) this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: false, error: err }, identity: opts.verdictIdentity });
-            opts?.onSettle?.({ ok: false, error: err }, fresh.opId);
-            if (fresh.surfacedPending) onSettledAfterPending?.({ ok: false, error: err }, fresh.opId);
+            // @decision 396d6602 — same isolation as the ok:true branch above: a throwing onSettle must
+            // never reject this settle chain or skip the delivery below.
+            try {
+              opts?.onSettle?.({ ok: false, error: err }, fresh.opId);
+            } catch (onSettleErr) {
+              console.error(`[pending-ops] onSettle threw for key=${key} opId=${fresh.opId} (op settled ok:false) — ignoring`, onSettleErr);
+            }
+            // @decision 396d6602 — same isolation, one hook further: a throwing onSettledAfterPending must
+            // not reject this settle chain either.
+            if (fresh.surfacedPending) {
+              try {
+                onSettledAfterPending?.({ ok: false, error: err }, fresh.opId);
+              } catch (afterPendingErr) {
+                console.error(`[pending-ops] onSettledAfterPending threw for key=${key} opId=${fresh.opId} (op settled ok:false) — ignoring`, afterPendingErr);
+              }
+            }
           }
         },
       );
