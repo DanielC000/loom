@@ -3262,6 +3262,49 @@ export class Db {
       } });
     }
   }
+  /**
+   * @decision 2a6a292a round 3 — the ONLY exit for a persistent branch-mismatch alert caused by a
+   * deliberate in-place mainline rename (no repoPath change happens on a rename, so
+   * {@link resetMainlineBaselinesForRepoChange} never fires for it): a human-only reset of W.
+   */
+  resetMainlineWatermark(projectId: string, repoKey: string): { reset: boolean } {
+    const wKey = `mainline-watermark:${projectId}:${repoKey}`;
+    const aKey = `mainline-boot-alerted:${projectId}:${repoKey}`;
+    const rawW = this.getMeta(wKey);
+    const rawMarker = this.getMeta(aKey);
+    if (rawW === undefined && rawMarker === undefined) return { reset: false };
+    let unread: Record<string, unknown> | null = null;
+    try { const m = rawMarker ? JSON.parse(rawMarker) as Record<string, unknown> : null; if (m && typeof m.nudgedAt !== "string") unread = m; } catch { /* unparseable marker: nothing to carry */ }
+    this.deleteMeta(wKey);
+    this.deleteMeta(aKey);
+    this.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "mainline_moved_outside_loom", detail: {
+      projectId, repoKey, source: "human-reset", severity: unread ? "high" : "low", reset: true,
+      reason: unread ? "mainline watermark reset by a human; an unread mainline alert was discarded by the reset" : "mainline watermark reset by a human",
+      ...(unread ? { discardedAlert: { branch: unread.branch, from: unread.from, to: unread.to, evidence: unread.evidence, suspectShas: unread.suspectShas } } : {}),
+    } });
+    return { reset: true };
+  }
+  /** Whether `repoKey` names a repo of `project` ("primary" always does) — the validation the human REST
+   *  mainline-watermark-reset route needs before calling {@link resetMainlineWatermark}; mirrors
+   *  `SessionService.mergeGateRepoKnown`'s own (private, service-scoped) check. */
+  projectHasRepoKey(project: Project, repoKey: string): boolean {
+    return repoKey === "primary" || project.repos.some((r) => r.key === repoKey);
+  }
+  /**
+   * @decision 2a6a292a round 3 — the dedupe fallback for when the shared marker slot is held by an
+   * UNRELATED undelivered alert (`keepPriorMarker`). Scoped to `blockedBy` (the SAME occupant currently
+   * blocking the marker) — (from, to) alone recurs across unrelated, already-resolved episodes.
+   */
+  hasMainlineDivertEvent(projectId: string, repoKey: string, from: string, to: string, blockedByFrom: string, blockedByTo: string): boolean {
+    const rows = this.db.prepare(
+      `SELECT detail_json FROM orchestration_events WHERE kind = 'mainline_moved_outside_loom'
+         AND json_extract(detail_json,'$.projectId') = ? AND json_extract(detail_json,'$.repoKey') = ?
+         AND json_extract(detail_json,'$.from') = ? AND json_extract(detail_json,'$.to') = ?
+         AND json_extract(detail_json,'$.blockedBy.from') = ? AND json_extract(detail_json,'$.blockedBy.to') = ?
+         ORDER BY seq DESC LIMIT 10`,
+    ).all(projectId, repoKey, from, to, blockedByFrom, blockedByTo) as { detail_json: string }[];
+    return rows.some((r) => { try { const d = JSON.parse(r.detail_json) as { evidence?: unknown }; return Array.isArray(d.evidence) && d.evidence.includes("branch-diverted"); } catch { return false; } });
+  }
   /** Replace a project's config override (Pillar C project_configure / PATCH config). */
   setProjectConfig(id: string, config: ProjectConfigOverride): void {
     this.db.prepare("UPDATE projects SET config_json = ? WHERE id = ?").run(JSON.stringify(config), id);

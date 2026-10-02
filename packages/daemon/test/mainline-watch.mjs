@@ -19,6 +19,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (S6) a worker that also deletes its reflog entry is still caught by branch reachability (and only that).
 //   (S7) a raw write onto a commit that is NOT a loom/* tip fires the reflog evidence only.
 //   (S7b) TOCTOU: the watermark advances only when the landing sits directly on the tip that was checked.
+//   (S7d) card 2a6a292a round 3: guard 1b exercised ALONE — advanceMainlineWatermark refuses a branch-mismatched W even with a valid checkedTip, independent of checkMainlineMove.
 //   (S8) FAIL-OPEN: a failing reader ⇒ the merge lands exactly as today, NO event, the watermark is NOT advanced past the unverified move — so
 //        the very next landing (reader restored) still catches it.
 //   (S9) BOUNDED: a >cap first-parent range ⇒ ONE low-severity "unverifiable" event (no nudge) and the watermark advances (no unbounded scan).
@@ -305,6 +306,25 @@ try {
     check("(S7b) TOCTOU: a landing whose first parent is NOT the checked tip leaves the watermark UNCHANGED (a move in the window stays catchable)", watermark()?.sha === before.sha);
     await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, parentOfHead);
     check("(S7b) …while a landing sitting directly on the checked tip advances it to the new tip", watermark()?.sha === headTip);
+  }
+
+  // ── (S7d) card 2a6a292a round 3 item 4: guard 1b EXERCISED ALONE — advanceMainlineWatermark must refuse
+  //         to change W.branch even with a VALID checkedTip (the first-parent check passes), independent of
+  //         checkMainlineMove ever having refused anything. This is the defense-in-depth guard round 2 added
+  //         ("never change W's BRANCH away from an existing trusted baseline, even here") — tested directly,
+  //         never through a full landing (D5/the batch pin test already cover that path). ───────────────────
+  {
+    const key = MW.mainlineWatermarkKey(P.projId, "primary");
+    const strayGuardBranch = "stray-guard-branch";
+    const headTipS7d = canonHead();
+    const parentOfHeadS7d = git(P.repo, "rev-parse", "HEAD~1");
+    db.setMeta(key, JSON.stringify({ branch: strayGuardBranch, sha: parentOfHeadS7d })); // W disagrees with the LIVE checked-out branch (MAIN)
+    await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, parentOfHeadS7d); // a VALID checkedTip: the first-parent check on its own would pass
+    check("(S7d) THE GUARD: a branch-mismatched W is left COMPLETELY untouched despite a valid checkedTip", watermark()?.branch === strayGuardBranch && watermark()?.sha === parentOfHeadS7d);
+    // control: the SAME checkedTip, with branch agreement restored, DOES advance — the guard is branch-specific, not a blanket refusal.
+    db.setMeta(key, JSON.stringify({ branch: MAIN, sha: parentOfHeadS7d }));
+    await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, parentOfHeadS7d);
+    check("(S7d) control: with branch agreement restored, the identical call DOES advance W", watermark()?.branch === MAIN && watermark()?.sha === headTipS7d);
   }
 
   // ── (S8) FAIL-OPEN ─────────────────────────────────────────────────────────

@@ -17677,15 +17677,13 @@ export class SessionService {
         // Card b801bad0 (fix round 3) — REVERTED: a prior round of this fix preferred the STORED mainline
         // watermark over this LIVE read for the branch half of the pin (catching a divert that predates the
         // cut, at the cost of the self-defeating case where the live read alone would have agreed with
-        // itself). That preference is undone here: `checkMainlineMove` (below) re-stamps the watermark to
-        // WHATEVER branch is currently checked out on any branch CHANGE, silently, including the very stray
-        // branch a batch's own divert refusal just correctly caught mid-run (it runs AFTER the gate closure
-        // but BEFORE this batch's own fast-forward — see its call site, below) — so a watermark-preferred
-        // pin lasts exactly one batch: the NEXT batch's cut reads the now-corrupted watermark and either
-        // spuriously refuses (canonical is actually back on mainline, pin says stray) or fast-forwards onto
-        // the stray branch (canonical is still diverted, pin now agrees with it). Card 2a6a292a owns closing
-        // that re-stamp gap; the watermark-preferred pin belongs back here only once it does. Pin from the
-        // live read alone — the branch canonical was checked out on right now, at cut time — and LOG (never
+        // itself). That preference was undone because `checkMainlineMove` used to re-stamp the watermark to
+        // WHATEVER branch was currently checked out on any branch CHANGE, silently — card 2a6a292a has since
+        // fixed that re-stamp (checkMainlineMove now alerts and leaves the watermark untouched on a branch
+        // mismatch, and the advance helpers below also refuse to move the watermark's branch away from an
+        // existing baseline) — but the watermark-preferred pin is NOT reintroduced here as part of that fix;
+        // it is separate follow-up work, owned by card ba663984, once this one has landed. Pin from the live
+        // read alone — the branch canonical was checked out on right now, at cut time — and LOG (never
         // silently degrade to an unpinned, sha-only batch) when it is unavailable (detached HEAD / a read
         // failure).
         const expectedBaseBranch = baseMainHead?.branch;
@@ -18631,7 +18629,45 @@ export class SessionService {
       const dropBootAlert = (sameBaseline?: string): void => { const m = parseMainlineBootAlert(this.db.getMeta(alertKey)); if (m && (m.nudgedAt || (sameBaseline !== undefined && m.from === sameBaseline))) this.db.deleteMeta(alertKey); };
       const store = (): void => { if (this.db.getMeta(key) === rawW) { this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip })); dropBootAlert(); } };
       const boot = a.source === "boot";
-      if (!w || w.branch !== head.branch) { store(); return head.tip; }
+      // @decision 4fa36502 — TRUE first sight only: no watermark has EVER been stamped for this (project, repoKey).
+      // There is nothing yet to compare the live checkout against, so initialise silently.
+      if (!w) { store(); return head.tip; }
+      if (w.branch !== head.branch) {
+        // @decision 2a6a292a — a branch change under an EXISTING watermark is never trusted by itself:
+        // alert, leave W untouched (dedupe via `sameMove` below), and never return a tip — a divert is
+        // never "safe to land" (see advanceMainlineWatermark{,ForBatch}'s own guard against this too).
+        const evidence = ["branch-diverted"];
+        const alertDetail = { severity: "high" as const, evidence, suspectShas: [head.tip], expectedBranch: w.branch, observedBranch: head.branch };
+        const detail = { projectId: a.projectId, repoKey: a.repoKey, branch: head.branch, from: w.sha, to: head.tip, ...(boot ? { source: "boot" } : {}) };
+        const prev = parseMainlineBootAlert(this.db.getMeta(alertKey));
+        // @decision 2a6a292a — "same move" also requires the SAME evidence kind: a sha-level alert (e.g.
+        // reflog-raw-write) can share this divert's (from, to) by coincidence (a checkout alone never
+        // moves the tip); matching on (from, to) alone would wrongly treat this divert as already filed.
+        const sameMoveMarker = !!(prev && prev.from === w.sha && prev.to === head.tip && prev.evidence.includes("branch-diverted"));
+        // @decision 2a6a292a — an UNDELIVERED marker (nudgedAt:null) for a DIFFERENT move is unread;
+        // never clobber it here — this divert still gets its own durable event below and relies on
+        // that (not the marker) until the prior alert is delivered and the marker slot frees up.
+        const keepPriorMarker = !!(prev && prev.nudgedAt === null && !sameMoveMarker);
+        // @decision 2a6a292a round 3 — when the marker slot is unavailable (keepPriorMarker), dedupe via the
+        // durable event log ONLY if it was filed while blocked by THIS SAME occupant (blockedBy): (from, to)
+        // alone recurs across unrelated, already-resolved episodes (a same-commit checkout never moves tip).
+        const sameMove = sameMoveMarker || (keepPriorMarker && this.db.hasMainlineDivertEvent(a.projectId, a.repoKey, w.sha, head.tip, prev.from, prev.to));
+        if (!sameMove) {
+          this.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: boot ? "" : (a.managerSessionId ?? ""), ...(!boot && a.workerSessionId ? { workerSessionId: a.workerSessionId } : {}), taskId: a.taskId, kind: "mainline_moved_outside_loom", detail: { ...detail, ...alertDetail, ...(keepPriorMarker ? { blockedBy: { from: prev.from, to: prev.to } } : {}) } });
+          if (!keepPriorMarker) this.db.setMeta(alertKey, JSON.stringify({ branch: head.branch, from: w.sha, to: head.tip, evidence, suspectShas: [head.tip], expectedBranch: w.branch, source: boot ? "boot" : "landing", nudgedAt: null } satisfies MainlineBootAlert));
+        }
+        if (boot) { this.deliverPendingBootAlerts(a.projectId); return null; }
+        // retry the nudge only when the MARKER says this exact move is still undelivered; the event-log
+        // fallback dedupe above has no "delivered" concept of its own, so it must never re-trigger a nudge.
+        if (!sameMove || (sameMoveMarker && !prev?.nudgedAt)) {
+          try {
+            if (!a.managerSessionId) throw new Error("no manager to nudge");
+            this.enqueueDurableMessage(a.managerSessionId, mainlineMovedNudgeText({ branch: head.branch, repoKey: a.repoKey, from: w.sha, to: head.tip, evidence, suspectShas: [head.tip], atBoot: false, expectedBranch: w.branch }), { sender: "system", taskId: a.taskId, kind: "warning" });
+            if (!keepPriorMarker) this.db.setMeta(alertKey, JSON.stringify({ branch: head.branch, from: w.sha, to: head.tip, evidence, suspectShas: [head.tip], expectedBranch: w.branch, source: "landing", nudgedAt: new Date().toISOString() } satisfies MainlineBootAlert));
+          } catch { /* the durable event above is the record; a failed nudge must not matter */ }
+        }
+        return null;
+      }
       if (w.sha === head.tip) { dropBootAlert(head.tip); return head.tip; } // main is on W: only a marker whose `from` IS the tip (the alerted move was truly UNDONE) or a delivered one goes; a move W absorbed unread stays
       // The inner reader stops at `deadlineAt` itself (keeping what it read); the outer race, a little later, only bounds a reader that never returns.
       const facts = await this.boundedByDeadline(this.mainlineFactsReader(a.repoPath, w.sha, head, ms, deadlineAt), deadlineAt, 100, "facts read");
@@ -18691,7 +18727,10 @@ export class SessionService {
         const claimed = JSON.stringify({ ...alert, nudgedAt: new Date().toISOString() });
         if (!this.db.compareAndSetMeta(row.key, row.value, claimed)) continue; // another path claimed it
         const repoKey = row.key.slice(`${MAINLINE_BOOT_ALERT_PREFIX}${projectId}:`.length);
-        const text = mainlineMovedNudgeText({ branch: alert.branch, repoKey, from: alert.from, to: alert.to, evidence: alert.evidence, suspectShas: alert.suspectShas, atBoot: true });
+        // @decision 2a6a292a round 3 — atBoot/expectedBranch must come from the marker's own `source`/`expectedBranch`, never be assumed:
+        // a landing-sourced divert whose inline nudge failed is delivered here too, and must keep landing wording + the real expected branch,
+        // never the boot "(found when the daemon started)" text with an "(unknown)" branch.
+        const text = mainlineMovedNudgeText({ branch: alert.branch, repoKey, from: alert.from, to: alert.to, evidence: alert.evidence, suspectShas: alert.suspectShas, atBoot: alert.source !== "landing", expectedBranch: alert.expectedBranch });
         try {
           // The durable record is written by THIS synchronous call, in the same step as the claim above: enqueueDurableNudge (which defers on an up-to-9s MCP wait) would leave a claimed alert with no record if the daemon died in that window.
           for (const m of managers) this.enqueueDurableMessage(m.id, text, { sender: "system", kind: "warning", taskId: null });
@@ -18731,7 +18770,13 @@ export class SessionService {
   private async advanceMainlineWatermark(projectId: string, repoKey: string, repoPath: string, checkedTip: string): Promise<void> {
     try {
       const head = await readMainlineHead(repoPath, this.mainlineGitMs());
-      if (head && (await readFirstParent(repoPath, head.tip, this.mainlineGitMs())) === checkedTip) this.db.setMeta(mainlineWatermarkKey(projectId, repoKey), JSON.stringify({ branch: head.branch, sha: head.tip }));
+      if (!head || (await readFirstParent(repoPath, head.tip, this.mainlineGitMs())) !== checkedTip) return;
+      // @decision 2a6a292a round 2 — a second, independent guard against the SAME bug `checkMainlineMove` already
+      // refuses a tip for: never change W's BRANCH away from an existing trusted baseline, even here.
+      const key = mainlineWatermarkKey(projectId, repoKey);
+      const w = parseMainlineWatermark(this.db.getMeta(key));
+      if (w && w.branch !== head.branch) return;
+      this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip }));
     } catch (err) {
       console.warn(`[mainline-watch] watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -18748,7 +18793,14 @@ export class SessionService {
       const ms = this.mainlineGitMs();
       if (!(await isAncestorCommit(repoPath, checkedTip, batchHeadSha, ms))) return;
       const head = await readMainlineHead(repoPath, ms);
-      if (head) this.db.setMeta(mainlineWatermarkKey(projectId, repoKey), JSON.stringify({ branch: head.branch, sha: batchHeadSha }));
+      if (!head) return;
+      // @decision 2a6a292a round 2 — same guard as the solo twin: never change W's BRANCH away from an
+      // existing trusted baseline, even on a verified fast-forward (a batch can "land" onto a stray
+      // branch when the whole batch, not just the gate, ran while canonical was already diverted).
+      const key = mainlineWatermarkKey(projectId, repoKey);
+      const w = parseMainlineWatermark(this.db.getMeta(key));
+      if (w && w.branch !== head.branch) return;
+      this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: batchHeadSha }));
     } catch (err) {
       console.warn(`[mainline-watch] batch watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
     }

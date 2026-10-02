@@ -8,6 +8,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (B2)  DEDUPE: the batch after that does not re-alert (the batch landing advanced the watermark to its own tip — through SEVERAL commits, so the
 //         solo first-parent rule would not have).
 //   (B3)  a human commit between batches is silent.
+//   (B4)  card 2a6a292a round 3: guard 1b exercised ALONE on advanceMainlineWatermarkForBatch — refuses a branch-mismatched W even with a fully valid (checkedTip, isAncestor) pair.
 // Run: 1) build daemon (pnpm build), 2) LOOM_CODEX_BIN=<nonexistent> node test/mainline-watch-batch.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -108,6 +109,27 @@ try {
   const i = await addWorker(d1.db, "i"), j = await addWorker(d1.db, "j");
   const r3 = await batch(d1, [i, j]);
   check("(B3) a human commit between batches ⇒ the batch lands, NO new event", r3.ok === true && mwEvents(d1).length === 1 && watermark(d1)?.sha === canonHead());
+
+  // ── (B4) card 2a6a292a round 3 item 4: guard 1b EXERCISED ALONE on the BATCH twin —
+  //        advanceMainlineWatermarkForBatch must refuse to change W.branch even with a fully valid
+  //        (checkedTip === baseMainSha, isAncestor) pair, independent of checkMainlineMove ever refusing
+  //        anything (the defense-in-depth guard round 2 added to this helper, tested directly). ───────────
+  {
+    const key = MW.mainlineWatermarkKey(P.projId, "primary");
+    const strayGuardBranch = "stray-guard-branch-batch";
+    const baseShaB4 = canonHead();
+    const kk = await addWorker(d1.db, "kk"), ll = await addWorker(d1.db, "ll");
+    const rk = await batch(d1, [kk, ll]);
+    check("(B4) setup control: a real batch landed on top of baseShaB4", rk.ok === true && canonHead() !== baseShaB4);
+    const batchHeadShaB4 = canonHead();
+    d1.db.setMeta(key, JSON.stringify({ branch: strayGuardBranch, sha: baseShaB4 })); // W disagrees with the LIVE checked-out branch (MAIN)
+    await d1.sessions.advanceMainlineWatermarkForBatch(P.projId, "primary", P.repo, baseShaB4, baseShaB4, batchHeadShaB4);
+    check("(B4) THE GUARD: a branch-mismatched W is left COMPLETELY untouched despite a fully valid (checkedTip, isAncestor) pair", watermark(d1)?.branch === strayGuardBranch && watermark(d1)?.sha === baseShaB4);
+    // control: the SAME call, with branch agreement restored, DOES advance — the guard is branch-specific.
+    d1.db.setMeta(key, JSON.stringify({ branch: MAIN, sha: baseShaB4 }));
+    await d1.sessions.advanceMainlineWatermarkForBatch(P.projId, "primary", P.repo, baseShaB4, baseShaB4, batchHeadShaB4);
+    check("(B4) control: with branch agreement restored, the identical call DOES advance W", watermark(d1)?.branch === MAIN && watermark(d1)?.sha === batchHeadShaB4);
+  }
 
 } finally {
   try { d1.db.close(); } catch { /* already closed */ }

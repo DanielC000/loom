@@ -69,19 +69,36 @@ export const MAINLINE_LOOM_TIP_CAP_REASON = "loom-tip signal skipped (cap)";
  */
 export const MAINLINE_BOOT_ALERT_PREFIX = "mainline-boot-alerted:";
 export const mainlineBootAlertKey = (projectId: string, repoKey: string): string => `${MAINLINE_BOOT_ALERT_PREFIX}${projectId}:${repoKey}`;
-export interface MainlineBootAlert { branch: string; from: string; to: string; evidence: string[]; suspectShas: string[]; nudgedAt: string | null }
+/** `expectedBranch` (set only on a branch-diverted marker) lets a later delivery render the divert text accurately.
+ * @decision 2a6a292a — do not infer `source` from `atBoot` at delivery time: a landing-time divert whose own inline nudge failed must be delivered later with landing wording, never boot's "(found when the daemon started)". */
+export interface MainlineBootAlert { branch: string; from: string; to: string; evidence: string[]; suspectShas: string[]; nudgedAt: string | null; expectedBranch?: string; source?: "boot" | "landing" }
 export function parseMainlineBootAlert(raw: string | undefined): MainlineBootAlert | null {
   if (!raw) return null;
   try {
     const v = JSON.parse(raw) as Partial<MainlineBootAlert>;
     if (typeof v.branch !== "string" || typeof v.from !== "string" || typeof v.to !== "string") return null;
-    return { branch: v.branch, from: v.from, to: v.to, evidence: Array.isArray(v.evidence) ? v.evidence.map(String) : [], suspectShas: Array.isArray(v.suspectShas) ? v.suspectShas.map(String) : [], nudgedAt: typeof v.nudgedAt === "string" ? v.nudgedAt : null };
+    return {
+      branch: v.branch, from: v.from, to: v.to, evidence: Array.isArray(v.evidence) ? v.evidence.map(String) : [], suspectShas: Array.isArray(v.suspectShas) ? v.suspectShas.map(String) : [], nudgedAt: typeof v.nudgedAt === "string" ? v.nudgedAt : null,
+      ...(typeof v.expectedBranch === "string" ? { expectedBranch: v.expectedBranch } : {}),
+      ...(v.source === "boot" || v.source === "landing" ? { source: v.source } : {}),
+    };
   } catch { return null; }
 }
 
-/** THE `[loom:mainline-moved]` nudge text — an addressed directive (exact commands + who to ask), shared by the landing path and the boot-alert delivery so there is ONE copy. */
-export function mainlineMovedNudgeText(a: { branch: string; repoKey: string; from: string; to: string; evidence: string[]; suspectShas: string[]; atBoot: boolean }): string {
+/**
+ * THE `[loom:mainline-moved]` nudge text — an addressed directive (exact commands + who to ask), shared by the landing path and the boot-alert delivery so there is ONE copy.
+ * @decision 2a6a292a round 2 — a `branch-diverted` move is NOT a mainline-tip move at all (the tip usually hasn't changed; a checkout alone never moves it), so it gets its OWN
+ * wording rather than the generic `from -> to` / `git log A..B` text: that text is actively misleading for a divert (an empty `git log X..X` for a same-commit checkout, and
+ * "treat as a bypass of the merge gate" when the likely cause is an ordinary checkout, not a forged ref write).
+ */
+export function mainlineMovedNudgeText(a: { branch: string; repoKey: string; from: string; to: string; evidence: string[]; suspectShas: string[]; atBoot: boolean; expectedBranch?: string }): string {
   const suspects = a.suspectShas.map((x) => x.slice(0, 8)).join(", ") || "none";
+  if (a.evidence.includes("branch-diverted")) {
+    const expected = a.expectedBranch ?? "(unknown — see the event's own expectedBranch field)";
+    return `[loom:mainline-moved] repo "${a.repoKey}" is checked out on "${a.branch}", not the expected mainline branch "${expected}"${a.atBoot ? " (found when the daemon started)" : ""} (evidence: branch-diverted; tip ${a.to.slice(0, 8)}). ` +
+      `The likely cause is a checkout away from "${expected}" in the canonical repo — a human REST GitWriter checkout/branch create, the Platform Lead's own git_checkout/git_create_branch, or a stray manual checkout. This is a tripwire, not a block: merges continue, but the NEXT landing would land OFF the expected mainline branch while this persists. ` +
+      `ACTION for you (the manager): check out "${expected}" again in the canonical repo to resume normal landings; if "${a.branch}" is actually a deliberate mainline RENAME, ask the owner to reset this project's mainline baseline (POST /api/projects/:id/mainline-watermark/reset, loopback, human-only — the only way to move this baseline onto a new branch name).`;
+  }
   return `[loom:mainline-moved] ${a.branch} in repo "${a.repoKey}" moved ${a.from.slice(0, 8)} -> ${a.to.slice(0, 8)} WITHOUT a Loom landing${a.atBoot ? " (found when the daemon started)" : ""} (evidence: ${a.evidence.join(", ")}; suspect ${suspects}). ` +
     `A worker can write refs/heads/${a.branch} through the shared .git; a human's own raw \`git update-ref\` looks the same. This is a tripwire, not a block: merges continue. ` +
     (a.evidence.includes("watermark-missing")

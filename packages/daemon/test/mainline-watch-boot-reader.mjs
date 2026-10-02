@@ -12,6 +12,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (M1) a POSITIVELY missing W at BOOT ⇒ ONE high event (watermark-missing + reason), W untouched, deduped over a second boot, delivered via the helper.
 //   (M2) the same at LANDING ⇒ ONE high event + a nudge to the confirming manager + W stored at the tip (the tripwire is not blinded).
 //   (M3) a TRANSIENT failure is NOT "missing": a rev-parse that throws rejects out of readMainlineFacts; one that prints nothing IS missing (control); the service fails open (no event, W untouched).
+//   (R7) card 2a6a292a round 3: an undelivered LANDING-sourced branch-divert marker, delivered later via deliverPendingBootAlerts, names the real expectedBranch and keeps landing wording (never boot's "(found when the daemon started)" / "(unknown)").
+//   (R7b) control: a BOOT-sourced divert marker delivered later still keeps boot wording — the fix is keyed on the marker's own `source`, not a blanket flip.
+//   (R8) card 2a6a292a round 3 item 3: a REPEATED divert check, while the SAME unrelated undelivered marker still blocks the shared slot, files no new event and sends no new nudge (blockedBy-scoped dedupe, never bare (from, to)).
 // Run: 1) build daemon (pnpm build), 2) LOOM_CODEX_BIN=<nonexistent> node test/mainline-watch-boot-reader.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -238,6 +241,66 @@ try {
   check("(I2b) control: pending marker for a raw move", marker()?.to === tipU && marker()?.nudgedAt === null);
   git(P.repo, "update-ref", MAINREF, wU); git(P.repo, "reset", "-q", "--hard"); await bootCheck();
   check("(I2b) the move UNDONE (tip back at W, a different tip than the alerted one) drops the undelivered marker", marker() === null && canonHead() === wU);
+
+  // ── (R7) round 3's own fix: deliverPendingBootAlerts used to call mainlineMovedNudgeText with atBoot:true
+  //        unconditionally and never passed expectedBranch, so a delivered DIVERT marker always read "(found
+  //        when the daemon started)" and 'check out "(unknown — ...)" again' — wrong for a landing-sourced
+  //        divert whose own inline nudge simply failed (no manager at the time). RED on 1b828961. ───────────
+  setW(canonHead()); db.deleteMeta(aKey); nudges.length = 0;
+  const strayR7 = `mwrd-stray-r7-${sfx}`;
+  git(P.repo, "checkout", "-q", "-b", strayR7);
+  // no live manager yet: checkMainlineMove's own inline nudge attempt throws ("no manager to nudge"),
+  // leaving the marker filed-but-undelivered with source:"landing" and the real expectedBranch.
+  await sessions.checkMainlineMove({ projectId: P.projId, repoKey: "primary", repoPath: P.repo, managerSessionId: null, workerSessionId: null, taskId: null, source: "landing" });
+  check("(R7) setup control: a landing-sourced divert marker is filed, undelivered, source landing, expectedBranch the true mainline", marker()?.nudgedAt === null && marker()?.source === "landing" && marker()?.expectedBranch === MAIN && nudges.length === 0);
+  const mgrR7 = addManager("r7", "live");
+  sessions.deliverPendingBootAlerts(P.projId);
+  const r7Nudge = forDelivery(mgrR7)[0]?.text ?? "";
+  check("(R7) THE FIX: a landing-sourced divert delivered later names the REAL expected branch, never '(unknown — …)'", r7Nudge.includes(`not the expected mainline branch "${MAIN}"`) && !r7Nudge.includes("unknown"));
+  check("(R7) THE FIX: it keeps LANDING wording, never the boot '(found when the daemon started)' framing", !r7Nudge.includes("found when the daemon started"));
+  check("(R7) it still names the checkout/reset-route remedy", /check out "/.test(r7Nudge) && r7Nudge.includes("/api/projects/:id/mainline-watermark/reset"));
+  db.setProcessState(mgrR7, "exited");
+  git(P.repo, "checkout", "-q", MAIN); git(P.repo, "branch", "-q", "-D", strayR7);
+
+  // ── (R7b) control: a BOOT-sourced divert marker keeps boot wording when delivered later (the fix must not
+  //         flip the opposite case: alert.source !== "landing" still reads atBoot:true for "boot") ──────────
+  db.deleteMeta(aKey); nudges.length = 0;
+  const strayR7b = `mwrd-stray-r7b-${sfx}`;
+  git(P.repo, "checkout", "-q", "-b", strayR7b);
+  await bootCheck(); // source:"boot", no live manager at boot time (same shape as D4): files, stays pending
+  check("(R7b) setup control: a boot-sourced divert marker is filed, undelivered, source boot, expectedBranch the true mainline", marker()?.nudgedAt === null && marker()?.source === "boot" && marker()?.expectedBranch === MAIN);
+  const mgrR7b = addManager("r7b", "live");
+  sessions.deliverPendingBootAlerts(P.projId);
+  const r7bNudge = forDelivery(mgrR7b)[0]?.text ?? "";
+  check("(R7b) control: a boot-sourced divert delivered later KEEPS the boot '(found when the daemon started)' wording and still names the real branch", r7bNudge.includes("found when the daemon started") && r7bNudge.includes(`not the expected mainline branch "${MAIN}"`));
+  db.setProcessState(mgrR7b, "exited");
+  git(P.repo, "checkout", "-q", MAIN); git(P.repo, "branch", "-q", "-D", strayR7b);
+  db.deleteMeta(aKey);
+
+  // ── (R8) card 2a6a292a round 3's own item 3: the marker slot held by an UNRELATED undelivered alert
+  //        must not make a REPEATED divert check (same SAME blocking occupant, nothing resolved in between)
+  //        re-file its event or re-nudge on every check. (from, to) alone is NOT a safe dedupe key here (a
+  //        same-commit checkout never moves the tip), so the fallback is scoped to `blockedBy` — RED on a
+  //        version that dedupes on bare (from, to): that version ALSO wrongly dedupes a genuinely NEW
+  //        episode sharing the same pair after the blocking marker is cleared (see mainline-watch-branch-
+  //        divert.mjs's (D5)/(D6), which this exact shape broke when first attempted). ─────────────────────
+  setW(canonHead()); const wR8 = watermark().sha; nudges.length = 0;
+  const strayR8 = `mwrd-stray-r8-${sfx}`;
+  git(P.repo, "checkout", "-q", "-b", strayR8);
+  // an UNRELATED, undelivered sha-level marker occupies the slot throughout — the real trigger for keepPriorMarker.
+  db.setMeta(aKey, JSON.stringify({ branch: MAIN, from: wR8, to: wR8, evidence: ["reflog-raw-write"], suspectShas: [wR8], nudgedAt: null }));
+  const mgrR8 = addManager("r8", "live");
+  const evBeforeR8 = mwEvents().length;
+  await sessions.checkMainlineMove({ projectId: P.projId, repoKey: "primary", repoPath: P.repo, managerSessionId: mgrR8, workerSessionId: null, taskId: null, source: "landing" });
+  check("(R8) setup control: the FIRST check of this divert files ONE new event and nudges the manager, the unrelated marker is untouched", mwEvents().length === evBeforeR8 + 1 && forDelivery(mgrR8).length === 1 && marker()?.evidence.join() === "reflog-raw-write" && marker()?.nudgedAt === null);
+  check("(R8) the filed event carries blockedBy naming the occupant that blocked its own marker write", mwEvents().at(-1).detail.blockedBy?.from === wR8 && mwEvents().at(-1).detail.blockedBy?.to === wR8);
+  nudges.length = 0;
+  await sessions.checkMainlineMove({ projectId: P.projId, repoKey: "primary", repoPath: P.repo, managerSessionId: mgrR8, workerSessionId: null, taskId: null, source: "landing" });
+  check("(R8) THE FIX: a REPEATED check of the SAME still-blocked divert files NO new event and sends NO new nudge", mwEvents().length === evBeforeR8 + 1 && nudges.length === 0);
+  check("(R8) …and the unrelated marker is still exactly as it was (never clobbered by either check)", marker()?.evidence.join() === "reflog-raw-write" && marker()?.from === wR8 && marker()?.to === wR8 && marker()?.nudgedAt === null);
+  db.setProcessState(mgrR8, "exited");
+  git(P.repo, "checkout", "-q", MAIN); git(P.repo, "branch", "-q", "-D", strayR8);
+  db.deleteMeta(aKey);
 
   // ── (L) the not-found probe reads git's MESSAGE, so it runs with the locale pinned; a hostile ambient locale must not change the answer ──
   const stripL = (s) => s.replace(/^\s*\/\/.*$/gm, "");

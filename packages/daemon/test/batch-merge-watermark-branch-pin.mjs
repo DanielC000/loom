@@ -20,8 +20,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        this revert — NOT caught: the live read at cut time captures the STRAY branch as "expected", so
 //        the pre-check agrees with itself and the batch proceeds, landing onto the stray branch rather than
 //        mainline. This is the exact self-defeating case the watermark-preferred pin existed to catch, and
-//        reintroducing it is the deliberate, accepted cost of this revert — closing it properly is owned by
-//        card 2a6a292a (stop checkMainlineMove's silent re-stamp first), not by restoring the preference.
+//        reintroducing it is the deliberate, accepted cost of this revert — the LANDING itself is owned by
+//        the pin and stays unfixed here; card ba663984 (reintroducing a watermark-preferred pin) is what
+//        closes THAT. What card 2a6a292a round 2 DOES close, and this file now also asserts: the stored
+//        WATERMARK itself must never be re-stamped to the stray branch by this landing — `checkMainlineMove`
+//        observes the SAME mismatch mid-gate (before the fast-forward) and now returns `null` (not a tip) on
+//        it, and `advanceMainlineWatermarkForBatch` independently refuses to move `W.branch` off an existing
+//        baseline too, so the watermark stays at MAIN even though the content lands on the stray branch.
 //   (P2) control: a divert DURING the gate run (after cut, before the fast-forward) is UNAFFECTED by this
 //        revert and is still caught — the live read at cut time pins the real branch, and the fast-forward
 //        later finds canonical checked out elsewhere. (Already covered end-to-end by
@@ -100,14 +105,19 @@ try {
 
   // ── (W1) the stored watermark is IGNORED for the pin: corrupt it to a branch that doesn't exist ─────────
   const bogusBranch = `bmwp-bogus-watermark-branch-${sfx}`;
-  db.setMeta(KEY, JSON.stringify({ branch: bogusBranch, sha: canonHead() }));
+  const w1CorruptSha = canonHead();
+  db.setMeta(KEY, JSON.stringify({ branch: bogusBranch, sha: w1CorruptSha }));
   check("(W1) precondition: canonical is genuinely on MAIN (no divert in effect)", canonBranch() === MAIN);
   const w1a = await addWorker("w1a"), w1b = await addWorker("w1b");
   const rw1 = await batch([w1a, w1b]);
   check("(W1) a corrupted/stale stored watermark does NOT cause a spurious branchDiverted refusal — the pin comes from the LIVE read, never the watermark", rw1.ok === true && rw1.landed?.length === 2 && rw1.branchDiverted === undefined);
-  // Restore a sane watermark for the rest of this file (the batch above already re-advanced it to MAIN via
-  // checkMainlineMove's own self-correction, but make that explicit rather than relying on it).
-  check("(W1) the watermark self-corrected back to MAIN despite the corruption (checkMainlineMove's own, separate mechanism)", watermark()?.branch === MAIN);
+  // @decision 2a6a292a round 2 — a corrupted watermark BRANCH no longer self-corrects via an ordinary
+  // landing: `checkMainlineMove` sees the SAME mismatch (W says `bogusBranch`, live HEAD is really on
+  // MAIN) and alerts without advancing, exactly as it would for a genuine divert — a rebind is now the
+  // only exit. Reset it directly here (simulating that rebind) so the rest of this file tests against a
+  // known-sane baseline, rather than relying on a self-correction that no longer happens.
+  check("(2a6a292a) THE FIX also covers a merely-corrupted watermark branch: it is NOT silently self-corrected by an ordinary landing any more — it stays stuck at the bogus branch until explicitly corrected", watermark()?.branch === bogusBranch && watermark()?.sha === w1CorruptSha);
+  db.setMeta(KEY, JSON.stringify({ branch: MAIN, sha: canonHead() }));
 
   // ── (P1) divert BEFORE dispatching the next batch — no divert during the gate this time ────────────────
   // By design of this revert, this is the SELF-DEFEATING case: the live read at cut time captures the
@@ -125,6 +135,10 @@ try {
   check("(P1) the batch does NOT refuse — the live-read-only pin agrees with the already-diverted checkout", v1.ok === true && v1.landed?.length === 2 && v1.branchDiverted === undefined);
   check("(P1) mainline's own ref was NOT advanced — the content landed on the stray branch instead", git(P.repo, "rev-parse", MAINREF) === preCutSha);
   check("(P1) the stray branch WAS advanced (this is the accepted, reverted-to-pre-MINOR-4 behavior)", git(P.repo, "rev-parse", `refs/heads/${strayBranch}`) !== preCutSha);
+  // @decision 2a6a292a round 2 — THE FIX under test here: even though the landing itself proceeds onto the
+  // stray branch (above, unchanged), the stored watermark must NOT be re-stamped to it one step later.
+  check("(2a6a292a) THE FIX: the watermark's branch is still MAIN despite a real landing on the stray branch", watermark()?.branch === MAIN);
+  check("(2a6a292a) THE FIX: the watermark's sha is unchanged too (a divert is never \"safe to land\" for W)", watermark()?.sha === preCutSha);
 
   // ── (P2) control: a divert DURING the gate (after cut, before the fast-forward) is unaffected by this
   //         revert and is still caught — confirming the pin itself still works, just not for a pre-existing
@@ -198,6 +212,6 @@ function canonBranchOf(repo) { try { return execFileSync("git", ["symbolic-ref",
 
 console.warn = realWarn;
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the batch's branch-divert pin now comes from a LIVE read alone (the stored mainline watermark is never consulted, so a stale/corrupted watermark cannot cause a spurious refusal or a wrong-branch landing), still catches a divert that happens DURING a batch's own gate run, accepts the reintroduced self-defeating case for a divert that PREDATES dispatch, and logs (never silently degrades) when no live branch is available."
+  ? "\n✅ ALL PASS — the batch's branch-divert pin now comes from a LIVE read alone (the stored mainline watermark is never consulted, so a stale/corrupted watermark cannot cause a spurious refusal or a wrong-branch landing), still catches a divert that happens DURING a batch's own gate run, accepts the reintroduced self-defeating case for a divert that PREDATES dispatch (the LANDING still proceeds onto the stray branch), but the stored WATERMARK is never re-stamped to it (card 2a6a292a round 2), and this file logs (never silently degrades) when no live branch is available."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

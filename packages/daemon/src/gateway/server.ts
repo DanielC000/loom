@@ -4470,6 +4470,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!p) return reply.code(404).send({ error: "project not found" });
     return new GitWriter(p.repoPath, gitWriteTimeouts).push();
   });
+  // @decision 2a6a292a round 3 — the ONLY way to clear a persistent branch-mismatch alert caused by a
+  // deliberate in-place mainline rename. Same trust class as the git writes above: loopback, human-only,
+  // never an MCP tool (checked by the surface-drift tests this card's own test file runs).
+  app.post("/api/projects/:id/mainline-watermark/reset", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const repoKey = ((req.body ?? {}) as { repoKey?: string }).repoKey ?? "primary";
+    if (!deps.db.projectHasRepoKey(p, repoKey)) return reply.code(404).send({ error: "repo not found" });
+    return deps.db.resetMainlineWatermark(p.id, repoKey);
+  });
 
   // --- REST: create / bind ---
   app.post("/api/projects", async (req, reply) => {
