@@ -92,7 +92,9 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 // in-memory sample arrays the human-readable summary lines already accumulate, additive-only, with
 // every field null (never a fabricated 0) when its source array is empty for this run.
 const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
-const GATE_TIMING_NDJSON = path.join(LOOM_HOME, "gate-timing", "daemon-per-file-timing.ndjson");
+// Exported (card 2403d1bc) so a standalone reader (gate-timing-margin-report.mjs) can locate this
+// SAME file without re-deriving the LOOM_HOME-relative path formula a second time.
+export const GATE_TIMING_NDJSON = path.join(LOOM_HOME, "gate-timing", "daemon-per-file-timing.ndjson");
 // Card afd51f5d: a FIXED, dedicated probe file — separate from GATE_TIMING_NDJSON, overwritten in place
 // every sample tick, NEVER appended to and NEVER grows. See `diskProbeWriteMs`'s own doc for why this file
 // exists and what it measures. Card fc53ea74: pid-qualified, mirroring card 6185fbfc's `runUid` fix for
@@ -936,7 +938,7 @@ const TEST_TIMEOUT_OVERRIDES = {
   "merge-confirm-solo-finalize-tip-cas": 540_000, // card e21cfd5f: ~144-148s bare on a busy host (n=2, 2026-09-26; the 148s run was on unchanged main, so it already exceeded the 120s blanket ceiling), 216-217s per copy with 3 copies at once (n=3 copies, 1 wave) — ~15 real createWorktree/solo-finalize scenarios; ~2.5x the loaded max (217s).
   "merge-gate-off": 480_000, // card c188412a: 82.8s alone through the harness (unloaded), 151-187s per copy with 4 copies at once (n=16 bare runs, 2026-09-26) — ~11 real createWorktree/merge scenarios; killed at the 120s blanket ceiling in the merge gate. ~2.6x the loaded max (187s).
   "merge-gate-reuse-admission": 250_000, // card f16bfbcf: solo 50-64s (n=4), loaded 93s per copy with 3 copies at once (n=3 copies, 1 wave, 2026-09-26, one host) — 1x120s ceiling was only ~1.3x loaded; ~2.7x that loaded time.
-  "canonical-git-isolation": 300_000, // card 7a1181cb: solo 93-102s (card's report; 101.4s re-measured through the harness), loaded 114-115s per copy with 3 copies at once (n=3 copies, 1 wave, 2026-09-28, one host) — killed at the 120s blanket ceiling under gate load, which was only ~1.04x loaded; ~2.6x that loaded time. Real-git S11/S12 scenarios, no dominant scenario.
+  "canonical-git-isolation": 475_000, /* raised from 300_000 by card 2403d1bc: per-file history (~/.loom/gate-timing/daemon-per-file-timing.ndjson), n=14 (2026-10-01->2026-10-02, one host), max pass 188,844ms, 0 fails — the 300k override had decayed to 1.59x margin at that max, below the 1.6x re-raise floor this card's own sweep uses. 475k restores ~2.52x margin at the observed max. */ // card 7a1181cb: solo 93-102s (card's report; 101.4s re-measured through the harness), loaded 114-115s per copy with 3 copies at once (n=3 copies, 1 wave, 2026-09-28, one host) — killed at the 120s blanket ceiling under gate load, which was only ~1.04x loaded; ~2.6x that loaded time. Real-git S11/S12 scenarios, no dominant scenario.
   "merge-reviewed-tip-refusal": 240_000, // card 7a1181cb: solo 78-82s (card's report; 80.9s re-measured through the harness), loaded 92-94s per copy with 3 copies at once (n=3 copies, 1 wave, 2026-09-28, one host) — killed at the 120s blanket ceiling under gate load, which was only ~1.3x loaded; ~2.6x that loaded time.
   "merge-repo-mutex": 300_000, // 15 trials x 2 concurrent real merges + a full content-integrity sweep
   "merge-stranded-backstop": 300_000, // 2x createWorktree + reviewWorkerMerge/confirmWorkerMerge, all real git
@@ -961,6 +963,27 @@ const TEST_TIMEOUT_OVERRIDES = {
   "merge-confirm-verdict-cache": 300_000, // card a9119abf: n=7, median 67s, max pass 75,533ms, 1 kill at 120s (a 1.6x-of-max tail spike, not a steady cost); 3.97x margin at the max pass.
   "merge-gate-single-file-retry": 300_000, // card a9119abf: n=7, max pass 108,722ms, 0 kills — included on the >=108,000ms cutoff alone; 2.76x margin.
   "merge-confirm-verdict-cache-retry-links": 220_000, // card 6184e67b: unlike its git-heavy siblings above (e.g. merge-confirm-verdict-cache), this file carried no override and was SIGTERM-killed at exactly the 120,000ms blanket ceiling (120,048ms, op 96c34be6, a real full gate run, 2026-10-01T20:33Z). Per-file history (~/.loom/gate-timing/daemon-per-file-timing.ndjson), n=14 (2026-10-01->2026-10-02, one host): 13 passes 51,147-85,537ms (median 59,511ms, max pass 85,537ms), that 1 SIGTERM kill (censored, true cost unknown). 220k gives ~2.57x margin at the observed max pass.
+  // card 2403d1bc — the fourteen entries below are 6184e67b's own discovered follow-up: every other
+  // file whose recorded max (per-file history, ~/.loom/gate-timing/daemon-per-file-timing.ndjson,
+  // re-pulled fresh 2026-10-02, n=13-14 per file, one host, 2026-10-01->2026-10-02) exceeded 0.6x its
+  // then-120s blanket ceiling with no override of its own. None carries an observed SIGTERM kill (every
+  // max below is a real completed run, including the two files whose max was an unrelated assertionFailed,
+  // not a timeout) — sized at ~2.5x the observed max per this family's established convention, not off
+  // an in-suite-kill cutoff (unlike the a9119abf nine above).
+  "merge-confirm-fail-identity-void": 265_000, // card 2403d1bc: n=13, max 104,787ms, 0 fails (0.87x of the 120s ceiling, no prior override). ~2.5x that max (2.53x).
+  "emit-compare-gate-test-importers": 260_000, // card 2403d1bc: n=14, max 102,629ms, 0 fails (0.86x of the 120s ceiling, no prior override); already red'd two gates on 2026-10-01. ~2.5x that max (2.53x).
+  "merge-confirm-verdict-cache-squash-refusal": 235_000, // card 2403d1bc: n=13, max 93,071ms, 0 fails (0.78x of the 120s ceiling, no prior override). ~2.5x that max (2.53x).
+  "emit-compare-gate-scope-reclassify": 210_000, // card 2403d1bc: n=14, max 82,588ms, 0 fails (0.69x of the 120s ceiling, no prior override). ~2.5x that max (2.54x).
+  "merge-quarantine-batch": 200_000, // card 2403d1bc: n=13, max 79,763ms, 0 fails (0.66x of the 120s ceiling, no prior override). ~2.5x that max (2.51x).
+  "merge-confirm-gated-tip-squash": 200_000, // card 2403d1bc: n=13, max 79,498ms, 0 fails (0.66x of the 120s ceiling, no prior override). ~2.5x that max (2.52x).
+  "merge-reject-notify-suppress": 200_000, // card 2403d1bc: n=13, max 78,441ms, 0 fails (0.65x of the 120s ceiling, no prior override). ~2.5x that max (2.55x).
+  "merge-rest-route-tracked": 195_000, // card 2403d1bc: n=13, max 76,113ms, 1 unrelated assertionFailed fail at 75,973ms (not a timeout; timeoutDetail null) (0.63x of the 120s ceiling, no prior override). ~2.5x that max (2.56x).
+  "deploy-staleness": 190_000, // card 2403d1bc: n=14, max 75,929ms — that max IS a real assertionFailed run (not a timeout kill; timeoutDetail null), well above this file's own median pass (~31s) (0.63x of the 120s ceiling, no prior override). ~2.5x that max (2.50x).
+  "merge-commit-kill-confirm": 190_000, // card 2403d1bc: n=13, max 75,592ms, 0 fails (0.63x of the 120s ceiling, no prior override). ~2.5x that max (2.51x).
+  "batch-merge-hold-crash-window": 190_000, // card 2403d1bc: n=14-15 (ndjson is a live-growing, host-local corpus; recount drifted by one row between this sweep's two passes, same max both times), max 74,588ms, 0 fails (0.62x of the 120s ceiling, no prior override). ~2.5x that max (2.55x).
+  "merge-gate-resume-remaining-steps": 190_000, // card 2403d1bc: n=13, max 74,210ms, 0 fails (0.62x of the 120s ceiling, no prior override). ~2.5x that max (2.56x).
+  "merge-composer-integrity-warning": 185_000, // card 2403d1bc: n=13, max 72,692ms, 0 fails (0.61x of the 120s ceiling, no prior override). ~2.5x that max (2.54x).
+  "merge-confirm-gate-tip-round-trip": 185_000, // card 2403d1bc: n=13, max 72,132ms, 0 fails (0.60x of the 120s ceiling, no prior override). ~2.5x that max (2.57x).
 };
 // Card fc53ea74: codex-doctrine-real-spawn's own 300_000 override moved to
 // `_codex-real-spawn-lock.mjs`'s `CODEX_OWN_WORK_BUDGET_MS` (that file's own doc carries card 3791b14e's
