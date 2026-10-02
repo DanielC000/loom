@@ -8,7 +8,7 @@ import type { SimpleGit, SimpleGitOptions } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
-import { withTimeout, boundedSimpleGit, localReadGitEnv } from "../git/bounded.js";
+import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv } from "../git/bounded.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 import { resolveGitToplevelSync } from "../git/repo-lock.js";
 
@@ -79,7 +79,12 @@ export type BoundedVaultGit = Pick<SimpleGit, "checkIsRepo" | "revparse" | "init
  * bounds both that block timeout and the {@link withTimeout} race. Real callers never pass this.
  */
 export interface VaultGitDeps {
-  gitFactory?: (repoPath: string, blockTimeoutMs: number) => BoundedVaultGit;
+  /** `env` (added card 306dd105) is OPTIONAL and ONLY ever carries what {@link messageClassifiedProbeEnv}
+   *  builds for a message-classified discovery probe: a locale pin PLUS ambient repo-location env
+   *  stripped — never a `GIT_DIR`/`GIT_WORK_TREE` *pin* (see {@link boundedVaultGit}'s own doc for why
+   *  those never belong here as a pin). A factory that ignores the third argument (every pre-existing
+   *  test factory) behaves exactly as before. */
+  gitFactory?: (repoPath: string, blockTimeoutMs: number, env?: Record<string, string | undefined>) => BoundedVaultGit;
   timeoutMs?: number;
   /**
    * Test-only, `flushSync`-specific override for its `git add -A` call, INDEPENDENT of `timeoutMs` /
@@ -132,8 +137,11 @@ const VAULT_GIT_SAFETY_UNSAFE: SimpleGitOptions["unsafe"] = { allowUnsafeHooksPa
 const VAULT_GIT_SAFETY_ARGS: string[] = VAULT_GIT_SAFETY_CONFIG.flatMap((c) => ["-c", c]);
 
 /** Build the bounded git instance + resolve the timeout for one vault-versioner op, applying the seam's
- *  defaults. No `.env()` override (see the doc immediately above for why — card 54b839c5). Every REAL
- *  (non-test-injected) instance carries {@link VAULT_GIT_SAFETY_CONFIG} — see that constant's own doc.
+ *  defaults. No `.env()` override BY DEFAULT (see the doc immediately above for why — card 54b839c5); an
+ *  explicit `env` is accepted (card 306dd105 round 2) ONLY for a caller that needs to pin something
+ *  LOCALE-only (never `GIT_DIR`/`GIT_WORK_TREE` — see {@link messageClassifiedProbeEnv}'s own doc) on top
+ *  of this plain discovery instance. Every REAL (non-test-injected) instance carries {@link
+ *  VAULT_GIT_SAFETY_CONFIG} — see that constant's own doc.
  *
  * **DISCOVERY ONLY** — never repo-pinned (no `GIT_DIR`/`GIT_WORK_TREE`): a caller resolving whether
  * `repoPath` IS a repo, or discovering its governing root via upward search (`resolveVaultRepoContext`,
@@ -143,11 +151,22 @@ const VAULT_GIT_SAFETY_ARGS: string[] = VAULT_GIT_SAFETY_CONFIG.flatMap((c) => [
 function boundedVaultGit(
   repoPath: string,
   deps: VaultGitDeps,
+  env?: Record<string, string | undefined>,
 ): { git: BoundedVaultGit; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory
-    ?? ((p, ms) => boundedSimpleGit(p, ms, undefined, undefined, VAULT_GIT_SAFETY_UNSAFE, VAULT_GIT_SAFETY_CONFIG));
-  return { git: makeGit(repoPath, timeoutMs), timeoutMs };
+  const git = deps.gitFactory
+    ? deps.gitFactory(repoPath, timeoutMs, env)
+    : boundedSimpleGit(repoPath, timeoutMs, env, undefined, VAULT_GIT_SAFETY_UNSAFE, VAULT_GIT_SAFETY_CONFIG);
+  return { git, timeoutMs };
+}
+
+/** @decision 306dd105 — pin LC_ALL=C/LANGUAGE=C (an unpinned host locale defeats isNotAGitRepositoryError's
+ *  English-only match) and STRIP (never pin) ambient repo-location env, so this unpinned discovery probe
+ *  can't be silently redirected at a different repo. See the decision record's "Round 3". */
+function messageClassifiedProbeEnv(): Record<string, string | undefined> {
+  const env = localReadGitEnv(process.env, { LC_ALL: "C", LANGUAGE: "C" });
+  stripRepoLocationEnv(env);
+  return env;
 }
 
 /**
@@ -467,9 +486,26 @@ export async function commitVault(
   //
   // @decision ffe98495 — never pin GIT_DIR for this discovery step; a genuine subfolder-of-a-bigger-repo
   //  would report "not a repo" and this function would wrongly `git init` a NESTED repo inside it.
-  const { git } = boundedVaultGit(vaultPath, { ...deps, timeoutMs: cheapTimeoutMs });
+  // @decision 306dd105 (round 2) — this probe's catch branch is MESSAGE-CLASSIFIED (isNotAGitRepositoryError
+  //  below), so it needs the LOCALE pin, not just the plain discovery instance — see messageClassifiedProbeEnv.
+  const { git } = boundedVaultGit(vaultPath, { ...deps, timeoutMs: cheapTimeoutMs }, messageClassifiedProbeEnv());
 
-  const isRepo = await withTimeout(git.checkIsRepo(), cheapTimeoutMs, "git check-is-repo (vault commit)").catch(() => false);
+  // @decision 306dd105 — fail CLOSED here: only an affirmative isNotAGitRepositoryError may count as
+  // "not a repo"; any other discovery error skips this commit instead of defaulting to isRepo=false. See
+  // the decision record for why the old blanket `.catch(() => false)` was wrong.
+  let isRepo: boolean;
+  try {
+    isRepo = await withTimeout(git.checkIsRepo(), cheapTimeoutMs, "git check-is-repo (vault commit)");
+  } catch (e) {
+    if (!isNotAGitRepositoryError(e)) {
+      console.warn(
+        `[vault-versioner] ${vaultPath} commitVault: discovery check-is-repo failed (not a clean "not a ` +
+        `git repository" result) — skipping this commit rather than risk initialising a nested repo: ${(e as Error)?.message ?? e}`,
+      );
+      return false;
+    }
+    isRepo = false;
+  }
   if (isRepo) {
     const root = (await withTimeout(git.revparse(["--show-toplevel"]), cheapTimeoutMs, "git rev-parse --show-toplevel (vault commit)").catch(() => "")).trim();
     const externallyManaged = !!root && root.replace(/\\/g, "/") !== vaultPath.replace(/\\/g, "/");
@@ -492,6 +528,38 @@ export async function commitVault(
   const { git: workGit } = boundedVaultGitAtConfirmedRoot(vaultPath, { ...deps, timeoutMs: workTreeTimeoutMs });
 
   if (!isRepo) {
+    // @decision 306dd105 — belt-and-suspenders: before `git init`, also probe the ENCLOSING dir from
+    // OUTSIDE `vaultPath` and refuse init when it's itself inside a repo. See the decision record.
+    // @decision 306dd105 (round 2) — this probe is ALSO message-classified (isNotAGitRepositoryError
+    //  below); same locale pin as the discovery probe above, independently, not inherited from it.
+    const parentDir = path.dirname(vaultPath);
+    const { git: outsideGit } = boundedVaultGit(parentDir, { ...deps, timeoutMs: cheapTimeoutMs }, messageClassifiedProbeEnv());
+    let enclosingRoot = "";
+    try {
+      enclosingRoot = (await withTimeout(
+        outsideGit.revparse(["--show-toplevel"]),
+        cheapTimeoutMs,
+        "git rev-parse --show-toplevel (vault commit, outside-vault probe)",
+      )).trim();
+    } catch (e) {
+      if (!isNotAGitRepositoryError(e)) {
+        console.warn(
+          `[vault-versioner] ${vaultPath} commitVault: outside-vault enclosing-repo probe failed (not a ` +
+          `clean "not a git repository" result) — skipping this commit rather than risk initialising a ` +
+          `nested repo: ${(e as Error)?.message ?? e}`,
+        );
+        return false;
+      }
+      // genuine "not a git repository" from OUTSIDE the vault dir too — safe to git init below.
+    }
+    if (enclosingRoot) {
+      console.warn(
+        `[vault-versioner] ${vaultPath} commitVault: refusing to git init — the enclosing directory ` +
+        `${parentDir} is itself inside a git repository (${enclosingRoot}); skipping this commit rather ` +
+        `than nest a repo inside it.`,
+      );
+      return false;
+    }
     await withTimeout(pinnedGit.init(), cheapTimeoutMs, "git init (vault commit)");
   }
 
@@ -1036,10 +1104,13 @@ export class VaultVersioner {
       // @decision ffe98495 — pin GIT_DIR/GIT_WORK_TREE here too: `this.commitPath` is already the
       // CONFIRMED governing root (resolved once, at `start()`), so — unlike `commitVault`'s own discovery
       // step — there is no "might still be a subfolder" case left to preserve upward search for.
-      const env = {
-        ...process.env, GIT_TERMINAL_PROMPT: "0",
+      const env = localReadGitEnv(process.env, {
+        GIT_TERMINAL_PROMPT: "0",
         GIT_DIR: path.join(this.commitPath, ".git"), GIT_WORK_TREE: this.commitPath,
-      };
+      });
+      // Built via localReadGitEnv (the same helper boundedVaultGitAtConfirmedRoot uses for its own
+      // pinned env), not a raw {...process.env} spread, so this path strips the same ambient
+      // transport-env family instead of carrying an independent copy (card 306dd105 NITPICK-2).
       const cheapTimeoutMs = this.gitDeps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
       // flushAddTimeoutMs/flushCommitTimeoutMs (test-only, see VaultGitDeps) each fall back to the shared
       // `timeoutMs` override, then to the real production default — see VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS.

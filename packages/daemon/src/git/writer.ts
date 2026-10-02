@@ -11,7 +11,14 @@ import {
   OPERATIONAL_HOME_GIT_WRITE_ERROR,
 } from "../vault/versioner.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
-import { withTimeout, boundedSimpleGit, scrubGitEnv, killableCanonicalRaw, treeDeathUnconfirmed } from "./bounded.js";
+import {
+  withTimeout,
+  boundedSimpleGit,
+  scrubGitEnv,
+  killableCanonicalRaw,
+  treeDeathUnconfirmed,
+  isNotAGitRepositoryError,
+} from "./bounded.js";
 import { enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 
 // The WRITE side of the project git view — sibling to reader.ts (which stays read-only introspection).
@@ -158,14 +165,13 @@ function isNoUpstreamError(e: unknown): boolean {
   return msg.includes("no upstream") || msg.includes("no configured push destination");
 }
 
-/** Does `e` mean "there is genuinely no git repository here" (git's own `--show-toplevel` exit-128
- *  failure), as opposed to a timeout/killed-child/other probe failure? Used by
- *  {@link GitWriter.refuseIfOperationalHome} to decide whether a toplevel-probe failure may fall through
- *  (this case only) or must refuse (every other case — round 3's fail-closed fix). Message-matched, same
- *  posture as {@link isNoUpstreamError} and `test/git-commit-helper.mjs`'s own `/not a git repository/i`. */
-function isNotAGitRepositoryError(e: unknown): boolean {
-  return /not a git repository/i.test((e as Error)?.message ?? String(e));
-}
+/** `./bounded.js` (a leaf module, card 306dd105) is the new home of `isNotAGitRepositoryError` — it used
+ *  to be defined here, module-PRIVATE (no prior external import to preserve). Re-exported BY CHOICE so
+ *  {@link GitWriter.refuseIfOperationalHome} below keeps referring to it by its bare name, and so
+ *  `vault/versioner.ts`'s `commitVault` discovery can import the SAME classifier from `./bounded.js`
+ *  directly without this module importing back from `vault/versioner.ts` (an existing cycle this module
+ *  already has, see `git/bounded.ts`'s own doc) gaining a second, reverse edge. */
+export { isNotAGitRepositoryError };
 
 /** Every method GitWriter's bounded git calls need, across checkout/createBranch/commit/push/pendingPushSummary. */
 type WriterGit = Pick<SimpleGit, "checkout" | "checkoutLocalBranch" | "branchLocal" | "status" | "raw" | "commit" | "revparse">;

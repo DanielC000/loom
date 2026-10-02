@@ -47,6 +47,17 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
   });
 }
 
+/** Does `e` mean "there is genuinely no git repository here" (git's own `--show-toplevel`/discovery
+ *  exit-128 failure), as opposed to a timeout/killed-child/other probe failure (a bare refusal, dubious
+ *  ownership, `safe.bareRepository` refusing a bare-looking dir)? Message-matched, same posture as
+ *  `git/writer.ts`'s `isNoUpstreamError`. Lives in this LEAF module (card 306dd105) rather than in
+ *  `git/writer.ts` (which re-exports it for compatibility) so BOTH `git/writer.ts` and
+ *  `vault/versioner.ts` can share the one classifier without recreating the import cycle this module's
+ *  own doc above exists to avoid between those two. */
+export function isNotAGitRepositoryError(e: unknown): boolean {
+  return /not a git repository/i.test((e as Error)?.message ?? String(e));
+}
+
 /**
  * A TYPED marker (a non-enumerable property, never a message-text change) carried on an Error to mean "we
  * killed something, or gave up trying, without a positive confirmation the whole process TREE actually
@@ -359,6 +370,41 @@ export function scrubGitEnv(env: Record<string, string | undefined>): Record<str
  * config-path keys (`GIT_CONFIG_GLOBAL/SYSTEM`, `GIT_CONFIG`, `GIT_EXEC_PATH`, `PREFIX`: allowed by {@link boundedSimpleGit}).
  */
 export const GIT_ENV_TRANSPORT_KEYS = ["GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND", "GIT_TEMPLATE_DIR", "GIT_CONFIG_COUNT"] as const;
+
+/**
+ * Env keys that PIN which repo/working-tree/object-store a git invocation targets, overriding its
+ * normal cwd-based upward discovery outright. An UNPINNED discovery probe (one that must answer "is
+ * `repoPath` itself a repo, or which repo governs it") needs these ABSENT, never merely benign.
+ *
+ * @decision 306dd105 — an ambient `GIT_DIR` (a shell export, an IDE terminal, a decoy left by a prior
+ * step) silently redirects such a probe at a DIFFERENT repo while it keeps reporting success, which is
+ * worse than an honest error; see that record's "Round 3" for the regression this closed.
+ *
+ * Deliberately EXCLUDES `GIT_CEILING_DIRECTORIES`: that var bounds how far UPWARD a search may walk, it
+ * does not point at a specific repo the way every key below does, and a caller legitimately bounding
+ * discovery to its own temp root may want it left alone on an otherwise-stripped probe env.
+ *
+ * @see {@link stripRepoLocationEnv} — the one place this list is applied; reuses {@link deleteEnvKeys},
+ * never a second hand-rolled removal loop.
+ */
+export const GIT_ENV_REPO_LOCATION_KEYS = [
+  "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+] as const;
+
+/**
+ * Deletes {@link GIT_ENV_REPO_LOCATION_KEYS} from `env`, IN PLACE (mirrors {@link deleteEnvKeys}'s own
+ * mutate-in-place contract) — for an UNPINNED discovery/read probe that must use git's own cwd-based
+ * repo resolution and must not be silently redirected by an ambient `GIT_DIR`/`GIT_WORK_TREE`/etc.
+ *
+ * Never call this on an env a caller is ABOUT to pin (e.g. via `localReadGitEnv`'s own `GIT_DIR`/
+ * `GIT_WORK_TREE` overrides) in order to "be safe" — stripping first is harmless there (the override
+ * re-adds exactly those two keys), but the helper exists for the UNPINNED case; a caller that wants to
+ * pin should just pin.
+ */
+export function stripRepoLocationEnv(env: Record<string, string | undefined>): void {
+  deleteEnvKeys(env, GIT_ENV_REPO_LOCATION_KEYS);
+}
 
 /**
  * The env for a LOCAL, read-only git probe that needs a pinned setting (e.g. `LC_ALL=C`, to read git's English message): `base` (case-aware) MINUS {@link GIT_ENV_TRANSPORT_KEYS},
