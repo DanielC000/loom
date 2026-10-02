@@ -589,6 +589,10 @@ export interface OwnerTextPtySource {
  * plain inline fallback expression once could have (card d326c3c2). `raceDiscarded` is checked ONLY in
  * the fallback — see `resolveQuestionForAgent`'s own doc for why it's independent of whatever `ownerText`
  * resolves to.
+ *
+ * @decision 2400d0bc — RULED: the active-turn branch (`activeOwnerText !== null`) deliberately never
+ * consults `hasRaceDiscardedOwnerSubmit`/rank, even if a marker was set since by a later, unrelated
+ * submit — see that record's "Follow-up" section for why.
  */
 export function resolveOwnerTextForQuestionResolve(
   pty: OwnerTextPtySource | undefined,

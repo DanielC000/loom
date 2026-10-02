@@ -4012,8 +4012,10 @@ export class SessionService {
           // @decision 02baa3a5 — carry ALL THREE: logicalId, mintedAtGen, mintedAtWallClock. No resume
           // boundary crossed here (same still-alive pty), so mintedAtGen is still valid age evidence —
           // unlike the post-resume loop below, which deliberately omits it.
+          // @decision 270b963c — requeueQueuedMessage carries msg.ownerTextSeq automatically, so a
+          // still-ambiguous race-discard marker can never be wrongly cleared by a fresh mint here.
           for (const msg of carried) {
-            this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, {
+            this.pty.requeueQueuedMessage(sessionId, msg, {
               giveUpHeldUntil: msg.giveUpHeldUntil, onGiveUpExhausted: msg.onGiveUpExhausted, logicalId: msg.logicalId,
               mintedAtGen: msg.mintedAtGen, // SAME still-alive pty, no boundary crossed — carries (see comment above)
               mintedAtWallClock: msg.mintedAtWallClock,
@@ -4036,10 +4038,13 @@ export class SessionService {
       // @decision 02baa3a5 — carry logicalId/mintedAtWallClock but deliberately OMIT mintedAtGen: a
       // fresh Live's submitGeneration restarts at 0 after resume(), so the predecessor's generation count
       // compared against it would be a unit error, not evidence.
-      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, {
+      // @decision 270b963c (Round 2) — a rank, like mintedAtGen, is only valid WITHIN one Live; a
+      // carried rank can outrank a marker set early in the fresh Live post-resume. Null it, fail closed.
+      this.pty.requeueQueuedMessage(sessionId, msg, {
         giveUpHeldUntil: msg.giveUpHeldUntil, onGiveUpExhausted: msg.onGiveUpExhausted, logicalId: msg.logicalId,
         mintedAtGen: undefined, // DELIBERATELY OMITTED — fresh Live's submitGeneration restarts at 0 (see comment above)
         mintedAtWallClock: msg.mintedAtWallClock,
+        ownerTextSeq: null, // DELIBERATELY NULLED — fresh Live's ownerAttributionSeq restarts at 0 too (see comment above)
       });
     }
     return resumed;

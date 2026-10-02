@@ -34,6 +34,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      idle before the interrupt lands — idle proceeds with zero added delay, a turn that clears within
 //      the bound is never interrupted, and a turn that stays busy past the bound (a genuinely long turn,
 //      or a stale busy stuck true) still proceeds — bounded, never a permanent refusal.
+//   6. CROSS-LIVE ownerTextSeq (card 270b963c, Round 2): the post-resume() requeue loop must never carry
+//      a PREDECESSOR Live's ownerTextSeq verbatim into the fresh Live spawned by this same upgrade — its
+//      ownerAttributionSeq counter restarts at 0, so a predecessor rank can wrongly outrank and clear a
+//      race-discard marker (card 2400d0bc) set early in the fresh Live.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/companion-live-upgrade.mjs
 import fs from "node:fs";
@@ -272,6 +276,95 @@ try {
       "(card f25bf3bf follow-up) proactive SURVIVES the capability-upgrade carry-forward — a dropped proactive flag would mistag the replayed turn's amber event-line in the web chat",
       groupMsg?.proactive === true,
     );
+  }
+
+  // ===================== CROSS-LIVE ownerTextSeq (card 270b963c, Round 2) =====================
+  // The post-resume() requeue loop must never carry a PREDECESSOR Live's ownerTextSeq verbatim into the
+  // fresh Live this SAME upgrade just spawned — its ownerAttributionSeq counter restarts at 0, so a
+  // predecessor rank (minted from the OLD Live's counter, already bumped past zero below) can wrongly
+  // outrank and clear a race-discard marker (card 2400d0bc) set EARLY in the fresh Live. Own isolated
+  // project/session (like the regression block above) via a REAL PtyHost (SeamHost), so the real
+  // requeue/attribution machinery runs end to end, not a scripted double.
+  {
+    const xDb = new Db();
+    const xProjId = randomUUID();
+    xDb.insertProject({ id: xProjId, name: "CrossLive", repoPath: cwd, vaultPath: cwd, config: {}, createdAt: now, archivedAt: null });
+    const xAgentId = randomUUID();
+    xDb.insertAgent({ id: xAgentId, projectId: xProjId, name: "Companion", startupPrompt: "", position: 0, profileId, endpoint: false, ioSchema: null });
+    const xSessionId = randomUUID();
+    const xEngineId = "eng-cross-live-rank";
+    xDb.insertSession({
+      id: xSessionId, projectId: xProjId, agentId: xAgentId, engineSessionId: xEngineId, title: null, cwd,
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null,
+      role: "assistant", browserTesting: false, documentConversion: false, restrictedTools: false,
+      noCommit: false, skills: null, connections: [], capabilities: [],
+    });
+    const xTpath = engineTranscriptPath(cwd, xEngineId);
+    fs.mkdirSync(path.dirname(xTpath), { recursive: true });
+    fs.writeFileSync(xTpath, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+
+    const xEvents = {
+      onEngineSessionId(id, eng) { xDb.setEngineSessionId(id, eng); },
+      onBusy(id, b) { xDb.setBusy(id, b); },
+      onContextStats() {}, onRateLimited() {},
+      onExit(id) { xDb.setProcessState(id, "exited"); xDb.setBusy(id, false); },
+    };
+    const xHost = new SeamHost(xEvents);
+    xHost.spawn({
+      sessionId: xSessionId, cwd, permission: { allow: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 },
+      resumeId: xEngineId, role: "assistant", browserTesting: false, documentConversion: false,
+      capabilities: [], restrictedTools: false, skills: null,
+    });
+    xHost.deliverHook(xSessionId, { hook_event_name: "SessionStart" });
+
+    // Bump the OLD Live's ownerAttributionSeq counter with an earlier owner turn, so the carried entry's
+    // own rank (minted below) is a REAL, nonzero predecessor rank — not merely whatever the counter's
+    // very first mint happens to be, which could coincide with the fresh Live's own early ranks by chance.
+    const earlierOwnerBody = "an earlier owner turn, pre-upgrade";
+    xHost.enqueueStdin(xSessionId, earlierOwnerBody, "system", undefined, undefined, "agent", undefined, earlierOwnerBody);
+    xHost.deliverHook(xSessionId, { hook_event_name: "Stop" });
+    check("cross-live setup: the earlier owner turn attested and cleared at Stop (just bumping the OLD Live's rank counter)", xHost.getActiveTurnOwnerText(xSessionId) === null);
+
+    const xSvc = new SessionService(xDb, xHost, new OrchestrationControl());
+    const xUpgradePromise = xSvc.upgradeCompanionCapabilities(xSessionId);
+    // The carried entry: queued (held) while the OLD pty is "stopping" (same deterministic timing as the
+    // AVAILABILITY-GAP block above) — enqueueStdin mints its ownerTextSeq from the OLD Live's counter,
+    // now past the bump above, so this is a real, nonzero predecessor rank.
+    const carriedOwnerBody = "carried across the resume boundary";
+    const carried = xHost.enqueueStdin(xSessionId, carriedOwnerBody, "human", undefined, undefined, "agent", undefined, carriedOwnerBody);
+    check("cross-live setup: the carried owner-attested message is HELD while the old pty is stopping", carried.delivered === false && carried.reason === "held");
+    await xUpgradePromise;
+    check("cross-live: the carried message was redelivered onto the fresh pty's pending (not yet drained — not ready yet)", xHost.getPending(xSessionId).includes(carriedOwnerBody));
+
+    // Flip the FRESH Live's `ready` WITHOUT letting the carried entry drain yet. A REAL resumed session
+    // only reaches `ready` through the async permission-mode-cycle dance (`cycleToMode`/`logLandedMode`,
+    // polling the footer) — out of scope here and orthogonal to the rank bug under test — so this reaches
+    // past that machinery directly (same test-only-internals pattern pty-owner-attestation.mjs scenario
+    // 13 already uses). Hold the drain across the flip (same holdDrain/releaseDrain discipline the
+    // upgrade itself uses) so the race below can be set up IN THIS Live before the carried entry is ever
+    // promoted into a turn. Releasing the hold does NOT itself trigger a drain (same as
+    // pty-owner-attestation.mjs scenario 22's own comment).
+    xHost.holdDrain(xSessionId);
+    xHost.live.get(xSessionId).ready = true;
+    xHost.releaseDrain(xSessionId);
+    check("cross-live: the carried entry is STILL queued, untouched, after the ready-flip", xHost.getPending(xSessionId).includes(carriedOwnerBody));
+
+    // A race IN THE FRESH LIVE: an outstanding (non-owner) turn, a raw line racing in before its
+    // confirming hook, discarded — setting the marker at the fresh Live's own FIRST rank (its counter
+    // restarted at 0 on this resume). The immediate-submit path doesn't require `pending` to be empty, so
+    // this turn submits directly while the carried entry stays queued behind it, untouched.
+    xHost.enqueueStdin(xSessionId, "[loom:worker-report] done", "system", undefined, undefined, "agent");
+    xHost.writeStdin(xSessionId, "raced human line\r");
+    xHost.deliverHook(xSessionId, { hook_event_name: "UserPromptSubmit" });
+    check("cross-live: marker set in the FRESH Live", xHost.hasRaceDiscardedOwnerSubmit(xSessionId) === true);
+    xHost.deliverHook(xSessionId, { hook_event_name: "Stop" }); // ends this turn -> drains the carried entry next
+
+    check("cross-live: the carried entry finally drains and re-attests", xHost.getActiveTurnOwnerText(xSessionId) === carriedOwnerBody);
+    check(
+      "cross-live (card 270b963c Round 2): the carried entry's cross-Live replay must NOT carry the predecessor Live's rank — the marker set in the FRESH Live must survive",
+      xHost.hasRaceDiscardedOwnerSubmit(xSessionId) === true,
+    );
+    xDb.close();
   }
 
   // ===================== SELF-HEAL RACE (CR fix): the wait loop must LATCH death, never re-read =====================

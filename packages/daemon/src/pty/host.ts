@@ -2278,7 +2278,7 @@ export type QueuedMessageKind = "warning" | "agent";
  * different value between `drainPending`'s real write and `requeueGiveUpOrigin`'s later reconstruction,
  * silently breaking the late-confirmation content-match/purge mechanism.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; ownerTextSeq?: number; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number; resolveTailAtDelivery?: () => string | undefined; resolvedTailReady?: boolean; resolvedTail?: string };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; ownerTextSeq?: number | null; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number; resolveTailAtDelivery?: () => string | undefined; resolvedTailReady?: boolean; resolvedTail?: string };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -2373,8 +2373,10 @@ export type EnqueueStdinTail = {
    * @decision 2400d0bc — a monotonic per-session sequence marking WHEN `ownerText` was captured. Do not
    * mint a fresh one for an entry re-attributing an EARLIER turn (a rate-limit replay) — that outranks a
    * race-discard marker set in between and wrongly clears it.
+   * @decision 270b963c — `null` is an explicit third state ("unknown rank — never mint, never
+   * outranks"), distinct from `undefined` ("not supplied — fresh capture, mint now"); see that record.
    */
-  ownerTextSeq?: number;
+  ownerTextSeq?: number | null;
 };
 /**
  * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
@@ -8119,9 +8121,12 @@ export class PtyHost {
     if (live.kind === "shell") return { delivered: false, reason: "shell-terminal", queued: false, deliveryState: "dropped" };
     // @decision 2400d0bc — resolved HERE (not above) so a fresh mint reads `live`'s own counter; an
     // explicit override (resumeAfterRateLimit's replay) is threaded through unchanged instead.
-    const ownerTextSeq: number | undefined = ownerText === undefined
+    // @decision 270b963c — `!== undefined`, never `??`: an explicit `null` override (requeueQueuedMessage's
+    // "unknown rank" sentinel) must be CARRIED, not treated as "no override, mint fresh" — only a truly
+    // absent override (ordinary fresh-capture caller never sets this field) falls through to minting.
+    const ownerTextSeq: number | null | undefined = ownerText === undefined
       ? undefined
-      : ownerTextSeqOverride ?? this.nextOwnerAttributionSeq(live);
+      : ownerTextSeqOverride !== undefined ? ownerTextSeqOverride : this.nextOwnerAttributionSeq(live);
     // @decision 21a281b6 — captureMintGen must stay a strict, EXPLICIT opt-in, never a
     // `mintedAtWallClock`-presence fallback:
     //
@@ -8292,6 +8297,29 @@ export class PtyHost {
     // tail here would silently lie about where a reordered message actually landed.
     const busyForMs = live.busySince != null ? Date.now() - live.busySince : undefined;
     return { delivered: false, position: insertAt + 1, reason: "held", queued: true, landsAt: "next-turn-boundary", busyForMs, deliveryState: "queued" };
+  }
+
+  /**
+   * Requeue an EXISTING `QueuedMessage` (a flushed/drained entry a caller is handing back to
+   * `enqueueStdin`) with its own `ownerTextSeq` carried AUTOMATICALLY — the one field a hand-rebuilt
+   * `enqueueStdin(sessionId, msg.text, ..., { ...tail })` call could always forget, because unlike
+   * `giveUpHeldUntil`/`logicalId`/`mintedAtGen` it has no visible effect until a race-discard marker is
+   * later mis-cleared by a freshly-minted rank outranking it (see `attributeOwnerText`'s own doc).
+   * `tail` carries every OTHER field a caller wants preserved (or deliberately omitted — e.g.
+   * `mintedAtGen` across a resume boundary) exactly as `enqueueStdin`'s own tail would; this method only
+   * ever adds `ownerTextSeq` ahead of it, so an explicit override in `tail` still wins.
+   * @decision 270b963c — the shared unit every re-enqueue of an existing `QueuedMessage` must go through.
+   * A `msg` with no recorded rank is FAIL-CLOSED to an explicit `null` ("unknown"), never left
+   * `undefined` (which `enqueueStdin` reads as "mint a fresh one" — see that record).
+   * @decision 270b963c (Round 2) — a rank, exactly like `mintedAtGen`, is only valid WITHIN the ONE Live
+   * it was minted in (the counter restarts at 0 on every fresh spawn/resume). A caller requeuing ACROSS
+   * a resume boundary must override this method's default carry with an explicit `ownerTextSeq: null`.
+   */
+  requeueQueuedMessage(sessionId: string, msg: QueuedMessage, tail: EnqueueStdinTail = {}): EnqueueResult {
+    return this.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, {
+      ownerTextSeq: msg.ownerTextSeq ?? null,
+      ...tail,
+    });
   }
 
   /**
@@ -9251,11 +9279,14 @@ export class PtyHost {
 
   /**
    * @decision 2400d0bc — `capturedSeq` is the RANK (never wall-clock) at which `ownerText` was genuinely
-   * authored; defaults to a freshly-minted one (an ordinary, non-replay attribution). Does not clear the
-   * race-discard marker for a `capturedSeq` that is not strictly newer than it.
+   * authored; `undefined` defaults to a freshly-minted one (an ordinary, non-replay attribution). Does
+   * not clear the race-discard marker for a `capturedSeq` that is not strictly newer than it.
+   * @decision 270b963c — `capturedSeq === null` is a THIRD, distinct state: an UNKNOWN rank (a requeue of
+   * an entry with no recorded rank). It is never minted and can never outrank/clear the marker — treat it
+   * as "this attribution's true rank is simply not knowable," not as "equivalent to a fresh mint."
    */
-  private attributeOwnerText(live: Live, ownerText: string, capturedSeq?: number): void {
-    const seq = capturedSeq ?? this.nextOwnerAttributionSeq(live);
+  private attributeOwnerText(live: Live, ownerText: string, capturedSeq?: number | null): void {
+    const seq = capturedSeq === undefined ? this.nextOwnerAttributionSeq(live) : capturedSeq;
     live.activeTurnOwnerText = ownerText;
     live.lastPromptOwnerText = ownerText;
     live.lastPromptOwnerTextSeq = seq;
@@ -9264,14 +9295,15 @@ export class PtyHost {
     // @decision d326c3c2 — a genuine owner turn just landed in recentOwnerTurns, so any earlier
     // race-discard marker no longer describes "the most recent owner turn is missing" — clear it.
     // @decision 2400d0bc — ONLY when this attribution OUTRANKS the marker (see this method's own doc).
-    if (live.raceDiscardedOwnerSubmitSeq === null || seq > live.raceDiscardedOwnerSubmitSeq) {
+    // @decision 270b963c — `seq === null` (unknown rank) can never outrank anything — skip the clear.
+    if (seq !== null && (live.raceDiscardedOwnerSubmitSeq === null || seq > live.raceDiscardedOwnerSubmitSeq)) {
       live.raceDiscardedOwnerSubmitAt = null;
       live.raceDiscardedOwnerSubmitGen = null;
       live.raceDiscardedOwnerSubmitSeq = null;
     }
   }
 
-  private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue", origin?: QueuedMessage[], ownerTextSeq?: number): void {
+  private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue", origin?: QueuedMessage[], ownerTextSeq?: number | null): void {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.kind === "shell") return; // @decision 710a34fa — never a programmatic turn into a host shell
 
@@ -10635,9 +10667,11 @@ export class PtyHost {
         // @decision 2400d0bc — pass the ORIGINAL `lastPromptOwnerTextSeq` through the tail object so the
         // held-and-later-drained replay re-attributes with its true (pre-race) rank, not a fresh one
         // minted at drain time.
-        this.enqueueStdin(sessionId, live.lastPrompt, "system", undefined, live.lastPromptRoute ?? undefined, "agent", undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, { ownerTextSeq: live.lastPromptOwnerTextSeq ?? undefined });
+        // @decision 270b963c — pass it THROUGH verbatim (never `?? undefined`): `null` ("unknown rank")
+        // must stay `null`, not get coerced into "no override — mint fresh" and reopen this exact bug.
+        this.enqueueStdin(sessionId, live.lastPrompt, "system", undefined, live.lastPromptRoute ?? undefined, "agent", undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, { ownerTextSeq: live.lastPromptOwnerTextSeq });
       } else {
-        this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, "rate-limit-replay", undefined, live.lastPromptOwnerTextSeq ?? undefined);
+        this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, "rate-limit-replay", undefined, live.lastPromptOwnerTextSeq);
       }
     }
     return true;

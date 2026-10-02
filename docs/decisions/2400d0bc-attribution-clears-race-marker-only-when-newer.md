@@ -33,3 +33,46 @@ Every ORDINARY (non-replay) attribution path — a live composer submit, a raw-t
 - Do not mint a FRESH seq for `resumeAfterRateLimit`'s replay or a late-draining queued entry — that silently reintroduces this exact bug by making a stale turn outrank the marker.
 - Do not revert to a `submitGeneration`-advance gate — `d326c3c2`'s own Code Review already proved that gate wrong (generation advances on every submit, not just an owner one).
 - Do not widen this ordering check into a general "never clear the marker twice" rule — it keys purely on rank vs. the marker's rank, nothing else.
+
+## Follow-up (card 270b963c, Code Review 81bb4927)
+
+**Gap 1 — a third hand-rebuilt requeue site missed the rank.** `sessions/service.ts`'s
+`upgradeCompanionCapabilities` rebuilds each flushed `QueuedMessage` by hand into `enqueueStdin` at two
+call sites (the still-alive-pty requeue, and the post-`resume()` requeue) — a THIRD shape of "re-enqueue an
+existing `QueuedMessage`" this card's own list above didn't enumerate, because it predates this card and
+was never audited against it. Neither site threaded `msg.ownerTextSeq`, so a requeued entry that still
+carried its own `ownerText` would mint a FRESH rank at `enqueueStdin` call time — exactly the defect this
+record exists to prevent, on a caller this record never named. Unreachable in production today (the
+companion-upgrade path is assistant-role only; assistant sessions never set the race-discard marker in the
+first place), but the missing-field default was in the wrong direction (silently clears) rather than
+fail-closed.
+
+Fixed structurally rather than by enumerating a fourth call site by hand: `PtyHost.requeueQueuedMessage
+(sessionId, msg, tail?)` is now the ONE shared unit every re-enqueue of an existing `QueuedMessage` must go
+through — it carries `msg.ownerTextSeq` automatically (ahead of whatever `tail` the caller supplies), so a
+future caller that forgets to mention it can no longer silently drop it. See its own decision record,
+`270b963c`, for the full mechanism; `upgradeCompanionCapabilities`'s two sites now call it.
+
+**Gap 2 (addressed, not a defect) — `resolveOwnerTextForQuestionResolve`'s active-turn path never
+consults rank at all.** `question_resolve`'s derivation (`mcp/questionTool.ts`) only checks
+`hasRaceDiscardedOwnerSubmit` in its FALLBACK branch (`activeOwnerText === null`). When there IS an active
+turn, its owner text is returned unconditionally — even if a race-discard marker was set in between by a
+LATER, unrelated submit this active turn has nothing to do with. Ruled **leave unchanged**: the active
+turn's owner text is genuinely that turn's text, correctly reported regardless of what happened to some
+other, later submit — the marker exists to guard the FALLBACK's "there is no active turn, so quote the
+most recent owner turn instead" inference, not to second-guess an active turn that is still, truthfully,
+active. Ranks are available now and COULD be compared here, but there is no real ambiguity to resolve by
+doing so — see `resolveOwnerTextForQuestionResolve`'s own doc comment for the same note at the call site.
+
+**Round 2 note (card `270b963c`, manager review): both the marker and `recentOwnerTurns` reset per Live,
+which fails closed today.** `raceDiscardedOwnerSubmitAt`/`Gen`/`Seq` and `ownerAttributionSeq` all
+re-initialize to their empty/zero state on every fresh spawn (including a `resume()`), and
+`recentOwnerTurns` is likewise seeded `[]` at every one of those same spawn sites — so a resume never
+carries a stale marker or a stale recent-turns window across the boundary; both start genuinely clean in
+the new Live. This is why `pty-owner-attestation.mjs` scenario 22 (`resumeAfterRateLimit`'s BLOCKED-branch
+rank carry) is GREEN on main today and only goes RED under a deliberate mutation (the tail's
+`ownerTextSeq` override removed) — it is not, and has never been, a currently-failing case; it covers
+EXISTING, already-correct behavior. Revisit this note if `recentOwnerTurns` (or the marker) is ever made
+to survive a resume boundary — at that point a carried rank crossing the SAME boundary (card `270b963c`'s
+own cross-Live fix) would need re-examining too, since the two are currently safe only because neither
+state persists across the one boundary where a carried rank could reach them.
