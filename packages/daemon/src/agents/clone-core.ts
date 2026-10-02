@@ -20,14 +20,25 @@ export function createAgentCore(
     { projectId: string; name: string; startupPrompt?: string; profileId?: string | null },
   opts?: { allowElevatedRoles?: boolean; skipRoleCheck?: boolean; humanAuthorized?: boolean },
 ): { ok: true; agent: Agent; promptWarning: string | null } | { ok: false; error: string } {
-  if (!db.getProject(projectId)) return { ok: false, error: "project not found" };
+  const project = db.getProject(projectId);
+  if (!project) return { ok: false, error: "project not found" };
   // Option B: a caller may ASSIGN an existing human-authored profile but never create one — a provided
   // profileId MUST resolve (else reject). Absent/null ⇒ profile-less agent.
+  let profile: Profile | undefined;
   if (profileId != null) {
-    const profile = db.getProfile(profileId);
+    profile = db.getProfile(profileId);
     if (!profile) return { ok: false, error: "profile not found" };
     const assignErr = agentAssignableProfileError(profile, opts);
     if (assignErr) return { ok: false, error: assignErr };
+  }
+  // card 73c16ec8: unlike the setup surface (mcp/setup.ts ~474), this core otherwise allows minting a
+  // non-manager agent into a reserved/system project (the Platform Lead legitimately administers its own
+  // home's standing agents, e.g. cloning the Auditor). A MANAGER-role agent is the one case that can never
+  // be legitimate there: 37e15c26's session-start guard refuses a manager start against a reserved home
+  // outright, so an agent minted with a manager-role profile here would be a dangling row that can never
+  // successfully spawn.
+  if (project.reserved && profile?.role === "manager") {
+    return { ok: false, error: "cannot create a manager-role agent in a reserved/system project (the workspace home) — a manager session can never start there (see the session-start reserved-home guard); only a human may add one here." };
   }
   const agent: Agent = {
     id: randomUUID(), projectId, name,
