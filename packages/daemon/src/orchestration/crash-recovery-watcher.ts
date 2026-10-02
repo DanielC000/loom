@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolveConfig, type SessionRole, type OrchestrationEvent } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
+import { isSupersededByRecycle } from "./crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "./report-resolution.js";
 import { RESUME_NUDGE_TAIL, buildBlockedResumeNudgeBody } from "./resume-nudge.js";
 import { isNoOpManagerWake } from "./restart.js";
@@ -154,7 +155,7 @@ export function recordUndeliveredReport(
 ): boolean {
   if (!manager.role || !RECOVERABLE_ROLES.includes(manager.role)) return false; // not a recoverable role
   if (!manager.engineSessionId || manager.resumability === "dead") return false; // never resumable
-  if (db.hasSuccessor(manager.id)) return false;                                 // recycled — successor owns it
+  if (isSupersededByRecycle(db, manager.id)) return false; // recycled — successor owns it (halted+unresolved is carved out, see that function's own doc)
   if (manager.rateLimitedUntil && manager.rateLimitedUntil > new Date().toISOString()) return false; // parked
   db.appendEvent({
     id: randomUUID(), ts: new Date().toISOString(),
@@ -187,7 +188,7 @@ export function recordUnexpectedExit(db: Db, sessionId: string, intended: boolea
   if (!s) return false;
   if (!s.role || !RECOVERABLE_ROLES.includes(s.role)) return false; // plain / run / auditor → out of scope
   if (!s.engineSessionId || s.resumability === "dead") return false; // never resumable → nothing to resume
-  if (db.hasSuccessor(sessionId)) return false; // recycled/superseded — its successor took over (intended)
+  if (isSupersededByRecycle(db, sessionId)) return false; // recycled/superseded (halted+unresolved carved out)
   db.appendEvent({
     id: randomUUID(), ts: new Date().toISOString(),
     managerSessionId: s.parentSessionId ?? s.id, // a worker files under its manager; a manager under itself
@@ -214,7 +215,7 @@ export function isCrashRecoveryEligible(
 ): boolean {
   if (!session.role || !RECOVERABLE_ROLES.includes(session.role)) return false;
   if (!session.engineSessionId || session.resumability === "dead") return false;
-  if (db.hasSuccessor(session.id)) return false;
+  if (isSupersededByRecycle(db, session.id)) return false;
   const project = db.getProject(session.projectId);
   if (!project) return false;
   const maxAttempts = resolveConfig(project.config).orchestration.crashRecoveryMaxAttempts;
@@ -320,7 +321,7 @@ export class CrashRecoveryWatcher {
       if (!s) continue;                                                   // session since hard-deleted
       if (!s.engineSessionId || s.resumability === "dead") continue;      // no longer a resume candidate
       if (!s.role || !RECOVERABLE_ROLES.includes(s.role)) continue;       // plain / run / auditor → not ours
-      if (db.hasSuccessor(s.id)) continue;                                // superseded by a recycle successor → intended
+      if (isSupersededByRecycle(db, s.id)) continue;                      // superseded (halted+unresolved carved out)
 
       const project = db.getProject(s.projectId);
       if (!project) continue;

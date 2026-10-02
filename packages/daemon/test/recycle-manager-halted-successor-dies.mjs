@@ -14,15 +14,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `SessionService.finishReconcilingHaltedRecycleSuccessors`) catches the identical case across a restart,
 // mirroring recycle-settle-lost-to-restart.mjs's own early/late split.
 //
-// ROUND 3 SCOPE CUT: an earlier fix round also carved `resume()`/`deriveCrashOrphanedManagers` open for a
-// HALTED predecessor despite `hasSuccessor` staying permanently true. A delta review REPRODUCED a CRITICAL
-// in that carve-out: the event it keyed on (`recycle_ownership_transfer_failed`) is PERMANENT, so a
-// predecessor that halted once, was later cleanly reclaimed (its halted successor died, ownership came
-// back), and was then cleanly re-recycled to a BRAND NEW successor would still auto-resume ALONGSIDE that
-// new successor — two live managers. That carve-out was REMOVED; `resume()` and
-// `deriveCrashOrphanedManagers` now behave exactly like main again for a halted predecessor (scenarios
-// (C)/(E) below prove the carve-out is GONE, not that it works). Auto-resuming a halted predecessor
-// through one superseded predicate keyed to its current successor is follow-up work, not this card.
+// ROUND 3 SCOPE CUT (NOW LANDED — card 386e4eb5): an earlier fix round carved `resume()`/
+// `deriveCrashOrphanedManagers` open for a HALTED predecessor despite `hasSuccessor` staying permanently
+// true, keyed on the BARE PRESENCE of `recycle_ownership_transfer_failed`. A delta review REPRODUCED a
+// CRITICAL in that carve-out: the event is PERMANENT, so a predecessor that halted once, was later cleanly
+// reclaimed (its halted successor died, ownership came back), and was then cleanly re-recycled to a BRAND
+// NEW successor would still auto-resume ALONGSIDE that new successor — two live managers. That carve-out
+// was REMOVED, and `resume()`/`deriveCrashOrphanedManagers`/`liveFleetResumeSet` went back to refusing
+// every halted predecessor unconditionally (main's old behavior) until card 386e4eb5 reintroduced the SAME
+// idea correctly scoped: `isSupersededByRecycle` (orchestration/crash-orphaned-workers.ts) now carves out
+// ONLY a predecessor whose CURRENT successor is EXACTLY the one its latest halt event named (id AND gen) —
+// never bare presence. Scenarios (C)/(E) below now prove this carve-out WORKS (a still-matching halted
+// predecessor auto-resumes); (D)/(G)/(G') prove it stays correctly SCOPED (an ordinary recycle, or a
+// re-recycle to a different successor than the halt event named, is still refused, exactly like before).
 //
 // Proves:
 //   (A) IN-PROCESS — a halted successor that dies before ever reaching ready has its transferred fleet
@@ -34,46 +38,64 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the in-process watch could ever see it (the successor never captured an engine id at all). The
 //       REAL boot sequence (runBootRecoveryPrefix + finishReconcilingHaltedRecycleSuccessors) reclaims the
 //       transferred fleet, exactly like (A) but driven by the boot-time pair instead of the live watch.
-//   (C) A STILL-SPLIT HALTED PREDECESSOR IS EXCLUDED FROM CAPTURE, never attempted — card 6859f9e7 (fix
-//       round, follow-up to this card). The successor DOES durably survive the restart (real engine id +
-//       transcript); the predecessor is itself still genuinely `live` (never stopped) WITH a successor, so
-//       `liveFleetResumeSet` now excludes it from the capture (the SAME `isSupersededByRecycle` predicate
-//       `deriveCrashOrphanedManagers` uses) instead of capturing it and letting `resume()` throw — it ends
-//       up in neither `resumed` nor `failed`, and files no `fleet_resume_failed` event, while the surviving
-//       successor resumes normally. `resume()` itself still refuses it directly if called (unchanged). A
-//       human resume is required to bring the predecessor back — this is a known, accepted gap (follow-up
-//       card 386e4eb5), not a regression.
+//   (C) FIX 386e4eb5 — A STILL-SPLIT HALTED PREDECESSOR WITH A STILL-MATCHING SUCCESSOR IS NOW CAPTURED +
+//       RESUMED. The successor DOES durably survive the restart (real engine id + transcript); the
+//       predecessor is itself still genuinely `live` (never stopped) WITH a successor that still EXACTLY
+//       matches its own latest unresolved halt event (same id + gen) — `liveFleetResumeSet` now INCLUDES
+//       it in the capture (via `isSupersededByRecycle`'s halted-and-matching carve-out), `resume()` called
+//       directly now SUCCEEDS, and `resumeFleetOnBoot` actually resumes it alongside the surviving
+//       successor (two live managers is the CORRECT end state here — ownership is genuinely still split).
 //   (D) NEGATIVE CONTROL — an ORDINARY (non-halted) recycled predecessor is STILL refused by resume(),
-//       proving (C)'s refusal isn't special-cased either way — halted and ordinary predecessors are
-//       refused identically.
-//   (E) CRASH PATH — the same still-split lineage as (C), but via the crash-path candidate derivation
-//       (deriveCrashOrphanedManagers + recoverCrashOrphanedWorkers, no RestartIntent): the predecessor is
-//       NOT a crash-recovery candidate (hasSuccessor excludes it, same as main) while the surviving
-//       successor still is.
+//       proving (C)'s new carve-out isn't a blanket hasSuccessor bypass — only a halted+matching lineage
+//       is exempt.
+//   (E) FIX 386e4eb5 — CRASH PATH: the same still-matching lineage as (C), but via the crash-path candidate
+//       derivation (deriveCrashOrphanedManagers + recoverCrashOrphanedWorkers, no RestartIntent): the
+//       predecessor NOW IS a crash-recovery candidate (same carve-out) and IS resumed, alongside the
+//       surviving successor.
 //   (F) BOTH DEAD — the predecessor is ALSO unresumable this boot (never captured an engine id): the
 //       halted-reconcile's own NEVER RESURRECT gate (mirrors reconcileStrandedRecycleSettlesEarly's
 //       isDurablyResumable(predecessor) check) leaves BOTH untouched — nothing archived, overwritten, or
-//       reparented onto a predecessor that can't come back either.
-//   (G) STALE GENERATION — a predecessor that halted once (naming successor S1), was reclaimed after S1
-//       died, and was then cleanly re-recycled to a BRAND NEW successor S2: the permanent halt event still
-//       names S1, but the halted-reconcile must only act when the predecessor's CURRENT successor is the
-//       EXACT one that event named (id + gen) — S2 is a different lineage entirely and is left alone.
-//       Code Review (fix round, card f1969787) found this scenario VACUOUS for the guard it's named for:
-//       (G) also makes M1 unresumable, so the EARLIER `isDurablyResumable(predecessor)` NEVER RESURRECT
-//       gate (08c81809) already blocks the reparent regardless of what the stale-generation guard itself
-//       decides — the guard's own effect is never actually exercised. See (G') below, which isolates it.
-//   (G') STALE GENERATION, GUARD-DISCRIMINATING — the same lineage shape as (G), but with M1 DURABLY
-//       RESUMABLE, so the NEVER RESURRECT gate can no longer mask the stale-generation guard: only the
-//       guard itself stands between S2's live, unrelated fleet and a wrongful reparent onto the stale M1.
-//       S2 reaches ready and the in-process settle genuinely completes (M1 is stopped), then S2 is left
-//       unresumable (no captured engine id) across the simulated restart — proving the guard, not the
-//       resumability gate, is what protects this lineage.
+//       reparented onto a predecessor that can't come back either. 386e4eb5's carve-out changes nothing
+//       here either: `resume()`'s EARLIER unresumability checks (no engine id) refuse the predecessor
+//       before the code ever reaches the superseded check, exactly as before this card.
+//   (G) A DIFFERENT SUCCESSOR (ID MISMATCH) — a predecessor that halted once (naming successor S1), was
+//       reclaimed after S1 died, and was then cleanly re-recycled to a BRAND NEW successor S2: the
+//       permanent halt event still names S1, but the halted-reconcile (and, since 386e4eb5,
+//       `isSupersededByRecycle` itself) must only treat the lineage as still-halted when the
+//       predecessor's CURRENT successor is the EXACT one that event named — id is the real discriminator
+//       here (S2's id differs from S1's; gen is checked too, but only as a defensive secondary check,
+//       since a real round-2 lineage like this one mints S2 with the SAME gen as S1 — both P.gen+1) — S2
+//       is a different lineage entirely and is correctly refused, same as an ordinary recycle. Code Review
+//       (fix round, card f1969787) found this scenario VACUOUS for the guard it's named for: (G) also makes
+//       M1 unresumable, so the EARLIER `isDurablyResumable(predecessor)` NEVER RESURRECT gate (08c81809)
+//       already blocks the reparent regardless of what the id-mismatch guard itself decides — the guard's
+//       own effect is never actually exercised. See (G') below, which isolates it, and asserts R1 (card
+//       386e4eb5's own DoD: halt, reclaim, clean re-recycle ⇒ refused) directly through
+//       `isSupersededByRecycle`/`resume()`, not just through the boot-reconcile side.
+//   (G') A DIFFERENT SUCCESSOR (ID MISMATCH), GUARD-DISCRIMINATING — the same lineage shape as (G), but
+//       with M1 DURABLY RESUMABLE, so the NEVER RESURRECT gate can no longer mask the id-mismatch guard:
+//       only the guard itself stands between S2's live, unrelated fleet and a wrongful reparent onto the
+//       stale M1. S2 reaches ready and the in-process settle genuinely completes (M1 is stopped), then S2
+//       is left unresumable (no captured engine id) across the simulated restart — proving the guard, not
+//       the resumability gate, is what protects this lineage. Also asserts R1 directly: `isSupersededByRecycle`
+//       is TRUE for M1 and `resume(m1.id)` still throws, even though M1 is durably resumable here — and R1
+//       here is discriminated by id ALONE: S1 and S2 share the SAME gen (both P.gen+1), so a gen-only match
+//       would wrongly treat S2 as the halt event's own successor.
+//   (H) R2 (card 386e4eb5's own DoD) — CRASH BETWEEN READY AND SETTLE: the same halt→reclaim→clean-
+//       re-recycle lineage as (G)/(G'), but the second (clean) recycle's successor S2 reaches ready and the
+//       simulated crash lands in the RACE WINDOW before the in-process settle loop's own next poll ever
+//       observes it (no await between delivering S2's ready hook and closing db1) — i.e. the ORDINARY
+//       (non-halted) settle-lost-to-restart mechanism (08c81809) must resolve this, not 386e4eb5's own
+//       carve-out (which correctly excludes M1 here as a different successor than its halt event named).
+//       Asserts the real boot sequence ends with ONLY S2 live — M1 stays excluded from every automatic
+//       resume path, including the REAL crash-recovery candidate derivation + resume attempt (not merely
+//       untried).
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: mirrors recycle-manager-fleet-recovery.mjs and
 // recycle-settle-lost-to-restart.mjs's own harnesses — a REAL Db + SessionService + PtyHost driven against
-// a FAKE low-level pty (the shared createPty() seam). (B)/(C)/(D)/(E)/(F)/(G) simulate a restart by closing
-// db1 and reopening the SAME fixed file as db2 (Db() always opens the one file derived from LOOM_HOME) —
-// the same technique recycle-settle-lost-to-restart.mjs uses, verified faithful there.
+// a FAKE low-level pty (the shared createPty() seam). (B)/(C)/(D)/(E)/(F)/(G)/(G')/(H) simulate a restart
+// by closing db1 and reopening the SAME fixed file as db2 (Db() always opens the one file derived from
+// LOOM_HOME) — the same technique recycle-settle-lost-to-restart.mjs uses, verified faithful there.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/recycle-manager-halted-successor-dies.mjs
 import fs from "node:fs";
@@ -115,7 +137,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
 const { runBootRecoveryPrefix } = await import("../dist/sessions/boot-backstop.js");
-const { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers } = await import("../dist/orchestration/crash-orphaned-workers.js");
+const { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers, isSupersededByRecycle } = await import("../dist/orchestration/crash-orphaned-workers.js");
 const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
 
 const repo = path.join(os.tmpdir(), `loom-rmhsd-repo-${Date.now()}-${process.pid}`);
@@ -315,7 +337,7 @@ try {
     check("(B) M1 is not in the failed list", !failed.includes(m1.id));
   }
 
-  // ==================== (C) a still-split halted predecessor is EXCLUDED FROM CAPTURE, never attempted ====================
+  // ==================== (C) FIX 386e4eb5 — a still-split, still-MATCHING halted predecessor IS captured + resumed ====================
   {
     const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
     const P = "rmhsd-c";
@@ -333,12 +355,12 @@ try {
     writeFakeTranscript(m2.cwd, "eng-m2-c");
     check("(C pre) M2 IS durably resumable", db1.getSession(m2.id)?.engineSessionId === "eng-m2-c");
 
-    // Card 6859f9e7 (RED on main before that fix): M1 is still genuinely `live` at capture time (never
-    // stopped — the halt branch keeps it live forever), so a naive capture would have included it right
-    // alongside M2. `liveFleetResumeSet` must exclude it instead.
+    // M1 is still genuinely `live` at capture time (never stopped — the halt branch keeps it live
+    // forever) AND its current successor M2 still EXACTLY matches its own latest unresolved halt event
+    // (id + gen, nothing reclaimed or re-recycled since) — `liveFleetResumeSet` must now INCLUDE it.
     const preRestartFleet = sessions1.liveFleetResumeSet();
-    check("(C) FIX 6859f9e7: liveFleetResumeSet EXCLUDES the still-live halted predecessor from capture", !preRestartFleet.some((e) => e.sessionId === m1.id));
-    check("(C) the surviving successor M2 IS captured", preRestartFleet.some((e) => e.sessionId === m2.id));
+    check("(C) FIX 386e4eb5: liveFleetResumeSet INCLUDES the still-live, still-matching halted predecessor", preRestartFleet.some((e) => e.sessionId === m1.id));
+    check("(C) the surviving successor M2 IS captured too", preRestartFleet.some((e) => e.sessionId === m2.id));
     db1.close();
     const { db: db2, host: host2 } = makeBoot();
     const { sessions: sessions2, haltedFinish } = runRealBootSequenceUpToResume(db2, host2);
@@ -346,22 +368,23 @@ try {
     check("(C pre-resume) hasSuccessor(M1) is STILL true going into the fleet resume", db2.hasSuccessor(m1.id) === true);
 
     let thrown;
-    try { sessions2.resume(m1.id); } catch (e) { thrown = e; }
-    check("(C) resume() still REFUSES the halted predecessor directly if called by hand, same as an ordinary recycled one",
-      !!thrown && /recycled.*successor exists/.test(thrown.message));
+    let resumedDirect;
+    try { resumedDirect = sessions2.resume(m1.id); } catch (e) { thrown = e; }
+    check("(C) FIX 386e4eb5: resume() called DIRECTLY now SUCCEEDS for the still-matching halted predecessor",
+      !thrown && resumedDirect?.id === m1.id);
 
-    // Card 6859f9e7's own test (DoD): the restart is requested by M2 (the surviving successor,
+    // Card 6859f9e7's own test shape (DoD): the restart is requested by M2 (the surviving successor,
     // post-handoff) — NOT by M1 — so M1 is exercised purely through the ORDINARY entries loop
-    // (liveFleetResumeSet's capture), never through resumeFleetOnBoot's separate "requester" branch,
-    // which unconditionally attempts `intent.managerSessionId` regardless of capture and would otherwise
-    // mask what this scenario is actually proving.
+    // (liveFleetResumeSet's capture), never through resumeFleetOnBoot's separate "requester" branch. M1
+    // was just resumed directly above (host2 now has a live entry for it) — resumeFleetOnBoot's own
+    // already-live short-circuit (resume()'s `pty.isAlive` check) makes a second attempt here a no-op
+    // success, which is still correctly counted as `resumed`, not `failed`.
     const restartIntent = { reason: "test", managerSessionId: m2.id, resume: preRestartFleet };
     const { resumed, failed } = sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS });
-    check("(C) FIX 6859f9e7: M1 (the halted predecessor) is NEVER ATTEMPTED — absent from BOTH `resumed` and `failed`, not merely absent from `resumed`", !resumed.includes(m1.id) && !failed.includes(m1.id));
-    check("(C) the surviving successor M2 (the restart requester here) is STILL resumed normally — its own resumability is unaffected", resumed.includes(m2.id));
-    check("(C) hasSuccessor(M1) is STILL true after the attempt — nothing wrongly unlinked it", db2.hasSuccessor(m1.id) === true);
-    check("(C) FIX 6859f9e7: no fleet_resume_failed event was fabricated for this restart (M1 was never a resume failure — it was never attempted)",
-      !hasEvent(db2, m1.id, "fleet_resume_failed") && !hasEvent(db2, m2.id, "fleet_resume_failed") && failed.length === 0);
+    check("(C) FIX 386e4eb5: M1 (the halted-but-matching predecessor) IS resumed via the ordinary fleet-resume pass", resumed.includes(m1.id));
+    check("(C) the surviving successor M2 (the restart requester here) is ALSO resumed normally — two live managers is the correct end state (ownership genuinely still split)", resumed.includes(m2.id));
+    check("(C) hasSuccessor(M1) is STILL true after the attempt — nothing unlinked it (no reclaim happened, just an ordinary resume)", db2.hasSuccessor(m1.id) === true);
+    check("(C) no fleet_resume_failed event was fabricated for this restart", !hasEvent(db2, m1.id, "fleet_resume_failed") && !hasEvent(db2, m2.id, "fleet_resume_failed") && failed.length === 0);
   }
 
   // ==================== (D) NEGATIVE CONTROL — an ORDINARY recycled predecessor stays refused ====================
@@ -389,7 +412,7 @@ try {
       !!thrown && /recycled.*successor exists/.test(thrown.message));
   }
 
-  // ==================== (E) CRASH PATH — the still-split lineage is NOT a crash-recovery candidate ====================
+  // ==================== (E) FIX 386e4eb5 — CRASH PATH: the still-matching lineage IS a crash-recovery candidate ====================
   {
     const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
     const P = "rmhsd-e";
@@ -410,15 +433,17 @@ try {
     const { sessions: sessions2, crashOrphanedWorkers, crashOrphanedManagers, haltedFinish } = runRealBootSequenceUpToResume(db2, host2);
     check("(E) the halted-reconcile left the still-resumable lineage untouched", haltedFinish.recovered.length === 0);
     check("(E pre) hasSuccessor(M1) is STILL true going into crash recovery", db2.hasSuccessor(m1.id) === true);
-    check("(E) ROUND 3: M1 is NOT a crash-recovery candidate — hasSuccessor excludes it, same as main", !crashOrphanedManagers.includes(m1.id));
-    check("(E) M2 (the surviving successor) is STILL a crash-recovery candidate", crashOrphanedManagers.includes(m2.id));
+    check("(E) FIX 386e4eb5: M1 IS a crash-recovery candidate — its successor still matches its unresolved halt", crashOrphanedManagers.includes(m1.id));
+    check("(E) M2 (the surviving successor) is STILL a crash-recovery candidate too", crashOrphanedManagers.includes(m2.id));
 
-    const { resumed, managersFailed } = sessions2.recoverCrashOrphanedWorkers(crashOrphanedWorkers, { soloManagerIds: crashOrphanedManagers });
-    check("(E) ROUND 3: M1 is NOT resumed via the crash path — never attempted, not just failed", !resumed.includes(m1.id) && !managersFailed.includes(m1.id));
-    // `resumed` only ever carries WORKER session ids (recoverCrashOrphanedWorkers never pushes a manager's
-    // own id onto it, even on a successful solo-manager resume) — a manager's success is "not in
-    // managersFailed", the same contract this file's own pre-existing (E) assertion already relied on.
-    check("(E) M2 IS resumed via the crash path — not in managersFailed", !managersFailed.includes(m2.id));
+    const { managersFailed } = sessions2.recoverCrashOrphanedWorkers(crashOrphanedWorkers, { soloManagerIds: crashOrphanedManagers });
+    // `recoverCrashOrphanedWorkers`'s own `resumed` array only ever carries WORKER session ids (never a
+    // manager's own id, even on a successful solo-manager resume) — a manager's success is "not in
+    // managersFailed" AND actually live, which is what we assert directly below.
+    check("(E) FIX 386e4eb5: M1 IS resumed via the crash path — not in managersFailed", !managersFailed.includes(m1.id));
+    check("(E) M1 is genuinely live again after the crash-path resume", host2.isAlive(m1.id) === true);
+    check("(E) M2 IS ALSO resumed via the crash path — two live managers is the correct end state here", !managersFailed.includes(m2.id));
+    check("(E) M2 is genuinely live again too", host2.isAlive(m2.id) === true);
   }
 
   // ==================== (F) BOTH DEAD — the halted reconcile must never resurrect ONTO an unresumable predecessor ====================
@@ -454,7 +479,7 @@ try {
     check("(F) FIX: no recycle_fleet_recovered event was fabricated for M1", !hasEvent(db2, m1.id, "recycle_fleet_recovered"));
   }
 
-  // ==================== (G) STALE GENERATION — a cleanly re-recycled lineage is left untouched ====================
+  // ==================== (G) A DIFFERENT SUCCESSOR (ID MISMATCH) — a cleanly re-recycled lineage is left untouched ====================
   {
     const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
     const P = "rmhsd-g";
@@ -462,8 +487,10 @@ try {
     const m1 = sessions1.startManager(`${P}-mgr`);
     // M1 never captures a real engine id either — deliberately, so the UNRELATED ordinary settle-reconcile
     // (08c81809, armed by the second/clean recycle below) ALSO can't reclaim S2 back onto M1. That isolates
-    // this scenario to the ONE thing it's actually proving: the halted reconcile's own stale-generation
-    // guard, uncontaminated by the ordinary mechanism legitimately doing its own, unrelated job.
+    // this scenario to the ONE thing it's actually proving: the halted reconcile's own id-mismatch guard
+    // (gen is checked too, but only as a defensive secondary check — S1 and S2 share the SAME gen here,
+    // both P.gen+1, so id is what actually discriminates), uncontaminated by the ordinary mechanism
+    // legitimately doing its own, unrelated job.
 
     // First halt: M1 -> S1, then S1 dies before reaching ready — the in-process watch reclaims ownership
     // back onto M1, filing the PERMANENT recycle_ownership_transfer_failed event naming S1.
@@ -498,7 +525,7 @@ try {
     check("(G) FIX: hasSuccessor(M1) still points at S2, not reparented away by either reconcile", db2.getSuccessor(m1.id)?.id === s2.id);
   }
 
-  // ==================== (G') STALE GENERATION, GUARD-DISCRIMINATING — M1 IS durably resumable ====================
+  // ==================== (G') A DIFFERENT SUCCESSOR (ID MISMATCH), GUARD-DISCRIMINATING — M1 IS durably resumable ====================
   {
     const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
     const P = "rmhsd-g2";
@@ -508,7 +535,7 @@ try {
     db1.setProjectConfig(P, { permission: { startupModeCycles: 0 } });
     const m1 = sessions1.startManager(`${P}-mgr`);
     // UNLIKE (G): M1 captures a REAL engine id + transcript here, so isDurablyResumable(M1) is TRUE — the
-    // one change that stops the NEVER RESURRECT gate from masking the stale-generation guard's own effect.
+    // one change that stops the NEVER RESURRECT gate from masking the id-mismatch guard's own effect.
     host1.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-g2" });
     writeFakeTranscript(m1.cwd, "eng-m1-g2");
     check("(G' pre) M1 IS durably resumable — the one thing (G) deliberately was NOT", db1.getSession(m1.id)?.engineSessionId === "eng-m1-g2");
@@ -547,10 +574,19 @@ try {
 
     db1.close();
     const { db: db2, host: host2 } = makeBoot();
-    const { haltedEarly } = runRealBootSequenceUpToResume(db2, host2);
+    const { sessions: sessions2, haltedEarly } = runRealBootSequenceUpToResume(db2, host2);
 
     check("(G') FIX: the stale halt event (naming dead S1) is NOT mistaken for M1's CURRENT, durably-resumable successor S2 — no reparent recorded for M1",
       !haltedEarly.recovered.some((r) => r.predecessorId === m1.id));
+    // R1 (card 386e4eb5's own DoD: halt, reclaim, clean re-recycle ⇒ refused) — asserted DIRECTLY through
+    // the actual changed predicate/resume(), not just through the boot-reconcile side above. M1 IS durably
+    // resumable here (the one thing (G) deliberately wasn't), so if 386e4eb5's carve-out were wrongly keyed
+    // on bare event presence instead of the exact id+gen match, THIS is where it would wrongly let M1 back in.
+    check("(R1) FIX 386e4eb5: isSupersededByRecycle(M1) is TRUE — its current successor (S2) does NOT match the stale halt event (naming dead S1)", isSupersededByRecycle(db2, m1.id) === true);
+    let r1Thrown;
+    try { sessions2.resume(m1.id); } catch (e) { r1Thrown = e; }
+    check("(R1) FIX 386e4eb5: resume() still REFUSES M1 directly, even though it is durably resumable",
+      !!r1Thrown && /recycled.*successor exists/.test(r1Thrown.message));
     check("(G') FIX: S2 is still linked — recycledFrom untouched", db2.getSession(s2.id)?.recycledFrom === m1.id);
     // S2 WAS genuinely live at the simulated restart, so the unconditional, unrelated crash-recovery sweep
     // (runBootRecoveryPrefix's own recoverStaleSessions + snapshotAndArchiveRecovered, which runs for EVERY
@@ -569,12 +605,97 @@ try {
     check("(G') FIX: still exactly the ONE legitimate recycle_fleet_recovered event for M1 (naming S1, not a second one fabricated for S2)",
       m1Recovered.length === 1 && m1Recovered[0].detail?.deadSuccessorId === s1.id);
   }
+
+  // ==================== (H) R2 — CRASH BETWEEN READY AND SETTLE: only the new successor ends up live ====================
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rmhsd-h";
+    seedProject(db1, P);
+    // markReady must run SYNCHRONOUSLY off the deliverHook call below (same reasoning as (A2)/(G')) — the
+    // whole point of this scenario is to close db1 with NO await between S2 reaching ready and the crash,
+    // so readiness must be observable the instant deliverHook returns.
+    db1.setProjectConfig(P, { permission: { startupModeCycles: 0 } });
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    // M1 captures a REAL engine id + transcript so the LAST assertion below exercises the actual
+    // superseded/hasSuccessor refusal, never masked by an earlier "no engine id" refusal.
+    host1.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-h" });
+    writeFakeTranscript(m1.cwd, "eng-m1-h");
+
+    // First halt: M1 -> S1, then S1 dies before reaching ready — the in-process watch reclaims ownership
+    // back onto M1, filing the PERMANENT recycle_ownership_transfer_failed event naming S1 — identical to
+    // (G)/(G')'s own first half.
+    const unstub = stubWakesPermanentFailure();
+    const s1 = await sessions1.recycleManager(m1.id, "handoff — first halt, S1 will die and be reclaimed");
+    unstub();
+    check("(H pre) the first recycle HALTED (naming S1)", hasEvent(db1, s1.id, "recycle_ownership_transfer_failed"));
+    const s1Pty = host1.handles.get(s1.id);
+    s1Pty.kill();
+    const reclaimed = await waitUntil(() => hasEvent(db1, m1.id, "recycle_fleet_recovered"));
+    check("(H pre) S1's death was reclaimed back onto M1", reclaimed);
+    check("(H pre) hasSuccessor(M1) is false again after the reclaim", db1.hasSuccessor(m1.id) === false);
+
+    // M1 now cleanly re-recycles to a BRAND NEW successor S2 — an ORDINARY recycle, no stub. UNLIKE (G'),
+    // S2 WILL capture a real engine id + transcript (durably resumable) — R2 needs the ordinary
+    // settle-lost-to-restart mechanism (08c81809) to actually be ABLE to resume S2 for real at boot, not
+    // merely decline to touch it.
+    const s2 = await sessions1.recycleManager(m1.id, "handoff — a clean re-recycle; the crash lands before settle observes readiness");
+    check("(H pre) the second recycle did NOT halt", !hasEvent(db1, s2.id, "recycle_ownership_transfer_failed"));
+    check("(H pre) hasSuccessor(M1) now points at S2", db1.getSuccessor(m1.id)?.id === s2.id);
+
+    // THE RACE WINDOW: deliver S2's SessionStart hook (captures its engine id AND marks it ready,
+    // synchronously, per startupModeCycles:0 above) and write its transcript, then close db1 IMMEDIATELY —
+    // no `await` anywhere in between. settleRecycleHandoff's own poll loop's first await is a
+    // RECYCLE_SUCCESSOR_SETTLE_FLUSH_DELAY_MS (40ms) setTimeout; since nothing here ever yields the event
+    // loop, that timer cannot have fired, so the in-process watch can NEVER have observed S2's readiness or
+    // stopped M1 — this deterministically simulates the crash landing in the exact gap between "successor
+    // reached ready" and "predecessor actually stopped", with no sleep/poll of any kind.
+    host1.deliverHook(s2.id, { hook_event_name: "SessionStart", session_id: "eng-s2-h" });
+    writeFakeTranscript(s2.cwd, "eng-s2-h");
+    check("(H pre) S2 reached real ready synchronously, with NO settle observation yet", host1.hasReachedReady(s2.id) === true);
+    check("(H pre) M1 was NEVER stopped — the settle loop never got a chance to observe readiness", host1.isAlive(m1.id) === true);
+    db1.close();
+
+    const { db: db2, host: host2 } = makeBoot();
+    const { sessions: sessions2, early, finish, crashOrphanedWorkers, crashOrphanedManagers } = (() => {
+      const { early, haltedEarly, recovered, crashOrphanedWorkers, crashOrphanedManagers } = runBootRecoveryPrefix(db2);
+      const sessions = new SessionService(db2, host2, new OrchestrationControl());
+      const finish = sessions.finishReconcilingRecycleSettles(early);
+      sessions.finishReconcilingHaltedRecycleSuccessors(haltedEarly);
+      return { sessions, early, finish, recovered, crashOrphanedWorkers, crashOrphanedManagers };
+    })();
+
+    check("(H) the ordinary (non-halted) settle-reconcile correctly classified S2 as `deferred` (reached ready, still linked)", early.deferred.some((d) => d.predecessorId === m1.id && d.freshId === s2.id));
+    check("(H) R2: the later phase actually RESUMED S2 for real (durably resumable)", finish.confirmedLiveSuccessors.includes(s2.id));
+    check("(H) R2: M1 was NEVER recovered/resumed by the ordinary settle-reconcile — this is S2's world now", !finish.recoveredPredecessors.includes(m1.id));
+    check("(H) R2: ONLY the new successor ends up live — S2 is live", db2.getSession(s2.id)?.processState === "live");
+    // M1's CURRENT successor is S2, which does NOT match the stale halt event naming dead S1 — the
+    // 386e4eb5 carve-out correctly does NOT apply here either, so M1 stays excluded from every automatic
+    // path going forward (a different successor — S2, not S1 — the same id-mismatch shape R1/(G)/(G')
+    // already prove, now composed with the ordinary settle-reconcile's own race-window recovery).
+    check("(H) R2: M1 stays superseded/excluded going forward (a different successor than its halt event named, same as R1)", isSupersededByRecycle(db2, m1.id) === true);
+    let h2Thrown;
+    try { sessions2.resume(m1.id); } catch (e) { h2Thrown = e; }
+    check("(H) R2: resume() still refuses M1 directly", !!h2Thrown && /recycled.*successor exists/.test(h2Thrown.message));
+
+    // Code Review 1f3951a5 Minor: the PRIOR end-state check ("M1 stays exited") was VACUOUS — nothing above
+    // ever gives the crash-recovery resume path a chance to actually touch M1 (recoverCrashOrphanedWorkers/
+    // resumeFleetOnBoot never run in this scenario), so M1 "stays exited" merely because nothing acted on
+    // it at all, regardless of whether the superseded predicate is even correct. Actually run the real
+    // crash-path candidate derivation + resume attempt here so this goes RED under the bare-event-presence
+    // mutant on its own, the same way (E) proves the POSITIVE (halted-and-matching) side of this predicate.
+    check("(H) R2 FIX 386e4eb5: M1 is NOT a crash-recovery candidate — its current successor (S2) does not match the stale halt event naming dead S1", !crashOrphanedManagers.includes(m1.id));
+    check("(H) S2 (the surviving successor) IS still a crash-recovery candidate", crashOrphanedManagers.includes(s2.id));
+    const { managersFailed } = sessions2.recoverCrashOrphanedWorkers(crashOrphanedWorkers, { soloManagerIds: crashOrphanedManagers });
+    check("(H) R2 FIX: the REAL crash-recovery resume attempt leaves M1 untouched — not live", host2.isAlive(m1.id) === false);
+    check("(H) R2 FIX: ONLY the new successor ends up live — M1 stays exited, now genuinely exercised (not vacuous)", db2.getSession(m1.id)?.processState === "exited");
+    check("(H) R2: M1 was never even attempted (excluded candidate), so it cannot appear in managersFailed either", !managersFailed.includes(m1.id));
+  }
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a halted recycle's successor-death watch reclaims whatever DID transfer, in-process and across a boot reconcile; resume() and the crash-recovery candidate derivation both still refuse a still-split halted predecessor, exactly like main (no carve-out)."
+  ? "\n✅ ALL PASS — a halted recycle's successor-death watch reclaims whatever DID transfer (in-process and across a boot reconcile); card 386e4eb5's isSupersededByRecycle carve-out correctly auto-resumes a halted predecessor ONLY while its successor still exactly matches its latest unresolved halt (id — the real discriminator; gen only a defensive secondary check) — via resume(), the crash-recovery candidate derivation, and resumeFleetOnBoot's capture alike — while an ordinary recycle, a re-recycle to a different successor (id mismatch) than its halt event named, and a both-dead lineage all stay refused exactly as before."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

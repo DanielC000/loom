@@ -14,6 +14,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     `session_recovered`, so a later death starts a fresh episode under the cap again.
 //   • Silent skips: disabled (crashRecoveryMaxAttempts=0), human-paused, superseded, out-of-scope role.
 //   • zod orchestrationOverride accepts crashRecoveryMaxAttempts (incl. 0; negatives rejected).
+//   • FIX 386e4eb5 — a HALTED recycle predecessor whose CURRENT successor still exactly matches its latest
+//     unresolved `recycle_ownership_transfer_failed` event (id+gen) is auto-resumed by tick, same as any
+//     other unexpectedly-dead resumable session (test 10); a STALE-GENERATION lineage (successor no longer
+//     matches) stays superseded and is NOT resumed (test 11); and a DELIBERATELY STOPPED halted predecessor
+//     (intended=true, so recordUnexpectedExit records nothing) is never even considered a candidate,
+//     proving the carve-out never revives a session a human or the manager itself deliberately ended
+//     (test 12).
 //
 // CLOCK NOTE: the tick-driven tests seed deaths with the `die()` helper (a session_died at a CONTROLLED
 // ts) so every event + tick shares ONE injected clock — deterministic regardless of wall-clock. The
@@ -717,7 +724,78 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ============================ (18) FIX 386e4eb5 — a HALTED predecessor whose successor still MATCHES is auto-resumed ============================
+{
+  const e = makeEnv();
+  seedSession(e, "old-18", { role: "manager" });
+  seedSession(e, "new-18", { role: "manager" }); // the halted successor the latest event names
+  e.db.setOrchestration("new-18", { recycledFrom: "old-18", gen: 1 });
+  e.db.appendEvent({
+    id: randomUUID(), ts: NOW.toISOString(),
+    managerSessionId: "new-18", workerSessionId: "old-18", taskId: null,
+    kind: "recycle_ownership_transfer_failed",
+    detail: { recycledFrom: "old-18", gen: 1, failedSteps: ["wakes"] },
+  });
+  die(e, "old-18", NOW); // the predecessor's OWN pty crashes while the halt is still unresolved
+  e.watcher.tick(at(100));
+  check("(18) FIX 386e4eb5: a halted predecessor whose CURRENT successor still matches its latest unresolved halt (id+gen) IS auto-resumed",
+    e.resumes.includes("old-18") && evKinds(e, "old-18", "session_resume_attempt").length === 1);
+  cleanup(e);
+}
+
+// ============================ (19) NEGATIVE CONTROL — a different successor (cleanly re-recycled, id mismatch) stays superseded ============================
+{
+  const e = makeEnv();
+  seedSession(e, "old-19", { role: "manager" });
+  seedSession(e, "s1-19", { role: "manager" }); // the ORIGINAL halted successor the permanent event names
+  seedSession(e, "s2-19", { role: "manager" }); // a later, UNRELATED clean re-recycle successor
+  e.db.appendEvent({
+    id: randomUUID(), ts: NOW.toISOString(),
+    managerSessionId: "s1-19", workerSessionId: "old-19", taskId: null,
+    kind: "recycle_ownership_transfer_failed",
+    detail: { recycledFrom: "old-19", gen: 1, failedSteps: ["wakes"] },
+  });
+  // old-19 was later cleanly reclaimed (s1 died) and re-recycled to s2 — its CURRENT successor is s2, a
+  // DIFFERENT session than the one the permanent halt event named (s1); id is the real discriminator (this
+  // fixture also varies gen for clarity, but gen is only a defensive secondary check — a real round-2
+  // lineage can mint a new successor with the SAME gen as the stale one, see 386e4eb5's own record). This
+  // is the EXACT ROUND 3 bug class (f1969787) 386e4eb5's predicate must never reopen: a bare-presence
+  // match would wrongly auto-resume old-19 ALONGSIDE its real, unrelated successor s2.
+  e.db.setOrchestration("s2-19", { recycledFrom: "old-19", gen: 2 });
+  die(e, "old-19", NOW);
+  e.watcher.tick(at(100));
+  check("(19) a cleanly re-recycled predecessor (a different successor than its halt event named) stays superseded — NOT auto-resumed",
+    !e.resumes.includes("old-19") && evKinds(e, "old-19", "session_resume_attempt").length === 0);
+  cleanup(e);
+}
+
+// ============================ (20) NEGATIVE CONTROL — a DELIBERATELY STOPPED halted predecessor is never revived ============================
+{
+  const e = makeEnv();
+  seedSession(e, "old-20", { role: "manager" });
+  seedSession(e, "new-20", { role: "manager" }); // the halted successor the latest event names
+  e.db.setOrchestration("new-20", { recycledFrom: "old-20", gen: 1 });
+  e.db.appendEvent({
+    id: randomUUID(), ts: NOW.toISOString(),
+    managerSessionId: "new-20", workerSessionId: "old-20", taskId: null,
+    kind: "recycle_ownership_transfer_failed",
+    detail: { recycledFrom: "old-20", gen: 1, failedSteps: ["wakes"] },
+  });
+  // A HUMAN (or the manager itself, e.g. end_me) deliberately ended old-20 — every pty.stop() sets
+  // intended:true, so the REAL production helper (not the `die()` test shortcut, which always records an
+  // UNEXPECTED death) must record NOTHING, exactly as it does for any other intended stop. This is the
+  // actual gate that keeps a halted-but-matching lineage from being wrongly revived after a deliberate
+  // end — unaffected by (and verified independent of) the 386e4eb5 carve-out itself.
+  const wrote = recordUnexpectedExit(e.db, "old-20", /*intended*/ true);
+  check("(20) pre: an INTENDED stop of a halted-but-matching predecessor records NOTHING", wrote === false);
+  e.db.setProcessState("old-20", "exited"); // mirrors the real graceful-stop flip die() does for an unexpected one
+  e.watcher.tick(at(100));
+  check("(20) FIX-SAFE: a deliberately-stopped halted predecessor is NEVER revived, even though its successor still matches",
+    !e.resumes.includes("old-20") && evKinds(e, "old-20", "session_resume_attempt").length === 0);
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged. A resumed manager/platform's continuation nudge is now STAKE-AWARE (card c9e51581): silent with zero stake, full when it has a live worker, stranded board work, an unconsumed answer, or was resumed via a worker_report_undelivered trigger — worker/assistant nudges stay unconditional w.r.t. that stake-aware silencing. A resumed WORKER's nudge is now report-state-aware too (card 24ed1edc, applying db05e657's ruling 2 to this runtime path): a blocked-and-unresolved worker gets a distinct 're-state your blocker' nudge instead of the generic continue-nudge it structurally can't act on, and a done-and-awaiting-review worker gets NO nudge at all (silence, matching the boot path's identical case) — an ordinary worker with no unresolved report still gets the unconditional continue-nudge. Its per-tick candidate set is now derived from ONE indexed trigger-kind query (bf0b902c) — listEventsForWorker is called only for sessions that ever actually recorded a trigger, not every resumable session in the fleet. `operator` (card a933613e) is now equally recoverable — RECOVERABLE_ROLES is now a compiler-checked Record<SessionRole, boolean> so a future SESSION_ROLES addition can't silently go undecided again — and every role's disposition is pinned by an explicit runtime assertion, not an absence-shaped default."
+  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged. A resumed manager/platform's continuation nudge is now STAKE-AWARE (card c9e51581): silent with zero stake, full when it has a live worker, stranded board work, an unconsumed answer, or was resumed via a worker_report_undelivered trigger — worker/assistant nudges stay unconditional w.r.t. that stake-aware silencing. A resumed WORKER's nudge is now report-state-aware too (card 24ed1edc, applying db05e657's ruling 2 to this runtime path): a blocked-and-unresolved worker gets a distinct 're-state your blocker' nudge instead of the generic continue-nudge it structurally can't act on, and a done-and-awaiting-review worker gets NO nudge at all (silence, matching the boot path's identical case) — an ordinary worker with no unresolved report still gets the unconditional continue-nudge. Its per-tick candidate set is now derived from ONE indexed trigger-kind query (bf0b902c) — listEventsForWorker is called only for sessions that ever actually recorded a trigger, not every resumable session in the fleet. `operator` (card a933613e) is now equally recoverable — RECOVERABLE_ROLES is now a compiler-checked Record<SessionRole, boolean> so a future SESSION_ROLES addition can't silently go undecided again — and every role's disposition is pinned by an explicit runtime assertion, not an absence-shaped default. A HALTED recycle predecessor whose current successor still exactly matches its latest unresolved ownership-transfer-failure event (id — gen only a defensive secondary check) is now auto-resumed too (card 386e4eb5), a cleanly re-recycled lineage with a different successor (id mismatch) still stays superseded, and a deliberately-stopped halted predecessor is never revived regardless."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

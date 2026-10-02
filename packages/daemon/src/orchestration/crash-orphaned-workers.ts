@@ -98,6 +98,34 @@ export function deriveCrashOrphanedWorkers(db: Db, recovered: Session[]): CrashO
 }
 
 /**
+ * `sessionId`'s CURRENT successor (`db.getSuccessor`), but ONLY when it is exactly the successor named by
+ * `sessionId`'s LATEST `recycle_ownership_transfer_failed` event (same id AND same `gen`) — i.e. "is this
+ * session a HALTED recycle predecessor whose ownership-transfer handoff is still genuinely unresolved,
+ * right now". Returns `undefined` for every other shape: no successor at all, an ordinary (never-halted)
+ * recycle, or a halt event that no longer names the current successor.
+ *
+ * `recycle_ownership_transfer_failed` is filed ONLY by `recycleManager` (sessions/service.ts) — never
+ * `recyclePlatformLead` (no ownership-transfer/halt branch exists there) and never a worker recycle (that
+ * event's `workerSessionId` is always the retiring MANAGER's id, never a worker's) — so this is a
+ * guaranteed no-op for a platform or worker `sessionId`, by construction, not by a role check here.
+ *
+ * @decision 386e4eb5 — never treat a missing/non-numeric `detail.gen` on either side as a match (fails
+ *  CLOSED); never add a separate "is this halt resolved" flag — every reclaim path nulls `recycled_from`
+ *  on success, so the exact id+gen match above already IS the unresolved test.
+ */
+export function currentHaltedSuccessor(db: Db, sessionId: string): Session | undefined {
+  const fresh = db.getSuccessor(sessionId);
+  if (!fresh) return undefined;
+  const latestHalt = db.listEventsForSession(sessionId)
+    .filter((e) => e.kind === "recycle_ownership_transfer_failed" && e.workerSessionId === sessionId)
+    .at(-1); // listEventsForSession is ORDER BY ts, rowid — chronological; .at(-1) is genuinely the latest.
+  if (!latestHalt) return undefined;
+  const haltGen = (latestHalt.detail as { gen?: number } | undefined)?.gen;
+  if (fresh.id !== latestHalt.managerSessionId || typeof haltGen !== "number" || fresh.gen !== haltGen) return undefined;
+  return fresh;
+}
+
+/**
  * Shared successor-exclusion predicate (card `6859f9e7`): a session with a recycle successor is never a
  * valid automatic resume target — `resume()` refuses it unconditionally without a human
  * `allowSuperseded` override (sessions/service.ts). Used by both `deriveCrashOrphanedManagers` below
@@ -108,11 +136,16 @@ export function deriveCrashOrphanedWorkers(db: Db, recovered: Session[]): CrashO
  * settle. On boot, `resume(predecessor)` threw "a successor exists" and that throw was counted as a
  * genuine `fleet_resume_failed`, even though the predecessor was never meant to resume.
  *
- * @decision f1969787 — the halted-recycle predecessor this guards against is deliberately left live with
- *  a successor already present; see that record for why it must still never be auto-resumed.
+ * @decision f1969787 — never refuse a halted-recycle predecessor unconditionally just because
+ *  `hasSuccessor` is true — see {@link currentHaltedSuccessor} for the one case that must stay resumable.
+ *
+ * @decision 386e4eb5 — never bypass {@link currentHaltedSuccessor}'s exact id+gen match here (e.g. back to
+ *  bare `hasSuccessor`) — a bare-presence check wrongly auto-resumes a predecessor that was already
+ *  cleanly re-recycled to an unrelated new successor.
  */
 export function isSupersededByRecycle(db: Db, sessionId: string): boolean {
-  return db.hasSuccessor(sessionId);
+  if (!db.hasSuccessor(sessionId)) return false;
+  return !currentHaltedSuccessor(db, sessionId);
 }
 
 /**

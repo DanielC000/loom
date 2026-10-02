@@ -1,4 +1,5 @@
 import type { Db } from "../db.js";
+import { currentHaltedSuccessor } from "../orchestration/crash-orphaned-workers.js";
 import { isDurablyResumable } from "./recycle-settle-reconcile.js";
 
 /**
@@ -21,22 +22,19 @@ export function reconcileHaltedRecycleSuccessorsEarly(db: Db): HaltedRecycleEarl
       if (!db.hasSuccessor(predecessorId)) continue;
       const predecessor = db.getSession(predecessorId);
       if (!predecessor) continue;
-      const fresh = db.getSuccessor(predecessorId);
-      if (!fresh) continue;
       // `recycle_ownership_transfer_failed` is PERMANENT (never cleared), so a predecessor that halted
       // once, was later cleanly reclaimed (its halted successor died, ownership came back), and was then
       // cleanly re-recycled to a BRAND NEW successor still shows up in listWorkerSessionIdsWithEventKind
-      // above — `hasSuccessor` is true again (pointing at the new, unrelated successor), and nothing here
-      // may touch that lineage: it's an ordinary clean recycle, handled entirely by
-      // `reconcileStrandedRecycleSettlesEarly`'s own settle-pending marker. Only proceed when the
-      // predecessor's CURRENT successor is the EXACT successor the latest halt event named — both by id
-      // and by gen, so a coincidental id reuse (never happens with real UUIDs, but mirrors the event's own
-      // pairing) can't paper over a generation mismatch either.
-      const latestHalt = db.listEventsForSession(predecessorId)
-        .filter((e) => e.kind === "recycle_ownership_transfer_failed" && e.workerSessionId === predecessorId)
-        .at(-1);
-      if (!latestHalt) continue;
-      if (fresh.id !== latestHalt.managerSessionId || fresh.gen !== (latestHalt.detail as { gen?: number } | undefined)?.gen) continue;
+      // above. `currentHaltedSuccessor` (shared with `isSupersededByRecycle`) tells that apart from a
+      // genuinely still-halted lineage: it returns the successor ONLY when it is the EXACT one the latest
+      // halt event named (id — the real discriminator; gen is checked too, but only as a defensive
+      // secondary check, ⛔ never simplify the match to gen-only) — a lineage whose CURRENT successor is a
+      // DIFFERENT session than the one the halt event named (an id mismatch) is an ordinary clean recycle,
+      // handled entirely by `reconcileStrandedRecycleSettlesEarly`'s own settle-pending marker, and must be
+      // left untouched here. See that function's own doc comment (orchestration/crash-orphaned-workers.ts)
+      // for the full match rule and its decision record (card 386e4eb5).
+      const fresh = currentHaltedSuccessor(db, predecessorId);
+      if (!fresh) continue;
       // The successor can still be resumed THIS boot — leave the lineage untouched; it'll be attempted via
       // the ordinary resumeFleetOnBoot/crash-recovery paths (nothing excludes a halted-lineage successor),
       // and ownership simply stays split if that attempt succeeds. A later resume FAILURE here is a known,

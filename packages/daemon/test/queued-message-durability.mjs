@@ -21,6 +21,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //         + resolves on the recipient's next turn.
 //     (c) UNDELIVERED OUTBOUND → a held message whose recipient isn't live at boot is SURFACED to the resumed
 //         (live) sender so it can re-send; a message to a RECYCLED/superseded recipient is RETIRED (bounded).
+//     (i) FIX 386e4eb5 ROUND 2 (Code Review 1f3951a5 Major) → redriveQueuedMessage now uses the SHARED
+//         `isSupersededByRecycle` predicate, not bare `hasSuccessor`: a halted recycle predecessor whose
+//         current successor still exactly matches its latest unresolved recycle_ownership_transfer_failed
+//         event is NOT superseded, so a durable message queued to it (a stranded worker's own `done`
+//         report) must NOT be retired just because the predecessor is exited at boot — it keeps redriving
+//         until the predecessor itself resumes.
 //     (e)+(f)+(g)+(h) DISPATCH SEMANTICS SURVIVE A REDRIVE (card 129efe74) → the persisted
 //         session_message_queued detail carries kind/rootMsgId/chainDepth/giveUpHeldUntil, so a redrive
 //         preserves a "warning" classification and an in-flight give-up hold instead of silently resetting
@@ -31,6 +37,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -46,6 +53,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
+const { isSupersededByRecycle } = await import("../dist/orchestration/crash-orphaned-workers.js");
 
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -336,6 +344,64 @@ try {
     const m2 = sessionsPost.recoverUndeliveredMessagesOnBoot();
     check("(B-c) a superseded (recycled) recipient's message is RETIRED, not re-enqueued", m2.retired >= 1);
     check("(B-c) the recycled-recipient message is no longer in the undelivered set (bounded)", !db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("RECYCLED DISPATCH")));
+  }
+
+  // ---- (B-i) FIX 386e4eb5 ROUND 2 (Code Review 1f3951a5 Major) — a halted-and-matching predecessor's own
+  // queued message is NOT retired just because it's exited at boot. redriveQueuedMessage used to key its
+  // superseded check on bare `hasSuccessor`, which can't tell a legitimate halted-and-matching predecessor
+  // P (isSupersededByRecycle(P) === false, a valid auto-resume target per 386e4eb5) apart from an ordinary
+  // superseded manager — so a stranded worker's own `done` report, deliberately left parented to P
+  // (f1969787), got silently retired the moment P is exited at boot, before P's own boot resume ever ran.
+  // RED on fd1a17cf: the bare hasSuccessor check retires this message regardless of the halted-and-matching
+  // carve-out.
+  {
+    const mgrP = `qmd-i-mgrP-${sfx}`, mgrS = `qmd-i-mgrS-${sfx}`, wkr = `qmd-i-wkr-${sfx}`;
+    db.insertSession({
+      id: mgrP, projectId: proj, agentId: agent, engineSessionId: `eng-${mgrP}`, title: null, cwd: os.tmpdir(),
+      processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+      lastError: null, role: "manager", parentSessionId: null, taskId: null,
+      worktreePath: null, branch: null, recycledFrom: null, gen: 1,
+    });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgrP });
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    pty.setLive(mgrP); pty.setBusy(mgrP); // P mid-turn (its own ownership-transfer handoff) → the report is HELD
+    sessions.enqueueDurableMessage(mgrP, "STRANDED DONE REPORT", { sender: wkr, taskId: null, kind: "agent" });
+    check("(B-i) setup: the worker's report to P is HELD as an undelivered durable record",
+      db.listUndeliveredQueuedMessages().some((e) => e.workerSessionId === mgrP && e.detail.text.includes("STRANDED DONE REPORT")));
+
+    // P halts a recycle naming S — S EXACTLY matches the halt event's id + gen (the carve-out shape).
+    db.insertSession({
+      id: mgrS, projectId: proj, agentId: agent, engineSessionId: `eng-${mgrS}`, title: null, cwd: os.tmpdir(),
+      processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+      lastError: null, role: "manager", parentSessionId: null, taskId: null,
+      worktreePath: null, branch: null, recycledFrom: mgrP, gen: 2,
+    });
+    db.appendEvent({
+      id: randomUUID(), ts: now, managerSessionId: mgrS, workerSessionId: mgrP, taskId: null,
+      kind: "recycle_ownership_transfer_failed", detail: { recycledFrom: mgrP, gen: 2, failedSteps: ["wakes"] },
+    });
+    check("(B-i) setup: isSupersededByRecycle(P) is FALSE — P is halted-and-matching, a legitimate auto-resume target",
+      !isSupersededByRecycle(db, mgrP));
+
+    // RESTART: P is exited at boot, before its own boot resume ever runs — the exact shape the Code Review named.
+    db.setProcessState(mgrP, "exited");
+    const ptyPost = new PtyStub();
+    const sessionsPost = new SessionService(db, ptyPost, new OrchestrationControl());
+    sessionsPost.recoverUndeliveredMessagesOnBoot();
+    check("(B-i) THE FIX: the stranded report is NOT retired while P is still halted-and-matching",
+      db.listUndeliveredQueuedMessages().some((e) => e.workerSessionId === mgrP && e.detail.text.includes("STRANDED DONE REPORT")));
+
+    // P itself resumes (its own boot recovery completes) → the report now redrives and delivers to P.
+    // Mirrors what a real resume() does: flips the DB row to "live" (redriveQueuedMessage reads the DB's
+    // own processState, not pty liveness) AND marks the stub pty alive. P is idle (not busy) here, so the
+    // redrive delivers IMMEDIATELY (PtyStub's idle branch) rather than landing in `q` — assert via `sent`
+    // (recorded on every enqueueStdin call, delivered or held), not `getPending` (HELD messages only).
+    db.setProcessState(mgrP, "live");
+    ptyPost.setLive(mgrP); // idle, not busy
+    const mAfterResume = sessionsPost.recoverUndeliveredMessagesOnBoot();
+    check("(B-i) THE FIX: once P is back live, the stranded report is re-enqueued to P (delivered, not dropped)",
+      mAfterResume.reEnqueued >= 1 && ptyPost.sent.some((m) => m.id === mgrP && m.text.includes("STRANDED DONE REPORT")));
   }
 
   // ---- (B-e) SYMPTOM 1 (card 129efe74): a kind:"warning" durable dispatch round-trips as "warning" through

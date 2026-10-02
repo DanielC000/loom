@@ -3712,8 +3712,13 @@ export class SessionService {
     // would otherwise zombie it ALONGSIDE its successor (two managers on one agent). A HUMAN can still
     // force it: the manual /resume endpoint passes allowSuperseded — a deliberate escape hatch to
     // inspect or recover a retired session. (recycle_me reparents the wakes/queue, so the automatic
-    // paths never NEED a recycled session anyway.)
-    if (!opts.allowSuperseded && this.db.hasSuccessor(sessionId)) {
+    // paths never NEED a recycled session anyway.) isSupersededByRecycle carves out one exception: a
+    // HALTED recycle predecessor whose current successor still exactly matches its latest unresolved
+    // ownership-transfer-failure event remains the live, legitimate owner and stays auto-resumable.
+    //
+    // @decision 386e4eb5 — never replace isSupersededByRecycle here with a bare `hasSuccessor` check —
+    // that reopens the exact bare-event-presence bug its own record documents.
+    if (!opts.allowSuperseded && isSupersededByRecycle(this.db, sessionId)) {
       throw new Error("session was recycled — a successor exists; only a manual (human) resume may force it");
     }
     // @decision 5a56bb0a — mirrors hasSuccessor above: the retired-successor marker never self-heals for
@@ -6423,7 +6428,10 @@ export class SessionService {
     // @decision f1969787 — scoped to role:"manager" ONLY: its ownership-transfer halt path keeps a
     // predecessor genuinely LIVE on purpose despite having a successor, so a live manager must still be
     // redriven directly; worker/platform recycle never reaches live+hasSuccessor, so stay unchanged.
-    if (recipient.role === "manager" ? recipient.processState !== "live" && this.db.hasSuccessor(recipientId) : this.db.hasSuccessor(recipientId)) {
+    // @decision 386e4eb5 — never replace this with bare `hasSuccessor`: a halted-and-matching predecessor
+    // is NOT superseded, so its queued messages (a stranded worker's own `done` report) must keep
+    // redriving there, not get retired as recipient-gone-or-superseded the moment it's exited at boot.
+    if (recipient.role === "manager" ? recipient.processState !== "live" && isSupersededByRecycle(this.db, recipientId) : isSupersededByRecycle(this.db, recipientId)) {
       // Gone (non-manager) / not-live-and-recycled-forward (manager) → the successor owns it now; retire
       // so it never re-scans forever.
       this.resolveQueuedMessage(msgId, { recipientId, reason: "recipient-gone-or-superseded", sender });
