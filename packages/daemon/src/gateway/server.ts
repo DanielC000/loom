@@ -102,6 +102,14 @@ import { detectIntegrations } from "../integrations/detect.js";
 /** Min gap between honoured `repaint` frames from one REMOTE /ws/term socket (card 5b4ddca5). */
 const REMOTE_REPAINT_MIN_INTERVAL_MS = 1000;
 
+// @decision d5e3fa82 — do not raise this back toward ws's ~100 MiB default: /ws/fleet accepts a
+// connection with no credential at all on loopback, so that reopens a per-connection memory/event-loop
+// DoS for any co-resident process; do not lower it below a real terminal paste's needs either.
+
+// Exported so a hermetic test can derive an over/under-cap frame size from this real constant instead of
+// guessing one (same reasoning as fleet-hub.ts's exported DIRTY_FLUSH_MS/MAX_EVENT_SUBSCRIPTIONS_PER_SOCKET).
+export const WS_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
 /** Sane upper bound on a viewer-requested terminal resize — a viewport, not a data buffer, so this is
  * generous headroom over any real pane, not a tuned value. Rejects a frame that would otherwise reach
  * `PtyHost.resize`/node-pty with a bogus size (0 already refused there; this also rejects a huge or
@@ -435,7 +443,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // FIRST client-offered Sec-WebSocket-Protocol entry verbatim into the 101 response — and that entry used
   // to BE the token. selectWsSubprotocol always negotiates the fixed generic marker (or nothing, if the
   // client didn't offer it), never the token-carrying `loom.bearer.*` entry — see gateway/trust-tier.ts.
-  await app.register(websocket, { options: { handleProtocols: selectWsSubprotocol } });
+  await app.register(websocket, { options: { handleProtocols: selectWsSubprotocol, maxPayload: WS_MAX_PAYLOAD_BYTES } });
 
   // --- CSRF / DNS-rebind backstop (one onRequest hook, the FIRST GUARD hook — registered right after the
   //     websocket plugin ON PURPOSE, see the guard above — so it is inherited by EVERY route and the

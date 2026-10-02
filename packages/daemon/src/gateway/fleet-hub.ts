@@ -9,6 +9,10 @@ import type { SessionService } from "../sessions/service.js";
  *  1addef27 — see test/ws-fleet-session-feed.mjs). */
 export const DIRTY_FLUSH_MS = 200;
 
+// @decision d5e3fa82 — do not remove this cap: /ws/fleet takes no credential on loopback, so an uncapped
+// per-socket subscription map lets any co-resident process grow it without limit (memory DoS).
+export const MAX_EVENT_SUBSCRIPTIONS_PER_SOCKET = 128;
+
 /**
  * C2/C3 of the WS delta-push umbrella (1efde4ba) — the registry backing `/ws/fleet`. Holds every connected
  * fleet socket (one per client/tab, NOT per session — contrast `/ws/term`'s per-sessionId subscribe) and,
@@ -50,9 +54,16 @@ export class FleetHub {
 
   /** Record (or update) this socket's subscription to a manager's event stream. Bookkeeping only in this
    *  card — `sinceSeq` is stored for a later card's replay logic (C7), not consumed here. A socket not
-   *  currently registered (e.g. a race with `remove`) is a silent no-op. */
+   *  currently registered (e.g. a race with `remove`) is a silent no-op. Updating an EXISTING subscription
+   *  (same managerId, new sinceSeq) never grows the map, so it's always allowed; a NEW managerId past
+   *  `MAX_EVENT_SUBSCRIPTIONS_PER_SOCKET` is silently dropped (card d5e3fa82) rather than accepted — no
+   *  real fleet client needs more managers than that on one socket, and the alternative (closing the
+   *  socket) would take out every OTHER already-subscribed manager's feed on that same connection too. */
   subscribeEvents(socket: WebSocket, managerId: string, sinceSeq: number): void {
-    this.sockets.get(socket)?.set(managerId, sinceSeq);
+    const subs = this.sockets.get(socket);
+    if (!subs) return;
+    if (!subs.has(managerId) && subs.size >= MAX_EVENT_SUBSCRIPTIONS_PER_SOCKET) return;
+    subs.set(managerId, sinceSeq);
   }
 
   /** Clear this socket's subscription to a manager's event stream. Silent no-op if not subscribed. */
