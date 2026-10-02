@@ -61,6 +61,7 @@ for (const m of ["log", "warn", "error", "info"]) {
 
 const { Db } = await import("../dist/db.js");
 const { resolveAllCompanionConfigs, maskCompanionConfig } = await import("../dist/companion/store.js");
+const { DEFAULT_HEARTBEAT_PROMPT } = await import("../dist/companion/config.js");
 const { encryptSecret, decryptSecret } = await import("../dist/keys/envelope.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
@@ -110,6 +111,22 @@ try {
     check("masked: exposes ONLY the last-4 of the token", masked.tokenLast4 === LAST4);
     check("masked: carries channel/cadence/scope/enabled", masked.channel === "telegram" && masked.heartbeatIntervalMinutes === 360 && masked.chatScope === "dm" && masked.enabled === true);
     check("masked: name is empty string when never named", masked.name === "");
+    // card b95e3bd0: with NO stored heartbeatPrompt (row.heartbeatPrompt is null), the masked read must
+    // carry the RAW null — NOT pre-resolve it to the default text. Pre-resolving is exactly what let a web
+    // form seed the default into its editable field and re-send it on an unrelated save, permanently
+    // pinning today's default as a literal override and breaking that companion's tracking of future
+    // default changes.
+    check("masked: heartbeatPrompt is the RAW null when no override is stored (never pre-resolved to the default)", masked.heartbeatPrompt === null);
+    check("masked: heartbeatPromptDefault separately carries the resolved default text", masked.heartbeatPromptDefault === DEFAULT_HEARTBEAT_PROMPT);
+    // A row that DOES carry a genuine stored override round-trips that exact text, never the default.
+    const customPrompt = "Check on the thing we discussed.";
+    const withOverride = db.upsertCompanionConfig({
+      sessionId: "sess-1", botTokenBlob: blob, channel: "telegram", allowedChatId: "chat-1",
+      chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: customPrompt, enabled: true,
+    });
+    const maskedOverride = maskCompanionConfig(withOverride, db.getCompanionHome("sess-1"));
+    check("masked: a genuine stored override round-trips verbatim (not swapped for the default)", maskedOverride.heartbeatPrompt === customPrompt);
+    check("masked: heartbeatPromptDefault is still reported alongside a real override", maskedOverride.heartbeatPromptDefault === DEFAULT_HEARTBEAT_PROMPT);
     // name round-trip: a config given a name surfaces it in the masked read (the read-back fix under test).
     const named = db.upsertCompanionConfig({
       sessionId: "sess-1", botTokenBlob: blob, channel: "telegram", allowedChatId: "chat-1",
@@ -553,6 +570,8 @@ try {
     const created = JSON.parse(create.payload);
     check("REST POST: create → 201 masked", create.statusCode === 201 && created.configured === true && created.tokenLast4 === LAST4);
     check("REST POST: masked create carries home from the body", JSON.stringify(created.home) === JSON.stringify({ channel: "telegram", chatId: "700800002" }));
+    // card b95e3bd0: a create that never set heartbeatPrompt reads back RAW null (not the resolved default).
+    check("REST POST: create with no heartbeatPrompt reads back null, not the resolved default", created.heartbeatPrompt === null && created.heartbeatPromptDefault === DEFAULT_HEARTBEAT_PROMPT);
     check("REST POST: envPinned false (no LOOM_COMPANION_* in process.env)", created.envPinned === false);
     check("REST POST: create body has NO plaintext token", !create.payload.includes(PLAINTEXT));
     // The STORED blob is ciphertext.
@@ -568,6 +587,17 @@ try {
     // UPDATE via POST (upsert), tokenless → the stored token is PRESERVED, cadence changes → 200.
     const upd = await inject({ method: "POST", url: "/api/companion/config", payload: { sessionId: "sess-1", heartbeatIntervalMinutes: 30 } });
     check("REST POST update (tokenless): → 200, cadence updated, token PRESERVED (last-4 unchanged)", upd.statusCode === 200 && JSON.parse(upd.payload).heartbeatIntervalMinutes === 30 && JSON.parse(upd.payload).tokenLast4 === LAST4);
+    // card b95e3bd0 — an UNRELATED save (cadence only, no heartbeatPrompt in the body at all). Split into
+    // the two halves that catch DIFFERENT things, so neither looks like coverage it isn't:
+    //   - the STORED-ROW half (db.getCompanionConfig) passes even PRE-FIX: buildCompanionUpsert already
+    //     kept `existing?.heartbeatPrompt ?? null` on an omitted field — that write-path logic was never
+    //     broken. It's asserted here as a contract pin, not a regression catcher.
+    //   - the RESPONSE half (upd.payload, what a client would actually read back and re-seed a form from)
+    //     is THE actual regression catcher: pre-fix, maskCompanionConfig resolved this to the default TEXT
+    //     (non-null) instead of null — a web form seeded from that response would then re-send the default
+    //     on its NEXT save, pinning it. This is the half that goes RED against the pre-fix code.
+    check("REST POST update (unrelated field only): the stored row keeps heartbeatPrompt null (contract pin — true pre-fix too)", db.getCompanionConfig("sess-1").heartbeatPrompt === null);
+    check("REST POST update (unrelated field only): the masked RESPONSE also reads null, never the resolved default (THE regression catch)", JSON.parse(upd.payload).heartbeatPrompt === null);
 
     // PUT a NEW token → last-4 changes; the new blob is ciphertext.
     const NEWTOKEN = "9999999999:BBBnew-secret-token-zzz9876";

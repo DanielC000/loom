@@ -109,6 +109,28 @@ check("heartbeat prompt: blank sends null (default), text is trimmed", () => {
   assert.equal(buildConfigBody({ ...baseForm(), heartbeatPrompt: " hi " }, "create").body.heartbeatPrompt, "hi");
 });
 
+// card b95e3bd0: a CONTRACT PIN on formFromMasked, not a regression test — formFromMasked already mapped
+// `heartbeatPrompt: null` to "" before this card (it always did `cfg.heartbeatPrompt ?? ""`), so this
+// check cannot go RED against the pre-fix code; it was the SERVER's masked read (maskCompanionConfig)
+// that pre-resolved an unset override to the default text, which this client-side pure-function test
+// never exercises. See companion-config.mjs for the actual regression coverage (the masked-read shape).
+// This pin exists so a future change to formFromMasked's null-handling can't silently regress the other
+// half of the fix: once the server correctly sends null, the form must still seed an empty field for it.
+check("heartbeat prompt: formFromMasked seeds an EMPTY field for a row with no stored override (never the resolved default)", () => {
+  const row = { ...maskedRow(), heartbeatPrompt: null };
+  const form = formFromMasked(row);
+  assert.equal(form.heartbeatPrompt, "", "the default must never be seeded into the editable field");
+  const body = buildConfigBody(form, "edit").body;
+  assert.equal(body.heartbeatPrompt, null, "an unrelated save must leave the stored override unset (null), not pin the default");
+});
+
+// And the inverse: a row that DOES carry a genuine custom override round-trips that text verbatim.
+check("heartbeat prompt: a row WITH a stored override seeds + round-trips that exact text", () => {
+  const form = formFromMasked(maskedRow());
+  assert.equal(form.heartbeatPrompt, "Check in");
+  assert.equal(buildConfigBody(form, "edit").body.heartbeatPrompt, "Check in");
+});
+
 check("home is never written by a config body — it is the daemon-global store, not per-companion", () => {
   assert.ok(!("home" in buildConfigBody(baseForm(), "create").body), "create must not carry a home key");
   assert.ok(!("home" in buildConfigBody(baseForm(), "edit").body), "edit must not carry a home key either");
@@ -370,6 +392,7 @@ function maskedRow() {
     chatScope: "dm",
     heartbeatIntervalMinutes: 30,
     heartbeatPrompt: "Check in",
+    heartbeatPromptDefault: "Proactive check-in. Briefly review anything you are tracking for the owner.",
     home: { channel: "telegram", chatId: "999" },
     enabled: true,
     envPinned: false,

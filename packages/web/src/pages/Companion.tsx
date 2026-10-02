@@ -433,11 +433,12 @@ function CompanionCreate({ onCreate, pending, error, onCancel }: {
 }
 
 // ── Shared config fields (channel / token / chat / cadence / home / enabled) ─────
-function ConfigFields({ form, set, mode, currentToken }: {
+function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault }: {
   form: CompanionConfigForm;
   set: <K extends keyof CompanionConfigForm>(k: K, v: CompanionConfigForm[K]) => void;
   mode: "create" | "edit";
   currentToken?: string; // the masked "••••1234" for the edit-mode read-only display
+  heartbeatPromptDefault?: string; // the resolved default prompt text — shown as a placeholder, never seeded into the field (card b95e3bd0)
 }) {
   return (
     <>
@@ -489,7 +490,7 @@ function ConfigFields({ form, set, mode, currentToken }: {
 
       <Field label="Heartbeat prompt" sub="proactive turn text · blank = default">
         <textarea value={form.heartbeatPrompt} onChange={(e) => set("heartbeatPrompt", e.target.value)}
-          placeholder="Check in — anything worth surfacing?" rows={2} spellCheck={false}
+          placeholder={heartbeatPromptDefault || "Check in — anything worth surfacing?"} rows={2} spellCheck={false}
           style={{
             background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`,
             borderRadius: radius.base, padding: "6px 8px", fontFamily: font.mono, fontSize: 13, resize: "vertical",
@@ -676,7 +677,8 @@ function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onCh
 
       {editing ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <ConfigFields form={form} set={set} mode={cfg ? "edit" : "create"} currentToken={cfg ? maskedToken(cfg) : undefined} />
+          <ConfigFields form={form} set={set} mode={cfg ? "edit" : "create"} currentToken={cfg ? maskedToken(cfg) : undefined}
+            heartbeatPromptDefault={cfg?.heartbeatPromptDefault} />
           {(localErr || save.error) && <span style={errStyle}>{localErr ?? errorText(save.error)}</span>}
           <div style={{ display: "flex", gap: 8 }}>
             <Button variant="primary" disabled={save.isPending} onClick={submit}>{save.isPending ? "Saving…" : "Save"}</Button>

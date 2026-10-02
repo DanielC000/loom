@@ -416,7 +416,12 @@ export function maskCompanionConfig(
     allowedChatId: row.allowedChatId,
     chatScope: row.chatScope,
     heartbeatIntervalMinutes: row.heartbeatIntervalMinutes,
-    heartbeatPrompt: row.heartbeatPrompt || DEFAULT_HEARTBEAT_PROMPT,
+    // card b95e3bd0: carry the RAW stored value (null when unset) rather than pre-resolving to the
+    // default — resolving here is what let a save that never touched this field pin today's default
+    // text as a permanent override. heartbeatPromptDefault lets the caller render/apply the default
+    // without destroying the stored-vs-default distinction.
+    heartbeatPrompt: row.heartbeatPrompt,
+    heartbeatPromptDefault: DEFAULT_HEARTBEAT_PROMPT,
     home,
     enabled: row.enabled,
     envPinned,

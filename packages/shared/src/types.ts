@@ -2799,8 +2799,16 @@ export interface CompanionConfigMasked {
   chatScope: "dm" | "group";
   /** Proactive heartbeat cadence in minutes (0 = off). */
   heartbeatIntervalMinutes: number;
-  /** The framed proactive-prompt text used on each heartbeat turn. */
-  heartbeatPrompt: string;
+  /**
+   * The RAW stored override, or `null` when unset (this companion inherits `heartbeatPromptDefault`).
+   * card b95e3bd0: this used to be pre-resolved to the default text, which made a save that never touched
+   * this field PIN that default as a literal override (the stored-vs-default distinction was destroyed
+   * server-side) — a caller that wants the EFFECTIVE prompt must apply `heartbeatPrompt || heartbeatPromptDefault`
+   * itself, same as the daemon's own runtime resolution (`companion/store.ts`'s `buildConfigFromRow`).
+   */
+  heartbeatPrompt: string | null;
+  /** The resolved default proactive-prompt text used when `heartbeatPrompt` is unset (`DEFAULT_HEARTBEAT_PROMPT`). */
+  heartbeatPromptDefault: string;
   /** The proactive HOME channel target (app_meta-backed, daemon-global), or null when unset. */
   home: CompanionRoute | null;
   /** Whether this config is enabled — a disabled config is treated as OFF at boot. */
