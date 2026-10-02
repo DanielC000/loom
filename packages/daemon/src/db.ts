@@ -2502,6 +2502,9 @@ export class Db {
     assertNotProdDbInTest(file);
     this.db = new Database(file);
     this.db.pragma("journal_mode = WAL");
+    // @decision 825e4a79 — defense-in-depth for FUTURE writes only; never add an automatic VACUUM here
+    // (exclusive lock, ~2x disk, unbounded cost) to retroactively scrub existing free-page/WAL content.
+    this.db.pragma("secure_delete = FAST");
     // One-shot structural rename (topics→agents) MUST run before exec(SCHEMA) — see the method doc.
     this.migrateTopicsToAgents();
     this.db.exec(SCHEMA);

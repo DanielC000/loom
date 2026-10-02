@@ -37,6 +37,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       (Db.recordProjectConfigChange never persists the raw rotated-out url) and READ time (a pre-fix
 //       legacy row's raw url is masked over REST too), with a control proving a sibling orchestration
 //       field (gateCommand) holding the same literal string is left untouched.
+//   (8) Card 825e4a79 (Code Review ddd96e27 gap): a real URL ROTATION (A → B, both non-empty) pins the
+//       PRIOR leg of recordProjectConfigChange's `orchestration` branch (`bOrch`, db.ts ~3406) — (7a)
+//       above only ever writes from an EMPTY prior, so it never exercises `bOrch !== undefined` with a
+//       real value. A dropped prior-leg mask would store old url A in cleartext with nothing short of a
+//       boot migration hiding it; this pins it directly against the raw DB row.
+//   (9) Card 825e4a79: the SAME rotation pin for `sessionEnv` (`bMasked`, db.ts ~3393) — the sibling gap:
+//       every existing sessionEnv case here also writes from an empty/legacy-inserted prior, never a real
+//       rotation, so the prior leg there was equally unpinned.
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -330,6 +338,61 @@ try {
   check("(7b) ★★ a pre-fix legacy row's alertWebhook.url is masked at READ time too", legacyWebhookEntry.next.orchestration.alertWebhook.url === "https://***");
   check("(7b) the masked value is never the raw legacy url", legacyWebhookEntry.next.orchestration.alertWebhook.url !== legacyWebhookUrl);
   check("(7b) ★ CONTROL: a sibling orchestration field (gateCommand) holding the SAME literal string is left untouched — proves the check isn't vacuous", legacyWebhookEntry.next.orchestration.gateCommand === legacyWebhookUrl);
+
+  // ===================== (8) card 825e4a79: the PRIOR leg of a real webhook-url ROTATION must never store cleartext =====================
+  // Unlike (7a) (writes from an EMPTY prior), this PATCHes url A then url B so the SECOND write's prior
+  // leg (`bOrch`, db.ts recordProjectConfigChange) is exercised with a REAL, non-empty prior value.
+  db.insertProject({ id: "pRotateHook", name: "RotateHook", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  const rotateUrlA = "https://hooks.example.com/services/TAAA/BAAA/rotate-url-a-not-real";
+  const rotateUrlB = "https://hooks.example.com/services/TBBB/BBBB/rotate-url-b-not-real";
+  const rotateHookA = await app.inject({
+    method: "PATCH", url: "/api/projects/pRotateHook/config",
+    payload: { config: { orchestration: { alertWebhook: { url: rotateUrlA, events: ["merge_done"] } } } },
+  });
+  check("(8) first PATCH (url A) → 200", rotateHookA.statusCode === 200);
+  const rotateHookB = await app.inject({
+    method: "PATCH", url: "/api/projects/pRotateHook/config",
+    payload: { config: { orchestration: { alertWebhook: { url: rotateUrlB, events: ["merge_done"] } } } },
+  });
+  check("(8) second PATCH (url B — the rotation) → 200", rotateHookB.statusCode === 200);
+  const rotateHookRows = db.db.prepare(
+    "SELECT prior_json, next_json FROM project_config_history WHERE project_id = ? ORDER BY created_at ASC, rowid ASC",
+  ).all("pRotateHook");
+  check("(8) exactly two history rows recorded for the rotation", rotateHookRows.length === 2);
+  const hookRotationRow = rotateHookRows[1]; // the SECOND write: prior = real url A, next = real url B
+  check("(8) ★★ the raw DB row's PRIOR leg never contains url A in cleartext", !hookRotationRow.prior_json.includes(rotateUrlA));
+  check("(8) ★★ the raw DB row's NEXT leg never contains url B in cleartext", !hookRotationRow.next_json.includes(rotateUrlB));
+  check("(8) prior leg masked to <scheme>://***", JSON.parse(hookRotationRow.prior_json).orchestration.alertWebhook.url === "https://***");
+  // Lead ruling (gen 389): a same-scheme rotation producing an IDENTICAL masked prior/next ("https://***"
+  // on both sides) is ACCEPTED — it matches sessionEnv masking, so no distinguishing marker is needed.
+  check("(8) next leg masked to <scheme>://*** (identical to prior — accepted, same-scheme rotation)", JSON.parse(hookRotationRow.next_json).orchestration.alertWebhook.url === "https://***");
+
+  // ===================== (9) card 825e4a79: the PRIOR leg of a real sessionEnv SECRET rotation must never store cleartext =====================
+  // Sibling gap to (8): every sessionEnv case above either writes from an empty prior (6a) or inserts a
+  // legacy row directly, bypassing recordProjectConfigChange entirely (6b) — neither exercises the
+  // `bMasked`/prior-leg branch (db.ts ~3393) against a REAL rotated-out secret.
+  db.insertProject({ id: "pRotateEnv", name: "RotateEnv", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  const rotateSecretA = "sk-rotate-secret-a-not-real";
+  const rotateSecretB = "sk-rotate-secret-b-not-real";
+  const rotateEnvA = await app.inject({
+    method: "PATCH", url: "/api/projects/pRotateEnv/config",
+    payload: { config: { sessionEnv: { API_KEY: rotateSecretA } } },
+  });
+  check("(9) first PATCH (secret A) → 200", rotateEnvA.statusCode === 200);
+  const rotateEnvB = await app.inject({
+    method: "PATCH", url: "/api/projects/pRotateEnv/config",
+    payload: { config: { sessionEnv: { API_KEY: rotateSecretB } } },
+  });
+  check("(9) second PATCH (secret B — the rotation) → 200", rotateEnvB.statusCode === 200);
+  const rotateEnvRows = db.db.prepare(
+    "SELECT prior_json, next_json FROM project_config_history WHERE project_id = ? ORDER BY created_at ASC, rowid ASC",
+  ).all("pRotateEnv");
+  check("(9) exactly two history rows recorded for the rotation", rotateEnvRows.length === 2);
+  const envRotationRow = rotateEnvRows[1]; // the SECOND write: prior = real secret A, next = real secret B
+  check("(9) ★★ the raw DB row's PRIOR leg never contains secret A in cleartext", !envRotationRow.prior_json.includes(rotateSecretA));
+  check("(9) ★★ the raw DB row's NEXT leg never contains secret B in cleartext", !envRotationRow.next_json.includes(rotateSecretB));
+  check("(9) prior leg masked to same-length bullet filler", JSON.parse(envRotationRow.prior_json).sessionEnv.API_KEY === "•".repeat(rotateSecretA.length));
+  check("(9) next leg masked to same-length bullet filler", JSON.parse(envRotationRow.next_json).sessionEnv.API_KEY === "•".repeat(rotateSecretB.length));
 } finally {
   try { if (app) await app.close(); } catch { /* ignore */ }
   db.close();
@@ -338,6 +401,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — project_config_history (card a0cafef2): the DB-level ring buffer records changed-keys/prior/next/actor/timestamp per write, a no-op records nothing, and eviction is scoped PER PROJECT (a busy project's churn never evicts a quiet sibling's history, unlike platform_config's single shared ring); setProjectConfigSafe threads a TRUTHFUL, per-surface-distinguishable actor across all four real writers — the human REST PATCH (\"human\"), the Platform Lead's project_configure (\"platform:<sessionId>\"), the Setup Assistant's project_configure AND project_update (\"setup:<sessionId>\"), and the manager's project_update (\"manager:<sessionId>\") — never hardcoding \"human\" for an agent write; a rejected/no-op write on any surface records nothing; GET /api/projects/:id/config/history (human-only REST) reflects the recorded entries newest-first, 404s on an unknown project, and empty-array's a fresh one; history is recorded correctly on BOTH of setProjectConfigSafe's paths — the blind path and the column re-key path; and (card b2f9ce3a) `sessionEnv` values are masked at BOTH the WRITE boundary (never persisted verbatim in the DB row, so a rotated-out secret is never archived) and the READ boundary (a pre-fix legacy row still holding a verbatim secret is masked over REST too), with a control proving an unrelated key holding the identical literal string is left untouched; and (card 5a5d7312) `orchestration.alertWebhook.url` gets the SAME treatment at both boundaries, with a control proving a sibling orchestration field (gateCommand) holding the identical literal string is left untouched."
+  ? "\n✅ ALL PASS — project_config_history (card a0cafef2): the DB-level ring buffer records changed-keys/prior/next/actor/timestamp per write, a no-op records nothing, and eviction is scoped PER PROJECT (a busy project's churn never evicts a quiet sibling's history, unlike platform_config's single shared ring); setProjectConfigSafe threads a TRUTHFUL, per-surface-distinguishable actor across all four real writers — the human REST PATCH (\"human\"), the Platform Lead's project_configure (\"platform:<sessionId>\"), the Setup Assistant's project_configure AND project_update (\"setup:<sessionId>\"), and the manager's project_update (\"manager:<sessionId>\") — never hardcoding \"human\" for an agent write; a rejected/no-op write on any surface records nothing; GET /api/projects/:id/config/history (human-only REST) reflects the recorded entries newest-first, 404s on an unknown project, and empty-array's a fresh one; history is recorded correctly on BOTH of setProjectConfigSafe's paths — the blind path and the column re-key path; and (card b2f9ce3a) `sessionEnv` values are masked at BOTH the WRITE boundary (never persisted verbatim in the DB row, so a rotated-out secret is never archived) and the READ boundary (a pre-fix legacy row still holding a verbatim secret is masked over REST too), with a control proving an unrelated key holding the identical literal string is left untouched; and (card 5a5d7312) `orchestration.alertWebhook.url` gets the SAME treatment at both boundaries, with a control proving a sibling orchestration field (gateCommand) holding the identical literal string is left untouched; and (card 825e4a79) a REAL rotation (A → B, non-empty prior) pins the PRIOR leg of recordProjectConfigChange's write-time mask directly against the raw DB row, for both orchestration.alertWebhook.url and sessionEnv — the gap every prior case here left unpinned, since each only ever wrote from an empty or directly-inserted prior."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

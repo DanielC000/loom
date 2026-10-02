@@ -51,6 +51,11 @@ const rowCount = (file, table) => {
   const liveTasks = db.listTasks("projA").length;
   check("seeded 2 projects + 5 tasks in the live DB", liveProjects === 2 && liveTasks === 5);
 
+  // Card 825e4a79: `secure_delete = FAST` is set on the main connection right next to journal_mode.
+  // FAST reads back as the numeric value 2 (OFF=0, ON=1, FAST=2) — assert the number, not the keyword,
+  // since better-sqlite3's pragma() read echoes the numeric form.
+  check("Db's main connection has secure_delete = FAST (2)", db.db.pragma("secure_delete")[0].secure_delete === 2);
+
   // (1) RESTORE-VERIFY — online backup while the writer is STILL OPEN (WAL'd data must be captured).
   const dest = await takeBackup({ reason: "test-restore", keep: 48, srcDbPath: dbFile, destDir, now: new Date() });
   check("takeBackup returned a snapshot path", typeof dest === "string");
