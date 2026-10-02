@@ -5077,6 +5077,8 @@ export class PtyHost {
     // `-c`/argv value — codex's config loader rejects a literal `bearer_token`, see
     // MCP_TOKEN_ENV_VAR's own doc); `mcpServersToCodexArgs` below emits the matching `-c
     // bearer_token_env_var=` pointer for every mount carrying an Authorization header.
+    // @decision 2e7373ab — on POSIX this env-carried token is readable by same-UID processes; accepted
+    // residual, don't claim otherwise.
     if (mcpToken) env[MCP_TOKEN_ENV_VAR] = mcpToken;
     const scratchDir = sessionScratchDir(opts.sessionId);
     try { fs.mkdirSync(scratchDir, { recursive: true }); } catch { /* best-effort; never block spawn */ }

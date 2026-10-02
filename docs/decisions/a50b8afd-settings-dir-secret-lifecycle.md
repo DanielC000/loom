@@ -104,8 +104,9 @@ a single computation shared both ways, so the two can never disagree.
   `env[MCP_TOKEN_ENV_VAR] = mcpToken` line stays unconditional — codex's config loader rejects a literal
   `bearer_token` value outright (card 280b1e44), so codex has no alternative to putting it in env, and this
   predates `a50b8afd`. **This means codex's own pattern has the SAME whole-session POSIX env-read exposure
-  this card's Major was about — just not introduced by this card, and not fixed by it.** The Code Reviewer
-  is passing this finding to card `7955458e` directly.
+  this card's Major was about — just not introduced by this card, and not fixed by it.** See
+  `docs/decisions/2e7373ab-codex-mcp-token-posix-env-residual.md` for the full investigation and accepted
+  residual.
   `mcpServersToCodexArgs` only checks the header matches `/^Bearer\s+\S/i` to decide whether to emit its
   own `-c mcp_servers.<id>.bearer_token_env_var=` pointer — it never reads the string's actual content, so
   neither platform branch above changes anything for codex's own translation path.
@@ -265,9 +266,9 @@ Per the DoD's own instruction to say so plainly: this does not achieve full isol
   POSIX, not less.
 - **Codex's own pre-existing mcpToken-in-env pattern (card 280b1e44, `createCodexPty`) has this SAME POSIX
   exposure today, unconditionally, on every platform codex runs on — predating and unaffected by this
-  card.** It was not introduced by `a50b8afd` and is not fixed by it; noted here for the record, and being
-  passed to card `7955458e` (which already tracks codex's permission/sandbox gaps) rather than addressed
-  inline.
+  card.** It was not introduced by `a50b8afd` and is not fixed by it; see
+  `docs/decisions/2e7373ab-codex-mcp-token-posix-env-residual.md` for the full investigation and accepted
+  residual.
 
 ## Follow-up filed (scope cut from this card)
 
