@@ -2927,6 +2927,7 @@ export class SessionService {
       }
       return { harness: pinned, skipped: undefined };
     }
+    // @decision 699099b4 — unreachable since 7955458e; kept deliberately as a second layer, do not delete as dead code
     if (spawn.harness === "codex") {
       const items = codexIncompatibilities({ ...old, permissionDeny });
       if (items.length > 0) return { harness: pinned, skipped: items };

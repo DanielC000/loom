@@ -22,6 +22,11 @@ Rules:
 - Do not describe the recycle skip as "the fleet default harness is codex": the re-resolved codex can also come from an EXPLICIT codex Profile pin. The event kind is reused from a fresh spawn; `trigger:"recycle"` is the discriminator.
 - Do not expect the skip to clear on its own. It is PERMANENT for a lineage whose row carries any of those fields: recycle carries them forever, only a fresh spawn (new agent/profile state) can move it, and every recycle files another skip event. Fail-closed is intended.
 - Do not re-resolve in `recycleWorker`, `resume`, `forkSession` or boot-reconcile.
+- Do not delete `recycleHarness`'s `codexIncompatibilities` branch, `harnessDrainStatus.blocked`, or the recycle-trigger `harness_default_skipped` events as dead code; they are intentional defense-in-depth (decision on card `699099b4` — see `docs/decisions/699099b4-recycleharness-codex-check-kept.md`).
+
+## Update (card `699099b4`)
+
+Card `7955458e`'s role-based force (`resolveAgentSpawn`, `TRANSCRIPT_ROOT_DENY_ROLES` in `profiles/codex-compat.ts`) now makes this file's own `codexIncompatibilities` check structurally unreachable for a manager/platform-lead recycle — manager and platform are both permanent `TRANSCRIPT_ROOT_DENY_ROLES` members, so `recycleHarness` never sees `spawn.harness === "codex"` from either real caller. RETAINED deliberately as a second layer per `7955458e`'s own record; not removed. Full evidence + ruling: `docs/decisions/699099b4-recycleharness-codex-check-kept.md`.
 
 ## Waived DoD item
 
