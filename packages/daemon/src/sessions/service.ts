@@ -27,11 +27,12 @@ import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnre
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
-import { boundedSimpleGit } from "../git/bounded.js";
+import { boundedSimpleGit, isNotAGitRepositoryError } from "../git/bounded.js";
 import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, parseMainlineWatermark, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
+import { isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import type { RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
@@ -3016,6 +3017,15 @@ export class SessionService {
   }
 
   /**
+   * @decision 37e15c26 — round 2: refuse any session whose RESOLVED role is `"manager"` into a reserved
+   * home (shared chokepoint — `startNew`'s profile-resolved role can be `"manager"` too, not just
+   * `startManager`'s explicit one). Raw path only (no git call yet); see the decision record.
+   */
+  private refuseManagerIntoReservedHome(role: SessionRole | undefined, project: Project): void {
+    if (role === "manager" && isLoomHomeOrAncestor(project.repoPath)) throw new Error(OPERATIONAL_HOME_GIT_WRITE_ERROR);
+  }
+
+  /**
    * Start a NEW session in an agent — injects the agent startup prompt once. `opts.forcePlain` (P3
    * web "Spawn → force plain") overrides any profile-conferred role to spawn a role-null session.
    * `opts.companionName` (companion provision only) bakes the companion's given name into its startup
@@ -3036,6 +3046,9 @@ export class SessionService {
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
     const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessDefaultSkipped, harnessRoleForced } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
+    // @decision 37e15c26 — round 2: a role-omitted "+New"/poll/webhook spawn can ALSO resolve role==="manager"
+    // via a Profile — refuse it here too, at the same resolved-role chokepoint startManager now uses.
+    this.refuseManagerIntoReservedHome(role, project);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3177,6 +3190,9 @@ export class SessionService {
     // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
     const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "manager");
+    // @decision 37e15c26 — round 2: refuse at the RESOLVED role, not the explicit-role call site, so
+    // startNew's profile-derived manager role is covered too. See the shared helper's own doc.
+    this.refuseManagerIntoReservedHome(role, project);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -14654,6 +14670,24 @@ export class SessionService {
     // SAME "unverified: no gateCommand" warning path a gateless PROJECT gets today (see the warning below).
     const targetRepo = resolveRepoByKey(project, worker.repoKey);
     const repoPath = targetRepo.path;
+    // @decision 37e15c26 — round 2: `repoPath` resolves LIVE on every call, so a re-confirm after a
+    // rebind to a reserved home must be refused HERE too. Same predicate as createWorktree's guard, via
+    // this class's own `boundedGit` (no `withTimeout` wrapper here) — see the decision record.
+    if (isLoomHomeOrAncestor(repoPath)) {
+      return { merged: false, reason: `${OPERATIONAL_HOME_GIT_WRITE_ERROR}. Nothing was landed, finalized or deleted.`, notified: false, opId: thisOpId };
+    }
+    try {
+      const toplevel = (await this.boundedGit(repoPath, this.gitOpMs ?? 15_000).raw(["rev-parse", "--show-toplevel"])).trim();
+      if (toplevel && isLoomHomeOrAncestor(toplevel)) {
+        return { merged: false, reason: `${OPERATIONAL_HOME_GIT_WRITE_ERROR}. Nothing was landed, finalized or deleted.`, notified: false, opId: thisOpId };
+      }
+    } catch (e) {
+      if (!isNotAGitRepositoryError(e)) {
+        return { merged: false, reason: `could not verify this repo's location; refusing to merge (${(e as Error).message}). Nothing was landed, finalized or deleted.`, notified: false, opId: thisOpId };
+      }
+      // An affirmative "not a git repository" — genuinely nothing to check here; fall through to the real
+      // git calls below, which fail on their own, clean terms (unchanged from before this guard).
+    }
     const gate = targetRepo.gateCommand;
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
     // Card e8df2659: the HUMAN-only per-project `orchestration.mergeGate:"off"` switch. Routed through the

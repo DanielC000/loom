@@ -7,8 +7,8 @@ import { pathToFileURL } from "node:url";
 import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
-import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
-import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure } from "./bounded.js";
+import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
@@ -863,6 +863,36 @@ export async function createWorktree(
   // quarantined repo refuses the same way every other failure here already does.
   const quarantineCheck = assertRepoNotQuarantined(repoPath);
   if (!quarantineCheck.ok) throw new Error(quarantineCheck.reason);
+  const { git: headGit, timeoutMs: headTimeoutMs } = boundedGit(repoPath, gitDeps);
+  // Refuse a worktree cut (and the branch/merge that would follow it) whose RAW `repoPath`, OR whose
+  // git-resolved TOPLEVEL, is Loom's own operational home (`LOOM_HOME`) or an ancestor of it — mirrors
+  // `GitWriter.refuseIfOperationalHome` (git/writer.ts) EXACTLY: same path-relation-only predicate
+  // (never `isOperationalVaultDir`'s content sniff — a descendant of LOOM_HOME with its own `.git`, e.g.
+  // a `project_init`-created project nested under the workspace root, resolves its OWN toplevel and is
+  // NOT refused), same fail-closed toplevel probe (only an affirmative "not a git repository" falls
+  // through; a timeout/killed-child/other error refuses rather than risk a worktree inside LOOM_HOME/.git).
+  // `git worktree add` (below) registers a new worktree AND a new branch ref under the repo's own
+  // `.git` — a mutating call exactly like GitWriter's checkout/commit/createBranch — so it needs the
+  // identical guard, checked BEFORE the mutating call (and before the read-only HEAD rev-parse next,
+  // so neither git call below ever runs against an operational home).
+  //
+  // @decision 37e15c26 — this closes the git-worktree/merge half of the reserved-home hazard; the
+  // session-start half (refusing any fresh session whose RESOLVED role is "manager" against a project
+  // that resolves here) is a separate guard, `refuseManagerIntoReservedHome` (sessions/service.ts).
+  if (isLoomHomeOrAncestor(repoPath)) throw new Error(OPERATIONAL_HOME_GIT_WRITE_ERROR);
+  try {
+    const toplevel = (await withTimeout(
+      headGit.raw(["rev-parse", "--show-toplevel"]), headTimeoutMs, "git rev-parse --show-toplevel (operational-home guard)",
+    )).trim();
+    if (toplevel && isLoomHomeOrAncestor(toplevel)) throw new Error(OPERATIONAL_HOME_GIT_WRITE_ERROR);
+  } catch (e) {
+    if (e instanceof Error && e.message === OPERATIONAL_HOME_GIT_WRITE_ERROR) throw e;
+    if (!isNotAGitRepositoryError(e)) {
+      throw new Error(`could not verify this repo's location; refusing to cut a worktree (${(e as Error).message})`);
+    }
+    // An affirmative "not a git repository" — there is genuinely no toplevel to check. Fall through;
+    // the real rev-parse HEAD below fails on its own, clean terms (unchanged from before this guard).
+  }
   const key = taskKey(taskId);
   const branch = `loom/${key}`;
   const worktreePath = repoKey && repoKey !== "primary"
@@ -873,7 +903,6 @@ export async function createWorktree(
   // BOUNDED (card c801d688): a hung rev-parse now throws within the bound instead of stalling the spawn
   // forever — this call has no local catch, so the throw propagates to createWorktree's own caller
   // exactly as an unbounded failure already did, just with a ceiling on how long that takes.
-  const { git: headGit, timeoutMs: headTimeoutMs } = boundedGit(repoPath, gitDeps);
   const mainSha = (await withTimeout(headGit.raw(["rev-parse", "HEAD"]), headTimeoutMs, "git rev-parse HEAD")).trim();
   if (fs.existsSync(worktreePath)) {
     // Retained worktree → reuse (already provisioned). Re-cut an empty/stale branch onto current main

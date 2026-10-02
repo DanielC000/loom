@@ -165,14 +165,6 @@ function isNoUpstreamError(e: unknown): boolean {
   return msg.includes("no upstream") || msg.includes("no configured push destination");
 }
 
-/** `./bounded.js` (a leaf module, card 306dd105) is the new home of `isNotAGitRepositoryError` — it used
- *  to be defined here, module-PRIVATE (no prior external import to preserve). Re-exported BY CHOICE so
- *  {@link GitWriter.refuseIfOperationalHome} below keeps referring to it by its bare name, and so
- *  `vault/versioner.ts`'s `commitVault` discovery can import the SAME classifier from `./bounded.js`
- *  directly without this module importing back from `vault/versioner.ts` (an existing cycle this module
- *  already has, see `git/bounded.ts`'s own doc) gaining a second, reverse edge. */
-export { isNotAGitRepositoryError };
-
 /** Every method GitWriter's bounded git calls need, across checkout/createBranch/commit/push/pendingPushSummary. */
 type WriterGit = Pick<SimpleGit, "checkout" | "checkoutLocalBranch" | "branchLocal" | "status" | "raw" | "commit" | "revparse">;
 
