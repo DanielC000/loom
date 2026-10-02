@@ -452,7 +452,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "agent_create",
       {
-        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human/assistant-authored) profileId as the agent's rig — assignment only (use profile_create to mint a new one); a non-existent profileId is rejected. LEAST-PRIVILEGE: profileId is rejected if its role is anything but manager/worker/null, or if it carries a connections/capabilities/vaultWrite grant (agentAssignableProfileError), symmetric with agent_update/profile_assign. REJECTED outright when projectId is a reserved/system project (the workspace home) — this closes a name-hijack: a same-named impostor agent (e.g. a fake \"Companion\") could otherwise be created there to collide with the real one that gateway/server.ts resolves BY NAME.",
+        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human/assistant-authored) profileId as the agent's rig — assignment only (use profile_create to mint a new one); a non-existent profileId is rejected. LEAST-PRIVILEGE: profileId is rejected if its role is anything but manager/worker/null, or if it carries a human-only field (agentAssignableProfileError, profiles/validate.ts), symmetric with agent_update/profile_assign. REJECTED outright when projectId is a reserved/system project (the workspace home) — this closes a name-hijack: a same-named impostor agent (e.g. a fake \"Companion\") could otherwise be created there to collide with the real one that gateway/server.ts resolves BY NAME.",
         inputSchema: strictShape({
           projectId: z.string(),
           name: z.string(),
@@ -553,8 +553,8 @@ export class SetupMcpRouter {
         if (!v.ok) return ok({ error: v.error });
         // LEAST-PRIVILEGE (setup-only, ON TOP of the shared validator): a non-null profileId is validated to
         // EXIST by validateAgentPatch above, so getProfile resolves — reject if its role is elevated, or if
-        // it carries connections/capabilities/vaultWrite, so the ungated setup surface can never bind an
-        // agent to a platform/auditor/workspace-auditor rig or a secrets/vault-write grant (strict/default).
+        // it carries a human-only field (agentAssignableProfileError, profiles/validate.ts), so the ungated
+        // setup surface can never bind an agent to an elevated rig or a human-only-field-carrying profile.
         if (v.patch.profileId != null) {
           const assignErr = agentAssignableProfileError(db.getProfile(v.patch.profileId)!);
           if (assignErr) return ok({ error: assignErr });
@@ -604,8 +604,8 @@ export class SetupMcpRouter {
           "cards. Reuses the existing agent_create + task-insert writers only, no new writer surface. " +
           "Fail-closed: an unknown templateName, an unknown projectId, an unknown profileName, a " +
           "template whose agent resolves to a role other than manager/worker/null, one whose resolved " +
-          "profile carries a non-empty connections, a non-empty capabilities, or vaultWrite:true, or a " +
-          "reserved/system projectId (the workspace home — closes the same name-hijack agent_create " +
+          "profile carries a human-only field (see agentAssignableProfileError in profiles/validate.ts), " +
+          "or a reserved/system projectId (the workspace home — closes the same name-hijack agent_create " +
           "refuses) are all rejected and nothing is written.",
         inputSchema: strictShape({
           projectId: z.string(),
@@ -704,7 +704,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_assign",
       {
-        description: "Assign an EXISTING profile to an agent (explicit agentId + profileId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). LEAST-PRIVILEGE: REJECTED outright when the TARGET agent's CURRENT rig role is anything but manager/worker/null, or when it lives in a reserved/system project — regardless of which profile you're trying to assign it — and separately rejected when the NEW profile's role is anything but manager/worker/null, or when it carries a connections/capabilities/vaultWrite grant.",
+        description: "Assign an EXISTING profile to an agent (explicit agentId + profileId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). LEAST-PRIVILEGE: REJECTED outright when the TARGET agent's CURRENT rig role is anything but manager/worker/null, or when it lives in a reserved/system project — regardless of which profile you're trying to assign it — and separately rejected when the NEW profile's role is anything but manager/worker/null, or when it carries a human-only field (see agentAssignableProfileError in profiles/validate.ts).",
         inputSchema: strictShape({ agentId: z.string(), profileId: z.string() }),
       },
       async ({ agentId, profileId }) => {
@@ -718,10 +718,10 @@ export class SetupMcpRouter {
         const assigned = db.getProfile(profileId);
         if (!assigned) return ok({ error: "profile not found" });
         // LEAST-PRIVILEGE (setup-only): mirror agent_update — reject binding an agent to a profile whose
-        // RESOLVED role is elevated (platform/auditor/workspace-auditor), or that carries connections/
-        // capabilities/vaultWrite, so the ungated setup surface can never plant a latent elevation or
-        // launder a secrets/vault-write grant by this back door (strict/default). A manager/null/plain
-        // rig with no such grant still assigns fine.
+        // RESOLVED role is elevated (platform/auditor/workspace-auditor), or that carries a human-only
+        // field (agentAssignableProfileError, profiles/validate.ts), so the ungated setup surface can
+        // never plant a latent elevation or launder such a grant by this back door (strict/default). A
+        // manager/null/plain rig with no such grant still assigns fine.
         const assignErr = agentAssignableProfileError(assigned);
         if (assignErr) return ok({ error: assignErr });
         db.updateAgent(agent.id, { profileId });

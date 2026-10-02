@@ -72,6 +72,9 @@ db.insertProfile({ id: "profAuditor", name: "Auditor Rig", role: "auditor", desc
 // Card a06650d2: a NON-elevated (worker) role that still carries a human-only field — the shared
 // agentAssignableProfileError predicate's FIELD check applies regardless of role or allowElevatedRoles.
 db.insertProfile({ id: "profVaultWrite", name: "Vault Rig", role: "worker", description: "vault-write rig", allowDelta: [], skills: null, model: null, icon: "📓", vaultWrite: true });
+// Card 1f52bc75: representative coverage for the field axis's 3 newly-checked members (documentConversion
+// here — see clone-core-field-check.mjs for exhaustive coverage of all 4 including harness/allowDelta).
+db.insertProfile({ id: "profDocConversion", name: "DocConversion Rig", role: "worker", description: "doc-conversion rig", allowDelta: [], skills: null, model: null, icon: "📄", documentConversion: true });
 
 // The source agents to clone: a plain one, one with an ordinary (worker) profile, two with an
 // elevated (platform/auditor) profile, and one with a non-elevated-but-field-bearing (vaultWrite) profile
@@ -81,6 +84,7 @@ db.insertAgent({ id: "agentQA", projectId: "pSrc", name: "QA", startupPrompt: "Y
 db.insertAgent({ id: "agentPlatform", projectId: "pSrc", name: "Lead-ish", startupPrompt: "elevated", position: 2, profileId: "profPlatform" });
 db.insertAgent({ id: "agentAuditor", projectId: "pSrc", name: "Audit-ish", startupPrompt: "elevated", position: 3, profileId: "profAuditor" });
 db.insertAgent({ id: "agentVaultWrite", projectId: "pSrc", name: "Vault-ish", startupPrompt: "vault-write", position: 4, profileId: "profVaultWrite" });
+db.insertAgent({ id: "agentDocConversion", projectId: "pSrc", name: "DocConversion-ish", startupPrompt: "doc-conversion", position: 5, profileId: "profDocConversion" });
 
 // A no-op SessionService/PtyHost — these tools never touch sessions, but the router constructor needs one.
 // LOCAL OVERRIDE (not _seam-host-fixture.mjs's shared SeamHost, card ec7983c6): createPty() throws by
@@ -151,6 +155,10 @@ try {
   const cloneVaultWrite = await call("agent_clone", { sourceAgentId: "agentVaultWrite", targetProjectId: "pA" });
   check("(b) agent_clone REJECTS cloning a vaultWrite-carrying (non-elevated-role) profiled agent",
     typeof cloneVaultWrite.error === "string" && /vaultWrite/i.test(cloneVaultWrite.error) && !cloneVaultWrite.id);
+  // Card 1f52bc75: representative coverage for the 3 newly-checked field members (documentConversion).
+  const cloneDocConversion = await call("agent_clone", { sourceAgentId: "agentDocConversion", targetProjectId: "pA" });
+  check("(b) agent_clone REJECTS cloning a documentConversion-carrying (non-elevated-role) profiled agent",
+    typeof cloneDocConversion.error === "string" && /documentConversion/i.test(cloneDocConversion.error) && !cloneDocConversion.id);
   check("(b) neither rejected clone created an agent anywhere", db.listAgents("pSrc").length === nAgentsPSrcBefore);
 
   // ===================== (c) agent_clone_batch — one source, many targets =====================
@@ -189,6 +197,14 @@ try {
   check("(c) agent_clone_batch: the FIELD check applies per-entry too (both targets rejected, vaultWrite)",
     batchVaultWrite.every((r) => typeof r.error === "string" && /vaultWrite/i.test(r.error) && !r.agent));
 
+  // Card 1f52bc75: same per-entry coverage for documentConversion.
+  const batchDocConversion = await call("agent_clone_batch", {
+    sourceAgentId: "agentDocConversion",
+    targets: [{ targetProjectId: "pA" }, { targetProjectId: "pB" }],
+  });
+  check("(c) agent_clone_batch: the FIELD check applies per-entry too (both targets rejected, documentConversion)",
+    batchDocConversion.every((r) => typeof r.error === "string" && /documentConversion/i.test(r.error) && !r.agent));
+
   // ===================== (d) REGRESSION — agent_create/agent_update unchanged =====================
   const created = await call("agent_create", { projectId: "pA", name: "Fresh", startupPrompt: "hi", profileId: "profQA" });
   check("(d) agent_create: still works exactly as before", created.name === "Fresh" && created.profileId === "profQA" && !created.error);
@@ -213,6 +229,16 @@ try {
   check("(d) agent_update: REJECTS a vaultWrite-carrying profileId even though the role check is lifted here",
     typeof updatedVaultWrite.error === "string" && /vaultWrite/i.test(updatedVaultWrite.error));
   check("(d) agent_update: the rejected vaultWrite patch left the agent's profile UNCHANGED (still profAuditor)",
+    db.getAgent(created.id)?.profileId === "profAuditor");
+  // Card 1f52bc75: representative coverage for the 3 newly-checked field members (documentConversion) —
+  // same shape as vaultWrite immediately above.
+  const createdDocConversion = await call("agent_create", { projectId: "pA", name: "DirectDocConversion", profileId: "profDocConversion" });
+  check("(d) agent_create: REJECTS a documentConversion-carrying profileId even though the role check is lifted here",
+    typeof createdDocConversion.error === "string" && /documentConversion/i.test(createdDocConversion.error) && !createdDocConversion.id);
+  const updatedDocConversion = await call("agent_update", { agentId: created.id, profileId: "profDocConversion" });
+  check("(d) agent_update: REJECTS a documentConversion-carrying profileId even though the role check is lifted here",
+    typeof updatedDocConversion.error === "string" && /documentConversion/i.test(updatedDocConversion.error));
+  check("(d) agent_update: the rejected documentConversion patch left the agent's profile UNCHANGED (still profAuditor)",
     db.getAgent(created.id)?.profileId === "profAuditor");
 
   await client.close();

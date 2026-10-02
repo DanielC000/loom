@@ -215,7 +215,7 @@ export function agentProfileKeyError(raw: unknown): string | null {
  *  - `skipRoleCheck: true` — the role axis is being checked by the CALLER's own narrower mechanism
  *    instead (e.g. clone's `operator`/`isPlatformProfile` check, below) — never widens WHO may bind an
  *    elevated role, only avoids double-checking a role that was already vetted a different way.
- * Neither option ever lifts the field checks (connections/capabilities/vaultWrite) below — ONLY
+ * Neither option ever lifts the field checks below (this function's own human-only-field list) — ONLY
  * `humanAuthorized: true` does that, and ONLY the field checks: see the delta-review ruling on card
  * `a06650d2` (the 3de74275 record's "Fix round" section) for why the field axis is fail-CLOSED by
  * default in every CORE (`createAgentCore`/`cloneAgentCore`, `applyWorkflowTemplate`) and needs this
@@ -227,9 +227,12 @@ export function agentProfileKeyError(raw: unknown): string | null {
  *
  * Returns an error string, or null when the profile is safe to bind via an agent-facing tool, OR (with
  * `humanAuthorized`) via one of the two named human-only REST routes.
+ *
+ * @decision 3de74275 — card `1f52bc75` extended the field axis to documentConversion/harness("codex")/
+ * non-empty allowDelta; browserTesting stays deliberately unchecked. See the decision record for why.
  */
 export function agentAssignableProfileError(
-  profile: Pick<Profile, "role" | "connections" | "capabilities" | "vaultWrite">,
+  profile: Pick<Profile, "role" | "connections" | "capabilities" | "vaultWrite" | "documentConversion" | "harness" | "allowDelta">,
   opts?: { allowElevatedRoles?: boolean; skipRoleCheck?: boolean; humanAuthorized?: boolean },
 ): string | null {
   if (!opts?.allowElevatedRoles && !opts?.skipRoleCheck && profile.role != null && LOCKED_PROFILE_ROLES.has(profile.role)) {
@@ -244,6 +247,15 @@ export function agentAssignableProfileError(
   }
   if (profile.vaultWrite) {
     return "cannot assign profile: it carries vaultWrite (write access into a human-reviewed vault corpus) — human-only, via the Profiles UI / REST";
+  }
+  if (profile.documentConversion) {
+    return "cannot assign profile: it carries documentConversion (launches a host markitdown subprocess) — human-only, via the Profiles UI / REST";
+  }
+  if (profile.harness != null && profile.harness !== "claude") {
+    return `cannot assign profile: it carries harness "${profile.harness}" (selects a different vendor CLI binary — the same trust class as gateCommand) — human-only, via the Profiles UI / REST`;
+  }
+  if (profile.allowDelta && profile.allowDelta.length > 0) {
+    return "cannot assign profile: it carries a non-empty allowDelta (widens the rig's spawn permission allowlist — the same trust class as gateCommand) — human-only, via the Profiles UI / REST";
   }
   return null;
 }

@@ -46,9 +46,9 @@ export function createAgentCore(
 // Least-privilege ROLE guard shared by every clone call site (incl. the human-only REST companion
 // auto-clone, gateway/server.ts): a clone carries the source agent's profileId through VERBATIM, so an
 // operator/platform/auditor source must be refused the same way assigning that profileId directly would
-// be. FIELD-only (connections/capabilities/vaultWrite): see cloneSourceFieldError below, NOT here — this
-// function's own narrower role check is the ONLY role axis for every cloneAgentCore caller, agent-facing
-// or not; it never calls the shared predicate at all.
+// be. FIELD-only (agentAssignableProfileError's own human-only-field list): see cloneSourceFieldError
+// below, NOT here — this function's own narrower role check is the ONLY role axis for every
+// cloneAgentCore caller, agent-facing or not; it never calls the shared predicate at all.
 //
 // @decision 3de74275 — clone's ROLE axis stays its OWN narrower, pre-existing check, never the shared
 // predicate's full locked-role set — a non-elevated role here (incl. "assistant") is load-bearing.
@@ -109,7 +109,7 @@ export function cloneAgentCore(
  */
 export function cloneSourceFieldError(db: Db, sourceProfileId: string | null): string | null {
   if (sourceProfileId == null) return null;
-  const profile: Pick<Profile, "role" | "connections" | "capabilities" | "vaultWrite"> | undefined = db.getProfile(sourceProfileId);
+  const profile: Pick<Profile, "role" | "connections" | "capabilities" | "vaultWrite" | "documentConversion" | "harness" | "allowDelta"> | undefined = db.getProfile(sourceProfileId);
   if (!profile) return null;
   const assignErr = agentAssignableProfileError(profile, { skipRoleCheck: true });
   return assignErr ? `cannot clone agent: ${assignErr}` : null;

@@ -542,6 +542,20 @@ try {
   const acCapabilities = await call("agent_create", { projectId: created.id, name: "CapabilitiesTarget", profileId: "capabilitiesRig" });
   check("(g) agent_create REJECTS a worker-role profile carrying a non-empty capabilities", typeof acCapabilities.error === "string" && /capabilities/i.test(acCapabilities.error) && !acCapabilities.id);
 
+  // Card 1f52bc75: the field axis also covers documentConversion/harness("codex")/allowDelta now —
+  // representative coverage (documentConversion) on all 3 binding tools, same shape as vaultWrite/
+  // connections/capabilities above. A browserTesting-carrying profile is DELIBERATELY NOT exercised here
+  // as a rejection — see clone-core-field-check.mjs / agent-assignable-profile-guard.mjs for the
+  // exhaustive coverage of all 4 fields plus the browserTesting regression guard.
+  db.insertProfile({ id: "docConversionRig", name: "DocConversion Rig", role: "worker", description: "doc-conversion rig", allowDelta: [], skills: null, model: null, icon: "📄", documentConversion: true });
+  const paDocConversion = await call("profile_assign", { agentId: agent.id, profileId: "docConversionRig" });
+  check("(g) profile_assign REJECTS a worker-role profile carrying documentConversion", typeof paDocConversion.error === "string" && /documentConversion/i.test(paDocConversion.error));
+  const auDocConversion = await call("agent_update", { agentId: agent.id, profileId: "docConversionRig" });
+  check("(g) agent_update REJECTS a worker-role profile carrying documentConversion", typeof auDocConversion.error === "string" && /documentConversion/i.test(auDocConversion.error));
+  check("(g) agent_update: the rejected documentConversion assign left the agent's assignment UNCHANGED", (db.getAgent(agent.id)?.profileId ?? null) === auBeforeField);
+  const acDocConversion = await call("agent_create", { projectId: created.id, name: "DocConversionTarget", profileId: "docConversionRig" });
+  check("(g) agent_create REJECTS a worker-role profile carrying documentConversion", typeof acDocConversion.error === "string" && /documentConversion/i.test(acDocConversion.error) && !acDocConversion.id);
+
   // ============ (g2) agent_update / profile_assign resolve an id-PREFIX like agent_get does ============
   // The bug: agent_get resolves an 8-char id-PREFIX, but the agent WRITE handlers (agent_update,
   // profile_assign) did EXACT-match only — a prefix that read fine 404'd on write. CRAFTED UUID-shaped

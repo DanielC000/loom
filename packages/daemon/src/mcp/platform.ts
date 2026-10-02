@@ -1257,7 +1257,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "agent_create",
       {
-        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human-authored) profileId as the agent's rig — you can only assign a profile a human already created, never mint one (a non-existent profileId is rejected). An elevated/locked-role profile (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job) — but a profile carrying connections/capabilities/vaultWrite is REJECTED regardless of role (human-only, via the Profiles UI / REST): those fields grant real external secrets / host-process launch / vault-write, and binding one across projects is never allowed through this tool.",
+        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human-authored) profileId as the agent's rig — you can only assign a profile a human already created, never mint one (a non-existent profileId is rejected). An elevated/locked-role profile (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job) — but a profile carrying a human-only field (see agentAssignableProfileError in profiles/validate.ts) is REJECTED regardless of role (human-only, via the Profiles UI / REST): binding one across projects is never allowed through this tool.",
         inputSchema: strictShape({
           projectId: z.string(),
           name: z.string(),
@@ -1275,7 +1275,7 @@ export class PlatformMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId. An elevated/locked-role profileId (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job), but a profileId carrying connections/capabilities/vaultWrite is REJECTED regardless of role (human-only, via the Profiles UI / REST). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
+          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId. An elevated/locked-role profileId (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job), but a profileId carrying a human-only field (see agentAssignableProfileError in profiles/validate.ts) is REJECTED regardless of role (human-only, via the Profiles UI / REST). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
         inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
@@ -1316,7 +1316,7 @@ export class PlatformMcpRouter {
         if (!v.ok) return ok({ error: v.error });
         // @decision 3de74275 — a non-null profileId is validated to EXIST above, so getProfile resolves;
         // elevated roles are allowed here (administering the Lead's own rigs is this surface's job), but
-        // connections/capabilities/vaultWrite are never assignable through an agent-facing tool.
+        // a human-only-field profile (agentAssignableProfileError, profiles/validate.ts) is never assignable.
         if (v.patch.profileId != null) {
           const assignErr = agentAssignableProfileError(db.getProfile(v.patch.profileId)!, { allowElevatedRoles: true });
           if (assignErr) return ok({ error: assignErr });
@@ -1345,9 +1345,9 @@ export class PlatformMcpRouter {
           "core agent_create uses (createAgentCore) — no forked create path. LEAST-PRIVILEGE (load-bearing, " +
           "mirrors the guard on assigning an elevated profile directly): REFUSED if the source agent's " +
           "profile role is platform/auditor — cloning an elevated rig into another project is never " +
-          "allowed. ALSO REFUSED, regardless of role, if the source agent's profile carries a non-empty " +
-          "connections, a non-empty capabilities, or vaultWrite:true — human-only, via the Profiles UI / " +
-          "REST. 404 (\"source agent not found\") if sourceAgentId is unknown; \"project not found\" if " +
+          "allowed. ALSO REFUSED, regardless of role, if the source agent's profile carries a human-only " +
+          "field (see agentAssignableProfileError in profiles/validate.ts) — human-only, via the Profiles " +
+          "UI / REST. 404 (\"source agent not found\") if sourceAgentId is unknown; \"project not found\" if " +
           "targetProjectId is unknown (same as agent_create); \"profile not found\" is impossible here (the " +
           "source's profileId was already validated when the source agent itself was created/updated).",
         inputSchema: strictShape({
@@ -1377,8 +1377,8 @@ export class PlatformMcpRouter {
           "agent_clone, for standing up a per-family role across N sibling projects (a tool-site roster, a " +
           "portfolio of similar repos) without N hand-written agent_clone round-trips. Each entry in " +
           "`targets` is applied INDEPENDENTLY through the exact same agent_clone core (same validation, " +
-          "same least-privilege platform/auditor-role guard, same REJECTION of a connections/capabilities/" +
-          "vaultWrite-carrying source profile regardless of role — human-only, via the Profiles UI / REST) " +
+          "same least-privilege platform/auditor-role guard, same REJECTION of a human-only-field-carrying " +
+          "source profile regardless of role — see agentAssignableProfileError in profiles/validate.ts) " +
           "— a bad entry (unknown targetProjectId) surfaces its own { error } and does NOT block the " +
           "other targets; nothing is transactional. " +
           "Returns one result per target, in the given order: { targetProjectId, agent } on success or " +
@@ -1951,7 +1951,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_assign",
       {
-        description: "Assign an EXISTING profile to an agent (cross-project, explicit agentId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). An elevated/locked-role profile (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job), but a profile carrying connections/capabilities/vaultWrite is REJECTED regardless of role (human-only, via the Profiles UI / REST).",
+        description: "Assign an EXISTING profile to an agent (cross-project, explicit agentId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). An elevated/locked-role profile (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job), but a profile carrying a human-only field (see agentAssignableProfileError in profiles/validate.ts) is REJECTED regardless of role (human-only, via the Profiles UI / REST).",
         inputSchema: strictShape({ agentId: z.string(), profileId: z.string() }),
       },
       async ({ agentId, profileId }) => {
@@ -1960,7 +1960,7 @@ export class PlatformMcpRouter {
         const profile = db.getProfile(profileId);
         if (!profile) return ok({ error: "profile not found" });
         // @decision 3de74275 — elevated roles are allowed here (administering the Lead's own rigs is this
-        // surface's job), but connections/capabilities/vaultWrite are never assignable through an agent tool.
+        // surface's job), but a human-only-field profile (agentAssignableProfileError) is never assignable.
         const assignErr = agentAssignableProfileError(profile, { allowElevatedRoles: true });
         if (assignErr) return ok({ error: assignErr });
         db.updateAgent(agent.id, { profileId });

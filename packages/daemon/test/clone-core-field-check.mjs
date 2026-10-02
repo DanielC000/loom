@@ -28,6 +28,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // rows created, confirming this file's own checks are capable of catching exactly the regression class the
 // review found. The patch was then reverted byte-for-byte and this file re-run GREEN before committing.
 //
+// Card 1f52bc75 extends FIELD_CASES to documentConversion/harness("codex")/non-empty allowDelta — the 3
+// other AGENT_FORBIDDEN_PROFILE_KEYS members CREATE already fail-closed on but ASSIGN never checked (same
+// gap class as a06650d2) — so (a)/(b)/(d) above now also cover them automatically, plus:
+//   (e) `{ humanAuthorized: true }` on both functions SKIPS the field check for each of the 3 new fields
+//       too (the human-path-still-succeeds shape the a06650d2 opt-out already has for connections/
+//       capabilities/vaultWrite — RED-PROVEN manually: reverted to pre-fix validate.ts/clone-core.ts,
+//       re-built, and (a)/(b)'s 3 new REJECTS failed as expected; restored and re-built GREEN before commit).
+//   (f) a profile carrying ONLY browserTesting:true (QA-Tester-shaped) still SUCCEEDS through both
+//       functions with NO opts — this is the ONE AGENT_FORBIDDEN_PROFILE_KEYS member DELIBERATELY left out
+//       of the field check (see the 3de74275 decision record's amendment): agent_assign_profile's own tool
+//       description documents autonomously provisioning the bundled "QA Tester"/"Web Designer" rigs as its
+//       intended, no-human-needed use case.
+//
 // Run: 1) build (turbo builds shared first), 2) node test/clone-core-field-check.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -59,12 +72,23 @@ try {
   db.insertProfile({ id: "profConnections", name: "Connections Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: ["connX"] });
   db.insertProfile({ id: "profCapabilities", name: "Capabilities Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, capabilities: [{ slug: "some-cap" }] });
   db.insertProfile({ id: "profVaultWrite", name: "VaultWrite Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, vaultWrite: true });
+  db.insertProfile({ id: "profDocConversion", name: "DocConversion Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, documentConversion: true });
+  db.insertProfile({ id: "profHarnessCodex", name: "Codex Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, harness: "codex" });
+  db.insertProfile({ id: "profAllowDelta", name: "AllowDelta Rig", role: "worker", description: "", allowDelta: ["Bash(*)"], skills: null, model: null, icon: null });
+  // Code review (fe4ae005): fail-closed on ANY unknown future harness value, not a "codex"-only allowlist.
+  db.insertProfile({ id: "profHarnessFuture", name: "Future Harness Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, harness: "some-future-vendor" });
   db.insertProfile({ id: "profClean", name: "Clean Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
+  // QA-Tester-shaped: browserTesting is the ONE AGENT_FORBIDDEN_PROFILE_KEYS member deliberately NOT checked.
+  db.insertProfile({ id: "profBrowserTesting", name: "QA Tester Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, browserTesting: true });
 
   const FIELD_CASES = [
     { profileId: "profConnections", label: "connections", pattern: /connections/i },
     { profileId: "profCapabilities", label: "capabilities", pattern: /capabilities/i },
     { profileId: "profVaultWrite", label: "vaultWrite", pattern: /vaultWrite/i },
+    { profileId: "profDocConversion", label: "documentConversion", pattern: /documentConversion/i },
+    { profileId: "profHarnessCodex", label: "harness(codex)", pattern: /codex/i },
+    { profileId: "profAllowDelta", label: "allowDelta", pattern: /allowDelta/i },
+    { profileId: "profHarnessFuture", label: "harness(unknown-future)", pattern: /some-future-vendor/i },
   ];
 
   // ===================== (a) createAgentCore, NO opts — fail-closed by default =====================
@@ -112,12 +136,36 @@ try {
     elevHAClone.ok === false && /platform/i.test(elevHAClone.error ?? ""));
   check("(d) the rejected elevated+humanAuthorized clone created NO agent row", db.listAgents("pTarget").length === beforeElevHA);
 
+  // ============== (e) card 1f52bc75: humanAuthorized:true SKIPS the field check for the 3 NEW fields too
+  // (the human-path-still-succeeds shape) ====================================================
+  const NEW_FIELD_CASES = FIELD_CASES.filter((c) => c.label !== "connections" && c.label !== "capabilities" && c.label !== "vaultWrite");
+  for (const { profileId, label } of NEW_FIELD_CASES) {
+    const haCreateNew = createAgentCore(db, { projectId: "pTarget", name: `HA-Create-${label}`, profileId }, { humanAuthorized: true });
+    check(`(e) createAgentCore({ humanAuthorized: true }) SKIPS the field check for a ${label} profile`,
+      haCreateNew.ok === true && haCreateNew.agent.profileId === profileId);
+    const sourceId = `agentSourceHA-${label}`;
+    db.insertAgent({ id: sourceId, projectId: "pSrc", name: `SourceHA-${label}`, startupPrompt: "x", position: 10, profileId });
+    const haCloneNew = cloneAgentCore(db, sourceId, "pTarget", {}, { humanAuthorized: true });
+    check(`(e) cloneAgentCore({ humanAuthorized: true }) SKIPS the field check for a ${label} source profile`,
+      haCloneNew.ok === true && haCloneNew.agent.profileId === profileId);
+  }
+
+  // ============== (f) card 1f52bc75: browserTesting is DELIBERATELY unchecked — a QA-Tester-shaped
+  // profile still SUCCEEDS through both functions with NO opts at all (not even humanAuthorized) ========
+  const browserCreate = createAgentCore(db, { projectId: "pTarget", name: "BrowserTestingCreateDirect", profileId: "profBrowserTesting" });
+  check("(f) createAgentCore with NO opts SUCCEEDS for a browserTesting:true (QA-Tester-shaped) profile",
+    browserCreate.ok === true && browserCreate.agent.profileId === "profBrowserTesting");
+  db.insertAgent({ id: "agentSourceBrowserTesting", projectId: "pSrc", name: "SourceBrowserTesting", startupPrompt: "x", position: 11, profileId: "profBrowserTesting" });
+  const browserClone = cloneAgentCore(db, "agentSourceBrowserTesting", "pTarget", {});
+  check("(f) cloneAgentCore with NO opts SUCCEEDS for a browserTesting:true (QA-Tester-shaped) source profile",
+    browserClone.ok === true && browserClone.agent.profileId === "profBrowserTesting");
+
   db.close();
 } finally {
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — createAgentCore/cloneAgentCore's OWN field check (connections/capabilities/vaultWrite) is fail-closed by default (no opts) for both direct-create and clone, a clean profile still succeeds through both (regression guard), humanAuthorized:true skips the field check but never the role check — exercised directly, bypassing every MCP-layer pre-check, so a regression in the cores' own default can never hide behind an agent-facing check that happens to also reject."
+  ? "\n✅ ALL PASS — createAgentCore/cloneAgentCore's OWN field check (connections/capabilities/vaultWrite/documentConversion/harness(\"codex\")/a non-empty allowDelta) is fail-closed by default (no opts) for both direct-create and clone, a clean profile still succeeds through both (regression guard), humanAuthorized:true skips the field check (for all 6 fields) but never the role check, and a browserTesting:true (QA-Tester-shaped) profile succeeds with NO opts at all (the one deliberately-unchecked field) — exercised directly, bypassing every MCP-layer pre-check, so a regression in the cores' own default can never hide behind an agent-facing check that happens to also reject."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

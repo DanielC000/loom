@@ -98,6 +98,9 @@ db.insertProfile({ id: "profQA", name: "QA Tester", role: "worker", description:
 // surface) and a non-elevated profile that carries a human-only field (never lifted, on any surface).
 db.insertProfile({ id: "profPlatform", name: "Platform Rig", role: "platform", description: "elevated rig", allowDelta: [], skills: null, model: null, icon: "🛡️" });
 db.insertProfile({ id: "profVaultWrite", name: "Vault Rig", role: "worker", description: "vault-write rig", allowDelta: [], skills: null, model: null, icon: "📓", vaultWrite: true });
+// Card 1f52bc75: representative coverage for the field axis's 3 newly-checked members (documentConversion
+// here — see clone-core-field-check.mjs for exhaustive coverage of all 4 including harness/allowDelta).
+db.insertProfile({ id: "profDocConversion", name: "DocConversion Rig", role: "worker", description: "doc-conversion rig", allowDelta: [], skills: null, model: null, icon: "📄", documentConversion: true });
 // One session per role (bound to pOrd/agentWork) — the role-gate fixtures.
 const seedSession = (id, role, parent) => db.insertSession({
   id, projectId: "pOrd", agentId: "agentWork", engineSessionId: null, title: null, cwd: repo,
@@ -319,6 +322,12 @@ try {
   check("profile_assign: REJECTS a vaultWrite-carrying profile even though the role check is lifted here",
     typeof paVaultWrite.error === "string" && /vaultWrite/i.test(paVaultWrite.error));
   check("profile_assign: the rejected vaultWrite assign left the agent's profile UNCHANGED (still profPlatform)",
+    db.getAgent("agentAssign")?.profileId === "profPlatform");
+  // Card 1f52bc75: representative coverage for the 3 newly-checked field members (documentConversion).
+  const paDocConversion = await call("profile_assign", { agentId: "agentAssign", profileId: "profDocConversion" });
+  check("profile_assign: REJECTS a documentConversion-carrying profile even though the role check is lifted here",
+    typeof paDocConversion.error === "string" && /documentConversion/i.test(paDocConversion.error));
+  check("profile_assign: the rejected documentConversion assign left the agent's profile UNCHANGED (still profPlatform)",
     db.getAgent("agentAssign")?.profileId === "profPlatform");
 
   // ===================== profile_delete / agent_delete (task 2c9b2960) =====================
