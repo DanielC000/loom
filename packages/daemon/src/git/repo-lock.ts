@@ -21,17 +21,82 @@ const canonicalIndexLocks = new Map<string, Promise<unknown>>();
  */
 export class RepoQuarantinedError extends Error {}
 
-/** Canonicalize a repo path for lock-keying — two spellings of the same physical directory must map to
- *  the SAME key. Best-effort: a repo that doesn't exist yet on disk (a test/edge case) falls back to a
- *  resolved (not necessarily real) path rather than throwing. */
-export function canonicalRepoLockKey(repoPath: string): string {
-  let real: string;
-  try {
-    real = fs.realpathSync.native(repoPath);
-  } catch {
-    real = path.resolve(repoPath); // repo may not exist yet on disk in a test/edge case — best effort
+/**
+ * Realpath the NEAREST EXISTING ancestor (inclusive) of `bp`, then reattach whatever trailing segments
+ * don't exist yet — so the result is the SAME value `bp` would realpath to once it exists, independent of
+ * whether `bp` ITSELF happens to exist at the moment this is called (an unmounted drive, a cloud-synced
+ * folder not yet materialized: the ENCLOSING directory structure is typically still there even when the
+ * leaf isn't). Falls back to `bp`'s own `path.resolve` only when NOTHING along the chain up to the
+ * filesystem root resolves at all (a wholly disconnected drive/share) — a last-resort literal, not a
+ * verified anchor.
+ */
+function findExistingAncestorRealpath(bp: string): string {
+  const resolvedInput = path.resolve(bp);
+  const tail: string[] = [];
+  let probe = resolvedInput;
+  for (;;) {
+    try {
+      const realAncestor = fs.realpathSync.native(probe);
+      return tail.length > 0 ? path.join(realAncestor, ...tail) : realAncestor;
+    } catch {
+      const parent = path.dirname(probe);
+      if (parent === probe) return resolvedInput; // walked to the fs root; nothing resolves at all
+      tail.unshift(path.basename(probe));
+      probe = parent;
+    }
   }
-  return process.platform === "win32" ? real.toLowerCase() : real;
+}
+
+/**
+ * Resolve the git TOPLEVEL for `bp` — walk UP from the nearest existing ancestor's realpath (see
+ * {@link findExistingAncestorRealpath}) looking for the nearest ancestor (inclusive) that contains a
+ * `.git` entry, a directory for an ordinary repo or a FILE for a linked worktree/submodule (its mere
+ * presence marks the enclosing directory as a git root; what the pointer inside it says doesn't matter
+ * here — see {@link canonicalRepoLockKey}'s own doc for why).
+ *
+ * Returns the existence-independent realpath, UNCHANGED, when no `.git` is found anywhere up to the
+ * filesystem root — `bp` isn't inside a git repo at all (a vault-only project's bound path, a not-yet-
+ * `git init`'d directory, a test fixture) — the same case {@link canonicalRepoLockKey} already fell back
+ * to before this existed.
+ *
+ * @decision 7673d096 — SYNCHRONOUS, no subprocess: never thread GIT_DIR/GIT_CEILING_DIRECTORIES/
+ * safe.directory through here, and never add a cache without re-reading the record first.
+ *
+ * Full record: docs/decisions/7673d096-sync-toplevel-walk-for-the-canonical-lock-key.md
+ */
+export function resolveGitToplevelSync(bp: string): string {
+  const real = findExistingAncestorRealpath(bp);
+  let dir = real;
+  for (;;) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir; // a directory (ordinary repo) or a FILE (worktree/submodule pointer)
+    const parent = path.dirname(dir);
+    if (parent === dir) return real; // reached the filesystem root — not inside any repo; fall back to the input
+    dir = parent;
+  }
+}
+
+/**
+ * True iff `bp` ITSELF currently resolves via realpath — used ONLY to gate a boot-time quarantine-latch
+ * MIGRATION decision (merge-quarantine.ts): never trust a freshly-computed key enough to migrate/destroy a
+ * durable latch when the registered path itself can't currently be verified (an unmounted drive, a
+ * not-yet-synced cloud folder) — even though {@link resolveGitToplevelSync} may still compute a STABLE key
+ * for it via the nearest-existing-ancestor walk above.
+ *
+ * @decision 7673d096 — never swap this for an ancestor-existence check — the reviewed bug is specifically
+ * about `bp` itself being momentarily absent while an ancestor (and `C:\`/`/` itself) still resolves, which
+ * would make an ancestor-existence check pass in virtually every real case and protect nothing.
+ */
+export function isRepoPathCurrentlyResolvable(bp: string): boolean {
+  try { fs.realpathSync.native(bp); return true; } catch { return false; }
+}
+
+/** Canonicalize a repo path for lock-keying — two spellings of the same physical directory, OR two
+ *  different paths inside the SAME physical repo (e.g. a project bound to a subdirectory with no `.git`
+ *  of its own), must map to the SAME key. See {@link resolveGitToplevelSync} for the toplevel walk this
+ *  delegates to and the full rationale. */
+export function canonicalRepoLockKey(repoPath: string): string {
+  const toplevel = resolveGitToplevelSync(repoPath);
+  return process.platform === "win32" ? toplevel.toLowerCase() : toplevel;
 }
 
 /**

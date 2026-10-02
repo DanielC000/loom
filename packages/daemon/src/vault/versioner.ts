@@ -10,6 +10,7 @@ import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
 import { withTimeout, boundedSimpleGit, localReadGitEnv } from "../git/bounded.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
+import { resolveGitToplevelSync } from "../git/repo-lock.js";
 
 /** Generic, non-personal identity used ONLY when the host has no git identity configured at all. */
 const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
@@ -633,9 +634,29 @@ const PAUSE_LEASE_FILENAME = "loom-vault-pause.json";
  * write or read, so the caller must skip it rather than create a nested `.git` directory that would
  * make a non-repo path look like a repo to `isGitRepo`-style checks and worktree cleanup (card 40dd6b62).
  * Never creates anything — pure resolution, same shape as `skills/inject.ts`'s `resolveGitCommonDir`.
+ *
+ * Resolves `commitPath` to its git TOPLEVEL first (`resolveGitToplevelSync`, shared with
+ * `canonicalRepoLockKey`), rather than statting `<commitPath>/.git` directly: a GitWriter op's own
+ * `pauseVaultAutoCommit(this.repoPath)` passes the project's BOUND path, which for a subdir-bound project
+ * (no `.git` of its own) used to resolve to nothing here — the pause silently no-opped — while
+ * `VaultVersioner`'s own tick checks the lease at the resolved TOPLEVEL root. Walking up first means both
+ * sides land on the SAME `.git`.
+ *
+ * KNOWN, ACCEPTED TRADEOFF: `commitPath` need not itself be inside any repo at all — if it happens to sit
+ * nested under some UNRELATED ancestor directory that IS a git repo (a dotfiles-managed home directory, an
+ * accidental `git init` somewhere up the tree), this now resolves to THAT ancestor's `.git` instead of
+ * `null`, and a pause lease can land in a repo that has nothing to do with this vault. Not guarded against:
+ * distinguishing "the intended enclosing repo" from "a coincidental unrelated ancestor" isn't resolvable
+ * from filesystem structure alone, and the failure mode is a harmless stray lease FILE in that repo's own
+ * `.git` — never a corruption of its history. The case this function exists for — a subdir genuinely
+ * inside the SAME physical repo as its vault's toplevel — is unaffected.
+ *
+ * @decision 7673d096 — never stat `<commitPath>/.git` directly here again; always resolve the toplevel
+ * first, or this function silently no-ops for a subdir-bound repoPath.
  */
 function resolveLeaseGitDir(commitPath: string): string | null {
-  const gitPath = path.join(commitPath, ".git");
+  const toplevel = resolveGitToplevelSync(commitPath);
+  const gitPath = path.join(toplevel, ".git");
   let stat: fs.Stats;
   try { stat = fs.statSync(gitPath); } catch { return null; } // no .git at all — not a repo, nothing to pause
   if (stat.isDirectory()) return gitPath;
@@ -645,7 +666,7 @@ function resolveLeaseGitDir(commitPath: string): string | null {
   try { pointer = fs.readFileSync(gitPath, "utf8"); } catch { return null; }
   const m = pointer.match(/^gitdir:\s*(.+?)\s*$/m);
   if (!m || !m[1]) return null; // not the worktree .git file shape we expect
-  const privateDir = path.resolve(commitPath, m[1]);
+  const privateDir = path.resolve(toplevel, m[1]);
   return fs.existsSync(privateDir) ? privateDir : null;
 }
 

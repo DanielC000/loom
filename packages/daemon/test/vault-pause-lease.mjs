@@ -4,6 +4,18 @@
 // (skips commit/flushSync while held, resumes normally once it expires or is explicitly lifted) and that
 // the lease file itself never pollutes vault history or spuriously wakes the watcher. Claude-free, no
 // network, no real timers (drives commit()/flushSync() directly rather than waiting on the debounce).
+//
+// SCENARIO 9 (card 7673d096): `resolveLeaseGitDir` (vault/versioner.ts) used to stat `<commitPath>/.git`
+// DIRECTLY, no upward search. A GitWriter op's own `pauseVaultAutoCommit(this.repoPath)` passes the
+// project's BOUND path — for a project bound to a SUBDIRECTORY with no `.git` of its own, that call
+// silently no-opped (nothing to pause — "no git dir at all"), while `VaultVersioner`'s own tick checks the
+// lease at the resolved TOPLEVEL root. So the auto-committer was NEVER actually paused during a
+// subdir-bound GitWriter op. `resolveLeaseGitDir` now resolves to the git toplevel first
+// (`resolveGitToplevelSync`, shared with `canonicalRepoLockKey`), so both sides land on the same `.git`.
+// RED on pre-fix code (verified manually during development by reverting `resolveLeaseGitDir` to its
+// pre-fix direct-stat form, rebuilding, and re-running this file — the pause was a silent no-op and the
+// edit committed anyway) — GREEN once it resolves the toplevel first.
+//
 // Run after build: node test/vault-pause-lease.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -131,6 +143,50 @@ const git = (...args) => execFileSync("git", args, { cwd: root, stdio: ["ignore"
     "B's own-token resume lifts the pause — the pending edit now commits (6 commits)",
     git("log", "--oneline").trim().split("\n").length === 6,
   );
+
+  await versioner.stop();
+}
+
+// 9. Card 7673d096 — a GitWriter op bound to a SUBDIRECTORY of the vault's own repo (no `.git` of its
+// own) must still actually pause the TOPLEVEL's auto-committer — not silently no-op.
+{
+  const topRoot = fs.realpathSync(mkdtempManaged("loom-vault-pause-subdir-"));
+  const subdir = path.join(topRoot, "teamA");
+  fs.mkdirSync(subdir);
+  const gitTop = (...args) => execFileSync("git", args, { cwd: topRoot, stdio: ["ignore", "pipe", "pipe"] }).toString();
+  gitTop("init");
+  gitTop("config", "user.email", "loom-test@example.com");
+  gitTop("config", "user.name", "loom-test");
+  fs.writeFileSync(path.join(topRoot, "base.md"), "# base\n");
+  gitTop("add", ".");
+  gitTop("commit", "-m", "base");
+  check("subdir fixture: subdir has NO .git of its own", !fs.existsSync(path.join(subdir, ".git")));
+
+  const versioner = new VaultVersioner(topRoot);
+  await versioner.start();
+  check("versioner resolved commitRoot to the TOPLEVEL (not the subdir)", versioner.commitRoot === topRoot);
+
+  // Pause via the SUBDIR path — exactly what a subdir-bound project's GitWriter op does
+  // (`pauseVaultAutoCommit(this.repoPath)`).
+  const subdirToken = pauseVaultAutoCommit(subdir, 60_000);
+  check(
+    "THE BUG: pre-fix, pausing via a subdir with no own .git silently no-opped — the lease now lands at the TOPLEVEL's .git",
+    fs.existsSync(path.join(topRoot, ".git", "loom-vault-pause.json")),
+  );
+
+  fs.writeFileSync(path.join(topRoot, "doc-subdir-pause.md"), "# edit during subdir-keyed pause\n");
+  await versioner.commit();
+  check(
+    "THE BUG: pre-fix, the auto-committer was NEVER actually paused by a subdir-keyed call — now commit() is a genuine no-op",
+    gitTop("log", "--oneline").trim().split("\n").length === 1,
+  );
+  check("paused via subdir: the edit sits staged/untracked, not committed", gitTop("status", "--porcelain").includes("doc-subdir-pause.md"));
+
+  // Resume, also via the subdir path — must lift the SAME toplevel lease, not create a second one.
+  resumeVaultAutoCommit(subdir, subdirToken);
+  check("resume via subdir: the toplevel's lease file is gone", !fs.existsSync(path.join(topRoot, ".git", "loom-vault-pause.json")));
+  await versioner.commit();
+  check("resumed via subdir: the previously-paused edit now commits", gitTop("log", "--oneline").trim().split("\n").length === 2);
 
   await versioner.stop();
 }
