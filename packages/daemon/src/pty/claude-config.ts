@@ -98,10 +98,11 @@ function readCfg(claudeJson: string): ClaudeCfg {
   try { return JSON.parse(fs.readFileSync(claudeJson, "utf8")); } catch { return {}; }
 }
 
-/** True iff `key`'s project entry already carries both trust flags. */
+// @decision 17237fba — only check `hasTrustDialogAccepted`; `hasCompletedProjectOnboarding` is stripped
+// from every project entry by the CLI itself on every save, so requiring it made this fast path dead.
 function isTrusted(cfg: ClaudeCfg, key: string): boolean {
   const e = cfg.projects?.[key];
-  return e?.hasTrustDialogAccepted === true && e?.hasCompletedProjectOnboarding === true;
+  return e?.hasTrustDialogAccepted === true;
 }
 
 /**
@@ -132,10 +133,17 @@ export function __setGitMainCheckoutRootResolverForTest(fn?: GitMainCheckoutRoot
  * (`canonicalRootByRoot`/`yIe()` in its bundle) reads for `dir` — the canonical git root: for a LINKED
  * WORKTREE, the MAIN checkout, never the worktree's own path (see
  * {@link resolveGitMainCheckoutRootSync}); for a non-git `dir`, `dir` itself (the CLI's own `?? cwd`
- * fallback). Normalized identically to the plain worktree `key` computed in `ensureTrusted` below
- * (`path.resolve` + forward slashes, NO case-folding) — verified against a real `~/.claude.json`: the
- * CLI's own written entries preserve `path.resolve`'s drive-letter casing verbatim, so case-folding here
- * would mint a key the CLI never reads.
+ * fallback, normalized the same `path.resolve` + forward-slashes way as the plain worktree `key`
+ * computed in `ensureTrusted` below, with NO case-folding — matching the CLI's own written entries,
+ * which preserve `path.resolve`'s drive-letter casing verbatim for a non-worktree cwd).
+ *
+ * ⚠️ CASING CAVEAT (e789ef3b review Minor 1, unresolved — card 17237fba): for a GIT `dir`, the value
+ * above instead comes from {@link resolveGitMainCheckoutRootSync}'s ancestor walk, which realpaths via
+ * `fs.realpathSync.native` — on Windows this CANONICALIZES drive-letter/8.3 casing, unlike the CLI's own
+ * equivalent resolution, which is casing-preserving. A `repoPath` stored with non-canonical casing (e.g.
+ * `c:\users\...`) can therefore diverge from the key the CLI itself reads, reopening the hang this whole
+ * mechanism exists to close. Measured exposure today: nil (0 of 8852 real keys are lowercase on this
+ * host) — not fixed here; re-measure before relying on that staying true.
  *
  * Bounded + fail-safe for the spawn hot path: the resolver is a handful of synchronous `fs` calls bounded
  * by directory depth (no subprocess). On ANY error escaping it, this falls back to `dir`'s own plain key

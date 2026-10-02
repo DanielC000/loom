@@ -204,6 +204,43 @@ try {
     check("ensureTrusted → pre-existing trusted entry with NO import flags gets the decline written (upgrade path)",
       declinedExternalImport(eiJson, keyFor(upgradeDir)));
 
+    // 5a2. Card 17237fba: isTrusted now checks ONLY hasTrustDialogAccepted (hasCompletedProjectOnboarding
+    // is stripped from every real project entry by the CLI itself on every save, so requiring it made the
+    // fast path dead). Prove that dropping it does NOT skip anything load-bearing: an entry carrying
+    // hasTrustDialogAccepted:true alone (no hasCompletedProjectOnboarding at all — the realistic
+    // CLI-stripped shape, not the old upgradeDir fixture above which still has both legacy flags) and NO
+    // import decision must still reach the lock and get the import decline written.
+    const strippedDir = path.join(eiHome, "stripped");
+    fs.mkdirSync(strippedDir, { recursive: true });
+    ownDirs.push(strippedDir);
+    let cfg5a2 = JSON.parse(fs.readFileSync(eiJson, "utf8"));
+    cfg5a2.projects[keyFor(strippedDir)] = { hasTrustDialogAccepted: true };
+    fs.writeFileSync(eiJson, JSON.stringify(cfg5a2, null, 2));
+    ensureTrusted(strippedDir);
+    const strippedEntry = entryFor(eiJson, keyFor(strippedDir));
+    check("ensureTrusted → trusted-but-onboarding-flag-absent entry still gets the import decline written",
+      declinedExternalImport(eiJson, keyFor(strippedDir)) && strippedEntry?.hasTrustDialogAccepted === true);
+
+    // 5a3. The other half of the same fix: once hasTrustDialogAccepted AND the import decision are BOTH
+    // already present (no hasCompletedProjectOnboarding at all — again the realistic CLI-stripped shape),
+    // the fast path must actually ENGAGE and skip the write entirely (byte-identical re-call, no lock
+    // taken). Under the OLD two-flag isTrusted this fixture could NEVER reach the fast path (onboarding is
+    // never present on a real entry), so it would have rewritten the file on every single call forever —
+    // this is the dead-fast-path perf claim from card 17237fba's own body, proven directly.
+    const fullyStrippedDir = path.join(eiHome, "fully-stripped");
+    fs.mkdirSync(fullyStrippedDir, { recursive: true });
+    ownDirs.push(fullyStrippedDir);
+    let cfg5a3 = JSON.parse(fs.readFileSync(eiJson, "utf8"));
+    cfg5a3.projects[keyFor(fullyStrippedDir)] = {
+      hasTrustDialogAccepted: true,
+      hasClaudeMdExternalIncludesApproved: false, hasClaudeMdExternalIncludesWarningShown: true,
+    };
+    fs.writeFileSync(eiJson, JSON.stringify(cfg5a3, null, 2));
+    const beforeFullyStripped = fs.readFileSync(eiJson);
+    ensureTrusted(fullyStrippedDir);
+    check("ensureTrusted → trusted + import-decided entry with NO onboarding flag is a pure no-op (fast path now engages)",
+      fs.readFileSync(eiJson).equals(beforeFullyStripped));
+
     // 5b. Never overwrite an EXISTING explicit approval — a human clicked "Yes, allow external imports"
     // for their own folder; Loom must never silently revoke that.
     const approvedDir = path.join(eiHome, "approved");
@@ -329,6 +366,97 @@ try {
   } finally {
     __setGitMainCheckoutRootResolverForTest(); // restore the real resolver for any later test
   }
+
+  // 6f. Card 17237fba, review Minor 2: a bare (or --separate-git-dir) repo's common git directory need
+  // not be named ".git" at all. The installed CLI's own equivalent branch (decompiled bundle:
+  // `he(c)!==".git" ? c : dirname(c)`) returns the common dir ITSELF in that case, never its parent —
+  // confirmed with a real `git clone --bare` + `git worktree add` fixture below (git rev-parse
+  // --git-common-dir for the worktree resolves to the bare repo dir, whose basename is "repo.git", not
+  // ".git"). Loom's resolver used to unconditionally return the parent; this proves the fix.
+  const bareRepo = path.join(root, "bare-repo.git");
+  ownDirs.push(bareRepo);
+  execSync(`git clone -q --bare "${giRepo}" "${bareRepo}"`);
+  const bareWt = path.join(root, "bare-wt");
+  ownDirs.push(bareWt);
+  execSync(`git worktree add -q -b bare-wt-branch "${bareWt}" HEAD`, { cwd: bareRepo });
+  const bareCommonDir = execSync(`git rev-parse --git-common-dir`, { cwd: bareWt }).toString().trim();
+  check("bare-repo fixture: git itself reports a common dir whose basename is NOT \".git\"",
+    path.basename(bareCommonDir) !== ".git");
+  ensureTrusted(bareWt);
+  check("bare/--separate-git-dir worktree → the import decline lands under the common dir ITSELF, not its parent",
+    claudeCliProjectKey(bareWt) === keyFor(bareRepo) && declinedExternalImport(giJson, keyFor(bareRepo)));
+
+  // 6g. Corrupt `.git` file: exists, but its content doesn't match the `gitdir: <path>` shape at all
+  // (garbage, truncated, or just empty). Must fall back to the toplevel itself, never throw or skip.
+  const corruptDir = path.join(root, "corrupt-gitfile");
+  fs.mkdirSync(corruptDir, { recursive: true });
+  ownDirs.push(corruptDir);
+  fs.writeFileSync(path.join(corruptDir, ".git"), "not a real gitdir pointer\n");
+  check("corrupt .git file (no gitdir: shape) → claudeCliProjectKey falls back to the toplevel itself",
+    claudeCliProjectKey(corruptDir) === keyFor(corruptDir));
+  ensureTrusted(corruptDir);
+  check("corrupt .git file → ensureTrusted still writes the decline, under the toplevel key",
+    declinedExternalImport(giJson, keyFor(corruptDir)));
+
+  // 6h. Missing `commondir` file inside the private gitdir (the submodule shape — a submodule's own
+  // private dir has no `commondir` file at all). Must fall back to the toplevel itself.
+  const submoduleLikeDir = path.join(root, "submodule-like");
+  fs.mkdirSync(submoduleLikeDir, { recursive: true });
+  ownDirs.push(submoduleLikeDir);
+  const privateDirNoCommondir = path.join(root, "submodule-like-private");
+  fs.mkdirSync(privateDirNoCommondir, { recursive: true }); // deliberately no "commondir" file inside
+  fs.writeFileSync(path.join(submoduleLikeDir, ".git"), `gitdir: ${privateDirNoCommondir}\n`);
+  check("missing commondir file (submodule shape) → claudeCliProjectKey falls back to the toplevel itself",
+    claudeCliProjectKey(submoduleLikeDir) === keyFor(submoduleLikeDir));
+
+  // 6i. Relative gitdir pointer (the shape `git worktree add --relative-paths` would write — not
+  // producible with the git version installed on this host, so simulated by rewriting a REAL worktree's
+  // `.git` file to use a relative path instead of the absolute one git wrote). The resolver must still
+  // land on the correct main checkout: it already resolves via `path.resolve(toplevel, …)`, never assumes
+  // an absolute pointer.
+  const giWtRel = path.join(root, "gitrepo-wt-rel");
+  ownDirs.push(giWtRel);
+  execSync(`git worktree add -q -b e789-wt-rel "${giWtRel}" HEAD`, { cwd: giRepo });
+  const giWtRelGitFile = path.join(giWtRel, ".git");
+  const absGitFileContents = fs.readFileSync(giWtRelGitFile, "utf8");
+  const absPrivateDir = absGitFileContents.trim().replace(/^gitdir:\s*/, "");
+  const relPrivateDir = path.relative(giWtRel, absPrivateDir).replace(/\\/g, "/");
+  // Windows marks a worktree's `.git` file HIDDEN; an in-place writeFileSync (truncate+rewrite) on it
+  // throws EPERM — same reason writeJsonAtomic (claude-config.ts) always replaces via temp+rename rather
+  // than writing in place. Mirror that here instead of writing the file directly.
+  const giWtRelGitFileTmp = `${giWtRelGitFile}.rel-test.tmp`;
+  fs.writeFileSync(giWtRelGitFileTmp, `gitdir: ${relPrivateDir}\n`);
+  fs.renameSync(giWtRelGitFileTmp, giWtRelGitFile);
+  check("relative gitdir pointer (--relative-paths shape) → still resolves to the main checkout's key",
+    claudeCliProjectKey(giWtRel) === giMainKey);
+
+  // 6j. The main checkout root itself, AND a subdirectory of it with no `.git` of its own, both converge
+  // on the SAME canonical key for the import decline — using a FRESH repo so this doesn't inherit giJson's
+  // accumulated state from the scenarios above. Calling ensureTrusted directly on the main checkout root
+  // (key === canonicalKey there) lands trust + decline in ONE entry; a sibling subdirectory resolves its
+  // OWN canonical key to that same toplevel entry.
+  const convergeRepo = path.join(root, "converge-repo");
+  fs.mkdirSync(convergeRepo, { recursive: true });
+  ownDirs.push(convergeRepo);
+  execSync(`git init -q && git config user.email c@c && git config user.name c && git commit -q -m init --allow-empty`, { cwd: convergeRepo });
+  const convergeSubdir = path.join(convergeRepo, "sub", "dir");
+  fs.mkdirSync(convergeSubdir, { recursive: true });
+  check("main checkout's own subdir → claudeCliProjectKey resolves UP to the same toplevel key",
+    claudeCliProjectKey(convergeSubdir) === keyFor(convergeRepo));
+  ensureTrusted(convergeRepo);
+  check("main checkout itself → trust + decline land in ONE entry (key === canonicalKey)",
+    trusted(giJson, keyFor(convergeRepo)) && declinedExternalImport(giJson, keyFor(convergeRepo)));
+  // The subdir's OWN trust key is still unkeyed (trust/MCP keying is per-cwd, unchanged by this card) —
+  // its call still writes trust under its own key, but must NOT re-touch or duplicate the decline already
+  // settled on the shared canonical entry above.
+  const convergeMainEntryBefore = JSON.stringify(entryFor(giJson, keyFor(convergeRepo)));
+  ensureTrusted(convergeSubdir);
+  check("a subdir of the same repo → gets its OWN trust entry (per-cwd keying, unchanged by this card)",
+    trusted(giJson, keyFor(convergeSubdir)));
+  check("a subdir of the same repo → does NOT also carry the import flags (those stay on the shared canonical entry)",
+    !("hasClaudeMdExternalIncludesWarningShown" in (entryFor(giJson, keyFor(convergeSubdir)) ?? {})));
+  check("a subdir of the same repo → the shared canonical (main-checkout) entry is left byte-unchanged",
+    JSON.stringify(entryFor(giJson, keyFor(convergeRepo))) === convergeMainEntryBefore);
 } finally {
   restoreEnv();
   fs.rmSync(root, { recursive: true, force: true });

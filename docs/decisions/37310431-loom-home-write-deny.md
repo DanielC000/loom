@@ -484,14 +484,20 @@ worker hang.
 `resolveGitMainCheckoutRootSync` (`git/repo-lock.ts`) walks the SAME synchronous, no-subprocess ancestor
 walk `resolveGitToplevelSync` already uses (@decision 7673d096's constraints apply here too), then, for a
 linked worktree (its `.git` is a FILE), follows the `gitdir:` pointer to the private worktree dir and that
-dir's `commondir` file (mirroring `git rev-parse --git-common-dir`) to the shared common `.git`, returning
-ITS PARENT — the main checkout. A non-git `dir` returns `null`, and `claudeCliProjectKey` falls back to
-the PLAIN `path.resolve` key in that case (the CLI's own `?? cwd`), with NO case-folding (verified against
-the real `~/.claude.json`: the CLI preserves `path.resolve`'s drive-letter casing verbatim). `ensureTrusted`
-now writes the decline under this canonical key, while trust + the per-project MCP-enable prompt stay
-keyed at the plain worktree path exactly as before (card `17237fba` owns revisiting THAT keying
-separately — out of scope here). On ANY error escaping the resolver, `claudeCliProjectKey` falls back to
-the plain key too — the protection is never silently skipped just because canonical-root resolution failed.
+dir's `commondir` file (mirroring `git rev-parse --git-common-dir`) to the shared common `.git` — returning
+ITS PARENT when that common dir's basename is `.git` (the ordinary layout), or the common dir ITSELF
+otherwise (a bare/`--separate-git-dir` repo, whose common dir need not be named `.git` at all — this
+mirrors the CLI's own `he(c)!==".git"` branch, confirmed by the same bundle decompilation; card `17237fba`
+fixed Loom's resolver to match after it was found unconditionally returning the parent). A non-git `dir`
+returns `null`, and `claudeCliProjectKey` falls back to the PLAIN `path.resolve` key in that case (the
+CLI's own `?? cwd`), with NO case-folding there. **⚠️ For a GIT `dir`, this is NOT true**: the ancestor walk
+realpaths via `fs.realpathSync.native`, which canonicalizes drive-letter/8.3 casing on Windows, unlike the
+CLI's own casing-preserving resolution — a real, unresolved divergence (card `17237fba`'s review Minor 1),
+measured nil exposure today (0 of 8852 real keys lowercase) but not fixed. `ensureTrusted` now writes the
+decline under this canonical key, while trust + the per-project MCP-enable prompt stay keyed at the plain
+worktree path exactly as before (card `17237fba` owns revisiting THAT keying separately — out of scope
+here). On ANY error escaping the resolver, `claudeCliProjectKey` falls back to the plain key too — the
+protection is never silently skipped just because canonical-root resolution failed.
 
 Re-verify `canonicalRootByRoot`'s resolution mechanism after any `claude` CLI upgrade — like every other
 key in this section, it was discovered by decompilation, not documented.

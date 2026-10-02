@@ -116,11 +116,20 @@ export function canonicalRepoLockKey(repoPath: string): string {
  * it is a FILE (a linked worktree or submodule pointer, `gitdir: <path>`), follow it to its own private
  * dir and that dir's `commondir` file (mirrors `git rev-parse --git-common-dir`, same resolution
  * `skills/inject.ts`'s local `resolveGitCommonDir` already performs for a different purpose) to the shared
- * common `.git` DIRECTORY, and return ITS PARENT — the main checkout. Any failure following that
- * indirection (malformed pointer, missing/unreadable `commondir` — e.g. a submodule, which has no
- * `commondir` file at all) falls back to the toplevel itself rather than throwing; a caller on the spawn
- * hot path (`claudeCliProjectKey` in `pty/claude-config.ts`) must still fall back further, to its own
- * plain non-git key, on any error escaping this function entirely.
+ * common `.git` path. If that common path's basename IS `.git`, return ITS PARENT (the ordinary
+ * `<repo>/.git/worktrees/<name>` layout) — otherwise return the common path ITSELF (a bare repo or a
+ * `--separate-git-dir` repo, whose git directory can be named anything). This mirrors the installed
+ * `claude` CLI's own equivalent branch (`he(c)!==".git" ? c : dirname(c)` in its decompiled bundle — card
+ * `17237fba`, which fixed this function after finding it unconditionally returned the parent instead);
+ * see docs/decisions/37310431-loom-home-write-deny.md § "ROUND 2 FIX" for the citation. The CLI's own walk
+ * additionally verifies the private worktree dir sits directly under `<commondir>/worktrees` and that its
+ * own `gitdir` file points back to this exact `.git` file before trusting the indirection at all — this
+ * function does not replicate that structural cross-check; a layout that fails it is not specially
+ * detected here, unlike in the CLI. Any failure following the indirection (malformed pointer,
+ * missing/unreadable `commondir` — e.g. a submodule, which has no `commondir` file at all) falls back to
+ * the toplevel itself rather than throwing; a caller on the spawn hot path (`claudeCliProjectKey` in
+ * `pty/claude-config.ts`) must still fall back further, to its own plain non-git key, on any error
+ * escaping this function entirely.
  *
  * SYNCHRONOUS, no subprocess — same posture as {@link resolveGitToplevelSync}: never thread
  * GIT_DIR/GIT_CEILING_DIRECTORIES/safe.directory through here, and never add a cache without re-reading
@@ -144,7 +153,7 @@ export function resolveGitMainCheckoutRootSync(bp: string): string | null {
   try { commondirRaw = fs.readFileSync(path.join(privateDir, "commondir"), "utf8").trim(); }
   catch { return toplevel; } // e.g. a submodule pointer — no commondir file; fall back to its own toplevel
   const commonDir = path.resolve(privateDir, commondirRaw);
-  return path.dirname(commonDir);
+  return path.basename(commonDir) === ".git" ? path.dirname(commonDir) : commonDir;
 }
 
 /**
