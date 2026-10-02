@@ -15,7 +15,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ensureTrusted, discoverProjectMcpServerNames } from "../dist/pty/claude-config.js";
+import { execSync } from "node:child_process";
+import {
+  ensureTrusted, discoverProjectMcpServerNames, claudeCliProjectKey,
+  __setGitMainCheckoutRootResolverForTest,
+} from "../dist/pty/claude-config.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -25,6 +29,10 @@ const entryFor = (cfgPath, key) => JSON.parse(fs.readFileSync(cfgPath, "utf8")).
 const trusted = (cfgPath, key) => {
   const e = entryFor(cfgPath, key);
   return e?.hasTrustDialogAccepted === true && e?.hasCompletedProjectOnboarding === true;
+};
+const declinedExternalImport = (cfgPath, key) => {
+  const e = entryFor(cfgPath, key);
+  return e?.hasClaudeMdExternalIncludesApproved === false && e?.hasClaudeMdExternalIncludesWarningShown === true;
 };
 const noTmpLeft = (dir) => fs.readdirSync(dir).every((f) => !f.includes(".loom.tmp"));
 
@@ -61,10 +69,13 @@ try {
   ensureTrusted(projA);
   check("CLAUDE_CONFIG_DIR set → trust written to <dir>/.claude.json", fs.existsSync(isoJson) && trusted(isoJson, keyFor(projA)));
   check("CLAUDE_CONFIG_DIR set → atomic temp file cleaned up (no .loom.tmp left)", noTmpLeft(configDir));
+  check("CLAUDE_CONFIG_DIR set → a fresh (undecided) entry gets the external-import dialog declined",
+    declinedExternalImport(isoJson, keyFor(projA)));
 
   // idempotent: already-trusted dir is a no-op and stays trusted
   ensureTrusted(projA);
   check("CLAUDE_CONFIG_DIR set → idempotent re-call keeps it trusted", trusted(isoJson, keyFor(projA)));
+  check("CLAUDE_CONFIG_DIR set → idempotent re-call keeps the external-import decline", declinedExternalImport(isoJson, keyFor(projA)));
 
   // a second project lands its own entry; both coexist, still no temp leftover (unique-suffix
   // temp name — fast-follow #3 — means concurrent calls can't collide on a shared .loom.tmp).
@@ -164,6 +175,159 @@ try {
     }
   } else {
     console.log("SKIP  mcp-prevention — os.homedir() not redirectable here; not risking the real file");
+  }
+
+  // === 5. External-import dialog (card e789ef3b): decline ONLY when genuinely undecided; NEVER
+  // overwrite an existing decision (ours or a human's own interactive `claude` run); and a
+  // pre-existing trusted entry with no import flags at all (the upgrade-path case — an older Loom
+  // build, or a human's own prior trust-only run) gets the decline written on its next ensureTrusted
+  // call, not skipped by the fast path. ===
+  const eiHome = path.join(root, "eihome");
+  fs.mkdirSync(eiHome, { recursive: true });
+  process.env.USERPROFILE = eiHome; process.env.HOME = eiHome;
+  if (os.homedir() === eiHome) {
+    const eiCfgDir = path.join(root, "eiconfig");
+    fs.mkdirSync(eiCfgDir, { recursive: true });
+    process.env.CLAUDE_CONFIG_DIR = eiCfgDir;
+    const eiJson = path.join(eiCfgDir, ".claude.json");
+
+    // 5a. Upgrade path: an entry already trusted by an OLDER Loom build (hasTrustDialogAccepted:true,
+    // no import flags at all) still gets the decline written on the next ensureTrusted call — the
+    // pre-fix `isTrusted`-only fast path would have wrongly treated this as "nothing to do".
+    const upgradeDir = path.join(eiHome, "upgrade");
+    fs.mkdirSync(upgradeDir, { recursive: true });
+    ownDirs.push(upgradeDir);
+    fs.writeFileSync(eiJson, JSON.stringify({
+      projects: { [keyFor(upgradeDir)]: { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true } },
+    }));
+    ensureTrusted(upgradeDir);
+    check("ensureTrusted → pre-existing trusted entry with NO import flags gets the decline written (upgrade path)",
+      declinedExternalImport(eiJson, keyFor(upgradeDir)));
+
+    // 5b. Never overwrite an EXISTING explicit approval — a human clicked "Yes, allow external imports"
+    // for their own folder; Loom must never silently revoke that.
+    const approvedDir = path.join(eiHome, "approved");
+    fs.mkdirSync(approvedDir, { recursive: true });
+    ownDirs.push(approvedDir);
+    let cfg5 = JSON.parse(fs.readFileSync(eiJson, "utf8"));
+    cfg5.projects[keyFor(approvedDir)] = {
+      hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true,
+      hasClaudeMdExternalIncludesApproved: true, hasClaudeMdExternalIncludesWarningShown: true,
+    };
+    fs.writeFileSync(eiJson, JSON.stringify(cfg5, null, 2));
+    const beforeApproved = fs.readFileSync(eiJson);
+    ensureTrusted(approvedDir);
+    const approvedEntry = entryFor(eiJson, keyFor(approvedDir));
+    check("ensureTrusted → an EXISTING explicit approval is left untouched, never overwritten",
+      approvedEntry?.hasClaudeMdExternalIncludesApproved === true && fs.readFileSync(eiJson).equals(beforeApproved));
+
+    // 5c. Never overwrite an EXISTING explicit decline either — idempotent, byte-identical re-call.
+    const declinedDir = path.join(eiHome, "declined");
+    fs.mkdirSync(declinedDir, { recursive: true });
+    ownDirs.push(declinedDir);
+    ensureTrusted(declinedDir); // writes the decline fresh
+    check("ensureTrusted → a fresh entry in this sub-scenario is declined too", declinedExternalImport(eiJson, keyFor(declinedDir)));
+    const beforeDeclined = fs.readFileSync(eiJson);
+    ensureTrusted(declinedDir); // re-call: already decided → must be a pure no-op
+    check("ensureTrusted → an EXISTING explicit decline is left untouched (byte-identical re-call)",
+      fs.readFileSync(eiJson).equals(beforeDeclined));
+  } else {
+    console.log("SKIP  external-import decline — os.homedir() not redirectable here; not risking the real file");
+  }
+
+  // === 6. Round-2 canonical-git-root keying (card e789ef3b, round 2): the installed `claude` CLI reads
+  // the external-import dialog's decision from the CANONICAL git root (for a linked worktree, the MAIN
+  // checkout), not path.resolve(cwd) — so the decline must land under THAT key, never the worktree's own
+  // path, while trust/MCP keep their existing (unchanged) worktree-path keying. ===
+  const giCfgDir = path.join(root, "giconfig");
+  fs.mkdirSync(giCfgDir, { recursive: true });
+  process.env.CLAUDE_CONFIG_DIR = giCfgDir;
+  const giJson = path.join(giCfgDir, ".claude.json");
+
+  const giRepo = path.join(root, "gitrepo-main");
+  fs.mkdirSync(giRepo, { recursive: true });
+  ownDirs.push(giRepo);
+  execSync(`git init -q && git config user.email e789@loom && git config user.name e789 && git commit -q -m init --allow-empty`, { cwd: giRepo });
+
+  const giWt = path.join(root, "gitrepo-wt-a");
+  ownDirs.push(giWt);
+  execSync(`git worktree add -q -b e789-wt-a "${giWt}" HEAD`, { cwd: giRepo });
+  // Ground truth for "the main checkout's key" — derived from git itself (git rev-parse
+  // --git-common-dir's PARENT), never assumed to equal `giRepo`'s own plain spelling.
+  const giCommonDir = execSync(`git rev-parse --git-common-dir`, { cwd: giWt }).toString().trim();
+  const giMainKey = keyFor(path.dirname(giCommonDir));
+
+  // 6a. A fresh linked worktree: trust/MCP land under the WORKTREE's own key (unchanged); the
+  // external-import decline lands under the MAIN CHECKOUT's key instead — NOT the worktree's key.
+  ensureTrusted(giWt);
+  check("linked worktree → trust still written under the worktree's OWN key",
+    trusted(giJson, keyFor(giWt)));
+  check("linked worktree → the worktree's OWN key does NOT carry the import decline (moved off it)",
+    !("hasClaudeMdExternalIncludesWarningShown" in (entryFor(giJson, keyFor(giWt)) ?? {})));
+  check("linked worktree → the import decline lands under the MAIN CHECKOUT's canonical key",
+    declinedExternalImport(giJson, giMainKey));
+  check("linked worktree → the main checkout's entry does NOT also get trust fields from this call",
+    !("hasTrustDialogAccepted" in (entryFor(giJson, giMainKey) ?? {})));
+  check("claudeCliProjectKey(worktree) resolves to the main checkout's key, not the worktree's own path",
+    claudeCliProjectKey(giWt) === giMainKey && claudeCliProjectKey(giWt) !== keyFor(giWt));
+
+  // 6b. An EXISTING human decision already recorded under the main checkout's canonical key (e.g. the
+  // owner's own interactive `claude` run at the repo root) must be left untouched by a worktree spawn —
+  // never silently revoked just because a second linked worktree happens to be undecided itself.
+  const giWt2 = path.join(root, "gitrepo-wt-b");
+  ownDirs.push(giWt2);
+  execSync(`git worktree add -q -b e789-wt-b "${giWt2}" HEAD`, { cwd: giRepo });
+  let cfg6b = JSON.parse(fs.readFileSync(giJson, "utf8"));
+  cfg6b.projects[giMainKey] = {
+    hasClaudeMdExternalIncludesApproved: true, hasClaudeMdExternalIncludesWarningShown: true,
+  };
+  fs.writeFileSync(giJson, JSON.stringify(cfg6b, null, 2));
+  ensureTrusted(giWt2);
+  const giMainEntryAfter = entryFor(giJson, giMainKey);
+  check("second linked worktree → an EXISTING human approval on the main checkout's key is untouched",
+    giMainEntryAfter?.hasClaudeMdExternalIncludesApproved === true);
+  check("second linked worktree → its OWN key still gets trusted independently",
+    trusted(giJson, keyFor(giWt2)));
+
+  // 6c. The reviewer's missing case (Code Review round 1): an entry that already carries an explicit
+  // Approved:true but has NOT YET been trusted (no hasCompletedProjectOnboarding) must keep Approved:true
+  // after ensureTrusted ALSO trusts it — the merge must never drop a prior decision while adding trust.
+  const partialDir = path.join(root, "partial-approved");
+  fs.mkdirSync(partialDir, { recursive: true });
+  ownDirs.push(partialDir);
+  let cfg6c = JSON.parse(fs.readFileSync(giJson, "utf8"));
+  cfg6c.projects[keyFor(partialDir)] = {
+    hasClaudeMdExternalIncludesApproved: true, hasClaudeMdExternalIncludesWarningShown: true,
+  };
+  fs.writeFileSync(giJson, JSON.stringify(cfg6c, null, 2));
+  ensureTrusted(partialDir);
+  const partialEntry = entryFor(giJson, keyFor(partialDir));
+  check("Approved:true WITHOUT hasCompletedProjectOnboarding is preserved, and trust is added on top",
+    partialEntry?.hasClaudeMdExternalIncludesApproved === true
+    && partialEntry?.hasTrustDialogAccepted === true
+    && partialEntry?.hasCompletedProjectOnboarding === true);
+
+  // 6d. Non-git cwd: claudeCliProjectKey degenerates to the plain resolved key (the CLI's own `?? cwd`
+  // fallback) — same key ensureTrusted already uses for trust/MCP, so decline+trust land in ONE entry.
+  const nonGitDir = path.join(root, "nongit-check");
+  fs.mkdirSync(nonGitDir, { recursive: true });
+  ownDirs.push(nonGitDir);
+  check("non-git cwd → claudeCliProjectKey equals the plain resolved key",
+    claudeCliProjectKey(nonGitDir) === keyFor(nonGitDir));
+
+  // 6e. Git-root-resolver failure (a malformed worktree, an unreadable commondir, or anything else
+  // escaping resolveGitMainCheckoutRootSync) must NEVER skip the protection — it falls back to the plain
+  // cwd key and the decline is still written there.
+  const fallbackDir = path.join(root, "fallback-dir");
+  fs.mkdirSync(fallbackDir, { recursive: true });
+  ownDirs.push(fallbackDir);
+  __setGitMainCheckoutRootResolverForTest(() => { throw new Error("simulated resolver failure"); });
+  try {
+    ensureTrusted(fallbackDir);
+    check("resolver failure → decline is still written, under the plain cwd key (never skipped)",
+      declinedExternalImport(giJson, keyFor(fallbackDir)) && trusted(giJson, keyFor(fallbackDir)));
+  } finally {
+    __setGitMainCheckoutRootResolverForTest(); // restore the real resolver for any later test
   }
 } finally {
   restoreEnv();

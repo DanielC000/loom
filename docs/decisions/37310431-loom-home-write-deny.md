@@ -408,13 +408,102 @@ just an attacker, to contain) an external `@import` can wedge that spawn indefin
 `worker_report`/`done`/`blocked`, nothing — it just sits there consuming a concurrency slot until a human
 notices and hard-kills it. This is a genuine availability risk, not merely a theoretical one.
 
-**Proposed fix (NOT built here — card `b180791a`'s own DoD is measure-and-report, not implement):**
-pre-decide this dialog the same way `ensureTrusted` already pre-decides the other two — once a follow-up
-investigation identifies the actual persisted-decision key(s) `~/.claude.json`'s project entry uses once a
-human answers the dialog once (by observing a real interactive accept/decline and diffing the config,
-the same technique `disabledMcpjsonServers` discovery already used). Until that lands, this is an open
-availability gap, not a registry gap — tracked here, not re-opened as a new card by this note (file a new
-one if picking this up later; do not silently fix it as a drive-by).
+**Fixed by card `e789ef3b`** — see the "FIXED (card `e789ef3b`)" section immediately below for the
+discovered key names, the two read sites, and the never-overwrite rule. (This paragraph used to describe
+the fix as not-yet-built; it is built as of that card.)
+
+### FIXED (card `e789ef3b`): the external-import dialog is now pre-decided — DECLINE, only when undecided
+
+The persisted-decision key(s) `~/.claude.json`'s project entry uses for this dialog, discovered by
+**static decompilation of the installed CLI's own bundle** (claude-cli `2.1.287`, Windows — the same
+version `b180791a` measured against) — NOT by answering the dialog interactively (no real dialog was
+answered; the bundle's own un-mangled property names and a default/empty-project-entry literal gave an
+unambiguous, citable answer without needing to). No documented schema exists for these keys; re-check
+on a future CLI upgrade, same posture as every other reverse-engineered `.claude.json` key in this file.
+
+**The keys**, in the per-project entry `hasTrustDialogAccepted` already lives in:
+- `hasClaudeMdExternalIncludesApproved` (boolean) — the actual choice. `true` = "Yes, allow external
+  imports"; `false` = "No, disable external imports".
+- `hasClaudeMdExternalIncludesWarningShown` (boolean) — set to `true` on EITHER answer.
+
+**Two distinct read sites — do not conflate them:**
+1. Whether the dialog RE-APPEARS: the CLI's own re-show check reads `Approved || WarningShown` — skips
+   showing it again once EITHER flag is true, regardless of which way it was decided.
+2. Whether external-import CONTENT actually LOADS: a separate site (the memory-file loader) gates
+   purely on `Approved` — `false` means external imports are structurally never read into context. This
+   is what makes writing `Approved:false` genuinely fail-closed, not merely "dialog silenced."
+
+**The fix**: `ensureTrusted` writes `{hasClaudeMdExternalIncludesApproved:false,
+hasClaudeMdExternalIncludesWarningShown:true}` — the same shape "No, disable external imports" persists
+interactively — but **only into a GENUINELY UNDECIDED entry** (`isExternalImportDecided` in
+`claude-config.ts`: neither flag already `true`). A plain/human session and the owner's own interactive
+`claude` runs share these SAME project entries, so an entry that already carries an explicit approval or
+an existing decline (ours or a human's) is left untouched — Loom never revokes a human's own decision for
+their own folder. A fresh worker worktree's entry is always undecided, so it is always declined.
+
+**The upgrade-path case**: `isFullyDecided`/`isTrusted`'s fast path now ALSO requires
+`isExternalImportDecided`, not just `hasTrustDialogAccepted` — so a project entry that was already
+trusted by an OLDER Loom build (no import flags at all) is no longer treated as "nothing to do"; its next
+`ensureTrusted` call reaches the lock and writes the decline. Before this, such a pre-existing entry would
+have passed the old `isTrusted`-only fast path and never gotten the new keys, leaving the hang open for
+every project that was already trusted before this fix shipped.
+
+**⚠️ Round 1's keying claim above was WRONG for a linked worktree — corrected by round 2 immediately
+below.** Round 1 wrote the decline into `key = path.resolve(dir).replace(/\\/g,"/")`, the SAME entry
+`hasTrustDialogAccepted` lives in — true for a non-worktree cwd, but for a Loom worker (always a linked
+git worktree) that is the WORKTREE's own path, never what the CLI actually reads for this dialog. See
+"ROUND 2 FIX" immediately below.
+
+**Do not:**
+- Do not ever write `hasClaudeMdExternalIncludesApproved:true` for an agent spawn — an external import is
+  exactly the cross-role instruction-planting vector this file's own instruction registry (above) guards
+  against from a different angle; approving it on the agent's behalf would open the same hole back up.
+- Do not overwrite an existing decision (`Approved:true` or an existing `WarningShown:true`) — check
+  `isExternalImportDecided` first; a human's own prior choice for their own folder is not Loom's to revoke.
+- Do not assume this generalizes past the measured CLI version — these are undocumented bundle
+  internals, discovered by decompilation, not a published API; re-verify after any `claude` CLI upgrade.
+
+### ROUND 2 FIX (card `e789ef3b`, after Code Review CHANGES REQUESTED): key the decline on the canonical git root, not `path.resolve(cwd)`
+
+Code Review on round 1 found the CLI itself reads a session's `.claude.json` project entry from
+`projects[yIe()]`, where `yIe() = canonicalRootByRoot(cwd) ?? cwd` — for a LINKED WORKTREE (every Loom
+worker's cwd), `canonicalRootByRoot` resolves to the MAIN checkout the worktree's `.git` file points back
+at, never the worktree's own path. Round 1's decline, written under `key` (the plain worktree path), was
+therefore invisible to the CLI at every real worker spawn — confirmed by a read-only census of the real
+`~/.claude.json`: 4623 `.loom-worktrees` keys existed with only 2 carrying any CLI-written field at all,
+while the real main-checkout key (`C:/Users/danie/Documents/GitHub/loom`) carried the CLI's own
+`hasClaudeMdExternalIncludesApproved:false`/`WarningShown:false` (undecided — never answered). Full
+investigation: project memory `claude-cli-project-config-keyed-by-canonical-git-root`.
+
+**Owner ruling (request `f8c268c9`, option A, 2026-10-02):** decline at the canonical-repo level when
+undecided — accepting that this also declines the dialog for the owner's OWN interactive `claude`
+sessions in that repo, if they haven't answered it themselves yet, as the tradeoff for closing the
+worker hang.
+
+**The fix**: a new `claudeCliProjectKey(dir)` (`pty/claude-config.ts`) resolves the CLI's own read key —
+`resolveGitMainCheckoutRootSync` (`git/repo-lock.ts`) walks the SAME synchronous, no-subprocess ancestor
+walk `resolveGitToplevelSync` already uses (@decision 7673d096's constraints apply here too), then, for a
+linked worktree (its `.git` is a FILE), follows the `gitdir:` pointer to the private worktree dir and that
+dir's `commondir` file (mirroring `git rev-parse --git-common-dir`) to the shared common `.git`, returning
+ITS PARENT — the main checkout. A non-git `dir` returns `null`, and `claudeCliProjectKey` falls back to
+the PLAIN `path.resolve` key in that case (the CLI's own `?? cwd`), with NO case-folding (verified against
+the real `~/.claude.json`: the CLI preserves `path.resolve`'s drive-letter casing verbatim). `ensureTrusted`
+now writes the decline under this canonical key, while trust + the per-project MCP-enable prompt stay
+keyed at the plain worktree path exactly as before (card `17237fba` owns revisiting THAT keying
+separately — out of scope here). On ANY error escaping the resolver, `claudeCliProjectKey` falls back to
+the plain key too — the protection is never silently skipped just because canonical-root resolution failed.
+
+Re-verify `canonicalRootByRoot`'s resolution mechanism after any `claude` CLI upgrade — like every other
+key in this section, it was discovered by decompilation, not documented.
+
+Real-spawn proof: the `covered` case in `test/claude-md-external-import-dialog-real-spawn.mjs` now
+reaches SessionStart, completes a turn, and the external file's sentinel string is absent from the
+model's view (RED on pre-fix code — see that file's own header). Hermetic unit coverage:
+`test/claude-config.mjs`, including a real `git init` + `git worktree add` fixture proving the decline
+lands under the main checkout's key (derived from `git rev-parse --git-common-dir`, never assumed),
+that an existing human decision on that key survives a worktree spawn, that an `Approved:true` entry
+without `hasCompletedProjectOnboarding` keeps its approval while trust is added, and that a resolver
+failure still falls back to writing the plain-key decline rather than skipping it.
 
 ### Bash coverage caveat — re-measure on CLI upgrade
 
@@ -531,6 +620,13 @@ instance throughout), but is disclosed here rather than silently left. The fix: 
   OPEN/unmeasured until card `b180791a`; measured result (claude-cli 2.1.287) is that it **hangs** the
   spawn indefinitely (blocks before SessionStart even fires), not a silent skip. See the "MEASURED (card
   `b180791a`)" section above before asserting either outcome from memory.
+- Do not write `hasClaudeMdExternalIncludesApproved:true` for an agent spawn, and do not overwrite an
+  existing `hasClaudeMdExternalIncludesApproved`/`hasClaudeMdExternalIncludesWarningShown` decision (a
+  human's own prior choice for their own project folder) — see the "FIXED (card `e789ef3b`)" section
+  above for `isExternalImportDecided` and why.
+- Do not key the external-import decline on `path.resolve(cwd)` — see "ROUND 2 FIX" above:
+  `canonicalRootByRoot` means a linked worktree's decline must land under the MAIN checkout's key
+  (`claudeCliProjectKey`), never the worktree's own path, or a real worker spawn never sees it.
 
 ## Source
 
@@ -563,3 +659,23 @@ the finding (hangs, not fail-closed) and the proposed-but-not-built fix.
 Test: `test/claude-md-external-import-dialog-real-spawn.mjs` (MANUAL-ONLY real-spawn measurement, in
 `NOT_HERMETIC`). Investigation: the worker's `worker_report` for card `b180791a`, cross-checked against
 the live docs at code.claude.com/docs/en/memory ("Import additional files").
+
+Card `e789ef3b` round 1 (this revision): built the fix the `b180791a` note left proposed-but-not-built —
+see "FIXED (card `e789ef3b`)" above for the discovered key names, the two read sites, and the
+decline-only-when-undecided rule. Implementation: `packages/daemon/src/pty/claude-config.ts`
+(`isExternalImportDecided`, `isFullyDecided`, `ensureTrusted`). Tests: `test/claude-config.mjs`
+(hermetic, extended) and the flipped `covered` case in
+`test/claude-md-external-import-dialog-real-spawn.mjs`. Investigation: static decompilation of the
+installed `claude.exe` (claude-cli `2.1.287`, Windows) — no interactive dialog answered; the worker's
+`worker_report` for card `e789ef3b` has the exact decompiled snippets + byte offsets.
+
+Card `e789ef3b` round 2 (this revision), after Code Review CHANGES REQUESTED and owner ruling (request
+`f8c268c9`, option A): see "ROUND 2 FIX" above for the canonical-git-root keying fix. Implementation:
+`packages/daemon/src/git/repo-lock.ts` (`resolveGitMainCheckoutRootSync`), `packages/daemon/src/pty/
+claude-config.ts` (`claudeCliProjectKey`, `isFullyDecided` widened to take a separate `canonicalKey`,
+`ensureTrusted` writing the decline there instead of `key`). Tests: `test/claude-config.mjs`, extended
+with a real `git init` + `git worktree add` fixture (main-checkout keying, an existing human decision
+surviving a worktree spawn, the `Approved:true`-without-`hasCompletedProjectOnboarding` case, a non-git
+cwd, and a resolver-failure fallback). Investigation: the Code Reviewer's own static decompilation of the
+installed `claude.exe` (claude-cli `2.1.287`, Windows) plus a read-only census of the real
+`~/.claude.json` — captured in project memory `claude-cli-project-config-keyed-by-canonical-git-root`.

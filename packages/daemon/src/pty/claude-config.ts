@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
 
 /**
  * Resolve Claude's main JSON config file. Honors CLAUDE_CONFIG_DIR (Claude relocates the
@@ -103,6 +104,60 @@ function isTrusted(cfg: ClaudeCfg, key: string): boolean {
   return e?.hasTrustDialogAccepted === true && e?.hasCompletedProjectOnboarding === true;
 }
 
+/**
+ * True iff `key`'s project entry already carries ANY decision for the external-CLAUDE.md-import
+ * approval dialog — either an explicit approval (`hasClaudeMdExternalIncludesApproved:true`, a human
+ * clicked "Yes, allow external imports") or an explicit decline/acknowledgement
+ * (`hasClaudeMdExternalIncludesWarningShown:true`, set on EITHER answer — see ensureTrusted's own doc).
+ * `false`/absent on both means genuinely undecided — the shape a fresh worktree is always in, and the
+ * ONLY shape ensureTrusted is allowed to write into (see "Never overwrite" there).
+ */
+function isExternalImportDecided(cfg: ClaudeCfg, key: string): boolean {
+  const e = cfg.projects?.[key];
+  return e?.hasClaudeMdExternalIncludesApproved === true || e?.hasClaudeMdExternalIncludesWarningShown === true;
+}
+
+/** TEST SEAM: swap the git-main-checkout-root resolver claudeCliProjectKey delegates to — same rationale
+ *  as the fs seams above. Lets a hermetic test fault-inject a resolver that throws, deterministically
+ *  exercising the fallback-to-plain-key branch without needing a real repo layout that naturally fails.
+ *  Defaults to the real resolveGitMainCheckoutRootSync; production code never calls the setter. */
+type GitMainCheckoutRootResolverFn = (bp: string) => string | null;
+let gitMainCheckoutRootResolverImpl: GitMainCheckoutRootResolverFn = resolveGitMainCheckoutRootSync;
+export function __setGitMainCheckoutRootResolverForTest(fn?: GitMainCheckoutRootResolverFn): void {
+  gitMainCheckoutRootResolverImpl = fn ?? resolveGitMainCheckoutRootSync;
+}
+
+/**
+ * Resolve the `.claude.json` project key the installed `claude` CLI's OWN per-project lookup
+ * (`canonicalRootByRoot`/`yIe()` in its bundle) reads for `dir` — the canonical git root: for a LINKED
+ * WORKTREE, the MAIN checkout, never the worktree's own path (see
+ * {@link resolveGitMainCheckoutRootSync}); for a non-git `dir`, `dir` itself (the CLI's own `?? cwd`
+ * fallback). Normalized identically to the plain worktree `key` computed in `ensureTrusted` below
+ * (`path.resolve` + forward slashes, NO case-folding) — verified against a real `~/.claude.json`: the
+ * CLI's own written entries preserve `path.resolve`'s drive-letter casing verbatim, so case-folding here
+ * would mint a key the CLI never reads.
+ *
+ * Bounded + fail-safe for the spawn hot path: the resolver is a handful of synchronous `fs` calls bounded
+ * by directory depth (no subprocess). On ANY error escaping it, this falls back to `dir`'s own plain key
+ * — the caller (`ensureTrusted`) must still write the decline under that fallback key rather than skip
+ * the protection entirely just because canonical-root resolution failed.
+ *
+ * @decision 7673d096 — the resolver's own synchronous/no-subprocess/no-cache constraints apply here too.
+ *
+ * Re-verify this key-resolution mechanism after any `claude` CLI upgrade — it was discovered by static
+ * decompilation of an installed bundle, not a published API; see
+ * docs/decisions/37310431-loom-home-write-deny.md § "FIXED (card e789ef3b)".
+ */
+export function claudeCliProjectKey(dir: string): string {
+  const plainKey = path.resolve(dir).replace(/\\/g, "/");
+  try {
+    const root = gitMainCheckoutRootResolverImpl(dir);
+    return root ? root.replace(/\\/g, "/") : plainKey;
+  } catch {
+    return plainKey;
+  }
+}
+
 /** Pull the mcpServers names out of one .mcp.json (canonical shape `{mcpServers:{<name>:…}}`). */
 function readMcpServerNames(mcpJsonPath: string, into: Set<string>): void {
   try {
@@ -147,12 +202,21 @@ export function discoverProjectMcpServerNames(dir: string): string[] {
 }
 
 /**
- * True iff `key`'s entry is FULLY pre-decided for an unattended boot: trusted AND every MCP server in
- * `mcpToDisable` is already in its `disabledMcpjsonServers` (so the enable-prompt has nothing pending).
- * When `mcpToDisable` is empty this reduces to `isTrusted` — i.e. byte-identical to the pre-fix behavior.
+ * True iff an unattended boot has NOTHING left pending across the (up to two) project entries
+ * `ensureTrusted` writes: `key`'s entry trusted, AND every MCP server in `mcpToDisable` already in
+ * `key`'s `disabledMcpjsonServers` (so the enable-prompt has nothing pending), AND `canonicalKey`'s entry
+ * already carries SOME decision for the external-import dialog (ours or a human's — see
+ * `isExternalImportDecided`). `key` and `canonicalKey` are the SAME string for a non-worktree cwd (see
+ * `claudeCliProjectKey`), so this reduces to one entry in the common case; for a linked worktree they
+ * differ, and this checks BOTH entries. When `mcpToDisable` is empty the trust/MCP half reduces to just
+ * `isTrusted`. A pre-existing entry that was already `isTrusted` before the import flag existed (written
+ * by an older Loom build, or a human's own interactive `claude` run) is NOT fully decided until
+ * `canonicalKey`'s import flag is also present — this is what makes the fast path actually reach and
+ * decline on such an entry's next spawn, instead of treating old trust alone as "nothing to do".
  */
-function isFullyDecided(cfg: ClaudeCfg, key: string, mcpToDisable: string[]): boolean {
+function isFullyDecided(cfg: ClaudeCfg, key: string, canonicalKey: string, mcpToDisable: string[]): boolean {
   if (!isTrusted(cfg, key)) return false;
+  if (!isExternalImportDecided(cfg, canonicalKey)) return false;
   if (mcpToDisable.length === 0) return true;
   const disabled = cfg.projects?.[key]?.disabledMcpjsonServers;
   const set = Array.isArray(disabled) ? new Set(disabled as string[]) : new Set<string>();
@@ -247,11 +311,12 @@ function withTrustLock(lockPath: string, fn: () => void): void {
 }
 
 /**
- * Pre-clear the two things that block an unattended spawned `claude` from reaching SessionStart,
- * BOTH persisted into .claude.json under projects[<abs path, forward slashes>]:
+ * Pre-clear the things that block an unattended spawned `claude` from reaching SessionStart:
  *
  *  1. The workspace-trust dialog ("Is this a project you trust?") — exactly what clicking
- *     "Yes, I trust this folder" persists ({hasTrustDialogAccepted, hasCompletedProjectOnboarding}).
+ *     "Yes, I trust this folder" persists ({hasTrustDialogAccepted, hasCompletedProjectOnboarding}),
+ *     persisted into .claude.json under projects[<abs path, forward slashes>] — `key` below, the plain
+ *     cwd-resolved path. Unchanged keying (card 17237fba owns revisiting this; out of scope here).
  *  2. The per-project "N new MCP servers found in this project — enable?" prompt. The CLI walks UP
  *     the tree from cwd reading every `.mcp.json`; since worktrees live under home it reaches
  *     `~/.mcp.json` and prompts for those servers (docker/sentry on this host). We discover those
@@ -260,12 +325,28 @@ function withTrustLock(lockPath: string, fn: () => void): void {
  *     one as already "rejected" → nothing pending → the prompt never appears. This REPLACES the
  *     fragile fire-and-forget Esc dismissal as the primary fix (host.ts keeps the Esc handler as a
  *     belt-and-suspenders fallback for anything not pre-decided here). Validated empirically against
- *     CLI 2.1.172 on 2026-06-11: a real spawn with these keys never surfaces the prompt.
+ *     CLI 2.1.172 on 2026-06-11: a real spawn with these keys never surfaces the prompt. Also keyed at
+ *     `key` — unchanged.
+ *  3. The external-CLAUDE.md-import approval dialog ("Allow external CLAUDE.md file imports?") — a
+ *     project CLAUDE.md/.claude/rules `@import` resolving outside cwd hangs an unattended spawn on
+ *     this dialog indefinitely, before SessionStart ever fires. We DECLINE it — but keyed at
+ *     `canonicalKey` (`claudeCliProjectKey(dir)`), NOT `key`: the CLI reads this dialog's decision from
+ *     the canonical git root (for a linked worktree, the MAIN checkout), so a decline written under the
+ *     worktree's own path never reaches a real spawn there. `key` and `canonicalKey` are the same
+ *     string for a non-worktree cwd (see claudeCliProjectKey), so this degenerates to one shared entry
+ *     in that common case.
  *
- * Idempotent: a no-op once the dir is trusted AND every discovered MCP server is already disabled, so
- * the read-modify-write of the (large, possibly concurrently-used) .claude.json happens at most once
- * per project dir. When no `.mcp.json` servers are discoverable, the written entry is byte-identical
- * to the pre-fix trust-only entry.
+ *     @decision 37310431 — only write the decline into a GENUINELY UNDECIDED `canonicalKey` entry; never
+ *     overwrite an existing human decision there. Owner ruling (request f8c268c9, option A): decline at
+ *     the canonical-repo level when undecided — see the decision record for the accepted tradeoff.
+ *
+ * Idempotent: a no-op once `key`'s entry is trusted (+ every discovered MCP server already disabled)
+ * AND `canonicalKey`'s entry already carries SOME decision for the external-import dialog (ours or a
+ * human's) — see `isFullyDecided`. The read-modify-write of the (large, possibly concurrently-used)
+ * .claude.json happens at most once per `ensureTrusted` CALL, touching up to TWO distinct project
+ * entries in that one write when `key` and `canonicalKey` differ (a linked worktree's own key for
+ * trust/MCP, the main checkout's canonical key for the import decision). When no `.mcp.json` servers
+ * are discoverable, the written entry omits the MCP keys exactly as before this dialog existed.
  *
  * Concurrency: writeJsonAtomic (temp+rename) prevents *corruption*, but two concurrent calls could
  * each read state S and each write S+theirs, last-writer-wins clobbering the other's entry. So the
@@ -280,17 +361,24 @@ function withTrustLock(lockPath: string, fn: () => void): void {
 export function ensureTrusted(dir: string): void {
   const claudeJson = claudeJsonPath();
   const key = path.resolve(dir).replace(/\\/g, "/");
+  // The CLI's OWN read key for the external-import dialog (canonical git root — the main checkout for a
+  // linked worktree). Computed unconditionally so a resolver failure degrades to `key` itself (same
+  // value as the plain non-git fallback) rather than skipping the decline write below. See claudeCliProjectKey.
+  const canonicalKey = claudeCliProjectKey(dir);
   const mcpToDisable = discoverProjectMcpServerNames(dir); // [] when none → trust-only, pre-fix behavior
 
-  // Fast-path, lock-free: already trusted AND every discovered MCP server pre-rejected → no-op (common).
-  if (isFullyDecided(readCfg(claudeJson), key, mcpToDisable)) return;
+  // Fast-path, lock-free: already trusted, the import dialog already decided, AND every discovered MCP
+  // server pre-rejected → no-op (common).
+  if (isFullyDecided(readCfg(claudeJson), key, canonicalKey, mcpToDisable)) return;
 
   // A write is needed — serialize it. RE-READ inside the lock: another writer may have changed
   // (or already decided) the config since the fast-path read above.
   withTrustLock(`${claudeJson}.loom-lock`, () => {
     const cfg = readCfg(claudeJson);
-    if (isFullyDecided(cfg, key, mcpToDisable)) return;
+    if (isFullyDecided(cfg, key, canonicalKey, mcpToDisable)) return;
     cfg.projects ??= {};
+
+    // Trust + per-project MCP prompt, keyed at `key` (unchanged keying — card 17237fba owns revisiting it).
     const entry = cfg.projects[key] ?? {};
     const merged: Record<string, unknown> = {
       ...entry,
@@ -305,6 +393,22 @@ export function ensureTrusted(dir: string): void {
       merged.enableAllProjectMcpServers = false;
     }
     cfg.projects[key] = merged;
+
+    // External-import decline, keyed at `canonicalKey` — the CLI's OWN read key for this dialog, which
+    // may be a DIFFERENT project entry than `key` above (a linked worktree's canonical root is its main
+    // checkout). Re-read AFTER the write above: when canonicalKey === key this picks up `merged` itself,
+    // so the two halves land in ONE entry rather than one clobbering the other. Only write into a
+    // GENUINELY UNDECIDED entry — never overwrite a human's own prior decision (an explicit approval, or
+    // an existing decline/acknowledgement). See isExternalImportDecided.
+    if (!isExternalImportDecided(cfg, canonicalKey)) {
+      const canonicalEntry = cfg.projects[canonicalKey] ?? {};
+      cfg.projects[canonicalKey] = {
+        ...canonicalEntry,
+        hasClaudeMdExternalIncludesApproved: false,
+        hasClaudeMdExternalIncludesWarningShown: true,
+      };
+    }
+
     writeJsonAtomic(claudeJson, cfg);
   });
 }

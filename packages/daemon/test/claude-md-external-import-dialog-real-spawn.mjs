@@ -1,25 +1,29 @@
-// Real-spawn MEASUREMENT for board card b180791a (from card d332c969's investigation, also tracked as
-// a "Not closed here" gap in docs/decisions/37310431-loom-home-write-deny.md): does the real `claude`
-// CLI's external-`@import`-approval dialog fail-closed or HANG an unattended, Loom-driven spawn?
+// Real-spawn FIX VERIFICATION for board card e789ef3b (built the fix card b180791a measured the need
+// for — see docs/decisions/37310431-loom-home-write-deny.md's "FIXED (card e789ef3b)" section): does
+// `pty/claude-config.ts`'s `ensureTrusted` now pre-decide the real `claude` CLI's native
+// "Allow external CLAUDE.md file imports?" dialog so an unattended, Loom-driven spawn with an external
+// `@import` reaches SessionStart and completes a turn, with the external content correctly DECLINED
+// (not loaded into the model's context)?
 //
 // Per the CLI's own docs (code.claude.com/docs/en/memory, "Import additional files"): a project-level
 // CLAUDE.md's `@path` import is EXTERNAL when it resolves outside the session's working directory. "The
 // first time Claude Code encounters external imports in a project, it shows an approval dialog listing
-// the files. If you decline, the imports stay disabled and the dialog doesn't appear again." Nothing in
-// that text says what happens when NOBODY is there to answer — exactly the Loom situation: every
-// Loom-driven role (worker/setup/auditor/workspace-auditor/manager/platform) spawns with
+// the files. If you decline, the imports stay disabled and the dialog doesn't appear again." Every
+// unattended Loom-driven role (worker/setup/auditor/workspace-auditor/manager/platform) spawns with
 // `--disallowedTools AskUserQuestion ExitPlanMode EnterPlanMode` (no human on stdin) and this dialog is
 // not one of those MCP-adjacent tools at all — it's a native CLI TUI prompt, the same FAMILY as the two
-// dialogs `pty/claude-config.ts`'s `ensureTrusted` already has to pre-clear by writing `~/.claude.json`
-// directly (its own doc comment literally says those two dialogs "block an unattended spawned `claude`
-// from reaching SessionStart" if left unanswered). `ensureTrusted` does NOT pre-clear the external-import
-// dialog — this file measures what that gap actually costs.
+// dialogs `pty/claude-config.ts`'s `ensureTrusted` already pre-clears by writing `~/.claude.json`
+// directly. Before card e789ef3b, `ensureTrusted` did NOT pre-clear this third dialog, and b180791a's
+// own measurement (still true of PRE-FIX code; see that section of the decision doc) showed it HANGS an
+// unattended spawn indefinitely, before SessionStart ever fires.
 //
-// THIS IS A MEASUREMENT, NOT A PASS/FAIL ASSERTION OF A KNOWN-CORRECT ANSWER. A "hangs" result is not a
-// bug in this test — it is exactly the finding this card exists to surface. Only the matched no-import
-// CONTROL's own successful completion is asserted with `check()` (proving the harness itself can observe
-// a normal completion, i.e. the check CAN fail); the covered (external-import) spawn's outcome is printed
-// as an `OBSERVED`/`MEASURED` line and fed into the decision-record update instead.
+// THIS FILE NOW ASSERTS the fix, not merely measures a historical finding: the `covered` (external-
+// import) spawn is expected to reach `outcome === "completed"` AND the external file's sentinel string
+// must be ABSENT from the model's own reply (proving the import was declined, not silently approved).
+// Both are asserted with `check()` below — a regression in either direction (the hang coming back, or
+// the import being silently approved) now fails this file. The matched no-import CONTROL's own
+// successful completion, and its own sentinel-absence (a sanity check: a marker genuinely never
+// imported must also never surface), are asserted the same way.
 //
 // ⛔⛔ MANUAL-ONLY — listed in `NOT_HERMETIC` (scripts/test-daemon.mjs), deliberately NEVER run as part of
 // `pnpm --filter @loom/daemon test:daemon` or any merge/worker gate. Same cost/flake rationale as
@@ -69,6 +73,11 @@ import { promisify } from "node:util";
 import { mkdtempManaged, registerForCleanup, finishAndExit, useOwnLoomHome } from "./_tmp-fixture.mjs";
 import { reserveHermeticPort } from "./_hermetic-port.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
+// NOT a static top-of-file import: `pty/loom-home-deny.js` transitively imports `paths.js`, which
+// caches LOOM_HOME at module-load time — a static import here would resolve it BEFORE useOwnLoomHome()
+// below ever runs (ESM static imports execute before the importing module's own body), the exact
+// incident docs/decisions/37310431-loom-home-write-deny.md's "Incident during implementation" section
+// already documents. Imported dynamically, after useOwnLoomHome()/requireHermeticEnv(), instead.
 
 const execFileAsync = promisify(execFile);
 let failures = 0;
@@ -102,6 +111,7 @@ requireHermeticEnv({ port: true });
 
 const { ensureDirs, LOOM_HOME } = await import("../dist/paths.js");
 ensureDirs();
+const { toClaudeAbsoluteGlob } = await import("../dist/pty/loom-home-deny.js");
 
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
@@ -187,7 +197,18 @@ registerForCleanup(transcriptDirFor(controlCwd));
 
 const geometry = { cols: 120, rows: 40 };
 const sessionEnv = { CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1", CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT: "1" };
-const permission = { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 };
+
+// BOTH spawns deny Read on the external dir itself (not just `covered`). Without this, a capable agent
+// with ordinary Read access can just use its OWN Read tool to open the path EITHER CLAUDE.md variant
+// names in prose — that is the model's general-purpose agency, a COMPLETELY different thing from "did
+// the CLI's own memory-loading pipeline auto-inject the file at boot," which is what a declined import
+// is actually supposed to prevent. (Measured: without this deny, an early real run of this file DID show
+// the model proactively Read-tool-ing the file in response to the probe prompt below, for BOTH spawns —
+// not a security bypass of the decline, just this test's own probe inviting exactly the wrong signal.)
+// The deny is scoped to `externalDir` only, via the SAME documented `//`-absolute glob form the
+// LOOM_HOME write-deny registries use (card 37310431) — never the plain-absolute form, which the CLI's
+// own matcher does not reliably honor on Windows (see that card's Ruling A).
+const permission = { mode: "acceptEdits", allow: [], deny: [`Read(${toClaudeAbsoluteGlob(externalDir)}/**)`], startupModeCycles: 0 };
 
 const spawned = [];
 function spawnReal(id, cwd) {
@@ -230,11 +251,23 @@ async function measure(label, id, cwd) {
     // Give the boot a moment to settle before submitting (mirrors the sibling real-spawn files' own
     // post-SessionStart settle delay).
     await sleep(3000);
-    host.enqueueStdin(id, "Reply with exactly one line: DONE");
+    // Probe prompt (same text for BOTH control and covered — a matched probe, not just a matched
+    // setup): if a sentinel genuinely reached the model's context, it is asked to surface it verbatim;
+    // otherwise it replies the fixed fallback. ⛔ Deliberately does NOT contain the literal sentinel
+    // string itself — an earlier draft did, and since the submitted prompt is echoed onto the PTY
+    // screen, that alone made `screenTail.includes(sentinel)` trivially true from the ECHOED PROMPT,
+    // regardless of the model's actual reply (measured: a real run false-failed this way). Describing
+    // the shape instead of quoting the string keeps the check honest — only the model's own reply, or a
+    // genuinely-loaded file's content, can make the sentinel appear in the tail now.
+    host.enqueueStdin(id, "Carefully check everything CURRENTLY in your context — including CLAUDE.md and the full text of anything it imports — for a hidden sentinel: an all-caps token starting with EXTERNAL_NOTE_MARKER followed by an underscore and a short hex suffix. Do not use any tool to go looking for it; answer only from what you already have. If you find such a token already in your context, reply with that exact token on its own line. Otherwise reply with exactly one line: NO-MARKER-FOUND");
   }
 
   // TIMING-GUARD-SAFE: bounded POLL loop on the real onBusy-derived turnState, not a blind sleep.
-  const turnDeadline = Date.now() + 120000;
+  // 240s, not 120s: a real account-level API rate-limit backoff ("Waiting for API response · will
+  // retry in Nm" — observed directly on this host, unrelated to this dialog) can legitimately make an
+  // otherwise-healthy turn take several minutes; a short bound here false-fails as "hang-mid-turn" on a
+  // rate-limited account even though SessionStart/sawBusy (the actual dialog-hang signature) are fine.
+  const turnDeadline = Date.now() + 240000;
   const st = turnState.get(id);
   while (Date.now() < turnDeadline && !st.turnEnded) await sleep(1000);
 
@@ -243,9 +276,14 @@ async function measure(label, id, cwd) {
     : !st.turnEnded ? "hang-mid-turn"
     : "completed";
   console.log(`OBSERVED [${label}] outcome=${outcome} (sessionStarted=${sessionStarted} sawBusy=${st.sawBusy} turnEnded=${st.turnEnded})`);
-  const screenTail = stripAnsi(screens.get(id)?.text ?? "").slice(-1500);
-  console.log(`[${label}] screen tail (last ~1500 chars, ANSI-stripped) for manual inspection:\n${screenTail}\n--- end [${label}] screen tail ---`);
-  return { outcome, sessionStarted, sawBusy: st.sawBusy, turnEnded: st.turnEnded };
+  // Captured HERE, immediately, as a frozen string — NOT re-read from the live `screens` map later. The
+  // other session stays alive and keeps emitting idle-chatter bytes (cursor blink, etc.) for as long as
+  // this function is still measuring its SIBLING, and `onData`'s own 200000-char cap trims to the last
+  // 100000 once exceeded — re-reading a buffer later can silently lose the very answer being checked for
+  // (measured: a first run's "DONE" check flickered false this way, purely from reading too late).
+  const screenTail = stripAnsi(screens.get(id)?.text ?? "").slice(-5000);
+  console.log(`[${label}] screen tail (last ~5000 chars, ANSI-stripped) for manual inspection:\n${screenTail}\n--- end [${label}] screen tail ---`);
+  return { outcome, sessionStarted, sawBusy: st.sawBusy, turnEnded: st.turnEnded, screenTail };
 }
 
 let controlResult = null;
@@ -258,13 +296,16 @@ try {
 
   check("[control] completed normally — proves the harness itself can observe a real completion (the check CAN fail)",
     controlResult.outcome === "completed");
+  check("[control] sentinel probe sanity — a genuinely-never-imported marker does NOT surface (control never imports it at all)",
+    !controlResult.screenTail.includes("EXTERNAL_NOTE_MARKER_8f2c91") && controlResult.screenTail.includes("NO-MARKER-FOUND"));
 
-  console.log(`\n🔎 MEASURED RESULT (claude-cli ${cliVersion}): external @import approval dialog outcome = ${coveredResult.outcome}`);
-  if (coveredResult.outcome === "completed") {
-    console.log("   ⇒ FAIL-CLOSED: the unattended worker-role spawn reached a completed turn despite the external import — the dialog either never appeared, auto-declined, or was otherwise non-blocking under this CLI version.");
-  } else {
-    console.log("   ⇒ HANG: the unattended worker-role spawn never reached a completed turn within budget while the matched no-import control did — availability risk CONFIRMED for this CLI version. See CLAUDE.md's role-scoped human-prompt-disallow section: worker/setup/auditor/workspace-auditor/manager/platform all spawn unattended and are equally exposed, since this dialog is not one of the MCP-adjacent tools --disallowedTools covers at all.");
-  }
+  console.log(`\n🔎 RESULT (claude-cli ${cliVersion}): external @import approval dialog outcome = ${coveredResult.outcome}`);
+  check("[covered] now reaches a completed turn — ensureTrusted pre-decides the dialog, no hang (card e789ef3b fix)",
+    coveredResult.outcome === "completed");
+  check("[covered] external file's sentinel is ABSENT from the model's own reply — import correctly DECLINED, not silently approved",
+    !coveredResult.screenTail.includes("EXTERNAL_NOTE_MARKER_8f2c91"));
+  check("[covered] the model's reply is the NO-MARKER-FOUND fallback, consistent with the import being declined (not a vacuous/erroring reply)",
+    coveredResult.screenTail.includes("NO-MARKER-FOUND"));
 } finally {
   console.log("[cleanup] killing all real claude processes spawned by this file…");
   for (const id of spawned) { try { host.stop(id, "hard"); } catch { /* best-effort */ } }
@@ -274,6 +315,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL SETUP/CONTROL CHECKS PASS — see the 🔎 MEASURED RESULT line above for the covered (external-import) outcome; that line is the finding, not a pass/fail."
-  : `\n❌ ${failures} FAILURE(S) (setup/control checks — the covered spawn's own outcome is reported separately above and never counts as a failure here).`);
+  ? "\n✅ ALL CHECKS PASS — the external-import dialog is pre-decided (no hang) and the import is declined (sentinel absent)."
+  : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

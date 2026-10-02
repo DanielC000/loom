@@ -100,6 +100,54 @@ export function canonicalRepoLockKey(repoPath: string): string {
 }
 
 /**
+ * Resolve the git MAIN WORKING TREE root for `bp` — the directory holding a real `.git` DIRECTORY, never
+ * a linked worktree's own root. This is DELIBERATELY DIFFERENT from {@link resolveGitToplevelSync}'s
+ * TOPLEVEL: for an ordinary repo the two agree, but for a LINKED WORKTREE the toplevel is the worktree's
+ * own root (its `.git` is a FILE), while this returns the MAIN checkout the worktree's `.git` file points
+ * back at — the same canonical root the installed `claude` CLI itself keys its per-project `.claude.json`
+ * entry on (`canonicalRootByRoot`/`yIe()` in its own bundle — see
+ * docs/decisions/37310431-loom-home-write-deny.md § "FIXED (card e789ef3b)"). Returns `null` when `bp` is
+ * not inside a git repo at all (a vault-only project, a not-yet-`git init`'d directory, a test fixture) —
+ * the caller decides that non-git fallback (the CLI's own `ci()` does `?? cwd`), rather than this function
+ * silently returning a realpath-normalized stand-in for it.
+ *
+ * Walk: start at `resolveGitToplevelSync(bp)` (same existence-tolerant ancestor walk, inclusive, up to the
+ * nearest `.git` entry). If that `.git` is a real DIRECTORY, the toplevel itself IS the main checkout. If
+ * it is a FILE (a linked worktree or submodule pointer, `gitdir: <path>`), follow it to its own private
+ * dir and that dir's `commondir` file (mirrors `git rev-parse --git-common-dir`, same resolution
+ * `skills/inject.ts`'s local `resolveGitCommonDir` already performs for a different purpose) to the shared
+ * common `.git` DIRECTORY, and return ITS PARENT — the main checkout. Any failure following that
+ * indirection (malformed pointer, missing/unreadable `commondir` — e.g. a submodule, which has no
+ * `commondir` file at all) falls back to the toplevel itself rather than throwing; a caller on the spawn
+ * hot path (`claudeCliProjectKey` in `pty/claude-config.ts`) must still fall back further, to its own
+ * plain non-git key, on any error escaping this function entirely.
+ *
+ * SYNCHRONOUS, no subprocess — same posture as {@link resolveGitToplevelSync}: never thread
+ * GIT_DIR/GIT_CEILING_DIRECTORIES/safe.directory through here, and never add a cache without re-reading
+ * that record first.
+ *
+ * @decision 7673d096 — the same constraints above apply to this function too, not just
+ * resolveGitToplevelSync.
+ */
+export function resolveGitMainCheckoutRootSync(bp: string): string | null {
+  const toplevel = resolveGitToplevelSync(bp);
+  const gitPath = path.join(toplevel, ".git");
+  let stat: fs.Stats;
+  try { stat = fs.statSync(gitPath); } catch { return null; } // no `.git` anywhere up to the fs root
+  if (stat.isDirectory()) return toplevel; // ordinary repo (or bare .git dir) — toplevel IS the main checkout
+  let pointer: string;
+  try { pointer = fs.readFileSync(gitPath, "utf8"); } catch { return toplevel; }
+  const m = pointer.match(/^gitdir:\s*(.+?)\s*$/m);
+  if (!m || !m[1]) return toplevel; // not the worktree `.git` file shape we expect
+  const privateDir = path.resolve(toplevel, m[1]);
+  let commondirRaw: string;
+  try { commondirRaw = fs.readFileSync(path.join(privateDir, "commondir"), "utf8").trim(); }
+  catch { return toplevel; } // e.g. a submodule pointer — no commondir file; fall back to its own toplevel
+  const commonDir = path.resolve(privateDir, commondirRaw);
+  return path.dirname(commonDir);
+}
+
+/**
  * Serialize `fn` against every other in-flight caller for the SAME canonical repo path — FIFO via promise
  * chaining. `prior.then(fn, fn)` runs `fn` once `prior` SETTLES regardless of whether it resolved or
  * rejected, so one caller's failure never poisons or skips the next caller's turn; the chained promise
