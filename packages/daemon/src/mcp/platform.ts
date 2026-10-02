@@ -12,7 +12,7 @@ import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
 import type { SessionService } from "../sessions/service.js";
 import type { PtyHost } from "../pty/host.js";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, pullQuestionsForAgent, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, pullQuestionsForAgent, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
@@ -3559,7 +3559,9 @@ export class PlatformMcpRouter {
           "owner-authored) their single most recent owner-authored turn — never something you write or " +
           "paraphrase. This is what lets you resolve your OWN question without reopening the human-only " +
           "answer boundary. Refused if there is no owner-authored turn at all yet this session (nothing " +
-          "to attest), if the request isn't yours (own agent lineage only) or isn't still 'pending', and " +
+          "to attest), if a reply typed directly in the terminal raced an in-flight agent turn and wasn't " +
+          "captured (ask the owner to repeat it once nothing else is in flight, or use the web Requests " +
+          "UI), if the request isn't yours (own agent lineage only) or isn't still 'pending', and " +
           "for type:\"credential\" (a secret must go through the secure REST answer flow, never chat " +
           "text). `chosenOption` is REQUIRED for type:\"permission\" (must be \"authorize\" or \"deny\"), " +
           "optional-but-validated for a \"decision\" that offers `options` (must be one of them), and " +
@@ -3577,10 +3579,8 @@ export class PlatformMcpRouter {
       },
       async ({ questionId, chosenOption }) => {
         if (!callerSessionId) return ok({ error: "no caller session" });
-        const result = resolveQuestionForAgent(
-          db, callerSessionId, questionId, chosenOption,
-          pty?.getActiveTurnOwnerText(callerSessionId) ?? pty?.getRecentOwnerTurns?.(callerSessionId)?.[0] ?? null,
-        );
+        const { ownerText, raceDiscarded } = resolveOwnerTextForQuestionResolve(pty, callerSessionId);
+        const result = resolveQuestionForAgent(db, callerSessionId, questionId, chosenOption, ownerText, raceDiscarded);
         // Card 788ed7f4: resolving a pending Request is a disposition — clear any open "owner message
         // left without a disposition" episode for THIS session, by occurrence alone (no content matching).
         if (!("error" in result)) db.clearPendingOwnerMessage(callerSessionId);

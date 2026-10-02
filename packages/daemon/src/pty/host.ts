@@ -2656,6 +2656,10 @@ interface Live {
   // check. This is a UX/correctness bound, not a trust one — a stale value is always genuinely
   // human-typed text, just possibly typed for a different purpose than the turn it would land on.
   pendingRawOwnerSubmitAt: number | null;
+  // @decision d326c3c2 — timestamp/gen ONLY (never the discarded text) of a fresh raw owner submit
+  // discarded by the submitWasOutstanding race below; never widen this to carry content.
+  raceDiscardedOwnerSubmitAt: number | null;
+  raceDiscardedOwnerSubmitGen: number | null;
   // True once ANY turn has ever started for this session (the first UserPromptSubmit hook observed).
   // Gates the fresh-spawn kickoff guarantee (scheduleKickoffGuarantee) and healIfStuck's short pre-first-
   // turn stale window (FIRST_TURN_STALE_MS) — see both for why "never started a turn" needs distinct
@@ -4737,6 +4741,8 @@ export class PtyHost {
       lastRawSubmit: null,
       pendingRawOwnerSubmit: null,
       pendingRawOwnerSubmitAt: null,
+      raceDiscardedOwnerSubmitAt: null,
+      raceDiscardedOwnerSubmitGen: null,
       firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
       enterConfirmed: true, // no submit() outstanding yet — nothing has called submit() for this pty at spawn time — see submit()'s reset
       submitGeneration: 0,
@@ -4980,6 +4986,7 @@ export class PtyHost {
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
+      raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
@@ -6178,6 +6185,7 @@ export class PtyHost {
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
+      raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
@@ -6903,7 +6911,15 @@ export class PtyHost {
           const fresh = live.pendingRawOwnerSubmitAt !== null && Date.now() - live.pendingRawOwnerSubmitAt <= RAW_OWNER_SUBMIT_TTL_MS;
           // Card fca6af6d: fresh alone is not enough — a raced-in raw line confirmed by a submit()'s OWN
           // outstanding Enter (submitWasOutstanding) must NOT be credited to that submit-originated turn.
-          if (fresh && !submitWasOutstanding) this.attributeOwnerText(live, live.pendingRawOwnerSubmit);
+          if (fresh && !submitWasOutstanding) {
+            this.attributeOwnerText(live, live.pendingRawOwnerSubmit);
+          } else if (fresh && submitWasOutstanding) {
+            // @decision d326c3c2 — a genuine owner line raced in and was discarded here by design
+            // (fca6af6d); record ONLY that it happened (timestamp/gen), never the text, so
+            // question_resolve's fallback can refuse instead of quoting a stale earlier owner turn.
+            live.raceDiscardedOwnerSubmitAt = Date.now();
+            live.raceDiscardedOwnerSubmitGen = live.submitGeneration;
+          }
           live.pendingRawOwnerSubmit = null;
           live.pendingRawOwnerSubmitAt = null;
         }
@@ -8415,6 +8431,15 @@ export class PtyHost {
   }
 
   /**
+   * @decision d326c3c2 — consulted ONLY by question_resolve's fallback; never widens
+   * getActiveTurnOwnerText's own contract or Primitive A's semantics. Claude-only (`this.live`, not
+   * `findAnyLive`) — codex has no raw-terminal owner-attribution mechanism to race in the first place.
+   */
+  hasRaceDiscardedOwnerSubmit(sessionId: string): boolean {
+    return this.live.get(sessionId)?.raceDiscardedOwnerSubmitAt != null;
+  }
+
+  /**
    * Companion Trust Window (Companion Capability & Permission-Lever Framework, card 0): the AUTHENTICATED
    * sender id of the session's IN-FLIGHT turn, for a GROUP-scope companion route only — null for a DM
    * route or a non-companion-inbound turn (see Live.activeTurnSenderId). Read by the trust-window/friction
@@ -9166,6 +9191,10 @@ export class PtyHost {
     // NEVER cleared at Stop — persists across the turn boundary so a later turn's lever call can still see it.
     live.recentOwnerTurns.unshift(ownerText);
     if (live.recentOwnerTurns.length > RECENT_OWNER_TURNS_WINDOW) live.recentOwnerTurns.length = RECENT_OWNER_TURNS_WINDOW;
+    // @decision d326c3c2 — a genuine owner turn just landed in recentOwnerTurns, so any earlier
+    // race-discard marker no longer describes "the most recent owner turn is missing" — clear it.
+    live.raceDiscardedOwnerSubmitAt = null;
+    live.raceDiscardedOwnerSubmitGen = null;
   }
 
   private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue", origin?: QueuedMessage[]): void {

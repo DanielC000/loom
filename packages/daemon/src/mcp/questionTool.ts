@@ -573,6 +573,34 @@ export function amendQuestionForAgent(
 }
 
 /**
+ * The minimal pty surface `resolveOwnerTextForQuestionResolve` needs — structural, not `PtyHost` itself,
+ * so this module stays pty-agnostic like every other function here. Every method is optional-chained by
+ * the caller below, matching how both registrations already treat an absent `pty`.
+ */
+export interface OwnerTextPtySource {
+  getActiveTurnOwnerText(sessionId: string): string | null;
+  getRecentOwnerTurns?(sessionId: string): string[];
+  hasRaceDiscardedOwnerSubmit?(sessionId: string): boolean;
+}
+
+/**
+ * `question_resolve`'s ownerText/raceDiscarded derivation, shared verbatim by BOTH registrations
+ * (`mcp/orchestration.ts`, `mcp/platform.ts`) so they can never drift apart on this logic the way the
+ * plain inline fallback expression once could have (card d326c3c2). `raceDiscarded` is checked ONLY in
+ * the fallback — see `resolveQuestionForAgent`'s own doc for why it's independent of whatever `ownerText`
+ * resolves to.
+ */
+export function resolveOwnerTextForQuestionResolve(
+  pty: OwnerTextPtySource | undefined,
+  sessionId: string,
+): { ownerText: string | null; raceDiscarded: boolean } {
+  const activeOwnerText = pty?.getActiveTurnOwnerText(sessionId) ?? null;
+  const raceDiscarded = activeOwnerText === null && (pty?.hasRaceDiscardedOwnerSubmit?.(sessionId) ?? false);
+  const ownerText = activeOwnerText ?? pty?.getRecentOwnerTurns?.(sessionId)?.[0] ?? null;
+  return { ownerText, raceDiscarded };
+}
+
+/**
  * `question_resolve` — the shared implementation behind BOTH manager (`mcp/orchestration.ts`) and Lead
  * (`mcp/platform.ts`) registrations, mirroring how `cancelQuestionForAgent` is shared. Lets an asker mark
  * its OWN still-pending Request answered from a live owner chat reply, instead of the file-then-cancel
@@ -599,6 +627,10 @@ export function amendQuestionForAgent(
  * validation): an unknown session/question; a question asked by a DIFFERENT agent lineage; a
  * non-'pending' question (an answered/consumed/cancelled question is never re-answered); `null`
  * `ownerText` (no owner-authored turn at all yet this session — nothing to attest, current or recent);
+ * `raceDiscarded` (card d326c3c2 — a fresh raw-terminal owner reply raced an already-outstanding submit()
+ * and was discarded rather than misattributed; falling back to `getRecentOwnerTurns[0]` here would
+ * silently quote a STALE, earlier owner turn as if it answered the owner's latest, lost reply — refused
+ * instead, checked BEFORE the `ownerText === null` case so a stale fallback value is never reached);
  * `type:"credential"` (secrets stay on the encrypted human-only REST flow, never chat text); and a
  * `chosenOption` that doesn't match what the question actually offers (its `options` for "decision", or
  * `PERMISSION_ANSWERS` for "permission" — REQUIRED for "permission", optional-but-validated for
@@ -614,7 +646,16 @@ export function resolveQuestionForAgent(
   questionId: string,
   chosenOption: string | undefined,
   ownerText: string | null,
+  raceDiscarded: boolean,
 ): { resolved: true; questionId: string; chosenOption: string | null; note: string } | { error: string } {
+  if (raceDiscarded) {
+    return {
+      error: "a reply typed directly in the terminal raced an in-flight agent turn and wasn't captured " +
+        "— rather than risk recording the wrong turn's text, nothing was attributed. Ask the owner to " +
+        "repeat their reply once nothing else is in flight, or have them answer via the web Requests UI " +
+        "instead.",
+    };
+  }
   if (ownerText === null) {
     return {
       error: "no owner reply yet this session — question_resolve can only act on the owner's own " +

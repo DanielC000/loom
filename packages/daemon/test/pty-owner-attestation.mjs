@@ -260,6 +260,62 @@ try {
     check("15: a genuine raw-terminal Enter (no submit outstanding) still attests correctly", host.getActiveTurnOwnerText(sid) === line);
   }
 
+  // ===== 16. Card d326c3c2: the SAME reverse-order race as test 14 also sets the race-discard marker
+  // (timestamp/gen only) — this is the new signal question_resolve's fallback consults so it can refuse
+  // instead of quoting a STALE, earlier owner turn as if it answered the raced-away one =====
+  {
+    const sid = newSession("P"); SIDS.push(sid);
+    check("16: no marker before any race", host.hasRaceDiscardedOwnerSubmit(sid) === false);
+    host.enqueueStdin(sid, "[loom:worker-report] done", "system", undefined, undefined, "agent"); // submit() outstanding
+    host.writeStdin(sid, "raced human line\r"); // races in before the submit's own confirming hook
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" }); // confirms the SUBMIT, discards the raced line
+    check("16: getActiveTurnOwnerText is null (unchanged from test 14)", host.getActiveTurnOwnerText(sid) === null);
+    check("16: the race-discard marker is now set", host.hasRaceDiscardedOwnerSubmit(sid) === true);
+  }
+
+  // ===== 17. The marker CLEARS the instant a genuine owner turn is actually attributed — a later owner
+  // reply (e.g. the SAME owner repeating themselves once nothing else is in flight) resolves normally,
+  // never permanently wedging question_resolve's fallback for this session =====
+  {
+    const sid = newSession("Q"); SIDS.push(sid);
+    host.enqueueStdin(sid, "[loom:worker-report] done", "system", undefined, undefined, "agent");
+    host.writeStdin(sid, "raced human line\r");
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" });
+    check("17: marker set after the race", host.hasRaceDiscardedOwnerSubmit(sid) === true);
+    stop(sid); // ends the submit-originated turn the race landed on
+    const repeated = "office@ works, switch it";
+    host.writeStdin(sid, `${repeated}\r`); // the owner repeats themselves — no competing outstanding submit now
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" });
+    check("17: a genuine later owner turn attests normally", host.getActiveTurnOwnerText(sid) === repeated);
+    check("17: attributing it CLEARED the race-discard marker", host.hasRaceDiscardedOwnerSubmit(sid) === false);
+  }
+
+  // ===== 18. Code Review correction (card d326c3c2): the marker must SURVIVE an unrelated submit() —
+  // clearing it on bare generation-advance reopens the exact stale-quote bug this card fixes. Walk:
+  // race at gen N -> turn N's Stop drains ANOTHER queued message as gen N+1 (a worker report, a
+  // rate-limit replay, a kickoff guarantee — none of them are the owner) -> if the marker cleared here,
+  // a LATER question_resolve would silently fall back to the stale PRIOR owner turn again. It must stay
+  // set until a GENUINE owner turn is actually attributed, however many unrelated turns pass first. =====
+  {
+    const sid = newSession("R"); SIDS.push(sid);
+    host.enqueueStdin(sid, "[loom:worker-report] done", "system", undefined, undefined, "agent");
+    host.writeStdin(sid, "raced human line\r");
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" });
+    check("18: marker set after the race", host.hasRaceDiscardedOwnerSubmit(sid) === true);
+    stop(sid); // ends that turn
+    host.enqueueStdin(sid, "[loom:reminder] unrelated follow-up #1", "system", undefined, undefined, "agent"); // a NEW, unrelated submit() — gen advances, no owner attribution
+    check("18: an unrelated submit() does NOT clear the marker", host.hasRaceDiscardedOwnerSubmit(sid) === true);
+    stop(sid);
+    host.enqueueStdin(sid, "[loom:reminder] unrelated follow-up #2", "system", undefined, undefined, "agent"); // a SECOND unrelated submit() — still no owner attribution
+    check("18: the marker SURVIVES multiple unrelated submits, not just one", host.hasRaceDiscardedOwnerSubmit(sid) === true);
+    stop(sid);
+    const repeated = "office@ works, switch it";
+    host.writeStdin(sid, `${repeated}\r`); // the owner FINALLY repeats themselves
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" });
+    check("18: a genuine owner turn still attests correctly after surviving those unrelated submits", host.getActiveTurnOwnerText(sid) === repeated);
+    check("18: ONLY that genuine attribution clears the marker", host.hasRaceDiscardedOwnerSubmit(sid) === false);
+  }
+
   await sleep(200); // let async paste-ends/Enters flush before teardown
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
@@ -267,6 +323,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — getActiveTurnOwnerText attests the literal owner bytes of an owner-authored turn, stays null for a proactive/system turn, and is cleared at turn end (never inherited by a later turn); getRecentOwnerTurns (card 2b26035c widening) retains a bounded, most-recent-first window of the SAME server-attested owner bytes that survives Stop, never admits a non-owner-authored turn, and evicts an old-enough entry once the window fills. Card b4b9b707: a raw-terminal (/ws/term) Enter-submit ALSO attests ownerText via the SAME writer, a Loom-originated submit() racing in before the correlating hook ALWAYS wins (never fabricates), a consumed attestation never leaks to a later turn, and a stale never-consumed draft is TTL-discarded rather than misattributed. Card fca6af6d (the REVERSE-order race): a raw line that races in BEHIND an already-outstanding submit() — before that submit's own confirming hook fires — is likewise never attributed to the submit-originated turn, while a genuine raw-terminal Enter with no submit outstanding still attests correctly (the enterConfirmed-captured-before-hook discriminator)."
+  ? "\n✅ ALL PASS — getActiveTurnOwnerText attests the literal owner bytes of an owner-authored turn, stays null for a proactive/system turn, and is cleared at turn end (never inherited by a later turn); getRecentOwnerTurns (card 2b26035c widening) retains a bounded, most-recent-first window of the SAME server-attested owner bytes that survives Stop, never admits a non-owner-authored turn, and evicts an old-enough entry once the window fills. Card b4b9b707: a raw-terminal (/ws/term) Enter-submit ALSO attests ownerText via the SAME writer, a Loom-originated submit() racing in before the correlating hook ALWAYS wins (never fabricates), a consumed attestation never leaks to a later turn, and a stale never-consumed draft is TTL-discarded rather than misattributed. Card fca6af6d (the REVERSE-order race): a raw line that races in BEHIND an already-outstanding submit() — before that submit's own confirming hook fires — is likewise never attributed to the submit-originated turn, while a genuine raw-terminal Enter with no submit outstanding still attests correctly (the enterConfirmed-captured-before-hook discriminator). Card d326c3c2: that SAME race ALSO sets a timestamp/gen-only race-discard marker (hasRaceDiscardedOwnerSubmit) — the signal question_resolve's fallback needs to refuse instead of quoting a stale earlier owner turn — which SURVIVES any number of unrelated submit()s (Code Review correction: an earlier gen-advance clear reopened the exact bug this card fixes) and clears ONLY the instant a genuine owner turn is actually attributed."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -111,11 +111,15 @@ try {
     // simulate "current turn is NOT owner-formed, but a recent one was" independently of the current-turn
     // map.
     recentTurns: new Map(),
+    // Card d326c3c2: an independently-settable race-discard marker (timestamp/gen only, mirrored here as
+    // a bare boolean set) — defaults to false for every existing test, so this is purely additive.
+    raceDiscarded: new Set(),
     getActiveTurnOwnerText(sid) { return this.ownerText.has(sid) ? this.ownerText.get(sid) : null; },
     getRecentOwnerTurns(sid) {
       if (this.recentTurns.has(sid)) return this.recentTurns.get(sid);
       const t = this.ownerText.get(sid); return t ? [t] : [];
     },
+    hasRaceDiscardedOwnerSubmit(sid) { return this.raceDiscarded.has(sid); },
     isAlive: () => true,
     enqueueStdin: () => ({ delivered: true }),
     getActiveTurnOrigin: () => null,
@@ -167,6 +171,29 @@ try {
   fakePty.recentTurns.set("mgrA", ["a STALE older reply", "the CURRENT reply"]);
   const resolvedB3 = await call(mgrServer, "question_resolve", { questionId: "b3" });
   check("(B3) the CURRENT turn's ownerText is preferred over the recent-turns fallback", resolvedB3.resolved === true && resolvedB3.note === "the CURRENT reply");
+  fakePty.ownerText.delete("mgrA");
+  fakePty.recentTurns.delete("mgrA");
+
+  // ============ (B4) card d326c3c2: race-discard REFUSES rather than quoting a stale recent turn ============
+  // Reproduces the real incident this card fixes: the current turn isn't owner-formed (no ownerText), a
+  // recent turn exists (the owner's PREVIOUS reply) — the old code would silently fall back to it — but a
+  // raw-terminal reply raced an in-flight agent turn and was discarded, so the marker is set. Must REFUSE,
+  // never fall back to the stale recent turn.
+  insertQ("b4", { sessionId: "mgrA", projectId: "pA", title: "Race-discarded — must refuse" });
+  fakePty.ownerText.delete("mgrA"); // current turn not owner-formed
+  fakePty.recentTurns.set("mgrA", ["yes dispatch. I not only wnat the sale Also research other websites."]); // the STALE prior owner turn
+  fakePty.raceDiscarded.add("mgrA"); // the owner's ACTUAL latest reply ("office@ works, switch it") raced and was discarded
+  const refusedB4 = await call(mgrServer, "question_resolve", { questionId: "b4" });
+  check("(B4) REFUSED — never silently quotes the stale prior owner turn", typeof refusedB4.error === "string" && refusedB4.error.includes("raced an in-flight agent turn"));
+  check("(B4) the row is untouched (still pending)", db.getQuestion("b4").state === "pending");
+  check("(B4) the STALE recent turn was never written anywhere", db.getQuestion("b4").note === null);
+
+  // ============ (B5) card d326c3c2: once the marker clears (a genuine owner turn lands), resolve works normally ============
+  insertQ("b5", { sessionId: "mgrA", projectId: "pA", title: "Marker cleared — resolves normally" });
+  fakePty.raceDiscarded.delete("mgrA"); // mirrors PtyHost clearing it the instant attributeOwnerText runs
+  fakePty.ownerText.set("mgrA", "office@ works, switch it"); // the owner's repeated/real current reply
+  const resolvedB5 = await call(mgrServer, "question_resolve", { questionId: "b5" });
+  check("(B5) resolves normally once the marker is cleared", resolvedB5.resolved === true && resolvedB5.note === "office@ works, switch it");
   fakePty.ownerText.delete("mgrA");
   fakePty.recentTurns.delete("mgrA");
 
@@ -271,6 +298,44 @@ try {
     const crossTurnResolve = await call(liveServer, "question_resolve", { questionId: "p2" });
     check("(Part 2b) question_resolve resolves via the recent-turn fallback on a turn the owner never formed", crossTurnResolve.resolved === true && crossTurnResolve.note === composerText);
     check("(Part 2b) the row is 'answered' with the recent (not current) owner text as its note", db.getQuestion("p2").state === "answered" && db.getQuestion("p2").note === composerText);
+
+    // ============ (Part 2c) card d326c3c2: the REAL race, end-to-end through the actual question_resolve
+    // MCP tool — reproduces the incident this card fixes (chenari-dev escalation 6a350b5b): a raw-terminal
+    // owner reply raced an in-flight agent turn, was discarded by design (fca6af6d), and question_resolve
+    // must REFUSE rather than silently resolving with the earlier, stale owner turn (composerText). ============
+    insertQ("p3", { sessionId: "mgrLive", projectId: "pA", title: "Real race — must refuse, not quote stale text" });
+    realHost.enqueueStdin("mgrLive", "[loom:worker-report] done", "system", undefined, undefined, "agent"); // a Loom-originated turn goes outstanding
+    realHost.writeStdin("mgrLive", "office@ works, switch it\r"); // the owner's REAL, current reply races in raw
+    realHost.deliverHook("mgrLive", { hook_event_name: "UserPromptSubmit" }); // confirms the OUTSTANDING submit, discards the raced-in owner line
+    check("(Part 2c) getActiveTurnOwnerText is null (the race discarded it)", realHost.getActiveTurnOwnerText("mgrLive") === null);
+    check("(Part 2c) getRecentOwnerTurns STILL only carries the earlier, stale turn", realHost.getRecentOwnerTurns("mgrLive")[0] === composerText);
+    const raceResolve = await call(liveServer, "question_resolve", { questionId: "p3" });
+    check("(Part 2c) REFUSED — never quotes the stale composerText as the owner's current answer", typeof raceResolve.error === "string" && raceResolve.error.includes("raced an in-flight agent turn"));
+    check("(Part 2c) the row is untouched (still pending)", db.getQuestion("p3").state === "pending" && db.getQuestion("p3").note === null);
+
+    // ============ (Part 2d) Code Review correction (card d326c3c2): the marker must SURVIVE an
+    // UNRELATED drained submit between the race and the resolve call — this is the more realistic
+    // chenari-dev timeline (the race's own turn Stops, something ELSE drains as the NEXT turn — e.g. a
+    // second worker report — and ONLY THEN does the agent call question_resolve). A bare
+    // generation-advance clear would have silently let this one through with the stale composerText;
+    // RED on commit 42abe107. ============
+    insertQ("p4", { sessionId: "mgrLive", projectId: "pA", title: "Unrelated drain after the race — must still refuse" });
+    realHost.deliverHook("mgrLive", { hook_event_name: "Stop" }); // ends the turn the race landed on
+    realHost.enqueueStdin("mgrLive", "[loom:worker-report] a second, unrelated report", "system", undefined, undefined, "agent"); // a NEW, UNRELATED turn drains — gen advances, no owner attribution
+    check("(Part 2d) the unrelated turn carries no owner text of its own", realHost.getActiveTurnOwnerText("mgrLive") === null);
+    const stillRaced = await call(liveServer, "question_resolve", { questionId: "p4" });
+    check("(Part 2d) STILL REFUSES after an unrelated drained submit — the marker survives", typeof stillRaced.error === "string" && stillRaced.error.includes("raced an in-flight agent turn"));
+    check("(Part 2d) the row is untouched (still pending)", db.getQuestion("p4").state === "pending" && db.getQuestion("p4").note === null);
+
+    // The owner repeats themselves once nothing else is in flight — ONLY a genuine attribution clears
+    // the marker, resolve works again (for BOTH the still-pending p3 and the still-pending p4).
+    realHost.deliverHook("mgrLive", { hook_event_name: "Stop" }); // end the unrelated turn from (Part 2d)
+    realHost.writeStdin("mgrLive", "office@ works, switch it\r");
+    realHost.deliverHook("mgrLive", { hook_event_name: "UserPromptSubmit" });
+    const repeatedResolve = await call(liveServer, "question_resolve", { questionId: "p3" });
+    check("(Part 2c) resolves once the owner repeats themselves with nothing else in flight", repeatedResolve.resolved === true && repeatedResolve.note === "office@ works, switch it");
+    const repeatedResolveP4 = await call(liveServer, "question_resolve", { questionId: "p4" });
+    check("(Part 2d) the SAME genuine attribution also resolves the other request still waiting on it", repeatedResolveP4.resolved === true && repeatedResolveP4.note === "office@ works, switch it");
   } finally {
     await app.close();
   }
@@ -280,6 +345,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — question_resolve (manager + Lead surfaces) marks a pending Request 'answered' using ONLY the server-captured verbatim owner text (never agent-authored, current-turn or the single most-recent turn as a cross-turn fallback), refuses cleanly with no owner turn at all / a credential type / an unoffered chosenOption / a foreign agent's question, is absent from the worker surface entirely, and — end-to-end via a REAL PtyHost, including a genuine Stop hook ending the owner-formed turn — the cross-turn fallback resolves a question on a LATER, non-owner-formed turn without exposing any Companion-only capability to a non-Companion session."
+  ? "\n✅ ALL PASS — question_resolve (manager + Lead surfaces) marks a pending Request 'answered' using ONLY the server-captured verbatim owner text (never agent-authored, current-turn or the single most-recent turn as a cross-turn fallback), refuses cleanly with no owner turn at all / a credential type / an unoffered chosenOption / a foreign agent's question, is absent from the worker surface entirely, and — end-to-end via a REAL PtyHost, including a genuine Stop hook ending the owner-formed turn — the cross-turn fallback resolves a question on a LATER, non-owner-formed turn without exposing any Companion-only capability to a non-Companion session. Card d326c3c2: when the owner's latest reply raced an in-flight agent turn and was discarded (fca6af6d), question_resolve REFUSES rather than silently falling back to a stale earlier owner turn — both via a fake pty and end-to-end via a REAL PtyHost reproducing the chenari-dev incident verbatim — and resolves normally again once the marker clears (a genuine later owner turn lands)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

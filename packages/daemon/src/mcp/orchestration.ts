@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { contextWindowForModel, contextPercentFor, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn, type Session, type OrchestrationEvent, type GateType } from "@loom/shared";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, pullQuestionsForAgent, auditRequestItem, pageRequests, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, pullQuestionsForAgent, auditRequestItem, pageRequests, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 // Card 40f4cae9 — the `fields:[...]` projection carried forward from `tasks_list` (card 23fde5f8): reuse
 // the SAME generic `pickFields` (mcp/tasks.ts) rather than writing a second projector — see that
@@ -4046,7 +4046,9 @@ export class OrchestrationMcpRouter {
           "owner-authored) their single most recent owner-authored turn — never something you write or " +
           "paraphrase. This is what lets you resolve your OWN question without reopening the human-only " +
           "answer boundary. Refused if there is no owner-authored turn at all yet this session (nothing " +
-          "to attest), if the request isn't yours (own agent lineage only) or isn't still 'pending', and " +
+          "to attest), if a reply typed directly in the terminal raced an in-flight agent turn and wasn't " +
+          "captured (ask the owner to repeat it once nothing else is in flight, or use the web Requests " +
+          "UI), if the request isn't yours (own agent lineage only) or isn't still 'pending', and " +
           "for type:\"credential\" (a secret must go through the secure REST answer flow, never chat " +
           "text). `chosenOption` is REQUIRED for type:\"permission\" (must be \"authorize\" or \"deny\"), " +
           "optional-but-validated for a \"decision\" that offers `options` (must be one of them), and " +
@@ -4063,10 +4065,8 @@ export class OrchestrationMcpRouter {
         inputSchema: strictShape({ questionId: z.string(), chosenOption: z.string().optional() }),
       },
       async ({ questionId, chosenOption }) => {
-        const result = resolveQuestionForAgent(
-          db, managerSessionId, questionId, chosenOption,
-          pty?.getActiveTurnOwnerText(managerSessionId) ?? pty?.getRecentOwnerTurns?.(managerSessionId)?.[0] ?? null,
-        );
+        const { ownerText, raceDiscarded } = resolveOwnerTextForQuestionResolve(pty, managerSessionId);
+        const result = resolveQuestionForAgent(db, managerSessionId, questionId, chosenOption, ownerText, raceDiscarded);
         // Card 788ed7f4: resolving a pending Request is a disposition — clear any open "owner message
         // left without a disposition" episode for THIS session, by occurrence alone (no content matching).
         if (!("error" in result)) db.clearPendingOwnerMessage(managerSessionId);
