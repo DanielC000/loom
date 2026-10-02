@@ -148,7 +148,14 @@ try {
   await landSquashWithoutFinalizing(R);
   seedProjectAndTask(db, R);
   seedWorker(db, R);
-  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: R.mgrId, workerSessionId: R.workerId, taskId: R.taskId, kind: "merge_done", detail: { branch: R.branch } });
+  // Card 9ac3a739 (round 2): a FRESH timestamp here, not the module-load `now` constant (which always
+  // predates landSquashWithoutFinalizing's real git commit) — the stale-`now` shape used to mask round
+  // 1's own regression (the own-row cleanup retry wrongly treated as "already finalized elsewhere" by a
+  // git-commit-time comparison) by accident: `now` < the squash's real committer time always kept the
+  // old check from firing, so this test passed whether or not the retry was actually exempted. Round 2's
+  // fix is seq-based and exempts the own-row case outright (never compares against a commit time at
+  // all), so this now genuinely proves the exemption rather than coincidentally dodging the old bug.
+  db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: R.mgrId, workerSessionId: R.workerId, taskId: R.taskId, kind: "merge_done", detail: { branch: R.branch, repoKey: null } });
   check("(replay-pre) landed HEAD carries the Loom-Worker-Branch trailer", git(R.repo, "log -1 --format=%b").includes(`Loom-Worker-Branch: ${R.branch}`));
   check("(replay-pre) worktree STILL ON DISK (retained, not yet GC'd)", fs.existsSync(R.worktreePath));
   check("(replay-pre) merge_done ALREADY recorded (alreadyFinalized true)", db.listEventsForWorker(R.workerId).filter((e) => e.kind === "merge_done").length === 1);

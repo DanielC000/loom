@@ -232,6 +232,12 @@ try {
   check("(5) setup: the orphan's squash genuinely landed on secondary (simulated pre-crash state)", orphanMerge.ok === true);
   check("(5) setup: the task is still NOT done (bookkeeping never ran — the simulated crash point)", db.getTask(taskOrphan)?.columnKey !== "done");
   check("(5) setup: the worktree dir still exists on disk (never cleaned up)", fs.existsSync(wOrphan.worktreePath));
+  // Card 9ac3a739 (round 2 ruling): boot-reconcile Pass A now ALSO skips any LIVE row's worktree path
+  // (never just an explicitly `protectedSessionIds` one) — the correct, safer rule. In production,
+  // `recoverStaleSessions()` ALWAYS marks every prior-run session `exited` before Pass A ever runs; this
+  // orphan's own fake-pty seam never fires that transition on its own, so mirror it explicitly or Pass A
+  // wrongly treats this still-"live" row as protected and never reaches it at all.
+  db.recoverStaleSessions();
 
   const reconcileResult = await sessions.reconcileOrchestrationOnBoot();
   check("(5) boot-reconcile Pass A finishes the orphaned secondary-repo merge (mergesFinished >= 1)", reconcileResult.mergesFinished >= 1);

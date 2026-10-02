@@ -20822,6 +20822,9 @@ export class SessionService {
    *     still exists, we run the SAME finalizeMerge. Idempotent: once the task is done AND the worktree
    *     is gone, a re-run short-circuits. NO trailer ⇒ a genuinely-live worker (its uncommitted work
    *     has no trailer in main) ⇒ KEEP — the 2026-06-05 P0 data-loss safety, preserved under squash.
+   *     Skips a worktree PATH protected-for-resume (restart-intent/crash-recovery) or currently live —
+   *     same shared `protectedWorktreePaths` set Pass B uses — never just the iterated row's own id,
+   *     so a worker_recycle predecessor sharing that path defers to it too (card 9ac3a739).
    *
    *  A2. Resolve branch-gone dangling merges (lingering-MERGE-REQUEST-alert root cause). Pass A's
    *     trailer detection finalizes a landed squash even after its branch is pruned, but it CANNOT
@@ -20850,6 +20853,15 @@ export class SessionService {
     // REBUILT here, not appended — this boot's Pass B is about to recompute the full retained set from
     // scratch, and a stale entry from a prior boot (e.g. a worktree since GC'd by hand) must not linger.
     this.retainedWorktreeRecords = [];
+    // @decision 9ac3a739 — do not let Pass A decide a worktree's fate from a per-row protectedSessionIds
+    // check; a recycle predecessor aliases the live successor's path, so BOTH passes must key on this
+    // ONE path-built set instead, computed once up front from every row.
+    const protectedWorktreePaths = new Set<string>();
+    for (const s of all) {
+      if (!s.worktreePath) continue;
+      const isLive = s.processState !== "exited" && s.resumability !== "dead";
+      if (protectedSessionIds.has(s.id) || isLive) protectedWorktreePaths.add(s.worktreePath);
+    }
     let mergesFinished = 0;
     let mergesHeld = 0; // card a5be590f: Pass A candidates skipped because their branch is HELD (a merge retained it) — surfaced in the result, not only a console.warn
     let mergesFailed = 0;
@@ -20912,11 +20924,14 @@ export class SessionService {
     }> = [];
     for (const s of all) {
       if (s.role !== "worker" || !s.branch || !s.taskId) continue;
-      if (protectedSessionIds.has(s.id)) continue; // about to be resumed (restart-intent) — leave it intact
+      const worktreePath = s.worktreePath ?? s.cwd;
+      // @decision 9ac3a739 — key protection on the worktree PATH, never this row's own id alone, but
+      // keep `protectedSessionIds.has(s.id)` alongside it so a protected row with no resolvable
+      // worktreePath still can't fall through unprotected.
+      if (protectedSessionIds.has(s.id) || (worktreePath && protectedWorktreePaths.has(worktreePath))) continue;
       const project = this.db.getProject(s.projectId);
       if (!project) continue;
       try {
-        const worktreePath = s.worktreePath ?? s.cwd;
         const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
         // "Already reconciled" is an EVENT signal (a recorded merge_done), not the task's CURRENT column —
         // a human can freely move a merged card OFF the terminal column afterward (e.g. into a review lane)
@@ -21027,6 +21042,8 @@ export class SessionService {
         // Card 42daa283: a HELD branch (a merge_batch retained it: commit(s) landed on it after assembly, never gated or landed) is NEVER finalized
         // here — its batch commit carries the Loom-Worker-Branch trailer, so the landed-squash lookup above happily "proves" it merged, yet the late
         // commit would be destroyed by finalize's branch delete + worktree force-remove. Skip it whole: no finalize, no delete, no merge_done.
+        // @decision 9ac3a739 — this held check runs BEFORE "already finalized" below (never after): a
+        // branch-name-only finalized check could otherwise swallow this skip's own mergesHeld++ count.
         const heldA = await this.isBranchHeld(s.branch, repoPath, s.repoKey ?? null);
         if (heldA) {
           mergesHeld++;
@@ -21035,6 +21052,68 @@ export class SessionService {
           console.warn(heldA.gitUnverified
             ? `[reconcile] worker ${s.id} (branch ${s.branch}) is HELD by a merge retain (batch or solo) and its release could NOT be VERIFIED (a git read of main failed) — skipping its finalize this boot (branch/worktree kept; a later boot retries)`
             : `[reconcile] worker ${s.id} (branch ${s.branch}) is HELD by a merge retain (batch or solo) — skipping its finalize (branch/worktree kept for review)`);          continue;
+        }
+        // @decision 9ac3a739 — never key "already finalized" on branch presence or git commit time;
+        // key it on DB event seq order (latest merge_done after latest merge_request, repo-scoped), and
+        // never on an own-row retry (`alreadyFinalized`), which must always fall through to finalizeMerge.
+        if (!alreadyFinalized) {
+          const repoScope = s.repoKey ?? null;
+          const latestDoneSeq = this.db.latestEventSeqForBranch(s.branch!, "merge_done", repoScope);
+          const latestRequestSeq = this.db.latestEventSeqForBranch(s.branch!, "merge_request", repoScope);
+          const finalizedElsewhere = latestDoneSeq != null && (latestRequestSeq == null || latestDoneSeq > latestRequestSeq);
+          if (finalizedElsewhere) {
+            // Some OTHER row sharing this branch already finalized this landing — never call the full
+            // finalizeMerge here (it would re-move the task column / re-persist ship-state / refire a
+            // reingest under THIS row's id, the original m1 bug). If this row's own worktree dir still
+            // lingers (the other row's own removal was incomplete), clean up ONLY the dir + branch ref —
+            // no task bookkeeping, no merge_done, no reingest, all already done under the other row.
+            // `retainIfUncommitted` (never `worktreeHasWork`, same reason Pass A never applies it to its
+            // own finalize below: a genuinely-landed squash is still "ahead of base" by git's literal
+            // ancestry, so that check would wrongly retain every real case this branch exists to clean up).
+            if (worktreeOnDisk) {
+              // @decision 9ac3a739 — mirror finalizeMerge's own order (round 3, item 3): check the live
+              // tip against the landed one BEFORE touching the worktree; a mismatch/unverifiable tip
+              // removes NOTHING and HOLDS the branch via the same merge_branch_retained mechanism.
+              const sibGuard = this.soloFinalizeTipGuard({
+                opId: randomUUID(), managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
+                branch: s.branch, landedTip: paLooked.landedTip, branchGone: paLooked.branchGone, landedSha, repoKey: s.repoKey ?? null,
+              });
+              let tipMismatch = false;
+              if (sibGuard.expectedBranchTip) {
+                let liveTip: string | null = null;
+                try { liveTip = (await resolveGitRef(repoPath, s.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
+                if (!liveTip || liveTip !== sibGuard.expectedBranchTip) {
+                  sibGuard.onBranchRetained(liveTip, "at-finalize");
+                  tipMismatch = true;
+                }
+              }
+              if (!tipMismatch) {
+                try {
+                  const { outcome } = await this.gcWorktreeDir(repoPath, worktreePath, { projectId: project.id, worktreeId: codescapeWorktreeId(s.taskId) }, { branch: s.branch, retainIfUncommitted: true });
+                  if (outcome === "removed") worktreesPruned++;
+                  else handledWorktrees.add(worktreePath); // retained (dirty/wedged/etc) — never re-decide it as a plain Pass B orphan
+                  // CAS pin is the branch's OWN tip, never landedSha (the squash commit on main — a
+                  // different object).
+                  // @decision 9ac3a739 — act on deleteBranch's own CAS refusal (round 3, item 3): `false`
+                  // means the tip moved since the check above — file the same retained event instead of
+                  // silently swallowing the refusal.
+                  if (sibGuard.expectedBranchTip) {
+                    const deleted = await deleteBranch(repoPath, s.branch, { timeoutMs: this.gitOpMs, expectedTip: sibGuard.expectedBranchTip });
+                    if (!deleted) {
+                      let liveTip2: string | null = null;
+                      try { liveTip2 = (await resolveGitRef(repoPath, s.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip2 = null; }
+                      sibGuard.onBranchRetained(liveTip2, "ref-kept-after-finalize");
+                    }
+                  }
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.warn(`[reconcile] could not clean up sibling worktree/branch for worker ${s.id} (branch ${s.branch}, already finalized through another row): ${(e as Error).message}`);
+                }
+              }
+              handledWorktrees.add(worktreePath);
+            }
+            continue;
+          }
         }
         // `landedSha` + `s.repoKey` (card 1eebc46a) are already resolved above (the squash-detection
         // lookup this pass exists to do) — free to persist, no extra git call.
@@ -21097,6 +21176,8 @@ export class SessionService {
     for (const s of all) {
       if (s.role !== "worker" || !s.taskId) continue;
       if (protectedSessionIds.has(s.id)) continue; // about to be resumed — leave its lifecycle intact
+      // Row-id check stays here (unlike Pass A above) — A2 never touches a worktree/branch, it only
+      // files a missing event, so there's no destructive aliasing hazard for protectedWorktreePaths to guard.
       // Card 1d10aea9: `terminalKey` is checked for `undefined` BEFORE the comparison, not folded into
       // one `!==` — same shape as Pass A's `isTerminalTask` guard above (card 6f73da1a), mirrored here
       // with the opposite polarity (this site SKIPS on mismatch rather than requiring a match).
@@ -21110,12 +21191,22 @@ export class SessionService {
       if (terminalKey === undefined || this.db.getTask(s.taskId)?.columnKey !== terminalKey) continue; // not a demonstrably-landed merge
       const evts = this.db.listEventsForWorker(s.id);
       const hasMergeRequest = evts.some((e) => e.kind === "merge_request");
-      const hasTerminal = evts.some((e) => e.kind === "merge_done" || e.kind === "merge_rejected");
+      // @decision 9ac3a739 — the branch leg is DB event seq order, repo-scoped, never bare presence: a
+      // branch-presence check wrongly reads an unrelated OLDER landing (e.g. before a re-task) as having
+      // resolved THIS row's own later merge_request, stranding its MERGE REQUEST alert forever.
+      const repoScope = s.repoKey ?? null;
+      const latestDoneSeq = s.branch ? this.db.latestEventSeqForBranch(s.branch, "merge_done", repoScope) : null;
+      const latestRequestSeq = s.branch ? this.db.latestEventSeqForBranch(s.branch, "merge_request", repoScope) : null;
+      const hasTerminal = evts.some((e) => e.kind === "merge_done" || e.kind === "merge_rejected")
+        || (latestDoneSeq != null && (latestRequestSeq == null || latestDoneSeq > latestRequestSeq));
       if (!hasMergeRequest || hasTerminal) continue;
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id,
-        taskId: s.taskId, kind: "merge_done", detail: { branch: s.branch ?? null, reconciled: true },
+        // @decision 9ac3a739 — stamp THIS row's own resolved repoKey (round 3, item 2): an omitted
+        // repoKey writes a legacy-shaped row that `latestEventSeqForBranch`'s own repo scope would
+        // wrongly match from ANY repo, defeating the scoping this fix just added above.
+        taskId: s.taskId, kind: "merge_done", detail: { branch: s.branch ?? null, reconciled: true, repoKey: repoScope },
       });
       staleMergesResolved++;
     }
@@ -21134,14 +21225,9 @@ export class SessionService {
     // session row; a worker_recycle chain aliases one worktreePath across two rows, and keying on
     // s.id let a dangling predecessor reap the live successor's worktree.
     //
-    // Build the set of paths held by any protected-for-resume OR currently-live session up front,
-    // ONCE, so whichever row Pass B visits first for a shared path, the decision is identical.
-    const protectedWorktreePaths = new Set<string>();
-    for (const s of all) {
-      if (!s.worktreePath) continue;
-      const isLive = s.processState !== "exited" && s.resumability !== "dead";
-      if (protectedSessionIds.has(s.id) || isLive) protectedWorktreePaths.add(s.worktreePath);
-    }
+    // `protectedWorktreePaths` is the SAME set computed once near the top of this method (card
+    // 9ac3a739) — Pass A now consults it too, so whichever row either pass visits first for a shared
+    // path, the decision is identical.
     for (const s of all) {
       const worktreePath = s.worktreePath;
       if (!worktreePath || handledWorktrees.has(worktreePath)) continue;

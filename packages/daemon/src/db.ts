@@ -6865,6 +6865,21 @@ export class Db {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE kind = ? AND json_extract(detail_json, '$.branch') = ? ORDER BY ts, rowid")
       .all(kind, branch) as Row[]).map(toOrchestrationEvent);
   }
+  /**
+   * @decision 9ac3a739 — never compare branch events by `ts`/rowid for an "already finalized" check:
+   * `ts` collides at ms resolution and rowid is reused on delete, so only this never-reused `seq`
+   * total-orders them; never drop the `repoKey` scope either, or a same-named branch re-cut in another repo answers for this one.
+   */
+  latestEventSeqForBranch(branch: string, kind: OrchestrationEventKind, repoKey: string | null): number | null {
+    const rows = this.db.prepare(
+      "SELECT seq, detail_json AS detailJson FROM orchestration_events WHERE kind = ? AND json_extract(detail_json, '$.branch') = ? ORDER BY seq DESC",
+    ).all(kind, branch) as { seq: number; detailJson: string | null }[];
+    for (const r of rows) {
+      const detail = r.detailJson ? (JSON.parse(r.detailJson) as { repoKey?: string | null }) : {};
+      if ((detail.repoKey ?? null) === repoKey) return r.seq;
+    }
+    return null;
+  }
   /** Card 42daa283 — every DISTINCT branch that has ever been filed a `batch_merge_branch_retained` (or, card cc9bce38, a solo `merge_branch_retained`) event (candidates for the hold). */
   listRetainedBranches(): string[] {
     return (this.db.prepare("SELECT DISTINCT json_extract(detail_json, '$.branch') AS b FROM orchestration_events WHERE kind IN ('batch_merge_branch_retained', 'merge_branch_retained')")
