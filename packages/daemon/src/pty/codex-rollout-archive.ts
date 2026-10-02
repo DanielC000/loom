@@ -6,17 +6,31 @@ import { realCodexHome } from "./codex-doctrine.js";
 /**
  * Card `b8124a1f` bounds the otherwise-unbounded `~/.codex/sessions` corpus by MOVING old rollout
  * files out to a Loom-owned archive tree, byte-for-byte — never deleting, compressing, or
- * transforming content. The move is TRANSPARENT to every reader: `codex-transcript.ts#resolveTranscriptFile`
- * scans this archive root as a fallback after the live `sessions/` tree, so an archived rollout is
- * exactly as readable/resumable as a live one — worker_transcript reads, exit-time `snapshotTranscript`,
- * `sessions/scratch-gc.ts`'s resumability check, and `sessions/liveness.ts`'s watcher's own re-check
- * all route through that one function (see its own doc for the enumeration). That transparency is WHY
- * this sweep does not need to prove a candidate belongs to no live-or-resumable session before moving
- * it: even a "wrong" move (a session that turns out to still be resumable) keeps working identically,
- * just via one extra directory-tree scan location — it degrades NOTHING.
+ * transforming content. The move is TRANSPARENT to every LOOM reader:
+ * `codex-transcript.ts#resolveTranscriptFile` scans this archive root as a fallback after the live
+ * `sessions/` tree, so an archived rollout is exactly as readable/resumable as a live one for
+ * worker_transcript reads, exit-time `snapshotTranscript`, `sessions/scratch-gc.ts`'s resumability
+ * check, and `sessions/liveness.ts`'s watcher's own re-check — all route through that one function (see
+ * its own doc for the enumeration). That transparency is WHY this sweep does not need to prove a
+ * candidate belongs to no live-or-resumable session before moving it: even a "wrong" move (a session
+ * that turns out to still be resumable) keeps Loom's OWN view working identically, just via one extra
+ * directory-tree scan location.
+ *
+ * ⚠️ CORRECTED (card `5172fe3a`, real-spawn-confirmed — this sentence used to claim the transparency
+ * above "degrades NOTHING", full stop; that was FALSE): it covers Loom's own readers only. The REAL
+ * `codex` CLI's own `resume <uuid>` lookup never goes through `resolveTranscriptFile` at all — it
+ * resolves the rollout some other way (its error message on a real, confirmed-reproduced failure cited
+ * the exact original absolute path, consistent with `~/.codex/thread_history_1.sqlite` being an index
+ * over rollout files rather than a live directory re-scan). A real spawn against a relocated-but-intact
+ * rollout file failed HARD: `thread/resume failed: no rollout found for thread id <uuid> (code -32600)`,
+ * process exit code 1 — not a graceful fallback, not a silently-blank fresh conversation. See
+ * `restoreArchivedCodexRollout` below, and its sole call site (`pty/host.ts#createCodexPty`, gated on
+ * `buildCodexResumeArgs(opts).length > 0` — the one decision point for whether `resume <uuid>` can ever
+ * appear in a codex spawn's argv) — every `codex resume <uuid>` is restored back to its EXACT original
+ * live path immediately before that argv is built, closing exactly the gap this correction describes.
  *
  * @decision b8124a1f — archive, never delete (owner decision, request 15bd0464): old rollouts move
- * byte-for-byte to a Loom-owned tree, and every reader stays transparent via the fallback scan above.
+ * byte-for-byte to a Loom-owned tree, and every LOOM reader stays transparent via the fallback scan.
  *
  * ⚠️ WHAT THIS DELIBERATELY DOES NOT TOUCH: `snapshotExistingConversationIdsForSpawn` and
  * `findConversationIdForSpawn` (`codex-transcript.ts`) — the ACTUAL synchronous codex-spawn hot path —
@@ -113,6 +127,10 @@ function moveFile(src: string, dest: string): void {
  * individual file (a failed move is recorded in `failed` and the source is left exactly as it was — an
  * archive attempt can never destroy or corrupt a rollout); a missing `sessions/` root (no codex use
  * yet on this host) is the expected, silent zero-result case.
+ *
+ * @decision 5172fe3a — this sweep cannot race {@link restoreArchivedCodexRollout}: its one call site
+ * (index.ts boot) runs synchronously, strictly before the gateway listener opens, and every restore path
+ * requires that listener. Proven structurally by test/codex-archive-sweep-precedes-listen.mjs.
  */
 export function archiveOldCodexRollouts(deps: CodexRolloutArchiveDeps = {}): CodexRolloutArchiveResult {
   const result: CodexRolloutArchiveResult = { scanned: 0, archived: [], failed: [] };
@@ -162,4 +180,78 @@ export function archiveOldCodexRollouts(deps: CodexRolloutArchiveDeps = {}): Cod
     }
   }
   return result;
+}
+
+/** Walk one `YYYY/MM/DD`-shaped root looking for a `.jsonl` file whose name contains `conversationId`.
+ *  Duplicates `codex-transcript.ts#scanForConversationId`'s own tree-walk shape rather than importing it
+ *  — that file already imports {@link codexRolloutArchiveRoot} from here, so the reverse import would be
+ *  circular. Returns both the absolute path and its `YYYY/MM/DD/<file>` path relative to `root`, since
+ *  {@link restoreArchivedCodexRollout} needs the latter to reconstruct the EXACT original live path. */
+function findRolloutByConversationId(root: string, conversationId: string): { full: string; rel: string } | null {
+  try {
+    for (const year of fs.readdirSync(root)) {
+      const yearDir = path.join(root, year);
+      let months: string[];
+      try { months = fs.readdirSync(yearDir); } catch { continue; }
+      for (const month of months) {
+        const monthDir = path.join(yearDir, month);
+        let days: string[];
+        try { days = fs.readdirSync(monthDir); } catch { continue; }
+        for (const day of days) {
+          const dayDir = path.join(monthDir, day);
+          let files: string[];
+          try { files = fs.readdirSync(dayDir); } catch { continue; }
+          const hit = files.find((f) => f.endsWith(".jsonl") && f.includes(conversationId));
+          if (hit) return { full: path.join(dayDir, hit), rel: path.join(year, month, day, hit) };
+        }
+      }
+    }
+  } catch { /* root missing — nothing to find */ }
+  return null;
+}
+
+export interface RestoreArchivedCodexRolloutResult {
+  /** true iff a rollout for this conversation id now sits at its live path — either moved there by this
+   *  call, or already present before it (see `alreadyLive`). false iff no archived copy exists for this
+   *  id at all (nothing to restore — the caller proceeds exactly as before this card). */
+  restored: boolean;
+  /** true iff the LIVE path already held a rollout for this id BEFORE this call. The archive (if a copy
+   *  also exists there) is left completely untouched in that case — never overwritten, never deleted —
+   *  per the "don't clobber a live file" rule (card 5172fe3a). */
+  alreadyLive: boolean;
+}
+
+/**
+ * The inverse of {@link archiveOldCodexRollouts}, for exactly ONE conversation: move its rollout file
+ * back from {@link codexRolloutArchiveRoot} to its EXACT original `YYYY/MM/DD/<file>` path under the
+ * live `sessions/` root — byte-identical (same {@link moveFile}), never a reconstruction. Called from
+ * `pty/host.ts#createCodexPty`, the sole chokepoint for every `codex resume <uuid>` spawn (see this
+ * file's header doc) — a real spawn proved the codex CLI cannot resume an archived rollout on its own.
+ *
+ * Never overwrites a live file: if a rollout for this id is already at the live path, this is a pure
+ * no-op (`alreadyLive: true`) — the archived copy, if one exists, is left exactly as it was. If a move
+ * genuinely fails (I/O error), this THROWS rather than swallowing — the caller must fail the resume
+ * loudly rather than spawn codex into a guaranteed "no rollout found" crash with a far more confusing
+ * error. See `docs/decisions/5172fe3a-codex-rollout-archiver-cannot-race-a-restore.md` for why the
+ * {@link archiveOldCodexRollouts} boot sweep can never race this call.
+ */
+export function restoreArchivedCodexRollout(conversationId: string, deps: CodexRolloutArchiveDeps = {}): RestoreArchivedCodexRolloutResult {
+  const sessionsRoot = deps.sessionsRoot ?? codexSessionsRoot();
+  const archiveRoot = deps.archiveRoot ?? codexRolloutArchiveRoot();
+
+  if (findRolloutByConversationId(sessionsRoot, conversationId)) {
+    return { restored: true, alreadyLive: true };
+  }
+  const archivedHit = findRolloutByConversationId(archiveRoot, conversationId);
+  if (!archivedHit) {
+    return { restored: false, alreadyLive: false };
+  }
+  const dest = path.join(sessionsRoot, archivedHit.rel);
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    moveFile(archivedHit.full, dest);
+  } catch (err) {
+    throw new Error(`failed to restore archived codex rollout ${archivedHit.full} back to ${dest}: ${(err as Error)?.message ?? String(err)}`);
+  }
+  return { restored: true, alreadyLive: false };
 }

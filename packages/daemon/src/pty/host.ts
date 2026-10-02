@@ -38,6 +38,7 @@ export const CODEX_CODESCAPE_REASON = `codescape is enabled for this project but
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine, withCodexRoleDoctrine } from "./codex-doctrine.js";
 import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail, MCP_TOKEN_ENV_VAR } from "./codex-host.js";
 import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
+import { restoreArchivedCodexRollout } from "./codex-rollout-archive.js";
 
 /** @decision 702f2197 — the ONLY server ids passed as `mcpServersToCodexArgs`'s `autoApproveServerIds` at
  *  `createCodexPty`'s call site: Loom's own first-party, daemon-local, role-gated surfaces. Never widen
@@ -5248,6 +5249,16 @@ export class PtyHost {
     // request carrying a codex resumeId is reported loudly here rather than silently mis-resumed.
     const resumeArgs = buildCodexResumeArgs(opts);
     const isCodexResume = resumeArgs.length > 0;
+    // @decision 5172fe3a — the sole chokepoint for every `codex resume <uuid>`; restore before spawning
+    // or fail loud here instead of reproducing codex's own real "no rollout found" crash. See
+    // codex-rollout-archive.ts's own doc.
+    if (isCodexResume && opts.resumeId) {
+      try {
+        restoreArchivedCodexRollout(opts.resumeId);
+      } catch (err) {
+        throw new Error(`codex resume ${opts.resumeId}: ${(err as Error)?.message ?? String(err)}`);
+      }
+    }
     if (opts.fork && opts.resumeId) {
       // eslint-disable-next-line no-console
       console.warn(`[pty] ${opts.sessionId} codex has no discovered fork/branch mechanism analogous to claude's --fork-session, so reusing "resume ${opts.resumeId}" here would risk a SECOND live pty racing writes into the source's own rollout file — deliberately NOT done, for safety, not merely for lack of parity. This "fork" spawns a FRESH, independent codex session (sharing the source's cwd) instead, not a branched copy of its conversation. Known, disclosed gap (card c6ce2804); use harness "claude" if forking a live conversation is required.`);

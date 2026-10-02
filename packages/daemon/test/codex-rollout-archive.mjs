@@ -17,6 +17,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   5. a genuinely nonexistent conversation id still resolves to null even with a populated archive
 //      root present (negative control — the fallback doesn't just match anything);
 //   6. scanned/archived/failed accounting, and the exact relative path recorded for a move.
+//   7. (card 5172fe3a) restoreArchivedCodexRollout: byte-identical restore to the EXACT original
+//      relative path; a genuinely unknown id is a no-op; a live file already present is NEVER
+//      overwritten (and its archive copy, if any, is left untouched too).
 //
 // ⚠️ NOT covered here: the EXDEV (cross-device rename) fallback inside moveFile — reproducing a real
 // cross-device rename hermetically would need two distinct filesystems/volumes, not available in this
@@ -45,6 +48,7 @@ const {
   archiveOldCodexRollouts,
   codexRolloutArchiveRoot,
   CODEX_ROLLOUT_ARCHIVE_AGE_MS,
+  restoreArchivedCodexRollout,
 } = await import("../dist/pty/codex-rollout-archive.js");
 const {
   resolveTranscriptFile,
@@ -176,6 +180,55 @@ check("the second sweep still scans the still-live fresh file", result2.scanned 
   const result3 = archiveOldCodexRollouts({ sessionsRoot: path.join(emptyHome, "sessions") });
   check("a missing sessions root yields scanned:0, archived:[], failed:[]",
     result3.scanned === 0 && result3.archived.length === 0 && result3.failed.length === 0);
+}
+
+// --- Scenario 9 (card 5172fe3a): restoreArchivedCodexRollout — byte-identical restore to the EXACT
+// original relative path. `oldId` is still sitting ONLY in the archive at `archivedPath` here (scenario
+// 4 restored-then-re-archived it; scenarios 5-8 never touched it again). --------------------------------
+{
+  check("RED CONTROL: before restoring, the live path genuinely does NOT have this file (proves the fixture is in the expected pre-restore state)", !fs.existsSync(oldFile));
+  const restoreResult = restoreArchivedCodexRollout(oldId);
+  check("restoreArchivedCodexRollout reports restored:true, alreadyLive:false", restoreResult.restored === true && restoreResult.alreadyLive === false, `got=${JSON.stringify(restoreResult)}`);
+  check("the rollout is back at its EXACT original live path", fs.existsSync(oldFile));
+  check("the restored file's content is byte-identical to the original", fs.existsSync(oldFile) && Buffer.compare(fs.readFileSync(oldFile), oldContent) === 0);
+  check("the archive copy is gone (moved, not copied-and-left)", !fs.existsSync(archivedPath));
+  // Put it back in the archive so a later run of this file (or a reader relying on file order) never
+  // depends on this scenario's own side effect persisting past it.
+  fs.mkdirSync(path.dirname(archivedPath), { recursive: true });
+  fs.renameSync(oldFile, archivedPath);
+}
+
+// --- Scenario 10: a genuinely unknown conversation id is a complete no-op — nothing created, nothing
+// moved, nothing deleted, even with a populated archive root present. -----------------------------------
+{
+  const unknownId = "restore-unknown-id-never-written-5172fe3a";
+  const beforeArchiveExists = fs.existsSync(archivedPath);
+  const beforeFreshExists = fs.existsSync(freshFile);
+  const restoreResult = restoreArchivedCodexRollout(unknownId);
+  check("NEGATIVE CONTROL: restoreArchivedCodexRollout reports restored:false, alreadyLive:false for an unknown id", restoreResult.restored === false && restoreResult.alreadyLive === false, `got=${JSON.stringify(restoreResult)}`);
+  check("the real archived file (a DIFFERENT, known id) is untouched", fs.existsSync(archivedPath) === beforeArchiveExists);
+  check("the real live fresh file (a DIFFERENT, known id) is untouched", fs.existsSync(freshFile) === beforeFreshExists);
+}
+
+// --- Scenario 11: a rollout already present at the LIVE path is NEVER overwritten, and its archive
+// copy (if one also exists, under the SAME relative layout) is left completely untouched — no clobber,
+// no delete. Distinguishable content on each side proves neither was touched. ----------------------------
+{
+  const dupId = "restore-already-live-dup-id-5172fe3a";
+  const dupRel = path.join("2026", "09", "05", `rollout-2026-09-05T00-00-00-${dupId}.jsonl`);
+  const liveContent = "LIVE-CONTENT-MUST-SURVIVE\n";
+  const archiveContent = "ARCHIVE-CONTENT-MUST-SURVIVE-UNTOUCHED\n";
+  const dupLivePath = path.join(tmpCodexHome, "sessions", dupRel);
+  const dupArchivePath = path.join(codexRolloutArchiveRoot(), dupRel);
+  fs.mkdirSync(path.dirname(dupLivePath), { recursive: true });
+  fs.writeFileSync(dupLivePath, liveContent);
+  fs.mkdirSync(path.dirname(dupArchivePath), { recursive: true });
+  fs.writeFileSync(dupArchivePath, archiveContent);
+
+  const restoreResult = restoreArchivedCodexRollout(dupId);
+  check("restoreArchivedCodexRollout reports alreadyLive:true when the live path already has this id", restoreResult.restored === true && restoreResult.alreadyLive === true, `got=${JSON.stringify(restoreResult)}`);
+  check("the LIVE file's content is UNCHANGED (never overwritten)", fs.readFileSync(dupLivePath, "utf8") === liveContent);
+  check("the ARCHIVE copy is left completely untouched (never deleted, never modified)", fs.existsSync(dupArchivePath) && fs.readFileSync(dupArchivePath, "utf8") === archiveContent);
 }
 
 await finishAndExit(failures === 0 ? 0 : 1);
