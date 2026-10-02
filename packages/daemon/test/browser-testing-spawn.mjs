@@ -45,6 +45,7 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildMcpServers, buildSpawnArgs, playwrightMcpServer, scratchDirEnv, disallowedToolsForSpawn, PLAYWRIGHT_DISALLOWED_TOOLS, ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS } = await import("../dist/pty/host.js");
+const { MCP_TOKEN_ENV_VAR } = await import("../dist/pty/codex-host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { sessionScratchDir } = await import("../dist/paths.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -86,9 +87,13 @@ check("(a) the resolved cli.js exists on disk (pinned daemon dependency)", fs.ex
 check("(a) headless + isolated flags are passed (unattended, per-worker isolation)",
   pw.args.includes("--headless") && pw.args.includes("--isolated"));
 // playwrightMcpServer(dir) (the exported builder) agrees with what buildMcpServers embedded — and
-// buildMcpServers wires the per-session scratch dir, so the no-output-dir builder is NOT equal.
-check("(a) playwrightMcpServer(scratchDir) returns the same absolute-path stdio entry",
-  JSON.stringify(playwrightMcpServer(sessionScratchDir("s1"))) === JSON.stringify(pw));
+// buildMcpServers wires the per-session scratch dir, so the no-output-dir builder is NOT equal. Card
+// 8d26596b: buildMcpServers' OWN chokepoint additionally blanks LOOM_MCP_TOKEN on every stdio mount, which
+// the raw producer (playwrightMcpServer) never does on its own — so the comparison accounts for that one
+// key rather than asserting byte-identical objects.
+check("(a) playwrightMcpServer(scratchDir) returns the same absolute-path stdio entry, modulo the chokepoint's LOOM_MCP_TOKEN blank",
+  JSON.stringify({ ...playwrightMcpServer(sessionScratchDir("s1")), env: { [MCP_TOKEN_ENV_VAR]: "" } }) === JSON.stringify(pw));
+check("(8d26596b) the playwright mount's env carries LOOM_MCP_TOKEN blanked to the empty string", pw.env?.[MCP_TOKEN_ENV_VAR] === "");
 
 // ===================== screenshot output defaults OUTSIDE the repo working tree (card 2218530e) =====================
 // The footgun: with no --output-dir, the Playwright MCP defaults captures to `<cwd>/.playwright-mcp`,

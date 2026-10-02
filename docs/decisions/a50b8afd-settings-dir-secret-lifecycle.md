@@ -118,11 +118,22 @@ independent of whether `collectMcpEnvSecrets` happens to still treat the header 
 still does too, since the sweep is non-empty-string-based — but that coincidence must never become the
 ONLY reason file mode is chosen, on either platform.)
 
-**win32 env inheritance, noted and accepted:** `LOOM_MCP_TOKEN`, once set on the spawned claude process's
-own env, is inherited by every child THAT process spawns — its own Bash tool invocations, the hook-relay
-script, any stdio MCP server it launches. This is acceptable: it is that SAME session's own short-lived
-token, already fully available to that session via its own MCP tool calls: a child inheriting it grants no
-access the session didn't already have through its own, sanctioned channel.
+**win32 env inheritance, noted and accepted — but corrected by card `8d26596b` for one child class:**
+`LOOM_MCP_TOKEN`, once set on the spawned claude process's own env, is inherited by every child THAT
+process spawns — its own Bash tool invocations, the hook-relay script, any stdio MCP server it launches.
+The "already available to that session, so a child inheriting it grants no new access" reasoning below
+holds for the agent's own shell and Loom's own hook scripts (both run AS the session, under its own
+control). It does **not** hold for a **third-party stdio MCP server** the session merely talks to (a
+capability/connection binary, or Loom's own playwright/markitdown, neither of which call back into Loom's
+MCP surface): handing an external binary this session's own bearer token is a materially different
+exposure than the session's own agent already having it — see `docs/decisions/8d26596b-stdio-mcp-token-env-blank.md`,
+which removes the passive-inheritance path (every stdio *mount* now gets the token blanked at the
+`buildMcpServers` chokepoint) without touching the acceptance below for the agent's own shell or the hook
+scripts. **For those two — the agent's own shell and Loom's own hook scripts, both running AS the session —
+this is acceptable:** it is that SAME session's own short-lived token, already fully available to that
+session via its own MCP tool calls, so a child inheriting it grants no access the session didn't already
+have through its own, sanctioned channel. (This does not extend to a third-party stdio binary — see the
+correction above and `8d26596b`'s own record for why that case is different and fixed separately.)
 
 ## (b2) — `<sid>.json` gets the SAME delete lifecycle `<sid>.mcp-config.json` already has
 

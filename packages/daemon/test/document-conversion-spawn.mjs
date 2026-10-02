@@ -49,6 +49,7 @@ process.env.LOOM_MARKITDOWN_BIN = MARKITDOWN_BIN;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildMcpServers, markitdownMcpServer } = await import("../dist/pty/host.js");
+const { MCP_TOKEN_ENV_VAR } = await import("../dist/pty/codex-host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { loomVenvBin, loomVenvDir } = await import("../dist/python/venv.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -99,9 +100,13 @@ check("(a) markitdown entry is a stdio server", md?.type === "stdio");
 check("(a) command is the resolved ABSOLUTE markitdown bin", typeof md?.command === "string" && path.isAbsolute(md.command) && md.command === MARKITDOWN_BIN);
 check("(a) args is an array (markitdown-mcp speaks STDIO by default — no args needed)",
   Array.isArray(md?.args) && md.args.length === 0);
-// markitdownMcpServer() (the exported builder) agrees with what buildMcpServers embedded.
-check("(a) markitdownMcpServer() returns the same absolute-path stdio entry",
-  JSON.stringify(markitdownMcpServer()) === JSON.stringify(md));
+// markitdownMcpServer() (the exported builder) agrees with what buildMcpServers embedded. Card 8d26596b:
+// buildMcpServers' OWN chokepoint additionally blanks LOOM_MCP_TOKEN on every stdio mount, which the raw
+// producer (markitdownMcpServer) never does on its own — account for that one key rather than asserting
+// byte-identical objects.
+check("(a) markitdownMcpServer() returns the same absolute-path stdio entry, modulo the chokepoint's LOOM_MCP_TOKEN blank",
+  JSON.stringify({ ...markitdownMcpServer(), env: { [MCP_TOKEN_ENV_VAR]: "" } }) === JSON.stringify(md));
+check("(8d26596b) the markitdown mount's env carries LOOM_MCP_TOKEN blanked to the empty string", md.env?.[MCP_TOKEN_ENV_VAR] === "");
 
 // a plain (role-null) document session still gets the server (document conversion is orthogonal to role).
 const plainDoc = buildMcpServers({ sessionId: "s2", port: 4317, documentConversion: true });

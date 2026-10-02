@@ -1956,7 +1956,29 @@ export function buildMcpServers(o: {
     }
     // !isLoomDev(): silent skip — the "missing" reason is the gate itself.
   }
+  // @decision 8d26596b — force LOOM_MCP_TOKEN to "" on every non-http mount here, ONE chokepoint,
+  // unconditionally on both platforms, never per-producer — see blanksMcpToken's own doc for the keying.
+  for (const mount of Object.values(mcpServers)) {
+    const m = mount as { type?: string; env?: Record<string, string> };
+    if (blanksMcpToken(m)) {
+      m.env = { ...(m.env ?? {}), [MCP_TOKEN_ENV_VAR]: "" };
+    }
+  }
   return mcpServers;
+}
+
+/**
+ * Card 8d26596b, Code Review: the ONE predicate deciding which `buildMcpServers` entries get the
+ * `LOOM_MCP_TOKEN` blank — pure and exported so a test can assert it directly, including against a
+ * TYPE-LESS `{command,args}` shape no current producer emits but a future one could. Keyed on NOT being an
+ * http mount, never on `type === "stdio"` — claude's own `--mcp-config` loader treats a type-less stdio
+ * entry (bare `{command,args}`, no `type` field at all) as stdio too, so keying on the stdio literal would
+ * let such an entry silently skip the blank. `buildMcpServers` calls this (never inlines the check itself)
+ * for the same reason `applyMcpTokenEnv` was extracted: a bare conditional at the call site is what
+ * regressed twice before in this file's own history.
+ */
+export function blanksMcpToken(mount: { type?: string }): boolean {
+  return mount.type !== "http";
 }
 
 /**

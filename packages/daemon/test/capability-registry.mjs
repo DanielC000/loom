@@ -49,6 +49,7 @@ const { resolveProfileCapabilities } = await import("@loom/shared");
 const {
   buildMcpServers, buildSpawnArgs, collectMcpEnvSecrets, mcpConfigHasSecret, redactSecrets, capabilityToolAllowlist,
 } = await import("../dist/pty/host.js");
+const { MCP_TOKEN_ENV_VAR } = await import("../dist/pty/codex-host.js");
 const { writeSessionMcpConfig } = await import("../dist/pty/claude-settings.js");
 const { SETTINGS_DIR } = await import("../dist/paths.js");
 const { Db } = await import("../dist/db.js");
@@ -155,7 +156,11 @@ const withCredNoBinding = buildMcpServers({
   capabilities: [{ slug: "needs-cred" }], capabilityCatalog: [credDef], // no connectionId granted on this profile
   resolveConnectionSecret: () => { secretResolverCalls++; return "should-never-be-used"; },
 });
-check("(credential-tie) no connectionId on the grant ⇒ mounts WITHOUT an env secret", withCredNoBinding["needs-cred"]?.env === undefined);
+// Card 8d26596b: buildMcpServers' chokepoint now ALWAYS puts an env block on a stdio mount (to carry the
+// LOOM_MCP_TOKEN blank), so "no secret" is no longer "no env block at all" — assert the ABSENCE of the
+// application-level secret key specifically, plus that the blank is present.
+check("(credential-tie) no connectionId on the grant ⇒ mounts WITHOUT an env secret", withCredNoBinding["needs-cred"]?.env?.FAKE_TOKEN === undefined);
+check("(8d26596b) ...but the env block still carries the LOOM_MCP_TOKEN blank, like every other stdio mount", withCredNoBinding["needs-cred"]?.env?.[MCP_TOKEN_ENV_VAR] === "");
 check("(credential-tie) no connectionId on the grant ⇒ the secret resolver is never even called", secretResolverCalls === 0);
 
 // ===================== CODE-REVIEW FIX: the secret must NEVER ride claude's argv or the spawn log =====================

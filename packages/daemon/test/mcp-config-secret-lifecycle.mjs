@@ -59,7 +59,7 @@ process.env.LOOM_HOME = tmpHome;
 const { requireHermeticEnv } = await import("./_guard.mjs");
 requireHermeticEnv();
 
-const { PtyHost, WINDOWS_COMMAND_LINE_LIMIT, buildMcpServers, applyMcpTokenEnv } = await import("../dist/pty/host.js");
+const { PtyHost, WINDOWS_COMMAND_LINE_LIMIT, buildMcpServers, applyMcpTokenEnv, collectMcpEnvSecrets, playwrightMcpServer, blanksMcpToken } = await import("../dist/pty/host.js");
 const { MCP_TOKEN_ENV_VAR } = await import("../dist/pty/codex-host.js");
 const {
   sessionMcpConfigPath, unlinkSessionMcpConfig, writeSessionMcpConfig,
@@ -193,6 +193,64 @@ registerForCleanup(WORKTREES_DIR);
     check("(2be634f2 REJECTED) the win32-forced and POSIX-forced maps are IDENTICAL for the capability secret fields — `ridesEnv` has NO effect here, unlike the mcpToken header",
       win32CapServers["cap-a"].env.CRED_A_TOKEN === posixCapServers["cap-a"].env.CRED_A_TOKEN
       && win32CapServers["cap-c"].env.CRED_C_TOKEN === posixCapServers["cap-c"].env.CRED_C_TOKEN);
+
+    // --- Card 8d26596b: the chokepoint fix — EVERY stdio mount buildMcpServers builds gets LOOM_MCP_TOKEN
+    // forced to the empty string, unconditionally on BOTH platforms, never per-producer, while keeping its
+    // own env keys intact; http mounts are UNTOUCHED (never get an env field at all). Covers: playwright
+    // (a Loom-owned stdio mount with no env of its own), a capability WITH a secret (cap-a), a capability
+    // WITH an outputDirEnvVar scratch-dir value (cap-c), and a capability with NEITHER (cap-noenv — proves
+    // `env` is never omitted for a stdio mount any more, unlike the pre-card shape). ---
+    {
+      const NOENV_ROW = {
+        id: "cap-noenv", slug: "cap-noenv", name: "Cap NoEnv", description: "test", transport: "stdio", kind: "bundled",
+        provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: ["noenv.js"] }),
+        toolAllowlistJson: JSON.stringify([]), wantsScratchDir: false, requiresConnection: false, secretEnvVar: null,
+        createdAt: new Date().toISOString(),
+      };
+      const ALL_CATALOG = [CRED_ROW_A, CRED_ROW_SCRATCH, NOENV_ROW];
+      const ALL_GRANTS = [...CAP_GRANTS, { slug: "cap-noenv" }];
+      const win32All = buildMcpServers({
+        sessionId: "probe-8d26596b", port: 4317, role: "worker", browserTesting: true,
+        capabilities: ALL_GRANTS, capabilityCatalog: ALL_CATALOG, resolveConnectionSecret: resolveCapSecret,
+        mcpTokenRidesEnv: true,
+      });
+      const posixAll = buildMcpServers({
+        sessionId: "probe-8d26596b", port: 4317, role: "worker", browserTesting: true,
+        capabilities: ALL_GRANTS, capabilityCatalog: ALL_CATALOG, resolveConnectionSecret: resolveCapSecret,
+        mcpTokenRidesEnv: false,
+      });
+      for (const [label, servers] of [["forced win32", win32All], ["forced POSIX", posixAll]]) {
+        check(`(8d26596b, ${label}) the Loom-owned playwright stdio mount carries LOOM_MCP_TOKEN blanked to ""`,
+          servers.playwright?.type === "stdio" && servers.playwright?.env?.[MCP_TOKEN_ENV_VAR] === "");
+        check(`(8d26596b, ${label}) a capability WITH a secret (cap-a) keeps its own secret key intact AND carries the blank`,
+          servers["cap-a"]?.env?.CRED_A_TOKEN === "secret-A-f3a1" && servers["cap-a"]?.env?.[MCP_TOKEN_ENV_VAR] === "");
+        check(`(8d26596b, ${label}) a capability WITH outputDirEnvVar (cap-c) keeps its scratch-dir key intact AND carries the blank`,
+          servers["cap-c"]?.env?.CAP_C_OUTPUT_DIR?.includes("probe-8d26596b") && servers["cap-c"]?.env?.[MCP_TOKEN_ENV_VAR] === "");
+        check(`(8d26596b, ${label}) a capability with NEITHER a secret nor outputDirEnvVar still gets an env block, carrying ONLY the blank`,
+          servers["cap-noenv"]?.env?.[MCP_TOKEN_ENV_VAR] === "" && Object.keys(servers["cap-noenv"]?.env ?? {}).length === 1);
+        check(`(8d26596b, ${label}) http mounts are UNTOUCHED — no env field at all, ever`,
+          servers["loom-tasks"]?.env === undefined && servers["loom-orchestration"]?.env === undefined);
+      }
+      // playwrightMcpServer() (the raw producer) never sets env itself — proves the blank is applied ONLY
+      // at the buildMcpServers chokepoint, never pushed down into the producer.
+      check("(8d26596b) the raw playwrightMcpServer() producer itself carries NO env field at all (the blank is chokepoint-only)",
+        playwrightMcpServer("/tmp/whatever").env === undefined);
+      // Negative control: the blank is never collected as a "secret" by collectMcpEnvSecrets (its `if (v)`
+      // falsy-string guard skips ""), so it can never trigger file-diversion or redaction on its own.
+      check("(8d26596b negative control) collectMcpEnvSecrets never collects the empty-string LOOM_MCP_TOKEN blank",
+        collectMcpEnvSecrets({ x: { type: "stdio", command: "y", args: [], env: { [MCP_TOKEN_ENV_VAR]: "" } } }).length === 0);
+
+      // --- Card 8d26596b, Code Review: blanksMcpToken is keyed on NOT-http, never on the "stdio" literal —
+      // claude treats a TYPE-LESS {command,args} mcp-config entry as stdio too, so a future producer that
+      // omits `type` entirely must still get the blank. No current producer emits a type-less entry, so
+      // this asserts the predicate directly (the same reason applyMcpTokenEnv is itself directly testable,
+      // above) rather than trying to coax one out of buildMcpServers end-to-end. ---
+      check("(8d26596b) blanksMcpToken({command,args}, no type at all) -> true (a type-less entry still gets blanked)",
+        blanksMcpToken({ command: "x", args: [] }) === true);
+      check("(8d26596b) blanksMcpToken({type:'stdio',...}) -> true", blanksMcpToken({ type: "stdio" }) === true);
+      check("(8d26596b) blanksMcpToken({type:'http',...}) -> false (http mounts are never touched)",
+        blanksMcpToken({ type: "http" }) === false);
+    }
   }
 
   check("SETTINGS_DIR_READ_DENY_RULE = Read(<SETTINGS_DIR, forward-slashed>/**)",
