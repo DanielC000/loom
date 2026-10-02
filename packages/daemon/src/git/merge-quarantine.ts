@@ -52,18 +52,54 @@ export interface MergeQuarantineEntry {
    *  @decision 7673d096 — never trust a freshly-recomputed key enough to migrate/discard a durable latch
    *  when `repoPath` isn't currently resolvable (see `isRepoPathCurrentlyResolvable`) — record this instead. */
   resolvedKey?: string;
+  /** IN-MEMORY BOOKKEEPING ONLY — never persisted ({@link writeMergeQuarantineLatch} strips it before
+   *  serializing). The full set of `activeQuarantines` map keys this exact logical entry currently
+   *  occupies, threaded through every arm/union/merge ({@link armQuarantineKey},
+   *  {@link unionQuarantineEntries}, PASS 2's orphan merge). `clearMergeQuarantine`/
+   *  `clearMergeQuarantineByToken` lift every key named here instead of scanning the map for reference
+   *  equality — which breaks the moment an entry is REBUILT (a union, an orphan merge) rather than mutated
+   *  in place, since the rebuilt object is no longer `===` the one still sitting at another of its own keys.
+   *
+   *  @decision 54054c01 (Code Review round 2) — see the decision record for the R3 repro this closes. */
+  armedKeys?: string[];
 }
 
 const activeQuarantines = new Map<string, MergeQuarantineEntry>();
 
+/** One {@link reenterMergeQuarantinesAtBoot} PASS 1 entry that could NOT be key-verified at all — no
+ *  `resolvedKey` to dual-arm under (a pre-7673d096 latch), AND the registered path was unresolvable at
+ *  load time. Arming it under the one key computed THEN (an existing-ancestor fallback, while absent)
+ *  would enforce against a key a later remount in the SAME boot will never actually produce — instead it
+ *  sits here, out of `activeQuarantines` entirely, and {@link activeMergeQuarantineFor} re-resolves it
+ *  lazily by recomputing its OWN key fresh on every query.
+ *
+ *  `sourceFile` (the on-disk filename, not a full path, this entry was loaded from — PASS 1 deliberately
+ *  never migrates/deletes it while pending, since its key can't be verified) lets a later clear OR a
+ *  successful graduation ({@link activeMergeQuarantineFor}) clean it up explicitly, rather than leaving it
+ *  to resurrect the quarantine on a later boot (round 2 finding 1).
+ */
+interface PendingUnresolvedQuarantine {
+  entry: MergeQuarantineEntry;
+  sourceFile: string;
+}
+let pendingUnresolvedQuarantines: PendingUnresolvedQuarantine[] = [];
+
 export const MERGE_QUARANTINE_DIR = path.join(LOOM_HOME, "merge-quarantines");
+
+/** Hash a raw canonical-repo-lock KEY directly (never a repoPath) — the primitive every other
+ *  `quarantineHashFor`/`quarantinePathFor`/residue helper below delegates to, so a caller holding an
+ *  entry's recorded {@link MergeQuarantineEntry.resolvedKey} (which may now differ from what
+ *  `canonicalRepoLockKey(repoPath)` recomputes) can still address that entry's own on-disk latch without
+ *  re-deriving the key from a repoPath it may not even trust. */
+function quarantineHashForKey(key: string): string {
+  return createHash("sha256").update(key).digest("hex").slice(0, 24);
+}
 
 /** The stable hash component of a quarantine latch's filename for `repoPath` — factored out of
  *  {@link quarantinePathFor} so boot-time re-entry can compute the SAME hash for every REGISTERED repo and
  *  match it against an unparsable latch's filename (round 6, BLOCKER 2) without reconstructing the path. */
 function quarantineHashFor(repoPath: string): string {
-  const key = canonicalRepoLockKey(repoPath);
-  return createHash("sha256").update(key).digest("hex").slice(0, 24);
+  return quarantineHashForKey(canonicalRepoLockKey(repoPath));
 }
 
 /**
@@ -84,8 +120,12 @@ function legacyQuarantineHashFor(repoPath: string): string {
   return createHash("sha256").update(key).digest("hex").slice(0, 24);
 }
 
+function quarantinePathForKey(key: string): string {
+  return path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKey(key)}.json`);
+}
+
 function quarantinePathFor(repoPath: string): string {
-  return path.join(MERGE_QUARANTINE_DIR, `${quarantineHashFor(repoPath)}.json`);
+  return quarantinePathForKey(canonicalRepoLockKey(repoPath));
 }
 
 /**
@@ -100,16 +140,26 @@ function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry
   const orphanLatchFiles = older.orphanLatchFiles || newer.orphanLatchFiles
     ? [...new Set([...(older.orphanLatchFiles ?? []), ...(newer.orphanLatchFiles ?? [])])]
     : undefined;
-  return { ...older, tokens: [...new Set([...older.tokens, ...newer.tokens])], orphanLatchFiles };
+  const armedKeys = [...new Set([...(older.armedKeys ?? []), ...(newer.armedKeys ?? [])])];
+  return { ...older, tokens: [...new Set([...older.tokens, ...newer.tokens])], orphanLatchFiles, armedKeys };
 }
 
 /** Set `key` -> `entry` in `byRepoKey`, UNIONING with whatever entry (if any) already occupies that key
  *  rather than silently overwriting it — see {@link unionQuarantineEntries}. Every boot-time PASS 1/1b
  *  write into `byRepoKey` must route through this, never a bare `.set()`, since the toplevel walk can make
- *  two previously-distinct latches collapse onto the same key. */
-function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: string, entry: MergeQuarantineEntry): void {
+ *  two previously-distinct latches collapse onto the same key. Also folds `key` itself into the result's
+ *  `armedKeys` and returns the final (armed) object — a caller dual-arming the SAME entry under a SECOND
+ *  key must pass this call's return value as the `entry` for that second call (see PASS 1/1b), or the
+ *  second key's slot ends up with an `armedKeys` missing the first.
+ *
+ *  @decision 54054c01 — set the final armed object at EVERY key in its OWN armedKeys, not just `key` — a
+ *  union can inherit a key from an already-dual-armed `prior`, which would otherwise keep pointing stale. */
+function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: string, entry: MergeQuarantineEntry): MergeQuarantineEntry {
   const prior = byRepoKey.get(key);
-  byRepoKey.set(key, prior ? unionQuarantineEntries(prior, entry) : entry);
+  const merged = prior ? unionQuarantineEntries(prior, entry) : entry;
+  const armed: MergeQuarantineEntry = { ...merged, armedKeys: [...new Set([...(merged.armedKeys ?? []), key])] };
+  for (const k of armed.armedKeys ?? [key]) byRepoKey.set(k, armed);
+  return armed;
 }
 
 /**
@@ -131,7 +181,11 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry): boolean {
     const final = quarantinePathFor(entry.repoPath);
     const tmp = `${final}.tmp-${process.pid}`;
     fd = fs.openSync(tmp, "w");
-    fs.writeSync(fd, JSON.stringify(entry, null, 2) + "\n");
+    // `armedKeys` is IN-MEMORY bookkeeping only (see its own doc comment) — never persisted. A restart
+    // rebuilds it fresh via arming, and a stale persisted value from a PRIOR process's keying would be
+    // actively misleading to a human reading the raw file.
+    const { armedKeys: _armedKeys, ...persistable } = entry;
+    fs.writeSync(fd, JSON.stringify(persistable, null, 2) + "\n");
     fs.fsyncSync(fd); // round 6 — durable on disk BEFORE the rename makes it visible, not just buffered
     fs.closeSync(fd);
     fd = undefined;
@@ -147,10 +201,27 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry): boolean {
   }
 }
 
-/** The stable hash-prefixed glob for `repoPath`'s OWN tmp residue — `<hash>.json.tmp-<pid>`, any pid.
- *  Best-effort; a missing/unreadable directory is not an error. Never throws. */
-function deleteMergeQuarantineTmpResidue(repoPath: string): void {
-  const prefix = `${quarantineHashFor(repoPath)}.json.tmp-`;
+/**
+ * Delete `sourceFile` (a latch basename previously loaded from disk — a stale/legacy/pending source,
+ * never a full path) ONLY IF it is NOT the same file `writtenEntry` was just durably written under.
+ *
+ * @decision 54054c01 (Code Review round 3, CRITICAL) — for a repo bound at its own git toplevel, the old
+ * and current key algorithms compute the IDENTICAL value, so a stale source's name can equal the file a
+ * graduation/merge just wrote — unlinking unconditionally deletes the quarantine just written, not a leftover.
+ *
+ * Shared by graduation, `enterMergeQuarantine`'s merge-into-pending path, and PASS 1's migrate branch (see
+ * docs/decisions/54054c01-clear-lifts-every-key-an-entry-was-armed-under.md for the full repro).
+ */
+function deleteSourceLatchIfSuperseded(sourceFile: string, writtenEntry: MergeQuarantineEntry): void {
+  const writtenFile = path.basename(quarantinePathFor(writtenEntry.repoPath));
+  if (sourceFile === writtenFile) return; // the "stale" source IS the file we just wrote — nothing to delete
+  try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, sourceFile)); } catch { /* best-effort */ }
+}
+
+/** The stable hash-prefixed glob for KEY's OWN tmp residue — `<hash>.json.tmp-<pid>`, any pid. Best-effort;
+ *  a missing/unreadable directory is not an error. Never throws. */
+function deleteMergeQuarantineTmpResidueForKey(key: string): void {
+  const prefix = `${quarantineHashForKey(key)}.json.tmp-`;
   let files: string[];
   try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return; }
   for (const f of files) {
@@ -159,12 +230,25 @@ function deleteMergeQuarantineTmpResidue(repoPath: string): void {
   }
 }
 
+/** The stable hash-prefixed glob for `repoPath`'s OWN tmp residue — `<hash>.json.tmp-<pid>`, any pid.
+ *  Best-effort; a missing/unreadable directory is not an error. Never throws. */
+function deleteMergeQuarantineTmpResidue(repoPath: string): void {
+  deleteMergeQuarantineTmpResidueForKey(canonicalRepoLockKey(repoPath));
+}
+
 /** Best-effort; a missing file is not an error. Never throws. Also sweeps any leftover `.json.tmp-<pid>`
- *  residue for this repo — a failed write DELIBERATELY leaves its tmp behind (round 2: it's the only
- *  durable record of an active quarantine until resolved) — HERE, at clear time, is where it gets swept. */
+ *  residue for KEY — a failed write DELIBERATELY leaves its tmp behind (round 2: it's the only durable
+ *  record of an active quarantine until resolved) — HERE, at clear time, is where it gets swept.
+ *
+ * @decision 54054c01 — takes a raw KEY, never a repoPath: a clear must address BOTH a key an entry is
+ * armed under, not just the one `canonicalRepoLockKey(repoPath)` recomputes fresh right now. */
+function deleteMergeQuarantineLatchByKey(key: string): void {
+  try { fs.unlinkSync(quarantinePathForKey(key)); } catch { /* ENOENT is the common case */ }
+  deleteMergeQuarantineTmpResidueForKey(key);
+}
+
 function deleteMergeQuarantineLatch(repoPath: string): void {
-  try { fs.unlinkSync(quarantinePathFor(repoPath)); } catch { /* ENOENT is the common case */ }
-  deleteMergeQuarantineTmpResidue(repoPath);
+  deleteMergeQuarantineLatchByKey(canonicalRepoLockKey(repoPath));
 }
 
 /**
@@ -204,6 +288,10 @@ export function unconfirmedKillReason(detail: string): string {
  * branch/reason/opId/enteredAt are kept (they describe the LONGEST-outstanding, still-unresolved raise),
  * so a second, unrelated raise never erases the first raise's own identity.
  *
+ * @decision 54054c01 — ALSO checks `pendingUnresolvedQuarantines` for a match before minting a brand-new
+ * entry: a fresh raise on a repo with an old pending (key-unverifiable) latch must merge into it, never
+ * mint an unrelated second entry that leaves the pending one's identity/tokens orphaned.
+ *
  * Returns the fresh token — the caller MUST hold onto it and present it back to
  * {@link clearMergeQuarantineByToken} for its own in-process auto-clear; never guess or reconstruct one.
  */
@@ -211,9 +299,33 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
   const token = randomUUID();
   const key = canonicalRepoLockKey(repoPath);
   const existing = activeQuarantines.get(key);
-  const entry: MergeQuarantineEntry = existing
-    ? { ...existing, tokens: [...existing.tokens, token] }
-    : { repoPath, branch, reason, opId, enteredAt: Date.now(), tokens: [token], resolvedKey: key };
+  if (existing) {
+    const entry: MergeQuarantineEntry = { ...existing, tokens: [...existing.tokens, token] };
+    // `existing` may be armed under a SECOND key too (its own resolvedKey) — update every one of those
+    // slots to this rebuilt object, not just `key` (round 2 finding 2).
+    for (const k of existing.armedKeys?.length ? existing.armedKeys : [key]) activeQuarantines.set(k, entry);
+    if (!writeMergeQuarantineLatch(entry)) {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] canonical repo ${repoPath} is quarantined IN THIS PROCESS ONLY right now — the durable latch failed to write (see the error just above), so a daemon restart BEFORE that is fixed would silently LIFT this quarantine instead of re-arming it. Investigate (disk full? permissions on ${MERGE_QUARANTINE_DIR}?) immediately.`);
+    }
+    return token;
+  }
+  const pendingIdx = pendingUnresolvedQuarantines.findIndex((p) => canonicalRepoLockKey(p.entry.repoPath) === key);
+  if (pendingIdx !== -1) {
+    const pending = pendingUnresolvedQuarantines[pendingIdx] as PendingUnresolvedQuarantine;
+    const fresh: MergeQuarantineEntry = { repoPath, branch, reason, opId, enteredAt: Date.now(), tokens: [token] };
+    const merged: MergeQuarantineEntry = { ...unionQuarantineEntries(pending.entry, fresh), resolvedKey: key, armedKeys: [key] };
+    activeQuarantines.set(key, merged);
+    if (writeMergeQuarantineLatch(merged)) {
+      pendingUnresolvedQuarantines.splice(pendingIdx, 1);
+      deleteSourceLatchIfSuperseded(pending.sourceFile, merged);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] canonical repo ${repoPath} is quarantined IN THIS PROCESS ONLY right now (merged with a pending latch) — the durable latch failed to write, so the pending latch's OWN source file (${pending.sourceFile}) is left in place rather than deleted; a later boot can still recover from it.`);
+    }
+    return token;
+  }
+  const entry: MergeQuarantineEntry = { repoPath, branch, reason, opId, enteredAt: Date.now(), tokens: [token], resolvedKey: key, armedKeys: [key] };
   activeQuarantines.set(key, entry);
   const persisted = writeMergeQuarantineLatch(entry);
   if (!persisted) {
@@ -246,7 +358,10 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
     return;
   }
   const updated: MergeQuarantineEntry = { ...current, tokens: remaining };
-  activeQuarantines.set(key, updated);
+  // Update EVERY key `current` is armed under, not just `key` — reference equality breaks the moment an
+  // entry is REBUILT elsewhere (a union, an orphan merge), since the rebuilt object stops being `===` the
+  // one still sitting at another of its own keys (round 2 finding 2).
+  for (const k of current.armedKeys?.length ? current.armedKeys : [key]) activeQuarantines.set(k, updated);
   // @decision bde5d1fe (Code Review of eae23ebe) — a sweep may only run AFTER a durable write of the
   // state that supersedes it has succeeded, never before: sweeping THEN failing this write would leave
   // NOTHING durable for a repo whose only prior copy was this same tmp.
@@ -275,8 +390,25 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
 export function clearMergeQuarantine(repoPath: string): void {
   const key = canonicalRepoLockKey(repoPath);
   const entry = activeQuarantines.get(key);
-  activeQuarantines.delete(key);
-  deleteMergeQuarantineLatch(repoPath);
+  // Lift EVERY key this entry is armed under (its own tracked set), never reference equality — a union or
+  // an orphan merge REBUILDS the entry object, so a map slot holding an OLDER build of the "same" logical
+  // entry is no longer `===` the one `key` resolves to (round 2 finding 2).
+  const keysToLift = entry?.armedKeys?.length ? entry.armedKeys : [key];
+  for (const k of keysToLift) activeQuarantines.delete(k);
+  // The entry's own physical latch file(s) may live at a DIFFERENT hash than `key`'s — e.g. never migrated
+  // because the registered path was unresolvable at boot (PASS 1 never migrates on an unverifiable key).
+  // Sweep every armed key's own latch path, or a stale file survives a "successful" clear and resurrects
+  // the quarantine on the next boot.
+  for (const k of keysToLift) deleteMergeQuarantineLatchByKey(k);
+  // A pending (boot-unverifiable, no-resolvedKey) entry isn't keyed into activeQuarantines at all — see
+  // reenterMergeQuarantinesAtBoot's PASS 1 and activeMergeQuarantineFor's lazy re-resolve. Match it by
+  // recomputing its own key fresh, right now, so a clear issued while still unresolvable actually lifts it
+  // — and delete its OWN source file too (round 2 finding 1), or it survives to resurrect the quarantine.
+  pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => {
+    if (canonicalRepoLockKey(p.entry.repoPath) !== key) return true;
+    try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, p.sourceFile)); } catch { /* best-effort */ }
+    return false;
+  });
   if (!entry?.orphanLatchFiles?.length) return;
   for (const orphanFile of entry.orphanLatchFiles) {
     const stillReferenced = [...activeQuarantines.values()].some((e) => e.orphanLatchFiles?.includes(orphanFile));
@@ -290,12 +422,49 @@ export function clearMergeQuarantine(repoPath: string): void {
 }
 
 export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry | undefined {
-  return activeQuarantines.get(canonicalRepoLockKey(repoPath));
+  const key = canonicalRepoLockKey(repoPath);
+  const direct = activeQuarantines.get(key);
+  if (direct || pendingUnresolvedQuarantines.length === 0) return direct;
+  // Lazily re-resolve a PENDING entry (see PASS 1's `pendingUnresolvedQuarantines.push` below) by
+  // recomputing ITS OWN key fresh, right now, rather than trusting whatever was guessed for it at boot
+  // load time while its path was unverifiable — a remount later in the same boot is then still enforced.
+  const idx = pendingUnresolvedQuarantines.findIndex((p) => canonicalRepoLockKey(p.entry.repoPath) === key);
+  if (idx === -1) return undefined;
+  const pending = pendingUnresolvedQuarantines[idx] as PendingUnresolvedQuarantine; // idx is a verified hit above
+  if (!isRepoPathCurrentlyResolvable(pending.entry.repoPath)) {
+    // STILL can't be verified (the match above is only against the SAME degraded fallback key this query
+    // also just computed) — report it active for THIS query, but leave it in `pendingUnresolvedQuarantines`
+    // rather than pinning it to a key that may not hold once the path genuinely resolves. Pinning it here
+    // would reopen the exact bug this pending mechanism exists to close: a LATER remount recomputes a
+    // DIFFERENT (real) key, and an already-graduated entry sitting under the degraded key would miss it
+    // exactly like the original one-boot fail-open did, just one query later.
+    return pending.entry;
+  }
+  // Genuinely resolvable now — graduate it: durably persist under the verified key and stop treating it as
+  // pending (a FUTURE query for the same repo hits `activeQuarantines` directly from here on). This happens
+  // UNCONDITIONALLY, in-memory, regardless of whether the durable write below succeeds — mirroring PASS 1's
+  // own migrate branch, enforcement for THIS process must not wait on disk I/O succeeding.
+  pendingUnresolvedQuarantines.splice(idx, 1);
+  const armed: MergeQuarantineEntry = { ...pending.entry, resolvedKey: key, armedKeys: [key] };
+  activeQuarantines.set(key, armed);
+  // Delete the pending entry's stale source file only after the new write succeeds, and only if it isn't
+  // the SAME file we just wrote — see deleteSourceLatchIfSuperseded's own doc comment.
+  if (writeMergeQuarantineLatch(armed)) {
+    deleteSourceLatchIfSuperseded(pending.sourceFile, armed);
+  } else {
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] lazily re-resolved a pending unverifiable quarantine for ${armed.repoPath} but could NOT durably persist it under its now-known key — still enforced in THIS process, but the ORIGINAL file (${pending.sourceFile}) is left in place so a later boot can still recover it.`);
+  }
+  return armed;
 }
 
-/** Diagnostic snapshot only (e.g. a status endpoint) — never used to decide anything itself. */
+/** Diagnostic snapshot only (e.g. a status endpoint) — never used to decide anything itself. Includes
+ *  PENDING (boot-unverifiable) entries too, so a human reading this never sees a blind spot that
+ *  `activeMergeQuarantineFor` itself would resolve the moment it's actually queried for that repo.
+ *  De-duped by entry IDENTITY — an entry armed under two keys (see `armedKeys`) sits twice in
+ *  `activeQuarantines.values()` (once per key) and must be reported once, not twice. */
 export function listActiveMergeQuarantines(): MergeQuarantineEntry[] {
-  return [...activeQuarantines.values()];
+  return [...new Set(activeQuarantines.values()), ...pendingUnresolvedQuarantines.map((p) => p.entry)];
 }
 
 /**
@@ -326,11 +495,12 @@ function quarantineAllRegisteredFailClosed(registeredRepoPaths: string[], reason
   console.error(`[merge-quarantine] ${reason} — QUARANTINING EVERY REGISTERED CANONICAL REPO (${registeredRepoPaths.length}) as a fail-closed precaution; a human must clear each one that turns out to be fine: POST /internal/merge-quarantine/clear`);
   const out: MergeQuarantineEntry[] = [];
   for (const repoPath of registeredRepoPaths) {
+    const key = canonicalRepoLockKey(repoPath);
     const entry: MergeQuarantineEntry = {
       repoPath, branch: "(unknown — boot could not resolve which repo/branch this protects)",
-      reason, enteredAt: Date.now(), tokens: [randomUUID()],
+      reason, enteredAt: Date.now(), tokens: [randomUUID()], armedKeys: [key],
     };
-    activeQuarantines.set(canonicalRepoLockKey(repoPath), entry);
+    activeQuarantines.set(key, entry);
     // Round 7 cheap-minor: don't ignore a failed durable write here either.
     if (!writeMergeQuarantineLatch(entry)) {
       // eslint-disable-next-line no-console
@@ -420,26 +590,56 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
       };
       const currentKey = canonicalRepoLockKey(entry.repoPath);
       const freshHash = createHash("sha256").update(currentKey).digest("hex").slice(0, 24);
+      const resolvableNow = isRepoPathCurrentlyResolvable(entry.repoPath);
+      if (!resolvableNow && !entry.resolvedKey) {
+        // A PRE-upgrade latch (no resolvedKey recorded at all) whose path can't be verified AT ALL right
+        // now — there is no second, trustworthy key to dual-arm under. This check runs BEFORE the
+        // freshHash/hash comparison below, deliberately: when NOTHING in the path's ancestor chain
+        // resolves, `canonicalRepoLockKey`'s own fallback degrades to the same "no toplevel walk" value a
+        // pre-upgrade (direct-path) key would also produce — so freshHash can coincidentally EQUAL this
+        // file's own (stale) hash even though the TRUE key, once the path resolves again, will differ.
+        // Trusting that coincidental equality as "already correctly keyed" would arm this entry under the
+        // same degraded key a plain fall-through would — see
+        // docs/decisions/54054c01-clear-lifts-every-key-an-entry-was-armed-under.md. Keep it PENDING
+        // instead and let activeMergeQuarantineFor re-resolve it lazily, against whatever key its own
+        // repoPath resolves to at the moment it's actually queried.
+        // eslint-disable-next-line no-console
+        console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} has no recorded resolvedKey and could NOT be verified against its current key — ${entry.repoPath} (and every one of its ancestors) does not currently resolve on disk — leaving the latch file AS WRITTEN and deferring enforcement to a lazy re-resolve on first query (never guessing a key now that a later remount this boot would not match).`);
+        pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+        continue;
+      }
       if (freshHash !== hash) {
-        if (isRepoPathCurrentlyResolvable(entry.repoPath)) {
+        if (resolvableNow) {
           // @decision 7673d096 — migrate a stale-key latch ONLY when the path itself currently resolves —
           // never on an unresolvable path, or a transient drive-unmount destroys a genuinely good latch.
           // eslint-disable-next-line no-console
           console.warn(`[merge-quarantine] boot-time latch ${f} was filed under a STALE key for ${entry.repoPath} (its canonical key resolution changed) — migrating to ${freshHash}.json so a future clear can find it.`);
           entry = { ...entry, resolvedKey: currentKey };
           if (writeMergeQuarantineLatch(entry)) {
-            try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, f)); } catch { /* best-effort */ }
+            // Uses the shared helper too (this branch is only reachable when `freshHash !== hash`, so `f`
+            // can never equal the freshly-written filename here — but sharing the check means that safety
+            // no longer depends on remembering to keep this gate in sync with the other two call sites).
+            deleteSourceLatchIfSuperseded(f, entry);
           } else {
             // eslint-disable-next-line no-console
             console.error(`[merge-quarantine] could not durably persist ${entry.repoPath}'s migrated latch under its new key — the OLD file (${f}) is left in place so nothing is lost; a later boot can retry the migration.`);
           }
         } else {
+          // entry.resolvedKey is guaranteed set here (the no-resolvedKey+unresolvable case is handled, and
+          // `continue`d past, above).
           // eslint-disable-next-line no-console
           console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} (and every one of its ancestors) does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the latch file AS WRITTEN rather than risk migrating/deleting it on an unreliable reading; arming enforcement under BOTH the current (possibly degraded) key and its recorded original key.`);
         }
       }
-      armQuarantineKey(byRepoKey, currentKey, entry);
-      if (entry.resolvedKey && entry.resolvedKey !== currentKey) armQuarantineKey(byRepoKey, entry.resolvedKey, entry);
+      // Thread the return value through both arms — armQuarantineKey folds `key` into the result's
+      // `armedKeys`, so the SECOND call must build on the FIRST's output, not the original `entry`, or the
+      // first key's own slot ends up missing the second key from its armedKeys (see PASS 1/1b "Do not" in
+      // docs/decisions/54054c01-clear-lifts-every-key-an-entry-was-armed-under.md, round 2 finding 2).
+      let armedEntry = armQuarantineKey(byRepoKey, currentKey, entry);
+      if (entry.resolvedKey && entry.resolvedKey !== currentKey) {
+        armedEntry = armQuarantineKey(byRepoKey, entry.resolvedKey, armedEntry);
+        byRepoKey.set(currentKey, armedEntry);
+      }
     } catch (e) {
       // BLOCKER 2 fix: an unparsable/corrupt latch must never fail OPEN (a 0-byte file at boot used to
       // re-arm nothing at all).
@@ -522,8 +722,12 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
         // eslint-disable-next-line no-console
         console.warn(`[merge-quarantine] recovered torn-write latch (${f}) for ${entry.repoPath} but could NOT verify its key — the path does not currently resolve on disk — leaving the tmp AS WRITTEN rather than promote to an unreliable location; arming enforcement under both the current and recorded keys.`);
       }
-      armQuarantineKey(byRepoKey, currentKey, entry);
-      if (entry.resolvedKey && entry.resolvedKey !== currentKey) armQuarantineKey(byRepoKey, entry.resolvedKey, entry);
+      // See PASS 1's identical threading note above — the second call must build on the first's result.
+      let armedTmpEntry = armQuarantineKey(byRepoKey, currentKey, entry);
+      if (entry.resolvedKey && entry.resolvedKey !== currentKey) {
+        armedTmpEntry = armQuarantineKey(byRepoKey, entry.resolvedKey, armedTmpEntry);
+        byRepoKey.set(currentKey, armedTmpEntry);
+      }
     } catch (e) {
       // Genuinely unreadable/unparsable tmp content (a crash mid-write, before fsync even completed) —
       // same fail-closed treatment as a corrupt `.json` file: matched hash quarantines that repo, unmatched
@@ -570,7 +774,11 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
         // Keep this repo's REAL data — only ADD the orphan filename(s) it doesn't already carry.
         const mergedOrphans = [...new Set([...(existing.orphanLatchFiles ?? []), ...orphanFilenames])];
         const updated: MergeQuarantineEntry = { ...existing, orphanLatchFiles: mergedOrphans };
-        byRepoKey.set(key, updated);
+        // `existing` may already be armed under a SECOND key too (its own resolvedKey, dual-armed by PASS
+        // 1/1b) — set EVERY one of those keys to this rebuilt object, not just `key`, or the other slot
+        // keeps pointing at the pre-merge `existing` forever (round 2 finding 2: the exact reference-
+        // equality trap this field exists to close, reachable from PASS 2 too, not just a later clear).
+        for (const k of existing.armedKeys?.length ? existing.armedKeys : [key]) byRepoKey.set(k, updated);
         if (!writeMergeQuarantineLatch(updated)) {
           // eslint-disable-next-line no-console
           console.error(`[merge-quarantine] could not durably persist the orphan-file reference on ${repoPath}'s existing quarantine — it will NOT survive another restart until this is fixed.`);
@@ -580,6 +788,7 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
       const entry: MergeQuarantineEntry = {
         repoPath, branch: "(unknown — boot could not resolve which repo/branch this protects)",
         reason, enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [...orphanFilenames],
+        armedKeys: [key],
       };
       byRepoKey.set(key, entry);
       if (!writeMergeQuarantineLatch(entry)) {
@@ -593,5 +802,5 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
   // differ) — set `activeQuarantines` under every key, but de-dupe `out` by entry IDENTITY so a caller
   // never sees the same quarantine reported twice.
   for (const [key, entry] of byRepoKey) activeQuarantines.set(key, entry);
-  return [...new Set(byRepoKey.values())];
+  return [...new Set(byRepoKey.values()), ...pendingUnresolvedQuarantines.map((p) => p.entry)];
 }
