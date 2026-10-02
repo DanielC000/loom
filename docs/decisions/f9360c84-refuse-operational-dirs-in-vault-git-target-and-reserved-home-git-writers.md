@@ -120,6 +120,40 @@ Two more fixes from the same review:
   was not pursued to a working test on this host, so that discrimination remains unverified — kept as a
   known gap rather than claimed closed.
 
+## ROUND 4 (delta review `86f00b05` of round 3) — companion pre-propose now resolves the toplevel too; empty-toplevel closed; a hung-probe test gap fixed
+
+Round 3 left the companion `"repo"`-branch pre-propose check (`resolveGitPushTarget`) checking only the
+RAW `isLoomHomeOrAncestor(project.repoPath)` — never the git-resolved TOPLEVEL. A non-git DESCENDANT of
+`LOOM_HOME` (the round-2 critical-bypass shape) passes that shallow check cleanly, so the companion still
+asks the owner to CONFIRM a commit that `GitWriter`'s own write-time guard will then refuse — a needless,
+confusing round-trip even though nothing actually lands. **Fix:** the toplevel-probe half of
+`GitWriter.refuseIfOperationalHome` is now a standalone exported function,
+`resolveOperationalHomeToplevelRefusal` (`git/writer.ts`) — `refuseIfOperationalHome` is now just the
+raw-path check plus a call to it, and `resolveGitPushTarget`'s `"repo"` branch calls the SAME function
+before proposing, so a non-git descendant is refused at propose time too, never just at confirm time.
+One shared implementation, never a second copy.
+
+Two more fixes from the same review:
+
+- **An empty toplevel from an otherwise-SUCCESSFUL probe now refuses too.** The check used to read
+  `if (toplevel && isLoomHomeOrAncestor(toplevel))` — an empty string short-circuited past
+  `isLoomHomeOrAncestor` and fell through as if the probe had proven "not a git repository", even though
+  it had actually succeeded with a result. Nothing documents `git rev-parse --show-toplevel` as able to
+  resolve empty for a real repo (practically unreachable), but trusting that undocumented absence of a
+  failure mode left the fail-closed property incomplete. Now `if (!toplevel || isLoomHomeOrAncestor(toplevel))`.
+- **`test/git-writer-operational-home-guard.mjs` case (f)'s own hung-probe assertions were weaker than
+  labeled.** The first check (`commitHungProbe.ok === false`) was labeled "RED on pre-fix fail-open code"
+  but actually PASSES on that old code too — the fake's `revparse()` never settling means `withTimeout`
+  throws regardless of which branch the surrounding code takes, and `commit()`'s own outer catch returns
+  `ok:false` either way; same for the "HEAD unchanged"/"nothing staged" checks, which pass trivially
+  because the fake never touches the real repo at all. Only the "could not verify this repo's location"
+  error-message regex actually discriminated fail-closed from fail-open. Fixed: the fake's
+  `checkout`/`checkoutLocalBranch`/`branchLocal`/`status`/`raw`/`commit` methods (`neverReached`) now
+  record every call into an array instead of only throwing, and a new assertion checks that array is
+  empty — proving the real op was never reached, rather than relying on the throw alone (which a
+  differently-shaped fail-open bug could dodge without tripping). The overclaiming "RED on pre-fix
+  fail-open code" label on the first check was corrected to name what actually discriminates.
+
 ## Do not
 
 - Do not re-introduce a per-caller refusal based on `isOperationalVaultDir`'s CONTENT sniff (human REST /
@@ -150,11 +184,17 @@ Two more fixes from the same review:
   `LOOM_HOME` when the simple case applies.
 - Do not touch or delete any real `~/.loom/.git` found while testing this — report it, never act on it.
   Every test fixture for this card uses a temp `LOOM_HOME` (`useOwnLoomHome` + `requireHermeticEnv`).
+- Do not give `resolveGitPushTarget`'s `"repo"` branch a SECOND, independent toplevel-probe implementation
+  — it must call the shared `resolveOperationalHomeToplevelRefusal` (`git/writer.ts`), the SAME function
+  `GitWriter.refuseIfOperationalHome` calls, never a copy (round 4).
+- Do not special-case an empty toplevel as "fall through" in `resolveOperationalHomeToplevelRefusal` — an
+  empty string from an otherwise-successful probe refuses, exactly like a match (round 4).
 
 ## Source
 
 Card `f9360c84`, discovered from the Code Review of `68cc29db` (reviewer `74590101`); round 2 from Code
-Review `2e017ba8`; round 3 from delta review `a9657427`. `packages/daemon/src/git/writer.ts`
+Review `2e017ba8`; round 3 from delta review `a9657427`; round 4 from delta review `86f00b05`
+(card `167dfabe`). `packages/daemon/src/git/writer.ts`
 (`GitWriter.refuseIfOperationalHome`, the current chokepoint), `packages/daemon/src/vault/versioner.ts`
 (`isOperationalVaultDir`, `isLoomHomeOrAncestor`, `resolveVaultGitTarget`,
 `OPERATIONAL_HOME_GIT_WRITE_ERROR`), `packages/daemon/src/companion/capabilities.ts`

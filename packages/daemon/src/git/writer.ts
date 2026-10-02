@@ -181,6 +181,43 @@ export interface GitWriterDeps {
   gitFactory?: (repoPath: string, blockTimeoutMs: number, env: Record<string, string | undefined>) => WriterGit;
 }
 
+/**
+ * Resolve `repoPath`'s git-resolved TOPLEVEL (bounded, fail-closed) and refuse if it is Loom's own
+ * operational home dir or an ancestor of it — the toplevel-probe HALF of {@link
+ * GitWriter.refuseIfOperationalHome} (that method's raw-path check is the other half), factored out so a
+ * PRE-PROPOSE check (companion/capabilities.ts's `resolveGitPushTarget`, `"repo"` branch) can run the
+ * SAME resolution before asking the owner to confirm a write `GitWriter` would refuse anyway at commit
+ * time — never a second, drifting implementation of this probe. `timeoutMs`/`gitFactory` let a caller
+ * override the bound/injected git; omitted, real callers get the module defaults.
+ *
+ * @decision f9360c84 — also refuses an EMPTY toplevel from an otherwise-successful probe, completing the
+ * fail-closed property this decision established; see that record.
+ */
+export async function resolveOperationalHomeToplevelRefusal(
+  repoPath: string,
+  timeoutMs: number = GIT_LOCAL_TIMEOUT_MS,
+  gitFactory: NonNullable<GitWriterDeps["gitFactory"]> = (p, ms, env) => boundedSimpleGit(p, ms, env),
+): Promise<{ ok: false; error: string } | null> {
+  try {
+    const git = gitFactory(repoPath, timeoutMs, nonInteractiveEnv());
+    const toplevel = (await withTimeout(
+      git.revparse(["--show-toplevel"]),
+      timeoutMs,
+      "git rev-parse --show-toplevel (operational-home guard)",
+    )).trim();
+    if (!toplevel || isLoomHomeOrAncestor(toplevel)) {
+      return { ok: false, error: OPERATIONAL_HOME_GIT_WRITE_ERROR };
+    }
+  } catch (e) {
+    if (!isNotAGitRepositoryError(e)) {
+      return { ok: false, error: `could not verify this repo's location; refusing to write (${gitError(e)})` };
+    }
+    // An affirmative "not a git repository" — there is genuinely no toplevel to check. Fall through;
+    // the real op below fails on its own, clean terms.
+  }
+  return null;
+}
+
 /** A GitHub noreply commit identity — correct for github.com repos, unroutable anywhere else. */
 const GITHUB_NOREPLY_SUFFIX = "@users.noreply.github.com";
 
@@ -286,6 +323,9 @@ export class GitWriter {
    * because the probe itself happened to be slow or flaky under host load. The raw-path check, by
    * contrast, always runs regardless of the probe's outcome.
    *
+   * The toplevel-probe half is {@link resolveOperationalHomeToplevelRefusal} (factored out so a
+   * pre-propose caller can reuse it); this method is that function plus the raw-path check.
+   *
    * @decision f9360c84 (round 2 owns this invariant HERE, not at each caller; round 3 made the probe
    * fail-closed) — see that decision record.
    */
@@ -293,24 +333,7 @@ export class GitWriter {
     if (isLoomHomeOrAncestor(this.repoPath)) {
       return { ok: false, error: OPERATIONAL_HOME_GIT_WRITE_ERROR };
     }
-    try {
-      const git = this.git(this.localMs);
-      const toplevel = (await withTimeout(
-        git.revparse(["--show-toplevel"]),
-        this.localMs,
-        "git rev-parse --show-toplevel (operational-home guard)",
-      )).trim();
-      if (toplevel && isLoomHomeOrAncestor(toplevel)) {
-        return { ok: false, error: OPERATIONAL_HOME_GIT_WRITE_ERROR };
-      }
-    } catch (e) {
-      if (!isNotAGitRepositoryError(e)) {
-        return { ok: false, error: `could not verify this repo's location; refusing to write (${gitError(e)})` };
-      }
-      // An affirmative "not a git repository" — there is genuinely no toplevel to check. Fall through;
-      // the real op below fails on its own, clean terms.
-    }
-    return null;
+    return resolveOperationalHomeToplevelRefusal(this.repoPath, this.localMs, this.gitFactory);
   }
 
   /** Adapts {@link testGitFactory} (if a test injected one) to the narrower shape

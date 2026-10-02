@@ -55,7 +55,13 @@ function makeFakeGit(hang = {}) {
     status: async () => ({ isClean: () => false, files: [] }),
     raw: async (args) => (Array.isArray(args) && args[0] === "add" ? "" : ""),
     commit: async () => ({ commit: "" }), // empty .commit forces commit()'s fallback revparse(["HEAD"]) path
-    revparse: async () => (hang.revparse ? new Promise(() => { /* never settles */ }) : "deadbeefcafe"),
+    // `hang.revparse` must hang ONLY the ["HEAD"] call this test exists to prove bounded — never the
+    // operational-home guard's OWN, EARLIER `revparse(["--show-toplevel"])` probe (card f9360c84 round 3:
+    // every write now pays that bounded call FIRST). An args-blind hang here makes the guard's own
+    // fail-closed probe-timeout refusal fire first and mask the specific in-lock site under test.
+    revparse: async (args) => (hang.revparse && Array.isArray(args) && args[0] === "HEAD")
+      ? new Promise(() => { /* never settles */ })
+      : "deadbeefcafe",
   };
 }
 

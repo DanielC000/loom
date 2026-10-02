@@ -28,6 +28,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       this host (plain fs.realpathSync ALSO resolves a junction) — kept anyway as a real regression
 //       guard; see the f9360c84 decision record for the 8.3-short-name alternative that was considered
 //       and not pursued further.
+//   (h) round 4 (card 167dfabe): an EMPTY toplevel from an otherwise-SUCCESSFUL probe is refused too,
+//       on an ordinary dir with no path relation to LOOM_HOME at all — completes the fail-closed property
+//       (a pre-fix `toplevel && …` check would have silently fallen through on an empty string).
 // Run: 1) build, 2) node test/git-writer-operational-home-guard.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -37,6 +40,15 @@ import { mkdtempManaged, useOwnLoomHome, finishAndExit } from "./_tmp-fixture.mj
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+/** A fake `WriterGit` method that records its call into `callsArr` before throwing — proves a real git
+ *  op was never reached, not just that something eventually threw (card 167dfabe). */
+function makeNeverReached(callsArr) {
+  return (label) => async () => {
+    callsArr.push(label);
+    throw new Error(`should never be reached: ${label} (refusal must fire before any real git call)`);
+  };
+}
 
 const loomHome = fs.realpathSync(useOwnLoomHome("loom-gitwriter-ophome-"));
 
@@ -134,7 +146,8 @@ try {
   const descendant2 = path.join(loomHome, "workspaces", "another-vault-only-home");
   fs.mkdirSync(descendant2, { recursive: true });
   fs.writeFileSync(path.join(descendant2, "pwned3.txt"), "should never be committed either\n");
-  const neverReached = (label) => async () => { throw new Error(`should never be reached: ${label} (refusal must fire before any real git call)`); };
+  const neverReachedCalls = [];
+  const neverReached = makeNeverReached(neverReachedCalls);
   const hungProbeGitFactory = () => ({
     checkout: neverReached("checkout"),
     checkoutLocalBranch: neverReached("checkoutLocalBranch"),
@@ -146,12 +159,45 @@ try {
   });
   const wHungProbe = new GitWriter(descendant2, { gitLocalMs: 50, gitFactory: hungProbeGitFactory });
   const commitHungProbe = await wHungProbe.commit("should never land via a hung probe");
-  check("(f) commit against a non-git descendant is REFUSED when the toplevel probe times out (RED on pre-fix fail-open code: would fall through and let the real op run)",
+  // Card 167dfabe: this FIRST check does NOT by itself discriminate fail-open from fail-closed code —
+  // on pre-fix fail-open code the fake's revparse() still never settles, withTimeout still throws, and
+  // commit()'s own outer catch still returns ok:false regardless of which branch handled that throw. It's
+  // a baseline sanity check only; the two checks below it are what actually discriminate.
+  check("(f) commit against a non-git descendant returns ok:false when the toplevel probe times out (baseline only — see the next two checks for what actually discriminates fail-closed from fail-open)",
     commitHungProbe.ok === false);
-  check("(f) …error says it could not verify the repo's location (never the clean 'not a git repository' fall-through message)",
+  check("(f) …error says it could not verify the repo's location (THIS discriminates: RED on pre-fix fail-open code, which falls through to the clean 'not a git repository' message instead)",
     /could not verify this repo.s location/i.test(commitHungProbe.error ?? ""));
+  check("(f) …and no real git op (checkout/checkoutLocalBranch/branchLocal/status/raw/commit) was ever reached (proves the refusal fired before any real git call; RED on fail-open code, which would reach one of these)",
+    neverReachedCalls.length === 0);
   check("(f) LOOM_HOME's own repo HEAD is STILL unchanged", git(loomHome, "rev-parse", "HEAD").trim() === loomHomeHeadBefore);
   check("(f) NOTHING in LOOM_HOME's own repo is STAGED", !/^[MADRC]/m.test(git(loomHome, "status", "--porcelain")));
+
+  // ===== (h) card 167dfabe: an EMPTY toplevel from an otherwise-SUCCESSFUL probe is refused too =====
+  // Completes the fail-closed property: pre-fix code read `if (toplevel && isLoomHomeOrAncestor(toplevel))`
+  // — an empty string short-circuited past the check and fell through as if the probe had proven "not a
+  // git repository", even though it had actually SUCCEEDED with a (empty) result. Uses an ORDINARY dir
+  // with NO path relation to LOOM_HOME at all (outside loomHome, outside fixturesRoot's other fixtures),
+  // so only the empty-toplevel branch itself — never the raw-path check — can be responsible for the
+  // refusal. Injects a fake gitFactory whose revparse() RESOLVES (not throws, not hangs) with "".
+  const ordinaryDirForEmptyToplevel = path.join(fixturesRoot, "empty-toplevel-ordinary-dir");
+  fs.mkdirSync(ordinaryDirForEmptyToplevel, { recursive: true });
+  const neverReachedCallsEmptyToplevel = [];
+  const neverReachedEmptyToplevel = makeNeverReached(neverReachedCallsEmptyToplevel);
+  const emptyToplevelGitFactory = () => ({
+    checkout: neverReachedEmptyToplevel("checkout"),
+    checkoutLocalBranch: neverReachedEmptyToplevel("checkoutLocalBranch"),
+    branchLocal: neverReachedEmptyToplevel("branchLocal"),
+    status: neverReachedEmptyToplevel("status"),
+    raw: neverReachedEmptyToplevel("raw"),
+    commit: neverReachedEmptyToplevel("commit"),
+    revparse: async () => "", // SUCCEEDS (no throw, no hang) — resolves to an empty string
+  });
+  const wEmptyToplevel = new GitWriter(ordinaryDirForEmptyToplevel, { gitFactory: emptyToplevelGitFactory });
+  const commitEmptyToplevel = await wEmptyToplevel.commit("should never land via an empty toplevel");
+  check("(h) commit is refused when the toplevel probe SUCCEEDS but resolves EMPTY (RED on pre-fix code: `toplevel && …` short-circuits past the check on an empty string, falling through to let the real op run)",
+    commitEmptyToplevel.ok === false && /operational home directory/i.test(commitEmptyToplevel.error ?? ""));
+  check("(h) …and no real git op was ever reached (proves the refusal fired before any real git call)",
+    neverReachedCallsEmptyToplevel.length === 0);
 
   // ===== (g) round 3 (card f9360c84), win32 only: fs.realpathSync.native resolves a directory JUNCTION
   // aliasing an ANCESTOR of LOOM_HOME, so isLoomHomeOrAncestor can't be defeated by one. =====

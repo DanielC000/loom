@@ -44,6 +44,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   - Card f9360c84 (round 3) NEGATIVE CONTROL: target:"repo" resolution checks isLoomHomeOrAncestor
 //     (path-relation only) now, never isOperationalVaultDir's content sniff — an ordinary repo with its
 //     own top-level worktrees/ folder must propose+commit normally, not be refused.
+//   - Card 167dfabe (round 4): target:"repo" resolution now ALSO resolves the git toplevel (bounded, via
+//     GitWriter's own resolveOperationalHomeToplevelRefusal) — a non-git DESCENDANT of a reserved home
+//     must be refused at PROPOSE time, never sail past this check and only fail once GitWriter itself is
+//     invoked at confirm time.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-git-push.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -731,6 +735,44 @@ try {
     const resPush = await call(client, "git_push", { project: proj, target: "repo" });
     check("reserved-home (repo target): git_push ALSO rejected with an {error}", typeof resPush.error === "string" && resPush.status === undefined);
     check("reserved-home (repo target): nothing delivered to the owner (git_push either)", companion.delivered.length === 0);
+    await client.close();
+    db.close();
+  }
+
+  // ============ reserved-home refusal, target:"repo", a NON-GIT DESCENDANT of LOOM_HOME (card 167dfabe) ============
+  // `resolveGitPushTarget`'s "repo" branch's raw-path `isLoomHomeOrAncestor` check (round 3, above) is
+  // blind to a DESCENDANT of a reserved home — the round-2 critical-bypass shape: git itself walks UP
+  // from a non-git descendant to find LOOM_HOME's own `.git`. Before this card, that shallow check PASSED
+  // for a descendant, so the companion would PROPOSE and ask the owner to CONFIRM a commit `GitWriter`'s
+  // own write-time guard would then refuse anyway. Fixed by also resolving the toplevel (bounded, via the
+  // SAME `resolveOperationalHomeToplevelRefusal` `GitWriter` itself calls) in this pre-propose check — so
+  // this must now refuse at PROPOSE time, with NOTHING ever delivered to the owner.
+  {
+    const db = tmpDb();
+    initRepo(tmpHome); // give LOOM_HOME a real .git — the exact shape git itself would walk up to
+    const descendant = path.join(tmpHome, "workspaces", "some-vault-only-home");
+    fs.mkdirSync(descendant, { recursive: true });
+    fs.writeFileSync(path.join(descendant, "pwned.txt"), "should never be committed\n");
+    const proj = "proj-reservedhome-repo-descendant";
+    seedProject(db, proj, "Reserved-home-shaped (repo, descendant)", "/does/not/matter/vault", descendant);
+    const companionSess = "companion-reservedhome-repo-descendant";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "git-push", projectId: proj, mode: "act", config: { targets: ["repo"], authoredContent: true } });
+    const pty = makeFakePty("the owner said: commit the repo");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const headBefore = git(tmpHome, "rev-parse", "HEAD").trim();
+    const resCommit = await call(client, "git_commit", { project: proj, target: "repo", message: "should never land either" });
+    check("reserved-home descendant (repo target): git_commit rejected with an {error} at PROPOSE time (RED on pre-fix code: would have proposed and asked the owner to confirm)",
+      typeof resCommit.error === "string" && resCommit.status === undefined);
+    check("reserved-home descendant (repo target): error names the operational home dir", /operational home directory/i.test(resCommit.error));
+    check("reserved-home descendant (repo target): nothing delivered to the owner (never even asked to confirm)", companion.delivered.length === 0);
+    check("reserved-home descendant (repo target): LOOM_HOME's own repo HEAD is unchanged", git(tmpHome, "rev-parse", "HEAD").trim() === headBefore);
+    check("reserved-home descendant (repo target): NOTHING in LOOM_HOME's own repo is staged", !/^[MADRC]/m.test(git(tmpHome, "status", "--porcelain")));
+    const resPush = await call(client, "git_push", { project: proj, target: "repo" });
+    check("reserved-home descendant (repo target): git_push ALSO rejected with an {error}", typeof resPush.error === "string" && resPush.status === undefined);
+    check("reserved-home descendant (repo target): nothing delivered to the owner (git_push either)", companion.delivered.length === 0);
     await client.close();
     db.close();
   }
