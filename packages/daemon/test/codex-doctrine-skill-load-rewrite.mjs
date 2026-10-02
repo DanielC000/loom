@@ -147,7 +147,11 @@ class FakeCodexHost extends PtyHost {
 const host = new FakeCodexHost({ onEngineSessionId() {}, onContextStats() {}, onRateLimited() {}, onBusy() {}, onExit() {} });
 const READY = "OpenAI Codex (v1.2.3)\n│ model:     gpt-6-astra medium                          │\n›  Ask Codex to do anything\n";
 const cwd = mkdtempManaged("loom-codex-skill-load-spawn-");
-host.spawn({ sessionId: "s-mgr", cwd, permission: {}, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "manager", harness: "codex", startupPrompt: orch });
+// Card 7955458e ruling 1(a): PtyHost.spawn() now REFUSES harness:"codex" for role:"manager" (a
+// TRANSCRIPT_ROOT_DENY_ROLES member) — call spawnCodexProcess directly to unit-test the kickoff
+// composition logic itself, bypassing only the new spawn()-level dispatch refusal (every real production
+// path still goes through spawn()).
+host.spawnCodexProcess({ sessionId: "s-mgr", cwd, permission: {}, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "manager", harness: "codex", startupPrompt: orch });
 host.ptys.get("s-mgr").push(READY);
 await waitUntil(() => host.kickoffs.has("s-mgr"), { label: "kickoff for seeded manager" });
 const k = host.kickoffs.get("s-mgr");

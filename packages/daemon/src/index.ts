@@ -417,6 +417,9 @@ async function main(): Promise<void> {
     // decides how to record the durable event + fail loud to the recipient AND the sender/manager. See
     // PtyHostEvents.onCodexUnsupportedCapability's own doc / SessionService.handleCodexUnsupportedCapability's own doc.
     onCodexUnsupportedCapability: (sessionId, info) => sessions.handleCodexUnsupportedCapability(sessionId, info),
+    // Card 7955458e, Code Review MAJOR fix: a SEPARATE signal from onCodexUnsupportedCapability above —
+    // see PtyHostEvents.onCodexIsolationGapDisclosed's own doc for why these must never share a handler.
+    onCodexIsolationGapDisclosed: (sessionId, info) => sessions.handleCodexIsolationGapDisclosed(sessionId, info),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).

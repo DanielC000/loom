@@ -85,7 +85,13 @@ const host = new FakeCodexHost({ onEngineSessionId() {}, onContextStats() {}, on
 const READY = "OpenAI Codex (v1.2.3)\n│ model:     gpt-6-astra medium                          │\n›  Ask Codex to do anything\n";
 for (const role of ["manager", "worker"]) {
   const cwd = mkdtempManaged(`loom-codex-role-pointer-spawn-${role}-`);
-  host.spawn({ sessionId: `s-${role}`, cwd, permission: {}, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role, harness: "codex", startupPrompt: "TASK-BODY" });
+  // Card 7955458e ruling 1(a): PtyHost.spawn() now REFUSES harness:"codex" for a TRANSCRIPT_ROOT_DENY_ROLES
+  // role (manager included) — a real, structural guarantee this role can never reach createCodexPty in
+  // production. This file unit-tests the kickoff/doctrine-pointer COMPOSITION logic itself (which still
+  // exists, is still correct to test, and still lives inside spawnCodexProcess regardless of whether a
+  // real caller can reach it for this role) — call spawnCodexProcess directly to bypass ONLY the new
+  // spawn()-level dispatch refusal, not a weakening of it (every real production path still goes through spawn()).
+  host.spawnCodexProcess({ sessionId: `s-${role}`, cwd, permission: {}, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role, harness: "codex", startupPrompt: "TASK-BODY" });
   host.ptys.get(`s-${role}`).push(READY);
   await waitUntil(() => host.kickoffs.has(`s-${role}`), { label: `kickoff for ${role}` });
   const k = host.kickoffs.get(`s-${role}`);

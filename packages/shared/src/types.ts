@@ -1577,6 +1577,22 @@ export type OrchestrationEventKind =
   // managerSessionId = the spawning manager, workerSessionId = the affected (claude) session;
   // `detail` carries { items: { id, reason }[] }.
   | "harness_default_skipped"
+  // Card 7955458e — a RESOLVED harness of codex was FORCED to claude at the resolveAgentSpawn chokepoint
+  // because the RESOLVED session role (not the profile's own `role` field — those can differ) is a
+  // TRANSCRIPT_ROOT_DENY_ROLES member, which gets claude's blanket transcript-root deny (card ac90ca8e)
+  // that codex has no lever for. Distinct from `harness_default_skipped`: fires even for an EXPLICIT
+  // profile harness, and is a hard FORCE, not a recorded skip-preference. Same managerSessionId/
+  // workerSessionId/taskId convention as `harness_default_skipped`; `detail` carries { role, agentId,
+  // profileId: string | null, reason }.
+  | "harness_role_forced_claude"
+  // Card 7955458e, Code Review MAJOR fix — a codex spawn's claude-side ISOLATION/secret-read denies that
+  // codex structurally drops (settingsDirReadDeny/transcriptRootReadDeny/workerProjectTranscriptDeny/
+  // permissionDeny). A SEPARATE kind from `codex_unsupported_capability` on purpose: this is a dropped
+  // PROTECTION, never delivered into the affected session's own turn input (see onCodexIsolationGapDisclosed's
+  // own doc). Filed EVERY spawn; `detail.nudged` (bool) says whether THIS row's manager-side notice actually
+  // fired — the notice itself is deduped once per agent lineage (`Db.hasEventForAgent`). `detail` carries
+  // { items: { id, reason }[], agentId: string | null, nudged: boolean }.
+  | "codex_isolation_gap_disclosed"
   // Card 9e4205f5 — `resumeFleetOnBoot` found ≥1 fleet-wide resume failure on a daemon restart (the SAME
   // `failed`/`failedDetail` this method already computes for the requester's own count-only notice — see
   // its doc). Filed under the RESTART REQUESTER (managerSessionId = `reqId`, a manager or platform-Lead
@@ -1724,7 +1740,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true,
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
   discovery_block_injection: true,
-  codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true,
+  codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
   codex_auto_commit: true,
   credential_revoked: true,
   worker_retired: true,

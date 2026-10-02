@@ -13,7 +13,7 @@ import {
 // Card 66b1b40d: its own statement (not folded into the import above). orchestration-mcp-role-guard.mjs now matches the
 // `usesOrchestrationMcp` import as a whole statement, so the split is no longer load-bearing for that guard.
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
-import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
+import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import { agentAssignableProfileError } from "../profiles/validate.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
@@ -2688,7 +2688,7 @@ export class SessionService {
   // re-resolve the profile's skills subset on resume/fork/recycle — read the PINNED value off the row.
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false, companionName?: string,
-  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean; harness: "claude" | "codex" | undefined; harnessDefaultSkipped: CodexIncompatibility[] | undefined } {
+  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean; harness: "claude" | "codex" | undefined; harnessDefaultSkipped: CodexIncompatibility[] | undefined; harnessRoleForced: { role: SessionRole; agentId: string; profileId: string | null; reason: string } | undefined } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
@@ -2711,7 +2711,12 @@ export class SessionService {
     // An explicit caller role still wins; then the (clamped) profile role (null under forcePlain), then
     // undefined (today's plain). The force-plain path passes no explicitRole, so it resolves null.
     const role = explicitRole ?? profileRole ?? undefined;
-    const harnessFromDefault = resolved.harness ? { harness: undefined, skipped: undefined } : this.defaultHarnessForSpawn(agent, role, resolved);
+    // Card 7955458e: `permissionDeny` isn't a `resolveProfile` field (a Profile has no `deny` field at all;
+    // this is PROJECT config, not profile-authored, and there is no platform permission layer either) —
+    // layer it on here from `config.permission.deny`, the same AUTHORED value every OTHER consumer of this
+    // card's fix reads (never Loom's own internal spawn-chokepoint additions, which apply later, inside
+    // createPty only, and never reach `config` at all).
+    const harnessFromDefault = resolved.harness ? { harness: undefined, skipped: undefined } : this.defaultHarnessForSpawn(agent, role, { ...resolved, permissionDeny: config.permission.deny });
     // @decision 760cd01d — do not let config.permission.startupModeCycles determine a worker's boot-cycle
     // target: a spawned worker has no human at its TUI to answer an acceptEdits-only prompt, so it is
     // pinned to `auto` independent of that project-level knob, via withRolePermissionModeCyclesPin.
@@ -2732,6 +2737,19 @@ export class SessionService {
     // (creation-time only, from startNew's provision caller) bakes a "Your name is <name>." identity line in
     // near the top of the base brief; undefined/blank ⇒ byte-identical to before this param existed.
     const startupPrompt = role === "assistant" ? composeAssistantStartupPrompt(ownPrompt, companionName) : ownPrompt;
+    // Card 7955458e, Code Review CRITICAL fix: force a RESOLVED codex harness back to claude when the
+    // RESOLVED session `role` (NOT the profile's own `role` field — an explicit-role start, e.g.
+    // startManager, can differ: a {role:"worker", harness:"codex"} profile spawned via startManager yields
+    // role:"manager" + harness:"codex", which validateProfile's save-time reject never sees, since IT
+    // checks the profile's own role field) is a TRANSCRIPT_ROOT_DENY_ROLES member. This is THE chokepoint:
+    // every start/recycle path routes its final harness through this function's return value (enumerated
+    // and proven in docs/decisions/7955458e), so forcing it HERE — never re-derived per call site — covers
+    // all of them structurally, including ones validateProfile's role-keyed reject cannot see. Does NOT
+    // refuse the spawn (that would break every manager/platform/auditor/workspace-auditor/setup start) —
+    // validateProfile's reject stays the early UX error for the common case; this is the backstop for
+    // whatever bypasses it.
+    const rawHarness = resolved.harness || harnessFromDefault.harness;
+    const roleForcesClaude = rawHarness === "codex" && role != null && TRANSCRIPT_ROOT_DENY_ROLES.has(role);
     return {
       role,
       startupPrompt,
@@ -2765,8 +2783,11 @@ export class SessionService {
       // spawn recipe. `|| undefined` mirrors the model coercion (null/absent ⇒ "engine default", i.e.
       // "claude") — RESOLVED ONCE HERE, at the same chokepoint as every other profile-conferred field;
       // see `createPty`'s own doc comment for where this feeds the actual binary choice.
-      harness: resolved.harness || harnessFromDefault.harness,
+      harness: roleForcesClaude ? undefined : rawHarness,
       harnessDefaultSkipped: resolved.harness ? undefined : harnessFromDefault.skipped,
+      harnessRoleForced: roleForcesClaude
+        ? { role: role!, agentId: agent.id, profileId: profile?.id ?? null, reason: codexTranscriptRoleForcedClaudeReason(role!) }
+        : undefined,
     };
   }
 
@@ -2792,6 +2813,7 @@ export class SessionService {
     const items = codexIncompatibilities({
       restrictedTools: resolved.restrictedTools, browserTesting: resolved.browserTesting,
       documentConversion: resolved.documentConversion, capabilities: resolved.capabilities,
+      permissionDeny: resolved.permissionDeny,
     });
     return items.length > 0 ? { harness: undefined, skipped: items } : { harness: candidate, skipped: undefined };
   }
@@ -2802,7 +2824,7 @@ export class SessionService {
    * invokes this after the new session's row exists, so `workerSessionId` is the affected session and
    * `managerSessionId` its spawning manager. Never throws — an audit failure must not fail a spawn.
    */
-  private recordHarnessDefaultSkipped(session: { id: string; taskId?: string | null }, managerSessionId: string, items: CodexIncompatibility[] | undefined, trigger?: "recycle"): void {
+  private recordHarnessDefaultSkipped(session: { id: string; taskId?: string | null }, managerSessionId: string, items: CodexIncompatibility[] | undefined, trigger?: "recycle" | "resume"): void {
     if (!items || items.length === 0) return;
     try {
       this.db.appendEvent({
@@ -2812,6 +2834,24 @@ export class SessionService {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(`[harness-default-skipped] ${session.id} failed to record audit event — swallowed: ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+
+  /**
+   * @decision 7955458e, Code Review CRITICAL fix — file the durable `harness_role_forced_claude` audit row.
+   * Mirrors `recordHarnessDefaultSkipped`'s call convention (session row must already exist; never throws).
+   */
+  private recordHarnessRoleForced(session: { id: string; taskId?: string | null }, managerSessionId: string, forced: { role: SessionRole; agentId: string; profileId: string | null; reason: string } | undefined, trigger?: "recycle" | "resume"): void {
+    if (!forced) return;
+    try {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId: session.id,
+        taskId: session.taskId ?? null, kind: "harness_role_forced_claude",
+        detail: { role: forced.role, agentId: forced.agentId, profileId: forced.profileId, reason: forced.reason, ...(trigger ? { trigger } : {}) },
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[harness-role-forced-claude] ${session.id} failed to record audit event — swallowed: ${(err as Error)?.message ?? String(err)}`);
     }
   }
 
@@ -2848,12 +2888,13 @@ export class SessionService {
       const project = this.db.getProject(s.projectId);
       if (!agent || !project) continue;
       const current = s.harness ?? "claude";
-      const spawn = this.resolveAgentSpawn(agent, resolveConfig(project.config), s.role ?? undefined);
+      const config = resolveConfig(project.config);
+      const spawn = this.resolveAgentSpawn(agent, config, s.role ?? undefined);
       const wanted = spawn.harness ?? "claude";
       if (current === wanted) continue;
       // A manager/platform-lead lands via RECYCLE, which is row-aware (`recycleHarness`) — ask the same helper.
       // Other roles land via a fresh spawn, whose profile-derived answer (`spawn.harness`) is already the truth.
-      const recycled = s.role === "manager" || s.role === "platform" ? this.recycleHarness(s, spawn) : undefined;
+      const recycled = s.role === "manager" || s.role === "platform" ? this.recycleHarness(s, spawn, config.permission.deny) : undefined;
       if (recycled?.skipped) blocked.push({ sessionId: s.id, role: s.role ?? null, harness: current, projectId: s.projectId, wanted, reasons: recycled.skipped });
       else pending.push({ sessionId: s.id, role: s.role ?? null, harness: current, projectId: s.projectId });
     }
@@ -2868,12 +2909,26 @@ export class SessionService {
    * so a codex successor with restrictedTools:true would run UNrestricted). Same `codexIncompatibilities`
    * (card 961da6c6) as `defaultHarnessForSpawn`, but fed the row's fields, since recycle carries the row's
    * fields forward rather than re-deriving them from the profile. The caller files `harness_default_skipped`.
+   *
+   * @decision 7955458e — do not add a `Session.permissionDeny` row field for this; every caller must keep
+   * re-deriving it LIVE from `resolveConfig(...).permission.deny` instead, since it can change between spawns.
    */
-  private recycleHarness(old: Session, spawn: { harness?: "claude" | "codex" } | undefined): { harness: "claude" | "codex" | undefined; skipped: CodexIncompatibility[] | undefined } {
+  private recycleHarness(old: Session, spawn: { harness?: "claude" | "codex" } | undefined, permissionDeny: readonly string[]):
+    { harness: "claude" | "codex" | undefined; skipped: CodexIncompatibility[] | undefined; roleForced?: { role: SessionRole; agentId: string; profileId: string | null; reason: string } } {
     const pinned = old.harness ?? undefined;
-    if (!spawn) return { harness: pinned, skipped: undefined };
+    if (!spawn) {
+      // @decision 7955458e — ruling 1(c): agent-missing means no resolveAgentSpawn to force through
+      // (managerSpawn/leadSpawn is undefined), so this pinned-passthrough must force here instead.
+      if (pinned === "codex" && old.role != null && TRANSCRIPT_ROOT_DENY_ROLES.has(old.role)) {
+        return {
+          harness: undefined, skipped: undefined,
+          roleForced: { role: old.role, agentId: old.agentId, profileId: null, reason: codexTranscriptRoleForcedClaudeReason(old.role) },
+        };
+      }
+      return { harness: pinned, skipped: undefined };
+    }
     if (spawn.harness === "codex") {
-      const items = codexIncompatibilities(old);
+      const items = codexIncompatibilities({ ...old, permissionDeny });
       if (items.length > 0) return { harness: pinned, skipped: items };
     }
     return { harness: spawn.harness, skipped: undefined };
@@ -2966,7 +3021,7 @@ export class SessionService {
     // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessDefaultSkipped } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessDefaultSkipped, harnessRoleForced } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -2997,6 +3052,7 @@ export class SessionService {
     // Card 961da6c6: a human "+New" on a worker-role agent also takes the default harness and is guarded, so it files the same
     // event — with NO manager, attributed to the session itself (the handleCodexUnsupportedCapability convention).
     this.recordHarnessDefaultSkipped(session, session.id, harnessDefaultSkipped);
+    this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
     // M5: flip to live BEFORE wiring the pty, so onExit ('exited') from a fast-failing spawn always
     // wins — there is no post-spawn 'live' write left to clobber it back to live.
     this.db.setProcessState(session.id, "live");
@@ -3106,7 +3162,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "manager");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "manager");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3135,6 +3191,7 @@ export class SessionService {
       harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
+    this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
     // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
@@ -3214,7 +3271,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "platform");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "platform");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3242,6 +3299,7 @@ export class SessionService {
       harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
+    this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
     // Card 2fed1663: a fresh Spawn always opens a NEW lineage (no recycledFrom yet) — its own id IS the
@@ -3303,7 +3361,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'auditor' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "auditor");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "auditor");
     const codescapeEnabled = resolveCodescapeConfig(project.config).enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -3332,6 +3390,7 @@ export class SessionService {
       harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
+    this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
     // Card 6ca4155f: wrapped so a synchronous throw in this window reconciles the row to 'exited'
@@ -3378,7 +3437,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'workspace-auditor' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. The locked role — NOT the profile role — drives the loom-user-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
     const codescapeEnabled = resolveCodescapeConfig(project.config).enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -3407,6 +3466,7 @@ export class SessionService {
       harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
+    this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
     // Card 6ca4155f: wrapped so a synchronous throw in this window reconciles the row to 'exited'
@@ -3459,7 +3519,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'setup' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-setup surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "setup");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "setup");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3487,6 +3547,7 @@ export class SessionService {
       harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
+    this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
     // Card 6ca4155f: wrapped so a synchronous throw in this window reconciles the row to 'exited'
@@ -3612,16 +3673,22 @@ export class SessionService {
     // current row WITHOUT re-spawning — a no-op that can't double-spawn or clobber the live map. A
     // genuinely exited/dead session (isAlive=false) falls through and resumes normally.
     if (this.pty.isAlive(session.id)) return session;
-    if (!session.engineSessionId) throw new Error("session has no engine id to resume");
-    // Backstop dead-ID detection: if the engine transcript is gone, this id is unresumable.
-    if (!engineTranscriptExists(session.cwd, session.engineSessionId, session.harness)) {
-      this.db.setResumability(session.id, "dead");
-      throw new Error("session is no longer resumable (engine transcript missing)");
+    // @decision 7955458e — ruling 1(b): a codex-pinned row whose RESOLVED role forces claude can never be
+    // `--resume`d on codex — detected here, before the codex-transcript checks below (irrelevant to it).
+    const forcedRoleFreshStart = session.harness === "codex" && session.role != null && TRANSCRIPT_ROOT_DENY_ROLES.has(session.role);
+    if (!forcedRoleFreshStart) {
+      if (!session.engineSessionId) throw new Error("session has no engine id to resume");
+      // Backstop dead-ID detection: if the engine transcript is gone, this id is unresumable.
+      if (!engineTranscriptExists(session.cwd, session.engineSessionId, session.harness)) {
+        this.db.setResumability(session.id, "dead");
+        throw new Error("session is no longer resumable (engine transcript missing)");
+      }
     }
     // Ghost-resume guard: the engine transcript lives under ~/.claude keyed by cwd, so it SURVIVES the
     // worktree's removal — a worker whose task merged + worktree was GC'd still passes the transcript
     // guard above, but a `--resume` spawn into the now-missing cwd dies code=1. Refuse here so the boot
-    // fleet-resume path counts it `failed` instead of spawning a doomed pty.
+    // fleet-resume path counts it `failed` instead of spawning a doomed pty. (Also applies to the
+    // forced-role fresh start above — a fresh spawn needs the SAME cwd to exist too.)
     if (!fs.existsSync(session.cwd)) {
       this.db.setResumability(session.id, "dead");
       throw new Error("session is no longer resumable (worktree/cwd missing)");
@@ -3661,8 +3728,12 @@ export class SessionService {
     // withRolePermissionModeCyclesPin(config.permission, session.role), keyed off the row's PINNED role
     // (not the deleted agent's profile) — never fall back to bare config.permission alone.
     const agent = this.db.getAgent(session.agentId);
-    const resumePermission = agent
-      ? this.resolveAgentSpawn(agent, config, session.role ?? undefined).permission
+    const resolvedSpawn = agent ? this.resolveAgentSpawn(agent, config, session.role ?? undefined) : undefined;
+    if (forcedRoleFreshStart) {
+      return this.resumeForcedRoleAsFreshClaude(session, project, config, agent, resolvedSpawn);
+    }
+    const resumePermission = resolvedSpawn
+      ? resolvedSpawn.permission
       : withRolePermissionModeCyclesPin(config.permission, session.role ?? undefined);
 
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
@@ -3701,7 +3772,9 @@ export class SessionService {
         // its /mcp/<codescapeId>/<worktreeId> route (session.taskId is whatever this row was ORIGINALLY
         // spawned with; a non-worker role never has one, so this is naturally undefined for those).
         worktreeId: codescapeWorktreeId(session.taskId),
-        resumeId: session.engineSessionId,
+        // Non-null: reached only when !forcedRoleFreshStart, where the engineSessionId guard above threw
+        // on null — TS can't correlate that narrowing across the two separate `if`s on its own.
+        resumeId: session.engineSessionId!,
         // Carry the role across resume so a manager/worker/platform session is re-spawned WITH its
         // role-gated MCP surface (loom-orchestration / loom-platform) + allowlist. Without this a
         // resumed manager loses worker_spawn/merge/etc. and a worker loses worker_report.
@@ -3773,6 +3846,81 @@ export class SessionService {
     // each message exactly once. enqueueStdin is ready-gated, so the message holds until the resumed TUI boots.
     this.redriveUndeliveredMessagesForRecipient(session.id);
     return { ...session, processState: "live", busy: false };
+  }
+
+  /**
+   * @decision 7955458e — ruling 1(b): `resume()`'s graceful redirect for a codex-pinned row whose
+   * RESOLVED role forces claude. Deliberately boots the SAME session id fresh (never a recycleManager/
+   * recyclePlatformLead-style new successor row) — see the decision record for the full why.
+   */
+  private resumeForcedRoleAsFreshClaude(
+    session: Session, project: Project, config: ResolvedConfig, agent: Agent | undefined,
+    resolvedSpawn: ReturnType<SessionService["resolveAgentSpawn"]> | undefined,
+  ): Session {
+    const role = session.role!;
+    const forcedDetail = resolvedSpawn?.harnessRoleForced ?? {
+      role, agentId: session.agentId, profileId: agent?.profileId ?? null,
+      reason: codexTranscriptRoleForcedClaudeReason(role),
+    };
+    const permission = resolvedSpawn?.permission ?? withRolePermissionModeCyclesPin(config.permission, role);
+    const notice =
+      `[loom:harness-corrected] Your prior engine was "codex", which card 7955458e no longer permits for role "${role}" ` +
+      `(${forcedDetail.reason}). This session has been restarted FRESH on harness "claude" — your previous codex ` +
+      `transcript is not resumed (a codex engine id cannot be resumed under claude), so nothing from your prior codex ` +
+      `turn carries forward automatically. Re-orient from your resume doc / the board.`;
+    const warmup = agent?.startupPrompt?.trim();
+    let startupPrompt: string | undefined;
+    if (role === "manager") {
+      const codescapeStatus = this.resolveCodescapeInjectionStatus(project);
+      startupPrompt = appendMemoryRecallToStartupPrompt(
+        composeManagerStartupPrompt(
+          (warmup ? warmup + "\n\n---\n" : "") + notice,
+          { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } },
+        ),
+        codescapeStatus.text,
+      );
+    } else if (role === "platform") {
+      const leadResumeDocPath = resolvePlatformLeadResumeDocPath(this.db, project.vaultPath, lineageRootId(this.db, session));
+      const resumeDocNotes = composeResumeDocOperationalNotes(project.vaultPath, leadResumeDocPath);
+      startupPrompt = composePlatformLeadStartupPrompt((warmup ? warmup + "\n\n---\n" : "") + notice, leadResumeDocPath, resumeDocNotes);
+    } else if (role === "assistant") {
+      startupPrompt = composeAssistantStartupPrompt((warmup ? warmup + "\n\n---\n" : "") + notice);
+    } else {
+      // auditor / workspace-auditor / setup: no dedicated composer exists for a fresh start of these
+      // roles either (startAuditor/startWorkspaceAuditor/startSetup all pass the bare agent prompt).
+      startupPrompt = (warmup ? warmup + "\n\n---\n" : "") + notice;
+    }
+    this.db.setSessionHarness(session.id, undefined);
+    this.db.setProcessState(session.id, "live");
+    try {
+      this.pty.spawn({
+        sessionId: session.id,
+        cwd: session.cwd,
+        permission: { ...permission, startupModeCycles: permission.startupModeCycles ?? 0 },
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined,
+        docLint: config.docLint,
+        codescapeEnabled: resolveCodescapeConfig(project.config).enabled,
+        projectId: project.id,
+        repoPath: project.repoPath,
+        startupPrompt,
+        role,
+        browserTesting: session.browserTesting ?? false,
+        documentConversion: session.documentConversion ?? false,
+        capabilities: session.capabilities ?? [],
+        restrictedTools: session.restrictedTools ?? false,
+        skills: session.skills ?? null,
+        model: resolvedSpawn?.model,
+        sessionName: composeRoleSessionName(role, project.name),
+        harness: undefined,
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(session.id, e);
+      throw e;
+    }
+    this.recordHarnessRoleForced(session, session.id, forcedDetail, "resume");
+    return { ...session, harness: undefined, processState: "live", busy: false };
   }
 
   // @decision d88163b7 — companion-specific CONVERSATION-PRESERVING respawn: re-resolve + re-pin the
@@ -9001,6 +9149,31 @@ export class SessionService {
   }
 
   /**
+   * @decision 7955458e — never deliver these DROPPED-isolation items into the codex session's OWN turn
+   * input. Durable event every spawn + a manager nudge deduped per (recycle lineage, item-id set).
+   */
+  handleCodexIsolationGapDisclosed(sessionId: string, info: { items: { id: string; reason: string }[] }): void {
+    const s = this.db.getSession(sessionId);
+    const itemLabel = info.items.map((i) => `${i.id} (${i.reason})`).join("; ");
+    const lineageId = s ? lineageRootId(this.db, s) : sessionId;
+    const itemsKey = info.items.map((i) => i.id).sort().join(",");
+    const alreadyNudged = this.db.hasNudgedEventForLineageItems("codex_isolation_gap_disclosed", lineageId, itemsKey);
+    // A nudge actually fires only when both conditions hold: not already nudged for this exact (lineage,
+    // item-set) pair, AND there's a recipient to send it to (a parentless session has nowhere to send it
+    // — `nudged` must record that honestly, never `!alreadyNudged` alone, or a later managed spawn of the
+    // same lineage/item-set would be wrongly suppressed by a parentless occurrence that sent nothing).
+    const nudged = !alreadyNudged && !!s?.parentSessionId;
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+      workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "codex_isolation_gap_disclosed", detail: { items: info.items, agentId: s?.agentId ?? null, lineageRootId: lineageId, itemsKey, nudged },
+    });
+    if (!nudged) return;
+    const senderMsg = `[loom:codex-isolation-gap] your codex session ${sessionId}${s?.taskId ? ` (task ${s.taskId})` : ""} is missing claude-side isolation/secret-read protections this harness structurally cannot enforce: ${itemLabel}. This is a DROPPED protection, not an optional capability — review whether harness "codex" is still right for this role/project. (Shown once per recycle lineage per distinct item set.)`;
+    this.enqueueSystemNudge(s!.parentSessionId!, senderMsg, { kind: "warning", taskId: s?.taskId ?? null });
+  }
+
+  /**
    * @decision f9b1ea00 — consumes `PtyHostEvents.onPromptMismatchUnresolved`; RECIPIENT is the session
    * itself, SENDER is its manager (`parentSessionId`) — the only party that could resend the content. A
    * session with no parent has no programmatic sender to nudge; the durable row still records the gap.
@@ -12504,7 +12677,7 @@ export class SessionService {
     const managerSpawn = agent ? this.resolveAgentSpawn(agent, config, "manager") : undefined;
     // @decision 8d4b4433 — the harness is RE-RESOLVED here (unlike resume/fork, which stay row-pinned): an
     // `undefined` re-resolve means claude, so a codex→claude flip lands; old.harness only when the agent is gone.
-    const { harness: managerHarness, skipped: managerHarnessSkipped } = this.recycleHarness(old, managerSpawn);
+    const { harness: managerHarness, skipped: managerHarnessSkipped, roleForced: managerHarnessAgentMissingForced } = this.recycleHarness(old, managerSpawn, config.permission.deny);
     const newGen = (old.gen ?? 0) + 1;
 
     this.db.appendEvent({
@@ -12566,6 +12739,7 @@ export class SessionService {
     // insertSession — see that method's own doc for why any later point would leave a gap.
     this.db.insertRecycleSuccessor(fresh, oldManagerId);
     this.recordHarnessDefaultSkipped(fresh, oldManagerId, managerHarnessSkipped, "recycle");
+    this.recordHarnessRoleForced(fresh, oldManagerId, managerSpawn?.harnessRoleForced ?? managerHarnessAgentMissingForced, "recycle");
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
     // Card 6ca4155f: wrapped through pty.spawn so a synchronous throw in this window reconciles the row
@@ -12829,7 +13003,7 @@ export class SessionService {
     // (mirrors recycleManager). Agent-missing ⇒ bare config.permission + no model.
     const leadSpawn = agent ? this.resolveAgentSpawn(agent, config, "platform") : undefined;
     // @decision 8d4b4433 — re-resolved harness, same rule as recycleManager (old.harness only if agent gone).
-    const { harness: leadHarness, skipped: leadHarnessSkipped } = this.recycleHarness(old, leadSpawn);
+    const { harness: leadHarness, skipped: leadHarnessSkipped, roleForced: leadHarnessAgentMissingForced } = this.recycleHarness(old, leadSpawn, config.permission.deny);
     const newGen = (old.gen ?? 0) + 1;
 
     this.db.appendEvent({
@@ -12891,6 +13065,7 @@ export class SessionService {
     // Still fully synchronous (no await), so it does not disturb the atomic handoff's own no-await guarantee.
     this.db.insertRecycleSuccessor(fresh, oldLeadId);
     this.recordHarnessDefaultSkipped(fresh, oldLeadId, leadHarnessSkipped, "recycle");
+    this.recordHarnessRoleForced(fresh, oldLeadId, leadSpawn?.harnessRoleForced ?? leadHarnessAgentMissingForced, "recycle");
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
     // Card 6ca4155f: wrapped so a synchronous throw in this window reconciles the fresh row to 'exited'

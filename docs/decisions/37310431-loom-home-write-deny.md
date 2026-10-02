@@ -381,16 +381,21 @@ own file I/O — and re-measure after any future `claude` CLI upgrade (this was 
 the prior project-memory Read()-deny measurement was 2.1.263 and needed re-verification for exactly this
 reason).
 
-## Codex harness — no change needed
+## Codex harness — no change needed (WRITE-side only — see card 7955458e for the READ side)
 
 `createCodexPty` never threads `opts.permission`/`disallowedTools` at all (confirmed by that method's own
-comment) — codex doesn't consume `permission.deny`. It needs none: codex's own OS-level sandbox
-(`-s workspace-write`) is deny-by-default and grants writes only to cwd (no `--add-dir` is ever passed —
-confirmed, zero call sites in this repo). Every codex-eligible role's cwd is the git worktree
-(`WORKTREES_DIR`, a sibling of LOOM_HOME, never nested), so LOOM_HOME is already structurally
-unreachable, enforced by the OS (ACE DENY on Windows / Landlock·Seatbelt elsewhere, confirmed
+comment) — codex doesn't consume `permission.deny`. For LOOM_HOME **writes** specifically, it needs none:
+codex's own OS-level sandbox (`-s workspace-write`) is deny-by-default and grants writes only to cwd (no
+`--add-dir` is ever passed — confirmed, zero call sites in this repo). Every codex-eligible role's cwd is
+the git worktree (`WORKTREES_DIR`, a sibling of LOOM_HOME, never nested), so LOOM_HOME is already
+structurally unreachable, enforced by the OS (ACE DENY on Windows / Landlock·Seatbelt elsewhere, confirmed
 cross-platform at codex's own source — `d7657543`) — a stronger guarantee than claude's CLI-classifier-
 based deny.
+
+**This section does NOT cover reads** — codex's sandbox_mode never gates reads, on any mode. The
+SETTINGS_DIR/transcript-root read-denies (and a project's own authored `permission.deny`) ARE silently
+dropped on codex; see `docs/decisions/7955458e` for the investigation, what's mapped vs. disclosed vs.
+hard-rejected, and the residual risk left open.
 
 ## Incident during implementation (round 1) — a real write DID land under the real `~/.loom`
 

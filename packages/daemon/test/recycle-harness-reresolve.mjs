@@ -1,11 +1,24 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 8d4b4433 (multi-harness epic df1f94b0) — manager + platform-lead RECYCLE re-resolves the harness
-// through resolveAgentSpawn (an `undefined` re-resolve ⇒ claude, so codex→claude works); a WORKER recycle
-// and resume stay pinned to the row. Deterministic + claude/codex-free: real Db + SessionService against a
-// fake pty for BOTH createPty and createCodexPty, with LOOM_CODEX_BIN at a dead path as a loud backstop.
+// through resolveAgentSpawn; a WORKER recycle and resume stay pinned to the row. Deterministic +
+// claude/codex-free: real Db + SessionService against a fake pty for BOTH createPty and createCodexPty,
+// with LOOM_CODEX_BIN at a dead path as a loud backstop.
 //
-//   (M) manager recycle: claude→codex, codex→claude, agent-missing ⇒ carries old.harness, and the
-//       default-layer seam (defaultHarnessForSpawn) feeds the recycled successor.
+// Card 7955458e, Code Review CRITICAL fix (this revision): `resolveAgentSpawn`'s own role-based backstop
+// now FORCES any resolved codex harness back to claude whenever the RESOLVED session role is a
+// TRANSCRIPT_ROOT_DENY_ROLES member — manager and platform ALWAYS are, unconditionally, regardless of
+// restrictedTools/browserTesting/documentConversion/capabilities/permissionDeny. This makes a manager or
+// platform-lead recycle's "→ codex" direction from (M)/(P) below now land back on claude every time,
+// firing `harness_role_forced_claude` instead of ever reaching createCodexPty — the OLD codex-landing
+// assertions (and the (S)/(PD) sections' OLD `harness_default_skipped`-via-codexIncompatibilities skip,
+// which can now never fire for these two roles at all, since the role-force preempts it first) are
+// rewritten below to assert the NEW, forced-to-claude outcome instead of the old codex-landing one.
+//
+//   (M) manager recycle: codex→claude still works (unaffected); claude row + codex PROFILE is now
+//       UNCONDITIONALLY forced back to claude (not landed); agent-missing ALSO now forces claude (ruling
+//       1(c), SECOND review round — recycleHarness's own `!spawn` branch forces it directly, since
+//       resolveAgentSpawn never runs on that path to force it there instead); the default-layer seam
+//       (defaultHarnessForSpawn) is ALSO covered by the same force, regardless of which layer produced codex.
 //   (P) platform-lead recycle mirrors (M).
 //   (W) worker recycle stays PINNED to the row in both directions, even against a contradicting profile.
 //   (R) resume stays row-pinned against a contradicting profile (claude row / codex profile direction only).
@@ -90,21 +103,27 @@ const goneAgent = (id) => {
   return () => db.db.pragma("foreign_keys = ON");
 };
 let n = 0;
-const seed = (role, agentId, harness, extra = {}) => {
+const seed = (role, agentId, harness, extra = {}, projectId = "pR") => {
   const id = `${role}-${++n}`;
   db.insertSession({
-    id, projectId: "pR", agentId, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown",
+    id, projectId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown",
     busy: false, createdAt: now, lastActivity: now, lastError: null, role, gen: 0, ...(harness ? { harness } : {}), ...extra,
   });
   return id;
 };
 const harnessOf = (id) => db.getSession(id).harness ?? undefined;
+const forcedEvent = (predId) => db.listEvents(predId).find((e) => e.kind === "harness_role_forced_claude");
 
 // ---------------- (M) manager ----------------
 {
-  const m1 = await svc.recycleManager(seed("manager", "aMgrCodex", undefined), "handoff");
-  check("(M1) claude→codex: successor row harness is codex", harnessOf(m1.id) === "codex");
-  check("(M1) claude→codex: pty.spawn opts.harness is codex, routed via createCodexPty", optsFor(m1.id)?.harness === "codex" && optsFor(m1.id)?.viaCodex === true);
+  // Card 7955458e: role:manager is a TRANSCRIPT_ROOT_DENY_ROLES member, so a resolved codex is now
+  // UNCONDITIONALLY forced back to claude — this profile would have landed codex before that fix.
+  const pM1 = seed("manager", "aMgrCodex", undefined);
+  const m1 = await svc.recycleManager(pM1, "handoff");
+  check("(M1) claude row + explicit codex profile + role:manager ⇒ FORCED back to claude (card 7955458e backstop)", harnessOf(m1.id) === undefined);
+  check("(M1) opts.harness undefined, routed via createPty — never reaches createCodexPty", optsFor(m1.id)?.harness === undefined && optsFor(m1.id)?.viaCodex === false);
+  check("(M1) harness_role_forced_claude filed naming role:manager + the source agentId, trigger:recycle",
+    forcedEvent(pM1)?.workerSessionId === m1.id && forcedEvent(pM1).detail.role === "manager" && forcedEvent(pM1).detail.agentId === "aMgrCodex" && forcedEvent(pM1).detail.trigger === "recycle" && forcedEvent(pM1).detail.reason.includes("FORCED"));
 
   const m2 = await svc.recycleManager(seed("manager", "aMgrPlain", "codex"), "handoff");
   check("(M2) codex→claude: successor row harness is unset (claude), NOT carried from old", harnessOf(m2.id) === undefined);
@@ -113,59 +132,95 @@ const harnessOf = (id) => db.getSession(id).harness ?? undefined;
   const fkOnM = goneAgent("ghostM"); const ghostM = seed("manager", "ghostM", "codex");
   check("(M3) setup: the agent row is really gone", db.getAgent("ghostM") === undefined && !!db.getSession(ghostM));
   let m3; try { m3 = await svc.recycleManager(ghostM, "handoff"); } finally { fkOnM(); }
-  check("(M3) agent missing ⇒ falls back to old.harness (codex), row + opts", harnessOf(m3.id) === "codex" && optsFor(m3.id)?.harness === "codex");
+  // Card 7955458e, SECOND Code Review ruling 1(c): agent-missing ⇒ no resolveAgentSpawn to force
+  // through, so recycleHarness's own `!spawn` branch forces claude itself — a codex row for a
+  // TRANSCRIPT_ROOT_DENY_ROLES role must NEVER land on codex regardless of why the agent is gone.
+  check("(M3) agent missing ⇒ recycleHarness's own !spawn branch still forces claude (ruling 1(c))", harnessOf(m3.id) === undefined && optsFor(m3.id)?.harness === undefined && optsFor(m3.id)?.viaCodex === false);
+  check("(M3) harness_role_forced_claude filed naming role:manager + the gone agentId, trigger:recycle",
+    forcedEvent(ghostM)?.workerSessionId === m3.id && forcedEvent(ghostM).detail.role === "manager" && forcedEvent(ghostM).detail.agentId === "ghostM" && forcedEvent(ghostM).detail.trigger === "recycle");
 
   // default-layer seam: aMgrPlain has no profile harness; stub the default so a manager would resolve codex.
+  // Card 7955458e: the role-force reads rawHarness = resolved.harness || harnessFromDefault.harness, so it
+  // catches a DEFAULT-derived codex too, not just an explicit profile one.
   const orig = svc.defaultHarnessForSpawn;
   svc.defaultHarnessForSpawn = (a, role, r) => (role === "manager" ? { harness: "codex", skipped: undefined } : orig.call(svc, a, role, r));
-  const m4 = await svc.recycleManager(seed("manager", "aMgrPlain", undefined), "handoff");
-  check("(M4) default-layer seam feeds the recycled manager (claude row → codex)", harnessOf(m4.id) === "codex" && optsFor(m4.id)?.harness === "codex");
+  const pM4 = seed("manager", "aMgrPlain", undefined);
+  const m4 = await svc.recycleManager(pM4, "handoff");
+  check("(M4) default-layer seam resolves codex for manager, but the role-based backstop STILL forces claude", harnessOf(m4.id) === undefined && optsFor(m4.id)?.harness === undefined && optsFor(m4.id)?.viaCodex === false);
+  check("(M4) harness_role_forced_claude filed — the backstop fires regardless of WHICH layer produced codex", forcedEvent(pM4)?.workerSessionId === m4.id && forcedEvent(pM4).detail.role === "manager");
   svc.defaultHarnessForSpawn = orig;
-  const m5 = await svc.recycleManager(seed("manager", "aMgrPlain", undefined), "handoff");
-  check("(M4) CONTROL: with the stub removed the same agent recycles to claude (M4 wasn't vacuous)", harnessOf(m5.id) === undefined);
+  const pM5 = seed("manager", "aMgrPlain", undefined);
+  const m5 = await svc.recycleManager(pM5, "handoff");
+  check("(M4) CONTROL: with the stub removed the same agent recycles to claude normally, no forced event (M4 wasn't vacuous)", harnessOf(m5.id) === undefined && forcedEvent(pM5) === undefined);
 }
 
 // ---------------- (S) codex flip must NOT strip carried safety/capability fields (M1 of the code review) ----------------
-// The profile flips to codex (validateProfile forces restrictedTools/stdio caps off in that same save) but the
-// recycled ROW still carries them; createCodexPty ignores restrictedTools, so flipping would run UNrestricted.
-// The successor keeps old.harness and the skip is filed as the SAME `harness_default_skipped` event a fresh
-// spawn files (card 961da6c6), attributed to the successor, reasons from the shared codexIncompatibilities().
+// Card 7955458e: role:manager/role:platform are ALWAYS TRANSCRIPT_ROOT_DENY_ROLES members, so the
+// role-based backstop now forces claude BEFORE recycleHarness's own codexIncompatibilities check (the
+// restrictedTools/browserTesting/documentConversion/capabilities skip these sections originally tested)
+// ever gets a chance to run — that field-specific skip is now STRUCTURALLY UNREACHABLE via a manager/
+// platform recycle (the only two roles that ever call recycleHarness). These sections now prove the
+// OPPOSITE of what they used to: `harness_role_forced_claude` fires, `harness_default_skipped` does NOT —
+// the two mechanisms never double-fire — while the carried field itself is still preserved on the row.
 const skipEvent = (predId) => db.listEvents(predId).find((e) => e.kind === "harness_default_skipped");
-const skipIds = (predId) => (skipEvent(predId)?.detail?.items ?? []).map((i) => i.id);
-for (const [label, extra, needle] of [
-  ["restrictedTools", { restrictedTools: true }, "restrictedTools"],
-  ["browserTesting", { browserTesting: true }, "browserTesting"],
-  ["documentConversion", { documentConversion: true }, "documentConversion"],
-  ["capabilities", { capabilities: [{ slug: "some-capability" }] }, "capabilities"],
+for (const [label, extra] of [
+  ["restrictedTools", { restrictedTools: true }],
+  ["browserTesting", { browserTesting: true }],
+  ["documentConversion", { documentConversion: true }],
+  ["capabilities", { capabilities: [{ slug: "some-capability" }] }],
 ]) {
   const pm = seed("manager", "aMgrCodex", undefined, extra);
   const sm = await svc.recycleManager(pm, "handoff");
-  check(`(S-mgr ${label}) claude row + codex profile + ${label} ⇒ successor stays claude (row + opts via createPty)`, harnessOf(sm.id) === undefined && optsFor(sm.id)?.harness === undefined && optsFor(sm.id)?.viaCodex === false);
-  check(`(S-mgr ${label}) harness_default_skipped filed for the successor with the shared reason`, skipEvent(pm)?.workerSessionId === sm.id && JSON.stringify(skipIds(pm)) === JSON.stringify([needle]) && skipEvent(pm).detail.items[0].reason.includes("not supported on harness") && skipEvent(pm).detail.trigger === "recycle");
+  check(`(S-mgr ${label}) claude row + codex profile + ${label} ⇒ successor stays claude (role-based backstop, row + opts via createPty)`, harnessOf(sm.id) === undefined && optsFor(sm.id)?.harness === undefined && optsFor(sm.id)?.viaCodex === false);
+  check(`(S-mgr ${label}) harness_role_forced_claude filed (role:manager alone is sufficient); harness_default_skipped is NOT filed (the field-specific skip never runs)`, forcedEvent(pm)?.workerSessionId === sm.id && forcedEvent(pm).detail.trigger === "recycle" && skipEvent(pm) === undefined);
   check(`(S-mgr ${label}) the carried field itself is unchanged on the successor`, JSON.stringify(db.getSession(sm.id)[label]) === JSON.stringify(extra[label]));
 }
 {
   const pl = seed("platform", "aLeadCodex", undefined, { restrictedTools: true });
   const sl = await svc.recyclePlatformLead(pl, "handoff");
-  check("(S-lead restrictedTools) claude row + codex profile + restrictedTools ⇒ successor stays claude", harnessOf(sl.id) === undefined && optsFor(sl.id)?.viaCodex === false);
-  check("(S-lead restrictedTools) skip filed as harness_default_skipped", skipEvent(pl)?.workerSessionId === sl.id && skipIds(pl).join() === "restrictedTools");
+  check("(S-lead restrictedTools) claude row + codex profile + restrictedTools ⇒ successor stays claude (role-based backstop)", harnessOf(sl.id) === undefined && optsFor(sl.id)?.viaCodex === false);
+  check("(S-lead restrictedTools) harness_role_forced_claude filed; harness_default_skipped is NOT", forcedEvent(pl)?.workerSessionId === sl.id && skipEvent(pl) === undefined);
   const pl2 = seed("platform", "aLeadCodex", undefined, { capabilities: [{ slug: "some-capability" }] });
   const sl2 = await svc.recyclePlatformLead(pl2, "handoff");
-  check("(S-lead capabilities) same for a capability field", harnessOf(sl2.id) === undefined && skipIds(pl2).join() === "capabilities");
+  check("(S-lead capabilities) same for a capability field", harnessOf(sl2.id) === undefined && forcedEvent(pl2)?.workerSessionId === sl2.id && skipEvent(pl2) === undefined);
   const pc = seed("manager", "aMgrCodex", undefined);
-  await svc.recycleManager(pc, "handoff");
-  check("(S) REGRESSION/CONTROL: with no incompatible field the same codex-profile flip still lands and records no skip", harnessOf(db.listSessions("aMgrCodex").find((x) => x.recycledFrom === pc).id) === "codex" && skipEvent(pc) === undefined);
+  const scSuccessor = await svc.recycleManager(pc, "handoff");
+  check("(S) card 7955458e: even with NO other incompatible field, role:manager ALONE still forces claude (manager can never run codex, period)", harnessOf(scSuccessor.id) === undefined && skipEvent(pc) === undefined && forcedEvent(pc)?.workerSessionId === scSuccessor.id);
+}
+
+// ---------------- (PD) permissionDeny — card 7955458e: a non-empty AUTHORED project permission.deny is the
+// ONE field `recycleHarness` cannot read off the OLD ROW (unlike restrictedTools/browserTesting/
+// documentConversion/capabilities in (S) above) — it has no Session column, so every caller re-derives it
+// LIVE from the project's CURRENT resolveConfig(...).permission.deny instead. Same (S)-section caveat
+// applies: role:manager's backstop fires BEFORE this field-specific skip ever runs, so this now proves the
+// backstop preempts permissionDeny too, not that permissionDeny independently skips a manager recycle (the
+// genuinely-reachable permissionDeny-skip case is `worker`, tested in codex-fleet-switch-guard.mjs — worker
+// is NOT a TRANSCRIPT_ROOT_DENY_ROLES member, so the backstop never preempts it there).
+{
+  db.insertProject({ id: "pRD", name: "RD", repoPath: repo, vaultPath: repo, config: { orchestration: { maxConcurrentWorkers: 50 }, permission: { deny: ["Read(//some/secret/**)"] } }, createdAt: now, archivedAt: null });
+  db.insertProfile({ id: "profMgrCodexPD", name: "profMgrCodexPD", role: "manager", description: "", allowDelta: [], skills: null, model: null, icon: null, harness: "codex" });
+  db.insertAgent({ id: "aMgrCodexPD", projectId: "pRD", name: "aMgrCodexPD", startupPrompt: "aMgrCodexPD", position: 0, profileId: "profMgrCodexPD" });
+
+  const pPD = seed("manager", "aMgrCodexPD", undefined, {}, "pRD");
+  const sPD = await svc.recycleManager(pPD, "handoff");
+  check("(PD) project's authored permission.deny + role:manager ⇒ successor stays claude (role-based backstop)", harnessOf(sPD.id) === undefined && optsFor(sPD.id)?.harness === undefined && optsFor(sPD.id)?.viaCodex === false);
+  check("(PD) harness_role_forced_claude filed; harness_default_skipped is NOT (the permissionDeny-specific skip never runs for this role)", forcedEvent(pPD)?.workerSessionId === sPD.id && skipEvent(pPD) === undefined);
 }
 
 // ---------------- (P) platform lead ----------------
 {
-  const p1 = await svc.recyclePlatformLead(seed("platform", "aLeadCodex", undefined), "handoff");
-  check("(P1) claude→codex: successor row + opts codex via createCodexPty", harnessOf(p1.id) === "codex" && optsFor(p1.id)?.harness === "codex" && optsFor(p1.id)?.viaCodex === true);
+  // Card 7955458e: role:platform is ALSO a TRANSCRIPT_ROOT_DENY_ROLES member — mirrors (M1) above.
+  const pP1 = seed("platform", "aLeadCodex", undefined);
+  const p1 = await svc.recyclePlatformLead(pP1, "handoff");
+  check("(P1) claude row + explicit codex profile + role:platform ⇒ FORCED back to claude (card 7955458e backstop)", harnessOf(p1.id) === undefined && optsFor(p1.id)?.harness === undefined && optsFor(p1.id)?.viaCodex === false);
+  check("(P1) harness_role_forced_claude filed naming role:platform, trigger:recycle", forcedEvent(pP1)?.workerSessionId === p1.id && forcedEvent(pP1).detail.role === "platform" && forcedEvent(pP1).detail.trigger === "recycle");
   const p2 = await svc.recyclePlatformLead(seed("platform", "aLeadPlain", "codex"), "handoff");
   check("(P2) codex→claude: successor row + opts unset via createPty", harnessOf(p2.id) === undefined && optsFor(p2.id)?.harness === undefined && optsFor(p2.id)?.viaCodex === false);
   const fkOnP = goneAgent("ghostP"); const ghostP = seed("platform", "ghostP", "codex");
   let p3; try { p3 = await svc.recyclePlatformLead(ghostP, "handoff"); } finally { fkOnP(); }
-  check("(P3) agent missing ⇒ falls back to old.harness (codex)", harnessOf(p3.id) === "codex" && optsFor(p3.id)?.harness === "codex");
+  check("(P3) agent missing ⇒ recycleHarness's own !spawn branch still forces claude (ruling 1(c))", harnessOf(p3.id) === undefined && optsFor(p3.id)?.harness === undefined && optsFor(p3.id)?.viaCodex === false);
+  check("(P3) harness_role_forced_claude filed naming role:platform + the gone agentId, trigger:recycle",
+    forcedEvent(ghostP)?.workerSessionId === p3.id && forcedEvent(ghostP).detail.role === "platform" && forcedEvent(ghostP).detail.agentId === "ghostP" && forcedEvent(ghostP).detail.trigger === "recycle");
 }
 
 // ---------------- (W) worker recycle stays pinned; (R) resume stays pinned ----------------

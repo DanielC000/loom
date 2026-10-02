@@ -1630,7 +1630,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   "manager_exited_with_live_workers", "fleet_resume_failed", "manager_crash_resume_failed",
   "parked_manager_workers_unresumed", "rate_limit_bailed", "usage_latch_cleared", "session_message_gave_up",
   "paste_length_loss", "paste_tripwire_give_up", "prompt_mismatch_unresolved", "repeated_tool_call",
-  "codex_submit_unconfirmed", "codex_boot_stuck", "codex_unsupported_capability", "harness_default_skipped", "companion_zero_reply_detected",
+  "codex_submit_unconfirmed", "codex_boot_stuck", "codex_unsupported_capability", "harness_default_skipped", "harness_role_forced_claude", "codex_isolation_gap_disclosed", "companion_zero_reply_detected",
   // Owner-interaction records (ruled durable — lead gen 345, low volume, provenance IS the value)
   "question_asked", "question_amended", "request_escalated", "task_held_cleared",
 ]);
@@ -5751,6 +5751,15 @@ export class Db {
     this.db.prepare("UPDATE sessions SET resumability = ? WHERE id = ?").run(r, id);
     this.notifySessionChanged(id);
   }
+  /**
+   * @decision 7955458e — the ONE deliberate exception to harness being WRITE-ONCE-AT-INSERT (every other
+   * path mints a fresh row instead, per 8d4b4433): `resume()`'s ruling-1(b) in-place forced-claude
+   * correction. Do not call this from any other path — see the card's decision record for the full why.
+   */
+  setSessionHarness(id: string, harness: "claude" | "codex" | undefined): void {
+    this.db.prepare("UPDATE sessions SET harness = ? WHERE id = ?").run(harness ?? null, id);
+    this.notifySessionChanged(id);
+  }
   /** @decision 5a56bb0a — atomic: archiveSession + setResumability("dead") + the retirement marker event,
    *  in ONE transaction, so a hard kill between them can never leave a dead+archived row with no marker
    *  (unrefusable by resume()'s chokepoint, and un-retried — nothing re-derives "dead" for this reason). */
@@ -6495,6 +6504,16 @@ export class Db {
       "SELECT * FROM orchestration_events WHERE manager_session_id = ? AND kind = ? ORDER BY ts DESC, rowid DESC LIMIT 1",
     ).get(managerSessionId, kind) as Row | undefined;
     return r ? toOrchestrationEvent(r) : undefined;
+  }
+  /**
+   * @decision 7955458e — once-per-(lineage, item-set) dedup for `codex_isolation_gap_disclosed`'s
+   * manager nudge, replacing the wrong agentId-keyed version. `nudged===true` only, so a PARENTLESS prior
+   * occurrence (recorded, never sent) never suppresses a later one that has a recipient.
+   */
+  hasNudgedEventForLineageItems(kind: OrchestrationEventKind, lineageRootId: string, itemsKey: string): boolean {
+    return !!this.db.prepare(
+      "SELECT 1 FROM orchestration_events WHERE kind = ? AND json_extract(detail_json, '$.lineageRootId') = ? AND json_extract(detail_json, '$.itemsKey') = ? AND json_extract(detail_json, '$.nudged') = 1 LIMIT 1",
+    ).get(kind, lineageRootId, itemsKey);
   }
 
   /** The HISTORY half of the Gates page. Enrichment is one JOIN, never a per-row lookup.

@@ -68,6 +68,17 @@ const vStdio = validateProfile({ name: "s", role: "worker", harness: "codex", br
 check("(1) validateProfile(codex+browserTesting) still rejects with the shared per-field reason", vStdio.ok === false && vStdio.error === codexStdioCapabilityReason(["browserTesting"]));
 check("(1) NEGATIVE CONTROL: a bogus field name yields no incompatibility", ids({ bogusZZZ: true }) === "");
 
+// --- card 7955458e: a non-empty AUTHORED permission.deny is ALSO codex-incompatible (fixed-to-claude), the
+// SAME remedy shape as the fields above (added to the SAME single matrix, never a second copy). ---
+check("(1) permissionDeny: [] ⇒ compatible", ids({ permissionDeny: [] }) === "");
+check("(1) permissionDeny: undefined ⇒ compatible (the common case — most projects never set one)", ids({ permissionDeny: undefined }) === "");
+check("(1) permissionDeny: non-empty alone", ids({ permissionDeny: ["Read(/etc/**)"] }) === "permissionDeny");
+check("(1) permissionDeny combines with the other fields, same fixed order",
+  ids({ restrictedTools: true, browserTesting: true, documentConversion: true, capabilities: [{ slug: "x" }], permissionDeny: ["Read(/etc/**)"] })
+    === "restrictedTools,browserTesting,documentConversion,capabilities,permissionDeny");
+check("(1) permissionDeny reason names the COUNT and is singular for exactly one rule", (reasonOf({ permissionDeny: ["x"] }, "permissionDeny") ?? "").includes("1 authored permission.deny rule that"));
+check("(1) permissionDeny reason is plural for more than one rule", (reasonOf({ permissionDeny: ["x", "y"] }, "permissionDeny") ?? "").includes("2 authored permission.deny rules that"));
+
 // ============ (2) spawnWorker under a codex default ============
 const repo = path.join(os.tmpdir(), `loom-cfsg-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
@@ -81,6 +92,10 @@ db.setPlatformConfig({ harness: { default: "codex" } }); // the fleet default is
 const baseCfg = { orchestration: { maxConcurrentWorkers: 50 } };
 db.insertProject({ id: "pC", name: "C", repoPath: repo, vaultPath: repo, config: baseCfg, createdAt: now, archivedAt: null });
 db.insertProject({ id: "pCS", name: "CS", repoPath: repo, vaultPath: repo, config: { ...baseCfg, codescape: { enabled: true } }, createdAt: now, archivedAt: null });
+// Card 7955458e: a project with an AUTHORED permission.deny override — the one field defaultHarnessForSpawn
+// reads from `config`, never from the profile (see resolveAgentSpawn's own doc) — so a SEPARATE project is
+// needed here, distinct from pC's empty default.
+db.insertProject({ id: "pPD", name: "PD", repoPath: repo, vaultPath: repo, config: { ...baseCfg, permission: { deny: ["Read(/etc/**)"] } }, createdAt: now, archivedAt: null });
 const profile = (id, extra) => db.insertProfile({ id, name: id, role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, ...extra });
 profile("profPlain", {});
 profile("profRestricted", { restrictedTools: true });
@@ -96,9 +111,11 @@ agent("agDoc", "pC", "profDoc", 3);
 agent("agCaps", "pC", "profCaps", 4);
 agent("agExplicit", "pC", "profExplicitCodex", 5);
 agent("agPlainCS", "pCS", "profPlain", 0);
+agent("agPlainPD", "pPD", "profPlain", 0);
 agent("agNoProfile", "pC", null, 6);
 agent("agMgr", "pC", null, 7);
 agent("agMgrCS", "pCS", null, 1);
+agent("agMgrPD", "pPD", null, 1);
 db.insertSession({
   id: "mgr1", projectId: "pC", agentId: "agMgr", engineSessionId: null, title: null,
   cwd: repo, processState: "live", resumability: "unknown", busy: false,
@@ -107,6 +124,12 @@ db.insertSession({
 
 db.insertSession({
   id: "mgrCS", projectId: "pCS", agentId: "agMgrCS", engineSessionId: null, title: null,
+  cwd: repo, processState: "live", resumability: "unknown", busy: false,
+  createdAt: now, lastActivity: now, lastError: null, role: "manager",
+});
+
+db.insertSession({
+  id: "mgrPD", projectId: "pPD", agentId: "agMgrPD", engineSessionId: null, title: null,
   cwd: repo, processState: "live", resumability: "unknown", busy: false,
   createdAt: now, lastActivity: now, lastError: null, role: "manager",
 });
@@ -134,7 +157,8 @@ const worktrees = [];
 const spawn = async (agentId, projectId = "pC") => {
   const taskId = randomUUID();
   db.insertTask({ id: taskId, projectId, title: `T-${agentId}`, body: "", columnKey: "todo", position: 1, createdAt: now, updatedAt: now });
-  const w = await svc.spawnWorker(projectId === "pCS" ? "mgrCS" : "mgr1", { taskId, agentId, kickoffPrompt: "KICK" });
+  const mgrId = projectId === "pCS" ? "mgrCS" : projectId === "pPD" ? "mgrPD" : "mgr1";
+  const w = await svc.spawnWorker(mgrId, { taskId, agentId, kickoffPrompt: "KICK" });
   worktrees.push(w.worktreePath);
   const skipped = db.listEventsForWorker(w.id).filter((e) => e.kind === "harness_default_skipped");
   return { w, opts: optsFor(w.id), row: db.getSession(w.id), skipped };
@@ -161,6 +185,17 @@ try {
 
   const cs = await spawn("agPlainCS", "pCS");
   check("(2) a codescape-enabled project's worker STILL gets codex (fail-CLOSED: a loud spawn-time degrade, not a skip) and files no skipped event", cs.opts?.harness === "codex" && cs.row.harness === "codex" && cs.skipped.length === 0);
+
+  // Card 7955458e: a project with an AUTHORED permission.deny — a compatible (profPlain) worker on it STILL
+  // stays claude under the codex default, same remedy shape as (2)'s restrictedTools/etc. loop above, proving
+  // this does NOT make codex "never run" fleet-wide — only pPD (which actually authored deny rules) is
+  // affected; pC (no deny) keeps getting codex, as `plain` above already proved.
+  const pd = await spawn("agPlainPD", "pPD");
+  check("(2) permissionDeny: a worker on a project with authored permission.deny STAYS claude under a codex default", pd.opts?.harness === undefined);
+  check("(2) permissionDeny: spawnWorker's result carries harnessDefaultSkipped naming it", pd.w.harnessDefaultSkipped?.some((i) => i.id === "permissionDeny") === true);
+  check("(2) permissionDeny: worker's session column is NULL (claude)", pd.row.harness === undefined || pd.row.harness === null);
+  check("(2) permissionDeny: exactly one harness_default_skipped event naming it, with the shared reason", pd.skipped.length === 1 && pd.skipped[0].detail.items.some((i) => i.id === "permissionDeny") && pd.skipped[0].detail.items.find((i) => i.id === "permissionDeny").reason === reasonOf({ permissionDeny: ["Read(/etc/**)"] }, "permissionDeny"));
+  check("(2) CONTROL: pC (empty deny) is UNAFFECTED by pPD's config — still plain spawn gets codex (not vacuous)", plain.opts?.harness === "codex");
 
   check("(2) a compatible worker's result has NO harnessDefaultSkipped", plain.w.harnessDefaultSkipped === undefined);
 

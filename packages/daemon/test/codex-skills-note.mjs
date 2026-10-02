@@ -131,7 +131,11 @@ const READY = "OpenAI Codex (v1.2.3)\n│ model:     gpt-6-astra medium         
 const BRIEF = "You are the Web Designer. Also invoke the **web-design** skill by name for UI work.";
 async function kickoff(sessionId, extra) {
   const cwd = mkdtempManaged(`loom-codex-skills-note-spawn-${sessionId}-`);
-  host.spawn({ sessionId, cwd, permission: {}, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, harness: "codex", startupPrompt: BRIEF, ...extra });
+  // Card 7955458e ruling 1(a): PtyHost.spawn() now REFUSES harness:"codex" for a TRANSCRIPT_ROOT_DENY_ROLES
+  // role (manager included, exercised below) — call spawnCodexProcess directly to unit-test the kickoff
+  // composition logic itself, bypassing only the new spawn()-level dispatch refusal (every real production
+  // path still goes through spawn(); worker calls are unaffected either way).
+  host.spawnCodexProcess({ sessionId, cwd, permission: {}, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, harness: "codex", startupPrompt: BRIEF, ...extra });
   host.ptys.get(sessionId).push(READY);
   await waitUntil(() => host.kickoffs.has(sessionId), { label: `kickoff for ${sessionId}` });
   return host.kickoffs.get(sessionId);

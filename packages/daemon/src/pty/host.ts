@@ -4,7 +4,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn as spawnProcess } from "node:child_process";
-import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
+import { CODEX_RESTRICTED_TOOLS_REASON, TRANSCRIPT_ROOT_DENY_ROLES, codexPermissionDenyReason, CodexRoleSpawnRefusedError } from "../profiles/codex-compat.js";
 import { spawn, type IPty } from "node-pty";
 import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
@@ -3358,6 +3358,10 @@ export interface PtyHostEvents {
    *  codescapeEnabled for codex), named distinctly in info.items[].reason, never blended — and never relied
    *  on alone, since profiles/validate.ts's save-time rejection can't catch a profile that predates it. */
   onCodexUnsupportedCapability?(sessionId: string, info: { items: { id: string; reason: string }[] }): void;
+  /** @decision 7955458e, Code Review MAJOR fix — never merge an ISOLATION-deny disclosure into
+   *  onCodexUnsupportedCapability above: that signal's recipient delivery puts text into the codex
+   *  session's OWN turn input, telling it exactly what it can now read. Durable event + manager-only nudge. */
+  onCodexIsolationGapDisclosed?(sessionId: string, info: { items: { id: string; reason: string }[] }): void;
   /** @decision 47c11741 — onPasteTripwireGiveUp: fires when Loom DID write the text (twice) and the
    *  one-shot automatic RECOVERY re-injection itself also collapsed — distinct from onPasteLengthLoss
    *  (never wrote it at all). Never retry the re-injection a second time; it's one-shot by design. */
@@ -3553,8 +3557,11 @@ export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedToo
  * the PINNED opts.role, UNIONed into .deny (never replaces); run is deliberately excluded.
  * @decision 31613c1e/@decision d78f8217 — LEAD RULING: BLANKET for manager/platform/setup, PROJECT-SCOPED
  * for worker (the weaker one-knob "blanket for all four" was rejected). Best-effort DENY-LIST, FAILS OPEN
- * on anything unenumerated: "CARRY ITS LIMIT VERBATIM OR THIS BECOMES THE NEXT OVERCLAIMED CONTAINMENT DOC." */
-export const TRANSCRIPT_ROOT_DENY_ROLES: ReadonlySet<SessionRole> = new Set(["assistant", "auditor", "workspace-auditor", "manager", "platform", "setup"]);
+ * on anything unenumerated: "CARRY ITS LIMIT VERBATIM OR THIS BECOMES THE NEXT OVERCLAIMED CONTAINMENT DOC."
+ * Card 7955458e: the role-set constant itself now lives in `profiles/codex-compat.ts` (re-exported here
+ * under the SAME name) — `profiles/validate.ts`'s codex-role hard-rejection needs the identical set, and a
+ * second hand-copied literal is exactly the drift this file's own "point at a source of truth" rule bans. */
+export { TRANSCRIPT_ROOT_DENY_ROLES };
 export const TRANSCRIPT_ROOT_DENY_RULES: readonly string[] = [TRANSCRIPT_ROOT_READ_DENY_RULE];
 export function withTranscriptRootDenyForSpawn(
   permission: PermissionPolicy,
@@ -4569,6 +4576,11 @@ export class PtyHost {
     // stateful runtime BEFORE any of the claude-specific machinery below runs. `spawnCodexProcess`
     // constructs its own CodexLive entry in the SEPARATE `liveCodex` map (never `this.live` — see
     // CodexLive's own doc for why) and returns; nothing past this point ever sees a codex spawn.
+    // @decision 7955458e — ruling 1(a): fail-closed backstop should resolveAgentSpawn's/resume()'s own
+    // forces ever be bypassed. Keyed on opts.role (every caller passes it), never re-resolved here.
+    if (opts.harness === "codex" && opts.role && TRANSCRIPT_ROOT_DENY_ROLES.has(opts.role)) {
+      throw new CodexRoleSpawnRefusedError(opts.role);
+    }
     if (opts.harness === "codex") { this.spawnCodexProcess(opts); return; }
     // Code review (2026-08-05, card c469d54e): a readiness-fallback timer's callback re-looks-up its Live
     // by sessionId at fire time (`this.live.get(sessionId)`) rather than closing over the Live object
@@ -5021,8 +5033,10 @@ export class PtyHost {
     // Reason: claude's codescape mount is safe only BECAUSE it's paired with a tool-level restriction —
     // CODESCAPE_TOOL_ALLOW/CODESCAPE_WRITE_TOOLS, enforced via claude's `--allowedTools`/`--disallowedTools`
     // (see createPty's own extraAllow/disallowedTools wiring below). createCodexPty has NO analogous
-    // per-tool lever at all (verified: opts.permission/disallowedTools never appear anywhere in this
-    // method or spawnCodexProcess).
+    // per-tool ENFORCEMENT lever at all — `opts.disallowedTools` never appears anywhere in this method or
+    // spawnCodexProcess, and `opts.permission`/`opts.role` are read further below ONLY for the loud
+    // isolationGapItems/transcriptRootReadDeny DISCLOSURE (card 7955458e), never to gate or allow/disallow
+    // anything codex itself does.
     // @decision d7657543 — codex's `-a never -s workspace-write` is deny-by-default, NOT "approves
     // everything" — denied actions fail back to the model, never silently auto-approved. A codex worker
     // on Windows also can never `git commit` in its own worktree — `.git` carries a sandbox DENY ACE.
@@ -5047,6 +5061,48 @@ export class PtyHost {
     // Card b94fcb72: codex ignores restrictedTools (its only consumer is the claude createPty disallow list), so a
     // session that arrives here with it on would run UNrestricted — report it in the SAME single report.
     if (opts.restrictedTools === true) unsupportedItems.push({ id: "restrictedTools", reason: CODEX_RESTRICTED_TOOLS_REASON });
+    // Card 7955458e, Code Review MAJOR fix — claude's permission.deny chokepoint (inside createPty ONLY)
+    // never runs for codex. LOOM_HOME writes need no entry (codex's own sandbox already blocks those —
+    // docs/decisions/37310431) but these four items have no codex-side equivalent; disclosed in a SEPARATE
+    // report (`isolationGapItems`/`onCodexIsolationGapDisclosed` — see that event's own doc for why it's
+    // never folded into `unsupportedItems` above). The transcript-root-deny role branch below is
+    // UNREACHABLE today via `spawn()` itself (ruling 1(a) above refuses this exact opts.harness/opts.role
+    // combination before `createCodexPty` is ever called) — kept as defense-in-depth should some OTHER
+    // caller of `createCodexPty` directly ever exist. See docs/decisions/7955458e for the full history
+    // (this was previously, incorrectly, believed unreachable via resolveAgentSpawn's force alone, which a
+    // SECOND review round found two real bypasses of — resume() and the agent-missing recycle fallback).
+    const isolationGapItems: { id: string; reason: string }[] = [];
+    isolationGapItems.push({
+      id: "settingsDirReadDeny",
+      reason: "claude denies Read() of <LOOM_HOME>/tmp/settings/** for every role (other live sessions' hook tokens, and a secret-bearing spawn's plaintext --mcp-config); codex has no filesystem-deny lever compatible with its \"-s workspace-write\" sandbox mode (the lever that exists, codex's own config.toml [permissions] profile system, is beta and mutually exclusive with sandbox_mode/-s — see docs/decisions/7955458e), so a codex session can read that directory freely via its own shell access. Use harness \"claude\" if this matters for this session.",
+    });
+    if (opts.role && TRANSCRIPT_ROOT_DENY_ROLES.has(opts.role)) {
+      isolationGapItems.push({
+        id: "transcriptRootReadDeny",
+        reason: `claude denies reading every OTHER project's and session's Claude Code transcript files for role "${opts.role}" (card ac90ca8e — blocks a cross-project/cross-session transcript read bypass); codex drops this entirely, so a codex session in this role can read every project's and every session's Claude Code transcripts. Use harness "claude" if this role needs that isolation.`,
+      });
+    }
+    if (opts.role === "worker" && opts.projectId) {
+      const otherProjectCount = this.getOtherProjects(opts.projectId).length;
+      if (otherProjectCount > 0) {
+        isolationGapItems.push({
+          id: "workerProjectTranscriptDeny",
+          reason: `claude denies a worker's reads of ${otherProjectCount} other live project${otherProjectCount === 1 ? "'s" : "s'"} Claude Code transcript director${otherProjectCount === 1 ? "y" : "ies"} (card d78f8217, already best-effort/fail-open on claude); codex drops this entirely too, so a codex worker can read every other project's Claude Code transcripts with no narrowing at all.`,
+        });
+      }
+    }
+    // Card 7955458e, Code Review item 3 — surfaces the explicit-profile and pinned-resume cases
+    // `defaultHarnessForSpawn`'s skip-to-claude (sessions/service.ts) never reaches: that skip only runs
+    // when the DEFAULT layer is consulted (profile harness unset), so an explicit codex profile with an
+    // authored project deny sails through with nothing reporting it short of this. `?? []`: `.deny` is
+    // non-optional on the real PermissionPolicy type, but a plain-JS test double (e.g. a bare `permission:
+    // {}`) can still omit it — found the hard way when this crashed companion-codex-restricted-tools-
+    // refusal.mjs's own direct createCodexPty call, which never set `.deny` and so never reached its own
+    // (unrelated) restrictedTools assertion below.
+    const permissionDenyRules = opts.permission.deny ?? [];
+    if (permissionDenyRules.length > 0) {
+      isolationGapItems.push({ id: "permissionDeny", reason: codexPermissionDenyReason(permissionDenyRules.length) });
+    }
     const mcpServers = buildMcpServers({
       sessionId: opts.sessionId, port: PORT, role: opts.role,
       browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,
@@ -5069,6 +5125,16 @@ export class PtyHost {
         // reported — swallow, loudly, and move on (this data path must never throw).
         // eslint-disable-next-line no-console
         console.error(`[codex-unsupported-capability] ${opts.sessionId} onCodexUnsupportedCapability handler threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+      }
+    }
+    // Card 7955458e, Code Review MAJOR fix — a SEPARATE report/event from the capability one above; see
+    // `onCodexIsolationGapDisclosed`'s own doc for why these must never share a callback.
+    if (isolationGapItems.length > 0) {
+      try {
+        this.events.onCodexIsolationGapDisclosed?.(opts.sessionId, { items: isolationGapItems });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[codex-isolation-gap] ${opts.sessionId} onCodexIsolationGapDisclosed handler threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
       }
     }
     // Card c6ce2804: buildCodexResumeArgs (codex-host.ts) is the PURE, directly-testable decision — see

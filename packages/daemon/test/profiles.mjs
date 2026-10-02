@@ -335,6 +335,45 @@ check("(validator) harness:claude + a non-empty capabilities array ⇒ still acc
   return r.ok && r.value.capabilities.length === 1;
 })());
 
+// --- (guard) card 7955458e, owner ruling — harness:"codex" is HARD-REJECTED for a role in
+// TRANSCRIPT_ROOT_DENY_ROLES (manager/platform/setup/auditor/workspace-auditor/assistant): that role gets
+// claude's BLANKET cross-project transcript-root read-deny (card ac90ca8e), and codex has no lever for it
+// at all — the blast radius (every other project's/session's Claude transcripts readable) is too large to
+// leave to a loud spawn-time warning, same posture as restrictedTools/browserTesting/documentConversion
+// above. "auditor"/"workspace-auditor" can only reach validateProfile as an unchanged CARRY-FORWARD
+// (card 71bcb207), so those two cases pass `opts.previousRole` to clear that earlier gate first; the other
+// four roles are ordinary CREATEs. -------------------------------------------------------------------
+for (const role of ["manager", "platform", "setup"]) {
+  check(`(validator) harness:codex + role:${role} (a TRANSCRIPT_ROOT_DENY_ROLES member) ⇒ rejected`, (() => {
+    const r = validateProfile({ name: "X", role, harness: "codex" });
+    return r.ok === false && r.error.includes(`role "${role}"`) && r.error.includes("ac90ca8e") && r.error.includes("7955458e");
+  })());
+  check(`(validator) CONTROL: harness:claude + role:${role} ⇒ still accepted (the gate is codex-only)`, (() => {
+    const r = validateProfile({ name: "X", role, harness: "claude" });
+    return r.ok && r.value.role === role;
+  })());
+}
+check("(validator) harness:codex + role:assistant ⇒ rejected (explicit restrictedTools avoids the UNRELATED assistant-role gate)", (() => {
+  const r = validateProfile({ name: "X", role: "assistant", harness: "codex", restrictedTools: false });
+  return r.ok === false && r.error.includes('role "assistant"') && r.error.includes("ac90ca8e");
+})());
+for (const role of ["auditor", "workspace-auditor"]) {
+  check(`(validator) harness:codex + CARRY-FORWARD role:${role} ⇒ STILL rejected (the 71bcb207 carry-forward gate doesn't exempt it)`, (() => {
+    const existingRow = { name: "X", role, description: "", allowDelta: [], skills: null, model: null, icon: null };
+    const patch = { harness: "codex" };
+    const r = validateProfile({ ...existingRow, ...patch }, { previousRole: role, patch });
+    return r.ok === false && r.error.includes(`role "${role}"`) && r.error.includes("ac90ca8e");
+  })());
+}
+check("(validator) CONTROL: harness:codex + role:worker (NOT a TRANSCRIPT_ROOT_DENY_ROLES member) ⇒ still accepted", (() => {
+  const r = validateProfile({ name: "X", role: "worker", harness: "codex" });
+  return r.ok && r.value.role === "worker" && r.value.harness === "codex";
+})());
+check("(validator) CONTROL: harness:codex + role omitted (plain session — no TRANSCRIPT_ROOT_DENY_ROLES role at all) ⇒ still accepted", (() => {
+  const r = validateProfile({ name: "X", harness: "codex" });
+  return r.ok && r.value.harness === "codex";
+})());
+
 // --- (guard) card 71bcb207: "auditor"/"workspace-auditor" are role-carry-forward-only — accepted by
 // validateProfile ONLY when the resolved value equals opts.previousRole (an unchanged edit to an
 // already-existing profile of that role); a CREATE or a reassignment into/out of either value is

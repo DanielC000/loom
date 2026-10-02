@@ -1,7 +1,7 @@
 import { z } from "zod";
-import type { Profile } from "@loom/shared";
+import type { Profile, SessionRole } from "@loom/shared";
 import { RESERVED_CAPABILITY_SLUGS } from "../capabilities/registry.js";
-import { CODEX_RESTRICTED_TOOLS_REASON, codexStdioCapabilityReason, codexStdioOffenders } from "./codex-compat.js";
+import { CODEX_RESTRICTED_TOOLS_REASON, codexStdioCapabilityReason, codexStdioOffenders, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleUnsupportedReason } from "./codex-compat.js";
 
 /**
  * The ONE spelling of the harness enum's runtime values. Shared by the profile validator below and the
@@ -375,6 +375,17 @@ function codexStdioCapabilityUnsupportedError(
   return codexStdioCapabilityReason(offending);
 }
 
+/**
+ * @decision 7955458e — HARD-REJECTS an explicit `harness:"codex"` profile whose role is in
+ * `TRANSCRIPT_ROOT_DENY_ROLES` (fresh OR carry-forward), at save time. This is the early UX error for the
+ * common case ONLY — it is bypassable by an explicit-role start, and never the only guard.
+ */
+function codexTranscriptRoleUnsupportedError(harness: string | undefined, role: string | null | undefined): string | null {
+  if (harness !== "codex") return null;
+  if (!role || !TRANSCRIPT_ROOT_DENY_ROLES.has(role as SessionRole)) return null;
+  return codexTranscriptRoleUnsupportedReason(role as SessionRole);
+}
+
 export function validateProfile(
   raw: unknown,
   opts?: { previousRole?: string | null; patch?: unknown },
@@ -393,6 +404,8 @@ export function validateProfile(
   if (codexRestrictedToolsError) return { ok: false, error: codexRestrictedToolsError };
   const codexStdioCapabilityError = codexStdioCapabilityUnsupportedError(d.harness, d.browserTesting, d.documentConversion, d.capabilities);
   if (codexStdioCapabilityError) return { ok: false, error: codexStdioCapabilityError };
+  const codexTranscriptRoleError = codexTranscriptRoleUnsupportedError(d.harness, d.role);
+  if (codexTranscriptRoleError) return { ok: false, error: codexTranscriptRoleError };
   // COMPILE-TIME FIELD TOTALITY (card 1059b3b9): the `satisfies Record<keyof Omit<Profile,"id">,
   // unknown>` below forces every key of Omit<Profile,"id"> to be named in this literal — the write-path
   // counterpart of entityRowFields.ts's `PROFILE_FIELDS: Record<keyof Profile, 1>` on the READ path. A

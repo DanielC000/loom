@@ -131,29 +131,37 @@ try {
   check("(4) the route is Tier 0 (loopback-only, never allowlisted for a remote bind)", routeTier("GET", "/api/harness/drain") === 0);
   check("(4) POSITIVE CONTROL: routeTier really returns 1 for an allowlisted read", routeTier("GET", "/api/sessions") === 1);
 
-  // (5) card c17ba928: a manager whose OLD ROW carries restrictedTools under a codex profile is BLOCKED (a recycle
-  // keeps it on claude — `recycleHarness`), never pending; a same-shaped manager without the field stays pending.
-  // Isolated in its own project so the exact sets above are untouched.
+  // (5) REWRITTEN for card 7955458e's Code Review CRITICAL fix: `resolveAgentSpawn`'s role-based backstop
+  // now FORCES a resolved codex harness back to claude UNCONDITIONALLY whenever the role is a
+  // TRANSCRIPT_ROOT_DENY_ROLES member — manager and platform ALWAYS are. This means `wanted` (what
+  // harnessDrainStatus computes a fresh spawn would resolve to) can NEVER be "codex" for either role
+  // anymore, regardless of restrictedTools/browserTesting/documentConversion/capabilities — so the OLD
+  // card c17ba928 scenario this section tested (a manager BLOCKED, not pending, because
+  // codexIncompatibilities' restrictedTools check kept it on claude) is now STRUCTURALLY UNREACHABLE:
+  // `blocked` can never be populated for these two roles at all (recycleHarness's own codexIncompatibilities
+  // branch never even runs, since `spawn.harness` arrives already forced to claude). A row whose CURRENT
+  // harness is still "codex" (e.g. a pre-existing row from before this fix shipped) now shows as PENDING
+  // instead — the role-force doesn't refuse the drain-detection read, it just makes "codex" unreachable as
+  // a WANTED value. Isolated in its own project so the exact sets above are untouched.
   db.insertProject({ id: "pC", name: "pC", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: now, archivedAt: null });
   prof("profMgrCodex", "manager", "codex");
   agent("aMgrCodexC", "pC", "profMgrCodex");
-  sess("s10-mgr-claude-restricted", "pC", "aMgrCodexC", "manager", null, "live", { restrictedTools: true });
-  sess("s11-mgr-claude-plain", "pC", "aMgrCodexC", "manager", null);
+  sess("s10-mgr-codex-restricted", "pC", "aMgrCodexC", "manager", "codex", "live", { restrictedTools: true });
+  sess("s11-mgr-codex-plain", "pC", "aMgrCodexC", "manager", "codex");
   const rC = svc.harnessDrainStatus({ projectId: "pC" });
-  check("(5) row WITHOUT carried fields is pending (recycle WILL move it)", same(ids(rC), ["s11-mgr-claude-plain"]));
-  check("(5) row WITH restrictedTools is blocked, not pending, with the compat reason",
-    rC.blocked.length === 1 && rC.blocked[0].sessionId === "s10-mgr-claude-restricted" && rC.blocked[0].wanted === "codex" &&
-    rC.blocked[0].harness === "claude" && rC.blocked[0].reasons.some((r) => r.id === "restrictedTools" && r.reason.length > 0));
-  check("(5) done false while s11 pending", rC.done === false);
-  db.setProcessState("s11-mgr-claude-plain", "exited");
-  const rCb = svc.harnessDrainStatus({ projectId: "pC" });
-  check("(5) blocked-only scope ⇒ pending empty, blocked 1, done FALSE", rCb.pending.length === 0 && rCb.blocked.length === 1 && rCb.done === false);
-  db.setProcessState("s10-mgr-claude-restricted", "exited");
-  check("(5) CONTROL: nothing pending or blocked ⇒ done true", svc.harnessDrainStatus({ projectId: "pC" }).done === true);
-  db.setProcessState("s10-mgr-claude-restricted", "live");
-  db.setProcessState("s11-mgr-claude-plain", "live");
+  check("(5) BOTH rows (with/without restrictedTools) are PENDING — role-force makes `wanted` claude unconditionally for role:manager", same(ids(rC), ["s10-mgr-codex-restricted", "s11-mgr-codex-plain"]));
+  check("(5) blocked is EMPTY for this role — the OLD c17ba928 skip-via-codexIncompatibilities path is now unreachable", rC.blocked.length === 0);
+  check("(5) done false while both are pending", rC.done === false);
+  // A row ALREADY on claude, under the SAME explicit-codex profile, simply matches (current===wanted===claude) — invisible to drain status.
+  sess("s12-mgr-claude-already", "pC", "aMgrCodexC", "manager", null);
+  const rC2 = svc.harnessDrainStatus({ projectId: "pC" });
+  check("(5) CONTROL: a row already on claude under the SAME codex profile does not appear in pending or blocked", !ids(rC2).includes("s12-mgr-claude-already") && !rC2.blocked.some((b) => b.sessionId === "s12-mgr-claude-already"));
+  for (const id of ["s10-mgr-codex-restricted", "s11-mgr-codex-plain"]) db.setProcessState(id, "exited");
+  const rCDone = svc.harnessDrainStatus({ projectId: "pC" });
+  check("(5) all drifting rows exited ⇒ pending empty, done:true", rCDone.pending.length === 0 && rCDone.done === true);
+  for (const id of ["s10-mgr-codex-restricted", "s11-mgr-codex-plain"]) db.setProcessState(id, "live");
   const restC = JSON.parse((await get("/api/harness/drain?projectId=pC")).body);
-  check("(5) REST carries the same blocked list", restC.blocked?.length === 1 && restC.blocked[0].sessionId === "s10-mgr-claude-restricted");
+  check("(5) REST carries the same pending list, blocked empty", same(restC.pending.map((p) => p.sessionId).sort(), ["s10-mgr-codex-restricted", "s11-mgr-codex-plain"]) && restC.blocked.length === 0);
   check("(5) NEGATIVE CONTROL: earlier scopes have no blocked rows", svc.harnessDrainStatus({ projectId: "pA" }).blocked.length === 0);
 } finally {
   try { await app.close(); } catch { /* ignore */ }
