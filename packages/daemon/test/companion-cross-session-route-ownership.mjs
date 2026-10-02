@@ -32,6 +32,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // actually FAILS against the bug this card closes — see the worker's `done` report for the captured
 // output. It is run normally (green) against the fixed code as the committed state.
 //
+// card 5ba1c39f: Part 3's fixture file was replaced with a REAL file under this test's own tmpHome (was a
+// nonexistent path, masking a removed ownership refusal behind sendMedia's own missing-file throw) — this
+// file was re-run with `companionRouteBlockReason`'s in-app ownership check again reverted to confirm
+// Part 3 now actually FAILS against the same bug, not just Part 1.
+//
 // Run: 1) build (turbo builds shared first), 2) node test/companion-cross-session-route-ownership.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -139,6 +144,12 @@ try {
   }
 
   // ============ 3 — deliverMedia ALSO refuses the same forged in-app cross-session route =================
+  // card 5ba1c39f: the fixture used to be a nonexistent path (C:/tmp/whatever.png) — in-app's own
+  // `sendMedia` `fs.promises.stat`s the file FIRST and throws if it's missing, so "nothing reached session
+  // B's client" passed regardless of whether the ownership refusal actually fired: even with the refusal
+  // REMOVED, a missing file would still make `sendMedia` throw before anything was pushed, masking the
+  // very regression this assertion exists to catch. A REAL file under the test's own tmpHome means the
+  // assertion can only pass because the refusal fired — not because the file never existed.
   {
     const rig = buildRig("p3.db");
     await rig.controller.startInitial(null);
@@ -148,7 +159,10 @@ try {
     const framesB = [];
     rig.inApp.attach("sess-B", { deliver: (f) => framesB.push(f) });
 
-    const r = await rig.controller.deliverMedia("sess-A", "C:/tmp/whatever.png");
+    const realFile = path.join(tmpHome, "p3-fixture.png");
+    fs.writeFileSync(realFile, Buffer.from("not actually a png, just real bytes on disk"));
+
+    const r = await rig.controller.deliverMedia("sess-A", realFile);
     check("3: deliverMedia refuses a foreign-session in-app route", r.delivered === false && r.reason === "route-foreign-session");
     check("3: nothing reached session B's client", framesB.length === 0);
 

@@ -90,6 +90,6 @@ the laundering this record describes); only an actual chatId or scope change doe
   `InAppChannel` adapter, not a global binding lookup.
 - Do not recompute `flagged_non_private` from shape alone on a SAME-ROUTE (same chatId + same scope)
   re-bind — only a chatId or scope change may clear a runtime-set flag.
-- Do not clear a runtime-set flag via scope staying "dm" with a different (still group-shaped) chatId — that
-  case recomputes fresh from shape (correct: a genuinely different chat deserves a fresh judgment), but
-  don't special-case it to preserve the old flag either, which would re-couple two unrelated chats' history.
+- Do not preserve the old flag when the chatId changes — scope staying "dm" with a different (still
+  group-shaped) chatId recomputes fresh from shape (correct: a genuinely different chat deserves a fresh
+  judgment); special-casing it to preserve the old flag would re-couple two unrelated chats' history.

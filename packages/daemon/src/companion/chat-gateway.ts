@@ -1122,7 +1122,7 @@ export class ChatGateway {
     // eslint-disable-next-line no-console
     console.warn(
       `[companion] SECURITY: session ${sessionId} attempted chat_reply/media delivery on channel=${channel} ` +
-        `to a route backed by ANOTHER session's binding — refused (card c7d7b43a). This should never happen ` +
+        `to a route owned by another session — refused (card c7d7b43a). This should never happen ` +
         `via normal use; if seen, investigate how this session's reply target came to name another ` +
         `session's route.`,
     );

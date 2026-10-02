@@ -123,7 +123,21 @@ function warnStaleStoredHomes(db: CompanionConfigStore): void {
     // card c7d7b43a: this caller HAS its own sessionId (row.sessionId) — pass it so an in-app home whose
     // chatId doesn't actually match this session (corrupt state, or a future bug) is caught here too, not
     // just at the delivery chokepoint.
-    if (companionRouteBlockReason(home, binding, row.sessionId) === undefined) continue;
+    const reason = companionRouteBlockReason(home, binding, row.sessionId);
+    if (reason === undefined) continue;
+    // card 5ba1c39f: a foreign-session in-app home has no binding to "pair or bind" — it's an ownership
+    // mismatch, not a missing/unbound chat. Branch on the ACTUAL reason instead of reusing the unbound
+    // message for every non-undefined case.
+    if (reason === "route-foreign-session") {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[companion] SETUP: session ${row.sessionId.slice(0, 8)}'s STORED home target (channel=` +
+          `${home.channel}) names a route owned by another session — proactive delivery (heartbeat/` +
+          `reminder/attention-push) to it is refused at the outbound chokepoint and will stay refused ` +
+          `until it's fixed. Update it via PUT /api/companion/home to a route this session actually owns.`,
+      );
+      continue;
+    }
     const badShape = isNonNumericTelegramChatId(home.channel, home.chatId) || isLikelyGroupTelegramChatId(home.channel, home.chatId);
     // card 1b0df437 item 3: disclosure-safe — never the chatId itself (identifying), only the channel and
     // which of the two distinct problems applies (bad shape vs. a shape that's fine but unbound).

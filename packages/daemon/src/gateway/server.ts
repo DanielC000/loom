@@ -1526,6 +1526,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // card c7d7b43a: this caller HAS its own sessionId — pass it so an in-app home naming a DIFFERENT
     // session's chatId is refused here too, not just at the delivery chokepoint.
     const blockReason = companionRouteBlockReason(route, binding, sessionId);
+    if (blockReason === "route-foreign-session") {
+      // card 5ba1c39f: this used to fall through to `return null` (valid) — `companionRouteBlockReason`
+      // already computed the refusal, but this caller never checked for it, so an in-app home naming a
+      // DIFFERENT session's chatId was silently accepted and stored (delivery still refused it, but the
+      // write itself was a dead home nobody could see was wrong).
+      return `(channel=${channel}, chatId=${chatId}) on session ${sessionId.slice(0, 8)} names a route owned by another session — this cannot be set as a home`;
+    }
     if (blockReason === "route-flagged-non-private") {
       // card c7d7b43a: re-submitting this SAME (channel, chatId, scope) will NOT clear the flag — only an
       // actual scope change (to "group", if it genuinely is a shared chat), binding a different chat, or
