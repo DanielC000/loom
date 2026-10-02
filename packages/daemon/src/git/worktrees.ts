@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
+import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
@@ -6263,11 +6264,16 @@ export async function mergeBranch(
   // @decision 24c0bdba (round 6) — the lock itself now refuses (RepoQuarantinedError) a quarantined repo
   // BEFORE mergeBranchLocked ever runs; catch it here and translate to this function's own {ok:false,
   // reason} shape rather than letting it escape as an unhandled rejection.
+  //
+  // @decision 87a3c87e — never drop this pause/resume bracket, and never move resume out of `finally`.
+  const pauseToken = pauseVaultAutoCommit(repoPath);
   try {
     return await withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip));
   } catch (e) {
     if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message };
     throw e;
+  } finally {
+    resumeVaultAutoCommit(repoPath, pauseToken);
   }
 }
 

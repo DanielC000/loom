@@ -5,6 +5,7 @@ import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
 import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, type MergeEmptyKind } from "./worktrees.js";
 import { readHeadShaAndBranch } from "./mainline-watch.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
+import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
 import { mergeCommitBlocksLinearization, MAX_MERGE_COMMITS_CHECKED } from "./merge-linearization.js";
 import { isMergeGateRed } from "../orchestration/gate-semaphore.js";
 
@@ -778,6 +779,9 @@ export interface FastForwardResult {
 export async function fastForwardCanonicalMain(
   repoPath: string, expectedBaseSha: string, targetSha: string, deps: BatchGitDeps = {},
 ): Promise<FastForwardResult> {
+  // @decision 87a3c87e — same vault-auto-commit pause bracket as the solo squash path (mergeBranch,
+  // git/worktrees.ts); resume stays in `finally` so a throw never leaves the lease held.
+  const pauseToken = pauseVaultAutoCommit(repoPath);
   try {
     return await withCanonicalIndexLock(repoPath, async () => {
       const { git, timeoutMs } = boundedGit(repoPath, deps);
@@ -860,6 +864,8 @@ export async function fastForwardCanonicalMain(
   } catch (e) {
     if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
     throw e;
+  } finally {
+    resumeVaultAutoCommit(repoPath, pauseToken);
   }
 }
 
