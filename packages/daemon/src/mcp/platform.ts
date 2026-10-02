@@ -3642,6 +3642,8 @@ export class PlatformMcpRouter {
     const resolveGitWriter = (p: Project, repoKey: string | null | undefined): { ok: true; writer: GitWriter; repoPath: string } | { ok: false; error: string } => {
       try {
         const repoPath = resolveRepoByKey(p, repoKey).path;
+        // @decision f9360c84 (round 2) — the operational-home refusal now lives INSIDE GitWriter itself
+        // (git/writer.ts), not here — see that decision record.
         return { ok: true, writer: gitWriterFor(repoPath), repoPath };
       } catch (e) {
         if (e instanceof UnknownRepoKeyError) return { ok: false, error: e.message };

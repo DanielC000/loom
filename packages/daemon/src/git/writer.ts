@@ -7,6 +7,8 @@ import {
   resumeVaultAutoCommit,
   DEFAULT_MAX_VAULT_FILE_BYTES,
   humanBytes,
+  isLoomHomeOrAncestor,
+  OPERATIONAL_HOME_GIT_WRITE_ERROR,
 } from "../vault/versioner.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
 import { withTimeout, boundedSimpleGit, scrubGitEnv, killableCanonicalRaw, treeDeathUnconfirmed } from "./bounded.js";
@@ -156,6 +158,15 @@ function isNoUpstreamError(e: unknown): boolean {
   return msg.includes("no upstream") || msg.includes("no configured push destination");
 }
 
+/** Does `e` mean "there is genuinely no git repository here" (git's own `--show-toplevel` exit-128
+ *  failure), as opposed to a timeout/killed-child/other probe failure? Used by
+ *  {@link GitWriter.refuseIfOperationalHome} to decide whether a toplevel-probe failure may fall through
+ *  (this case only) or must refuse (every other case — round 3's fail-closed fix). Message-matched, same
+ *  posture as {@link isNoUpstreamError} and `test/git-commit-helper.mjs`'s own `/not a git repository/i`. */
+function isNotAGitRepositoryError(e: unknown): boolean {
+  return /not a git repository/i.test((e as Error)?.message ?? String(e));
+}
+
 /** Every method GitWriter's bounded git calls need, across checkout/createBranch/commit/push/pendingPushSummary. */
 type WriterGit = Pick<SimpleGit, "checkout" | "checkoutLocalBranch" | "branchLocal" | "status" | "raw" | "commit" | "revparse">;
 
@@ -257,6 +268,51 @@ export class GitWriter {
     return this.gitFactory(this.repoPath, blockMs, nonInteractiveEnv());
   }
 
+  /**
+   * Refuse a write whose RAW `this.repoPath`, OR whose git-resolved TOPLEVEL, is Loom's own operational
+   * home dir (`LOOM_HOME`) or an ancestor of it — checked BEFORE any mutating git call, from every write
+   * method below (checkout/createBranch/commit/push). The raw-path check alone misses a non-git
+   * DESCENDANT of `LOOM_HOME` (e.g. a vault-only project home nested under it): git itself walks up from
+   * `this.repoPath` to find the nearest `.git`, so such a descendant's `add -A`/commit lands in
+   * `LOOM_HOME`'s own repo — this guard resolves that SAME toplevel via `git rev-parse --show-toplevel`
+   * (the writer's own bounded git runner) and checks it too. PATH RELATION ONLY
+   * ({@link isLoomHomeOrAncestor}) — never `isOperationalVaultDir`'s content sniff, which would wrongly
+   * refuse an ordinary code repo that happens to have its own top-level `worktrees/` folder.
+   *
+   * The toplevel probe is FAIL-CLOSED (round 3): only an AFFIRMATIVE "not a git repository" result falls
+   * through to let the real op below fail on its own terms — that is the one case that actually proves
+   * there's no toplevel to check. Any OTHER probe failure (a timeout, a killed child, an unexpected git
+   * error) refuses instead of falling through; a retryable refusal beats risking a write into `LOOM_HOME`
+   * because the probe itself happened to be slow or flaky under host load. The raw-path check, by
+   * contrast, always runs regardless of the probe's outcome.
+   *
+   * @decision f9360c84 (round 2 owns this invariant HERE, not at each caller; round 3 made the probe
+   * fail-closed) — see that decision record.
+   */
+  private async refuseIfOperationalHome(): Promise<{ ok: false; error: string } | null> {
+    if (isLoomHomeOrAncestor(this.repoPath)) {
+      return { ok: false, error: OPERATIONAL_HOME_GIT_WRITE_ERROR };
+    }
+    try {
+      const git = this.git(this.localMs);
+      const toplevel = (await withTimeout(
+        git.revparse(["--show-toplevel"]),
+        this.localMs,
+        "git rev-parse --show-toplevel (operational-home guard)",
+      )).trim();
+      if (toplevel && isLoomHomeOrAncestor(toplevel)) {
+        return { ok: false, error: OPERATIONAL_HOME_GIT_WRITE_ERROR };
+      }
+    } catch (e) {
+      if (!isNotAGitRepositoryError(e)) {
+        return { ok: false, error: `could not verify this repo's location; refusing to write (${gitError(e)})` };
+      }
+      // An affirmative "not a git repository" — there is genuinely no toplevel to check. Fall through;
+      // the real op below fails on its own, clean terms.
+    }
+    return null;
+  }
+
   /** Adapts {@link testGitFactory} (if a test injected one) to the narrower shape
    *  `killableCanonicalRaw` itself expects. Returns `undefined` on the real production path, so
    *  `killableCanonicalRaw` spawns a REAL, tree-killable child instead of reusing a test fake that has
@@ -297,6 +353,8 @@ export class GitWriter {
   async checkout(branch: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!branch?.trim()) return { ok: false, error: "branch name required" };
     const target = branch.trim();
+    const homeRefusal = await this.refuseIfOperationalHome();
+    if (homeRefusal) return homeRefusal;
     // @decision 24c0bdba (round 6) — the try/catch wraps the WHOLE withCanonicalIndexLock(...) call, not
     // just the callback passed to it: a quarantine refusal (RepoQuarantinedError) is thrown by the lock
     // itself BEFORE that callback ever runs, so a try/catch nested inside it would never see it.
@@ -345,6 +403,8 @@ export class GitWriter {
   async createBranch(name: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!name?.trim()) return { ok: false, error: "branch name required" };
     const target = name.trim();
+    const homeRefusal = await this.refuseIfOperationalHome();
+    if (homeRefusal) return homeRefusal;
     // @decision 24c0bdba (round 6) — see checkout()'s identical comment above: the try/catch must wrap
     // the WHOLE withCanonicalIndexLock(...) call, not just its callback.
     try {
@@ -408,6 +468,8 @@ export class GitWriter {
     // "commit message required" — same shape as the original guard, just evaluated on what will actually
     // be committed.
     if (!cleanedMessage.trim()) return { ok: false, error: "commit message required" };
+    const homeRefusal = await this.refuseIfOperationalHome();
+    if (homeRefusal) return homeRefusal;
     // @decision 24c0bdba (round 6) — see checkout()'s identical comment above: the try/catch must wrap
     // the WHOLE withCanonicalIndexLock(...) call, not just its callback.
     try {
@@ -523,6 +585,8 @@ export class GitWriter {
    * failure — never skip it; surfacing a rejected remote durably is the origin finding this closes.
    */
   async push(): Promise<GitWriteResult<{ branch: string; warning?: string }>> {
+    const homeRefusal = await this.refuseIfOperationalHome();
+    if (homeRefusal) return homeRefusal;
     return this.withVaultPauseLease(async () => {
       try {
         const git = this.git(this.pushMs);

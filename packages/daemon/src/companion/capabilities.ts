@@ -30,7 +30,7 @@ import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } fro
 import type { OwnerAttestation, AuthoredContentGrantScope } from "./attestation.js";
 import { CompanionTrustWindow } from "./trust-window.js";
 import type { GitWriter } from "../git/writer.js";
-import { resolveVaultGitTarget } from "../vault/versioner.js";
+import { resolveVaultGitTarget, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
 import { requestAnsweredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -2644,10 +2644,14 @@ function pendingGitWriteKey(sessionId: string, route: CompanionRoute | null): st
  *  `project.repoPath` directly — the SAME verbatim path `mcp/platform.ts`'s `git_commit`/`git_push`
  *  (`gitWriterFor(p.repoPath)`) already trust; an unset path is a structured error here (mirroring
  *  `mcp/operator.ts`'s own `!p.repoPath` check), and an actually-INVALID one (no repo there) surfaces as
- *  `GitWriter`'s own structured git error the first time it's touched — never a throw. */
+ *  `GitWriter`'s own structured git error the first time it's touched — never a throw.
+ *
+ *  @decision f9360c84 (round 3) — the `"repo"` branch checks `isLoomHomeOrAncestor` (path-relation only,
+ *  the SAME predicate `GitWriter`'s own guard uses), never `isOperationalVaultDir`'s content sniff. */
 async function resolveGitPushTarget(project: Pick<Project, "vaultPath" | "repoPath">, target: GitPushTarget): Promise<{ ok: true; repoPath: string } | { ok: false; error: string }> {
   if (target === "repo") {
     if (!project.repoPath?.trim()) return { ok: false, error: "this project has no repo path configured" };
+    if (isLoomHomeOrAncestor(project.repoPath)) return { ok: false, error: OPERATIONAL_HOME_GIT_WRITE_ERROR };
     return { ok: true, repoPath: project.repoPath };
   }
   const r = await resolveVaultGitTarget(project.vaultPath);
@@ -2656,6 +2660,7 @@ async function resolveGitPushTarget(project: Pick<Project, "vaultPath" | "repoPa
     "no-vault": "this project has no vault configured",
     "no-repo": "this project's vault has no git repository yet — set one up before using this lever",
     "externally-managed": "this vault's history is managed by the Obsidian Git plugin — Loom will not commit or push it",
+    "operational-dir": "this project's vault points at Loom's own operational home directory — refusing to commit or push it",
   };
   return { ok: false, error: messages[r.reason] };
 }

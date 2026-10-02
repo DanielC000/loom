@@ -37,6 +37,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   - additive: byte-identical companion surface with no git-push grant
 //   - grant/revoke: a live per-request row-read gates BOTH directions — granting registers both tools,
 //     and DELETING the grant removes both on the very next buildServer/request (not just the grant path)
+//   - Card f9360c84: a reserved home's vaultPath/repoPath both equal LOOM_HOME exactly — target:"vault"
+//     resolves through resolveVaultGitTarget (which now refuses an operational dir), and target:"repo"
+//     NEVER reached that resolver at all (its own independent bypass) — both must refuse, never commit
+//     into this test's own real, temp LOOM_HOME.
+//   - Card f9360c84 (round 3) NEGATIVE CONTROL: target:"repo" resolution checks isLoomHomeOrAncestor
+//     (path-relation only) now, never isOperationalVaultDir's content sniff — an ordinary repo with its
+//     own top-level worktrees/ folder must propose+commit normally, not be refused.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-git-push.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -673,6 +680,89 @@ try {
     check("grant DELETED: git_commit is absent on the VERY NEXT buildServer/request", !afterRevoke.includes("git_commit"));
     check("grant DELETED: git_push is absent on the VERY NEXT buildServer/request", !afterRevoke.includes("git_push"));
 
+    db.close();
+  }
+
+  // ============ reserved-home refusal, target:"vault" (card f9360c84) ============
+  // `tmpHome` IS this process's own LOOM_HOME (set at the top of this file) — pointing a project's
+  // vaultPath at it reproduces the EXACT reserved-home shape (platform/seed.ts's PLATFORM_HOME_PATH /
+  // setup/seed.ts's SETUP_HOME_PATH both bind vaultPath to LOOM_HOME this way). No pre-existing `.git` is
+  // needed here: resolveVaultGitTarget's new check fires on the RAW vaultPath before any git call at all.
+  {
+    const db = tmpDb();
+    const proj = "proj-reservedhome-vault";
+    seedProject(db, proj, "Reserved-home-shaped (vault)", tmpHome);
+    const companionSess = "companion-reservedhome-vault";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "git-push", projectId: proj, mode: "act", config: { targets: ["vault"], authoredContent: true } });
+    const pty = makeFakePty("the owner said: commit my vault");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const res = await call(client, "git_commit", { project: proj, target: "vault", message: "should never land" });
+    check("reserved-home (vault target): rejected with an {error} (RED on old code: would have resolved ok:true)", typeof res.error === "string" && res.status === undefined);
+    check("reserved-home (vault target): error names the operational home dir", /operational home directory/i.test(res.error));
+    check("reserved-home (vault target): NEVER auto-inited a .git in this process's own LOOM_HOME", !fs.existsSync(path.join(tmpHome, ".git")));
+    check("reserved-home (vault target): nothing delivered to the owner", companion.delivered.length === 0);
+    await client.close();
+    db.close();
+  }
+
+  // ============ reserved-home refusal, target:"repo" — finding #2, the resolveVaultGitTarget bypass (card f9360c84) ============
+  // `resolveGitPushTarget`'s "repo" branch never calls resolveVaultGitTarget at all — it used to return
+  // project.repoPath verbatim with NO check whatsoever. This is the MORE dangerous of the two, since it
+  // didn't even need an existing .git to be discovered first.
+  {
+    const db = tmpDb();
+    const proj = "proj-reservedhome-repo";
+    seedProject(db, proj, "Reserved-home-shaped (repo)", "/does/not/matter/vault", tmpHome);
+    const companionSess = "companion-reservedhome-repo";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "git-push", projectId: proj, mode: "act", config: { targets: ["repo"], authoredContent: true } });
+    const pty = makeFakePty("the owner said: commit the repo");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const resCommit = await call(client, "git_commit", { project: proj, target: "repo", message: "should never land either" });
+    check("reserved-home (repo target): git_commit rejected with an {error} (RED on old code: NO check at all)", typeof resCommit.error === "string" && resCommit.status === undefined);
+    check("reserved-home (repo target): error names the operational home dir", /operational home directory/i.test(resCommit.error));
+    check("reserved-home (repo target): NEVER touched LOOM_HOME's git state", !fs.existsSync(path.join(tmpHome, ".git")));
+    check("reserved-home (repo target): nothing delivered to the owner (git_commit)", companion.delivered.length === 0);
+    const resPush = await call(client, "git_push", { project: proj, target: "repo" });
+    check("reserved-home (repo target): git_push ALSO rejected with an {error}", typeof resPush.error === "string" && resPush.status === undefined);
+    check("reserved-home (repo target): nothing delivered to the owner (git_push either)", companion.delivered.length === 0);
+    await client.close();
+    db.close();
+  }
+
+  // ============ NEGATIVE CONTROL: target:"repo" with its OWN top-level worktrees/ folder is NOT refused (card f9360c84 round 3) ============
+  // `isOperationalVaultDir`'s CONTENT sniff (a top-level `worktrees/` dir) used to over-refuse this
+  // ordinary repo shape on the companion "repo" target — a refusal REST/Lead/Operator never produced for
+  // the identical shape, since they go through GitWriter's path-relation-only guard instead. `resolveGitPushTarget`
+  // now checks `isLoomHomeOrAncestor` only, so this ordinary repo must propose+commit normally.
+  {
+    const db = tmpDb();
+    const repo = initRepo(path.join(fixturesRoot, "ordinary-repo-with-worktrees-folder"));
+    fs.mkdirSync(path.join(repo, "worktrees"));
+    const proj = "proj-ordinary-worktrees-folder";
+    seedProject(db, proj, "Ordinary repo with its own worktrees/ folder", "/does/not/matter/vault", repo);
+    const companionSess = "companion-ordinary-worktrees-folder";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "git-push", projectId: proj, mode: "act", config: { targets: ["repo"], authoredContent: true } });
+    const pty = makeFakePty("the owner said: commit the ordinary repo");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    fs.writeFileSync(path.join(repo, "code.txt"), "change\n");
+    const proposed = await call(client, "git_commit", { project: proj, target: "repo", message: "ordinary repo with worktrees/ folder" });
+    check("negative control: an ordinary repo with its own top-level worktrees/ folder is NOT refused (RED on pre-fix content-sniffing code: would have rejected with an {error})",
+      proposed.status === "proposed" && proposed.error === undefined);
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const committed = await call(client, "git_commit", { project: proj, target: "repo", message: "ordinary repo with worktrees/ folder" });
+    check("negative control: the commit actually lands", committed.status === "committed" && typeof committed.hash === "string");
+    check("negative control: it lands in THIS repo", git(repo, "log", "--pretty=%s").includes("ordinary repo with worktrees/ folder"));
+    await client.close();
     db.close();
   }
 

@@ -24,6 +24,13 @@
 //       `git add .`. See docs/decisions/68cc29db-refuse-operational-vault-dir-writes.md's ancestor addendum;
 //   (g) NEGATIVE CONTROL for (f): a plain SIBLING of LOOM_HOME under the same parent (not an ancestor of
 //       either LOOM_HOME or WORKTREES_DIR) still writes/commits normally.
+//   (h) Card f9360c84 follow-up: `resolveVaultGitTarget` (the companion `git-push` capability's
+//       "vault"-target resolver) never checked `isOperationalVaultDir` — only `checkIsRepo`/
+//       `externally-managed`. Given a reserved home with a REAL PRE-EXISTING `.git` (the exact shape a
+//       real host can carry — see docs/decisions/f9360c84-...md), it would resolve {ok:true, repoPath:
+//       LOOM_HOME}. Proves: refused on LOOM_HOME itself, refused on the ANCESTOR case too, refused on a
+//       non-canonically-spelled LOOM_HOME (mixed case / trailing slash), and a NEGATIVE CONTROL that an
+//       ordinary vault with a real repo still resolves ok:true.
 // Run after build: node test/vault-operational-dir-refusal.mjs
 import { requireHermeticEnv } from "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 import fs from "node:fs";
@@ -48,7 +55,7 @@ requireHermeticEnv(); // confirms LOOM_HOME is the temp dir just established abo
 const loomHome = fs.realpathSync(loomHomePath);
 
 const { writeVaultFile, createVaultFile, deleteVaultFile } = await import("../dist/vault/writer.js");
-const { commitVault, isOperationalVaultDir } = await import("../dist/vault/versioner.js");
+const { commitVault, isOperationalVaultDir, resolveVaultGitTarget } = await import("../dist/vault/versioner.js");
 const { WORKTREES_DIR } = await import("../dist/paths.js");
 // Fixture sanity: WORKTREES_DIR really is a SIBLING of LOOM_HOME under `home` (paths.ts derives it as
 // `dirname(LOOM_HOME)/${basename(LOOM_HOME)}-worktrees`) — the real shape the ancestor tests below rely on.
@@ -173,6 +180,38 @@ const scratchRoot = fs.realpathSync(mkdtempManaged("loom-op-dir-refusal-scratch-
   check("negative control: the file actually landed on disk", fs.readFileSync(path.join(normalVault, "notes", "hello.md"), "utf8").includes("hello"));
   check("negative control: .git WAS created for an ordinary vault", fs.existsSync(path.join(normalVault, ".git")));
   check("negative control: the write actually committed", git(normalVault, "log --pretty=%s").includes("loom: write notes/hello.md (via UI)"));
+}
+
+// (h) Card f9360c84: `resolveVaultGitTarget` must ALSO refuse an operational dir — give LOOM_HOME (and
+// its ancestor `home`) a REAL `.git` first, reproducing exactly the "pre-fix commitVault already ran, or
+// a hand-made repo" shape the card worries about, so this exercises the genuinely dangerous case rather
+// than a lucky "no repo yet" short-circuit.
+{
+  git(loomHome, "init");
+  git(loomHome, "config user.email loom-test@example.com");
+  git(loomHome, "config user.name loom-test");
+
+  const rLoomHome = await resolveVaultGitTarget(loomHome);
+  check("resolveVaultGitTarget(LOOM_HOME-with-a-real-.git) refuses (RED on old code: would return ok:true)",
+    rLoomHome.ok === false && rLoomHome.reason === "operational-dir");
+
+  const rAncestor = await resolveVaultGitTarget(home);
+  check("resolveVaultGitTarget(ancestor-of-LOOM_HOME) refuses too", rAncestor.ok === false && rAncestor.reason === "operational-dir");
+
+  // Non-canonical spelling of LOOM_HOME (manager constraint: mixed case + a trailing separator on
+  // win32) must still be caught — isOperationalVaultDir itself already realpath/case-normalizes both
+  // sides, so this proves the NEW call site actually threads the raw argument through to it unmangled.
+  const nonCanonical = loomHome.toUpperCase() + path.sep;
+  const rNonCanonical = await resolveVaultGitTarget(nonCanonical);
+  check("resolveVaultGitTarget refuses a non-canonically-spelled LOOM_HOME (mixed case + trailing sep) too",
+    rNonCanonical.ok === false && rNonCanonical.reason === "operational-dir");
+
+  // NEGATIVE CONTROL: an ordinary vault with a real repo (the SAME sibling (g) above already created at
+  // this path) still resolves ok:true — the new check doesn't misfire on the legitimate case.
+  const siblingVault = path.join(home, "notes-vault");
+  const rNormal = await resolveVaultGitTarget(siblingVault);
+  check("negative control: resolveVaultGitTarget on an ordinary vault still resolves ok:true", rNormal.ok === true);
+  check("negative control: …and the resolved repoPath actually has a .git", fs.existsSync(path.join(rNormal.repoPath ?? "", ".git")));
 }
 
 console.log(failures === 0 ? "\nALL PASS — operational vault dirs refuse init/commit/write; ordinary vaults unaffected." : `\n${failures} FAILURE(S).`);

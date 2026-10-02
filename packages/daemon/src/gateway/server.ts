@@ -4408,6 +4408,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // bounded + non-interactive in GitWriter (a hung push can't wedge the daemon). An EXPECTED git failure
   // (dirty tree, no upstream, conflict) comes back as 200 { ok:false, error } so the UI shows the
   // reason — never a 500.
+  // @decision f9360c84 (round 2) — the operational-home refusal now lives INSIDE GitWriter (git/writer.ts)
+  // itself, not at this call site — see that decision record for why a raw-repoPath-only check here
+  // missed a non-git descendant of LOOM_HOME.
   app.post("/api/projects/:id/git/checkout", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });

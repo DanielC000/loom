@@ -591,7 +591,7 @@ async function resolveVaultRepoContext(
 
 export type VaultGitTargetResult =
   | { ok: true; repoPath: string }
-  | { ok: false; reason: "no-vault" | "no-repo" | "externally-managed" };
+  | { ok: false; reason: "no-vault" | "no-repo" | "externally-managed" | "operational-dir" };
 
 /**
  * Resolve a project's vault to the git repo a WRITE lever (the companion `git-push` capability) may
@@ -606,11 +606,17 @@ export type VaultGitTargetResult =
  * owner's behalf; that host-write is out of scope for "commit to an EXISTING repo." Also refuses
  * (`"externally-managed"`) when the resolved repo is Obsidian-Git-managed — a real external
  * auto-committer already owns that history, mirroring `VaultVersioner`'s own backoff.
+ *
+ * @decision f9360c84 — also refuses (`"operational-dir"`) on `vaultPath` OR its resolved governing root
+ * (reused `isOperationalVaultDir`) — checked on the raw path first, before any git call, matching
+ * `startVaultVersioners`'s own dual check.
  */
 export async function resolveVaultGitTarget(vaultPath: string, deps: VaultGitDeps = {}): Promise<VaultGitTargetResult> {
   const trimmed = vaultPath?.trim();
   if (!trimmed) return { ok: false, reason: "no-vault" };
+  if (isOperationalVaultDir(trimmed)) return { ok: false, reason: "operational-dir" };
   const ctx = await resolveVaultRepoContext(trimmed, deps);
+  if (isOperationalVaultDir(ctx.commitPath)) return { ok: false, reason: "operational-dir" };
   if (ctx.externallyManaged) return { ok: false, reason: "externally-managed" };
   const { git, timeoutMs } = boundedVaultGit(ctx.commitPath, deps);
   const isRepo = await withTimeout(git.checkIsRepo(), timeoutMs, "git check-is-repo (vault git target)").catch(() => false);
@@ -1248,11 +1254,44 @@ export class VaultPushStatusWatcher {
   }
 }
 
-/** Resolve `p` through the filesystem (following symlinks/junctions to their real target) when it
- *  exists, so an ancestor check below can't be fooled by a junction alias; falls back to a lexical
- *  `path.resolve` when `p` doesn't exist yet (nothing on disk to resolve through). */
-function realpathOrResolve(p: string): string {
-  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+/** Resolve `p` through the filesystem via the OS's NATIVE realpath (`fs.realpathSync.native`) when it
+ *  exists, so an ancestor check below can't be fooled by a junction/symlink alias OR an 8.3 short-name
+ *  alias (the native call normalizes those; Node's own JS-level `fs.realpathSync` does not — round 2 of
+ *  card f9360c84); falls back to a lexical `path.resolve` when `p` doesn't exist yet. */
+function realpathNativeOrResolve(p: string): string {
+  try { return fs.realpathSync.native(p); } catch { return path.resolve(p); }
+}
+
+function normLoomPath(p: string): string {
+  const r = path.resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32" ? r.toLowerCase() : r;
+}
+
+/**
+ * The pure PATH-RELATION half of {@link isOperationalVaultDir}: is `dir` EQUAL to `LOOM_HOME`, or an
+ * ANCESTOR of `LOOM_HOME`/`WORKTREES_DIR` (e.g. the user's home dir itself as a vaultPath or repoPath)?
+ * Resolved via `fs.realpathSync.native` so a junction/symlink/8.3-short-name alias can't defeat it.
+ *
+ * Exported so `git/writer.ts`'s `GitWriter` can refuse a write whose RAW `repoPath`, or whose
+ * git-resolved TOPLEVEL, is LOOM_HOME-or-an-ancestor — BEFORE any mutating git call — without pulling in
+ * this file's own CONTENT sniff (a top-level `loom.db`/`worktrees/` dir), which would wrongly refuse an
+ * ordinary code repo that happens to have its own top-level `worktrees/` folder. Content sniffing stays
+ * ONLY in {@link isOperationalVaultDir} (the vault auto-committer's own, broader check), below.
+ *
+ * @decision f9360c84 (round 2) — ONE source of truth for the path-relation check: both this vault-side
+ *  predicate and GitWriter's guard call this SAME function; never re-derive a second ancestor comparison
+ *  at either call site.
+ */
+export function isLoomHomeOrAncestor(dir: string): boolean {
+  if (normLoomPath(dir) === normLoomPath(LOOM_HOME)) return true;
+  const realDir = normLoomPath(realpathNativeOrResolve(dir));
+  for (const home of [LOOM_HOME, WORKTREES_DIR]) {
+    const realHome = normLoomPath(realpathNativeOrResolve(home));
+    // `dir` is operational if it IS LOOM_HOME/WORKTREES_DIR (realpath form) OR an ANCESTOR of one —
+    // i.e. realHome === realDir or realHome sits strictly inside realDir.
+    if (realHome === realDir || realHome.startsWith(`${realDir}/`)) return true;
+  }
+  return false;
 }
 
 /**
@@ -1261,30 +1300,33 @@ function realpathOrResolve(p: string): string {
  * "Loom Platform" home points its `vaultPath` AT this dir, so `startVaultVersioners` must NEVER watch it:
  * a `git add -A` there would stage the LIVE SQLite DB (churn / bloat / commit-mid-write corruption) and
  * chokidar walking `worktrees/`+node_modules thrashes. We detect it by CONTENT (a `loom.db` file or a
- * `worktrees/` dir present — env-independent, the robust PRIMARY signal) with `LOOM_HOME`-equality as
- * belt-and-suspenders. Checked against BOTH the raw vault dir and its resolved governing repo root.
+ * `worktrees/` dir present — env-independent, the robust PRIMARY signal) PLUS the shared path-relation
+ * check ({@link isLoomHomeOrAncestor}, equality-or-ancestor against `LOOM_HOME`/`WORKTREES_DIR`).
  *
  * @decision 68cc29db — `dir` being an ANCESTOR of `LOOM_HOME`/`WORKTREES_DIR` (e.g. the user's home dir
  *  itself as `vaultPath`) is ALSO operational — `git add .` there would sweep loom.db/secrets/worktrees
- *  in too. Compared via realpath (junction/symlink-resolved) + win32 case-insensitive norm().
+ *  in too.
  */
 export function isOperationalVaultDir(dir: string): boolean {
-  const norm = (p: string) => {
-    const r = path.resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
-    return process.platform === "win32" ? r.toLowerCase() : r;
-  };
-  if (norm(dir) === norm(LOOM_HOME)) return true; // belt-and-suspenders: equals the daemon home
+  if (isLoomHomeOrAncestor(dir)) return true; // path-relation half — shared with GitWriter's guard
   if (fs.existsSync(path.join(dir, "loom.db"))) return true; // the live daemon DB lives here
   if (fs.existsSync(path.join(dir, "worktrees"))) return true; // worker worktrees (node_modules churn)
-  const realDir = norm(realpathOrResolve(dir));
-  for (const home of [LOOM_HOME, WORKTREES_DIR]) {
-    const realHome = norm(realpathOrResolve(home));
-    // `dir` is operational if it IS LOOM_HOME/WORKTREES_DIR (realpath form) OR an ANCESTOR of one —
-    // i.e. realHome === realDir or realHome sits strictly inside realDir.
-    if (realHome === realDir || realHome.startsWith(`${realDir}/`)) return true;
-  }
   return false;
 }
+
+/**
+ * Shared error text for a git write refused because its target resolves to Loom's own operational/
+ * daemon-home dir. This used to be checked by a per-caller wrapper (`refuseOperationalRepoPath`) at each
+ * of the Platform Lead's and the human REST git-write call sites, against the RAW `repoPath` only — never
+ * the toplevel `GitWriter` actually writes to, so a non-git descendant of `LOOM_HOME` slipped through
+ * while git itself walked up and wrote into `LOOM_HOME/.git`. The refusal now lives INSIDE `GitWriter`
+ * itself (the ONE chokepoint every git-write surface goes through), checking both the raw path and the
+ * git-resolved toplevel before any mutating call; exported so that guard (and a test) share one literal.
+ *
+ * @decision f9360c84 (round 2) — see git/writer.ts's own guard for the real mechanism.
+ */
+export const OPERATIONAL_HOME_GIT_WRITE_ERROR =
+  "refusing this git write: the repo path resolves to Loom's own operational home directory — nothing was written";
 
 /**
  * Boot wiring for the vault auto-committer: start ONE `VaultVersioner` per UNIQUE live project vault.
