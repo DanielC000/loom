@@ -8,7 +8,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   PART 1 — the pure building blocks (claude-settings.js): sessionMcpConfigPath, unlinkSessionMcpConfig,
 //            sessionSettingsPath, unlinkSessionSettings, SETTINGS_DIR_READ_DENY_RULE,
 //            withSettingsDirDenyForSpawn — in isolation, no pty/DB. Also buildMcpServers (host.js), pure:
-//            the mcpToken placeholder (b1).
+//            the mcpToken placeholder (b1). Card 2be634f2 considered — and REJECTED — generalizing that
+//            SAME placeholder pattern to third-party capability connection secrets: claude's own process
+//            env is inherited by everything it spawns, including the agent's own Bash/PowerShell, so
+//            putting a capability secret there would hand the agent a raw third-party secret for the
+//            whole session. The tests below PIN the rejected shape: a capability secret stays the
+//            LITERAL value in the map/file on every platform, and is NEVER added to claude's own spawn
+//            env — see docs/decisions/2be634f2-capability-secret-env-placeholder-generalization.md.
 //   PART 2 — the REAL (unsubclassed) `PtyHost.createPty()`, driven through a real child process
 //            substituted for `claude` via LOOM_CLAUDE_BIN (the SAME technique
 //            transcript-root-deny-chokepoint.mjs / kickoff-real-spawn.mjs already established, reusing
@@ -136,6 +142,58 @@ registerForCleanup(WORKTREES_DIR);
   const envNoToken = {};
   applyMcpTokenEnv(envNoToken, undefined, true);
   check("(applyMcpTokenEnv) no mcpToken sets NOTHING even when ridesEnv:true", envNoToken[MCP_TOKEN_ENV_VAR] === undefined);
+
+  // --- Card 2be634f2: CONSIDERED AND REJECTED generalizing (b1)'s placeholder pattern to third-party
+  // capability connection secrets — claude's own process env is inherited by everything it spawns
+  // (including the agent's own Bash/PowerShell), so putting a capability secret there would hand the
+  // agent a raw third-party secret for the whole session. These pin the REJECTED shape: a capability
+  // secret stays the LITERAL value in the map, on EITHER platform, regardless of `mcpTokenRidesEnv` —
+  // unlike the mcpToken header, which still differs per platform. Two catalog rows: a plain
+  // requiresConnection grant and one that ALSO wantsScratchDir (proves the separate outputDirEnvVar
+  // scratch-dir value is unaffected by whatever this grant's own secret does). ---
+  {
+    const CRED_ROW_A = {
+      id: "cap-a", slug: "cap-a", name: "Cap A", description: "test", transport: "stdio", kind: "bundled",
+      provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: ["a.js"] }),
+      toolAllowlistJson: JSON.stringify([]), wantsScratchDir: false, requiresConnection: true, secretEnvVar: "CRED_A_TOKEN",
+      createdAt: new Date().toISOString(),
+    };
+    const CRED_ROW_SCRATCH = {
+      id: "cap-c", slug: "cap-c", name: "Cap C", description: "test", transport: "stdio", kind: "bundled",
+      provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: ["c.js"], outputDirEnvVar: "CAP_C_OUTPUT_DIR" }),
+      toolAllowlistJson: JSON.stringify([]), wantsScratchDir: true, requiresConnection: true, secretEnvVar: "CRED_C_TOKEN",
+      createdAt: new Date().toISOString(),
+    };
+    const CAP_CATALOG = [CRED_ROW_A, CRED_ROW_SCRATCH];
+    const CAP_GRANTS = [{ slug: "cap-a", connectionId: "conn-a" }, { slug: "cap-c", connectionId: "conn-c" }];
+    const CAP_SECRETS = { "conn-a": "secret-A-f3a1", "conn-c": "secret-C-7be0" };
+    const resolveCapSecret = (id) => CAP_SECRETS[id];
+
+    const win32CapServers = buildMcpServers({
+      sessionId: "probe-sid", port: 4317, role: "worker",
+      capabilities: CAP_GRANTS, capabilityCatalog: CAP_CATALOG, resolveConnectionSecret: resolveCapSecret,
+      mcpTokenRidesEnv: true,
+    });
+    check("(2be634f2 REJECTED, win32-forced) cap-a's secret stays the LITERAL value — never a placeholder, even with ridesEnv true",
+      win32CapServers["cap-a"]?.env?.CRED_A_TOKEN === "secret-A-f3a1");
+    check("(2be634f2 REJECTED, win32-forced) cap-c's secret ALSO stays literal",
+      win32CapServers["cap-c"]?.env?.CRED_C_TOKEN === "secret-C-7be0");
+    check("(2be634f2 REJECTED, win32-forced, negative control) no LOOM_CAP_SECRET_ placeholder string appears anywhere in the map",
+      !JSON.stringify(win32CapServers).includes("LOOM_CAP_SECRET_"));
+    check("(2be634f2) cap-c's outputDirEnvVar value is a real path, unaffected by its sibling secret",
+      win32CapServers["cap-c"]?.env?.CAP_C_OUTPUT_DIR?.includes("probe-sid"));
+
+    const posixCapServers = buildMcpServers({
+      sessionId: "probe-sid", port: 4317, role: "worker",
+      capabilities: CAP_GRANTS, capabilityCatalog: CAP_CATALOG, resolveConnectionSecret: resolveCapSecret,
+      mcpTokenRidesEnv: false,
+    });
+    check("(2be634f2 REJECTED, POSIX-forced) cap-a's secret ALSO stays the literal value — platform makes no difference for capability secrets",
+      posixCapServers["cap-a"]?.env?.CRED_A_TOKEN === "secret-A-f3a1");
+    check("(2be634f2 REJECTED) the win32-forced and POSIX-forced maps are IDENTICAL for the capability secret fields — `ridesEnv` has NO effect here, unlike the mcpToken header",
+      win32CapServers["cap-a"].env.CRED_A_TOKEN === posixCapServers["cap-a"].env.CRED_A_TOKEN
+      && win32CapServers["cap-c"].env.CRED_C_TOKEN === posixCapServers["cap-c"].env.CRED_C_TOKEN);
+  }
 
   check("SETTINGS_DIR_READ_DENY_RULE = Read(<SETTINGS_DIR, forward-slashed>/**)",
     SETTINGS_DIR_READ_DENY_RULE === `Read(${SETTINGS_DIR.replace(/\\/g, "/")}/**)`);
@@ -348,18 +406,52 @@ if (process.platform !== "win32") {
         dump.LOOM_MCP_TOKEN === liveToken);
     }
 
+    // --- Card 2be634f2: REJECTED — on THIS host (win32, real resolveMcpTokenRidesEnv()), a capability
+    // secret must stay the LITERAL value in the file, and the REAL spawned process's own env must carry
+    // NO `LOOM_CAP_SECRET_*` var at all — the finding that killed the placeholder design: claude's env is
+    // inherited by the agent's own shell, so putting a third-party secret there would be readable from
+    // the agent's own Bash/PowerShell for the whole session. ---
+    {
+      const sid = "mcgc-2be634f2-cap-secret-stays-off-env";
+      const dumpPath = path.join(tmpHome, `${sid}-env-dump.json`);
+      host.spawn({
+        sessionId: sid, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+        geometry: { cols: 120, rows: 40 }, sessionEnv: { FIXTURE_ENV_DUMP_FILE: dumpPath }, role: "worker",
+        capabilities: [{ slug: "needs-cred", connectionId: "conn1" }],
+      });
+      spawned.push(sid);
+      const file = sessionMcpConfigPath(sid);
+      const fileContent = fs.readFileSync(file, "utf8");
+      check("(2be634f2 REJECTED) the written mcp-config.json FILE contains the LITERAL capability-secret bytes, never a placeholder",
+        fileContent.includes("super-secret-value") && !fileContent.includes("LOOM_CAP_SECRET_"));
+      await waitUntil(() => fs.existsSync(dumpPath), { label: `${sid} fixture env dump`, timeoutMs: 15000 });
+      const dump = JSON.parse(fs.readFileSync(dumpPath, "utf8"));
+      check("(2be634f2 REJECTED — THE FINDING THIS PINS) the REAL spawned process's OWN env carries NO LOOM_CAP_SECRET_* var at all — the secret is NEVER inherited by the agent's own shell",
+        Object.keys(dump.capabilitySecrets ?? {}).length === 0);
+    }
+
     // --- Card a50b8afd, Code Review round 3: the SAME real-spawn proof as above, but with the platform
     // decision FORCED via the injectable `resolveMcpTokenRidesEnv` seam — on THIS host (win32), the block
     // above already proves the true branch, but only because this host's REAL platform happens to resolve
     // true; it says NOTHING about whether the FALSE branch's call site actually works. This block forces
     // BOTH branches explicitly, closing that gap on any host. ---
     {
-      const forcedPosixHost = new ForcedPosixPtyHost(events);
+      // Card 2be634f2: both forced hosts ALSO carry the capability catalog + resolver (same shape as
+      // `host`/`noTokenHost` above) and both spawns ALSO request the "needs-cred" capability — pins the
+      // REJECTED design on BOTH forced platforms at the real CALL SITE, not just the pure helper (PART 1):
+      // a capability secret must stay literal and off claude's env regardless of `ridesEnv`, unlike the
+      // mcpToken header which genuinely differs per platform below.
+      const capOpts = {
+        getCapabilityCatalog: () => [CRED_DEF],
+        resolveConnectionSecret: (id) => (id === "conn1" ? "super-secret-value" : undefined),
+      };
+      const forcedPosixHost = new ForcedPosixPtyHost(events, capOpts);
       const sid = "mcgc-a50b8afd-forced-posix";
       const dumpPath = path.join(tmpHome, `${sid}-env-dump.json`);
       forcedPosixHost.spawn({
         sessionId: sid, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
         geometry: { cols: 120, rows: 40 }, sessionEnv: { FIXTURE_ENV_DUMP_FILE: dumpPath }, role: "worker",
+        capabilities: [{ slug: "needs-cred", connectionId: "conn1" }],
       });
       try {
         const file = sessionMcpConfigPath(sid);
@@ -369,21 +461,26 @@ if (process.platform !== "win32") {
         const fileContent = fs.readFileSync(file, "utf8");
         check("(forced-POSIX, card a50b8afd Code Review round 3 FIX) with ridesEnv FORCED false, the mcp-config.json FILE carries the LITERAL token, never the placeholder",
           fileContent.includes(liveToken) && !fileContent.includes("${LOOM_MCP_TOKEN}"));
+        check("(forced-POSIX, card 2be634f2 REJECTED) with ridesEnv FORCED false, the capability secret stays the LITERAL value, never a placeholder",
+          fileContent.includes("super-secret-value") && !fileContent.includes("LOOM_CAP_SECRET_"));
         await waitUntil(() => fs.existsSync(dumpPath), { label: `${sid} fixture env dump`, timeoutMs: 15000 });
         const dump = JSON.parse(fs.readFileSync(dumpPath, "utf8"));
         check("(forced-POSIX, card a50b8afd Code Review round 3 FIX — THE REGRESSION THIS CLOSES) with ridesEnv FORCED false, the REAL spawned process's env does NOT carry LOOM_MCP_TOKEN at all",
           dump.LOOM_MCP_TOKEN === null || dump.LOOM_MCP_TOKEN === undefined);
+        check("(forced-POSIX, card 2be634f2 REJECTED) with ridesEnv FORCED false, the REAL spawned process's env carries NO LOOM_CAP_SECRET_* var at all",
+          Object.keys(dump.capabilitySecrets ?? {}).length === 0);
       } finally {
         try { forcedPosixHost.stop(sid, "hard"); } catch { /* best-effort */ }
         try { await waitUntil(() => !forcedPosixHost.isAlive(sid), { label: `${sid} pty exit (cleanup)`, timeoutMs: 15000 }); } catch { /* best-effort */ }
       }
 
-      const forcedWin32Host = new ForcedWin32PtyHost(events);
+      const forcedWin32Host = new ForcedWin32PtyHost(events, capOpts);
       const sid2 = "mcgc-a50b8afd-forced-win32";
       const dumpPath2 = path.join(tmpHome, `${sid2}-env-dump.json`);
       forcedWin32Host.spawn({
         sessionId: sid2, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
         geometry: { cols: 120, rows: 40 }, sessionEnv: { FIXTURE_ENV_DUMP_FILE: dumpPath2 }, role: "worker",
+        capabilities: [{ slug: "needs-cred", connectionId: "conn1" }],
       });
       try {
         const file2 = sessionMcpConfigPath(sid2);
@@ -391,10 +488,14 @@ if (process.platform !== "win32") {
         const fileContent2 = fs.readFileSync(file2, "utf8");
         check("(forced-win32, via the SAME injectable seam) the mcp-config.json FILE carries the placeholder, never the literal token",
           fileContent2.includes("${LOOM_MCP_TOKEN}") && !fileContent2.includes(liveToken2));
+        check("(forced-win32, card 2be634f2 REJECTED) the capability secret, UNLIKE the mcpToken header just above, stays the LITERAL value even with ridesEnv FORCED true",
+          fileContent2.includes("super-secret-value") && !fileContent2.includes("LOOM_CAP_SECRET_"));
         await waitUntil(() => fs.existsSync(dumpPath2), { label: `${sid2} fixture env dump`, timeoutMs: 15000 });
         const dump2 = JSON.parse(fs.readFileSync(dumpPath2, "utf8"));
         check("(forced-win32, via the SAME injectable seam) the REAL spawned process's env DOES carry the real mcpToken",
           dump2.LOOM_MCP_TOKEN === liveToken2);
+        check("(forced-win32, card 2be634f2 REJECTED — THE FINDING THIS PINS) the REAL spawned process's env carries NO LOOM_CAP_SECRET_* var, even with ridesEnv FORCED true — the secret is never inherited by the agent's own shell",
+          Object.keys(dump2.capabilitySecrets ?? {}).length === 0);
       } finally {
         try { forcedWin32Host.stop(sid2, "hard"); } catch { /* best-effort */ }
         try { await waitUntil(() => !forcedWin32Host.isAlive(sid2), { label: `${sid2} pty exit (cleanup)`, timeoutMs: 15000 }); } catch { /* best-effort */ }

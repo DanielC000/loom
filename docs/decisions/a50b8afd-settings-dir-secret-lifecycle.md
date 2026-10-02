@@ -244,13 +244,19 @@ Per the DoD's own instruction to say so plainly: this does not achieve full isol
   output.
 
 **win32 only:**
-- Once the mcpToken lives only in the claude process's own env block, a same-OS-user caller can still
-  extract it via a DELIBERATE PEB read (there is no built-in Windows CLI/PowerShell one-liner for this the
-  way `/proc/<pid>/environ` is on Linux — it requires a purpose-written program using `OpenProcess` +
-  `ReadProcessMemory` against the target's PEB) — not reachable via `Read`/`Glob`/ordinary `Bash`
-  (`cat`/`type`) alone. This is a materially higher bar than the pre-card file-read exposure, but it is NOT
-  a structural guarantee — closing it for real needs per-session OS identity (AppContainer or
-  restricted-token process isolation) — out of proportion to this card.
+- Once the mcpToken lives only in the claude process's own env block, a same-OS-user caller IN A DIFFERENT
+  PROCESS can still extract it via a DELIBERATE PEB read (there is no built-in Windows CLI/PowerShell
+  one-liner for this the way `/proc/<pid>/environ` is on Linux — it requires a purpose-written program
+  using `OpenProcess` + `ReadProcessMemory` against the target's PEB) — not reachable via
+  `Read`/`Glob`/ordinary `Bash` (`cat`/`type`) alone, FROM OUTSIDE the session. This is a materially higher
+  bar than the pre-card file-read exposure for a CROSS-session reader, but it is NOT a structural guarantee
+  — closing it for real needs per-session OS identity (AppContainer or restricted-token process isolation)
+  — out of proportion to this card. **This PEB-read bar does NOT apply to the session's OWN agent** — see
+  "win32 env inheritance, noted and accepted" above: the agent's own Bash/PowerShell trivially inherits and
+  can read `LOOM_MCP_TOKEN` with an ordinary `echo $env:LOOM_MCP_TOKEN`, no PEB read needed at all, because
+  it's a CHILD of the claude process, not a cross-process reader. Accepted there ONLY because this is the
+  session's own token; card `2be634f2` found this exact inheritance makes the SAME move wrong for a
+  third-party capability secret, which the agent must never see directly (see that card's own record).
 
 **POSIX only:**
 - The mcpToken's exposure is UNCHANGED from before this card: the literal value in mcp-config.json, for
@@ -270,10 +276,17 @@ Per the DoD's own instruction to say so plainly: this does not achieve full isol
   `docs/decisions/2e7373ab-codex-mcp-token-posix-env-residual.md` for the full investigation and accepted
   residual.
 
-## Follow-up filed (scope cut from this card)
+## Follow-up filed (scope cut from this card) — CONSIDERED AND REJECTED, see `2be634f2`'s own record
 
 Generalizing (b1)'s placeholder-plus-env-var pattern to third-party capability secrets in a stdio mount's
-own `env` (not just the mcpToken header) — card `2be634f2`, `discoveredFrom a50b8afd`, p2.
+own `env` (not just the mcpToken header) — card `2be634f2`, `discoveredFrom a50b8afd`, p2. REJECTED, not
+built: the SAME win32 env-inheritance this record accepts for the mcpToken (see "win32 env inheritance,
+noted and accepted" above) makes the placeholder move a REGRESSION for a third-party secret — it would
+hand the agent's own Bash/PowerShell a raw capability secret for the whole session, which the agent must
+never see directly. Capability secrets stay literal in the mcp-config.json file, on every platform,
+unconditionally; the file's own delete lifecycle (markReady/onExit/boot-sweep, above) is unaffected either
+way. Full writeup, live `${VAR}`-expansion-in-`env` evidence, and the rejection reasoning:
+`docs/decisions/2be634f2-capability-secret-env-placeholder-generalization.md`.
 
 ## V2 addendum — Code Review's read-only bundle evidence that PERMISSION RULES also survive deletion
 

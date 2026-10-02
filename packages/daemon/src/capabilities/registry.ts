@@ -447,6 +447,8 @@ export function resolveCapabilityServer(row: CapabilityDefRow, ctx: ResolveCapab
   if (!server) return null;
   const env: Record<string, string> = {};
   if (row.requiresConnection && ctx.connectionSecret) {
+    // @decision 2be634f2 — never move this onto claude's OWN process env (a win32 ${VAR}-placeholder
+    // pattern, mirroring a50b8afd's mcpToken case) — that env is inherited by the agent's own shell.
     env[row.secretEnvVar ?? "LOOM_CAPABILITY_SECRET"] = ctx.connectionSecret;
   }
   // The bundled/command env-var-based scratch-dir mechanism (see CapabilityProvision's `outputDirEnvVar`

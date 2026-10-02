@@ -50,8 +50,14 @@ if (!outputFile) {
 // real claude process's actual environment block) so a test can assert the real spawn env carries the
 // per-session mcpToken, proving the mcp-config.json FILE's own placeholder is backed by a real value
 // somewhere other than the file itself.
+// Card 2be634f2: ALSO dumps every `LOOM_CAP_SECRET_*`-named var this process's env actually carries. Card
+// 2be634f2 CONSIDERED AND REJECTED putting a capability secret here (claude's own env is inherited by
+// everything it spawns, including the agent's own shell) — this scan exists so a test can assert the
+// NEGATIVE: this set is always empty, on every platform, proving the rejected design never shipped.
 if (process.env.FIXTURE_ENV_DUMP_FILE) {
-  fs.writeFileSync(process.env.FIXTURE_ENV_DUMP_FILE, JSON.stringify({ LOOM_MCP_TOKEN: process.env.LOOM_MCP_TOKEN ?? null }));
+  const capSecrets = {};
+  for (const [k, v] of Object.entries(process.env)) if (k.startsWith("LOOM_CAP_SECRET_")) capSecrets[k] = v;
+  fs.writeFileSync(process.env.FIXTURE_ENV_DUMP_FILE, JSON.stringify({ LOOM_MCP_TOKEN: process.env.LOOM_MCP_TOKEN ?? null, capabilitySecrets: capSecrets }));
 }
 
 // A real spawn's argv is all FLAGS (--settings, --permission-mode, --strict-mcp-config, etc.) — that's
