@@ -1378,6 +1378,19 @@ const REDIRECT_SETTLE_MS = Number(process.env.LOOM_REDIRECT_SETTLE_MS) || 1_500;
 const RECENT_OWNER_TURNS_WINDOW = 5;
 
 /**
+ * Card f7e580cf: the ONE shared ring-push for `recentOwnerTurns`, used by BOTH harnesses — claude
+ * (`attributeOwnerText`) and codex (`enqueueStdinCodex`/`drainCodexPending`) — so they cannot drift
+ * into different orders again. Always most-recent-first: `[0]` is the newest turn after this call,
+ * matching `getRecentOwnerTurns`'s own doc. Mutates `recentOwnerTurns` in place (array identity is the
+ * `Live`/`CodexLive` field itself); pure ring bookkeeping only — never touches the race-discard marker,
+ * which stays the CALLER's concern (see `attributeOwnerText`'s own doc for why).
+ */
+function pushRecentOwnerTurn(recentOwnerTurns: string[], ownerText: string): void {
+  recentOwnerTurns.unshift(ownerText);
+  if (recentOwnerTurns.length > RECENT_OWNER_TURNS_WINDOW) recentOwnerTurns.length = RECENT_OWNER_TURNS_WINDOW;
+}
+
+/**
  * Resolve the per-session Playwright MCP (`@playwright/mcp`) stdio server entry, injected at spawn
  * ONLY for a browserTesting session (opt-in, gated). Built with ABSOLUTE paths — the same lesson as
  * the absolute-claude-path invariant: node-pty's Windows agent does NOT search %PATH%, and a bare
@@ -6006,8 +6019,7 @@ export class PtyHost {
       live.activeTurnProactive = proactive; live.lastPromptProactive = proactive;
       live.activeTurnOwnerText = ownerText ?? null; live.lastPromptOwnerText = ownerText ?? null;
       if (ownerText !== undefined) {
-        live.recentOwnerTurns.push(ownerText);
-        if (live.recentOwnerTurns.length > RECENT_OWNER_TURNS_WINDOW) live.recentOwnerTurns.shift();
+        pushRecentOwnerTurn(live.recentOwnerTurns, ownerText);
       }
       live.activeTurnSenderId = normalizedSenderId; live.lastPromptSenderId = normalizedSenderId;
       this.submitCodex(sessionId, live, text);
@@ -6043,8 +6055,7 @@ export class PtyHost {
     live.activeTurnProactive = entry.proactive ?? false; live.lastPromptProactive = entry.proactive ?? false;
     live.activeTurnOwnerText = entry.ownerText ?? null; live.lastPromptOwnerText = entry.ownerText ?? null;
     if (entry.ownerText !== undefined) {
-      live.recentOwnerTurns.push(entry.ownerText);
-      if (live.recentOwnerTurns.length > RECENT_OWNER_TURNS_WINDOW) live.recentOwnerTurns.shift();
+      pushRecentOwnerTurn(live.recentOwnerTurns, entry.ownerText);
     }
     live.activeTurnSenderId = entry.senderId ?? null; live.lastPromptSenderId = entry.senderId ?? null;
     this.submitCodex(sessionId, live, entry.text);
@@ -9245,8 +9256,7 @@ export class PtyHost {
     live.lastPromptOwnerText = ownerText;
     live.lastPromptOwnerTextSeq = seq;
     // NEVER cleared at Stop — persists across the turn boundary so a later turn's lever call can still see it.
-    live.recentOwnerTurns.unshift(ownerText);
-    if (live.recentOwnerTurns.length > RECENT_OWNER_TURNS_WINDOW) live.recentOwnerTurns.length = RECENT_OWNER_TURNS_WINDOW;
+    pushRecentOwnerTurn(live.recentOwnerTurns, ownerText);
     // @decision d326c3c2 — a genuine owner turn just landed in recentOwnerTurns, so any earlier
     // race-discard marker no longer describes "the most recent owner turn is missing" — clear it.
     // @decision 2400d0bc — ONLY when this attribution OUTRANKS the marker (see this method's own doc).
