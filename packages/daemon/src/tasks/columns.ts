@@ -1,4 +1,4 @@
-import { resolveConfig, columnKeyForRole, isMaskedSessionEnvEcho, type KanbanColumn, type ColumnRole, type ProjectConfigOverride } from "@loom/shared";
+import { resolveConfig, columnKeyForRole, isMaskedSessionEnvEcho, isMaskedAlertWebhookUrlEcho, type KanbanColumn, type ColumnRole, type ProjectConfigOverride } from "@loom/shared";
 import type { Db } from "../db.js";
 
 // Board-column lifecycle (task B): the ONE-TIME role backfill migration + the pure desired-vs-current
@@ -365,6 +365,16 @@ export function setProjectConfigSafe(
         error: `sessionEnv write rejected: ${echoedKeys.join(", ")} look like a masked read-response echoed back (all filler characters, same length as the stored value) rather than a real value — re-read the ACTUAL secret before writing it, or leave the key out of the payload to keep it unchanged`,
       };
     }
+  }
+  // @decision eccd874c — reject a masked projectFields alertWebhook.url read echoed back as a write,
+  // mirroring the sessionEnv guard above (card a253cec8); reachable via project_configure's FULL
+  // (Platform Lead) validator, which accepts orchestration.alertWebhook unlike the agent validator.
+  const nextWebhookUrl = next.orchestration?.alertWebhook?.url;
+  if (nextWebhookUrl && isMaskedAlertWebhookUrlEcho(nextWebhookUrl, before.orchestration?.alertWebhook?.url)) {
+    return {
+      ok: false,
+      error: `orchestration.alertWebhook.url write rejected: looks like a masked read-response echoed back (matches the masked-placeholder shape for the stored value) rather than a real URL — re-read the ACTUAL URL before writing it, or leave alertWebhook out of the payload to keep it unchanged`,
+    };
   }
   const recordAndOk = (): { ok: true } => {
     db.recordProjectConfigChange(projectId, before, db.getProject(projectId)?.config ?? next, actor);

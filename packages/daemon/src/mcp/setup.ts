@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import type { Project, ProjectConfigOverride, Agent, Profile } from "@loom/shared";
+import { redactAlertWebhookInConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
@@ -355,9 +356,13 @@ export class SetupMcpRouter {
         const sessionEnvKeys = sessionEnv
           ? Object.fromEntries(Object.entries(sessionEnv).map(([name, value]) => [name, String(value ?? "").length]))
           : undefined;
+        // @decision eccd874c — alertWebhook.url is masked here too: this surface can never WRITE it, but a
+        // benign change (e.g. docLint) still echoes the project's PRE-EXISTING config, which would
+        // otherwise leak a value this agent could never have set itself.
+        const maskedConfig = redactAlertWebhookInConfig(configSansSessionEnv);
         return ok({
           ok: true, projectId: resolvedProjectId,
-          config: sessionEnvKeys === undefined ? configSansSessionEnv : { ...configSansSessionEnv, sessionEnvKeys },
+          config: sessionEnvKeys === undefined ? maskedConfig : { ...maskedConfig, sessionEnvKeys },
         });
       },
     );

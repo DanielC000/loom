@@ -1,4 +1,4 @@
-import { redactSessionEnvInConfig, type Agent, type Profile, type Project } from "@loom/shared";
+import { redactAlertWebhookInConfig, redactSessionEnvInConfig, type Agent, type Profile, type Project } from "@loom/shared";
 
 /**
  * Shared MCP-layer row projections for the platform + setup routers' Project/Agent/Profile
@@ -62,10 +62,13 @@ const PROJECT_KEYS = Object.keys(PROJECT_FIELDS) as (keyof Project)[];
 // @decision e5c82138 — re-expressed over the shared `redactSessionEnvInConfig` (@loom/shared): a
 // pre-existing `sessionEnv: {}` now round-trips as `{}` (was: silently dropped) — see that primitive's
 // own doc for the empty-record policy this adopts.
+// @decision eccd874c — config.orchestration.alertWebhook.url is ALSO masked here (via
+// redactAlertWebhookInConfig), at the same chokepoint as sessionEnv above: a webhook URL is a bearer
+// credential, human-only to WRITE, so an agent read must never see it verbatim.
 export function projectFields(row: Project | undefined): Project | undefined {
   if (row === undefined) return row;
   const picked = pickFields(row, PROJECT_KEYS);
-  return { ...picked, config: redactSessionEnvInConfig(picked.config) };
+  return { ...picked, config: redactAlertWebhookInConfig(redactSessionEnvInConfig(picked.config)) };
 }
 
 const AGENT_FIELDS: Record<keyof Agent, 1> = {

@@ -1178,6 +1178,63 @@ export function isMaskedSessionEnvEcho(value: string, priorValue: string | undef
 }
 
 /**
+ * Mask an `AlertWebhook.url` down to `<scheme>//***` (card eccd874c round 2) — strips the HOST as well as
+ * the path/query. Round 1 kept the host as a non-secret "configured, pointed at this host" indicator, but
+ * some providers (e.g. Pipedream's `https://<token>.m.pipedream.net`) carry their actual
+ * bearer-credential material in the SUBDOMAIN, which that form still leaked. Only the scheme survives as
+ * the "configured" indicator now. A url that fails to parse falls back to a fixed `"***"` (defensive
+ * only — every stored `alertWebhook.url` is already validated as a real URL at write time by
+ * `alertWebhookSchema`, so this branch should never actually run against a real row).
+ */
+export function maskAlertWebhookUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//***`;
+  } catch {
+    return "***";
+  }
+}
+
+/**
+ * Mask `orchestration.alertWebhook.url` inside a config-shaped object, leaving every other key
+ * (including the sibling `events` list) untouched. Mirrors `redactSessionEnvInConfig`'s shape. Callers
+ * today: `projectFields` (`mcp/entityRowFields.ts`, the read chokepoint for project_get/project_update/
+ * list_all_projects on every MCP router), and `project_configure`'s own write-response on both
+ * `mcp/platform.ts` and `mcp/setup.ts` (that response is a read of the project's config in disguise).
+ * @decision eccd874c — this is the ONLY masker for this field; never duplicate the logic at a call site.
+ */
+export function redactAlertWebhookInConfig(config: ProjectConfigOverride): ProjectConfigOverride {
+  const url = config.orchestration?.alertWebhook?.url;
+  if (!url) return config;
+  return {
+    ...config,
+    orchestration: {
+      ...config.orchestration,
+      alertWebhook: { ...config.orchestration!.alertWebhook!, url: maskAlertWebhookUrl(url) },
+    },
+  };
+}
+
+/**
+ * True when `url` looks like a `maskAlertWebhookUrl` placeholder echoed straight back as a write — the
+ * alertWebhook sibling of `isMaskedSessionEnvEcho` (card a253cec8). `url === priorUrl` is never flagged
+ * (an unchanged value is never a clobber); past that this matches the mask by SHAPE, not by exact-string
+ * comparison against `maskAlertWebhookUrl(priorUrl)`.
+ * @decision eccd874c — why shape-not-exact and the unchanged-value exemption: the fixed-point lockout a
+ * pure exact-match caused, and the case/trailing-slash variants it missed. Do not revert to exact-match.
+ */
+export function isMaskedAlertWebhookUrlEcho(url: string, priorUrl: string | undefined): boolean {
+  if (priorUrl === undefined || url === priorUrl) return false;
+  try {
+    const u = new URL(url);
+    if (u.host === "***") return true;
+    return u.pathname.replace(/\/+$/, "") === "/***";
+  } catch {
+    return url.trim() === "***";
+  }
+}
+
+/**
  * Daemon-global platform override — the SEPARATE 2nd arg to `resolveConfig`, NOT part of a per-project
  * override. Deep-partial of PlatformConfig: each sub-group optional, each field within it optional, so
  * the human can tune one number and inherit the rest. The daemon loads this from its SQLite singleton

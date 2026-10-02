@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { TASK_STRUCTURE_SHAPE, TASK_STRUCTURE_DOC, TASK_CREATE_STRUCTURE_SHAPE, TASK_CREATE_STRUCTURE_DOC } from "../tasks/relations.js";
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds, RotationMarker } from "@loom/shared";
-import { MEMORY_CONFIG_MAX, MERGE_GATE_INTERVAL_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, PLATFORM_MS_BOUNDS, harnessFleetScopeAvailable, resolveConfig } from "@loom/shared";
+import { MEMORY_CONFIG_MAX, MERGE_GATE_INTERVAL_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, PLATFORM_MS_BOUNDS, harnessFleetScopeAvailable, redactAlertWebhookInConfig, resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
@@ -1555,9 +1555,13 @@ export class PlatformMcpRouter {
         const sessionEnvKeys = sessionEnv
           ? Object.fromEntries(Object.entries(sessionEnv).map(([name, value]) => [name, String(value ?? "").length]))
           : undefined;
+        // @decision eccd874c — alertWebhook.url is masked here too, through the SAME primitive projectFields
+        // uses for reads: this write-response echoes the project's config exactly like a read would, so an
+        // agent that can only make a benign config change (e.g. docLint) must not read the credential back.
+        const maskedConfig = redactAlertWebhookInConfig(configSansSessionEnv);
         return ok({
           ok: true, projectId: resolvedProjectId,
-          config: sessionEnvKeys === undefined ? configSansSessionEnv : { ...configSansSessionEnv, sessionEnvKeys },
+          config: sessionEnvKeys === undefined ? maskedConfig : { ...maskedConfig, sessionEnvKeys },
         });
       },
     );
