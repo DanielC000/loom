@@ -412,6 +412,12 @@ async function main(): Promise<void> {
     // the durable event + fail loud to the recipient AND the sender/manager. See
     // PtyHostEvents.onCodexBootStuck's own doc / SessionService.handleCodexBootStuck's own doc.
     onCodexBootStuck: (sessionId, info) => sessions.handleCodexBootStuck(sessionId, info),
+    // Card 01160ae3: claude's analog of onCodexBootStuck above — dialogStuckTimer's one-shot fail-loud
+    // ceiling, fired for an unattended-role spawn that never observed SessionStart. `sessions` decides
+    // how to record the durable event + nudge the recipient AND its manager, mirroring the SAME two-
+    // recipient shape as handleCodexBootStuck rather than inventing a new one. See
+    // PtyHostEvents.onClaudeBootDialogStuck's own doc / SessionService.handleClaudeBootDialogStuck's own doc.
+    onClaudeBootDialogStuck: (sessionId, info) => sessions.handleClaudeBootDialogStuck(sessionId, info),
     // Card b987f086: a codex spawn declared a capability (a stdio MCP server, or codescape) this harness
     // structurally cannot mount — `sessions` (forward reference, same pattern as onCodexBootStuck above)
     // decides how to record the durable event + fail loud to the recipient AND the sender/manager. See

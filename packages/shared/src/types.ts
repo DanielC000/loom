@@ -1562,6 +1562,17 @@ export type OrchestrationEventKind =
   // `detail` carries { timeoutMs, pendingCount }. Deliberately one-shot — a LATE boot-readiness still
   // resolves normally afterward; this only reports that the wait already exceeded the ceiling once.
   | "codex_boot_stuck"
+  // Card 01160ae3 — claude's analog of codex_boot_stuck above: an unattended-role (see
+  // pty/host.ts's LOOM_DRIVEN_ROLES) claude session never observed SessionStart within its bounded
+  // fail-loud ceiling (`CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS`) — a known blocking-CLI-dialog family
+  // (workspace-trust / MCP-server-enable / external-@import / an unknown future one) can hang an
+  // unattended spawn indefinitely with no turn ever starting. DETECT + NOTIFY ONLY — never auto-answered.
+  // Filed under the AFFECTED session's manager, workerSessionId = the affected session itself; `detail`
+  // carries { timeoutMs, signatureName, role } — signatureName is a NAME only (e.g. "external-imports",
+  // "enter-esc-footer"), never raw screen content. Deliberately one-shot, same as codex_boot_stuck.
+  // @decision 01160ae3 — never a nudge to the AFFECTED session itself (see that record): it would be
+  // typed into the live dialog and its Enter would confirm the dialog's highlighted option.
+  | "claude_boot_dialog_stuck"
   // Card b987f086 — a codex spawn declared ≥1 capability the harness structurally cannot mount: either an
   // MCP server this session resolved is not `{type:"http"}` (codex has no stdio-MCP-server concept — see
   // pty/codex-host.ts's `unsupportedCodexMcpServers`), or the project's `codescape.enabled` is true (codex
@@ -1740,7 +1751,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true,
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
   discovery_block_injection: true,
-  codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
+  codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
   codex_auto_commit: true,
   credential_revoked: true,
   worker_retired: true,

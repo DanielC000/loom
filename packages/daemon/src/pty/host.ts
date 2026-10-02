@@ -927,7 +927,10 @@ const ESC_KEY = "\x1b";
 const BACKSPACE = "\x7f";
 /** Strip CSI sequences so the boot-output scan matches the MCP prompt's words across TUI styling. */
 const ANSI_CSI = new RegExp(ESC_KEY + "\\[[0-9;?]*[ -/]*[@-~]", "g");
-const collapseBoot = (s: string): string => s.replace(ANSI_CSI, "").replace(/\s+/g, "");
+/** Exported for testing (card 01160ae3, Code Review round 2 item (d)) — so a signature-detection test
+ *  exercises the REAL normalization this module actually runs, not a hand-copied regex of its own that
+ *  could silently drift from this one. */
+export const collapseBoot = (s: string): string => s.replace(ANSI_CSI, "").replace(/\s+/g, "");
 
 /** Settle window before the ONE Down press on the resume-summary gate (let its initial render finish
  *  painting before we read/press anything — mirrors MODE_CYCLE_SETTLE_MS's rationale). */
@@ -1064,6 +1067,26 @@ export function nextRawDraftState(prevText: string, data: string): { text: strin
  */
 export function isResumeSummaryGate(flatCollapsed: string): boolean {
   return /resumefromsummary/i.test(flatCollapsed) && /resumefullsession/i.test(flatCollapsed);
+}
+
+/**
+ * Card 01160ae3: known blocking-dialog signatures that can stall an unattended spawn BEFORE SessionStart
+ * (detect + notify only — never auto-answered). Checked in priority order; the first match names the
+ * signature for the durable event + nudge. Input is collapseBoot()'d output, same convention as
+ * isResumeSummaryGate above. The generic `enter-esc-footer` catch-all is checked LAST so a currently-
+ * unknown future dialog sharing that same confirm/cancel-footer shape still gets caught, even if it
+ * can't be named specifically yet. Returns null when nothing in the buffer matches.
+ */
+export function detectBlockingDialogSignature(flatCollapsed: string): string | null {
+  // "Allow external CLAUDE.md file imports? ... Enter to confirm · Esc to cancel" (card b180791a).
+  if (/externalimports/i.test(flatCollapsed)) return "external-imports";
+  // The workspace-trust dialog ("Is this a project you trust?" — see claude-config.ts's own doc).
+  if (/isthisaprojectyoutrust/i.test(flatCollapsed)) return "workspace-trust";
+  // The per-project "N new MCP servers found — enable?" prompt — same test as the existing bootScan
+  // dismiss-scan above (mcpPromptHandled), reused here rather than re-derived.
+  if (/mcpserver/i.test(flatCollapsed) && /rejectall/i.test(flatCollapsed)) return "mcp-server-enable";
+  if (/entertoconfirm/i.test(flatCollapsed) && /esctocancel/i.test(flatCollapsed)) return "enter-esc-footer";
+  return null;
 }
 
 /**
@@ -1298,6 +1321,22 @@ export const MODE_CYCLE_FALLBACK_MS = Number(process.env.LOOM_MODE_CYCLE_FALLBAC
  *  @decision c469d54e
  *  — part of the same three-constant invariant as MODE_CYCLE_FALLBACK_MS/READY_FALLBACK_MS above. */
 export const READY_FALLBACK_ABSOLUTE_CEILING_MS = Number(process.env.LOOM_READY_FALLBACK_ABSOLUTE_CEILING_MS) || 45_000;
+
+/** Card 01160ae3: bounded detector for an unattended spawn stuck on a blocking CLI dialog (workspace-
+ *  trust / MCP-server-enable / external-@import / a future unknown one with the same shape) BEFORE
+ *  SessionStart ever fires — DETECT + NOTIFY ONLY, never auto-answered (see detectBlockingDialogSignature).
+ *  Sized from ~10 days / 778 real unattended-role fresh-spawn SessionStart latencies measured on the
+ *  owner's fleet (daemon-output.log): median ~3.2s, p99 ~10.6s, worst observed 90.4s (a genuinely
+ *  slow-but-healthy boot under host contention, not a dialog). 150s gives ~60s of headroom above that
+ *  worst case — 0/778 implied false positives on that data — while a real hang is, per card b180791a,
+ *  indefinite, so extra detection latency costs nothing against a true positive.
+ *
+ *  Deliberately INDEPENDENT of READY_FALLBACK_MS/READY_FALLBACK_ABSOLUTE_CEILING_MS above — this timer
+ *  (armed in spawn(), see its own call site) is checked against `live.sessionStartObserved`, NEVER
+ *  `live.ready`: the missed-hook fallback above can flip `ready` true purely on elapsed time even when
+ *  SessionStart never genuinely fired, and gating this alarm on `ready` would silence it exactly when a
+ *  real stuck dialog needs it most. */
+export const CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS = Number(process.env.LOOM_CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS) || 150_000;
 
 /**
  * Card df5e37e7: bound on waitForMcpSeen — how long a deferred resume-continuation nudge (see
@@ -2909,6 +2948,20 @@ interface Live {
   modeCycleChain: Promise<void>;
   mcpPromptHandled: boolean;  // guard: dismiss the plugin-MCP enable-prompt with Esc at most once per session
   bootScan: string;           // bounded rolling buffer of early boot output, scanned for that prompt
+  // Card 01160ae3: a SEPARATE bounded rolling buffer (same convention as bootScan above — 8192 cap,
+  // collapseBoot-normalized), but gated on !sessionStartObserved rather than !mcpPromptHandled, so it
+  // keeps accumulating for the WHOLE pre-SessionStart window — bootScan stops growing the instant ONE
+  // recognized prompt is dismissed, which would hide a DIFFERENT dialog appearing afterward.
+  dialogStuckScan: string;
+  // One-shot; armed in spawn() (claude path only — never for a shell/canned entry) for an unattended-role
+  // session, cleared the instant SessionStart is observed or the pty exits. null once cleared/fired.
+  dialogStuckTimer: NodeJS.Timeout | null;
+  // Card 01160ae3 (Code Review round 2): set unconditionally at the top of deliverHook for ANY hook
+  // event, never scoped to SessionStart alone — proves the engine reached live hook delivery even on the
+  // rare path where SessionStart itself was missed (the READY_FALLBACK case). Checked alongside
+  // sessionStartObserved/firstTurnStarted at the boot-dialog-stuck timer's fire site so a healthy session
+  // that merely missed its SessionStart hook is never wrongly flagged as stuck on a dialog.
+  anyHookObserved: boolean;
   resumeGateHandled: boolean; // TERMINAL: true once Enter has actually been sent for the resume-from-summary
                               // gate (confirmed-or-given-up) — see resolveResumeGate. Also gates whether
                               // resumeGateScan keeps accumulating (stays false through the whole verify-retry).
@@ -3457,6 +3510,11 @@ export interface PtyHostEvents {
    *  a late boot still resolves normally via the onData composite check. info.readyMarker/modelLoaded/
    *  trustDialogResolved: all-true is a real outcome (never simultaneous in one tick), not a contradiction. */
   onCodexBootStuck?(sessionId: string, info: { timeoutMs: number; pendingCount: number; readyMarker: boolean; modelLoaded: boolean; trustDialogResolved: boolean }): void;
+  /** Card 01160ae3 — claude's analog of onCodexBootStuck above: dialogStuckTimer's one-shot fail-loud
+   *  ceiling (never retried; a late SessionStart still resolves normally). Fires on the timeout whether or
+   *  not a signature matched — `signatureName` null means nothing recognized was in the scan buffer, not
+   *  that the session is fine. Never carries screen content — signature NAME only. */
+  onClaudeBootDialogStuck?(sessionId: string, info: { timeoutMs: number; signatureName: string | null; role: SessionRole | null }): void;
   /** @decision b987f086 — onCodexUnsupportedCapability: two independent reasons (a stdio-only MCP server;
    *  codescapeEnabled for codex), named distinctly in info.items[].reason, never blended — and never relied
    *  on alone, since profiles/validate.ts's save-time rejection can't catch a profile that predates it. */
@@ -3551,22 +3609,18 @@ export const TASK_TRACKING_TOOLS: readonly string[] = ["TaskCreate", "TaskGet", 
  */
 export const HARNESS_SCHEDULING_TOOLS: readonly string[] = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger"];
 
-/** @decision 8dd1dd1c — human-prompt disallow: Loom-driven roles only (worker/setup/auditor/
- *  workspace-auditor/run/assistant), NEVER manager/platform — they legitimately surface decisions to the
- *  human. Task-tracking (card 33f9f181) and harness-self-scheduling ({@link HARNESS_SCHEDULING_TOOLS}) disallow are separate/disjoint, each with its own role scope. */
+/** @decision 8dd1dd1c — Loom-driven roles whose stdin nobody watches live: a human-prompt tool would
+ *  block forever, and a stuck-dialog detector (card 01160ae3) has nobody present to notice. Shared by
+ *  disallowedToolsForRole below and that detector's spawn-time gate — one source, not a second copy. */
+export const LOOM_DRIVEN_ROLES: readonly SessionRole[] = ["worker", "setup", "auditor", "workspace-auditor", "run", "assistant"];
+
+/** @decision 8dd1dd1c — human-prompt disallow: Loom-driven roles only (see {@link LOOM_DRIVEN_ROLES}),
+ *  never manager/platform. Task-tracking (card 33f9f181) and harness-scheduling
+ *  ({@link HARNESS_SCHEDULING_TOOLS}) disallow are separate, each with its own role scope. */
 export function disallowedToolsForRole(role?: SessionRole | null): string[] {
   const out: string[] = [];
-  switch (role) {
-    case "worker":
-    case "setup":
-    case "auditor":
-    case "workspace-auditor":
-    case "run":
-    case "assistant":
-      out.push(...HUMAN_PROMPT_TOOLS);
-      break;
-    default:
-      break; // manager / platform / plain — no human-prompt disallow
+  if (role && (LOOM_DRIVEN_ROLES as readonly string[]).includes(role)) {
+    out.push(...HUMAN_PROMPT_TOOLS);
   }
   switch (role) {
     case "manager":
@@ -4701,6 +4755,10 @@ export class PtyHost {
     // to close, since the handle now exists on Live. Clear it before the overwrite.
     const outgoing = this.live.get(opts.sessionId);
     if (outgoing?.readyFallbackTimer) clearTimeout(outgoing.readyFallbackTimer);
+    // Card 01160ae3: SAME overwrite-on-resume race as readyFallbackTimer immediately above — the
+    // dialog-stuck timer also re-looks-up its Live by sessionId at fire time, so a stale outgoing handle
+    // left running would check the NEW (resumed) Live instead of a dead one.
+    if (outgoing?.dialogStuckTimer) clearTimeout(outgoing.dialogStuckTimer);
     // Card 019d2e7a — the entry whose viewers `adoptSubscribers` (below, after the map write) moves into
     // the successor. Captured HERE, before the overwrite, and across BOTH live maps.
     const previousLive = this.findAnyLive(opts.sessionId);
@@ -4811,9 +4869,12 @@ export class PtyHost {
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
       sessionStartObserved: false,
+      anyHookObserved: false,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: false,
       bootScan: "",
+      dialogStuckScan: "",
+      dialogStuckTimer: null, // armed just below (role-gated) — see its own call site
       resumeGateHandled: false,
       resumeGateDetected: false,
       resumeGateScan: "",
@@ -4857,6 +4918,13 @@ export class PtyHost {
           setTimeout(() => { if (live.alive && !live.killed) this.ptyWrite(opts.sessionId, live, ESC_KEY, "esc-mcp-dismiss"); }, 300);
         }
       }
+      // Card 01160ae3: feed the boot-dialog-stuck scan for the WHOLE pre-SessionStart window — gated on
+      // `dialogStuckTimer` being armed (i.e. this is an unattended-role session the detector watches at
+      // all), never on `mcpPromptHandled`/`sessionStartObserved` directly, so a DIFFERENT dialog appearing
+      // after the MCP-prompt scan above already fired is still visible when the timer checks it.
+      if (live.dialogStuckTimer) {
+        live.dialogStuckScan = (live.dialogStuckScan + d).slice(-8192);
+      }
       // Resuming a large/old session shows a "resume from summary / as-is" gate BEFORE SessionStart
       // whose DEFAULT (option 1) summarizes — silently compacting away the manager's full context — and
       // which blocks the whole resume (mode-cycles + the queued boot nudge never run; the readiness
@@ -4887,6 +4955,10 @@ export class PtyHost {
       // the overwrite-on-resume case); this handles every OTHER exit path (a deliberate stop, a crash) so
       // a stale timer never outlives the Live it was armed for, even if this sessionId is never respawned.
       if (live.readyFallbackTimer) { clearTimeout(live.readyFallbackTimer); live.readyFallbackTimer = null; }
+      // Card 01160ae3: same belt-and-suspenders clear for the boot-dialog-stuck timer — a dead session
+      // can never be "stuck" (nothing left to notice), and this closes the died-before-SessionStart path
+      // that the SessionStart handler's own clear never reaches.
+      if (live.dialogStuckTimer) { clearTimeout(live.dialogStuckTimer); live.dialogStuckTimer = null; }
       // Card f9b1ea00 — Code Review MAJOR (confirmed, board card f9b1ea00): the SAME belt-and-suspenders
       // clear as `readyFallbackTimer` just above, for `checkPromptMismatchUnresolved`'s own pending timers
       // (see `Live.pendingMismatchUnresolvedTimers`' own doc). `spawn()`'s own clear (mirroring
@@ -4981,6 +5053,37 @@ export class PtyHost {
         this.markReady(opts.sessionId);
       }
     }, READY_FALLBACK_MS);
+
+    // Card 01160ae3: bounded, one-shot detector for an unattended spawn stuck on a blocking CLI dialog
+    // (workspace-trust / MCP-server-enable / external-@import / a future unknown one with the same shape)
+    // BEFORE SessionStart ever fires — DETECT + NOTIFY ONLY, never auto-answered. Role-gated to
+    // LOOM_DRIVEN_ROLES: only those roles have nobody watching a live terminal who'd otherwise notice.
+    // Deliberately keyed on `sessionStartObserved`, NEVER `ready` — see CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS's
+    // own doc for why the missed-hook readiness fallback above must not silence this alarm.
+    if (live.role && (LOOM_DRIVEN_ROLES as readonly string[]).includes(live.role)) {
+      live.dialogStuckTimer = setTimeout(() => {
+        const l = this.live.get(opts.sessionId);
+        if (!l) return;
+        l.dialogStuckTimer = null; // nulled first, mirrors onCodexBootStuck's own one-shot pattern
+        // Card 01160ae3 (Code Review round 2): also bail when the engine is clearly past boot even though
+        // `sessionStartObserved` itself is somehow still false — `firstTurnStarted` (UserPromptSubmit) and
+        // `anyHookObserved` (ANY hook at all) are both strictly later than SessionStart, so either one
+        // being true means SessionStart was merely missed (the READY_FALLBACK case), not that the session
+        // is genuinely stuck on a dialog.
+        if (!l.alive || l.sessionStartObserved || l.firstTurnStarted || l.anyHookObserved) return; // already resolved (or the session died) — nothing to report
+        const signatureName = detectBlockingDialogSignature(collapseBoot(l.dialogStuckScan));
+        // eslint-disable-next-line no-console
+        console.error(`[claude-boot-dialog-stuck] ${opts.sessionId} SessionStart never observed after ${CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS}ms — signature=${signatureName ?? "none recognized"}. Manager intervention may be needed.`);
+        try {
+          this.events.onClaudeBootDialogStuck?.(opts.sessionId, { timeoutMs: CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS, signatureName, role: l.role });
+        } catch (err) {
+          // A failure to emit this signal must never become a SECOND failure mode on top of the one being
+          // reported — swallow, loudly, and move on (mirrors onCodexBootStuck's own guard).
+          // eslint-disable-next-line no-console
+          console.error(`[claude-boot-dialog-stuck] ${opts.sessionId} onClaudeBootDialogStuck handler threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+        }
+      }, CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS);
+    }
   }
 
   /**
@@ -5008,6 +5111,7 @@ export class PtyHost {
       hookToken: "", // a shell has no hook relay; unreachable anyway (deliverHook/verifyHookToken gate on kind==="claude")
       mcpToken: "", // a shell mounts no MCP server; unreachable anyway (verifyMcpToken's own gate never matches "")
       sessionStartObserved: true, // a shell never reaches deliverHook/markReady at all; inert placeholder
+      anyHookObserved: true, // a shell has no hook relay; inert placeholder, same convention as sessionStartObserved
       engineSessionId: null,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
@@ -5045,6 +5149,7 @@ export class PtyHost {
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
+      dialogStuckScan: "", dialogStuckTimer: null, // never armed for a shell — see its own call site (claude path only)
       resumeGateHandled: true, resumeGateDetected: true, resumeGateScan: "",
       isResume: false, modeLogged: true, // a shell has no claude footer/permission mode to read
       resumeModeTarget: null, // a shell never cycles a permission mode
@@ -6221,6 +6326,7 @@ export class PtyHost {
       hookToken: "", // a canned entry has no hook relay; unreachable anyway (deliverHook/verifyHookToken gate on kind==="claude")
       mcpToken: "", // a canned entry mounts no MCP server; unreachable anyway (verifyMcpToken's own gate never matches "")
       sessionStartObserved: true, // a canned entry never reaches deliverHook/markReady at all; inert placeholder
+      anyHookObserved: true, // a canned entry has no hook relay; inert placeholder, same convention as sessionStartObserved
       engineSessionId: null,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
@@ -6256,6 +6362,7 @@ export class PtyHost {
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
+      dialogStuckScan: "", dialogStuckTimer: null, // never armed for a canned entry — see its own call site (claude path only)
       resumeGateHandled: true, resumeGateDetected: true, resumeGateScan: "",
       isResume: false, modeLogged: true,
       resumeModeTarget: null,
@@ -6764,6 +6871,9 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live) return;
     if (live.kind !== "claude") return; // shells/canned entries have no hook relay; the busy/readiness machine is Claude-only
+    // Card 01160ae3: ANY hook delivery proves the engine is past the pre-SessionStart boot window, even
+    // when SessionStart itself was missed — see anyHookObserved's own doc comment on Live.
+    live.anyHookObserved = true;
     // eslint-disable-next-line no-console
     console.log(`[hook] ${sessionId} ${hook.hook_event_name ?? "?"} session_id=${hook.session_id ?? "-"}`);
     switch (hook.hook_event_name) {
@@ -6821,6 +6931,10 @@ export class PtyHost {
         if (live.ready) unlinkSessionSettings(sessionId);
         // SessionStart only fires once boot is past the (now-dismissed) MCP prompt — stop scanning.
         live.mcpPromptHandled = true; live.bootScan = "";
+        // Card 01160ae3: SessionStart genuinely fired — the boot-dialog-stuck window is over. Clear the
+        // timer (idempotent if it already fired and nulled itself) and drop the scan buffer.
+        if (live.dialogStuckTimer) { clearTimeout(live.dialogStuckTimer); live.dialogStuckTimer = null; }
+        live.dialogStuckScan = "";
         // Capture the engine session id — and track a ROTATION. Card 7c1fc117 (confirmed via a real
         // production incident, not just a theory): the engine can fire a SECOND SessionStart, reporting a
         // DIFFERENT session_id, for the SAME live pty process — NO new Loom spawn, no resume, no fork —

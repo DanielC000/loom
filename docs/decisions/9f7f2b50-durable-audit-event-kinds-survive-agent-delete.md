@@ -49,7 +49,10 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
   `fleet_resume_failed`, `manager_crash_resume_failed`, `parked_manager_workers_unresumed`,
   `rate_limit_bailed`, `usage_latch_cleared`, `session_message_gave_up`, `paste_length_loss`,
   `paste_tripwire_give_up`, `prompt_mismatch_unresolved`, `repeated_tool_call`,
-  `codex_submit_unconfirmed`, `codex_boot_stuck`, `codex_unsupported_capability`,
+  `codex_submit_unconfirmed`, `codex_boot_stuck`,
+  `claude_boot_dialog_stuck` (card `01160ae3` — claude's analog of `codex_boot_stuck`: the only durable
+  trace that an unattended spawn hung on a blocking CLI dialog before SessionStart ever fired),
+  `codex_unsupported_capability`,
   `harness_default_skipped` (card `961da6c6`: the only durable trace that a safety-scoped agent was kept on
   claude instead of the fleet's codex default), `companion_zero_reply_detected`.
 - **Owner-interaction records** (ruled durable by the manager, `gen 345`: each is a record of an
