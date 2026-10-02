@@ -33,6 +33,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       row) and READ time (GET .../config/history masks a pre-fix LEGACY row that still holds the secret
 //       verbatim on disk, with a control proving an unrelated key holding the same literal string is left
 //       untouched — so the masking is scoped to sessionEnv, not a blanket string scrub).
+//   (7) Card 5a5d7312: the SAME treatment for `orchestration.alertWebhook.url` — WRITE time
+//       (Db.recordProjectConfigChange never persists the raw rotated-out url) and READ time (a pre-fix
+//       legacy row's raw url is masked over REST too), with a control proving a sibling orchestration
+//       field (gateCommand) holding the same literal string is left untouched.
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -286,6 +290,46 @@ try {
   check("(6b) ★★ a pre-fix legacy row's sessionEnv value is masked at READ time too", legacyEntry.next.sessionEnv.OLD_KEY === "•".repeat(legacySecret.length));
   check("(6b) the masked value is never the raw legacy secret", legacyEntry.next.sessionEnv.OLD_KEY !== legacySecret);
   check("(6b) ★ CONTROL: an unrelated key (docLint) holding the SAME literal string is left untouched — proves the check isn't vacuous", legacyEntry.next.docLint === legacySecret);
+
+  // ===================== (7) card 5a5d7312: orchestration.alertWebhook.url is masked end-to-end over REST, at BOTH boundaries =====================
+  // (7a) a REST-driven write with a real webhook URL must never surface the raw value over GET history.
+  db.insertProject({ id: "pWebhook", name: "Webhook", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  const webhookUrl = "https://hooks.example.com/services/T000/B111/throwaway-not-a-real-token-xyz789";
+  const webhookPatch = await app.inject({
+    method: "PATCH", url: "/api/projects/pWebhook/config",
+    payload: { config: { orchestration: { alertWebhook: { url: webhookUrl, events: ["merge_done"] } } } },
+  });
+  check("(7a) REST PATCH with an alertWebhook url → 200", webhookPatch.statusCode === 200);
+  const webhookHist = (await app.inject({ method: "GET", url: "/api/projects/pWebhook/config/history" })).json().entries;
+  check("(7a) ★★ the RAW url NEVER appears in the history response", JSON.stringify(webhookHist).includes(webhookUrl) === false);
+  check("(7a) the url is masked to <scheme>//***", webhookHist[0].next.orchestration.alertWebhook.url === "https://***");
+  check("(7a) the sibling `events` list round-trips untouched", JSON.stringify(webhookHist[0].next.orchestration.alertWebhook.events) === JSON.stringify(["merge_done"]));
+  // The SAME invariant holds directly in the DB row, proving the redaction is at WRITE time, not just at
+  // the REST boundary — mirrors (6a)'s sessionEnv proof, same already-open `db` handle for the same
+  // Windows-lock-avoidance reason.
+  const webhookRow = db.db.prepare("SELECT next_json FROM project_config_history WHERE project_id = ?").get("pWebhook");
+  check("(7a) ★★ the RAW url never reaches the DB row either", webhookRow.next_json.includes(webhookUrl) === false);
+
+  // (7b) READ-SIDE defense for a LEGACY row written BEFORE this fix — i.e. one that still holds the url
+  // verbatim on disk (inserted directly, bypassing recordProjectConfigChange, to simulate pre-fix data).
+  // NEGATIVE CONTROL: prove the route is actually capable of leaking a raw value by first inserting a row
+  // that mimics a sibling orchestration field (gateCommand, never masked) holding the SAME literal string,
+  // then confirming ONLY the alertWebhook.url occurrence is redacted while gateCommand passes through
+  // untouched — so a passing check here isn't just "nothing untrusted is echoed at all".
+  const legacyWebhookUrl = "https://hooks.example.com/services/T999/B888/pre-fix-legacy-token";
+  db.db.prepare(
+    "INSERT INTO project_config_history (id, project_id, changed_keys, prior_json, next_json, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(
+    randomUUID(), "pWebhook", JSON.stringify(["orchestration"]),
+    JSON.stringify({}),
+    JSON.stringify({ orchestration: { alertWebhook: { url: legacyWebhookUrl, events: [] }, gateCommand: legacyWebhookUrl } }),
+    "human", new Date(Date.now() + 1000).toISOString(),
+  );
+  const legacyWebhookHist = (await app.inject({ method: "GET", url: "/api/projects/pWebhook/config/history" })).json().entries;
+  const legacyWebhookEntry = legacyWebhookHist.find((e) => e.next.orchestration?.gateCommand === legacyWebhookUrl);
+  check("(7b) ★★ a pre-fix legacy row's alertWebhook.url is masked at READ time too", legacyWebhookEntry.next.orchestration.alertWebhook.url === "https://***");
+  check("(7b) the masked value is never the raw legacy url", legacyWebhookEntry.next.orchestration.alertWebhook.url !== legacyWebhookUrl);
+  check("(7b) ★ CONTROL: a sibling orchestration field (gateCommand) holding the SAME literal string is left untouched — proves the check isn't vacuous", legacyWebhookEntry.next.orchestration.gateCommand === legacyWebhookUrl);
 } finally {
   try { if (app) await app.close(); } catch { /* ignore */ }
   db.close();
@@ -294,6 +338,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — project_config_history (card a0cafef2): the DB-level ring buffer records changed-keys/prior/next/actor/timestamp per write, a no-op records nothing, and eviction is scoped PER PROJECT (a busy project's churn never evicts a quiet sibling's history, unlike platform_config's single shared ring); setProjectConfigSafe threads a TRUTHFUL, per-surface-distinguishable actor across all four real writers — the human REST PATCH (\"human\"), the Platform Lead's project_configure (\"platform:<sessionId>\"), the Setup Assistant's project_configure AND project_update (\"setup:<sessionId>\"), and the manager's project_update (\"manager:<sessionId>\") — never hardcoding \"human\" for an agent write; a rejected/no-op write on any surface records nothing; GET /api/projects/:id/config/history (human-only REST) reflects the recorded entries newest-first, 404s on an unknown project, and empty-array's a fresh one; history is recorded correctly on BOTH of setProjectConfigSafe's paths — the blind path and the column re-key path; and (card b2f9ce3a) `sessionEnv` values are masked at BOTH the WRITE boundary (never persisted verbatim in the DB row, so a rotated-out secret is never archived) and the READ boundary (a pre-fix legacy row still holding a verbatim secret is masked over REST too), with a control proving an unrelated key holding the identical literal string is left untouched."
+  ? "\n✅ ALL PASS — project_config_history (card a0cafef2): the DB-level ring buffer records changed-keys/prior/next/actor/timestamp per write, a no-op records nothing, and eviction is scoped PER PROJECT (a busy project's churn never evicts a quiet sibling's history, unlike platform_config's single shared ring); setProjectConfigSafe threads a TRUTHFUL, per-surface-distinguishable actor across all four real writers — the human REST PATCH (\"human\"), the Platform Lead's project_configure (\"platform:<sessionId>\"), the Setup Assistant's project_configure AND project_update (\"setup:<sessionId>\"), and the manager's project_update (\"manager:<sessionId>\") — never hardcoding \"human\" for an agent write; a rejected/no-op write on any surface records nothing; GET /api/projects/:id/config/history (human-only REST) reflects the recorded entries newest-first, 404s on an unknown project, and empty-array's a fresh one; history is recorded correctly on BOTH of setProjectConfigSafe's paths — the blind path and the column re-key path; and (card b2f9ce3a) `sessionEnv` values are masked at BOTH the WRITE boundary (never persisted verbatim in the DB row, so a rotated-out secret is never archived) and the READ boundary (a pre-fix legacy row still holding a verbatim secret is masked over REST too), with a control proving an unrelated key holding the identical literal string is left untouched; and (card 5a5d7312) `orchestration.alertWebhook.url` gets the SAME treatment at both boundaries, with a control proving a sibling orchestration field (gateCommand) holding the identical literal string is left untouched."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

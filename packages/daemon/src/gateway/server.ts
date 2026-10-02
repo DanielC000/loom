@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
-import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
+import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { GatewayTokenSocketRegistry } from "./token-sockets.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
@@ -380,6 +380,29 @@ export function redactSessionEnvForRead(project: Project): Project {
  */
 export function redactSessionEnvHistoryEntry(entry: ProjectConfigHistoryEntry): ProjectConfigHistoryEntry {
   return { ...entry, prior: redactSessionEnvInConfig(entry.prior), next: redactSessionEnvInConfig(entry.next) };
+}
+
+/**
+ * Card 5a5d7312: mask `orchestration.alertWebhook.url` inside a project-config-history entry's
+ * `prior`/`next` blobs before it leaves the daemon over `GET /api/projects/:id/config/history`. Unlike
+ * `gateCommand` (host-exec, not a leakable bearer value the way a URL's own text is), a rotated-out
+ * webhook URL IS a bearer credential — the same reasoning `sessionEnv` already gets above, hence the
+ * same read-side-defense shape: `Db.recordProjectConfigChange` masks at write time (card 5a5d7312), this
+ * is the backstop for legacy rows written before that fix. Reuses `redactAlertWebhookInConfig`
+ * (`@loom/shared`, card eccd874c) on each leg; masking an already-masked value is idempotent, so this is
+ * a safe no-op on a post-fix row, not a double-redaction.
+ *
+ * Deliberately NOT applied to `redactSessionEnvForRead`'s live `/api/projects` route — the human
+ * Settings UI needs the real current `alertWebhook.url` to let a human edit it; this history view is a
+ * different surface with no such need.
+ * @decision eccd874c — why the live route stays unmasked; do not extend this function's reasoning there.
+ */
+export function redactAlertWebhookHistoryEntry(entry: ProjectConfigHistoryEntry): ProjectConfigHistoryEntry {
+  return {
+    ...entry,
+    prior: redactAlertWebhookInConfig(entry.prior as ProjectConfigOverride) as Record<string, unknown>,
+    next: redactAlertWebhookInConfig(entry.next as ProjectConfigOverride) as Record<string, unknown>,
+  };
 }
 
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
@@ -4832,13 +4855,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // config can carry gateCommand (host-RCE), alertWebhook (data-exfil), and sessionEnv (arbitrary
   // delivered secrets, card e668518f) — this history exposes PRIOR values of those same fields, so it
   // inherits the config-PATCH route's own trust posture, not the read-only project-data routes' looser
-  // one. `sessionEnv` values are additionally MASKED (card b2f9ce3a, redactSessionEnvHistoryEntry) —
-  // unlike gateCommand/alertWebhook, rotating a leaked sessionEnv secret through the supported Settings
-  // flow is exactly the action that would otherwise archive the old value here forever.
+  // one. `sessionEnv` values are additionally MASKED (card b2f9ce3a, redactSessionEnvHistoryEntry), and
+  // likewise `alertWebhook.url` (card 5a5d7312, redactAlertWebhookHistoryEntry) — unlike gateCommand
+  // (host-exec, not a leakable bearer value), rotating a leaked sessionEnv secret OR webhook URL through
+  // the supported Settings flow is exactly the action that would otherwise archive the old value here
+  // forever.
   app.get("/api/projects/:id/config/history", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
-    return { entries: deps.db.listProjectConfigHistory(id).map(redactSessionEnvHistoryEntry) };
+    return { entries: deps.db.listProjectConfigHistory(id).map((e) => redactAlertWebhookHistoryEntry(redactSessionEnvHistoryEntry(e))) };
   });
 
   // Atomic safe board-column layout change (task B) — the editor's mutation (card C), NOT the blind

@@ -86,7 +86,7 @@ import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { edgesAfterPatch, type EdgeBits, type EdgePatch } from "./tasks/edge-state.js";
 import type { MergeGateOutcomeEntry } from "@loom/shared";
 import { emptyMergeGateState, type MergeGateState } from "./orchestration/merge-gate-interval.js";
-import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord } from "@loom/shared";
+import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord, redactAlertWebhookInConfig } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
 import { findControlCharViolation, stripEscapeAndControlChars, type ControlByteClass } from "./security/control-chars.js";
@@ -2526,6 +2526,7 @@ export class Db {
     this.migrateConnections();
     this.migrateProjectMemory();
     this.migratePurgeLegacySessionEnvHistory();
+    this.migratePurgeLegacyAlertWebhookHistory();
   }
 
   /**
@@ -3314,6 +3315,53 @@ export class Db {
     run(rows);
   }
   /**
+   * Card 5a5d7312: mask any cleartext (or pre-round-2 host-leaking) `orchestration.alertWebhook.url`
+   * still sitting in `project_config_history`'s `prior_json`/`next_json` — rows written before
+   * `recordProjectConfigChange` masked this leaf at write time. Reuses `redactAlertWebhookInConfig`
+   * (`@loom/shared`), the SAME primitive the write path now applies, so a legacy row converges onto
+   * exactly the current masked shape rather than a third state. Idempotent (masking an already-masked
+   * url reproduces it unchanged — see `maskAlertWebhookUrl`'s own doc), so this scan is safe to re-run on
+   * every boot. Mirrors `migratePurgeLegacySessionEnvHistory` immediately above; only the
+   * `orchestration.alertWebhook.url` leaf is rewritten — every sibling orchestration field (gateCommand,
+   * events, timeouts, …) and any other changed key in the same row survives untouched. Never drops a row.
+   */
+  private migratePurgeLegacyAlertWebhookHistory(): void {
+    const rows = this.db.prepare(
+      "SELECT id, prior_json, next_json FROM project_config_history WHERE changed_keys LIKE '%orchestration%'",
+    ).all() as Row[];
+    if (rows.length === 0) return;
+    const update = this.db.prepare("UPDATE project_config_history SET prior_json = ?, next_json = ? WHERE id = ?");
+    const run = this.db.transaction((candidates: Row[]) => {
+      for (const r of candidates) {
+        let prior: Record<string, unknown>;
+        let next: Record<string, unknown>;
+        try {
+          prior = JSON.parse(r.prior_json as string) as Record<string, unknown>;
+          next = JSON.parse(r.next_json as string) as Record<string, unknown>;
+        } catch {
+          continue; // malformed row — leave untouched rather than risk destroying data we can't parse
+        }
+        let changed = false;
+        if (prior.orchestration && typeof prior.orchestration === "object") {
+          const masked = redactAlertWebhookInConfig({ orchestration: prior.orchestration as ProjectConfigOverride["orchestration"] }).orchestration;
+          if (JSON.stringify(masked) !== JSON.stringify(prior.orchestration)) {
+            prior = { ...prior, orchestration: masked };
+            changed = true;
+          }
+        }
+        if (next.orchestration && typeof next.orchestration === "object") {
+          const masked = redactAlertWebhookInConfig({ orchestration: next.orchestration as ProjectConfigOverride["orchestration"] }).orchestration;
+          if (JSON.stringify(masked) !== JSON.stringify(next.orchestration)) {
+            next = { ...next, orchestration: masked };
+            changed = true;
+          }
+        }
+        if (changed) update.run(JSON.stringify(prior), JSON.stringify(next), r.id);
+      }
+    });
+    run(rows);
+  }
+  /**
    * Record ONE project-config write into its bounded, PER-PROJECT change history (card a0cafef2, sibling
    * of `recordPlatformConfigChange`) — the top-level keys that actually differ between `before` and `after`
    * (JSON-compared, so a same-value resubmit of an untouched sibling never counts as a change), each
@@ -3327,6 +3375,8 @@ export class Db {
    * attribute an agent's write. See `ProjectConfigHistoryEntry`'s doc for the actor-string convention.
    * Card b2f9ce3a: `sessionEnv` is MASKED (`maskSessionEnvRecord`) before reaching this row — rotating a
    * secret must never archive the old value in cleartext.
+   * Card 5a5d7312: the same treatment for `orchestration.alertWebhook.url` (via `redactAlertWebhookInConfig`)
+   * — a rotated-out webhook URL is a bearer credential too, and must not survive in this history either.
    * @decision e5c82138 — evaluated for unification with `redactSessionEnvInConfig` (@loom/shared) and
    * DELIBERATELY EXCLUDED: this builds a fresh diff-accumulator, not a projection. Left as-is.
    */
@@ -3344,6 +3394,17 @@ export class Db {
         const aMasked = maskSessionEnvRecord(a[key] as Record<string, unknown> | undefined);
         if (bMasked !== undefined) prior[key] = bMasked;
         if (aMasked !== undefined) next[key] = aMasked;
+        continue;
+      }
+      // Card 5a5d7312: `orchestration.alertWebhook.url` is a bearer credential nested inside the
+      // `orchestration` key — mask ONLY that leaf (via the shared `redactAlertWebhookInConfig`, the SAME
+      // primitive `projectFields`/`project_configure` use) while every sibling orchestration field
+      // (gateCommand, events, timeouts, …) survives untouched, same shape as the sessionEnv branch above.
+      if (key === "orchestration") {
+        const bOrch = b[key] as ProjectConfigOverride["orchestration"] | undefined;
+        const aOrch = a[key] as ProjectConfigOverride["orchestration"] | undefined;
+        if (bOrch !== undefined) prior[key] = redactAlertWebhookInConfig({ orchestration: bOrch }).orchestration;
+        if (aOrch !== undefined) next[key] = redactAlertWebhookInConfig({ orchestration: aOrch }).orchestration;
         continue;
       }
       if (b[key] !== undefined) prior[key] = b[key];
