@@ -151,6 +151,53 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { register } from "node:module";
+
+// Card 944eeaed: a test-only ESM loader hook (Node's `node:module` `register()`, stable since Node 20.6 —
+// a genuine module-customization-hooks seam, not a mock) that intercepts `node:child_process` ONLY when
+// it's imported by the real compiled `dist/deploy-staleness.js` (never by this test file's OWN `execSync`
+// import above, nor by anything else in this process) and swaps in a thin passthrough wrapper around the
+// REAL `execFileSync`. Every call that isn't deliberately armed via `globalThis.__dsGitFault` falls
+// straight through to the real `execFileSync`, so every scenario in this file that doesn't explicitly arm
+// the fault is byte-for-byte unaffected by this hook's mere presence. Used below at (23m-fault-proof) to
+// prove — by actually injecting a transient `ETIMEDOUT`-shaped failure into ONE of
+// `computeAncestorBehaviouralMatch`'s own per-file `git show` calls — that this failure mode is swallowed
+// to `builtContentMatchesHead:null` while `available` stays `true`, a shape the top-level
+// `isTransientGitTimeout` retry below structurally cannot see (it only ever inspects `available`).
+// A bare PATH shim (prepending a directory holding a `git.cmd`/`git.bat` to PATH) does NOT work for this:
+// Node's own `execFileSync`/`spawnSync` refuses to resolve a bare command name to a shell file without
+// `shell:true` (the CVE-2024-27980 fix) — confirmed empirically while building this fixture, the same
+// conclusion 52ce4b2d separately reached for simple-git's own spawn path.
+const CP_FAULT_HOOK_SOURCE = `
+export async function resolve(specifier, context, nextResolve) {
+  if (specifier === "node:child_process" && /deploy-staleness\\.js$/.test(context.parentURL ?? "")) {
+    return { url: "virtual:deploy-staleness-cp-fault", shortCircuit: true };
+  }
+  return nextResolve(specifier, context);
+}
+export async function load(url, context, nextLoad) {
+  if (url === "virtual:deploy-staleness-cp-fault") {
+    const src = \`
+      import { execFileSync as real } from "node:child_process";
+      export const execFileSync = (file, args, opts) => {
+        const fault = globalThis.__dsGitFault;
+        if (fault && fault.armed && file === "git" && Array.isArray(args) && args.includes("show") && fault.fired < fault.maxFires) {
+          fault.fired++;
+          const sab = new Int32Array(new SharedArrayBuffer(4));
+          Atomics.wait(sab, 0, 0, fault.delayMs);
+          const err = new Error("spawnSync git ETIMEDOUT");
+          err.code = "ETIMEDOUT";
+          throw err;
+        }
+        return real(file, args, opts);
+      };
+    \`;
+    return { format: "module", source: src, shortCircuit: true };
+  }
+  return nextLoad(url, context);
+}
+`;
+register("data:text/javascript," + encodeURIComponent(CP_FAULT_HOOK_SOURCE), import.meta.url);
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -205,6 +252,30 @@ function computeDeployStalenessRaw(options) {
     const result = computeDeployStalenessRawUnwrapped(options);
     if (!isTransientGitTimeout(result) || attempt >= GIT_TIMEOUT_RETRY_MAX_ATTEMPTS) return result;
     console.log(`RETRY (${attempt}/${GIT_TIMEOUT_RETRY_MAX_ATTEMPTS}) computeDeployStaleness hit a transient git ETIMEDOUT under host load (reason: ${JSON.stringify(result.reason)}) — retrying`);
+    attempt++;
+  }
+}
+// Card 944eeaed: a THIRD git-timeout exposure, after 74ac7d4e's top-level `isTransientGitTimeout` retry
+// above and (23o)'s soundness-walk fix below. `computeAncestorBehaviouralMatch`'s own per-file `git show`
+// calls (up to `MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES` * 2 of them, plus the initial `diff --name-status`)
+// are EACH independently bounded by production's `GIT_TIMEOUT_MS` — any ONE of them hitting a transient
+// scheduling delay under host load throws, and `computeAncestorBehaviouralMatch`'s own try/catch swallows
+// that to a bare `null` return (deploy-staleness.ts). That surfaces as `builtContentMatchesHead:null`/
+// `stale:true` with `available` staying `true` throughout — a shape `isTransientGitTimeout` above
+// structurally cannot see (it only ever inspects `available`). Proven via fault injection at
+// (23m-fault-proof) below. Reuses the SAME `GIT_TIMEOUT_RETRY_MAX_ATTEMPTS`/`GIT_TIMEOUT_EVIDENCE_MS`
+// evidence rule (23o) already established, never a second copy: a SLOW (>= `GIT_TIMEOUT_EVIDENCE_MS`),
+// unexpectedly-non-true result is retried (logged, bounded); a FAST unexpected result is a real regression
+// and must fail loud on the very first attempt, never be silently retried away.
+function computeAtCapWithRetry(options, label) {
+  let result;
+  let attempt = 1;
+  for (;;) {
+    const t0 = performance.now();
+    result = computeDeployStalenessRaw(options);
+    const elapsedMs = performance.now() - t0;
+    if (result.builtContentMatchesHead === true || elapsedMs < GIT_TIMEOUT_EVIDENCE_MS || attempt >= GIT_TIMEOUT_RETRY_MAX_ATTEMPTS) return result;
+    console.log(`RETRY (${attempt}/${GIT_TIMEOUT_RETRY_MAX_ATTEMPTS}) (${label}): builtContentMatchesHead came back ${result.builtContentMatchesHead} and the call took ${Math.round(elapsedMs)}ms (>= ${GIT_TIMEOUT_EVIDENCE_MS}ms) — consistent with one of the per-file \`git show\` calls hitting production's GIT_TIMEOUT_MS=1000ms bound under host load, not a real regression; retrying`);
     attempt++;
   }
 }
@@ -1166,7 +1237,27 @@ try {
   };
 
   const atCap = makeCapFixtureRepo("at", MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES);
-  const r23m = computeDeployStalenessRaw({ distEntry: atCap.capDistEntry, repoRoot: atCap.capRepo, processBuiltSha: atCap.capBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+
+  // ---- (23m-fault-proof) Card 944eeaed: prove the hazard is real, and prove the retry fix rescues it, by
+  // actually injecting a transient ETIMEDOUT-shaped failure into the FIRST per-file `git show` call
+  // computeAncestorBehaviouralMatch makes against this exact at-cap fixture — via the CP_FAULT_HOOK_SOURCE
+  // loader hook registered at the top of this file (a real Node module-customization-hooks seam, not a
+  // mock: everything that isn't this one deliberately-armed call falls straight through to the real git).
+  const capOptions = { distEntry: atCap.capDistEntry, repoRoot: atCap.capRepo, processBuiltSha: atCap.capBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START };
+  globalThis.__dsGitFault = { armed: true, fired: 0, maxFires: 1, delayMs: GIT_TIMEOUT_EVIDENCE_MS + 50 };
+  const rFaultRaw = computeDeployStalenessRaw(capOptions);
+  check("(23m-fault-proof) THE HAZARD: a single transient git-show ETIMEDOUT inside computeAncestorBehaviouralMatch is swallowed to builtContentMatchesHead:null/stale:true even though every file is genuinely comment-only" + reasonSuffix(rFaultRaw),
+    rFaultRaw.builtContentMatchesHead === null && rFaultRaw.stale === true);
+  check("(23m-fault-proof) THE GAP: available stays true throughout, so the existing top-level isTransientGitTimeout retry structurally cannot see this failure at all",
+    rFaultRaw.available === true);
+
+  globalThis.__dsGitFault = { armed: true, fired: 0, maxFires: 1, delayMs: GIT_TIMEOUT_EVIDENCE_MS + 50 };
+  const rFaultRetried = computeAtCapWithRetry(capOptions, "23m-fault-proof-retry");
+  check("(23m-fault-proof) THE FIX: the SAME injected fault recovers to builtContentMatchesHead:true/stale:false once computeAtCapWithRetry's elapsed-time-evidenced retry re-attempts against the now-unarmed fault",
+    rFaultRetried.builtContentMatchesHead === true && rFaultRetried.stale === false);
+  globalThis.__dsGitFault = null;
+
+  const r23m = computeAtCapWithRetry(capOptions, "23m");
   check(`(23m-setup) exactly MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES (${MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES}) files changed, all comment-only, and the date-based clock reads stale:true` + reasonSuffix(r23m),
     r23m.commitsBehind === 1);
   check(`(23m) AT THE CAP (${MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES} files): the check still runs and resolves true — the boundary is inclusive, not off-by-one`,
