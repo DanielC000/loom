@@ -47,6 +47,43 @@ import { parseCommand, commandHandler } from "./commands.js";
 import { vendorProcessSlashCommand } from "../pty/claude-doctrine.js";
 import { IN_APP_CHANNEL } from "./in-app.js";
 import { companionRouteBlockReason, type CompanionRouteBlockReason } from "./reconcile.js";
+import { DOWNLOAD_TIMEOUT_MS } from "./telegram.js";
+import { STT_ACQUIRE_MAX_WAIT_MS, STT_SUBPROCESS_TIMEOUT_MS } from "./stt.js";
+
+// @decision 986bdddd — never widen the inbound-serialization key below (channel, chatId) to anything
+// coarser (e.g. per-session) — a different route must always run fully concurrently.
+//
+/** Margin (ms) added atop the worst-case legitimate latency chain when deriving INBOUND_QUEUE_MAX_WAIT_MS
+ *  below — absorbs scheduling/GC jitter so the bound stays comfortably clear of the sum it derives from. */
+const INBOUND_QUEUE_MARGIN_MS = 30_000;
+
+// @decision 986bdddd — keep this bound DERIVED from DOWNLOAD_TIMEOUT_MS + STT_ACQUIRE_MAX_WAIT_MS +
+// STT_SUBPROCESS_TIMEOUT_MS + margin, never a hand-picked literal — see the decision record's round-2
+// addition for the incident a hand-picked value caused (it silently omitted the STT acquire wait).
+//
+/** Bound (ms) on how long a queued inbound may wait for a SLOWER predecessor on the SAME (channel, chatId)
+ *  route before proceeding anyway (companion-inbound serialization, card 986bdddd). Past this bound,
+ *  ordering across that pair is best-effort only — see the decision record for the full rationale. */
+export const INBOUND_QUEUE_MAX_WAIT_MS =
+  DOWNLOAD_TIMEOUT_MS + STT_ACQUIRE_MAX_WAIT_MS + STT_SUBPROCESS_TIMEOUT_MS + INBOUND_QUEUE_MARGIN_MS;
+
+/**
+ * Like `Promise.race([prior, delay(ms)])`, but clears the timeout's own timer once the race settles either
+ * way — `Promise.race` has no way to cancel the loser, so the unmodified version left a live, un-cleared
+ * `ms`-long timer running for EVERY inbound message, even the common case where `prior` resolves almost
+ * immediately (card 986bdddd round 2, Minor 2). Harmless today (shutdown is a bare `process.exit`, and the
+ * real daemon process always holds other live handles open regardless), but untidy — clearing it is one
+ * line. Deliberately NOT `unref`'d for the same reason the old `delay()` helper wasn't: in a narrow
+ * standalone script (a hermetic test with nothing else scheduled) an unref'd timer can be dropped by Node's
+ * event loop before it ever fires.
+ */
+function raceWithTimeout(prior: Promise<unknown>, ms: number): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return Promise.race([prior, timeout]).finally(() => clearTimeout(timer));
+}
 
 /**
  * Split `text` into chunks no longer than `max` chars, preferring a newline then a whitespace boundary so
@@ -110,6 +147,15 @@ export class ChatGateway {
    *  warning itself) — this should never fire under correct operation, so dedup is a courtesy against log
    *  spam, not a correctness requirement the way the other two warned-sets are. */
   private readonly warnedForeignSessionRoutes = new Set<string>();
+
+  /**
+   * Per-ROUTE (`channel\x00chatId` — NOT per-binding: the route is known before a binding is even
+   * resolved, e.g. during dm-bind pairing) inbound serialization chain (card 986bdddd). Holds the latest
+   * queued `processInboundOnce` promise for that route so a slower predecessor (e.g. a voice note's
+   * download+transcribe) can't let a faster successor's `submitTurn` call run first and invert real arrival
+   * order into `pty.enqueueStdin`'s FIFO. See `handleInbound`'s own doc for the full mechanism.
+   */
+  private readonly inboundChains = new Map<string, Promise<unknown>>();
 
   /**
    * @param submitTurn  the injected pty turn-submit primitive (kept db-free — see SubmitTurn).
@@ -240,6 +286,11 @@ export class ChatGateway {
      *  db.recordCompanionUnboundRouteRefused(sid, channel, chatId)` (factory.ts). Never allowed to throw
      *  out of the outbound path — the call site wraps it. */
     private readonly onUnboundRouteRefused: ((sessionId: string, channel: string, chatId: string) => void) | undefined = undefined,
+    /** Card 986bdddd: bound (ms) a queued inbound may wait for a slower predecessor on the SAME
+     *  (channel, chatId) route before proceeding anyway — see `INBOUND_QUEUE_MAX_WAIT_MS`'s own doc for
+     *  the rationale. Defaults to that constant; test-overridable so a serialization test can prove the
+     *  bound actually fires without a real 150s wait. */
+    private readonly inboundQueueMaxWaitMs: number = INBOUND_QUEUE_MAX_WAIT_MS,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -320,12 +371,47 @@ export class ChatGateway {
   }
 
   /**
-   * INBOUND. Allowlist by (channel, chatId) → the bound session, then submit the body as a TURN via the
-   * EXISTING pty primitive. A foreign chat id (no binding) is REJECTED and never submitted (load-bearing
-   * allowlist — untrusted input). A DEAD bound session gets an error ACK back to the chat instead of
-   * vanishing silently. Every rejection / dead-session path is debug-logged.
+   * PUBLIC inbound entry point. Serializes processing per (channel, chatId) route before delegating to
+   * `processInboundOnce` below (card 986bdddd — see its decision record for the race this closes and why
+   * the wait is bounded, not unbounded). NO `await` in this method's own body on purpose: the key lookup +
+   * chain-extension write must happen synchronously, in one tick, or a second call for the SAME route
+   * arriving before this one yields would read the same `prior` and race it anyway (the standard
+   * promise-mutex shape). This method is NOT `async` for exactly that reason (an `async` function body
+   * yields a microtask at its first `await`/`return`), so the try/catch below is what keeps its documented
+   * contract — "always returns a Promise, never throws synchronously" — true for every caller (card
+   * 986bdddd round 2, Nitpick 4): a synchronous throw inside this body would otherwise propagate straight
+   * to the caller instead of rejecting the returned promise, surprising a fire-and-forget adapter call site
+   * that only ever expects to `.catch()` a Promise.
    */
-  async handleInbound(msg: InboundMessage): Promise<InboundResult> {
+  handleInbound(msg: InboundMessage): Promise<InboundResult> {
+    try {
+      const routeKey = `${msg.channel}\x00${msg.chatId}`;
+      const prior = this.inboundChains.get(routeKey) ?? Promise.resolve();
+      const waited = raceWithTimeout(prior, this.inboundQueueMaxWaitMs);
+      const task = waited.then(() => this.processInboundOnce(msg));
+      const settled = task.then(
+        () => undefined,
+        () => undefined,
+      );
+      this.inboundChains.set(routeKey, settled);
+      settled.finally(() => {
+        if (this.inboundChains.get(routeKey) === settled) this.inboundChains.delete(routeKey);
+      });
+      return task;
+    } catch (err) {
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  }
+
+  /**
+   * INBOUND (the real logic). Allowlist by (channel, chatId) → the bound session, then submit the body as a
+   * TURN via the EXISTING pty primitive. A foreign chat id (no binding) is REJECTED and never submitted
+   * (load-bearing allowlist — untrusted input). A DEAD bound session gets an error ACK back to the chat
+   * instead of vanishing silently. Every rejection / dead-session path is debug-logged. Called ONLY through
+   * the public `handleInbound` above, which serializes per-route calls into this method — never call this
+   * directly from outside the class.
+   */
+  private async processInboundOnce(msg: InboundMessage): Promise<InboundResult> {
     // An audio-only inbound (Companion Voice epic, VOICE-P2) carries an empty body — it must NOT be
     // dropped here before it reaches the authz gates below (the load-bearing STT-behind-authz ordering).
     const audioAttachment = msg.attachments?.find((a) => a.type === "audio");

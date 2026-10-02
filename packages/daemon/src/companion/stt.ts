@@ -157,10 +157,100 @@ async function runTranscribeScript(pythonBin: string, filePath: string, langHint
 
 /** Bounded run of `transcribe.py --warm` — instantiates the model with no audio needed, so the one-time HF
  *  model download happens here (boot pre-warm) rather than inside a real voice note's tighter bound.
- *  Never throws; resolves whether the warm-up succeeded (for logging only — readiness doesn't depend on it). */
+ *  Never throws; resolves whether the warm-up succeeded (for logging only — readiness doesn't depend on it).
+ *  Runs OUTSIDE `acquireSttSlot`/`releaseSttSlot` (card 986bdddd round 2) — it's a boot-time, pre-traffic
+ *  call with no concurrent companion transcription to contend with, so it deliberately doesn't take the
+ *  global decode slot. See the decision record's "Do not" for the one way that could stop being true. */
 async function warmSttModel(pythonBin: string): Promise<boolean> {
   const { ok } = await runPythonHelper(pythonBin, ["--warm"], STT_MODEL_WARM_TIMEOUT_MS);
   return ok;
+}
+
+// @decision 986bdddd — never raise this above 1 without first confirming the host can run that many
+// faster-whisper decodes concurrently without starving every companion.
+
+/** Global concurrency cap on faster-whisper transcription (companion-inbound serialization, card 986bdddd)
+ *  — one `transcribe()` call across EVERY companion on the daemon at a time (the shared venv's decode is
+ *  CPU-heavy; running more than one just slows every concurrent decode down, so this serializes rather than
+ *  parallelizes). Bounds host resource exhaustion that per-route inbound serialization (chat-gateway.ts)
+ *  does NOT: that fix only serializes messages WITHIN one chat, so N different chats each sending a voice
+ *  note at once would otherwise still spawn N python subprocesses with no cap. */
+const STT_MAX_CONCURRENT_TRANSCRIPTIONS = 1;
+
+/** Bound (ms) on how long a `transcribe()` call may wait to ACQUIRE the slot above. Past this bound, the
+ *  waiting call gives up and resolves `null` — the SAME "no transcript" result a real STT failure already
+ *  produces, so a long queue degrades through the existing transcribe-unavailable ack instead of hanging a
+ *  voice note indefinitely behind other voice notes. Exported (card 986bdddd round 2, Major) so
+ *  chat-gateway.ts's INBOUND_QUEUE_MAX_WAIT_MS can be DERIVED from this value rather than an independently
+ *  hand-picked literal that can silently drift below the real worst case. */
+export const STT_ACQUIRE_MAX_WAIT_MS = 150_000;
+
+let sttActiveCount = 0;
+const sttAcquireWaiters: Array<() => void> = [];
+
+/** TEST SEAM: override the cap/bound above for a test that wants to prove contention/timeout behavior
+ *  without either spawning real subprocesses or waiting out a real 150s bound. */
+let sttMaxConcurrent = STT_MAX_CONCURRENT_TRANSCRIPTIONS;
+let sttAcquireMaxWaitMs = STT_ACQUIRE_MAX_WAIT_MS;
+export function __setSttConcurrencyForTest(opts: { maxConcurrent?: number; acquireMaxWaitMs?: number } = {}): void {
+  sttMaxConcurrent = opts.maxConcurrent ?? STT_MAX_CONCURRENT_TRANSCRIPTIONS;
+  sttAcquireMaxWaitMs = opts.acquireMaxWaitMs ?? STT_ACQUIRE_MAX_WAIT_MS;
+}
+/** TEST SEAM: reset the concurrency gate itself between test cases in the same process (module state would
+ *  otherwise leak a held slot or a stale waiter across cases in one test file). */
+export function __resetSttConcurrencyGateForTest(): void {
+  sttActiveCount = 0;
+  sttAcquireWaiters.length = 0;
+}
+
+/** Acquire one of `sttMaxConcurrent` global transcription slots, bounded by `sttAcquireMaxWaitMs`. Resolves
+ *  `true` once a slot is held (caller MUST `releaseSttSlot()` when done, success or failure), or `false` if
+ *  the bound elapsed first (no slot held — nothing to release). Never throws. Exported (alongside
+ *  `releaseSttSlot`) so a test can exercise the gate's contention/timeout/FIFO-wake behavior directly,
+ *  without spawning a real transcription subprocess. */
+export function acquireSttSlot(): Promise<boolean> {
+  if (sttActiveCount < sttMaxConcurrent) {
+    sttActiveCount++;
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const onReady = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sttActiveCount++;
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const idx = sttAcquireWaiters.indexOf(onReady);
+      if (idx >= 0) sttAcquireWaiters.splice(idx, 1);
+      resolve(false);
+    }, sttAcquireMaxWaitMs);
+    // Deliberately NOT unref'd — see chat-gateway.ts's `delay()` doc for why: in the real daemon process
+    // this timer is never the only live handle, and unref'ing it only risks a standalone test script
+    // dropping the timer before it fires.
+    sttAcquireWaiters.push(onReady);
+  });
+}
+
+/** Release a slot held via `acquireSttSlot()`, waking the longest-waiting queued acquirer, if any. */
+export function releaseSttSlot(): void {
+  sttActiveCount--;
+  const next = sttAcquireWaiters.shift();
+  if (next) next();
+}
+
+/** TEST SEAM: swap the "actually run the decode" step `createFasterWhisperTranscriber().transcribe()` calls
+ *  AFTER acquiring the global slot — lets a test exercise the real acquire/release-around-transcribe wiring
+ *  (including a throwing or null-resolving run still releasing the slot via the `finally` below) without a
+ *  real python subprocess. Mirrors `__setSttProvisionerForTest`'s shape. */
+type TranscribeRunner = (pythonBin: string, filePath: string, langHint: string | null) => Promise<string | null>;
+let transcribeRunner: TranscribeRunner = runTranscribeScript;
+export function __setTranscribeRunnerForTest(fn?: TranscribeRunner): void {
+  transcribeRunner = fn ?? runTranscribeScript;
 }
 
 /**
@@ -182,7 +272,15 @@ export function createFasterWhisperTranscriber(pythonInterpreterPath?: string, e
       if (!enabled) return null;
       const bin = resolveSttPython(pythonInterpreterPath);
       if (!bin) return null;
-      return runTranscribeScript(bin, filePath, langHint);
+      // Global concurrency cap (card 986bdddd): wait for a slot, bounded — a timed-out wait degrades to the
+      // SAME "no transcript" result a real STT failure already produces (never a hang).
+      const acquired = await acquireSttSlot();
+      if (!acquired) return null;
+      try {
+        return await transcribeRunner(bin, filePath, langHint);
+      } finally {
+        releaseSttSlot();
+      }
     },
   };
 }

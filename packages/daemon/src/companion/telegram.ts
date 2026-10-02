@@ -29,9 +29,12 @@ const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
 /**
  * The OVERALL deadline (ms) for a voice-note download — covers connect/TTFB AND the full body stream (one
  * AbortController threaded through both the `fetch` call and the piped body read below), so a mid-stream
- * stall is bounded exactly like a slow/hanging connect — neither can wedge the daemon.
+ * stall is bounded exactly like a slow/hanging connect — neither can wedge the daemon. Exported (card
+ * 986bdddd round 2, Major) so chat-gateway.ts can DERIVE its own inbound-queue wait bound from this plus
+ * the STT constants, rather than carrying an independently hand-picked literal that can silently drift
+ * below the real worst case.
  */
-const DOWNLOAD_TIMEOUT_MS = 60_000;
+export const DOWNLOAD_TIMEOUT_MS = 60_000;
 
 export const TELEGRAM_CHANNEL = "telegram";
 /** Telegram's hard per-message character limit — the gateway chunks outbound replies to this. */
