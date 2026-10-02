@@ -47,6 +47,8 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
   only record of an abnormal outcome): `session_died`, `session_recovery_abandoned`,
   `worker_report_undelivered`, `worker_exited_without_report`, `manager_exited_with_live_workers`,
   `fleet_resume_failed`, `manager_crash_resume_failed`, `parked_manager_workers_unresumed`,
+  `fleet_resume_entry_failed` (card `09e9ba29` — the per-entry sibling of `manager_crash_resume_failed`,
+  filed once per `resumeFleetOnBoot` entry whose own processing threw, never batched),
   `rate_limit_bailed`, `usage_latch_cleared`, `session_message_gave_up`, `paste_length_loss`,
   `paste_tripwire_give_up`, `prompt_mismatch_unresolved`, `repeated_tool_call`,
   `codex_submit_unconfirmed`, `codex_boot_stuck`,

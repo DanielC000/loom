@@ -1638,6 +1638,10 @@ export type OrchestrationEventKind =
   // @decision 55d40cfd — never send a nudge alongside this event: it would push a turn into a parked
   //  manager's cap, exactly what the park exists to prevent. This is a durable record only.
   | "parked_manager_workers_unresumed"
+  // @decision 09e9ba29 — never let a throw in one resumeFleetOnBoot entry escape uncaught (it would
+  // strand every later entry); catch it per-entry and file it HERE under the failed entry's own
+  // identity, never batched like `fleet_resume_failed` — `detail.reason` is always the generic fallback.
+  | "fleet_resume_entry_failed"
   // Canonical main advanced between a batch worktree being cut and its post-gate fast-forward, so the
   // batch's single gate never validated main's real current tree — abandoned, every candidate falls
   // back to its own individual gate. Filed under the confirming MANAGER; `detail` carries
@@ -1748,7 +1752,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   companion_home_cleared: true, companion_reminder_rerouted: true, companion_unbound_route_refused: true,
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
-  manager_crash_resume_failed: true, parked_manager_workers_unresumed: true,
+  manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, fleet_resume_entry_failed: true,
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,

@@ -71,7 +71,7 @@ import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_W
 import { isSupersededByRecycle, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
-import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN, normalizeResumeOneResult, type ResumeOneResult } from "../orchestration/resume-nudge.js";
+import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN, normalizeResumeOneResult, RESUME_UNKNOWN_REASON_FALLBACK, type ResumeOneResult } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
@@ -5578,6 +5578,51 @@ export class SessionService {
         reason: reason ?? null,
       };
     };
+    // @decision 09e9ba29 — never let a throw from inside one entry's processing escape uncaught, and
+    // never push an entry that crashed AFTER resumeOne already succeeded into BOTH `resumed` and
+    // `failed` — a live, already-resumed entry must stay out of `failed` entirely.
+    const recordEntryCrash = (e: RestartResumeEntry, err: unknown, resumeOk: boolean = false): void => {
+      console.warn(
+        `[restart] resumeFleetOnBoot: entry ${e.sessionId} threw during resume/nudge processing — ` +
+        `${resumeOk ? "it was already resumed; only its continuation nudge is affected" : "skipping it"}, ` +
+        `continuing with the rest of the fleet: ${(err as Error)?.message ?? err}`,
+      );
+      const reason = resumeOk
+        ? "resumed, but its continuation nudge could not be composed"
+        : RESUME_UNKNOWN_REASON_FALLBACK;
+      if (!resumeOk) {
+        failed.push(e.sessionId);
+        failedDetail.push(captureFailureDetail(e, RESUME_UNKNOWN_REASON_FALLBACK));
+      }
+      try {
+        this.db.appendEvent({
+          id: randomUUID(), ts: now.toISOString(),
+          managerSessionId: e.parentSessionId ?? e.sessionId,
+          workerSessionId: e.parentSessionId ? e.sessionId : undefined,
+          taskId: e.parentSessionId ? (this.db.getSession(e.sessionId)?.taskId ?? null) : undefined,
+          kind: "fleet_resume_entry_failed",
+          detail: { role: e.role, reason },
+        });
+      } catch (appendErr) {
+        console.warn(`[restart] appendEvent(fleet_resume_entry_failed) failed for ${e.sessionId.slice(0, 8)}: ${(appendErr as Error)?.message ?? appendErr}`);
+      }
+      // @decision 55d40cfd — never push a nudge into a PARKED parent's own cap; the durable event filed
+      // above already carries the failure for it to find on its next due wake. Mirrors
+      // recoverCrashOrphanedWorkers's own identical skip for its summary nudge.
+      if (e.parentSessionId && !isParked(e.parentSessionId)) {
+        try {
+          const parentRole = this.db.getSession(e.parentSessionId)?.role ?? "manager";
+          this.enqueueDurableNudge(
+            e.parentSessionId, parentRole,
+            `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} One of your workers (${e.sessionId}) hit an ` +
+            `unexpected error while being resumed after this restart and may not be fully resumed — check ` +
+            `worker_list for its state.`,
+          );
+        } catch (nudgeErr) {
+          console.warn(`[restart] resumeFleetOnBoot: failed to notify parent ${e.parentSessionId.slice(0, 8)} about entry ${e.sessionId.slice(0, 8)}'s crash: ${(nudgeErr as Error)?.message ?? nudgeErr}`);
+        }
+      }
+    };
 
     // @decision sha:974017b4 — replay a session's pre-restart pending FIFO in order, before its continuation nudge (enqueueStdin is ready-gated, so it queues until boot).
     // @decision sha:ab65c2ac — the replayed snapshot carries no per-entry warning/agent kind; bias an
@@ -5726,139 +5771,151 @@ export class SessionService {
     // Resume everyone EXCEPT the requesting manager first (it gets the last word + its own summary nudge).
     for (const e of entries) {
       if (e.sessionId === reqId) continue;
-      const parked = isParked(e.sessionId);
-      const attempt = normalizeResumeOneResult(resumeOne(e.sessionId));
-      if (!attempt.ok) { failed.push(e.sessionId); failedDetail.push(captureFailureDetail(e, attempt.reason)); continue; }
-      resumed.push(e.sessionId);
-      if (parked) { skippedParked.push(e.sessionId); continue; } // resumed live; honor the park — no nudge/replay
-      replayPending(e.sessionId);
-      // The composer-dirty disclosure (see DRAFT_LOSS_NOTE) is ADDITIVE to whatever nudge a role already
-      // gets — appended when one is enqueued below, or sent standalone when a role's classification would
-      // otherwise stay silent (a lost draft is new, actionable information distinct from board-impact
-      // classification, so it is never suppressed by the no-op/idle/no-nudge branches below).
-      const draftNote = e.hadUnsentDraft ? DRAFT_LOSS_NOTE : "";
-      if (e.role === "worker") {
-        // Card db05e657 (MAJOR 2 review fix): this daemon_restart path is the OTHER, mutually-exclusive
-        // boot-resume branch (index.ts picks EXACTLY ONE of resumeFleetOnBoot / recoverCrashOrphanedWorkers
-        // per boot) — until this fix it never consulted report state at all, so a `blocked` worker got this
-        // SAME generic "continue your assigned task" text ruling 2 says it must not get. Apply ruling 2 here
-        // too, via the SAME shared `deriveAwaitingReview` the crash path calls, so both boot paths give a
-        // blocked worker identical treatment.
-        //
-        // Card 9f7c59f1 (closing the gap the paragraph above used to leave open): a `done`-awaiting-review
-        // worker is now ALSO silenced here, mirroring recoverCrashOrphanedWorkers's identical branch (see
-        // its own doc, and deriveAwaitingReview's contract in report-resolution.ts) — its last report is an
-        // unconsumed `done`, it has nothing left to continue, and the report already stands; the manager's
-        // move is next, not the worker's. A lost draft is still new, actionable information (draftNote's
-        // own additive contract above) and is sent standalone rather than swallowed by this silence, exactly
-        // like the no-op manager/platform branch below does for the same reason.
-        const { reportedState, awaitingReview } = deriveAwaitingReview(this.db.listEventsForWorker(e.sessionId));
-        // Card 06ebbb78: taskId for the durable record, mirroring recoverCrashOrphanedWorkers's own
-        // worker-branch enqueueDurableNudge calls (w.taskId ?? null). NOTED, NOT ACTED ON (Code Review):
-        // a non-null taskId arms `staleQueuedMessageReason`'s "already-reported" retire arm (below,
-        // `if (e.taskId) { ... ev.kind === "worker_report" && ev.taskId === e.taskId ... }`) — if THIS
-        // worker's draft-loss-only nudge (the `if (draftNote)` branch just below) is ever still held when
-        // a LATER worker_report for the SAME taskId lands, a boot-scan redrive would retire it as
-        // "already-reported" and silently drop the draft-loss disclosure, which isn't actually superseded
-        // by a new report on an unrelated fact. Real but narrow (requires the notice to still be held at
-        // exactly the wrong moment); left as-is rather than special-cased — no reachable production window
-        // was constructed for it, and this mirrors the SAME coupling recoverCrashOrphanedWorkers's own
-        // worker-branch calls already carry.
-        const workerTaskId = this.db.getSession(e.sessionId)?.taskId ?? null;
-        if (awaitingReview && reportedState === "done") {
-          if (draftNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}`, workerTaskId);
-        } else {
-          this.enqueueDurableNudge(
-            e.sessionId, e.role,
-            reportedState === "blocked"
-              ? buildBlockedResumeNudgeBody(
-                  `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} The daemon was rebuilt + restarted and you were resumed.`,
-                ) + RESUME_NUDGE_TAIL + draftNote
-              : `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} The daemon was rebuilt + restarted and you were resumed — re-check your ` +
-                `worktree's state. Continue your assigned task from where you left off. If you had already finished, ` +
-                `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
-            workerTaskId,
-          );
-        }
-      } else if (e.role === "manager" || e.role === "platform") {
-        const impact = wakeImpact(e.sessionId, e.role);
-        // Card a1b79655: same ADDITIVE treatment as draftNote — a dropped cap-queued spawn intent is new,
-        // actionable information distinct from board-impact classification, so it must never be suppressed
-        // by the no-op/idle branch below either.
-        const capNote = capQueuedNote(e.sessionId);
-        if (isNoOpManagerWake(impact)) {
-          // @decision b5664b5b — a non-causal bystander (no workers/queued-I/O/unconsumed-answer/stranded board work) resumes SILENTLY; EXCEPT a lost draft or dropped cap-queue entry, both still forced.
-          // @decision 61cc91c6 — !strandedBoardWork no longer needs an empty board: watching/snoozed backlog is already covered by the idle-watcher; only suppressed-via-escalation backlog still forces the nudge.
-          // @decision 066d317c — this branch's enqueue never names intent.reason, so recordDeployShasDelivered must NOT fire here (the `else` branch below is the one place it IS correct).
-          if (draftNote || capNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}${capNote}`);
-        } else {
-          // Affected (workers resumed, queued I/O replayed, an unconsumed answer, or stranded board work)
-          // → the full re-orient, with a one-line classification of WHAT this restart touched.
-          // @decision 11b847e1 — reasonClause names intent.reason only for a same-project MANAGER recipient (Lead exempt, @decision 5a9a963b); the SHA-delivered record below must follow the identical condition.
-          // @decision 066d317c — recordDeployShasDelivered fires here only because this branch's reasonClause CAN be non-empty (unlike the silent/minimal branches above).
-          const reasonClause = e.role === "platform" ? ` (reason: ${intent.reason})` : reasonClauseFor(e.sessionId);
-          if (reasonClause) this.recordDeployShasDelivered(e.sessionId, reasonShas);
-          const affected = [
-            impact.liveWorkersResumed > 0 ? `${impact.liveWorkersResumed} of your live workers were resumed` : null,
-            worktreeNoteFor(e.sessionId),
-            impact.queuedIoReplayed > 0 ? `${impact.queuedIoReplayed} queued message(s) were replayed to you` : null,
-            impact.hasUnconsumedAnswer ? `you have an answered question awaiting question_pull` : null,
-            impact.strandedBoardWork ? `your board has pending work` : null,
-          ].filter(Boolean).join("; ");
-          if (e.role === "platform") {
-            // Lead-appropriate text: a Platform Lead has no worktrees and no workers, so the manager-shaped
-            // "resume orchestrating from where you left off / re-check your workers' state and worktrees"
-            // phrasing is nonsense it has to reason away on EVERY restart. A Lead now gets the SAME
-            // IdleWatcher coverage a manager does
-            // (card 98b3725c) — `strandedBoardWork` is no longer unconditionally true for platform sessions,
-            // so this branch is reached only when the Lead genuinely has a stake in this restart, exactly
-            // like a manager. Re-orient it from the board + its own living resume doc instead of the
-            // manager-shaped worktree/worker phrasing.
-            this.enqueueDurableNudge(
-              e.sessionId, e.role,
-              `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} Another manager restarted the daemon${reasonClause} and you ` +
-              `were resumed (${affected}). Re-orient from your home board and your living resume doc, then ` +
-              `continue your platform work from where you left off.` + RESUME_NUDGE_TAIL + draftNote + capNote,
-            );
+      // @decision 09e9ba29 — this entry's FULL processing (not just the resumeOne call) is guarded: a
+      // throw anywhere in here must be caught per-entry via recordEntryCrash, never left to escape and
+      // strand every later entry in this loop.
+      let resumeOk = false;
+      try {
+        const parked = isParked(e.sessionId);
+        const attempt = normalizeResumeOneResult(resumeOne(e.sessionId));
+        if (!attempt.ok) { failed.push(e.sessionId); failedDetail.push(captureFailureDetail(e, attempt.reason)); continue; }
+        resumed.push(e.sessionId);
+        resumeOk = true;
+        if (parked) { skippedParked.push(e.sessionId); continue; } // resumed live; honor the park — no nudge/replay
+        replayPending(e.sessionId);
+        // The composer-dirty disclosure (see DRAFT_LOSS_NOTE) is ADDITIVE to whatever nudge a role already
+        // gets — appended when one is enqueued below, or sent standalone when a role's classification would
+        // otherwise stay silent (a lost draft is new, actionable information distinct from board-impact
+        // classification, so it is never suppressed by the no-op/idle/no-nudge branches below).
+        const draftNote = e.hadUnsentDraft ? DRAFT_LOSS_NOTE : "";
+        if (e.role === "worker") {
+          // Card db05e657 (MAJOR 2 review fix): this daemon_restart path is the OTHER, mutually-exclusive
+          // boot-resume branch (index.ts picks EXACTLY ONE of resumeFleetOnBoot / recoverCrashOrphanedWorkers
+          // per boot) — until this fix it never consulted report state at all, so a `blocked` worker got this
+          // SAME generic "continue your assigned task" text ruling 2 says it must not get. Apply ruling 2 here
+          // too, via the SAME shared `deriveAwaitingReview` the crash path calls, so both boot paths give a
+          // blocked worker identical treatment.
+          //
+          // Card 9f7c59f1 (closing the gap the paragraph above used to leave open): a `done`-awaiting-review
+          // worker is now ALSO silenced here, mirroring recoverCrashOrphanedWorkers's identical branch (see
+          // its own doc, and deriveAwaitingReview's contract in report-resolution.ts) — its last report is an
+          // unconsumed `done`, it has nothing left to continue, and the report already stands; the manager's
+          // move is next, not the worker's. A lost draft is still new, actionable information (draftNote's
+          // own additive contract above) and is sent standalone rather than swallowed by this silence, exactly
+          // like the no-op manager/platform branch below does for the same reason.
+          const { reportedState, awaitingReview } = deriveAwaitingReview(this.db.listEventsForWorker(e.sessionId));
+          // Card 06ebbb78: taskId for the durable record, mirroring recoverCrashOrphanedWorkers's own
+          // worker-branch enqueueDurableNudge calls (w.taskId ?? null). NOTED, NOT ACTED ON (Code Review):
+          // a non-null taskId arms `staleQueuedMessageReason`'s "already-reported" retire arm (below,
+          // `if (e.taskId) { ... ev.kind === "worker_report" && ev.taskId === e.taskId ... }`) — if THIS
+          // worker's draft-loss-only nudge (the `if (draftNote)` branch just below) is ever still held when
+          // a LATER worker_report for the SAME taskId lands, a boot-scan redrive would retire it as
+          // "already-reported" and silently drop the draft-loss disclosure, which isn't actually superseded
+          // by a new report on an unrelated fact. Real but narrow (requires the notice to still be held at
+          // exactly the wrong moment); left as-is rather than special-cased — no reachable production window
+          // was constructed for it, and this mirrors the SAME coupling recoverCrashOrphanedWorkers's own
+          // worker-branch calls already carry.
+          const workerTaskId = this.db.getSession(e.sessionId)?.taskId ?? null;
+          if (awaitingReview && reportedState === "done") {
+            if (draftNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}`, workerTaskId);
           } else {
             this.enqueueDurableNudge(
               e.sessionId, e.role,
-              `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} Another manager restarted the daemon${reasonClause} and you ` +
-              `were resumed (${affected}). Resume orchestrating from where you left off (re-check your workers' ` +
-              `state AND worktrees; some may have just been resumed too).` + RESUME_NUDGE_TAIL + draftNote + capNote,
+              reportedState === "blocked"
+                ? buildBlockedResumeNudgeBody(
+                    `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} The daemon was rebuilt + restarted and you were resumed.`,
+                  ) + RESUME_NUDGE_TAIL + draftNote
+                : `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} The daemon was rebuilt + restarted and you were resumed — re-check your ` +
+                  `worktree's state. Continue your assigned task from where you left off. If you had already finished, ` +
+                  `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
+              workerTaskId,
             );
           }
-        }
-      } else if (e.role === "auditor" || e.role === "workspace-auditor" || e.role === "setup" || e.role === "assistant") {
-        // A scheduled/standing role (Platform Auditor, Workspace Auditor, Setup Assistant, Companion) gets
-        // no startup prompt on resume, so one that was MID-TURN at the restart would otherwise sit idle
-        // until a human re-engages it — it gets the continuation nudge. (For the Companion, "mid-turn" means
-        // it was answering a chat message when the daemon went down; an idle Companion falls through to the
-        // silent resume below and its next inbound chat message re-engages it.)
-        // card b5664b5b (Problem B): but gate it on busy-at-capture. An already-IDLE reviewer (e.g. an
-        // Auditor that finished its bounded run between scheduled fires) does NOT need a nudge — its next
-        // due wake/schedule re-engages it on its own via the durable WakeService/Scheduler tickers (which
-        // fire past-due entries on boot and auto-resume a non-live session), so the old UNCONDITIONAL nudge
-        // only burned a wasted turn every restart. Silencing blindly would strand a genuinely mid-run one,
-        // so nudge ONLY the busy-at-capture case; the idle case falls through to a silent resume.
-        if (e.busy) {
-          this.enqueueDurableNudge(
-            e.sessionId, e.role,
-            `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} The daemon was rebuilt + restarted and you were resumed — continue your ` +
-            `work from where you left off.` + RESUME_NUDGE_TAIL + draftNote,
-          );
+        } else if (e.role === "manager" || e.role === "platform") {
+          const impact = wakeImpact(e.sessionId, e.role);
+          // Card a1b79655: same ADDITIVE treatment as draftNote — a dropped cap-queued spawn intent is new,
+          // actionable information distinct from board-impact classification, so it must never be suppressed
+          // by the no-op/idle branch below either.
+          const capNote = capQueuedNote(e.sessionId);
+          if (isNoOpManagerWake(impact)) {
+            // @decision b5664b5b — a non-causal bystander (no workers/queued-I/O/unconsumed-answer/stranded board work) resumes SILENTLY; EXCEPT a lost draft or dropped cap-queue entry, both still forced.
+            // @decision 61cc91c6 — !strandedBoardWork no longer needs an empty board: watching/snoozed backlog is already covered by the idle-watcher; only suppressed-via-escalation backlog still forces the nudge.
+            // @decision 066d317c — this branch's enqueue never names intent.reason, so recordDeployShasDelivered must NOT fire here (the `else` branch below is the one place it IS correct).
+            if (draftNote || capNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}${capNote}`);
+          } else {
+            // Affected (workers resumed, queued I/O replayed, an unconsumed answer, or stranded board work)
+            // → the full re-orient, with a one-line classification of WHAT this restart touched.
+            // @decision 11b847e1 — reasonClause names intent.reason only for a same-project MANAGER recipient (Lead exempt, @decision 5a9a963b); the SHA-delivered record below must follow the identical condition.
+            // @decision 066d317c — recordDeployShasDelivered fires below only because this branch's reasonClause CAN be non-empty (unlike the silent/minimal branches above).
+            const reasonClause = e.role === "platform" ? ` (reason: ${intent.reason})` : reasonClauseFor(e.sessionId);
+            const affected = [
+              impact.liveWorkersResumed > 0 ? `${impact.liveWorkersResumed} of your live workers were resumed` : null,
+              worktreeNoteFor(e.sessionId),
+              impact.queuedIoReplayed > 0 ? `${impact.queuedIoReplayed} queued message(s) were replayed to you` : null,
+              impact.hasUnconsumedAnswer ? `you have an answered question awaiting question_pull` : null,
+              impact.strandedBoardWork ? `your board has pending work` : null,
+            ].filter(Boolean).join("; ");
+            if (e.role === "platform") {
+              // Lead-appropriate text: a Platform Lead has no worktrees and no workers, so the manager-shaped
+              // "resume orchestrating from where you left off / re-check your workers' state and worktrees"
+              // phrasing is nonsense it has to reason away on EVERY restart. A Lead now gets the SAME
+              // IdleWatcher coverage a manager does
+              // (card 98b3725c) — `strandedBoardWork` is no longer unconditionally true for platform sessions,
+              // so this branch is reached only when the Lead genuinely has a stake in this restart, exactly
+              // like a manager. Re-orient it from the board + its own living resume doc instead of the
+              // manager-shaped worktree/worker phrasing.
+              this.enqueueDurableNudge(
+                e.sessionId, e.role,
+                `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} Another manager restarted the daemon${reasonClause} and you ` +
+                `were resumed (${affected}). Re-orient from your home board and your living resume doc, then ` +
+                `continue your platform work from where you left off.` + RESUME_NUDGE_TAIL + draftNote + capNote,
+              );
+            } else {
+              this.enqueueDurableNudge(
+                e.sessionId, e.role,
+                `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} Another manager restarted the daemon${reasonClause} and you ` +
+                `were resumed (${affected}). Resume orchestrating from where you left off (re-check your workers' ` +
+                `state AND worktrees; some may have just been resumed too).` + RESUME_NUDGE_TAIL + draftNote + capNote,
+              );
+            }
+            // @decision 066d317c — recorded only AFTER the nudge above has actually been enqueued (moved
+            // here, round 2 — a throw between the old earlier call site and the enqueue would have marked
+            // this SHA delivered with no nudge ever sent).
+            if (reasonClause) this.recordDeployShasDelivered(e.sessionId, reasonShas);
+          }
+        } else if (e.role === "auditor" || e.role === "workspace-auditor" || e.role === "setup" || e.role === "assistant") {
+          // A scheduled/standing role (Platform Auditor, Workspace Auditor, Setup Assistant, Companion) gets
+          // no startup prompt on resume, so one that was MID-TURN at the restart would otherwise sit idle
+          // until a human re-engages it — it gets the continuation nudge. (For the Companion, "mid-turn" means
+          // it was answering a chat message when the daemon went down; an idle Companion falls through to the
+          // silent resume below and its next inbound chat message re-engages it.)
+          // card b5664b5b (Problem B): but gate it on busy-at-capture. An already-IDLE reviewer (e.g. an
+          // Auditor that finished its bounded run between scheduled fires) does NOT need a nudge — its next
+          // due wake/schedule re-engages it on its own via the durable WakeService/Scheduler tickers (which
+          // fire past-due entries on boot and auto-resume a non-live session), so the old UNCONDITIONAL nudge
+          // only burned a wasted turn every restart. Silencing blindly would strand a genuinely mid-run one,
+          // so nudge ONLY the busy-at-capture case; the idle case falls through to a silent resume.
+          if (e.busy) {
+            this.enqueueDurableNudge(
+              e.sessionId, e.role,
+              `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} The daemon was rebuilt + restarted and you were resumed — continue your ` +
+              `work from where you left off.` + RESUME_NUDGE_TAIL + draftNote,
+            );
+          } else if (draftNote) {
+            // Idle-at-capture normally resumes silently (its schedule re-engages it) — but a lost draft is
+            // new, actionable information a silent resume would otherwise never surface at all.
+            this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}`);
+          }
         } else if (draftNote) {
-          // Idle-at-capture normally resumes silently (its schedule re-engages it) — but a lost draft is
-          // new, actionable information a silent resume would otherwise never surface at all.
+          // role null (plain session) or "run": normally no nudge at all (no orchestration loop to re-engage)
+          // — but a lost draft still needs surfacing, since nothing else will ever tell this session about it.
+          // enqueueDurableNudge's role gate never defers here (null/"run" don't mount loom-orchestration) —
+          // same as today's immediate enqueueStdin (wrapped in the durable helper for the same never-vanish
+          // guarantee — card 06ebbb78).
           this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}`);
         }
-      } else if (draftNote) {
-        // role null (plain session) or "run": normally no nudge at all (no orchestration loop to re-engage)
-        // — but a lost draft still needs surfacing, since nothing else will ever tell this session about it.
-        // enqueueDurableNudge's role gate never defers here (null/"run" don't mount loom-orchestration) —
-        // same as today's immediate enqueueStdin (wrapped in the durable helper for the same never-vanish
-        // guarantee — card 06ebbb78).
-        this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}`);
+      } catch (err) {
+        recordEntryCrash(e, err, resumeOk);
       }
     }
 
@@ -5866,18 +5923,23 @@ export class SessionService {
     // @decision 08c81809 — round 4 nit (item 7): respect the SAME exclusion the fleet loop above applies,
     // so "structural" is literally true — reqId can't practically BE a retired successor (it just issued
     // the daemon_restart MCP call), but this closes the special case rather than assuming it.
+    // @decision 09e9ba29 — this final block is guarded too (via recordEntryCrash): a throw here would
+    // crash the whole boot even though the rest of the fleet already got its nudges above.
+    const reqEntry: RestartResumeEntry = entries.find((e) => e.sessionId === reqId) ??
+      { sessionId: reqId, role: this.db.getSession(reqId)?.role ?? "manager", parentSessionId: null };
+    let reqResumeOk = false;
+    try {
     if (isRetired(reqId)) {
       // Round 5 nit: distinct from an ordinary resume failure — do NOT also push to `failed` (the final
       // `else` below is what handles a genuine `resumeOne` failure; this is a different, counted outcome).
       retiredSkipped.push(reqId);
     } else if (normalizeResumeOneResult(resumeOne(reqId)).ok) {
       resumed.push(reqId);
+      reqResumeOk = true;
       if (isParked(reqId)) {
         skippedParked.push(reqId);
       } else {
         replayPending(reqId);
-        // @decision 5907b71e — the requester's nudge always names the reason, so record its SHA too.
-        this.recordDeployShasDelivered(reqId, reasonShas);
         const reqWorkersResumed = reqWorkers.filter((id) => resumed.includes(id)).length;
         const reqDraftNote = entries.find((e) => e.sessionId === reqId)?.hadUnsentDraft ? DRAFT_LOSS_NOTE : "";
         // Card a1b79655: the requester can ALSO have had its own cap-queued intent(s) dropped by the very
@@ -5982,9 +6044,17 @@ export class SessionService {
         // Card fde10c75: the SAME `deployStaleness` this method already computed for `liveClaim` above —
         // not a fresh read, so the two can never disagree with each other on the same nudge.
         this.enqueueDurableNudge(reqId, reqRole, reqText + this.buildStampSuffix(deployStaleness));
+        // @decision 5907b71e — the requester's nudge always names the reason, so record its SHA too.
+        // @decision 066d317c — recorded only AFTER the nudge above has actually been enqueued (moved
+        // here, round 2 — a throw between the old earlier call site and the enqueue would have marked
+        // this SHA delivered with no nudge ever sent).
+        this.recordDeployShasDelivered(reqId, reasonShas);
       }
     } else {
       failed.push(reqId);
+    }
+    } catch (err) {
+      recordEntryCrash(reqEntry, err, reqResumeOk);
     }
 
     return { resumed, skippedParked, failed, retiredSkipped };
