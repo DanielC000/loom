@@ -21,6 +21,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Run: node test/codex-archive-sweep-precedes-listen.mjs (no build needed — reads src/index.ts directly)
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -84,6 +85,63 @@ check("archiveOldCodexRollouts() ALSO runs strictly before resumeFleetOnBoot() (
 check("[negative control] the call-finder isn't vacuously matching everything — a call to a plainly-nonexistent identifier finds nothing",
   findIdentifierCalls("thisIdentifierDoesNotExistAnywhere_5172fe3a").length === 0);
 
+// ═══ Card 7306e109 item 4(c): the "cannot race" argument above only checked index.ts — it says nothing
+// about whether some OTHER file in the whole daemon also calls archiveOldCodexRollouts(. A second call
+// site anywhere would reopen the exact race this file exists to rule out. Grep ALL of
+// packages/daemon/src, not just index.ts. ═══
+function listTsFilesRecursive(dir) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === "dist") continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...listTsFilesRecursive(full));
+    else if (entry.name.endsWith(".ts")) out.push(full);
+  }
+  return out;
+}
+
+function countIdentifierCallsInFile(filePath, name) {
+  const text = fs.readFileSync(filePath, "utf8");
+  const sf = ts.createSourceFile(filePath, text, ts.ScriptTarget.Latest, true);
+  let count = 0;
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name) count++;
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return count;
+}
+
+const srcRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
+const allSrcFiles = listTsFilesRecursive(srcRoot);
+const perFileCounts = allSrcFiles.map((f) => ({ file: f, count: countIdentifierCallsInFile(f, "archiveOldCodexRollouts") }));
+const totalCallsInSrc = perFileCounts.reduce((sum, r) => sum + r.count, 0);
+const filesWithCalls = perFileCounts.filter((r) => r.count > 0);
+
+check("archiveOldCodexRollouts( is called EXACTLY ONCE across the ENTIRE packages/daemon/src tree (not just index.ts)",
+  totalCallsInSrc === 1, `files with calls=${JSON.stringify(filesWithCalls.map((r) => `${r.file} (${r.count})`))}`);
+check("that one call site is the same one already found in src/index.ts above — no second, unexamined call site exists elsewhere in the daemon",
+  filesWithCalls.length === 1 && path.resolve(filesWithCalls[0].file) === path.resolve(srcPath), `filesWithCalls=${JSON.stringify(filesWithCalls)}`);
+
+// POSITIVE CONTROL: prove the recursive multi-file walker itself can actually find calls spread across
+// MULTIPLE, NESTED files — before trusting its "exactly 1 in the whole real tree" verdict above, show it
+// can report a DIFFERENT, known count against a synthetic tree built for exactly this purpose.
+{
+  const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-archive-sweep-walker-control-"));
+  try {
+    fs.mkdirSync(path.join(scratchDir, "nested"), { recursive: true });
+    fs.writeFileSync(path.join(scratchDir, "a.ts"), "function f() { archiveOldCodexRollouts(); }");
+    fs.writeFileSync(path.join(scratchDir, "nested", "b.ts"), "function g() { archiveOldCodexRollouts(); archiveOldCodexRollouts(); }");
+    fs.writeFileSync(path.join(scratchDir, "nested", "c.ts"), "function h() { /* no call here */ }");
+    const scratchFiles = listTsFilesRecursive(scratchDir);
+    const scratchTotal = scratchFiles.reduce((sum, f) => sum + countIdentifierCallsInFile(f, "archiveOldCodexRollouts"), 0);
+    check("[positive control] the recursive multi-file walker finds calls spread across NESTED files (1 + 2 = 3, not just the top-level file's own 1)",
+      scratchFiles.length === 3 && scratchTotal === 3, `files=${JSON.stringify(scratchFiles)} total=${scratchTotal}`);
+  } finally {
+    fs.rmSync(scratchDir, { recursive: true, force: true });
+  }
+}
+
 // ═══ PROVE THIS CHECK CAN GO RED: parse a synthetic snippet with the calls in the WRONG order ═══
 // (never mutates the real src/index.ts — a fresh, independent ts.createSourceFile over fabricated text)
 {
@@ -108,6 +166,6 @@ check("[negative control] the call-finder isn't vacuously matching everything �
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — archiveOldCodexRollouts() is called exactly once in src/index.ts, strictly before both the gateway listener opens and resumeFleetOnBoot() runs, so no caller of SessionService.resume() (the sole path to restoreArchivedCodexRollout) can ever be in flight while the sweep runs."
+  ? "\n✅ ALL PASS — archiveOldCodexRollouts() is called exactly once in src/index.ts, strictly before both the gateway listener opens and resumeFleetOnBoot() runs, AND it is called exactly once across the ENTIRE packages/daemon/src tree (not just index.ts) — so no caller of SessionService.resume() (the sole path to restoreArchivedCodexRollout) can ever be in flight while the sweep runs, and no second, unexamined call site elsewhere in the daemon could reopen that race."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

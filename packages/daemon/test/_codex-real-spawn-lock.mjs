@@ -39,6 +39,7 @@ export const CODEX_REAL_SPAWN_BASENAMES = [
   "codex-mcp-connect-stuck-real-spawn",
   "codex-mcp-reachability-real-spawn",
   "codex-prompt-ascii-fold-real-spawn",
+  "codex-rollout-archive-restore-real-spawn",
   "codex-stateful-runtime-real-spawn",
   "codex-submit-confirmation-real-spawn",
   "codex-transcript-real-spawn",
@@ -138,6 +139,11 @@ export function computeCodexLockWaitTimeoutMs(cap) {
 export const DEFAULT_CODEX_OWN_WORK_BUDGET_MS = 120_000;
 export const CODEX_OWN_WORK_BUDGET_MS = {
   "codex-doctrine-real-spawn": 300_000,
+  // Card 7306e109: a full create+turn+stop+archive+resume+stop cycle — two separate "boot to ready" waits
+  // (up to 20s/30s each) plus the same 90s turn-completion wait the transcript sibling already needs,
+  // comfortably clears the 120s default; sized the same as codex-doctrine-real-spawn above rather than a
+  // tighter number nobody has measured yet.
+  "codex-rollout-archive-restore-real-spawn": 300_000,
 };
 
 /** The TOTAL outer per-file ceiling `scripts/test-daemon.mjs`'s harness must give a codex-real-spawn

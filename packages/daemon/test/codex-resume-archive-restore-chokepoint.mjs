@@ -11,7 +11,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Drives the REAL (unsubclassed) `PtyHost.createCodexPty()` against a fixture CLI that records its own
 // argv (fixtures/env-dump-cli.mjs via LOOM_CODEX_BIN) — never the real codex CLI, no
 // acquireCodexRealSpawnLock() needed. Same technique as codex-model-pin-spawn-argv.mjs /
-// codex-update-check-spawn-argv.mjs. WINDOWS-ONLY (`.cmd` wrapper); SKIPS (exit 0) elsewhere.
+// codex-update-check-spawn-argv.mjs. Card 7306e109 item 4(b): CROSS-PLATFORM — a `.cmd` wrapper on
+// win32, a plain `#!/bin/sh` shebang shim (chmod +x) elsewhere, both just `exec`ing the same fixture —
+// so ubuntu CI now covers this wiring too, not just a Windows dev host.
 //
 // Run: 1) build, 2) node test/codex-resume-archive-restore-chokepoint.mjs
 import fs from "node:fs";
@@ -26,18 +28,18 @@ const check = (label, cond, diag) => {
   if (!cond) { failures++; if (diag) console.log(`      ${diag}`); }
 };
 
-if (process.platform !== "win32") {
-  console.log("WARN  SKIP  codex-resume-archive-restore-chokepoint.mjs — the .cmd-wrapper fixture mechanism is Windows-only (mirrors codex-model-pin-spawn-argv.mjs's accepted POSIX gap); restoreArchivedCodexRollout's own unit coverage (codex-rollout-archive.mjs) is platform-agnostic and still runs everywhere.");
-  process.exit(0);
-}
-
 const FIXTURE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "env-dump-cli.mjs");
 const tmpHome = mkdtempManaged("loom-codex-resume-restore-chokepoint-");
 useOwnLoomHome("loom-codex-resume-restore-chokepoint-loomhome-"); // scopes codexRolloutArchiveRoot() to a fresh temp LOOM_HOME
 const tmpCodexHome = mkdtempManaged("loom-codex-resume-restore-chokepoint-codexhome-");
 process.env.CODEX_HOME = tmpCodexHome; // scopes codexSessionsRoot() to a fresh temp CODEX_HOME — never the real ~/.codex
-const wrapperPath = path.join(tmpHome, "fake-codex.cmd");
-fs.writeFileSync(wrapperPath, `@"${process.execPath}" "${FIXTURE_PATH}" %*\r\n`);
+const wrapperPath = process.platform === "win32" ? path.join(tmpHome, "fake-codex.cmd") : path.join(tmpHome, "fake-codex.sh");
+if (process.platform === "win32") {
+  fs.writeFileSync(wrapperPath, `@"${process.execPath}" "${FIXTURE_PATH}" %*\r\n`);
+} else {
+  fs.writeFileSync(wrapperPath, `#!/bin/sh\nexec "${process.execPath}" "${FIXTURE_PATH}" "$@"\n`);
+  fs.chmodSync(wrapperPath, 0o755);
+}
 process.env.LOOM_CODEX_BIN = wrapperPath;
 
 const { PtyHost } = await import("../dist/pty/host.js");
@@ -141,11 +143,61 @@ function writeRollout(dayDirPath, fileName, sessionId, cwd) {
   }
   check("createCodexPty THROWS synchronously when the restore fails (never returns a live pty on this path)", threw instanceof Error, `threw=${threw}`);
   check("the thrown error names the resume id (a clear, diagnosable error, not a bare crash)", threw ? String(threw.message).includes(RESUME_ID) : false, `message=${threw?.message}`);
-  check("the fixture process was NEVER spawned — no argv dump file exists (the throw is BEFORE spawn(), not racing it)", !fs.existsSync(argvOutputFile));
+  check("the fixture process was NEVER spawned — no argv dump file exists immediately after the synchronous throw", !fs.existsSync(argvOutputFile));
+  // Card 7306e109 item 4(d): the check right above is already sound BY CONSTRUCTION (the throw happens
+  // strictly before this method's own spawn(bin, args, …) line, with zero `await` in between — a child
+  // process cannot exist yet). This second check adds real EVIDENCE on top of that structural argument,
+  // not just a restatement of it: it waits the SAME real window scenarios A/B above actually needed for
+  // their own successful spawns to write THEIR argv dump files (observed well under 1s for this fixture),
+  // so a future regression that let spawn() run anyway would have a genuine chance to flip this red.
+  const deadline = Date.now() + 2000;
+  let appearedLate = false;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(argvOutputFile)) { appearedLate = true; break; }
+    // TIMING-GUARD-SAFE: sync-early-return — restoreArchivedCodexRollout's throw (verified above) happens
+    // synchronously before createCodexPty's own spawn(bin, args, …) call, so no async scheduling of a
+    // real child process can occur on this path regardless of how long we wait; this wait is defensive
+    // evidence only, not a correctness requirement.
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  check("the fixture process STILL never appears after waiting 2s (real evidence, not a zero-time check)", !appearedLate);
   check("the archive copy was left untouched by the failed attempt (no partial move)", fs.existsSync(archivePath));
 }
 
+// ═══ Scenario D (card 7306e109 item 4(a)): fork:true with an archived resumeId must NOT move the file —
+// buildCodexResumeArgs already returns [] whenever fork:true (codex-host-decisions.mjs's own coverage),
+// so isCodexResume is false and the restore branch in createCodexPty never runs at all for this spawn. ═══
+{
+  const RESUME_ID = "dddddddd-4444-4444-4444-444444444444";
+  const rel = path.join("2026", "09", "02", `rollout-2026-09-02T00-00-00-${RESUME_ID}.jsonl`);
+  const archivePath = path.join(codexRolloutArchiveRoot(), rel);
+  const livePath = path.join(tmpCodexHome, "sessions", rel);
+  writeRollout(path.dirname(archivePath), path.basename(archivePath), RESUME_ID, "/fake/cwd/d");
+
+  check("RED CONTROL: before the fork spawn, the rollout is ONLY in the archive, not the live tree", fs.existsSync(archivePath) && !fs.existsSync(livePath));
+
+  const host = new PtyHost(events);
+  const spawnCwd = fs.mkdtempSync(path.join(tmpHome, "cwd-d-"));
+  const argvOutputFile = path.join(tmpHome, "argv-d.json");
+  const pty = host.createCodexPty({
+    sessionId: "chokepoint-d", cwd: spawnCwd, permission: {}, geometry: { cols: 120, rows: 40 },
+    sessionEnv: { FIXTURE_ENV_OUTPUT_FILE: path.join(tmpHome, "env-d.json"), FIXTURE_ARGV_OUTPUT_FILE: argvOutputFile },
+    role: "worker", harness: "codex", resumeId: RESUME_ID, fork: true,
+  });
+  try {
+    await waitUntil(() => fs.existsSync(argvOutputFile), { label: "chokepoint-d fixture's argv dump file to appear (a fork:true spawn still proceeds — as a FRESH conversation, not a resume)" });
+    const argv = JSON.parse(fs.readFileSync(argvOutputFile, "utf8"));
+    check("a fork:true spawn carries NO `resume <uuid>` in argv (buildCodexResumeArgs returns [] for fork:true)", argv[0] !== "resume", `argv=${JSON.stringify(argv)}`);
+  } catch (err) {
+    console.log(`FAIL  ${err.message}`);
+    failures++;
+  } finally {
+    try { pty.kill(); } catch { /* best-effort */ }
+  }
+  check("the rollout is STILL only in the archive — a fork:true spawn never touches restoreArchivedCodexRollout at all", fs.existsSync(archivePath) && !fs.existsSync(livePath));
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — createCodexPty restores an archived rollout to its exact original live path before spawning any `codex resume <uuid>`, a no-archive id passes through untouched, and a genuine restore failure refuses the spawn synchronously with a clear error instead of letting codex crash on its own."
+  ? "\n✅ ALL PASS — createCodexPty restores an archived rollout to its exact original live path before spawning any `codex resume <uuid>`, a no-archive id passes through untouched, a genuine restore failure refuses the spawn synchronously with a clear error instead of letting codex crash on its own, and a fork:true spawn carrying an archived resumeId never moves the file at all (it's a fresh conversation, not a resume)."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

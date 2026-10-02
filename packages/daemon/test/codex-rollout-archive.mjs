@@ -20,6 +20,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   7. (card 5172fe3a) restoreArchivedCodexRollout: byte-identical restore to the EXACT original
 //      relative path; a genuinely unknown id is a no-op; a live file already present is NEVER
 //      overwritten (and its archive copy, if any, is left untouched too).
+//   8. (card 7306e109 round 2) restoreArchivedCodexRollout's resolvedPathHint is re-verified, not
+//      trusted blindly: a hint that no longer exists, sits under neither known root, names a DIFFERENT
+//      conversation, or (for an archive-root hint) sits at the wrong YYYY/MM/DD/<file> depth all fall
+//      through to the full walk; a stale ARCHIVE hint while a live copy already exists reports
+//      alreadyLive and never clobbers the live file.
 //
 // ⚠️ NOT covered here: the EXDEV (cross-device rename) fallback inside moveFile — reproducing a real
 // cross-device rename hermetically would need two distinct filesystems/volumes, not available in this
@@ -229,6 +234,109 @@ check("the second sweep still scans the still-live fresh file", result2.scanned 
   check("restoreArchivedCodexRollout reports alreadyLive:true when the live path already has this id", restoreResult.restored === true && restoreResult.alreadyLive === true, `got=${JSON.stringify(restoreResult)}`);
   check("the LIVE file's content is UNCHANGED (never overwritten)", fs.readFileSync(dupLivePath, "utf8") === liveContent);
   check("the ARCHIVE copy is left completely untouched (never deleted, never modified)", fs.existsSync(dupArchivePath) && fs.readFileSync(dupArchivePath, "utf8") === archiveContent);
+}
+
+// --- Scenario 12 (card 7306e109 round 2): restoreArchivedCodexRollout's resolvedPathHint is
+// re-verified, never trusted blindly — it must exist, name THIS conversation, and (for an archive-root
+// hint) sit at the exact YYYY/MM/DD/<file> depth the destination is reconstructed from. Isolated
+// sessionsRoot/archiveRoot (via deps) so these sub-scenarios never interact with the shared fixture state
+// exercised above. --------------------------------------------------------------------------------------
+{
+  const hintSessionsRoot = mkdtempManaged("loom-codex-rollout-archive-hint-sessions-");
+  const hintArchiveRoot = mkdtempManaged("loom-codex-rollout-archive-hint-archive-");
+  const hintDeps = { sessionsRoot: hintSessionsRoot, archiveRoot: hintArchiveRoot };
+
+  function writeRawRollout(root, y, m, d, fileName, content) {
+    const dir = path.join(root, y, m, d);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, fileName);
+    fs.writeFileSync(file, content);
+    return file;
+  }
+
+  // (c) a LIVE hint ⇒ alreadyLive, no restore attempted.
+  {
+    const id = "hint-live-id";
+    const liveFile = writeRawRollout(hintSessionsRoot, "2026", "09", "10", `rollout-2026-09-10T00-00-00-${id}.jsonl`, "LIVE\n");
+    const result = restoreArchivedCodexRollout(id, { ...hintDeps, resolvedPathHint: liveFile });
+    check("(c) a LIVE hint reports alreadyLive:true, restored:true", result.restored === true && result.alreadyLive === true, `got=${JSON.stringify(result)}`);
+    check("(c) the live file is untouched", fs.readFileSync(liveFile, "utf8") === "LIVE\n");
+  }
+
+  // (a) a hint that no longer exists on disk ⇒ discarded, full walk engages (the archived copy is found
+  // by the id-matching walk instead, proving the fallback actually ran rather than silently no-op'ing).
+  {
+    const id = "hint-missing-id";
+    const archivedFile = writeRawRollout(hintArchiveRoot, "2026", "09", "11", `rollout-2026-09-11T00-00-00-${id}.jsonl`, "ARCHIVED\n");
+    const missingHint = path.join(hintSessionsRoot, "2026", "09", "11", `rollout-does-not-exist-${id}.jsonl`);
+    check("(a) RED CONTROL: the bogus hint path genuinely does not exist", !fs.existsSync(missingHint));
+    const result = restoreArchivedCodexRollout(id, { ...hintDeps, resolvedPathHint: missingHint });
+    check("(a) a hint that no longer exists falls through to the full walk and restores correctly", result.restored === true && result.alreadyLive === false, `got=${JSON.stringify(result)}`);
+    const dest = path.join(hintSessionsRoot, "2026", "09", "11", `rollout-2026-09-11T00-00-00-${id}.jsonl`);
+    check("(a) the real archived file landed at its correct live destination", fs.existsSync(dest) && fs.readFileSync(dest, "utf8") === "ARCHIVED\n");
+    check("(a) the archive copy is gone (moved via the full walk, not the discarded hint)", !fs.existsSync(archivedFile));
+  }
+
+  // (b) a hint that exists but sits under NEITHER known root ⇒ discarded, full walk engages.
+  {
+    const id = "hint-foreign-root-id";
+    const archivedFile = writeRawRollout(hintArchiveRoot, "2026", "09", "12", `rollout-2026-09-12T00-00-00-${id}.jsonl`, "ARCHIVED\n");
+    const foreignRoot = mkdtempManaged("loom-codex-rollout-archive-hint-foreign-");
+    const foreignHint = path.join(foreignRoot, `rollout-2026-09-12T00-00-00-${id}.jsonl`);
+    fs.writeFileSync(foreignHint, "FOREIGN-COPY\n");
+    const result = restoreArchivedCodexRollout(id, { ...hintDeps, resolvedPathHint: foreignHint });
+    check("(b) a hint under neither known root falls through to the full walk and restores correctly", result.restored === true && result.alreadyLive === false, `got=${JSON.stringify(result)}`);
+    const dest = path.join(hintSessionsRoot, "2026", "09", "12", `rollout-2026-09-12T00-00-00-${id}.jsonl`);
+    check("(b) the real archived file (never the foreign-root decoy) landed at the live destination", fs.existsSync(dest) && fs.readFileSync(dest, "utf8") === "ARCHIVED\n");
+    check("(b) the foreign-root decoy file is untouched", fs.existsSync(foreignHint) && fs.readFileSync(foreignHint, "utf8") === "FOREIGN-COPY\n");
+  }
+
+  // (d) an ARCHIVE hint while a live copy already exists ⇒ live wins, archive left completely untouched
+  // (round 2 item 1 — the real bug: a stale archive hint, e.g. from a failed EXDEV unlink, must never
+  // clobber a file that is already correctly live). RED under the pre-round-2 code: it trusted the
+  // archive hint unconditionally and moved/overwrote straight over the live file.
+  {
+    const id = "hint-archive-stale-id";
+    const y = "2026", m = "09", d = "13";
+    const fileName = `rollout-2026-09-13T00-00-00-${id}.jsonl`;
+    const liveFile = writeRawRollout(hintSessionsRoot, y, m, d, fileName, "LIVE-MUST-SURVIVE\n");
+    const archivedFile = writeRawRollout(hintArchiveRoot, y, m, d, fileName, "ARCHIVE-MUST-SURVIVE\n");
+    const result = restoreArchivedCodexRollout(id, { ...hintDeps, resolvedPathHint: archivedFile });
+    check("(d) a stale ARCHIVE hint while a live copy exists reports alreadyLive:true (live wins)", result.restored === true && result.alreadyLive === true, `got=${JSON.stringify(result)}`);
+    check("(d) the LIVE file's content is UNCHANGED (never overwritten)", fs.readFileSync(liveFile, "utf8") === "LIVE-MUST-SURVIVE\n");
+    check("(d) the ARCHIVE copy is left completely untouched (never deleted, never modified)", fs.existsSync(archivedFile) && fs.readFileSync(archivedFile, "utf8") === "ARCHIVE-MUST-SURVIVE\n");
+  }
+
+  // (e) a hint that EXISTS and sits under a known root, but names a DIFFERENT conversation ⇒ discarded,
+  // full walk engages and restores the correct id instead of falsely reporting the wrong one alreadyLive.
+  {
+    const id = "hint-wrong-id-target";
+    const otherId = "hint-wrong-id-other";
+    const archivedFile = writeRawRollout(hintArchiveRoot, "2026", "09", "14", `rollout-2026-09-14T00-00-00-${id}.jsonl`, "TARGET-ARCHIVED\n");
+    const otherLiveFile = writeRawRollout(hintSessionsRoot, "2026", "09", "14", `rollout-2026-09-14T00-00-00-${otherId}.jsonl`, "OTHER-LIVE\n");
+    const result = restoreArchivedCodexRollout(id, { ...hintDeps, resolvedPathHint: otherLiveFile });
+    check("(e) a hint naming a DIFFERENT id falls through to the full walk and restores the correct id", result.restored === true && result.alreadyLive === false, `got=${JSON.stringify(result)}`);
+    const dest = path.join(hintSessionsRoot, "2026", "09", "14", `rollout-2026-09-14T00-00-00-${id}.jsonl`);
+    check("(e) the TARGET id's rollout landed at its live destination", fs.existsSync(dest) && fs.readFileSync(dest, "utf8") === "TARGET-ARCHIVED\n");
+    check("(e) the archive copy for the target id is gone (moved via the full walk)", !fs.existsSync(archivedFile));
+    check("(e) the unrelated OTHER id's live file is untouched", fs.readFileSync(otherLiveFile, "utf8") === "OTHER-LIVE\n");
+  }
+
+  // (f) an ARCHIVE hint that names this conversation but sits at the WRONG depth (not YYYY/MM/DD/<file>)
+  // ⇒ discarded, full walk engages and restores the real, correctly-nested archived copy rather than
+  // misreconstructing a destination from the wrong-depth decoy.
+  {
+    const id = "hint-depth-mismatch-id";
+    const realArchivedFile = writeRawRollout(hintArchiveRoot, "2026", "09", "15", `rollout-2026-09-15T00-00-00-${id}.jsonl`, "REAL-ARCHIVED\n");
+    const decoyFile = path.join(hintArchiveRoot, `rollout-flat-${id}.jsonl`);
+    fs.writeFileSync(decoyFile, "DECOY-WRONG-DEPTH\n");
+    const result = restoreArchivedCodexRollout(id, { ...hintDeps, resolvedPathHint: decoyFile });
+    check("(f) a wrong-depth archive hint falls through to the full walk and restores the real copy", result.restored === true && result.alreadyLive === false, `got=${JSON.stringify(result)}`);
+    const dest = path.join(hintSessionsRoot, "2026", "09", "15", `rollout-2026-09-15T00-00-00-${id}.jsonl`);
+    check("(f) the REAL, correctly-nested archived copy landed at its live destination", fs.existsSync(dest) && fs.readFileSync(dest, "utf8") === "REAL-ARCHIVED\n");
+    check("(f) the real archive copy is gone (moved via the full walk, not the decoy)", !fs.existsSync(realArchivedFile));
+    check("(f) the wrong-depth decoy file is untouched (never used as a move source)", fs.existsSync(decoyFile) && fs.readFileSync(decoyFile, "utf8") === "DECOY-WRONG-DEPTH\n");
+  }
 }
 
 await finishAndExit(failures === 0 ? 0 : 1);

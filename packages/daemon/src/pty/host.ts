@@ -37,7 +37,7 @@ import { stripEscapeAndControlChars } from "../security/control-chars.js";
 export const CODEX_CODESCAPE_REASON = `codescape is enabled for this project but codex has no per-tool allow/disallow mechanism to pair with its write-tool restriction — never mounted for this harness, use harness "claude" for codescape access`;
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine, withCodexRoleDoctrine } from "./codex-doctrine.js";
 import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail, MCP_TOKEN_ENV_VAR } from "./codex-host.js";
-import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
+import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn, resolveTranscriptFile as resolveCodexRolloutFile } from "./codex-transcript.js";
 import { restoreArchivedCodexRollout } from "./codex-rollout-archive.js";
 
 /** @decision 702f2197 — the ONLY server ids passed as `mcpServersToCodexArgs`'s `autoApproveServerIds` at
@@ -5267,7 +5267,11 @@ export class PtyHost {
     // codex-rollout-archive.ts's own doc.
     if (isCodexResume && opts.resumeId) {
       try {
-        restoreArchivedCodexRollout(opts.resumeId);
+        // Card 7306e109 item 2: resolveCodexRolloutFile is the SAME cached lookup
+        // SessionService.resume() already ran moments earlier as its own resumability check — passing
+        // its result lets restoreArchivedCodexRollout skip its own fresh tree walk on the common path
+        // (see CodexRolloutArchiveDeps#resolvedPathHint for the full rationale + the untrusted-hint rule).
+        restoreArchivedCodexRollout(opts.resumeId, { resolvedPathHint: resolveCodexRolloutFile(opts.cwd, opts.resumeId) });
       } catch (err) {
         throw new Error(`codex resume ${opts.resumeId}: ${(err as Error)?.message ?? String(err)}`);
       }

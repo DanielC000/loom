@@ -88,12 +88,19 @@ export interface CodexRolloutArchiveResult {
 }
 
 /** Injectable seam for tests — mirrors `ScratchGcDeps`'s own convention (`sessions/scratch-gc.ts`).
- *  Real callers (the boot wiring in `index.ts`) never pass any of these. */
+ *  `archiveOldCodexRollouts`'s one real caller (the boot wiring in `index.ts`) never passes any of
+ *  these. `restoreArchivedCodexRollout`'s one real caller (`pty/host.ts#createCodexPty`) passes
+ *  {@link resolvedPathHint} in production (see that field's own doc) but never the rest. */
 export interface CodexRolloutArchiveDeps {
   nowMs?: number;
   ageMs?: number;
   sessionsRoot?: string;
   archiveRoot?: string;
+  /**
+   * @decision 7306e109 — never trust this hint blindly: a stale or foreign value must fall through to
+   * the full live-then-archive walk exactly as if no hint had been passed, never produce a wrong result.
+   */
+  resolvedPathHint?: string | null;
 }
 
 /**
@@ -105,6 +112,10 @@ export interface CodexRolloutArchiveDeps {
  * throws before `fs.unlinkSync` ever runs, leaving the original untouched rather than orphaned, and
  * `dest` is never left partially written (the temp-then-rename step either fully succeeds or `dest` is
  * never created).
+ *
+ * Content is always byte-identical, but (unlike a same-device rename) the EXDEV fallback gives the
+ * moved file a FRESH mtime, Linux included — harmless, since it can only make a restored file look
+ * fresher to {@link archiveOldCodexRollouts}'s own age filter, never staler.
  */
 function moveFile(src: string, dest: string): void {
   try {
@@ -235,9 +246,64 @@ export interface RestoreArchivedCodexRolloutResult {
  * error. See `docs/decisions/5172fe3a-codex-rollout-archiver-cannot-race-a-restore.md` for why the
  * {@link archiveOldCodexRollouts} boot sweep can never race this call.
  */
+/** Shared move-back-and-wrap-errors tail for both the hint path and the full-walk path below. */
+function restoreFromArchive(archivedFull: string, archivedRel: string, sessionsRoot: string): RestoreArchivedCodexRolloutResult {
+  const dest = path.join(sessionsRoot, archivedRel);
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    moveFile(archivedFull, dest);
+  } catch (err) {
+    throw new Error(`failed to restore archived codex rollout ${archivedFull} back to ${dest}: ${(err as Error)?.message ?? String(err)}`);
+  }
+  return { restored: true, alreadyLive: false };
+}
+
+/** `resolvedPathHint`'s filename must actually belong to THIS conversation — a hint whose name doesn't
+ *  mention `conversationId` at all must never be trusted as proof the id is already live or archived
+ *  (card `7306e109` round 2 item 2; see scenario (e) in `test/codex-rollout-archive.mjs`). */
+function hintNamesConversation(hintPath: string, conversationId: string): boolean {
+  const base = path.basename(hintPath);
+  return base.endsWith(".jsonl") && base.includes(conversationId);
+}
+
+/** An archive-root hint must resolve to exactly the `YYYY/MM/DD/<file>` depth (4 segments) this function
+ *  reconstructs the live destination from — any other depth would rebuild the wrong path under
+ *  `sessionsRoot` instead of falling back to the real walk (card `7306e109` round 2 item 2; see scenario
+ *  (f) in `test/codex-rollout-archive.mjs`). */
+function isDayShapedRelativePath(relPath: string): boolean {
+  return relPath.split(path.sep).filter(Boolean).length === 4;
+}
+
 export function restoreArchivedCodexRollout(conversationId: string, deps: CodexRolloutArchiveDeps = {}): RestoreArchivedCodexRolloutResult {
   const sessionsRoot = deps.sessionsRoot ?? codexSessionsRoot();
   const archiveRoot = deps.archiveRoot ?? codexRolloutArchiveRoot();
+
+  // Card 7306e109 item 2 (round 1) / items 1-2 (round 2) — honor an already-resolved hint (see
+  // CodexRolloutArchiveDeps#resolvedPathHint for the full rationale) in place of this function's own
+  // fresh live-then-archive walk, but only after re-verifying it: a stale, foreign, or misnamed value
+  // falls straight through to that same walk below exactly as if no hint had been passed.
+  const hint = deps.resolvedPathHint;
+  if (hint && fs.existsSync(hint) && hintNamesConversation(hint, conversationId)) {
+    const relToSessions = path.relative(sessionsRoot, hint);
+    if (!relToSessions.startsWith("..") && !path.isAbsolute(relToSessions)) {
+      return { restored: true, alreadyLive: true };
+    }
+    const relToArchive = path.relative(archiveRoot, hint);
+    if (!relToArchive.startsWith("..") && !path.isAbsolute(relToArchive) && isDayShapedRelativePath(relToArchive)) {
+      // Round 2 item 1: an archive hint can be STALE — e.g. a prior EXDEV restore whose final `unlink`
+      // failed leaves BOTH copies in place, and resolveTranscriptFile's cache keeps returning the archive
+      // path until a daemon restart. Live always wins: a cheap O(1) destination stat (never the expensive,
+      // unbounded archive walk) before ever touching the archive copy, so a stale hint can never clobber
+      // or throw against a file that is already correctly live.
+      const dest = path.join(sessionsRoot, relToArchive);
+      if (fs.existsSync(dest)) {
+        return { restored: true, alreadyLive: true };
+      }
+      return restoreFromArchive(hint, relToArchive, sessionsRoot);
+    }
+    // hint sits under neither known root, or fails the conversation-name/depth checks above — fall
+    // through to the full walk below exactly as if no hint had been passed.
+  }
 
   if (findRolloutByConversationId(sessionsRoot, conversationId)) {
     return { restored: true, alreadyLive: true };
@@ -246,12 +312,5 @@ export function restoreArchivedCodexRollout(conversationId: string, deps: CodexR
   if (!archivedHit) {
     return { restored: false, alreadyLive: false };
   }
-  const dest = path.join(sessionsRoot, archivedHit.rel);
-  try {
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    moveFile(archivedHit.full, dest);
-  } catch (err) {
-    throw new Error(`failed to restore archived codex rollout ${archivedHit.full} back to ${dest}: ${(err as Error)?.message ?? String(err)}`);
-  }
-  return { restored: true, alreadyLive: false };
+  return restoreFromArchive(archivedHit.full, archivedHit.rel, sessionsRoot);
 }
