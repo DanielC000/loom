@@ -4322,6 +4322,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (r.reason === "exists") return reply.code(409).send({ error: "file already exists" });
     if (r.reason === "not-found") return reply.code(404).send({ error: "file not found" });
     if (r.reason === "is-dir") return reply.code(400).send({ error: "path is a directory" });
+    if (r.reason === "hard-link") return reply.code(409).send({ error: "overwrite target is a hard link to another file — refused" });
     if (r.reason === "operational-dir") return reply.code(403).send({ error: "this project's vault points at Loom's own operational home directory — vault writes are refused there" });
     return reply.code(500).send({ error: "write failed" });
   };

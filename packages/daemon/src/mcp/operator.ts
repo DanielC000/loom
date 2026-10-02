@@ -167,7 +167,7 @@ export class OperatorMcpRouter {
     server.registerTool(
       "vault_write",
       {
-        description: "Write (create or overwrite) a UTF-8 text file under YOUR OWN project's vault, then commit it through the vault auto-committer (reuses vault/writer.ts writeVaultFile — its mandatory path-traversal guard confines the write to the vault root). No projectId — always your own project. Returns { ok:true, committed } or { ok:false, reason } ('traversal' on a path escape, 'is-dir', 'operational-dir' if this project's vault points at Loom's own home directory, 'error').",
+        description: "Write (create or overwrite) a UTF-8 text file under YOUR OWN project's vault, then commit it through the vault auto-committer (reuses vault/writer.ts writeVaultFile — its mandatory path-traversal guard confines the write to the vault root). No projectId — always your own project. Returns { ok:true, committed } or { ok:false, reason } ('traversal' on a path escape, 'is-dir', 'hard-link' if the overwrite target is a hard link to another file, 'operational-dir' if this project's vault points at Loom's own home directory, 'error').",
         inputSchema: strictShape({ path: z.string(), content: z.string() }),
       },
       async ({ path: relPath, content }) => {

@@ -722,7 +722,8 @@ export class TaskMcpRouter {
               "— confined to the project's vault root; a `..`/absolute-path escape or a backslash is REJECTED. " +
               "Prefer the project's documented vault taxonomy folder for a well-behaved note rather than the " +
               "vault root. Returns { ok:true, committed } or { ok:false, reason } ('traversal' on a path " +
-              "escape, 'is-dir', 'operational-dir' if this project's vault points at Loom's own home " +
+              "escape, 'is-dir', 'hard-link' if the overwrite target is a hard link to another file, " +
+              "'operational-dir' if this project's vault points at Loom's own home " +
               "directory, 'error'). There is no delete — this tool only ever creates or overwrites.",
             inputSchema: strictShape({ path: z.string(), content: z.string() }),
           },
