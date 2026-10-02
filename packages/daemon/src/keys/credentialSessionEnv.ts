@@ -27,14 +27,16 @@ export interface CredentialSessionEnvDbStore {
  * every accepted name absolutely, no exceptions. The DENYLIST is NOT — it is a best-effort enumeration of
  * known code-injection/host-launch vectors (JS: NODE_OPTIONS, NODE_PATH; native: the LD_ and DYLD_
  * prefixes — Loom ships to Linux/macOS via `loomctl`, not just this Windows dev host; Loom's own: the
- * GIT_, LOOM_, PYTHON and CLAUDE_ prefixes) and will always be one unenumerated var behind. Adding a name
- * here narrows the gap; it never closes it.
+ * GIT_, LOOM_, PYTHON and CLAUDE_ prefixes; Anthropic's own: ANTHROPIC_ — billing/API-redirect; network
+ * interception: HTTP(S)_PROXY/ALL_PROXY/NO_PROXY and NODE_EXTRA_CA_CERTS) and will always be one
+ * unenumerated var behind. Adding a name here narrows the gap; it never closes it.
  */
 const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const RESERVED_ENV_VAR_EXACT = new Set([
   "PATH", "NODE_OPTIONS", "NODE_PATH", "HOME", "USERPROFILE", "PAGER", "CLAUDECODE",
+  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS",
 ]);
-const RESERVED_ENV_VAR_PREFIXES = ["GIT_", "LOOM_", "PYTHON", "CLAUDE_", "LD_", "DYLD_"];
+const RESERVED_ENV_VAR_PREFIXES = ["GIT_", "LOOM_", "PYTHON", "CLAUDE_", "LD_", "DYLD_", "ANTHROPIC_"];
 
 /** True for a well-formed, DENYLIST-CLEAR env-var name (see the honest-limit note above — the regex half
  *  is absolute, the denylist half is best-effort) — the ONE check shared by the ask-time rejection

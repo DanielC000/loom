@@ -136,6 +136,20 @@ function cleanup(e) {
     ["HAS-DASH", "a dash is not a valid env-var character"],
     ["HAS=EQUALS", "= is never valid in an env-var name"],
     ["   ", "blank/whitespace-only"],
+    // card 08f2c7ce — ANTHROPIC_/proxy/CA-cert additions: an agent-chosen name here would flip a project
+    // to metered billing, redirect its own API traffic, or route/decrypt outbound traffic via an
+    // attacker-controlled host/CA.
+    ["ANTHROPIC_API_KEY", "ANTHROPIC_ prefix — flips a project to metered billing"],
+    ["ANTHROPIC_BASE_URL", "ANTHROPIC_ prefix — redirects API traffic"],
+    ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_ prefix — overrides the session's own auth"],
+    ["anthropic_custom_header", "ANTHROPIC_ prefix, lowercase — case-insensitive match"],
+    ["HTTP_PROXY", "exact reserved name — traffic interception"],
+    ["HTTPS_PROXY", "exact reserved name — traffic interception"],
+    ["ALL_PROXY", "exact reserved name — traffic interception"],
+    ["NO_PROXY", "exact reserved name — traffic interception"],
+    ["http_proxy", "exact reserved name, lowercase — case-insensitive match"],
+    ["NODE_EXTRA_CA_CERTS", "exact reserved name — CA interception"],
+    ["node_extra_ca_certs", "exact reserved name, lowercase — case-insensitive match"],
   ];
   for (const [envVar, reason] of rejected) {
     const built = buildQuestionAsk(
@@ -150,6 +164,20 @@ function cleanup(e) {
   );
   check("(A2) a well-formed, non-reserved envVar is ACCEPTED", "question" in good);
   check("(A2) it is stored TRIMMED", "question" in good && good.question.credentialEnvVar === "MY_GOOD_TOKEN");
+
+  // A name that merely CONTAINS "proxy"/"anthropic" as a substring (not a reserved exact name or prefix)
+  // must still be accepted — the denylist is exact/prefix, never a substring ban, so a legitimate existing
+  // config (e.g. a project's own proxy-auth token) is never falsely refused.
+  const legitProxyLike = buildQuestionAsk(
+    { type: "credential", title: "t", body: "b", envVar: "MY_PROXY_AUTH_TOKEN" },
+    { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+  );
+  check("(A2) a name merely CONTAINING \"proxy\" (not an exact reserved name) is ACCEPTED, no false refusal", "question" in legitProxyLike);
+  const legitAnthropicLike = buildQuestionAsk(
+    { type: "credential", title: "t", body: "b", envVar: "MY_ANTHROPIC_PARTNER_TOKEN" },
+    { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+  );
+  check("(A2) a name merely CONTAINING \"anthropic\" (not the ANTHROPIC_ prefix) is ACCEPTED, no false refusal", "question" in legitAnthropicLike);
 
   cleanup(e);
 }

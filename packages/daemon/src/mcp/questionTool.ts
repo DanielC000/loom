@@ -119,8 +119,9 @@ export function buildQuestionAsk(
     return {
       error: `envVar "${input.envVar}" is not a valid credential env-var name — it must match ` +
         "^[A-Za-z_][A-Za-z0-9_]*$ and must not be PATH/NODE_OPTIONS/NODE_PATH/HOME/USERPROFILE/PAGER/" +
-        "CLAUDECODE or start with GIT_/LOOM_/PYTHON/CLAUDE_/LD_/DYLD_ (load-bearing, host-launch, or " +
-        "native/JS code-injection names)",
+        "CLAUDECODE/HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY/NODE_EXTRA_CA_CERTS or start with " +
+        "GIT_/LOOM_/PYTHON/CLAUDE_/LD_/DYLD_/ANTHROPIC_ (load-bearing, host-launch, native/JS " +
+        "code-injection, billing/API-redirect, or network-interception names)",
     };
   }
   if (type === "credential" && input.provisionTo) {
