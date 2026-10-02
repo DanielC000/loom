@@ -33,15 +33,21 @@
 // DEFAULT_CONCURRENCY (safe when unset — see its own doc below) — either way clamped to the
 // MAX_CONCURRENCY ceiling (concurrent temp-SQLite DBs + in-process daemon boots thrash host
 // resources past a point; incident: this exact command, run with no env override, starved a live
-// self-hosting sibling service — card 301d8c01). Each of the fixed pool "lanes" owns one port for its
-// whole run (4400+laneIndex), so concurrent workers never collide — unlike a file-index-derived port,
-// which only avoided collisions when tests ran strictly one-at-a-time.
+// self-hosting sibling service — card 301d8c01). Each test file run gets its own OS-reserved
+// `LOOM_PORT` (`reserveHermeticPort`, test/_hermetic-port.mjs — card fc53ea74) rather than a
+// `4400+laneIndex` literal: the OLD scheme avoided collisions only WITHIN one invocation of this
+// script — two CONCURRENT invocations (e.g. two gates admitted at once under `maxConcurrentGates` >=
+// 2, or two workers' own `run_gate` on the same repo, which `gate-semaphore.ts`'s `mergeRepoFree`
+// deliberately leaves unguarded) independently computed the SAME port numbers for the same lane
+// index. The OS-assigned port is unique at the instant it's reserved, across every process on the
+// host, not just within this one.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { cleanupPathSync } from "../test/_tmp-fixture.mjs";
+import { reserveHermeticPort } from "../test/_hermetic-port.mjs";
 import { reapStaleLoomTempDirs } from "./temp-reaper.mjs";
 // Card f8b176f7 CR follow-up: deliberately NOT a top-level import. `git/worktrees.ts`'s
 // `loadNotHermeticNames`/`loadExcludedTestDirNames` load THIS FILE as a real module (dynamic
@@ -89,10 +95,51 @@ const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 const GATE_TIMING_NDJSON = path.join(LOOM_HOME, "gate-timing", "daemon-per-file-timing.ndjson");
 // Card afd51f5d: a FIXED, dedicated probe file — separate from GATE_TIMING_NDJSON, overwritten in place
 // every sample tick, NEVER appended to and NEVER grows. See `diskProbeWriteMs`'s own doc for why this file
-// exists and what it measures.
-const DISK_PROBE_FILE = path.join(LOOM_HOME, "gate-timing", ".disk-probe.bin");
+// exists and what it measures. Card fc53ea74: pid-qualified, mirroring card 6185fbfc's `runUid` fix for
+// GATE_TIMING_NDJSON's own row-join collision — two concurrent test-daemon.mjs processes (two gates
+// admitted at once under `maxConcurrentGates` >= 2) would otherwise overwrite the SAME shared file every
+// sample tick, corrupting each other's disk-I/O sample (never a gating signal, but still a real
+// diagnostics defect). Removed at the end of a normal run (see the tmpRoots cleanup below); a process that
+// never reaches that point (a hard kill) leaves its own pid-named file behind — `sweepOrphanedDiskProbeFiles`
+// below is what reclaims that one on a LATER run, so this is no longer silent, uncovered accumulation.
+const DISK_PROBE_FILE = path.join(LOOM_HOME, "gate-timing", `.disk-probe-${process.pid}.bin`);
 const DISK_PROBE_BYTES = 64 * 1024;
 const DISK_PROBE_BUF = Buffer.alloc(DISK_PROBE_BYTES, 7);
+
+// Card fc53ea74 (Code Review follow-up): best-effort sweep of ORPHANED pid-qualified DISK_PROBE_FILEs a
+// prior, force-killed run left behind — a normal exit already removes its own file (see the tmpRoots
+// cleanup below); this only ever finds one from a run that never got that far. Scoped STRICTLY to
+// `.disk-probe-<pid>.bin` filenames directly under the SAME `gate-timing` dir DISK_PROBE_FILE lives in,
+// never a blanket sweep. Liveness-checked the same way `_codex-real-spawn-lock.mjs`'s
+// `isRecordedHolderDead` does (`process.kill(pid, 0)`, ESRCH = definitively gone, anything else = don't
+// guess) — a pid that's still alive (including a concurrent sibling process, or this one) is left alone.
+// Never throws: a failure here must never fail the suite run it precedes.
+// `homeDir` defaults to the module-level LOOM_HOME (production behavior, unchanged) but is overridable so
+// a test can exercise this against a synthetic directory without needing a fresh module instance (the
+// SAME reason resolveEffectiveTimeoutMs's `cap` param is optional, above).
+export function sweepOrphanedDiskProbeFiles(homeDir = LOOM_HOME) {
+  let entries;
+  try {
+    entries = fs.readdirSync(path.join(homeDir, "gate-timing"));
+  } catch {
+    return; // directory doesn't exist yet (first-ever run on this LOOM_HOME) — nothing to sweep
+  }
+  for (const name of entries) {
+    const m = /^\.disk-probe-(\d+)\.bin$/.exec(name);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pid === process.pid) continue; // never our own
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      alive = err?.code !== "ESRCH";
+    }
+    if (!alive) {
+      try { fs.unlinkSync(path.join(homeDir, "gate-timing", name)); } catch { /* best-effort */ }
+    }
+  }
+}
 
 // Card 17069e7e (CR follow-up, DIRECTIVE #3): tally, don't print, on each individual write failure. A
 // single gate run calls `appendGateTimingRow` up to ~633 times (1 run-start + 1 run-summary + one per test
@@ -913,11 +960,36 @@ const TEST_TIMEOUT_OVERRIDES = {
   "emit-compare-gate-scope": 300_000, // card a9119abf: n=7, max pass 101,446ms, 1 kill; 2.96x margin.
   "merge-confirm-verdict-cache": 300_000, // card a9119abf: n=7, median 67s, max pass 75,533ms, 1 kill at 120s (a 1.6x-of-max tail spike, not a steady cost); 3.97x margin at the max pass.
   "merge-gate-single-file-retry": 300_000, // card a9119abf: n=7, max pass 108,722ms, 0 kills — included on the >=108,000ms cutoff alone; 2.76x margin.
-  // @decision 3791b14e — this override must stay numerically ABOVE codex-doctrine-real-spawn.mjs's
-  // own largest internal waitUntil timeout (currently 150_000ms, widened from 90s per card
-  // 887e10b8) — an outer ceiling below an inner wait can never let that wait mature.
-  "codex-doctrine-real-spawn": 300_000,
 };
+// Card fc53ea74: codex-doctrine-real-spawn's own 300_000 override moved to
+// `_codex-real-spawn-lock.mjs`'s `CODEX_OWN_WORK_BUDGET_MS` (that file's own doc carries card 3791b14e's
+// still-binding constraint). Every codex-real-spawn family member's EFFECTIVE timeout is now resolved
+// dynamically by `resolveEffectiveTimeoutMs` below, never read from this static map.
+
+/** @decision fc53ea74 — a codex-family member's outer timeout must equal `computeCodexFileCeilingMs`'s
+ *  own work-plus-wait sum, the ONE place that sum is computed, so it can never silently undercut the
+ *  lock's own `WAIT_TIMEOUT_MS` the way the old static-map ceiling did.
+ *
+ *  Resolves the EFFECTIVE per-file timeout `runOne` gives a test file: an ordinary (non-codex) file is
+ *  byte-identical to before this card (`TEST_TIMEOUT_OVERRIDES[name] ?? TEST_TIMEOUT_MS`); a
+ *  `CODEX_REAL_SPAWN_SET` member instead gets its own work allowance plus the lock's cap-derived wait
+ *  budget, both read from `_codex-real-spawn-lock.mjs`.
+ *
+ *  The import stays a LAZY, call-site `await import()` (never module-top), same reason as the sibling
+ *  lazy import a few lines up (card 3791b14e): this function is only ever called from `runOne`'s real
+ *  execution path, never from the two fixture-repo loaders a top-level import would break.
+ *
+ *  `cap` is optional so a test can pin a specific value deterministically — omitted, it resolves the SAME
+ *  live `LOOM_GATE_CONCURRENT_CAP` env var the lock itself reads, via the identical
+ *  `resolveGateCapFromEnv`. */
+export async function resolveEffectiveTimeoutMs(name, cap) {
+  const { CODEX_REAL_SPAWN_SET, CODEX_OWN_WORK_BUDGET_MS, DEFAULT_CODEX_OWN_WORK_BUDGET_MS, computeCodexFileCeilingMs, resolveGateCapFromEnv } =
+    await import("../test/_codex-real-spawn-lock.mjs");
+  if (!CODEX_REAL_SPAWN_SET.has(name)) return TEST_TIMEOUT_OVERRIDES[name] ?? TEST_TIMEOUT_MS;
+  const resolvedCap = cap ?? resolveGateCapFromEnv(process.env.LOOM_GATE_CONCURRENT_CAP);
+  const ownWork = CODEX_OWN_WORK_BUDGET_MS[name] ?? DEFAULT_CODEX_OWN_WORK_BUDGET_MS;
+  return computeCodexFileCeilingMs(ownWork, resolvedCap);
+}
 
 // @decision 0f0816e2 — this JUDGMENT-CURATED set of real-spawn/daemon-boot-heavy basenames runs FIRST and
 // SEQUENTIALLY (pool size 1) before the remainder runs in the existing concurrent pool, unchanged; it does
@@ -1272,27 +1344,48 @@ export function buildFailureEntryLines(f) {
   return lines;
 }
 
-// Runs one test file on a fixed pool "lane" (its port for the whole run, so concurrent lanes never
-// collide). Resolves to a result record; never rejects — a spawn error is captured as a failure.
+// @decision fc53ea74 — the lane-port allocator `runOne` uses for every spawned test file. Never revert to
+// the old `4400 + lane` formula (card fa52f555): it collided across concurrent test-daemon.mjs invocations,
+// and real test files genuinely `.listen()` on this port, so that collision was a real exposure, not theoretical.
+//
+// Exported (not inlined into `runOne`) so `test-daemon-port-allocation.mjs` exercises this EXACT function,
+// the same way `test-daemon-discovery.mjs` already imports `discoverHermeticTests` directly rather than a
+// duplicate.
+export async function reserveLanePort() {
+  return reserveHermeticPort();
+}
+
+// Runs one test file on a fixed pool "lane". Resolves to a result record; never rejects — a spawn
+// error (including a failed port reservation, below) is captured as a failure.
 async function runOne(name, lane) {
   const file = path.join(TEST_DIR, `${name}.mjs`);
   if (!fs.existsSync(file)) return { name, ok: true, skipped: true };
 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), `loom-td-${name}-`));
   tmpRoots.push(home);
-  // Card fa52f555: this is safe WITHIN one invocation of this script (POOL_SIZE lanes, POOL_SIZE
-  // distinct ports) but NOT across two CONCURRENT invocations — e.g. two merge gates admitted at once
-  // under `maxConcurrentGates` >= 2 — since each independently computes the same `4400 + lane` values.
-  // Checked (census card d39db2db): not currently reachable, because no hermetic test binds a real
-  // listener on this assigned port (all either use in-memory `.inject()` or an unrelated ephemeral
-  // `:0` bind) — but that is a property of today's test files, not a guarantee this scheme provides.
-  const port = 4400 + lane;
+  // Card fc53ea74: reserveLanePort() is a real async OS call (net.createServer().listen(0)) and
+  // CAN reject (e.g. resource exhaustion) — catch it here so a reservation failure degrades to an ordinary
+  // failed-result record, matching this function's own documented never-rejects contract, instead of
+  // throwing out of runOne and crashing the whole suite run.
+  const reserveStartTs = Date.now();
+  let port;
+  try {
+    port = await reserveLanePort();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const endTs = Date.now();
+    return {
+      name, ok: false, status: null, stdout: "", stderr: `reserveLanePort() failed: ${message}`, signal: null,
+      lane, startTs: reserveStartTs, endTs, durationMs: endTs - reserveStartTs,
+      failureDetail: { failureType: "port-reservation-failed", messages: [], truncated: false },
+    };
+  }
 
   // Card 17069e7e: Date.now() (not performance.now()) to match the existing NDJSON schema's
   // startTs/endTs, which the standalone investigation script (test/census/lib.mjs's `runOneTimed`)
   // already stamps this same way.
   const startTs = Date.now();
-  const timeoutMs = TEST_TIMEOUT_OVERRIDES[name] ?? TEST_TIMEOUT_MS;
+  const timeoutMs = await resolveEffectiveTimeoutMs(name);
   const r = await spawnWithTimeout(process.execPath, [file], {
     timeoutMs,
     // Card d1e10795: LOOM_REAL_HOME carries the harness's own (real) LOOM_HOME through to the spawned
@@ -1346,7 +1439,8 @@ async function runOne(name, lane) {
 }
 
 // A fixed number of lanes each pull the next unclaimed test off a shared cursor — bounded concurrency,
-// stable per-lane port, and every file still runs to completion regardless of earlier failures.
+// a freshly OS-reserved port per file (see runOne), and every file still runs to completion regardless
+// of earlier failures.
 function makeCursor(length) {
   let next = 0;
   return () => (next < length ? next++ : null);
@@ -1633,6 +1727,7 @@ if (isMain) {
   } catch (err) {
     console.warn(`⚠ temp-reaper failed (non-fatal): ${err.message}`);
   }
+  sweepOrphanedDiskProbeFiles();
 
   // Card e6e55f7a: sample only around the actual test run, never during --count/--help/error paths above.
   // `runInstrumentedSuite` seeds the gap series with the run's own start (so a long stall BEFORE the
@@ -1806,6 +1901,9 @@ if (isMain) {
     // ~1,067 loom-td-* dirs/14d, the largest of any family — one per test file per full-suite run, since
     // this loop's own retry could never actually succeed against a transient lock).
     for (const root of tmpRoots) cleanupPathSync(root);
+    // Card fc53ea74: best-effort removal of this process's own pid-qualified DISK_PROBE_FILE (see its own
+    // doc) — never grown, so a plain bounded-retry remove is enough; no second helper needed.
+    cleanupPathSync(DISK_PROBE_FILE);
 
     // Card b122c7d4 DoD #1: assert the executed PATH SET against the discovered allowlist, by path, never
     // by count — a count (e.g. `results.length === SELECTED.length`) can't distinguish "ran the right

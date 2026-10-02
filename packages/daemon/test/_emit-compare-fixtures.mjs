@@ -60,14 +60,16 @@ export const REAL_TEST_DAEMON_SCRIPT = fs.readFileSync(
 );
 
 // Card 17cd1f30: `test-daemon.mjs` itself statically imports `../test/_tmp-fixture.mjs` and
-// `./temp-reaper.mjs` — a fixture repo that writes ONLY `REAL_TEST_DAEMON_SCRIPT` and dynamically imports
-// it (to exercise `loadExcludedTestDirNames`/`loadNotHermeticNames` for REAL, not a stubbed-out success)
-// fails module resolution on those two siblings and falls back to `null` — for (I)/(J)/(K) that happens to
-// still land on the SAME "full gate" verdict their assertions expect (fixtures/-dir membership would have
-// forced it anyway), so the gap was invisible there; a scenario that needs the load to actually SUCCEED
-// (proving a NOT_HERMETIC name gets filtered, not just proving "some notEligible path fired") surfaces it
-// immediately. Both siblings only import node builtins + each other — no further transitive fixture is
-// needed. REAL content (not hand-typed stubs), same reasoning as REAL_TEST_DAEMON_SCRIPT itself.
+// `./temp-reaper.mjs` (card fc53ea74 added a third, `../test/_hermetic-port.mjs` — see its own doc below)
+// — a fixture repo that writes ONLY `REAL_TEST_DAEMON_SCRIPT` and dynamically imports it (to exercise
+// `loadExcludedTestDirNames`/`loadNotHermeticNames` for REAL, not a stubbed-out success) fails module
+// resolution on these siblings and falls back to `null` — for (I)/(J)/(K) that happens to still land on
+// the SAME "full gate" verdict their assertions expect (fixtures/-dir membership would have forced it
+// anyway), so the gap was invisible there; a scenario that needs the load to actually SUCCEED (proving a
+// NOT_HERMETIC name gets filtered, not just proving "some notEligible path fired") surfaces it
+// immediately. Each sibling only imports node builtins (+ each other, for the first two) — no further
+// transitive fixture is needed. REAL content (not hand-typed stubs), same reasoning as
+// REAL_TEST_DAEMON_SCRIPT itself.
 const REAL_TMP_FIXTURE_SCRIPT = fs.readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), "_tmp-fixture.mjs"), "utf8",
 );
@@ -83,6 +85,13 @@ const REAL_TEMP_REAPER_SCRIPT = fs.readFileSync(
 // just because the current import happens to be lazy.
 const REAL_GATE_TIMING_RETENTION_SCRIPT = fs.readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "lib", "gate-timing-retention.mjs"), "utf8",
+);
+// Card fc53ea74: test-daemon.mjs gained a new STATIC sibling import (`../test/_hermetic-port.mjs`, the
+// OS-reserved lane-port allocator) — exactly the import-graph-drift defect class
+// `writeRealTestDaemonScript`'s own doc warns about. Only imports `node:net` — no further transitive
+// fixture needed, same shape as REAL_TMP_FIXTURE_SCRIPT/REAL_TEMP_REAPER_SCRIPT above.
+const REAL_HERMETIC_PORT_SCRIPT = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "_hermetic-port.mjs"), "utf8",
 );
 
 // Writes a REAL, fully self-resolving copy of scripts/test-daemon.mjs into `repoDir` — "self-resolving"
@@ -102,6 +111,7 @@ export function writeRealTestDaemonScript(repoDir) {
   fs.writeFileSync(path.join(repoDir, "packages", "daemon", "scripts", "temp-reaper.mjs"), REAL_TEMP_REAPER_SCRIPT);
   fs.writeFileSync(path.join(repoDir, "packages", "daemon", "scripts", "lib", "gate-timing-retention.mjs"), REAL_GATE_TIMING_RETENTION_SCRIPT);
   fs.writeFileSync(path.join(repoDir, "packages", "daemon", "test", "_tmp-fixture.mjs"), REAL_TMP_FIXTURE_SCRIPT);
+  fs.writeFileSync(path.join(repoDir, "packages", "daemon", "test", "_hermetic-port.mjs"), REAL_HERMETIC_PORT_SCRIPT);
 }
 
 export function seed(db, p) {

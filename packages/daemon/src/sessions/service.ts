@@ -1368,9 +1368,13 @@ const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_GATE_TEST_CONCURRENCY
  *
  *  ⚠️ CROSS-PROJECT CONTRACT (card 0f1920e0): Codescape reads `LOOM_GATE_OP_ID` in production from
  *  inside the gate child. Renaming it, or dropping it from any `runGateSeq(` call site, is a BREAKING
- *  CHANGE for that external consumer — tell them first (a manager reaches them via `peer_message`). */
-function gateOpIdEnvOverride(opId: string, batchSize: number, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return { ...base, LOOM_GATE_OP_ID: opId, LOOM_GATE_BATCH_SIZE: String(batchSize) };
+ *  CHANGE for that external consumer — tell them first (a manager reaches them via `peer_message`).
+ *
+ *  @decision fc53ea74 — ALSO stamps `LOOM_GATE_CONCURRENT_CAP`, required never optional: an absent cap
+ *  on some gate children and present on others leaves `test/_codex-real-spawn-lock.mjs` unable to tell
+ *  "no cap info" from "cap is 1", silently under-sizing its own cross-process lock wait budget. */
+function gateOpIdEnvOverride(opId: string, batchSize: number, cap: number, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...base, LOOM_GATE_OP_ID: opId, LOOM_GATE_BATCH_SIZE: String(batchSize), LOOM_GATE_CONCURRENT_CAP: String(cap) };
 }
 
 /** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
@@ -4156,7 +4160,7 @@ export class SessionService {
           quarantinedAtAdmission = admittedQuarantineCheck.reason;
           return Promise.resolve({ passed: false, failedStatus: null, failedSignal: null, failedTimedOut: false, steps: [] });
         }
-        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0), undefined, undefined, hooks, gateSpillPath(opId));
+        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, orchestration.maxConcurrentGates), undefined, undefined, hooks, gateSpillPath(opId));
       },
       "high",
     );
@@ -15799,7 +15803,7 @@ export class SessionService {
             // @decision d099087f — same for the round-trip state: a whole-gate re-run on the re-pinned tip is complete evidence for THAT tip
             // (c59165b8's contract); captureGatedTip below re-takes the reflog snapshots at the re-pin. Single-file/resumed links stay sticky.
             gateHeadLeftDuringRun = false; gateHeadReturned = false; gateHeadLeftAt = undefined; gateReflogUnverified = false; anyLinkPreHeadOff = undefined; anyLinkPreUnverified = false;
-            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
+            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap), false, undefined, hooks, gateSpillFile);
             transientGateSpawned = true;
             if (r.passed) holdRepoGuardOnExit();
             return r;
@@ -15850,7 +15854,7 @@ export class SessionService {
             // DELIBERATELY NO `reunionAtAdmission()` (card b9e07a4a): this runs ONE test file, so re-unioning
             // onto a moved main would let the squash land on a base the other files never ran against; a
             // moved base instead fails closed via `requireCanonicalHead` at squash time.
-            await captureGatedTip(); const rr = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
+            await captureGatedTip(); const rr = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap), false, undefined, hooks, gateSpillFile);
             // Only the LAST link's hold counts (the semaphore resets it per link), so a pass here that a
             // resume then follows is simply superseded — the card 7ad12202 self-deadlock cannot occur.
             if (rr.passed) holdRepoGuardOnExit();
@@ -15881,7 +15885,7 @@ export class SessionService {
                 // Card 3007bb04: this is the ONLY other link that can auto-extend (the retry links pass
                 // `allowExtend:false`), so its extend must feed `futileNow()` too, exactly like attempt 1's.
                 const resumeHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-                await captureGatedTip(); const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, resumeHooks, gateSpillFile);
+                await captureGatedTip(); const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap), undefined, undefined, resumeHooks, gateSpillFile);
                 if (resumed.passed) holdRepoGuardOnExit();
                 return resumed;
               },
@@ -15929,7 +15933,7 @@ export class SessionService {
             // Card 9f6598dd: mirror the semaphore's own onExtend into `anyExtended` too — an ADDITIONAL
             // observer of the SAME event, never a replacement for the live registry's `entry.extended`.
             const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, mirroredHooks, gateSpillFile);
+            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap), undefined, undefined, mirroredHooks, gateSpillFile);
             // CARD c24dd48a: a passing gate hands off to this method's own squash phase — keep the per-repo
             // guard held (`beginSquash`/`endSquash` extend then release it). A failing gate never squashes.
             if (r.passed) holdRepoGuardOnExit();
@@ -17443,7 +17447,7 @@ export class SessionService {
                 fn: async (startedAt, _cancelSignal, hooks, _getMaxConcurrentGates, holdRepoGuardOnExit) => {
                   batchRetryStartedAt = startedAt;
                   // Card a16c580b: ONE spill path for the whole batch op (`gateSpillPath(opId)` is pure).
-                  const rr = await runGateSeq(identification.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), false, undefined, hooks, gateSpillPath(opId));
+                  const rr = await runGateSeq(identification.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates), false, undefined, hooks, gateSpillPath(opId));
                   // Only the LAST link's hold counts (the semaphore resets it per link).
                   if (rr.passed) holdRepoGuardOnExit();
                   if (rr.passed && remaining.length > 0) batchPartialPassResult = rr;
@@ -17468,7 +17472,7 @@ export class SessionService {
                     fn: async (startedAt, _cancelSignal, hooks, _getMaxConcurrentGates, holdRepoGuardOnExit) => {
                       batchResumeStartedAt = startedAt;
                       // No re-union; `allowExtend` left at its default (card 7ad12202 [7]).
-                      const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks, gateSpillPath(opId));
+                      const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates), undefined, undefined, hooks, gateSpillPath(opId));
                       if (resumed.passed) holdRepoGuardOnExit();
                       return resumed;
                     },
@@ -17492,7 +17496,7 @@ export class SessionService {
                 gateStartedAt = startedAt;
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 getConcurrentGatesMax = getMaxConcurrentGates;
-                const gr = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks, gateSpillPath(opId));
+                const gr = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates), undefined, undefined, hooks, gateSpillPath(opId));
                 if (gr.passed) holdRepoGuardOnExit();
                 return gr;
               }, "high", afterAttempt1, async (settled, thrown) => {
@@ -19215,7 +19219,7 @@ export class SessionService {
                 // comment applies verbatim here) — `hooks.onExtend?.()` still fires so gate_queue/gate_status
                 // keep reading the SAME live signal they always have.
                 const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { workerGateExtended = true; hooks.onExtend?.(); } };
-                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, mirroredHooks, gateSpillPath(opId));
+                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, gateCap, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, mirroredHooks, gateSpillPath(opId));
               },
               "low",
             );

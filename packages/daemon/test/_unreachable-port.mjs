@@ -3,11 +3,12 @@
 // WHY: a codex real-spawn fixture that drives a real `PtyHost.spawn({harness:"codex"})` gets the Loom MCP
 // servers (loom-tasks, loom-orchestration, ...) embedded in codex's argv at `http://127.0.0.1:${PORT}`,
 // where `PORT` (paths.ts) is `Number(process.env.LOOM_PORT || 4317)`. Under `scripts/test-daemon.mjs` that
-// is the LANE port (4400+lane), where normally nothing listens — but if anything on that port ACCEPTS and
-// never responds, codex waits out the whole MCP handshake and boot-ready slips to ~34s, past the fixtures'
-// own boot budget. A refused connection or a 404 is a fast failure and harmless; only an accept-and-stay-
-// silent listener hurts. Pinning LOOM_PORT to a port a live TCP probe has just shown refuses/blackholes
-// makes the fixture independent of whatever the host (or a sibling lane) has on the lane port.
+// is an OS-reserved port (`reserveHermeticPort`, card fc53ea74), where normally nothing listens — but if
+// anything on that port ACCEPTS and never responds, codex waits out the whole MCP handshake and boot-ready
+// slips to ~34s, past the fixtures' own boot budget. A refused connection or a 404 is a fast failure and
+// harmless; only an accept-and-stay-silent listener hurts. Pinning LOOM_PORT to a port a live TCP probe
+// has just shown refuses/blackholes makes the fixture independent of whatever the host (or a sibling
+// invocation) has on the port `test-daemon.mjs` happened to reserve for it.
 //
 // The probe counts a port as REACHABLE only on a successful TCP connect — exactly the accept-but-silent
 // shape above — so an accepting listener is rejected here regardless of whether it ever answers.

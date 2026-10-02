@@ -71,14 +71,87 @@ const LOCK_PATH = process.env.LOOM_CODEX_REAL_SPAWN_LOCK_PATH || path.join(os.tm
 // codex-transcript-real-spawn 120.0s (killed at the OUTER per-file ceiling, still holding this lock —
 // see PID-liveness reaping below for why that no longer costs a full STALE_MS wait), codex-doctrine-
 // real-spawn 96.8s (PASS), codex-mcp-reachability-real-spawn 91.7s (FAIL, blocked on this very lock),
-// codex-stateful-runtime-real-spawn 69.4s (PASS). 180s clears the highest of those with real margin while
-// staying well below STALE_MS (5 min) — this is a genuine field measurement, not a guess; if a fresh
-// contended-vs-sequential comparison after this fix lands shows a smaller number suffices, it can shrink,
-// but there was never a passing run recorded above 120s to justify going lower than that on this data
-// alone.
+// codex-stateful-runtime-real-spawn 69.4s (PASS). 180s (BASE_WAIT_TIMEOUT_MS below) clears the highest of
+// those with real margin — this is a genuine field measurement, not a guess; if a fresh contended-vs-
+// sequential comparison after this fix lands shows a smaller number suffices, it can shrink, but there was
+// never a passing run recorded above 120s to justify going lower than that on this data alone.
+// Card fc53ea74 — HONEST CAVEAT, was: "staying well below STALE_MS (5 min)": true only at the unscaled
+// 180s. The ACTUAL wait budget (`WAIT_TIMEOUT_MS` below) now SCALES with cap and already reaches/exceeds
+// STALE_MS at cap>=3 (360_000 vs 300_000) — at today's owner-set cap=2 it's still 180_000, safely under.
+// `tryAcquireOnce` force-reaps on `age > STALE_MS` REGARDLESS of `isRecordedHolderDead`'s own verdict, so
+// a cap raised far enough that a legitimate holder's own hold genuinely outlives STALE_MS could, in
+// principle, have a waiter force-reap it out from under a still-alive, still-running process — the
+// EXACT double-hold hazard this lock exists to prevent. Not fixed here (the cap is owner-controlled and
+// sits at 2 today — project memory `gate-cap-is-2-by-owner-decision-never-change-silently`); re-derive
+// this relationship against the live STALE_MS/cap before ever raising the cap past 2.
 const STALE_MS = 5 * 60_000;
 const POLL_MS = 250;
-const WAIT_TIMEOUT_MS = 180_000;
+// Card fc53ea74: WAIT_TIMEOUT_MS now SCALES with the daemon's own `orchestration.maxConcurrentGates`
+// cap instead of staying a flat 180s. WHY: at most `cap` gate-executing processes exist on this daemon
+// at once (GateSemaphore's own structural bound), so a waiter here can, in the worst realistic case,
+// have to wait behind (cap - 1) OTHER processes' own codex-family holders — not just the ONE this 180s
+// figure was originally measured against (see the field-measurement comment above). `BASE_WAIT_TIMEOUT_MS`
+// is that same 180s, now read as "one other holder's worst observed runtime, plus margin" rather than a
+// fixed ceiling; the budget is that figure times the number of OTHER holders a waiter could legitimately
+// queue behind. The daemon passes its resolved cap down via `LOOM_GATE_CONCURRENT_CAP` (sessions/
+// service.ts's `gateOpIdEnvOverride`, same mechanism `LOOM_GATE_TEST_CONCURRENCY` already uses to pin the
+// worker self-gate's own lane pool) — absent for a bare/manual run (no gate-child env), which falls back
+// to cap=2's value, UNCHANGED from today's flat 180s (every caller observed before this card ran at
+// cap<=2, see project memory `gate-cap-is-2-by-owner-decision-never-change-silently`). Never hardcode a
+// raised cap's own resulting number here instead of deriving it — the cap is a human-tunable daemon-
+// global setting and a hardcoded multiple would silently go stale the moment it's raised.
+export const BASE_WAIT_TIMEOUT_MS = 180_000;
+
+// Card fc53ea74: mirrors the daemon-global `orchestration.maxConcurrentGates` config validator's own
+// ceiling (mcp/platform.ts: `z.number().int().min(1).max(50)`) — not imported; that validator lives in
+// compiled daemon `src`, not a plain `.mjs` this file can reach without a build step. Re-check against
+// that validator if it ever changes.
+const MAX_GATE_CAP = 50;
+
+/** Pure: resolves `LOOM_GATE_CONCURRENT_CAP`'s raw env string to a cap number. Accepts ONLY a finite
+ *  integer >= 1, clamped to {@link MAX_GATE_CAP} — anything else (`undefined`/empty/non-numeric/non-
+ *  integer/`"Infinity"`/zero/negative) falls back to 2 (the bare-run/absent case, and today's unchanged
+ *  behavior). `Number.isInteger` alone rejects `NaN`/`±Infinity`/non-integers in one check, so "Infinity"
+ *  can never resolve to an unbounded wait via {@link computeCodexLockWaitTimeoutMs}. Exported separately
+ *  from that function so each half (env parsing vs. the arithmetic) is independently testable without
+ *  needing to spawn a child process to vary `process.env`. */
+export function resolveGateCapFromEnv(envValue) {
+  const n = Number(envValue);
+  if (!Number.isInteger(n) || n < 1) return 2;
+  return Math.min(n, MAX_GATE_CAP);
+}
+
+/** Pure: the cap-derived wait budget — see the comment above for the arithmetic's rationale. `Math.max(1,
+ *  cap - 1)` floors at cap<=2 (today's unchanged value), scaling linearly above it. */
+export function computeCodexLockWaitTimeoutMs(cap) {
+  return Math.max(1, cap - 1) * BASE_WAIT_TIMEOUT_MS;
+}
+
+// Card fc53ea74: per-family-member "own work" budget — how long a file's OWN real test logic needs once
+// it actually HOLDS the lock, i.e. EXCLUDING any time spent waiting on a same-host sibling. Defaults to
+// DEFAULT_CODEX_OWN_WORK_BUDGET_MS (today's blanket scripts/test-daemon.mjs TEST_TIMEOUT_MS) for every
+// member not named here. `codex-doctrine-real-spawn` carries the 300_000 scripts/test-daemon.mjs used to
+// hold directly in its own TEST_TIMEOUT_OVERRIDES entry (moved here, not duplicated) — `@decision
+// 3791b14e` requires this stay above that file's own largest internal `waitUntil` (150_000ms);
+// {@link computeCodexFileCeilingMs} only ever ADDS the lock wait budget on top, so that invariant holds
+// at every cap by construction.
+export const DEFAULT_CODEX_OWN_WORK_BUDGET_MS = 120_000;
+export const CODEX_OWN_WORK_BUDGET_MS = {
+  "codex-doctrine-real-spawn": 300_000,
+};
+
+/** The TOTAL outer per-file ceiling `scripts/test-daemon.mjs`'s harness must give a codex-real-spawn
+ *  family member: its own work budget PLUS however long it could legitimately wait on THIS lock. Exported
+ *  so `scripts/test-daemon.mjs` and any test pinning this invariant call the EXACT SAME function
+ *  {@link computeCodexLockWaitTimeoutMs} derives from — they cannot silently drift apart.
+ *  @decision fc53ea74 — the outer per-file ceiling must never be smaller than this sum, or a waiter can be
+ *  SIGTERM'd by the harness before its own lock wait would ever have given up. */
+export function computeCodexFileCeilingMs(ownWorkBudgetMs, cap) {
+  return ownWorkBudgetMs + computeCodexLockWaitTimeoutMs(cap);
+}
+
+const RESOLVED_GATE_CAP = resolveGateCapFromEnv(process.env.LOOM_GATE_CONCURRENT_CAP); // env: cap fed down by the gate child spawn (see above)
+const WAIT_TIMEOUT_MS = computeCodexLockWaitTimeoutMs(RESOLVED_GATE_CAP);
 
 // Card 3791b14e DoD-3: a holder killed via `scripts/test-daemon.mjs`'s own per-file timeout (`child.kill()`
 // with no signal — Node reports it to the PARENT as "SIGTERM", but EMPIRICALLY CONFIRMED on this host

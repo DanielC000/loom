@@ -4096,6 +4096,15 @@ export const CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS = [
   // could otherwise take the reduced path and never trip a single check — exactly the op a450e3dd / card
   // fc53ea74 incident class this guard exists to catch.
   "packages/daemon/test/test-daemon-fixture-import-guard.mjs",
+  // Card fc53ea74: comment-stripped (same `_strip-comments.mjs` discipline as
+  // test-daemon-fixture-import-guard.mjs immediately above) raw-read of real
+  // packages/daemon/scripts/test-daemon.mjs SOURCE, asserting `runOne`'s own port-assignment call site is
+  // literally `port = await reserveLanePort()` and never the retired `4400 + lane` literal. Same
+  // membership ground as its sibling above: a plain `.mjs` script has no compile/emit step for the
+  // reduced/emit-compare path to reason about on its own, so a CODE-level change to this exact call site
+  // (not merely a comment) has nothing else re-verifying it before a reduced gate could otherwise skip
+  // straight past the regression this test exists to catch (Code Review of fc53ea74's own first landing).
+  "packages/daemon/test/test-daemon-port-allocation.mjs",
 ];
 
 /** @decision fd0d34da — a coarse, PATH-FREE classification of WHY `notApplicable:true`, safe to leave
