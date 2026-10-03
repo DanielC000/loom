@@ -232,6 +232,30 @@ try {
     check("/export: singular count reads '1 message' (no trailing s)", singular.ack.includes("1 message)"));
   }
 
+  // ============ 9b — '/export' refuses on a GROUP route (card 5f9b0580): never leaks the cross-channel
+  //                   conversation to an authenticated-but-non-owner group member ============
+  {
+    const groupRoute = { sessionId: "s", channel: "telegram", chatId: "chat-9", senderId: "user-1" }; // group: senderId set
+    let calls = 0;
+    const spyDeps = {
+      exportConversation: () => {
+        calls++;
+        return [{ id: "1", sessionId: "s", channel: "telegram", chatId: "chat-9", author: "user", text: "leaked secret", createdAt: "2026-07-08T00:00:00.000Z", viaVoice: false }];
+      },
+    };
+
+    const groupResult = commandHandler("export")(undefined, groupRoute, inMemoryVoicePrefs(), spyDeps);
+    check("/export (group): the exporter is never called", calls === 0);
+    check("/export (group): refuses with the exact approved DM-only ack (no DM-retry invitation — a non-owner's own DM isn't authorized either)", groupResult.ack === "📤 /export only works in a private chat with me — it isn't available in group chats.");
+    check("/export (group): the refusal never contains the (unread) conversation text", !groupResult.ack.includes("leaked secret"));
+
+    // DM route is a REGRESSION GUARD: completely unaffected by the group check — still calls the
+    // exporter and dumps the real conversation, exactly as before this fix.
+    const dmRoute = { sessionId: "s", channel: "in-app", chatId: "s", senderId: null };
+    const dmResult = commandHandler("export")(undefined, dmRoute, inMemoryVoicePrefs(), spyDeps);
+    check("/export (DM): unaffected by the group-scope fix — exporter called and the real dump is returned", calls === 1 && dmResult.ack.includes("leaked secret"));
+  }
+
   // ============ 10 — end-to-end via CompanionController.handleInAppInbound: '/export'/'/whoami' swallowed ============
   {
     // Seed a real exchange into the session's CURRENT conversation so "/export" has something to dump.

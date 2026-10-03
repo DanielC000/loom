@@ -237,7 +237,19 @@ const COMMANDS: Record<string, CommandDef> = {
     // separate document/file mechanism, never leaves this route. `deps.exportConversation` reads exactly
     // the CURRENT (open) conversation (respects a prior "/new" boundary), so this can never leak an
     // already-archived conversation.
+    // DM-only (card 5f9b0580): `deps.exportConversation` is keyed by sessionId alone, with no channel/
+    // chatId scoping, so it returns the WHOLE cross-channel current conversation — anything said over DM
+    // or another channel, not just this chat. A GROUP binding authorizes every member on its allowlist,
+    // not the owner exclusively (auth.ts), so without this check any allowlisted group member could dump
+    // the owner's full conversation history into the shared chat. Checked FIRST, mirroring "/voice"'s own
+    // `route.senderId !== null` group-scope idiom above — `deps.exportConversation` must never even be
+    // called on a group route. The refusal deliberately does NOT invite a DM retry: a non-owner group
+    // member's own DM to the companion is not an authorized route either (auth.ts), so suggesting one
+    // would promise an export that can never actually happen for them.
     handler(_args, route, _prefs, deps) {
+      if (route.senderId !== null) {
+        return { ack: "📤 /export only works in a private chat with me — it isn't available in group chats." };
+      }
       const messages = deps.exportConversation(route.sessionId);
       if (messages.length === 0) {
         return { ack: "📤 Nothing to export yet — this conversation is empty." };
