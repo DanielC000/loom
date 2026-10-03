@@ -7716,8 +7716,14 @@ export class Db {
    * Compare-and-sets against the existing row's monotonic `version`, never `updatedAt` (see the decision
    * record for why a timestamp is not a safe CAS token here). `baseVersion` is the `version` the caller
    * last read for this key (via memory_read/memory_list/a prior memory_write response):
-   *   - key doesn't exist yet → plain insert (starts at version 1); `baseVersion` is irrelevant (nothing
-   *     to race against on a brand-new key).
+   *   - key doesn't exist yet AND `baseVersion` is `undefined` → plain insert (starts at version 1);
+   *     `baseVersion` is irrelevant (nothing to race against on a brand-new key).
+   *   - key doesn't exist yet AND `baseVersion` IS set → REJECTED: returns `{ok:false, notFound:true}`.
+   *     Card 42e9caf9: a caller only ever sends a `baseVersion` after reading an existing row, so this
+   *     means the key was DELETED (e.g. `memory_forget`) since that read — without this check the
+   *     `existing && …` test below short-circuits false (nothing to compare against) and falls through
+   *     to a plain insert, silently RESURRECTING the deleted key as a new version-1 row instead of
+   *     surfacing the deletion as a conflict.
    *   - key exists and `baseVersion` is `undefined` OR doesn't equal the row's current `version` →
    *     REJECTED: returns `{ok:false, current}` (the row as it stands right now) instead of writing, so
    *     the caller can reconcile/merge and retry with the fresh version.
@@ -7734,9 +7740,12 @@ export class Db {
     input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[]; triggerGlob?: string },
     maxNotes: number,
     baseVersion: number | undefined,
-  ): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } | ({ ok: false } & ProjectMemoryControlCharRejection) {
-    const run = this.db.transaction((): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } | ({ ok: false } & ProjectMemoryControlCharRejection) => {
+  ): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } | { ok: false; notFound: true } | ({ ok: false } & ProjectMemoryControlCharRejection) {
+    const run = this.db.transaction((): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } | { ok: false; notFound: true } | ({ ok: false } & ProjectMemoryControlCharRejection) => {
       const existing = this.getProjectMemoryByKey(projectId, input.key);
+      if (!existing && baseVersion !== undefined) {
+        return { ok: false, notFound: true };
+      }
       if (existing && existing.version !== baseVersion) {
         return { ok: false, current: existing };
       }

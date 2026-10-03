@@ -304,6 +304,58 @@ check("(a6598c1e) buildMcpServers: an ORDINARY capability slug that merely start
   withLegitLoomPrefixed["loom-tasks-helper"]?.command === process.execPath
   && withLegitLoomPrefixed["loom-tasks"]?.type === "http" && withLegitLoomPrefixed["loom-orchestration"]?.type === "http");
 
+// ===================== card 42e9caf9: the REAL mcpServers mount keys reserved too, not just the grant slugs =====================
+// "browser-testing"/"document-conversion" (the grant slugs, already covered above) are NOT the same
+// strings buildMcpServers actually mounts them under — it mounts "playwright"/"markitdown" respectively
+// (see buildMcpServers' own doc). Codescape is mounted as "codescape" and isn't a capability grant at all.
+// Pre-fix, none of these three literal map keys were in RESERVED_CAPABILITY_SLUGS, so an owner-added
+// catalog row could be slugged exactly one of them and silently collide with the real mount.
+check("(42e9caf9) RESERVED_CAPABILITY_SLUGS carries the real mount keys 'playwright'/'markitdown'/'codescape'",
+  RESERVED_CAPABILITY_SLUGS.includes("playwright") && RESERVED_CAPABILITY_SLUGS.includes("markitdown") && RESERVED_CAPABILITY_SLUGS.includes("codescape"));
+
+for (const slug of ["playwright", "markitdown", "codescape"]) {
+  const r = validateCapabilityDefInput({ slug, name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });
+  check(`(42e9caf9) validateCapabilityDefInput REJECTS an owner-catalog row slugged '${slug}'`, r.ok === false);
+}
+
+// The collision case directly, mirroring the a6598c1e squat tests above: a catalog row slugged exactly
+// "playwright" must never displace the REAL, already-hardened Playwright MCP mount for a session that
+// also has browserTesting enabled.
+const playwrightSquatDef = { ...fakeBundled, id: "squat-playwright", slug: "playwright" };
+const withPlaywrightSquat = buildMcpServers({
+  sessionId: "s-42e9caf9-pw", port: 4317, role: "worker", browserTesting: true,
+  capabilities: [{ slug: "playwright" }], capabilityCatalog: [playwrightSquatDef],
+});
+// Discriminates on ARGS, not `command` — the real Playwright mount's command is the host's own node
+// binary (the same `process.execPath` this test runs under), so comparing `command` alone can't tell the
+// real mount apart from the squat's fake `{command: process.execPath}` provision. The real mount's args
+// always resolve @playwright/mcp's own cli.js; the squat's args are the fake bundled recipe's `["--version"]`.
+check("(42e9caf9) a catalog row squatting 'playwright' never displaces the real Playwright mount",
+  Array.isArray(withPlaywrightSquat.playwright?.args) && withPlaywrightSquat.playwright.args.some((a) => /cli\.js$/.test(a)) && !withPlaywrightSquat.playwright.args.includes("--version"));
+
+// Same for "markitdown" — LOOM_MARKITDOWN_BIN is the documented hermetic override seam (mirrors
+// document-conversion-spawn.mjs) so this resolves deterministically regardless of whether the real venv
+// happens to be warm on the host running this test.
+process.env.LOOM_MARKITDOWN_BIN = process.execPath;
+const markitdownSquatDef = { ...fakeBundled, id: "squat-markitdown", slug: "markitdown" };
+const withMarkitdownSquat = buildMcpServers({
+  sessionId: "s-42e9caf9-md", port: 4317, role: "worker", documentConversion: true,
+  capabilities: [{ slug: "markitdown" }], capabilityCatalog: [markitdownSquatDef],
+});
+check("(42e9caf9) a catalog row squatting 'markitdown' never displaces the real markitdown mount",
+  Array.isArray(withMarkitdownSquat.markitdown?.args) && withMarkitdownSquat.markitdown.args.length === 0 && !withMarkitdownSquat.markitdown?.args?.includes("--version"));
+
+// "codescape" isn't a capability grant at all (a separate per-project toggle) — exercised here with
+// codescapeEnabled left unset/false, so there is no real mount to defend; the reservation must still
+// refuse the squat outright (log-and-skip) rather than silently mounting the owner's row under that key.
+const codescapeSquatDef = { ...fakeBundled, id: "squat-codescape", slug: "codescape" };
+const withCodescapeSquat = buildMcpServers({
+  sessionId: "s-42e9caf9-cs", port: 4317, role: "worker",
+  capabilities: [{ slug: "codescape" }], capabilityCatalog: [codescapeSquatDef],
+});
+check("(42e9caf9) a catalog row squatting 'codescape' is refused, never silently mounted",
+  withCodescapeSquat.codescape === undefined);
+
 // ===================== (d) byte-identical BRIDGE regression =====================
 const oldShape = buildMcpServers({ sessionId: "s6", port: 4317, role: "worker", browserTesting: true });
 const newShapeEquivalent = buildMcpServers({ sessionId: "s6", port: 4317, role: "worker", browserTesting: true, documentConversion: false, capabilities: [], capabilityCatalog: [] });

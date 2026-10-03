@@ -1,8 +1,9 @@
-// Card 8d158088 — the ENFORCEMENT half of cd0c7fee's correlation mechanism: memory_write refuses ONLY a
-// POSITIVELY CONFIRMED sub-agent call; worker_report NEVER refuses (attribute-and-allow, always) since it
-// is a worker's ONLY channel up and a wrongful refusal would strand it with no way to report at all. Both
-// "unknown" and "ambiguous" (the two correlation-FAILURE states) MUST fail open for BOTH tools — that is
-// the non-negotiable rule this test is red-proofing (CLAUDE.md, card 8d158088's own DoD-2).
+// Card 8d158088 — the ENFORCEMENT half of cd0c7fee's correlation mechanism: memory_write (and, since card
+// 42e9caf9, memory_forget) refuses ONLY a POSITIVELY CONFIRMED sub-agent call; worker_report NEVER refuses
+// (attribute-and-allow, always) since it is a worker's ONLY channel up and a wrongful refusal would strand
+// it with no way to report at all. Both "unknown" and "ambiguous" (the two correlation-FAILURE states)
+// MUST fail open for ALL THREE tools — that is the non-negotiable rule this test is red-proofing
+// (CLAUDE.md, card 8d158088's own DoD-2).
 //
 // Driven end-to-end through the REAL gateway/server.ts buildServer() + a REAL @modelcontextprotocol/sdk
 // client over a REAL http.listen() socket (mirrors mcp-inbound-log.mjs's harness) — this exercises the
@@ -88,6 +89,14 @@ async function callMemoryWrite(key, text) {
   return result;
 }
 
+async function callMemoryForget(key) {
+  const client = new Client({ name: "subagent-enforce-test", version: "0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/S`), mcpAuthRequestInit(tokenS)));
+  const result = await client.callTool({ name: "memory_forget", arguments: { key } });
+  await client.close();
+  return result;
+}
+
 async function callWorkerReport(summary) {
   const client = new Client({ name: "subagent-enforce-test", version: "0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/S`), mcpAuthRequestInit(tokenS)));
@@ -138,6 +147,45 @@ async function memoryKeyExists(key) {
   check("(memory_write) 'confirmed-subagent' -> the note was NOT written (refusal is real, not cosmetic)", !(await memoryKeyExists("k-subagent")));
 }
 
+// ============================ memory_forget (card 42e9caf9): mirrors memory_write's own enforcement ============================
+{
+  nextAttribution = { state: "confirmed-main" };
+  for (const k of ["f-unknown", "f-ambiguous", "f-main"]) {
+    await callMemoryWrite(k, "seed note to be forgotten");
+    check(`(memory_forget setup) seeded "${k}" for the forget attempt below`, await memoryKeyExists(k));
+  }
+}
+{
+  nextAttribution = { state: "unknown" };
+  const r = toolJson(await callMemoryForget("f-unknown"));
+  check("(memory_forget) 'unknown' attribution -> NOT refused (no error)", r.error === undefined);
+  check("(memory_forget) 'unknown' -> the note was actually deleted", !(await memoryKeyExists("f-unknown")));
+}
+{
+  nextAttribution = { state: "ambiguous", candidateCount: 2 };
+  const r = toolJson(await callMemoryForget("f-ambiguous"));
+  check("(memory_forget) 'ambiguous' attribution -> NOT refused (no error)", r.error === undefined);
+  check("(memory_forget) 'ambiguous' -> the note was actually deleted", !(await memoryKeyExists("f-ambiguous")));
+}
+{
+  nextAttribution = { state: "confirmed-main" };
+  const r = toolJson(await callMemoryForget("f-main"));
+  check("(memory_forget) 'confirmed-main' attribution -> NOT refused (no error)", r.error === undefined);
+  check("(memory_forget) 'confirmed-main' -> the note was actually deleted", !(await memoryKeyExists("f-main")));
+}
+{
+  // Seed under a non-refusing attribution so the write itself isn't what's under test here.
+  nextAttribution = { state: "confirmed-main" };
+  await callMemoryWrite("f-subagent", "should survive a sub-agent's forget attempt");
+  check("(memory_forget setup) seeded \"f-subagent\"", await memoryKeyExists("f-subagent"));
+
+  nextAttribution = { state: "confirmed-subagent", agentId: "sub-3", agentType: "Explore" };
+  const r = toolJson(await callMemoryForget("f-subagent"));
+  check("(memory_forget) 'confirmed-subagent' attribution -> REFUSED (error present)", typeof r.error === "string");
+  check("(memory_forget) refusal names the sub-agent's agentType", r.error?.includes("Explore"));
+  check("(memory_forget) 'confirmed-subagent' -> the note was NOT deleted (refusal is real, not cosmetic)", await memoryKeyExists("f-subagent"));
+}
+
 // ============================ worker_report: NEVER refuses, on ANY attribution state (the non-negotiable rule) ============================
 for (const [label, attribution] of [
   ["unknown", { state: "unknown" }],
@@ -160,6 +208,6 @@ await app.close();
 db.close();
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — memory_write refuses ONLY a confirmed-subagent call and fails open on unknown/ambiguous/confirmed-main; worker_report never refuses on any attribution state, and threads the real result through to sessions.workerReport for the durable-record surface."
+  ? "\n✅ ALL PASS — memory_write and memory_forget each refuse ONLY a confirmed-subagent call and fail open on unknown/ambiguous/confirmed-main; worker_report never refuses on any attribution state, and threads the real result through to sessions.workerReport for the durable-record surface."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

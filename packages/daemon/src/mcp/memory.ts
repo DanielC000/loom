@@ -92,8 +92,13 @@ export interface MemoryWriteConflict {
   error: string;
   conflict: true;
   /** The note as it stands right now — reconcile/merge into this and retry with its `version` as the
-   *  new `baseVersion`. */
-  current: ProjectMemoryEntry;
+   *  new `baseVersion`. Omitted when `notFound` is set (see below) — there is no current row to show. */
+  current?: ProjectMemoryEntry;
+  /** Card 42e9caf9: true when this conflict is because the key was DELETED (e.g. via `memory_forget`)
+   *  since the caller last read `baseVersion` — distinguishes "someone deleted this note" from "someone
+   *  edited it" so the caller doesn't mistake a missing `current` for a transient glitch and doesn't
+   *  retry with the same `baseVersion` expecting it to silently recreate the note. */
+  notFound?: true;
 }
 
 export interface MemoryWriteTooLong {
@@ -358,6 +363,17 @@ export function writeProjectMemory(
     // Card ea5fb00a — a control-char rejection (see db.ts's `upsertProjectMemory`) is a DIFFERENT
     // outcome from a version conflict: no `current` row to reconcile against, just a bad input to fix.
     if ("rejected" in result) return { error: result.error };
+    // Card 42e9caf9 — the key was deleted (e.g. memory_forget) since baseVersion was read: distinct from
+    // an edit conflict, and there is no `current` row to show. Retrying with the same baseVersion must
+    // NOT silently recreate the note — drop baseVersion entirely to write it fresh, or confirm the key.
+    if ("notFound" in result) {
+      return {
+        error: "this note no longer exists — it looks like it was deleted (e.g. via memory_forget) since " +
+          "you last read it — omit baseVersion to write it as a brand-new note, or confirm the key is correct",
+        conflict: true,
+        notFound: true,
+      };
+    }
     return {
       error: "this note changed since you last read it (or you never read it) — re-read it (memory_read) " +
         "and retry with the current version as baseVersion, merging your change into the current text",

@@ -91,8 +91,15 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
  *  derived — never hand-typed — from `pty/tool-attribution.ts`'s own constants). Without this, an
  *  owner-created capability slugged e.g. `loom-tasks` would overwrite Loom's own mount in
  *  `buildMcpServers` (last-write-wins on `mcpServers[def.slug] = server`) and the replacement would
- *  inherit `loom-tasks`'s universal `BASELINE_SESSION_ALLOW` auto-approval. */
-export const RESERVED_CAPABILITY_SLUGS = ["browser-testing", "document-conversion", ...LOOM_FIRST_PARTY_SERVER_IDS] as const;
+ *  inherit `loom-tasks`'s universal `BASELINE_SESSION_ALLOW` auto-approval.
+ *
+ *  @decision 42e9caf9 — reserve the REAL `mcpServers` map key `buildMcpServers` (pty/host.ts) mounts a
+ *  builtin under (`"playwright"`/`"markitdown"`/`"codescape"`), never just its grant slug — the two can
+ *  differ, and an unreserved mount key lets an owner-added capability silently shadow it. */
+export const RESERVED_CAPABILITY_SLUGS = [
+  "browser-testing", "document-conversion", "playwright", "markitdown", "codescape",
+  ...LOOM_FIRST_PARTY_SERVER_IDS,
+] as const;
 
 function isNonBlankStr(v: unknown, max: number): v is string {
   return typeof v === "string" && v.trim().length > 0 && v.length <= max;

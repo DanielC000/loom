@@ -363,6 +363,21 @@ const KNOWN_LEAKING_FILES = [
   "packages/daemon/dist/sessions/platform-lead-prompt.js",
   // packages/daemon/dist — 1 file added by card a6f1b29b (see the provenance note above).
   "packages/daemon/dist/mcp/setup.js",
+  // packages/daemon/dist — 2 files added by card 42e9caf9. RESERVED_CAPABILITY_SLUGS
+  // (capabilities/registry.ts) now reserves the literal mount-key slugs "playwright"/"markitdown"/
+  // "codescape" (not just their grant/toggle names) so an owner-added capability catalog row can never
+  // collide with the real first-party mounts — see docs/decisions/42e9caf9-reserved-capability-slugs-
+  // missed-the-real-mount-keys.md. INVESTIGATED, not quarantined (per this list's own rule above): this is
+  // the SAME category the already-accepted `mcp/setup.js` entry above is on — a settable/reserved-KEY-NAME
+  // mention in an owner/agent-facing validation surface (here: a capability-creation reject error naming
+  // the reserved slug), not a rendered end-user UI surface. It fires only when someone explicitly attempts
+  // to create (or spawn) a capability literally slugged "codescape", exactly as narrow as a6f1b29b's own
+  // settable-key description. Only `.d.ts`/`.js` hit (confirmed via `grep -l codescape
+  // packages/daemon/dist/capabilities/registry.*`) — no `.map` pair, same shape as `mcp/setup.js`'s own
+  // single-file footprint. Flag for a second look if the category read is wrong, per this list's own
+  // standing rule.
+  "packages/daemon/dist/capabilities/registry.d.ts",
+  "packages/daemon/dist/capabilities/registry.js",
 ];
 
 if (KNOWN_LEAKING_FILES.length === 0) {

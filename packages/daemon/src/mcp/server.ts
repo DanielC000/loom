@@ -571,8 +571,32 @@ export class TaskMcpRouter {
     );
     server.registerTool(
       "memory_forget",
-      { description: "Delete a project-scoped memory note by key. Idempotent — deleting a missing key returns {ok:true,deleted:false}, never an error.", inputSchema: strictShape({ key: z.string() }) },
-      async ({ key }) => ok(forgetProjectMemory(db, projectId, key)),
+      {
+        description:
+          "Delete a project-scoped memory note by key. Idempotent — deleting a missing key returns " +
+          "{ok:true,deleted:false}, never an error. Card 42e9caf9 (mirrors memory_write's own card 8d158088 " +
+          "refusal): REFUSED with {error} if this specific call is CONFIRMED to have originated from a " +
+          "sub-agent (a Task/Agent sub-call), rather than your own top-level turn — project memory is " +
+          "shared, durable knowledge; deleting it is a deliberate curation decision the calling agent " +
+          "should make directly, not through a delegated sub-agent. An UNCERTAIN attribution never refuses " +
+          "(fail-open) — only a positively-confirmed sub-agent call is rejected.",
+        inputSchema: strictShape({ key: z.string() }),
+      },
+      async ({ key }) => {
+        // Card 8d158088 / 42e9caf9: same fail-open-unless-confirmed posture as memory_write above — see
+        // that handler's own comment for why "unknown"/"ambiguous" attributions must never refuse.
+        const attribution = attributions?.get("memory_forget");
+        if (isConfirmedSubagent(attribution?.state)) {
+          return ok({
+            error:
+              `memory_forget REFUSED — this call was attributed to a sub-agent` +
+              `${attribution?.agentType ? ` (agentType=${attribution.agentType})` : ""}, not your own top-level ` +
+              "turn. Project memory is shared, durable knowledge — call memory_forget directly from your own " +
+              "reasoning, not through a delegated Task/Agent sub-call.",
+          });
+        }
+        return ok(forgetProjectMemory(db, projectId, key));
+      },
     );
     server.registerTool(
       "memory_list",
