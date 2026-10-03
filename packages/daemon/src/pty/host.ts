@@ -2618,6 +2618,11 @@ interface Live {
   // once markReady has run (whichever call actually clears it).
   readyFallbackTimer: NodeJS.Timeout | null;
   busySince: number | null;  // epoch ms when busy rose — for stuck-busy self-heal (BUSY_STALE_MS)
+  // Card f18a2201 (item 2): set true in `persistBusy`'s catch when `events.onBusy` throws, cleared false
+  // on its next successful call (from EITHER a real setBusy/setCodexBusy edge or reconcile()'s own
+  // retry) — PtyHost has no DB read access, so this is the only proxy it has for "the DB busy column may
+  // disagree with live.busy". `reconcile()` re-persists the CURRENT `busy` value while this is true.
+  busyPersistDirty: boolean;
   lastOutputAt: number; // epoch ms of the last pty output — "is the engine actually producing?"
   composerLen: number;  // best-effort length of the human's UNCOMMITTED raw-terminal draft. >0 ("composer-dirty")
                         // HOLDS programmatic delivery so a queued turn can never land ON the human's half-typed
@@ -3177,6 +3182,8 @@ export interface CodexLive {
   logStream: fs.WriteStream;
   logBroken: boolean;
   busy: boolean;
+  // Card f18a2201 (item 2): same field + same contract as `Live.busyPersistDirty` — see that field's doc.
+  busyPersistDirty: boolean;
   // Card a1916267: NO `lastOutputAt` field here — deliberately, unlike `Live.lastOutputAt`. Codex's TUI
   // repaints continuously (spinner/cursor chrome) with NO turn running, so a per-chunk "engine produced
   // output" timestamp does not discriminate "working" from "idle and finished" on this harness the way it
@@ -4920,6 +4927,7 @@ export class PtyHost {
       logStream: openSessionLogStream(opts.sessionId, spawnLogReason),
       logBroken: false,
       busy: false,
+      busyPersistDirty: false,
       ready: false, // flipped on the first SessionStart (after mode-cycles) — see Live.ready / markReady
       readyFallbackTimer: null, // armed just below; re-armed by the SessionStart handler — see its own doc
       mcpSeen: false, // flipped on the first observed loom-orchestration MCP hit — see Live.mcpSeen / markMcpSeen
@@ -5247,7 +5255,7 @@ export class PtyHost {
       logBroken: false,
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
-      busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a shell is ready immediately — no fallback timer is ever armed for it
+      busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a shell is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
@@ -5606,6 +5614,7 @@ export class PtyHost {
       logStream: openSessionLogStream(opts.sessionId, isCodexResumeSpawn ? "codex resume" : "codex fresh spawn"),
       logBroken: false,
       busy: false,
+      busyPersistDirty: false,
       pending: [], stopping: false, drainHeld: false,
       role: opts.role ?? null,
       mcpSeen: false, mcpSeenWaiters: [],
@@ -5978,7 +5987,7 @@ export class PtyHost {
     live.busy = busy;
     // eslint-disable-next-line no-console
     console.log(`[busy] ${sessionId} -> ${busy ? "true" : "false"} (${reason})`);
-    this.persistBusy(sessionId, busy);
+    this.persistBusy(sessionId, busy, live);
     this.broadcastControl(live, { type: "busy", busy });
   }
 
@@ -6260,7 +6269,10 @@ export class PtyHost {
       }
       live.activeTurnSenderId = normalizedSenderId; live.lastPromptSenderId = normalizedSenderId;
       this.submitCodex(sessionId, live, text);
-      onDeliver?.();
+      // Card f18a2201 (item 3): guarded like every other onDeliver call site in this file (drainCodexPending
+      // below, consumePending, drainPending) — an onDeliver fault must never undo a hand-off that already
+      // happened (the text was already written to the pty by submitCodex above).
+      if (onDeliver) { try { onDeliver(); } catch { /* never break the idle-submit hand-off */ } }
       return { delivered: true, deliveryState: "handed-off" };
     }
     const id = randomUUID();
@@ -6461,7 +6473,7 @@ export class PtyHost {
       startedAt: Date.now(),
       logStream: openSessionLogStream(opts.id, "canned test seed"),
       logBroken: false,
-      busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
+      busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
@@ -9542,6 +9554,10 @@ export class PtyHost {
       if (!live.alive || live.kind !== "claude") continue; // shells/canned entries have no busy/queue to heal or drain
       this.healIfStuck(live, sessionId);
       this.drainPending(sessionId);
+      // Card f18a2201 (item 2): re-persist on mismatch — a prior persistBusy failure (set this flag true
+      // in its catch) may have left the DB busy column stale. Re-asserts the CURRENT live.busy (idempotent,
+      // cheap, and never races a concurrent edge — everything here runs synchronously, no await in between).
+      if (live.busyPersistDirty) this.persistBusy(sessionId, live.busy, live);
     }
     // Code Review M9 fix: codex sessions used to be excluded from this safety net TWICE over — once by
     // this loop only ever iterating `this.live` (codex lives in the separate `liveCodex` map), and again by
@@ -9555,7 +9571,13 @@ export class PtyHost {
     // `setCodexBusy`'s own doc), so this only drains; a codex session that is genuinely still busy is a
     // no-op here, exactly like `drainPending`'s own busy-gate for claude.
     for (const [sessionId, live] of this.liveCodex) {
-      if (!live.alive || live.busy) continue;
+      if (!live.alive) continue;
+      // Card f18a2201 (item 2): checked BEFORE the `live.busy` drain-gate below (not after) — a failed
+      // RISING-edge persist leaves live.busy=true, and setCodexBusy's own `live.busy === busy` early
+      // return (see its doc) means codex can otherwise go a full opposite-edge cycle before ever retrying
+      // on its own. Re-asserts the CURRENT live.busy either way, same reasoning as the claude loop above.
+      if (live.busyPersistDirty) this.persistBusy(sessionId, live.busy, live);
+      if (live.busy) continue;
       this.drainCodexPending(sessionId, live);
     }
   }
@@ -11004,12 +11026,18 @@ export class PtyHost {
 
   /** @decision 72c58b1c — the ONE chokepoint for the `events.onBusy` persistence callout, shared by
    *  `setBusy` and `setCodexBusy` (never a second copy of this try/catch) — see the decision record for why. */
-  private persistBusy(sessionId: string, busy: boolean): void {
+  // `live` (card f18a2201, item 2) is optional only so an existing test double that calls this directly
+  // stays byte-identical without supplying one — both real callers (setBusy/setCodexBusy) already have
+  // their session's `live` in scope and always pass it, so reconcile()'s own re-persist-on-mismatch retry
+  // (which reads busyPersistDirty off the SAME object) has somewhere to record the outcome.
+  private persistBusy(sessionId: string, busy: boolean, live?: Live | CodexLive): void {
     try {
       this.events.onBusy(sessionId, busy);
+      if (live) live.busyPersistDirty = false;
     } catch (e) {
+      if (live) live.busyPersistDirty = true;
       // eslint-disable-next-line no-console
-      console.error(`[busy] ${sessionId} onBusy callout failed — busy persistence AND the manager idle-notification it also drives (notifyManagerOfIdleWorker/purgeStaleIdleNudgeForReengagedWorker, index.ts) may have been skipped, not fatal:`, (e as Error).message);
+      console.error(`[busy] ${sessionId} onBusy callout failed — busy persistence AND the manager idle-notification it also drives (notifyManagerOfIdleWorker/purgeStaleIdleNudgeForReengagedWorker, index.ts) may have been skipped, not fatal (reconcile() will retry if the DB column is now stale):`, (e as Error).message);
     }
   }
 
@@ -11031,7 +11059,7 @@ export class PtyHost {
     live.busySince = busy ? Date.now() : null; // track the rising edge for the stuck-busy heal
     // eslint-disable-next-line no-console
     console.log(`[busy] ${sessionId} -> ${busy ? "true" : "false"} (${reason})${!busy && prevBusySince != null ? ` afterMs=${Date.now() - prevBusySince}` : ""}`);
-    this.persistBusy(sessionId, busy);
+    this.persistBusy(sessionId, busy, live);
     this.broadcastControl(live, { type: "busy", busy });
   }
 

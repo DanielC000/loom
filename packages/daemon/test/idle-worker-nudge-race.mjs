@@ -57,17 +57,14 @@ class TestPtyHost extends createSeamHost(PtyHost) {
   }
 }
 
-// Mirrors index.ts's ACTUAL onBusy wiring byte-for-byte (the wiring under test): falling edge notifies,
-// rising edge purges. `sessions` is assigned after `host` is constructed — same forward-reference the
-// production module uses.
+// Card f18a2201: calls the REAL `SessionService.handleBusyEdge` (the ONE place this wiring's body lives)
+// rather than keeping its own hand-copied mirror of index.ts's onBusy callback — a mirror drifts silently
+// from the real wiring the moment either one changes without the other. `sessions` is assigned after
+// `host` is constructed — same forward-reference the production module uses.
 let sessions;
 const events = {
   onEngineSessionId() {}, onContextStats() {}, onRateLimited() {}, onExit() {},
-  onBusy: (sessionId, busy) => {
-    db.setBusy(sessionId, busy);
-    if (!busy) sessions.notifyManagerOfIdleWorker(sessionId);
-    else sessions.purgeStaleIdleNudgeForReengagedWorker(sessionId);
-  },
+  onBusy: (sessionId, busy) => sessions.handleBusyEdge(sessionId, busy),
 };
 
 const dbFile = path.join(tmpHome, "iwr.db");

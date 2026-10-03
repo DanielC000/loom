@@ -12322,6 +12322,19 @@ export class SessionService {
     try { this.pty.purgeQueuedWorkerIdleNudges(w.parentSessionId, workerSessionId); } catch { /* manager not live */ }
   }
 
+  /** @decision f18a2201 — do not inline `db.setBusy` + the notify/purge calls back at the `onBusy`
+   *  callback site (index.ts); keep the DB write isolated here, in its own try/catch, so its failure
+   *  can never skip the manager notification that follows it. */
+  handleBusyEdge(sessionId: string, busy: boolean): void {
+    try {
+      this.db.setBusy(sessionId, busy);
+    } catch (err) {
+      console.error(`[busy] ${sessionId} db.setBusy(${busy}) failed — the busy DB column may now be stale (PtyHost.reconcile() heals it on its next tick):`, (err as Error)?.message ?? err);
+    }
+    if (!busy) this.notifyManagerOfIdleWorker(sessionId);
+    else this.purgeStaleIdleNudgeForReengagedWorker(sessionId);
+  }
+
   /**
    * @decision 84151b99 — a fast/first worker can EXIT before the busy→false edge ever fires (onExit,
    *  not onBusy); record a durable worker_exited_without_report event + nudge so the manager isn't

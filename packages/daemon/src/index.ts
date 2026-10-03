@@ -338,11 +338,11 @@ async function main(): Promise<void> {
     // nudge computed back when it was idle would otherwise drain stale into a later manager turn
     // (auditor finding 2e3a8e6f). `sessions` is assigned below but this closure only runs at
     // runtime — same forward-reference pattern as onExit→orchMcp.
-    onBusy: (sessionId, busy) => {
-      db.setBusy(sessionId, busy);
-      if (!busy) sessions.notifyManagerOfIdleWorker(sessionId);
-      else sessions.purgeStaleIdleNudgeForReengagedWorker(sessionId);
-    },
+    // Card f18a2201: delegates to SessionService.handleBusyEdge (the ONE place this body lives) rather
+    // than inlining db.setBusy + the two notify/purge calls here — see that method's own doc for why
+    // the DB write is isolated from the notify, and so a test can drive the REAL logic instead of a
+    // hand-copied mirror of this wiring.
+    onBusy: (sessionId, busy) => sessions.handleBusyEdge(sessionId, busy),
     onContextStats: (sessionId, s) => db.setContextCounters(sessionId, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns, model: s.model }),
     // Card 343441bd: persist the completed-turn counter — see PtyHostEvents.onTurnCompleted's doc for scope.
     // Card 48e8d289: the zero-reply detector's check, scoped to companion sessions (a no-op for every
