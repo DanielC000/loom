@@ -45,7 +45,7 @@ check("sessions/service.ts imports usesOrchestrationMcp from @loom/shared", SHAR
 check("sessions/service.ts's dispatch gate calls the shared predicate", /if \(usesOrchestrationMcp\(role\)\)/.test(serviceSrc));
 check("sessions/service.ts no longer hand-defines its own usesOrchestrationMcp method", !/\busesOrchestrationMcp\(role: SessionRole \| null\): boolean \{/.test(serviceSrc));
 
-check("pty/host.ts imports usesOrchestrationMcp from @loom/shared", /import \{ resolveProfileCapabilities, usesOrchestrationMcp \} from "@loom\/shared";/.test(hostSrc));
+check("pty/host.ts imports usesOrchestrationMcp from @loom/shared", SHARED_IMPORT_OF_PREDICATE.test(hostSrc));
 check("pty/host.ts's kickoff gateOnMcp calls the shared predicate", /const gateOnMcp = usesOrchestrationMcp\(l0\?\.role \?\? null\);/.test(hostSrc));
 check(
   "pty/host.ts's kickoff gate no longer hand-derives the role list inline",
