@@ -5373,12 +5373,47 @@ async function readRefSha(gitDir: string, refName: string): Promise<string | nul
   return null;
 }
 
-/** The canonical repo's current HEAD sha, resolved via fs only (handles both symbolic and detached HEAD). */
+/**
+ * Resolve the two git-dir roles `repoPath`'s `.git` entry actually implies, fs-only, no `git` spawn.
+ * `privateDir` is where THIS checkout's own per-checkout files live (`HEAD`, `index`, `logs/HEAD`) —
+ * always read HEAD from here. `commonDir` is where SHARED refs live (`refs/**`, `packed-refs`) — always
+ * resolve a ref from here, never `privateDir` for a linked worktree.
+ *
+ * `.git` a DIRECTORY: both roles are that same directory. `.git` a FILE (`gitdir: <path>`): that target
+ * is `privateDir`; if it has its own `commondir` file (a linked worktree), `commonDir` resolves from it;
+ * otherwise (a submodule or `--separate-git-dir` repo) `commonDir` is `privateDir` itself.
+ *
+ * @decision 472f14d1 — do not change that fallback to `null`: a submodule/`--separate-git-dir` repo has
+ * no `commondir` file by design, and `HEAD`/`refs/**`/`packed-refs` all live directly in `privateDir`;
+ * `null` would make such a repo's ref resolution permanently fail instead of correctly resolving.
+ */
+async function resolveGitDirs(repoPath: string): Promise<{ privateDir: string; commonDir: string } | null> {
+  const gitPath = path.join(repoPath, ".git");
+  let stat: import("node:fs").Stats;
+  try { stat = await fs.promises.stat(gitPath); } catch { return null; }
+  if (stat.isDirectory()) return { privateDir: gitPath, commonDir: gitPath };
+  let pointer: string;
+  try { pointer = await fs.promises.readFile(gitPath, "utf8"); } catch { return null; }
+  const m = pointer.match(/^gitdir:\s*(.+?)\s*$/m);
+  if (!m || !m[1]) return null; // not the `gitdir: <path>` shape every real .git FILE has
+  const privateDir = path.resolve(repoPath, m[1]);
+  try { await fs.promises.stat(path.join(privateDir, "HEAD")); } catch { return null; } // bad pointer target
+  try {
+    const commondirRaw = (await fs.promises.readFile(path.join(privateDir, "commondir"), "utf8")).trim();
+    return { privateDir, commonDir: path.resolve(privateDir, commondirRaw) };
+  } catch {
+    return { privateDir, commonDir: privateDir }; // submodule / --separate-git-dir: no indirection
+  }
+}
+
+/** The canonical repo's current HEAD sha, resolved via fs only (handles both symbolic and detached HEAD,
+ *  and a `.git` that's a directory OR a gitfile pointer — see {@link resolveGitDirs}). */
 async function readHeadSha(repoPath: string): Promise<string | null> {
   try {
-    const gitDir = path.join(repoPath, ".git");
-    const head = (await fs.promises.readFile(path.join(gitDir, "HEAD"), "utf8")).trim();
-    if (head.startsWith("ref:")) return readRefSha(gitDir, head.slice(4).trim());
+    const dirs = await resolveGitDirs(repoPath);
+    if (!dirs) return null;
+    const head = (await fs.promises.readFile(path.join(dirs.privateDir, "HEAD"), "utf8")).trim();
+    if (head.startsWith("ref:")) return readRefSha(dirs.commonDir, head.slice(4).trim());
     return head || null; // detached HEAD: a raw sha
   } catch {
     return null;
@@ -5400,7 +5435,9 @@ async function readHeadSha(repoPath: string): Promise<string | null> {
  */
 export async function readBaseSha(repoPath: string, base: string): Promise<string | null> {
   if (base === "HEAD") return (await readHeadSha(repoPath)) ?? "-";
-  return readRefSha(path.join(repoPath, ".git"), base);
+  const dirs = await resolveGitDirs(repoPath);
+  if (!dirs) return null;
+  return readRefSha(dirs.commonDir, base);
 }
 
 /**
@@ -5459,7 +5496,8 @@ async function computeDiffCacheKey(
     if (contentFp === null) return { key: null, headSha };
     return { key: `wt:${headSha}:${contentFp}`, headSha };
   }
-  const branchSha = await readRefSha(path.join(repoPath, ".git"), `refs/heads/${branch}`);
+  const dirs = await resolveGitDirs(repoPath);
+  const branchSha = dirs ? await readRefSha(dirs.commonDir, `refs/heads/${branch}`) : null;
   if (branchSha) return { key: `branch:${branchSha}`, headSha };
   // Branch merged+deleted (or unknown): stage 3 searches history from HEAD, so HEAD alone is the key.
   return { key: `merged:${headSha}`, headSha };
