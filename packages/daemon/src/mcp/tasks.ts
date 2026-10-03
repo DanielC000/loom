@@ -256,14 +256,23 @@ function resolveDeferredEventStuck(db: Db, projectId: string, event: DeferredUnt
  * beyond the persisted `deferredStuck` column itself), so downstream consumers that read them straight off
  * the DB (the idle watchdog, `db.listTasks`) self-heal on the next read that happens to pass through this
  * MCP layer, without needing any knowledge of `deferredUntilTaskId` themselves. Best-effort / NON-FATAL by
- * design (card 793ac76d review): a board read must never fail or alter its OWN result because this persist
- * failed — the caller already computed the correct in-memory value from `resolveDeferredEffective` and
- * returns that regardless of whether this write lands.
+ * design (card 793ac76d review): a board read must never fail because this persist failed — the caller
+ * already computed the correct in-memory value from `resolveDeferredEffective` and returns that
+ * regardless of whether this write lands. Returns whether it actually landed: card f5292cf9 — a caller
+ * that got `false` back for an `autoCleared` attempt must NOT build its response from a plain re-read
+ * alone (see {@link rereadAfterPersist}'s own callers) — the row is still the PRE-persist row in that
+ * case, so the response would otherwise pair the always-correct computed `deferred:false` with a stale,
+ * still-non-null `deferredUntilTaskId`/`deferredReason`/`deferredAt` straight off that row — the exact
+ * cf62c1ef contradiction resurrected on the failure path. Overlay `deferredUntilTaskId`/`deferredReason`/
+ * `deferredAt` to `null` on top of the re-read when this returns `false` for an `autoCleared` attempt;
+ * never needed when it returns `true` (the re-read already reflects the clear) or for a `stuckChanged`-only
+ * attempt (that write never touches those three fields either way).
  *
- * On an `autoCleared` transition, also clears `deferredUntilTaskId` to `null` in the SAME write — leaving
- * it set was a footgun (see docs/decisions/cf62c1ef-....md): a stale blocker reference would silently
- * re-arm and swallow a future, unrelated manual re-defer. A `stuckChanged`-only write (deferred stays
- * true) leaves `deferredUntilTaskId` untouched — the blocker reference is still exactly what made it stuck.
+ * On an `autoCleared` transition, also clears `deferredUntilTaskId` to `null` in the SAME transaction —
+ * leaving it set was a footgun (see docs/decisions/cf62c1ef-....md): a stale blocker reference would
+ * silently re-arm and swallow a future, unrelated manual re-defer. A `stuckChanged`-only write (deferred
+ * stays true) leaves `deferredUntilTaskId` untouched — the blocker reference is still exactly what made it
+ * stuck.
  * @decision cf62c1ef
  *
  * Card c90e9525: an `autoCleared` transition ALSO nulls `deferredAt`/`deferredReason` in the same write —
@@ -272,58 +281,68 @@ function resolveDeferredEventStuck(db: Db, projectId: string, event: DeferredUnt
  * it only extends the ALREADY-EXISTING route-(a) auto-clear (card 93669813, unrelated to this card's own
  * scope) to also clear the two fields it happens to share a write with — a manual deferral is never
  * auto-cleared by anything, so this branch is unreachable for one.
+ *
+ * Card f5292cf9: the row write and the edge release used to be two independent `db` calls — a throw from
+ * the SECOND one (`releaseDeferralEdges`) after the FIRST one (`updateTask`) already landed left the row
+ * genuinely half-updated (`deferred:false` persisted, edges still gating). Both now run in ONE
+ * `db.runInTransaction` so a failure anywhere in this function leaves the row exactly as it was before the
+ * attempt — only "fully landed" or "untouched" are reachable, never a partial state.
  */
 function persistDeferredStateBestEffort(
   db: Db, taskId: string, state: Pick<ResolvedDeferredState, "autoCleared" | "stuck" | "stuckChanged" | "mergedBlockers">,
-): void {
-  if (!state.autoCleared && !state.stuckChanged) return;
+): boolean {
+  if (!state.autoCleared && !state.stuckChanged) return true; // nothing to persist — trivially landed
   try {
-    // Re-fetch immediately before folding, rather than trusting the caller's snapshot: closes the
-    // git-log-scan-shaped race window and, as a proven consequence, makes two near-simultaneous
-    // autoCleared reads on the same row structurally unable to fold twice. See
-    // docs/decisions/1d27c3cd-....md (site 1) for the full argument.
-    // @decision 1d27c3cd
-    const fresh = db.getTask(taskId);
-    if (!fresh) return; // deleted concurrently — nothing left to persist
-    const patch: Parameters<Db["updateTask"]>[1] = state.autoCleared
-      ? {
-          deferred: false, deferredStuck: false, deferredAt: null, deferredReason: null,
-          // Card 1d27c3cd: this auto-release IS the designed, recommended way a deferral ends — which is
-          // exactly why it must not also be the thing that silently destroys the closure record
-          // `deferredReason` held. Fold it into the body before it's lost, same as the manual-clear branch
-          // in updateProjectTask below. Only when there's actually a reason to save.
-          ...(fresh.deferredReason ? { body: foldReleasedDeferralIntoBody(fresh.body, fresh.deferredReason, new Date().toISOString()) } : {}),
-        }
-      : { deferredStuck: state.stuck };
-    // DELIBERATELY UN-VERSIONED (no baseVersion / optimistic-concurrency check on this body write): the
-    // re-fetch above closes the wide git-scan-shaped window, but a residual, much narrower one remains —
-    // an unrelated tasks_update({body, baseVersion}) landing in the single synchronous gap between the
-    // `db.getTask` read above and this `db.updateTask` write would still lose its edit, since `body` is a
-    // full replace and this write never checks version. Accepted, not fixed: this is a best-effort side
-    // effect of a plain board READ (this function's own doc: "a board read must never fail... because this
-    // persist failed"), so there is no caller-supplied baseVersion to check even in principle — plumbing
-    // one through would mean tasks_list/tasks_get themselves start demanding a version just to read the
-    // board, which is a contract this card must not change. Every other blind writer in this file
-    // (heldByPatch/deferredAtPatch in updateProjectTask) carries the identical residual risk.
-    db.updateTask(fresh.id, patch);
-    // Card 3df86c87 (cf62c1ef's "no stale blocker reference" guarantee, on the edge storage): the released
-    // deferral's edges are RELEASED, not deleted (gates_deferral cleared; kept as `released` history unless the
-    // user also declared them) — the card no longer projects a deferredUntilTaskId, and the closure history stays
-    // visible as a resolved, display-only entry.
-    if (state.autoCleared) {
-      db.releaseDeferralEdges(fresh.id);
-      // Card 3df86c87: the release fired on a LIVE git merge scan; stamp each blocker's merged ship-state
-      // (setTaskMergedInfoNoTouch — the drawer's own cache-fill, never bumping updatedAt) so the released,
-      // now-released/declared edge and `ready` agree that the blocker is done. Only fills a blocker with no stamp yet.
-      for (const mb of state.mergedBlockers ?? []) {
-        const b = db.getTask(mb.id);
-        if (b && !b.mergedSha) {
-          db.setTaskMergedInfoNoTouch(mb.id, { mergedSha: mb.merged.sha, mergedRepoKey: mb.repoKey, mergedDate: mb.merged.date, mergedVerification: mb.merged.verification ?? null });
+    db.runInTransaction(() => {
+      // Re-fetch immediately before folding, rather than trusting the caller's snapshot: closes the
+      // git-log-scan-shaped race window and, as a proven consequence, makes two near-simultaneous
+      // autoCleared reads on the same row structurally unable to fold twice. See
+      // docs/decisions/1d27c3cd-....md (site 1) for the full argument.
+      // @decision 1d27c3cd
+      const fresh = db.getTask(taskId);
+      if (!fresh) return; // deleted concurrently — nothing left to persist
+      const patch: Parameters<Db["updateTask"]>[1] = state.autoCleared
+        ? {
+            deferred: false, deferredStuck: false, deferredAt: null, deferredReason: null,
+            // Card 1d27c3cd: this auto-release IS the designed, recommended way a deferral ends — which is
+            // exactly why it must not also be the thing that silently destroys the closure record
+            // `deferredReason` held. Fold it into the body before it's lost, same as the manual-clear branch
+            // in updateProjectTask below. Only when there's actually a reason to save.
+            ...(fresh.deferredReason ? { body: foldReleasedDeferralIntoBody(fresh.body, fresh.deferredReason, new Date().toISOString()) } : {}),
+          }
+        : { deferredStuck: state.stuck };
+      // DELIBERATELY UN-VERSIONED (no baseVersion / optimistic-concurrency check on this body write): the
+      // re-fetch above closes the wide git-scan-shaped window, but a residual, much narrower one remains —
+      // an unrelated tasks_update({body, baseVersion}) landing in the single synchronous gap between the
+      // `db.getTask` read above and this `db.updateTask` write would still lose its edit, since `body` is a
+      // full replace and this write never checks version. Accepted, not fixed: this is a best-effort side
+      // effect of a plain board READ (this function's own doc: "a board read must never fail... because this
+      // persist failed"), so there is no caller-supplied baseVersion to check even in principle — plumbing
+      // one through would mean tasks_list/tasks_get themselves start demanding a version just to read the
+      // board, which is a contract this card must not change. Every other blind writer in this file
+      // (heldByPatch/deferredAtPatch in updateProjectTask) carries the identical residual risk.
+      db.updateTask(fresh.id, patch);
+      // Card 3df86c87 (cf62c1ef's "no stale blocker reference" guarantee, on the edge storage): the released
+      // deferral's edges are RELEASED, not deleted (gates_deferral cleared; kept as `released` history unless the
+      // user also declared them) — the card no longer projects a deferredUntilTaskId, and the closure history stays
+      // visible as a resolved, display-only entry.
+      if (state.autoCleared) {
+        db.releaseDeferralEdges(fresh.id);
+        // Card 3df86c87: the release fired on a LIVE git merge scan; stamp each blocker's merged ship-state
+        // (setTaskMergedInfoNoTouch — the drawer's own cache-fill, never bumping updatedAt) so the released,
+        // now-released/declared edge and `ready` agree that the blocker is done. Only fills a blocker with no stamp yet.
+        for (const mb of state.mergedBlockers ?? []) {
+          const b = db.getTask(mb.id);
+          if (b && !b.mergedSha) {
+            db.setTaskMergedInfoNoTouch(mb.id, { mergedSha: mb.merged.sha, mergedRepoKey: mb.repoKey, mergedDate: mb.merged.date, mergedVerification: mb.merged.verification ?? null });
+          }
         }
       }
-    }
+    });
+    return true;
   } catch (e) {
     console.warn(`[mcp/tasks] best-effort deferred/deferredStuck write-through failed for task ${taskId} (read result is unaffected):`, e);
+    return false;
   }
 }
 
@@ -342,6 +361,22 @@ function persistDeferredStateBestEffort(
  */
 function rereadAfterPersist(db: Db, taskId: string, fallback: Task): Task {
   return db.getTask(taskId) ?? fallback;
+}
+
+/**
+ * Card f5292cf9: when {@link persistDeferredStateBestEffort} attempted an `autoCleared` transition and it
+ * did NOT land (`landed:false`), the row {@link rereadAfterPersist} hands back is still the PRE-persist
+ * row — pairing that straight with the always-correct computed `deferred:false` would echo the cf62c1ef
+ * contradiction right back (a non-null `deferredUntilTaskId`/stale `deferredReason`/`deferredAt` alongside
+ * `deferred:false`). Overlay the three fields the failed write would have cleared; a no-op whenever
+ * `autoCleared` is false (nothing was ever meant to clear) or the write actually landed (the re-read
+ * already reflects the clear, and overlaying again would just be redundant).
+ */
+function overlayFailedAutoClear<T extends Pick<Task, "deferredUntilTaskId" | "deferredReason" | "deferredAt">>(
+  row: T, autoCleared: boolean, landed: boolean,
+): T {
+  if (!autoCleared || landed) return row;
+  return { ...row, deferredUntilTaskId: null, deferredReason: null, deferredAt: null };
 }
 
 /**
@@ -384,6 +419,19 @@ export function foldReleasedDeferralIntoBody(body: string, reason: string, relea
  * where a concurrent write already cleared/changed `deferredReason`/`body` in between.
  *
  * @decision 1d27c3cd
+ *
+ * Card f5292cf9 (lead gen 384): a forced clear (the caller left `deferredUntilTaskId` untouched in THIS
+ * patch) is reported back as `releaseDeferralEdgesAsHistory:true` rather than a `deferredUntilTaskIdPatch:
+ * null` value to fold into the generic row patch — the generic `db.updateTask({deferredUntilTaskId:null})`
+ * path DELETES the alias edge with no history (`setDeferralEdges`/`applyBlocksPatch`), which is correct
+ * for an EXPLICIT caller clear but was also, until this card, what a forced/implicit clear went through —
+ * an asymmetry against the auto-release path (`persistDeferredStateBestEffort`), which has always called
+ * `releaseDeferralEdges` to keep the edge as `released` history instead. The caller must call
+ * `db.releaseDeferralEdges(ownedId)` itself (inside the same write transaction, only once the write it
+ * guards is confirmed to actually land) when this flag comes back true, and must NOT also fold
+ * `deferredUntilTaskId` into the row patch in that case. An EXPLICIT same-patch value (the field is NOT
+ * left untouched) never reaches this function's own branch at all — that case is unaffected and keeps
+ * deleting, matching `setDeferralEdges`'s own documented "explicit clear — no history" contract.
  */
 export function computeDeferralReleasePatch(
   db: Db,
@@ -392,12 +440,12 @@ export function computeDeferralReleasePatch(
   patch: { deferredUntilTaskId?: string | string[] | null; deferredUntilEvent?: DeferredUntilEvent | null; body?: string },
 ): {
   deferredReasonPatch: null;
-  deferredUntilTaskIdPatch?: null;
+  releaseDeferralEdgesAsHistory?: true;
   deferredUntilEventPatch?: null;
   bodyFoldPatch?: string;
 } {
   const result: ReturnType<typeof computeDeferralReleasePatch> = { deferredReasonPatch: null };
-  if (patch.deferredUntilTaskId === undefined) result.deferredUntilTaskIdPatch = null;
+  if (patch.deferredUntilTaskId === undefined) result.releaseDeferralEdgesAsHistory = true;
   if (patch.deferredUntilEvent === undefined) result.deferredUntilEventPatch = null;
   const freshForFold = db.getTask(ownedId) ?? owned;
   if (freshForFold.deferredReason) {
@@ -634,8 +682,10 @@ export async function listProjectTasks(
       // caller never actually sees landed (stale body/deferredAt/deferredReason/version/deferredUntilTaskId).
       // Skipped when nothing was persisted — `t` is already accurate then, so there's nothing to re-read.
       const persisted = autoCleared || stuckChanged;
-      if (persisted) persistDeferredStateBestEffort(db, t.id, { autoCleared, stuck, stuckChanged, mergedBlockers });
-      const base = persisted ? rereadAfterPersist(db, t.id, t) : t;
+      const landed = persisted ? persistDeferredStateBestEffort(db, t.id, { autoCleared, stuck, stuckChanged, mergedBlockers }) : true;
+      // Card f5292cf9: overlay the would-have-cleared fields when an autoCleared persist attempt didn't
+      // land — see overlayFailedAutoClear's own doc for why a plain re-read alone isn't enough there.
+      const base = overlayFailedAutoClear(persisted ? rereadAfterPersist(db, t.id, t) : t, autoCleared, landed);
       // Card 634edd2b: `mergedVerification` destructured OUT of the spread and re-exposed as
       // `mergedVerificationAtMerge` — see TaskWithMerged's own doc for why the raw name is ambiguous
       // against the live `merged.verification` sitting right next to it.
@@ -908,8 +958,10 @@ export async function getProjectTask(
   // can fold deferredReason into body and bump version; echoing pre-persist `found` would report those
   // stale). Skipped when nothing was actually persisted.
   const persisted = autoCleared || stuckChanged;
-  if (persisted) persistDeferredStateBestEffort(db, found.id, { autoCleared, stuck, stuckChanged, mergedBlockers });
-  const base = persisted ? rereadAfterPersist(db, found.id, found) : found;
+  const landed = persisted ? persistDeferredStateBestEffort(db, found.id, { autoCleared, stuck, stuckChanged, mergedBlockers }) : true;
+  // Card f5292cf9: overlay the would-have-cleared fields when an autoCleared persist attempt didn't land
+  // — see overlayFailedAutoClear's own doc for why a plain re-read alone isn't enough there.
+  const base = overlayFailedAutoClear(persisted ? rereadAfterPersist(db, found.id, found) : found, autoCleared, landed);
   // Card 634edd2b: same rename as listProjectTasks — see TaskWithMerged's own doc.
   const { mergedVerification, ...foundRest } = base;
   return {
@@ -1575,8 +1627,15 @@ export async function updateProjectTask(
   // hasn't already told us what to do with the field in THIS SAME patch; an explicit simultaneous value is
   // respected, never silently overridden.
   // @decision 363f5c2d
-  let deferredUntilTaskIdPatch: string | string[] | null | undefined;
+  //
+  // Card f5292cf9: a FORCED clear (the caller left `deferredUntilTaskId` untouched) is tracked separately
+  // as `releaseDeferralEdgesAsHistory` rather than folded into `deferredUntilTaskIdPatch` — see
+  // computeDeferralReleasePatch's own doc for why: it must go through `db.releaseDeferralEdges` (keeps the
+  // edge as `released` history, mirroring the auto-release path) rather than the generic
+  // `deferredUntilTaskId`-key row patch (which DELETES the alias edge with no history — correct only for
+  // an EXPLICIT caller clear, which never sets this flag in the first place).
   let deferredUntilEventPatch: DeferredUntilEvent | null | undefined;
+  let releaseDeferralEdgesAsHistory = false;
   if (patch.deferred === false) {
     // Explicit manual clear — reset deferral provenance, mirrors heldBy resetting on a held clear below.
     // Un-deferring never needs a reason of its own — only a write that would LEAVE the card manually
@@ -1585,7 +1644,7 @@ export async function updateProjectTask(
     // see its own doc for the re-fetch-before-fold reasoning (1d27c3cd) this used to carry inline here.
     const release = computeDeferralReleasePatch(db, owned.id, owned, patch);
     deferredReasonPatch = release.deferredReasonPatch;
-    deferredUntilTaskIdPatch = release.deferredUntilTaskIdPatch;
+    releaseDeferralEdgesAsHistory = release.releaseDeferralEdgesAsHistory === true;
     deferredUntilEventPatch = release.deferredUntilEventPatch;
     bodyFoldPatch = release.bodyFoldPatch;
   } else if (touchesDeferralFields && isManualDeferral) {
@@ -1689,12 +1748,13 @@ export async function updateProjectTask(
   // demanding one whenever the card happens to carry a reason, which this card must not change. Same
   // residual risk persistDeferredStateBestEffort documents for its own fold.
   const dbPatch2 = bodyFoldPatch !== undefined ? { ...dbPatch1, body: bodyFoldPatch } : dbPatch1;
-  // Card 363f5c2d (M6): same exclusion-from-`patch` reasoning as deferredAt/heldBy/bodyFoldPatch above —
-  // see the deferredUntilTaskIdPatch/deferredUntilEventPatch declaration for why these clear on a manual
-  // release. `applyBlocksPatch` (via db.updateTask's own deferredUntilTaskId handling) reaches these edges
-  // the same way an explicit `tasks_update({deferredUntilTaskId:null})` call already does — no new DB path.
-  const dbPatch3 = deferredUntilTaskIdPatch !== undefined ? { ...dbPatch2, deferredUntilTaskId: deferredUntilTaskIdPatch } : dbPatch2;
-  const dbPatch = deferredUntilEventPatch !== undefined ? { ...dbPatch3, deferredUntilEvent: deferredUntilEventPatch } : dbPatch3;
+  // Card 363f5c2d (M6) / f5292cf9: same exclusion-from-`patch` reasoning as deferredAt/heldBy/bodyFoldPatch
+  // above — see the deferredUntilEventPatch declaration for why this clears on a manual release.
+  // `deferredUntilTaskId` itself is DELIBERATELY left OUT of `dbPatch` on a forced clear
+  // (`releaseDeferralEdgesAsHistory`) — that field's generic row-patch path deletes the edge with no
+  // history; the release is instead applied via `db.releaseDeferralEdges` in the write transaction below,
+  // once the write it guards is confirmed to land.
+  const dbPatch = deferredUntilEventPatch !== undefined ? { ...dbPatch2, deferredUntilEvent: deferredUntilEventPatch } : dbPatch2;
   // Destructive-body-truncation guard (whole-patch-reject like every guard above): `body` is a FULL
   // REPLACE with no undo — that is CORRECT, field-level PATCH semantics are not what's wrong here. What's
   // missing is friction in front of the one catastrophic shape: a substantial existing body reduced to a
@@ -1737,13 +1797,19 @@ export async function updateProjectTask(
   const touchesContent = patch.title !== undefined || patch.body !== undefined;
   let updated: Task;
   // Row write + planned structure in ONE transaction (card 3df86c87): a rejected (conflict) row write applies
-  // no structure, and a throw rolls both back.
+  // no structure, and a throw rolls both back. Card f5292cf9: the deferral-edges release (when forced) joins
+  // the SAME transaction, and ONLY after the row write is confirmed to have actually landed (never on a
+  // conflict/notFound result) — a rejected title/body write must leave the edges untouched too.
   const written = db.runInTransaction(() => {
     if (touchesContent) {
       const r = db.updateTaskChecked(owned.id, dbPatch, baseVersion);
-      if (r.ok && plan) applyTaskPlan(db, projectId, owned.id, plan);
+      if (r.ok) {
+        if (releaseDeferralEdgesAsHistory) db.releaseDeferralEdges(owned.id);
+        if (plan) applyTaskPlan(db, projectId, owned.id, plan);
+      }
       return r;
     }
+    if (releaseDeferralEdgesAsHistory) db.releaseDeferralEdges(owned.id);
     db.updateTask(owned.id, dbPatch);
     if (plan) applyTaskPlan(db, projectId, owned.id, plan);
     return null;
@@ -1802,6 +1868,12 @@ export async function updateProjectTask(
     updated = rereadAfterPersist(db, owned.id, { ...owned, ...dbPatch, updatedAt: new Date().toISOString() });
   }
   if (plan) updated = { ...updated, parentId: db.getTask(owned.id)?.parentId ?? null };
+  // Card f5292cf9: in the touchesContent branch, `result.task` above was read by `updateTaskChecked`'s OWN
+  // internal re-fetch — which runs BEFORE the `db.releaseDeferralEdges` call this function makes right
+  // after, inside the same transaction — so it can still carry the PRE-release `deferredUntilTaskId`. A
+  // second fresh read here (same shape as the `plan` fixup just above) closes that; harmless/idempotent in
+  // the non-touchesContent branch, which already reflects the release via `rereadAfterPersist`.
+  if (releaseDeferralEdgesAsHistory) updated = { ...updated, deferredUntilTaskId: db.getTask(owned.id)?.deferredUntilTaskId ?? null };
   // Audit trail: a real clear just went through. Only reachable here for an AGENT-set hold — a
   // human-set hold already returned above, so this fires on the DoD's "agent-set-then-agent-clear"
   // path, never on a refused clear.

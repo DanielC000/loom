@@ -5544,21 +5544,32 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // computeDeferralReleasePatch so the two paths can't diverge on this again. Same convention as the MCP
     // path: an explicit simultaneous value for deferredUntilTaskId/deferredUntilEvent in THIS SAME patch is
     // respected, never silently overridden — only a field left untouched (undefined) gets force-cleared.
+    //
+    // Card f5292cf9: a FORCED clear (`releaseDeferralEdgesAsHistory`) must go through `db.releaseDeferralEdges`
+    // (keeps the edge as `released` history, mirroring the auto-release path) rather than riding
+    // `deferredUntilTaskId` through the generic row patch below (which DELETES the alias edge with no
+    // history) — see computeDeferralReleasePatch's own doc.
+    let releaseDeferralEdgesAsHistory = false;
     if (b.deferred === false) {
       const release = computeDeferralReleasePatch(deps.db, existingTask.id, existingTask, { deferredUntilTaskId: rawDeferral, deferredUntilEvent: b.deferredUntilEvent, body: b.body });
       b.deferredReason = release.deferredReasonPatch;
       b.deferredAt = null;
-      if (release.deferredUntilTaskIdPatch !== undefined) b.deferredUntilTaskId = release.deferredUntilTaskIdPatch;
+      releaseDeferralEdgesAsHistory = release.releaseDeferralEdgesAsHistory === true;
       if (release.deferredUntilEventPatch !== undefined) b.deferredUntilEvent = release.deferredUntilEventPatch;
       if (release.bodyFoldPatch !== undefined) b.body = release.bodyFoldPatch;
     }
-    // Row write + planned structure in ONE transaction (all or nothing).
+    // Row write + planned structure in ONE transaction (all or nothing). The deferral-edges release (when
+    // forced) joins the SAME transaction, only once the row write is confirmed to have actually landed.
     const outcome = deps.db.runInTransaction(() => {
       if (touchesContent && baseVersion !== undefined) {
         const r = deps.db.updateTaskChecked(id, b, baseVersion);
-        if (r.ok && plan) applyTaskPlan(deps.db, existingTask.projectId, existingTask.id, plan);
+        if (r.ok) {
+          if (releaseDeferralEdgesAsHistory) deps.db.releaseDeferralEdges(id);
+          if (plan) applyTaskPlan(deps.db, existingTask.projectId, existingTask.id, plan);
+        }
         return r;
       }
+      if (releaseDeferralEdgesAsHistory) deps.db.releaseDeferralEdges(id);
       deps.db.updateTask(id, b);
       if (plan) applyTaskPlan(deps.db, existingTask.projectId, existingTask.id, plan);
       return null;
