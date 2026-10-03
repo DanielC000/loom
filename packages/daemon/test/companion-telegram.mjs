@@ -60,19 +60,30 @@ const tick = () => new Promise((r) => setTimeout(r, 15));
 // A fake grammY Bot implementing the minimal TelegramBotLike seam (no network).
 function makeFakeBot({ startResolves = false } = {}) {
   const sends = [];
+  const sendVoiceCalls = [];
+  const sendPhotoCalls = [];
+  const sendDocumentCalls = [];
   let messageHandler = null;
   let errorHandler = null;
   let running = false;
   let startCalls = 0, stopCalls = 0;
   return {
     sends,
+    sendVoiceCalls,
+    sendPhotoCalls,
+    sendDocumentCalls,
     get startCalls() { return startCalls; },
     get stopCalls() { return stopCalls; },
     get hasMessageHandler() { return messageHandler !== null; },
     get hasErrorHandler() { return errorHandler !== null; },
     fireMessage(update) { return messageHandler?.({ update }); },
     bot: {
-      api: { async sendMessage(chatId, text, ...rest) { sends.push({ chatId, text, args: [chatId, text, ...rest] }); } },
+      api: {
+        async sendMessage(chatId, text, ...rest) { sends.push({ chatId, text, args: [chatId, text, ...rest] }); },
+        async sendVoice(chatId, voice, ...rest) { sendVoiceCalls.push({ chatId, voice, args: [chatId, voice, ...rest] }); },
+        async sendPhoto(chatId, photo, ...rest) { sendPhotoCalls.push({ chatId, photo, args: [chatId, photo, ...rest] }); },
+        async sendDocument(chatId, document, ...rest) { sendDocumentCalls.push({ chatId, document, args: [chatId, document, ...rest] }); },
+      },
       on(_filter, h) { messageHandler = h; },
       catch(h) { errorHandler = h; },
       async start(opts) { startCalls++; running = true; opts?.onStart?.({ username: "loombot" }); if (!startResolves) await new Promise(() => {}); },
@@ -104,6 +115,32 @@ function makeFakeBot({ startResolves = false } = {}) {
   const lastCall = fake.sends[fake.sends.length - 1];
   check("adapter.send: threads the AbortSignal to bot.api.sendMessage as args[3]", lastCall.args[3] === controller.signal);
   check("adapter.send: args[2] (grammY's unused options slot) stays undefined", lastCall.args[2] === undefined);
+
+  // Card 2c7ac1dd: sendVoice/sendMedia (sendPhoto/sendDocument) thread the AbortSignal to grammY as args[3]
+  // too — the INSTALLED grammy@1.44.0 (node_modules/.pnpm/grammy@1.44.0/…/out/core/api.d.ts) gives
+  // sendVoice/sendPhoto/sendDocument the IDENTICAL (chat_id, media, other?, signal?) shape sendMessage has.
+  const voiceSignal = new AbortController();
+  await adapter.sendVoice("557", "/tmp/fake-voice.ogg", "spoken reply", false, voiceSignal.signal);
+  const voiceCall = fake.sendVoiceCalls[fake.sendVoiceCalls.length - 1];
+  check("adapter.sendVoice: routes to bot.api.sendVoice with the chat id", voiceCall.chatId === "557");
+  check("adapter.sendVoice: threads the AbortSignal to bot.api.sendVoice as args[3]", voiceCall.args[3] === voiceSignal.signal);
+  check("adapter.sendVoice: args[2] (grammY's unused options slot) stays undefined", voiceCall.args[2] === undefined);
+
+  // sendMedia: a photo extension routes to sendPhoto
+  const photoSignal = new AbortController();
+  await adapter.sendMedia("558", "/tmp/fake-mockup.png", { signal: photoSignal.signal });
+  const photoCall = fake.sendPhotoCalls[fake.sendPhotoCalls.length - 1];
+  check("adapter.sendMedia: a .png routes to bot.api.sendPhoto", fake.sendPhotoCalls.length === 1 && fake.sendDocumentCalls.length === 0);
+  check("adapter.sendMedia: threads the AbortSignal to bot.api.sendPhoto as args[3]", photoCall.args[3] === photoSignal.signal);
+  check("adapter.sendMedia: args[2] (grammY's unused options slot) stays undefined", photoCall.args[2] === undefined);
+
+  // sendMedia: a non-photo extension routes to sendDocument
+  const docSignal = new AbortController();
+  await adapter.sendMedia("559", "/tmp/fake-report.pdf", { signal: docSignal.signal });
+  const docCall = fake.sendDocumentCalls[fake.sendDocumentCalls.length - 1];
+  check("adapter.sendMedia: a .pdf routes to bot.api.sendDocument", fake.sendDocumentCalls.length === 1);
+  check("adapter.sendMedia: threads the AbortSignal to bot.api.sendDocument as args[3]", docCall.args[3] === docSignal.signal);
+  check("adapter.sendMedia: args[2] (grammY's unused options slot) stays undefined", docCall.args[2] === undefined);
 
   // inbound: a bot message event → onInbound(normalized)
   await fake.fireMessage({ message: { chat: { id: 12345 }, text: "ping" } });

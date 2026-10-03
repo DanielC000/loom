@@ -100,6 +100,23 @@ export const ACK_SEND_TIMEOUT_MS = 15_000;
  *  read as coupled. */
 export const REPLY_SEND_TIMEOUT_MS = 15_000;
 
+/** Bound (ms) on a single OUTBOUND voice-reply upload (card 2c7ac1dd) — `ChatGateway.tryDeliverVoice`'s
+ *  `adapter.sendVoice` call. A synthesized TTS clip is governed by the SAME 20MB size class
+ *  `DOWNLOAD_TIMEOUT_MS` (telegram.ts) already bounds in the opposite direction (download), so this reuses
+ *  that already-reviewed figure rather than hand-picking a new one for the same size class. Deliberately a
+ *  SEPARATE constant from `MEDIA_SEND_TIMEOUT_MS` below (even where the two values happen to differ) so
+ *  they stay free to diverge independently, same posture as `ACK_SEND_TIMEOUT_MS`/`REPLY_SEND_TIMEOUT_MS`
+ *  above. Far above the 15s text bounds — an upload, not a tiny JSON post. */
+export const VOICE_SEND_TIMEOUT_MS = 60_000;
+
+/** Bound (ms) on a single OUTBOUND media upload (card 2c7ac1dd) — `ChatGateway.deliverMedia`'s
+ *  `adapter.sendMedia` call. UNLIKE `VOICE_SEND_TIMEOUT_MS` above, this does NOT reuse
+ *  `DOWNLOAD_TIMEOUT_MS`'s 20MB-class figure: `telegram.ts`'s own `sendMedia` enforces NO size cap at all
+ *  (only the in-app transport caps at `IN_APP_MEDIA_MAX_BYTES`), and Telegram's Bot API accepts a local
+ *  `sendDocument` upload up to 50MB — more than double the 20MB class the 60s voice/download bound was
+ *  sized for — so this is scaled up rather than reused. */
+export const MEDIA_SEND_TIMEOUT_MS = 120_000;
+
 /** Distinguishable sentinel `withTimeout` resolves to when its timer wins the race — never a value a real
  *  send result could produce, so a caller can tell "timed out" apart from "resolved/rejected normally"
  *  without relying on `undefined`/`null`, which `promise` could itself legitimately produce. */
@@ -342,6 +359,14 @@ export class ChatGateway {
      *  constant; test-overridable so a hang test can prove the bound actually fires without a real 15s
      *  wait. */
     private readonly sendTimeoutMs: number = REPLY_SEND_TIMEOUT_MS,
+    /** Card 2c7ac1dd: bound (ms) on a single `tryDeliverVoice` transport send — see `VOICE_SEND_TIMEOUT_MS`'s
+     *  own doc for the rationale. Defaults to that constant; test-overridable so a hang test can prove the
+     *  bound actually fires without a real 60s wait. */
+    private readonly voiceSendTimeoutMs: number = VOICE_SEND_TIMEOUT_MS,
+    /** Card 2c7ac1dd: bound (ms) on a single `deliverMedia` transport send — see `MEDIA_SEND_TIMEOUT_MS`'s
+     *  own doc for the rationale. Defaults to that constant; test-overridable so a hang test can prove the
+     *  bound actually fires without a real 120s wait. */
+    private readonly mediaSendTimeoutMs: number = MEDIA_SEND_TIMEOUT_MS,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -952,8 +977,16 @@ export class ChatGateway {
     if (this.synthesize) {
       const voiceResult = await this.tryDeliverVoice(sessionId, target, text, voice, proactive);
       if (voiceResult) {
-        this.recordOutboundSafely(sessionId, target.channel, target.chatId, text, proactive, true);
-        this.onReplyDelivered?.(sessionId);
+        // Card 2c7ac1dd: `voiceResult` is also truthy on an UNCONFIRMED `{delivered:false,reason:"timeout"}`
+        // (see tryDeliverVoice's own doc) — gate the record + onReplyDelivered on actual delivery, never on
+        // mere truthiness. An unconfirmed send must not be recorded as a genuine voice reply (we don't know
+        // it happened) and must not reset the zero-reply streak, mirroring sendVia's own text-timeout branch
+        // below (b343c5f0 round 2): a timeout's cause is undiagnosed anywhere else, so it still counts
+        // toward that streak instead of resetting it every turn.
+        if (voiceResult.delivered) {
+          this.recordOutboundSafely(sessionId, target.channel, target.chatId, text, proactive, true);
+          this.onReplyDelivered?.(sessionId);
+        }
         return voiceResult;
       }
     }
@@ -1017,6 +1050,13 @@ export class ChatGateway {
    *   tag its OWN frame + history row (unlike `send`, `sendVoice` REPLACES the record/deliver step entirely on
    *   the voice path — see in-app.ts's `sendVoice` doc — so this can't ride the generic recordOutboundSafely
    *   tagging alone).
+   *
+   * Card 2c7ac1dd: unlike every OTHER failure mode above (which resolves `null` so `deliverReply` falls
+   * through to the plain text send — those are all CONFIRMED non-delivery), a `sendVoice` TIMEOUT resolves
+   * a real `{delivered:false, reason:"timeout"}` instead — the send is AMBIGUOUS (it may land late), so
+   * falling through to a text send here would risk a double delivery. Returning a non-null `DeliverResult`
+   * makes `deliverReply`'s `if (voiceResult)` gate stop there instead of trying text, exactly mirroring how
+   * `sendVia`'s own text-timeout branch never retries.
    */
   private async tryDeliverVoice(sessionId: string, target: CompanionRoute, text: string, agentVoice?: boolean, proactive = false): Promise<DeliverResult | null> {
     if (!this.synthesize) return null;
@@ -1048,7 +1088,19 @@ export class ChatGateway {
       // got flagged mid-synth.
       if (!this.mayDeliverTo(target.channel, target.chatId, sessionId)) return null;
       try {
-        await adapter.sendVoice(target.chatId, audio.filePath, text, proactive);
+        // Card 2c7ac1dd: bound this upload exactly like sendVia/tryAck bound theirs (same withTimeout/
+        // AbortController shape) — a hung voice upload must not hang the caller's whole turn. See this
+        // method's own doc for why a timeout resolves a real DeliverResult instead of falling through.
+        const controller = new AbortController();
+        const outcome = await withTimeout(
+          adapter.sendVoice(target.chatId, audio.filePath, text, proactive, controller.signal),
+          this.voiceSendTimeoutMs,
+          () => controller.abort(),
+        );
+        if (outcome === TIMED_OUT) {
+          this.debug(`tryDeliverVoice send timed out after ${this.voiceSendTimeoutMs}ms (channel=${target.channel} chat=${target.chatId})`);
+          return { delivered: false, reason: "timeout" };
+        }
         return { delivered: true, chunks: 1 };
       } finally {
         await audio.cleanup().catch(() => { /* best-effort — cleanup must never block/throw */ });
@@ -1084,7 +1136,21 @@ export class ChatGateway {
     if (!adapter) return { delivered: false, reason: "no-adapter" };
     if (!adapter.sendMedia) return { delivered: false, reason: "unsupported-channel" };
     try {
-      await adapter.sendMedia(target.chatId, filePath);
+      // Card 2c7ac1dd: bound this upload exactly like tryDeliverVoice/sendVia/tryAck bound theirs (same
+      // withTimeout/AbortController shape) — a hung media upload must not hang the caller's whole turn.
+      // No fallback concern here (unlike voice→text): media has no secondary delivery path, so a timeout
+      // is reported structurally the same way `send-failed` already is — just with its own distinct,
+      // honestly-unconfirmed reason.
+      const controller = new AbortController();
+      const outcome = await withTimeout(
+        adapter.sendMedia(target.chatId, filePath, { signal: controller.signal }),
+        this.mediaSendTimeoutMs,
+        () => controller.abort(),
+      );
+      if (outcome === TIMED_OUT) {
+        this.debug(`deliverMedia send timed out after ${this.mediaSendTimeoutMs}ms for ${target.channel}/${target.chatId}`);
+        return { delivered: false, reason: "timeout" };
+      }
       return { delivered: true };
     } catch (err) {
       this.debug(`deliverMedia send failed for ${target.channel}/${target.chatId}: ${describeError(err)}`);

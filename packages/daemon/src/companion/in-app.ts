@@ -318,7 +318,10 @@ export class InAppChannel {
     // `proactive` (proactive event-line producer) is threaded through EXACTLY like `send`'s `opts.proactive`
     // — this replaces `send` entirely on the voice path, so it's the only place left to tag a voiced
     // heartbeat/reminder/attention-push reply's self-recorded row + live frame.
-    sendVoice: async (chatId: string, audioFilePath: string, text: string, proactive = false) => {
+    // `signal` (card 2c7ac1dd) is accepted on the seam for parity with Telegram's adapter but IGNORED here
+    // — there is no network call to abort (a local file read + an in-process WS push), exactly like `send`
+    // above ignores it for the same reason.
+    sendVoice: async (chatId: string, audioFilePath: string, text: string, proactive = false, _signal?: AbortSignal) => {
       const data = await fs.promises.readFile(audioFilePath, { encoding: "base64" });
       this.recordSafely(chatId, "companion", text, proactive, true);
       this.deliver(chatId, text, { data, mimeType: "audio/ogg" }, proactive);
@@ -329,8 +332,9 @@ export class InAppChannel {
     // push is simply dropped (mirrors `deliver`'s own doc for a text reply with zero clients, except media
     // has no durable fallback — `ChatGateway.deliverMedia` deliberately never persists it). Throws on an
     // oversize file or any read failure — the caller (`ChatGateway.deliverMedia`) contains it and reports
-    // `{delivered:false, reason:"send-failed"}`, exactly like a throwing `sendVoice`.
-    sendMedia: async (chatId: string, filePath: string, opts?: { fileName?: string }) => {
+    // `{delivered:false, reason:"send-failed"}`, exactly like a throwing `sendVoice`. `opts.signal` (card
+    // 2c7ac1dd) is accepted but IGNORED — same no-network-call reason as `sendVoice` above.
+    sendMedia: async (chatId: string, filePath: string, opts?: { fileName?: string; signal?: AbortSignal }) => {
       const stat = await fs.promises.stat(filePath);
       if (!stat.isFile()) throw new Error("not a regular file");
       if (stat.size > IN_APP_MEDIA_MAX_BYTES) {

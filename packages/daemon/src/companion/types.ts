@@ -157,8 +157,17 @@ export interface ChannelAdapter {
    * adapter with no separate record hook (in-app), so it's the only place left to tag that self-recorded
    * row + the live frame. Telegram's implementation ignores it (its outbound tagging happens generically via
    * chat-gateway's recordOutboundSafely instead). Default (omitted/false) ⇒ an ordinary reply.
+   *
+   * `signal` (card 2c7ac1dd — bounding `ChatGateway.tryDeliverVoice`'s send so a hung upload can't hang the
+   * caller's turn, same shape as `send`'s own `opts.signal`) — a TRAILING POSITIONAL param here rather than
+   * folded into an options object, unlike `sendMedia` below: `sendVoice` had no options object before this
+   * (its 4th param, `proactive`, is itself positional), so adding one more positional is the smaller diff;
+   * `sendMedia` already took an `opts` object, so its `signal` was added as a new field on that instead.
+   * This asymmetry is deliberate, not an oversight — don't "fix" it by converting `sendVoice` to an options
+   * object. An adapter that can't honor it (in-app — no network call to abort) ignores it, exactly like an
+   * adapter that doesn't implement `downloadAttachment`.
    */
-  sendVoice?(chatId: string, audioFilePath: string, text: string, proactive?: boolean): Promise<void>;
+  sendVoice?(chatId: string, audioFilePath: string, text: string, proactive?: boolean, signal?: AbortSignal): Promise<void>;
   /**
    * OPTIONAL: send a local file to `chatId` as a native image/document message (the `media-out` Companion
    * lever, card 3a81b0f2 — "show me the latest mockup"). Only implemented by adapters whose platform can
@@ -168,8 +177,14 @@ export interface ChannelAdapter {
    * `{delivered:false, reason:"unsupported-channel"}` and never attempts a send on this channel — a future
    * channel with no file-push capability degrades gracefully instead of erroring. May throw — the caller
    * contains it and reports a failed delivery, exactly like `sendVoice`.
+   *
+   * `opts.signal` (card 2c7ac1dd — bounding `ChatGateway.deliverMedia`'s send so a hung upload can't hang
+   * the caller's turn, same shape as `send`'s own `opts.signal`) rides the EXISTING `opts` object here
+   * rather than a new trailing positional, since `sendMedia` already had one (unlike `sendVoice` — see its
+   * own doc for why that one differs). An adapter that can't honor it (in-app — no network call to abort)
+   * ignores it, exactly like `send`'s in-app implementation does.
    */
-  sendMedia?(chatId: string, filePath: string, opts?: { fileName?: string }): Promise<void>;
+  sendMedia?(chatId: string, filePath: string, opts?: { fileName?: string; signal?: AbortSignal }): Promise<void>;
 }
 
 /**

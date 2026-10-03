@@ -36,9 +36,11 @@ import { inMemoryVoicePrefs } from "../dist/companion/voice-prefs.js";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-function makeAdapter(name, { withSendVoice = true, sendVoiceThrows = false } = {}) {
+function makeAdapter(name, { withSendVoice = true, sendVoiceThrows = false, sendVoiceHangs = false } = {}) {
   const sent = [];
   const voiceSent = [];
+  let sawSignal = null;
+  let wasAborted = false;
   const adapter = {
     name,
     maxMessageLength: 4096,
@@ -47,12 +49,15 @@ function makeAdapter(name, { withSendVoice = true, sendVoiceThrows = false } = {
     async send(chatId, text) { sent.push({ chatId, text }); },
   };
   if (withSendVoice) {
-    adapter.sendVoice = async (chatId, filePath) => {
+    adapter.sendVoice = async (chatId, filePath, _text, _proactive, signal) => {
       if (sendVoiceThrows) throw new Error("simulated telegram sendVoice failure");
+      sawSignal = signal ?? null;
+      sawSignal?.addEventListener("abort", () => { wasAborted = true; });
+      if (sendVoiceHangs) return new Promise(() => { /* never settles — simulates a hung upload */ });
       voiceSent.push({ chatId, filePath });
     };
   }
-  return { sent, voiceSent, adapter };
+  return { sent, voiceSent, adapter, get sawSignal() { return sawSignal; }, get wasAborted() { return wasAborted; } };
 }
 
 function makeSynthesizer({ ready = true, result = () => ({ filePath: "/tmp/reply.ogg" }) } = {}) {
@@ -286,6 +291,58 @@ try {
     const rOmitted = await gw.deliverReply("sess-A", "hello there");
     check("14: mode auto + voice omitted ⇒ text (default, no surprise voice)", rOmitted.delivered === true && tg.sent.length === 1 && tg.voiceSent.length === 0);
     check("14: synth() never called across either omitted/false case", synth.calls.length === 0);
+  }
+  // ============ 15 — Card 2c7ac1dd: adapter.sendVoice TIMES OUT ⇒ distinct {delivered:false,reason:"timeout"}
+  //                   — NO text fallback (ambiguous send, would risk a double delivery), NO history record,
+  //                   NO onReplyDelivered (mirrors sendVia's own text-timeout branch; b343c5f0 round 2) ======
+  {
+    const tg = makeAdapter("telegram", { sendVoiceHangs: true });
+    const synth = makeSynthesizer({ ready: true, result: () => ({ filePath: "/tmp/voice-reply.ogg" }) });
+    const prefs = inMemoryVoicePrefs();
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
+    const recorded = [];
+    const delivered = [];
+    const gw = new ChatGateway(
+      noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }],
+      undefined, undefined, originResolver, prefs, undefined, synth.synthesizer,
+      undefined, // historyReset
+      { record: (...args) => recorded.push(args) }, // recorder
+      undefined, undefined, undefined, undefined, undefined,
+      (sid) => delivered.push(sid), // onReplyDelivered
+      undefined, undefined, undefined,
+      undefined, // inboundQueueMaxWaitMs
+      undefined, // ackSendTimeoutMs
+      undefined, // sendTimeoutMs
+      20, // voiceSendTimeoutMs
+    );
+    gw.registerAdapter(tg.adapter);
+
+    const startedAt = Date.now();
+    const r = await gw.deliverReply("sess-A", "hello there");
+    const elapsedMs = Date.now() - startedAt;
+    check("15: deliverReply resolves promptly, NOT hung on the stuck voice upload", elapsedMs < 5000);
+    check("15: distinct {delivered:false, reason:'timeout'} — never a false 'delivered'", r.delivered === false && r.reason === "timeout");
+    check("15: NO text fallback (the voice send is ambiguous, not confirmed-failed)", tg.sent.length === 0);
+    check("15: adapter.sendVoice passed a real AbortSignal", tg.sawSignal instanceof AbortSignal);
+    check("15: the signal was aborted (no lingering request)", tg.wasAborted === true);
+    check("15: NO chat-history record of an unconfirmed send", recorded.length === 0);
+    check("15: onReplyDelivered did NOT fire (a timeout's cause is undiagnosed elsewhere, same as sendVia's text-timeout branch)", delivered.length === 0);
+    check("15: the temp audio file was STILL cleaned up (finally, even on a timed-out send)", synth.cleanupCalls === 1);
+  }
+
+  // ============ 16 — Card 2c7ac1dd: a CONFIRMED-thrown adapter.sendVoice (not a timeout) still degrades to
+  //                   text — the timeout branch above must not accidentally swallow this existing path =====
+  {
+    const tg = makeAdapter("telegram", { sendVoiceThrows: true });
+    const synth = makeSynthesizer({ ready: true, result: () => ({ filePath: "/tmp/voice-reply.ogg" }) });
+    const prefs = inMemoryVoicePrefs();
+    prefs.setVoiceReplies({ sessionId: "sess-A", channel: "telegram", chatId: "111", senderId: null }, "on");
+    const gw = new ChatGateway(noopSubmit, [{ sessionId: "sess-A", channel: "telegram", chatId: "111", scope: "dm" }], undefined, undefined, originResolver, prefs, undefined, synth.synthesizer);
+    gw.registerAdapter(tg.adapter);
+
+    const r = await gw.deliverReply("sess-A", "hello there");
+    check("16: a confirmed-thrown sendVoice (not a timeout) still degrades to text", r.delivered === true && tg.sent.length === 1 && tg.sent[0].text === "hello there");
+    check("16: the temp file was STILL cleaned up (finally, even on a throwing send)", synth.cleanupCalls === 1);
   }
 } catch (err) {
   console.error("UNCAUGHT:", err);

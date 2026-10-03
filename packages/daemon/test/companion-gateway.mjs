@@ -425,6 +425,48 @@ const originOf = (map) => (sid) => map[sid] ?? null;
   check("sendToChannel timeout: resolves promptly with the distinct 'timeout' reason (not 'send-failed')", res.delivered === false && res.reason === "timeout");
 }
 
+// --- Card 2c7ac1dd: a HUNG OUTBOUND MEDIA send (deliverMedia) does NOT hang the caller's turn -------------
+// RED on pre-fix code: `deliverMedia` used to `await adapter.sendMedia(...)` with no timeout, so this
+// block's own `await gw.deliverMedia(...)` would itself never settle.
+{
+  let sendMediaCalls = 0;
+  let sawSignal = null;
+  let wasAborted = false;
+  const hangingAdapter = {
+    name: "telegram",
+    maxMessageLength: 4096,
+    start() {},
+    async stop() {},
+    async sendMedia(_chatId, _filePath, opts) {
+      sendMediaCalls++;
+      sawSignal = opts?.signal ?? null;
+      sawSignal?.addEventListener("abort", () => { wasAborted = true; });
+      return new Promise(() => { /* never settles — simulates a hung upload */ });
+    },
+  };
+  const gw = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }],
+    undefined, undefined, originOf({ "sess-A": { channel: "telegram", chatId: "111" } }),
+    undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined,
+    undefined, // inboundQueueMaxWaitMs
+    undefined, // ackSendTimeoutMs
+    undefined, // sendTimeoutMs
+    undefined, // voiceSendTimeoutMs
+    20, // mediaSendTimeoutMs
+  );
+  gw.registerAdapter(hangingAdapter);
+  const startedAt = Date.now();
+  const res = await gw.deliverMedia("sess-A", "/tmp/fake-mockup.png");
+  const elapsedMs = Date.now() - startedAt;
+  check("media timeout: deliverMedia resolves promptly, NOT hung on the stuck upload", elapsedMs < 5000);
+  check("media timeout: structured { delivered:false, reason:'timeout' } — distinct from 'send-failed'", res.delivered === false && res.reason === "timeout");
+  check("media timeout: the adapter's sendMedia was actually invoked", sendMediaCalls === 1);
+  check("media timeout: deliverMedia passed a real AbortSignal", sawSignal instanceof AbortSignal);
+  check("media timeout: the signal was aborted (no lingering request)", wasAborted === true);
+}
+
 // --- Card b343c5f0: a MULTI-CHUNK reply that times out on a LATER chunk records ONLY the confirmed-sent
 // prefix — the timed-out chunk's own text is never optimistically included (unconfirmed, not known-sent) ---
 {

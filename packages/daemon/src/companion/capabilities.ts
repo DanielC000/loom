@@ -340,7 +340,10 @@ export interface GrantOutbound {
    * media at all (`reason:"unsupported-channel"` — every channel today, Telegram and in-app (card
    * 9ec79b52), implements delivery; this is future-proofing for one that doesn't) apart from a genuine send
    * failure — the former degrades gracefully (the lever tells the owner where the file is), the latter
-   * fails closed exactly like `deliverToOwner`.
+   * fails closed exactly like `deliverToOwner`. `reason:"timeout"` (card 2c7ac1dd) is a THIRD, distinct
+   * case — the upload didn't confirm within the bound, so it may have landed late; the call site handles
+   * it with the SAME "don't blindly repeat the send" framing `deliverToOwnerError` gives `deliverToOwner`'s
+   * own timeout (see `timedOutSendNote`), never collapsed into the generic failure branch.
    */
   deliverMediaToOwner(sessionId: string, filePath: string): Promise<{ delivered: boolean; reason?: string }>;
 }
@@ -356,17 +359,28 @@ export interface GrantOutbound {
  *  it. Either branch is fail-closed the same way: the caller never reaches its `pendingXxx.set(...)` line. */
 function deliverToOwnerError(delivered: boolean | "timeout"): ReturnType<typeof ok> | null {
   if (delivered === "timeout") {
-    return ok({
-      error:
-        "the confirmation may or may not have reached the owner's chat — the send timed out, so nothing " +
-        "is pending here. Don't re-propose; wait for the owner's next message and only try again if they " +
-        "say they didn't get it (re-proposing now risks a duplicate landing if the original arrives late)",
-    });
+    return ok({ error: timedOutSendNote("the confirmation", "nothing is pending here", "re-propose", "re-proposing") });
   }
   if (!delivered) {
     return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
   }
   return null;
+}
+
+/** Shared wording for an outbound send to the owner that TIMED OUT — card b343c5f0 round 2 coined it for
+ *  `deliverToOwnerError` above; card 2c7ac1dd reuses it for the `send_media` lever's own timeout branch
+ *  rather than re-deriving the same "it may have landed late, don't blindly repeat the action" guidance a
+ *  second time. `subject` names what was sent ("the confirmation" / "the file"); `noActionState` names
+ *  what did NOT happen as a result ("nothing is pending here" / "the delivery is unconfirmed, not failed");
+ *  `verb`/`verbIng` name the repeat action to forbid and its -ing form (kept as two separate params rather
+ *  than derived from one, since "re-propose"/"re-proposing" drops a letter that "resend"/"resending"
+ *  doesn't — a mechanical suffix wouldn't work for both). `deliverToOwnerError`'s own call below reproduces
+ *  its PRE-EXTRACTION wording byte-for-byte — see companion-decision-resolve.mjs's regex check on
+ *  "re-propose"/"do not re-propose", which this must keep satisfying. */
+function timedOutSendNote(subject: string, noActionState: string, verb: string, verbIng: string): string {
+  return `${subject} may or may not have reached the owner's chat — the send timed out, so ${noActionState}. ` +
+    `Don't ${verb}; wait for the owner's next message and only try again if they say they didn't get it ` +
+    `(${verbIng} now risks a duplicate landing if the original arrives late)`;
 }
 
 /** The slice of `SessionService` the `session-steer` ACT lever needs (card 305a54fb) — cross-session
@@ -2040,6 +2054,12 @@ const MEDIA_OUT: CompanionCapability = {
             status: "unsupported-channel",
             note: `media delivery isn't available on this channel yet — the file is at ${resolved}`,
           });
+        }
+        // Card 2c7ac1dd: a "timeout" is UNCONFIRMED, not a known failure — the file may land late. Give the
+        // same "don't blindly repeat the send" guidance `deliverToOwnerError` gives the propose-sites,
+        // rather than the generic "couldn't deliver" wording below, which would invite a risky re-send.
+        if (delivery.reason === "timeout") {
+          return ok({ error: timedOutSendNote("the file", "the delivery is unconfirmed, not failed", "resend", "resending") });
         }
         return ok({ error: `couldn't deliver the file (${delivery.reason ?? "unknown reason"})` });
       },

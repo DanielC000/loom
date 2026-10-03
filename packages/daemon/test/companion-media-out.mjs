@@ -83,7 +83,7 @@ const tmpDb = () => new Db(path.join(tmpHome, `${randomUUID()}.db`));
 
 // A FAKE companion (CompanionHooks) — the ONLY method the media-out outbound seam calls is `deliverMedia`.
 // `mode` selects the simulated result: "ok" delivers, "unsupported" mirrors an adapter with no sendMedia,
-// "fail" mirrors a genuine send-failed.
+// "fail" mirrors a genuine send-failed, "timeout" (card 2c7ac1dd) mirrors an UNCONFIRMED upload.
 function makeFakeCompanion(mode = "ok") {
   const delivered = [];
   return {
@@ -91,6 +91,7 @@ function makeFakeCompanion(mode = "ok") {
       delivered.push({ sessionId, filePath });
       if (mode === "ok") return { delivered: true };
       if (mode === "unsupported") return { delivered: false, reason: "unsupported-channel" };
+      if (mode === "timeout") return { delivered: false, reason: "timeout" };
       return { delivered: false, reason: "send-failed" };
     },
     delivered,
@@ -367,6 +368,33 @@ try {
 
     const res = await call(client, "send_media", { pathOrName: "shot.png" });
     check("(h) a genuine send failure: rejected with an {error}, not a bare status", typeof res.error === "string" && res.status === undefined);
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ (h2) Card 2c7ac1dd: a "timeout" is UNCONFIRMED, not a known failure — the agent gets the
+  //               SAME "don't blindly resend" guidance deliverToOwnerError gives the propose-sites, never
+  //               the generic "couldn't deliver" wording (which would invite a risky duplicate send) ======
+  {
+    const root = makeRoot("timeout");
+    fs.writeFileSync(path.join(root, "shot.png"), "bytes");
+
+    const db = tmpDb();
+    const proj = "proj-media-timeout";
+    seedProject(db, proj, "Media Timeout");
+    const companionSess = "companion-media-timeout";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "media-out", projectId: proj, mode: "act", config: { roots: [root] } });
+
+    const companion = makeFakeCompanion("timeout");
+    const orch = new OrchestrationMcpRouter(db, {}, companion);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const res = await call(client, "send_media", { pathOrName: "shot.png" });
+    check("(h2) a timeout is reported as an {error}, not a bare status", typeof res.error === "string" && res.status === undefined);
+    check("(h2) the error tells the agent NOT to blindly resend", /don't resend|do not resend/i.test(res.error));
+    check("(h2) the error names the duplicate-landing risk (same framing as deliverToOwnerError's timeout)", /duplicate/i.test(res.error));
 
     await client.close();
     db.close();

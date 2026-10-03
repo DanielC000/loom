@@ -58,15 +58,20 @@ export interface TelegramBotLike {
      *  seam so an existing test fake bot (no voice-download tests) stays valid. */
     getFile?(fileId: string): Promise<{ file_path?: string }>;
     /** Send a native voice message (Companion Voice epic, VOICE-P3 — outbound TTS). Optional on the seam
-     *  so an existing test fake bot (no voice-reply tests) stays valid — the call site guards with `?.`. */
-    sendVoice?(chatId: string | number, voice: InputFile): Promise<unknown>;
+     *  so an existing test fake bot (no voice-reply tests) stays valid — the call site guards with `?.`.
+     *  `other`/`signal` mirror `sendMessage`'s own two trailing params above (card 2c7ac1dd) — grammY's real
+     *  `sendVoice` has the identical `(chat_id, voice, other?, signal?)` shape. */
+    sendVoice?(chatId: string | number, voice: InputFile, other?: undefined, signal?: AbortSignal): Promise<unknown>;
     /** Send a native photo (renders inline) — the `media-out` lever (card 3a81b0f2). Optional on the seam
-     *  so an existing test fake bot (no media tests) stays valid — the call site guards with `?.`. */
-    sendPhoto?(chatId: string | number, photo: InputFile): Promise<unknown>;
+     *  so an existing test fake bot (no media tests) stays valid — the call site guards with `?.`.
+     *  `other`/`signal` mirror `sendMessage`'s own two trailing params above (card 2c7ac1dd) — grammY's real
+     *  `sendPhoto` has the identical `(chat_id, photo, other?, signal?)` shape. */
+    sendPhoto?(chatId: string | number, photo: InputFile, other?: undefined, signal?: AbortSignal): Promise<unknown>;
     /** Send a native document (generic file attachment) — the `media-out` lever (card 3a81b0f2). Optional
      *  on the seam so an existing test fake bot (no media tests) stays valid — the call site guards with
-     *  `?.`. */
-    sendDocument?(chatId: string | number, document: InputFile): Promise<unknown>;
+     *  `?.`. `other`/`signal` mirror `sendMessage`'s own two trailing params above (card 2c7ac1dd) —
+     *  grammY's real `sendDocument` has the identical `(chat_id, document, other?, signal?)` shape. */
+    sendDocument?(chatId: string | number, document: InputFile, other?: undefined, signal?: AbortSignal): Promise<unknown>;
   };
   on(filter: "message", handler: (ctx: { update: unknown }) => void | Promise<void>): void;
   catch(handler: (err: unknown) => void): void;
@@ -224,19 +229,24 @@ export function createTelegramAdapter(
       // merely giving up waiting on it.
       await bot.api.sendMessage(chatId, text, undefined, opts?.signal);
     },
-    async sendVoice(chatId, audioFilePath) {
+    async sendVoice(chatId, audioFilePath, _text, _proactive, signal) {
       if (!bot.api.sendVoice) throw new Error("sendVoice not supported by this bot");
-      await bot.api.sendVoice(chatId, new InputFile(audioFilePath));
+      // `other` stays `undefined` (grammY's own options slot — never used here), mirroring `send` above
+      // (card 2c7ac1dd) — the caller's own timeout (ChatGateway.tryDeliverVoice) can then actually abort
+      // this request via `signal` instead of merely giving up waiting on it.
+      await bot.api.sendVoice(chatId, new InputFile(audioFilePath), undefined, signal);
     },
     async sendMedia(chatId, filePath, opts) {
       const fileName = opts?.fileName ?? path.basename(filePath);
       const input = new InputFile(filePath, fileName);
+      // `signal` (card 2c7ac1dd) lets the caller's own timeout (ChatGateway.deliverMedia) actually abort
+      // this request, same shape as `sendVoice` above.
       if (TELEGRAM_PHOTO_EXTENSIONS.has(path.extname(fileName).toLowerCase())) {
         if (!bot.api.sendPhoto) throw new Error("sendPhoto not supported by this bot");
-        await bot.api.sendPhoto(chatId, input);
+        await bot.api.sendPhoto(chatId, input, undefined, opts?.signal);
       } else {
         if (!bot.api.sendDocument) throw new Error("sendDocument not supported by this bot");
-        await bot.api.sendDocument(chatId, input);
+        await bot.api.sendDocument(chatId, input, undefined, opts?.signal);
       }
     },
     async downloadAttachment(attachment) {
