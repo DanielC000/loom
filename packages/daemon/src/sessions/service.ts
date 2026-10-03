@@ -2196,6 +2196,16 @@ export function withRolePermissionModeCyclesPin(permission: PermissionPolicy, ro
     : permission;
 }
 
+/**
+ * Shared by resume()'s ghost-resume guard and forkSession(): the engine transcript lives under
+ * ~/.claude keyed by cwd, so it SURVIVES the worktree's removal — a session whose worktree/cwd was
+ * already GC'd (e.g. a merged worker) still passes the transcript-exists check, but spawning into
+ * the now-missing cwd dies immediately. Check this BEFORE spawning to refuse rather than spawn a doomed pty.
+ */
+export function sessionCwdMissing(cwd: string): boolean {
+  return !fs.existsSync(cwd);
+}
+
 /** Card 961da6c6: `forkSession` on a codex-pinned source — codex has no fork primitive, so nothing is created. */
 export class CodexForkUnsupportedError extends Error {
   constructor() {
@@ -3793,7 +3803,7 @@ export class SessionService {
     // guard above, but a `--resume` spawn into the now-missing cwd dies code=1. Refuse here so the boot
     // fleet-resume path counts it `failed` instead of spawning a doomed pty. (Also applies to the
     // forced-role fresh start above — a fresh spawn needs the SAME cwd to exist too.)
-    if (!fs.existsSync(session.cwd)) {
+    if (sessionCwdMissing(session.cwd)) {
       this.db.setResumability(session.id, "dead");
       throw new Error("session is no longer resumable (worktree/cwd missing)");
     }
@@ -6929,6 +6939,12 @@ export class SessionService {
     // The fork reads the source's transcript; if it's gone there's nothing to branch from.
     if (!engineTranscriptExists(src.cwd, src.engineSessionId, src.harness)) {
       throw new Error("source conversation transcript is missing — nothing to fork");
+    }
+    // Mirrors resume()'s ghost-resume guard (sessionCwdMissing): the engine transcript survives the
+    // source's worktree being GC'd (e.g. a merged worker), so the check above alone can't catch it —
+    // refuse here rather than spawn a fork into the now-missing cwd and watch it die immediately.
+    if (sessionCwdMissing(src.cwd)) {
+      throw new Error("source session's worktree/cwd is missing — nothing to fork");
     }
     const project = this.db.getProject(src.projectId);
     if (!project) throw new Error("project not found");
