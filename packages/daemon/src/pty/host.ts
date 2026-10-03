@@ -1096,6 +1096,49 @@ export function isMcpServerEnableSignature(flatCollapsed: string): boolean {
 }
 
 /**
+ * Position-aware sibling of detectBlockingDialogSignature, used ONLY by the boot-dialog-stuck alarm's
+ * fire-time signature name — never by isBlockedOnUnresolvedBootDialog's own gate, which only needs "any
+ * match at all". Ranks the three SPECIFIC signatures (external-imports, workspace-trust, mcp-server-enable)
+ * by the LAST position each is provably present at in `flatCollapsed`, returning whichever ranks latest —
+ * "most recently appeared", not "highest priority". mcp-server-enable (isMcpServerEnableSignature) is
+ * COMPOUND — two independent sub-patterns that can land at different buffer positions — so its position is
+ * the LATER of its two sub-patterns' own last positions: both must be present for the signature to hold at
+ * all, so the later of the two is the earliest point by which it's actually, fully satisfied. Returns null
+ * only when nothing — specific or catch-all — matches at all (same convention as the sibling function).
+ *
+ * @decision 44fcf9ba — never rank the generic `enter-esc-footer` catch-all as a peer candidate here; it's
+ * a fallback ONLY. Two of the three specific dialogs render that same generic footer, so ranking it as a
+ * peer would spuriously make it "win" by name whenever both appeared. See record for the full reasoning.
+ */
+export function detectNewestBlockingDialogSignature(flatCollapsed: string): string | null {
+  const lastIndex = (re: RegExp): number => {
+    let last = -1;
+    for (const m of flatCollapsed.matchAll(re)) last = m.index ?? last;
+    return last;
+  };
+  const candidates: Array<{ name: string; pos: number }> = [];
+
+  const externalImports = lastIndex(/externalimports/gi);
+  if (externalImports >= 0) candidates.push({ name: "external-imports", pos: externalImports });
+
+  const workspaceTrust = lastIndex(/isthisaprojectyoutrust/gi);
+  if (workspaceTrust >= 0) candidates.push({ name: "workspace-trust", pos: workspaceTrust });
+
+  // Compound: isMcpServerEnableSignature is the shared boolean test (never re-derived — see the
+  // e29923e3 decision record); position is computed separately, from the SAME two sub-patterns it tests.
+  if (isMcpServerEnableSignature(flatCollapsed)) {
+    candidates.push({ name: "mcp-server-enable", pos: Math.max(lastIndex(/mcpserver/gi), lastIndex(/rejectall/gi)) });
+  }
+
+  if (candidates.length > 0) {
+    return candidates.reduce((best, c) => (c.pos > best.pos ? c : best)).name;
+  }
+  // Fallback only — never ranked as a peer candidate. See this function's own doc comment for why.
+  if (/entertoconfirm/i.test(flatCollapsed) && /esctocancel/i.test(flatCollapsed)) return "enter-esc-footer";
+  return null;
+}
+
+/**
  * Which option the resume-summary gate's ❯ cursor currently sits on — "1"/"2"/"3", or `null` if
  * unreadable (the frame hasn't painted the cursor yet, or the gate isn't on screen). PURE + exported
  * for the hermetic test. `collapseBoot` strips ANSI but does NOT insert separators between lines, so a
@@ -5107,7 +5150,9 @@ export class PtyHost {
         // for EVERY hook, including the very UserPromptSubmit that flips `firstTurnStarted`, so the latter
         // can never be true while the former is false — a redundant disjunct, not a second condition.
         if (!l.alive || l.sessionStartObserved || l.anyHookObserved) return; // already resolved (or the session died) — nothing to report
-        const signatureName = detectBlockingDialogSignature(collapseBoot(l.dialogStuckScan));
+        // Card 44fcf9ba: name whichever signature most recently appeared, not detectBlockingDialogSignature's
+        // own fixed-priority first match — see detectNewestBlockingDialogSignature's own doc comment.
+        const signatureName = detectNewestBlockingDialogSignature(collapseBoot(l.dialogStuckScan));
         // eslint-disable-next-line no-console
         console.error(`[claude-boot-dialog-stuck] ${opts.sessionId} SessionStart never observed after ${CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS}ms — signature=${signatureName ?? "none recognized"}. Manager intervention may be needed.`);
         try {

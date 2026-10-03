@@ -107,8 +107,9 @@ process.env.LOOM_READY_FALLBACK_MS = "60000"; // comfortably longer than any sce
 process.env.LOOM_MCP_DISMISS_INITIAL_DELAY_MS = "20";
 
 const {
-  PtyHost, detectBlockingDialogSignature, collapseBoot, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES,
-  isMcpServerEnableSignature, disallowedToolsForRole, HUMAN_PROMPT_TOOLS,
+  PtyHost, detectBlockingDialogSignature, detectNewestBlockingDialogSignature, collapseBoot,
+  LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES, isMcpServerEnableSignature, disallowedToolsForRole,
+  HUMAN_PROMPT_TOOLS,
 } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
@@ -132,6 +133,51 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
   check("detectBlockingDialogSignature: negative control — empty buffer never matches", detectBlockingDialogSignature("") === null);
   check("(setup) 'worker' is in LOOM_DRIVEN_ROLES; 'manager' is not",
     LOOM_DRIVEN_ROLES.includes("worker") && !LOOM_DRIVEN_ROLES.includes("manager"));
+}
+
+// --- Unit-level: detectNewestBlockingDialogSignature (card 44fcf9ba) ----------------------------------
+// Parity on single-signature inputs, then the discriminating cases that actually distinguish it from
+// detectBlockingDialogSignature's fixed-priority-first match, using the SAME real fixture text (including
+// footers) the rest of this file already relies on.
+{
+  const collapse = collapseBoot;
+  const EXTERNAL_IMPORTS_TEXT = "Allow external CLAUDE.md file imports?\n❯ No, disable external imports\n  Yes, allow external imports\nEnter to confirm · Esc to cancel";
+  const WORKSPACE_TRUST_TEXT = "Is this a project you trust?\n❯ Yes, I trust this folder\n  No\nEnter to confirm · Esc to cancel";
+  const MCP_ENABLE_TEXT = "2 new MCP servers found\n❯ Enable\n  Reject all"; // this repo's own fixtures never give this dialog the generic footer — see @decision 44fcf9ba
+
+  check("detectNewestBlockingDialogSignature: parity — external-imports alone", detectNewestBlockingDialogSignature(collapse(EXTERNAL_IMPORTS_TEXT)) === "external-imports");
+  check("detectNewestBlockingDialogSignature: parity — workspace-trust alone", detectNewestBlockingDialogSignature(collapse(WORKSPACE_TRUST_TEXT)) === "workspace-trust");
+  check("detectNewestBlockingDialogSignature: parity — mcp-server-enable alone", detectNewestBlockingDialogSignature(collapse(MCP_ENABLE_TEXT)) === "mcp-server-enable");
+  check("detectNewestBlockingDialogSignature: parity — generic enter/esc footer alone (nothing specific present)",
+    detectNewestBlockingDialogSignature(collapse("Some future dialog we've never seen\nEnter to confirm · Esc to cancel")) === "enter-esc-footer");
+  check("detectNewestBlockingDialogSignature: negative control — ordinary busy/working text never matches",
+    detectNewestBlockingDialogSignature(collapse("Working (3s · esc to interrupt)\n> Ask Claude to do anything")) === null);
+  check("detectNewestBlockingDialogSignature: negative control — empty buffer never matches", detectNewestBlockingDialogSignature("") === null);
+
+  // Discriminating test 1: a HIGHER-priority simple signature (external-imports) appeared FIRST and is now
+  // stale; a LOWER-priority simple signature (workspace-trust) replaced it and is the real, newest state.
+  const staleHighThenFreshLow = collapse(EXTERNAL_IMPORTS_TEXT + "\n" + WORKSPACE_TRUST_TEXT);
+  check("detectBlockingDialogSignature (OLD): priority-first still names the STALE external-imports dialog",
+    detectBlockingDialogSignature(staleHighThenFreshLow) === "external-imports");
+  check("detectNewestBlockingDialogSignature (NEW): names the NEWEST dialog (workspace-trust), not the stale higher-priority one",
+    detectNewestBlockingDialogSignature(staleHighThenFreshLow) === "workspace-trust");
+
+  // Discriminating test 2: a higher-priority simple signature (external-imports) is stale; the COMPOUND
+  // mcp-server-enable signature is the real, newest state — proves the compound position (the later of
+  // its two independent sub-matches) is tracked correctly, not just simple signatures.
+  const staleSimpleThenFreshCompound = collapse(EXTERNAL_IMPORTS_TEXT + "\n" + MCP_ENABLE_TEXT);
+  check("detectBlockingDialogSignature (OLD): priority-first still names the STALE external-imports dialog (compound case)",
+    detectBlockingDialogSignature(staleSimpleThenFreshCompound) === "external-imports");
+  check("detectNewestBlockingDialogSignature (NEW): names the NEWEST compound signature (mcp-server-enable)",
+    detectNewestBlockingDialogSignature(staleSimpleThenFreshCompound) === "mcp-server-enable");
+
+  // Regression guard (manager-directed correction): a SINGLE specific dialog rendered WITH its real
+  // generic "Enter to confirm · Esc to cancel" footer must still be named by its OWN specific signature,
+  // never demoted to the generic enter-esc-footer catch-all just because that footer text is also present
+  // and trails the dialog's own identifying text (which a naive "rank the catch-all as a peer" design
+  // would get wrong — see @decision 44fcf9ba).
+  check("detectNewestBlockingDialogSignature: a specific dialog WITH its real footer still names the SPECIFIC signature, not the generic catch-all",
+    detectNewestBlockingDialogSignature(collapse(WORKSPACE_TRUST_TEXT)) === "workspace-trust");
 }
 
 // --- Card e2a3c613: BOOT_DIALOG_DETECTOR_ROLES is a SEPARATE, wider constant from LOOM_DRIVEN_ROLES ----
@@ -555,6 +601,27 @@ try {
     check("19b: a later SessionStart on the same incarnation does not refire", resolvedEvents.filter((e) => e.sessionId === R).length === 1);
     try { host.stop(R, "hard"); } catch { /* ignore */ }
   }
+
+  // ============ 20) Card 44fcf9ba — end-to-end: dialog A observed, then dialog B REPLACES it on screen; ===
+  // ============      the alarm fires and names B, not A (the fixed-priority-first match the old function
+  // ============      would have named). Realistic dialog text INCLUDING each dialog's own real footer —
+  // ============      external-imports (higher priority, fed first — now stale) then workspace-trust (lower
+  // ============      priority, fed second — the real, current state) never delivering SessionStart. =======
+  {
+    const S = "sess-newest-signature-not-priority-first-S";
+    const fs_ = spawnOne(S, "worker");
+    const DIALOG_A = "Allow external CLAUDE.md file imports?\n❯ No, disable external imports\n  Yes, allow external imports\nEnter to confirm · Esc to cancel";
+    const DIALOG_B = "Is this a project you trust?\n❯ Yes, I trust this folder\n  No\nEnter to confirm · Esc to cancel";
+    fs_.feed(DIALOG_A); // dialog A observed first
+    fs_.feed(DIALOG_B); // dialog B replaces it on screen — A's text stays in the rolling scan buffer too
+    check("20: (setup) the combined buffer still names the STALE dialog A under the old priority-first function",
+      detectBlockingDialogSignature(collapseBoot(host.live.get(S).dialogStuckScan)) === "external-imports");
+    const firedS = await waitUntil(() => stuckEvents.some((e) => e.sessionId === S), 3000);
+    check("20a: onClaudeBootDialogStuck fired once the timeout elapsed with SessionStart never observed", firedS);
+    check("20b: the event names dialog B (workspace-trust) — the newest, not dialog A (external-imports) — the fixed-priority-first match",
+      stuckEvents.find((e) => e.sessionId === S)?.info.signatureName === "workspace-trust");
+    try { host.stop(S, "hard"); } catch { /* ignore */ }
+  }
 } finally {
   for (const id of [
     "sess-dialog-stuck-A", "sess-slow-healthy-B", "sess-late-sessionstart-C", "sess-manager-gated-D",
@@ -565,7 +632,7 @@ try {
     "sess-exactly-one-esc-worker-WR", "sess-exactly-one-esc-plain-MG", "sess-respawn-during-delay-D1",
     "sess-sessionstart-during-delay-still-escapes-N",
     "sess-resolved-ontime-O", "sess-resolved-late-sessionstart-P", "sess-resolved-respawn-Q",
-    "sess-resolved-non-sessionstart-first-R",
+    "sess-resolved-non-sessionstart-first-R", "sess-newest-signature-not-priority-first-S",
   ]) {
     try { host.stop(id, "hard"); } catch { /* ignore */ }
   }
@@ -573,6 +640,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — claude boot-dialog-stuck detector fires once (named signature, no screen content) for an unattended spawn that never reaches SessionStart; never fires for a slow-but-healthy boot or a late SessionStart after the alarm; role-gated to LOOM_DRIVEN_ROLES; re-arms on resume; the overwrite-on-resume and onExit timer clears hold under real timing; the fire-time bail suppresses the alarm whenever firstTurnStarted or any other hook proves the engine is past boot; and (card e29923e3 round 3 scope cut) the MCP-prompt Esc-dismiss is a single write, never a retry loop — the hold stays engaged forever past a dropped/lone Esc on a static dialog, no post-write screen output of any kind (sync frames, OSC, ticks, or even a full clean repaint) ever releases it, only a real SessionStart releases AND delivers a queued entry, the single write fires uniformly for every role (not just LOOM_DRIVEN_ROLES), a same-id respawn during the write's own settle delay never misattributes it across generations, and (round 4) a SessionStart landing DURING the deferred delay no longer suppresses the single Esc write; (card b1da256d) and onClaudeBootDialogResolved fires exactly once per Live incarnation on the first hook of any kind — an on-time or late SessionStart, a re-spawn's own fresh first hook, and (the round-4 gap itself) a non-SessionStart first hook with SessionStart never observed at all — never twice for the same incarnation."
+  ? "\n✅ ALL PASS — claude boot-dialog-stuck detector fires once (named signature, no screen content) for an unattended spawn that never reaches SessionStart; never fires for a slow-but-healthy boot or a late SessionStart after the alarm; role-gated to LOOM_DRIVEN_ROLES; re-arms on resume; the overwrite-on-resume and onExit timer clears hold under real timing; the fire-time bail suppresses the alarm whenever firstTurnStarted or any other hook proves the engine is past boot; and (card e29923e3 round 3 scope cut) the MCP-prompt Esc-dismiss is a single write, never a retry loop — the hold stays engaged forever past a dropped/lone Esc on a static dialog, no post-write screen output of any kind (sync frames, OSC, ticks, or even a full clean repaint) ever releases it, only a real SessionStart releases AND delivers a queued entry, the single write fires uniformly for every role (not just LOOM_DRIVEN_ROLES), a same-id respawn during the write's own settle delay never misattributes it across generations, and (round 4) a SessionStart landing DURING the deferred delay no longer suppresses the single Esc write; (card b1da256d) and onClaudeBootDialogResolved fires exactly once per Live incarnation on the first hook of any kind — an on-time or late SessionStart, a re-spawn's own fresh first hook, and (the round-4 gap itself) a non-SessionStart first hook with SessionStart never observed at all — never twice for the same incarnation; and (card 44fcf9ba) the alarm names whichever signature most recently appeared — not the old fixed-priority-first match — when more than one showed up in the pre-SessionStart window."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
