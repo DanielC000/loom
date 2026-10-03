@@ -90,7 +90,13 @@ const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
 const op1 = await settleTracked(() => sessions.confirmWorkerMergeTracked(wrongMgrId, workerId), { label: "op1" });
 check("(op1, wrong manager) settled", op1.settled === true);
 check("(op1, wrong manager) refused with a genuine ownership error, not some other failure", op1.settled && op1.ok === false && op1.error instanceof Error && op1.error.message === "not your worker");
-check("(op1, wrong manager) this is a genuinely fresh mint — nothing cached before this call", op1.settled && op1.freshMint?.reason === "genuinely-new");
+// Round 2 (card 656e326f): the ownership pre-check now hoists AHEAD of pendingOps.attach() entirely (see
+// confirmWorkerMergeTracked's own "OWNERSHIP PRE-CHECK" comment) — so this refusal never reaches attach()
+// at all and carries no `freshMint` (that field only exists on an AttachResult attach() itself produces).
+// Assert the NEW semantics directly: no freshMint on this result, and nothing was written into the
+// registry under this worker's merge key — never synthesize a freshMint to match the old assertion.
+check("(op1, wrong manager) the refusal fires before any pendingOps mint/attach — no freshMint on this result", op1.settled && op1.freshMint === undefined);
+check("(op1, wrong manager) nothing was cached in the registry under this worker's merge key", sessions.peekPendingMerge(workerId) === undefined);
 check("(op1, wrong manager) no gate ever ran — the refusal fires before any git/gate work", gateCalls === 0);
 
 // op2: the worker's ACTUAL, current parent calls confirm at the IDENTICAL branch tip (nothing changed

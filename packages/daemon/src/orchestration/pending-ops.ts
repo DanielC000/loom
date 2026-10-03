@@ -320,6 +320,24 @@ export class PendingOpRegistry {
     }, retainMs).unref?.();
   }
 
+  /** @decision 656e326f — never re-derive this decision a second time outside `attach()`; a second caller
+   *  (e.g. an ownership guard) must call this SAME helper, or its copy can silently drift from attach()'s. */
+  private usableRetainedHit<T>(key: string, isRetainedResultUsable?: (value: T) => boolean): RetainedView | undefined {
+    const hit = this.retained.get(key);
+    if (!hit || Date.now() >= hit.expiresAt || NEVER_CACHED_OUTCOMES.has(hit.outcome ?? "")) return undefined;
+    const usable = !hit.rawOutcome.ok || !isRetainedResultUsable || isRetainedResultUsable(hit.rawOutcome.value as T);
+    return usable ? hit : undefined;
+  }
+
+  /** @decision 656e326f — read-only: "would `attach()` treat `key` as attachable?", never a raw/possibly-
+   *  stale view the way `peek()` returns one. See the decision record's "Round 2" for why this exists. */
+  peekAttachable<T>(key: string, opts?: { isRetainedResultUsable?: (value: T) => boolean }): PendingOpView | undefined {
+    const e = this.entries.get(key);
+    if (e && e.state === "running") return projectView(e);
+    const hit = this.usableRetainedHit<T>(key, opts?.isRetainedResultUsable);
+    return hit ? projectView(hit) : undefined;
+  }
+
   /** Wait UP TO `ms` for the op keyed `key` to leave "running" state — the bounded settle-wait
    *  `gate_cancel` (card 8d585277) needs after asking an already-running gate to stop: a manager-facing
    *  tool call must answer promptly, never hang for however long the underlying `gateTimeoutMs` backstop
@@ -620,30 +638,17 @@ export class PendingOpRegistry {
         }
         untilSupersededMiss = true;
       }
-      const retainedHit = untilSupersededMiss ? undefined : this.retained.get(key);
-      // NEVER_CACHED_OUTCOMES (cards 171297dc / 99a1cf6f — mirrors the untilSupersededVerdicts write gate
-      // above, same set, same reasoning): a re-call landing INSIDE this short TTL window must not replay
-      // either sentinel outcome — checked unconditionally, ahead of (and regardless of)
-      // `isRetainedResultUsable` below, since this applies independent of whether a caller ever opted into
-      // that predicate at all.
-      if (!opts?.bypassRetained && retainedHit && Date.now() < retainedHit.expiresAt && !NEVER_CACHED_OUTCOMES.has(retainedHit.outcome ?? "")) {
-        // USABILITY GATE (card 79b0ee52): an `ok:false` hit, or an `ok:true` hit with no
-        // `isRetainedResultUsable` opt, is unconditionally usable — byte-identical to before this opt
-        // existed. The `ok:false` half is a DELIBERATE, pre-existing contract from card 33172f01 (predates
-        // this opt) — locked by test/pending-ops-registry.mjs's "(retain dedupe/failed)" cases, not a gap
-        // for this opt to also close; see this method's own `isRetainedResultUsable` doc for why re-serving
-        // an error is correct. An `ok:true` hit whose value the predicate rejects is treated as a MISS:
-        // falls through to the fresh-mint path below instead of returning here, exactly like a genuine
-        // cache miss.
-        const usable = !retainedHit.rawOutcome.ok || !opts?.isRetainedResultUsable || opts.isRetainedResultUsable(retainedHit.rawOutcome.value as T);
-        if (usable) {
-          // CACHE-HIT ANNOUNCEMENT (card 4aedde84) — same reasoning as the untilSupersededVerdicts hit
-          // above: this TTL'd retained-view hit is also a genuine cache hit, no run() invocation this call.
-          const cacheHit: CacheHitInfo = { identity: retainedHit.identity };
-          return retainedHit.rawOutcome.ok
-            ? { settled: true, ok: true, value: retainedHit.rawOutcome.value as T, cacheHit }
-            : { settled: true, ok: false, error: retainedHit.rawOutcome.error, cacheHit };
-        }
+      // RETAINED-HIT DECISION (card 656e326f, Round 2): extracted into `usableRetainedHit` so a second
+      // caller (`peekAttachable`/`foreignSpawnGuard`) can ask the identical question — see that helper's
+      // own doc for the expiry/NEVER_CACHED_OUTCOMES/usability logic it now owns.
+      const retainedHit = (untilSupersededMiss || opts?.bypassRetained) ? undefined : this.usableRetainedHit<T>(key, opts?.isRetainedResultUsable);
+      if (retainedHit) {
+        // CACHE-HIT ANNOUNCEMENT (card 4aedde84) — same reasoning as the untilSupersededVerdicts hit
+        // above: this TTL'd retained-view hit is also a genuine cache hit, no run() invocation this call.
+        const cacheHit: CacheHitInfo = { identity: retainedHit.identity };
+        return retainedHit.rawOutcome.ok
+          ? { settled: true, ok: true, value: retainedHit.rawOutcome.value as T, cacheHit }
+          : { settled: true, ok: false, error: retainedHit.rawOutcome.error, cacheHit };
       }
       // FRESH-MINT REASON (card 615967c5 — the cached-verdict-legibility fix): reaching this line means
       // BOTH cache reads above missed, so a genuinely new op is about to run — record WHY, purely for

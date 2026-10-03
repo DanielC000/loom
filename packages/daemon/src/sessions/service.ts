@@ -2151,6 +2151,18 @@ class NotYourWorkerError extends Error {
   }
 }
 
+/** @decision 656e326f — INFORM, don't leak: spawnWorkerTracked/reviveWorkerTracked attach to an existing
+ *  running/retained op purely by key (taskId), with no ownership check at all until now. A caller whose
+ *  lineage root does not own that op gets this typed refusal instead of the other manager's Session. */
+class ForeignSpawnInFlightError extends Error {
+  constructor(taskRef: string, opId: string, running: boolean) {
+    super(running
+      ? `task '${taskRef}' is already being spawned by another manager's in-flight op ${opId} — not attached; no worker data returned`
+      : `task '${taskRef}' was already spawned by another manager's recent op ${opId} — not attached; no worker data returned`);
+    this.name = "ForeignSpawnInFlightError";
+  }
+}
+
 /**
  * Card b798e706: thrown from INSIDE the merge gate's `gateSemaphore.runExclusive` callback when the
  * ADMISSION-TIME re-union — re-checking whether canonical main moved during this op's semaphore queue
@@ -8233,6 +8245,18 @@ export class SessionService {
   ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }>> {
     const taskRef = (opts.taskId ?? "").trim();
     const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
+    // LIVENESS + BINDING RE-CHECK (manager review, card b1fcb6a7): a 10-minute window is long enough that
+    // the cached worker may have exited (merged, stopped, recycled away) by the time a re-call lands.
+    // Re-derive the CURRENT live-worker-for-this-task from the db (the SAME query spawnWorker's own guard
+    // uses) rather than trusting the cached value's own frozen fields. Hoisted into a shared const (card
+    // 656e326f, Round 2) so BOTH the ownership guard below and attach() itself apply the identical rule.
+    const isRetainedResultUsable = (value: Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }) => this.spawnResultStillUsable(value);
+    // OWNERSHIP PRE-CHECK (card 656e326f): a taskless key is unique per call, so this never finds
+    // anything for it (always passes through). A real taskRef's key is shared daemon-wide — refuse an
+    // attach to another manager's lineage's in-flight/still-usable-retained op before it ever reaches
+    // attach(), reusing attach()'s own usable-vs-miss rule via `isRetainedResultUsable` above.
+    const guard = this.foreignSpawnGuard(managerSessionId, taskRef, key, isRetainedResultUsable);
+    if (guard) return guard;
     return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }>(
       key, "spawn", managerSessionId, this.syncAttachBudgetMs,
       () => this.spawnWorker(managerSessionId, opts),
@@ -8241,17 +8265,13 @@ export class SessionService {
         // Card b1fcb6a7 — see SPAWN_OP_RETAIN_MS's own doc: a re-call landing within this window after
         // settle gets the same settled worker back instead of falling through to a fresh spawnWorker call
         // (which would hit the live-worker guard). A taskless spawn's key is unique per call, so this
-        // never produces a hit for it — harmless, self-evicting.
+        // never produces a hit for it — harmless, self-evicting. A mismatch (worker no longer live, or the
+        // task got reassigned) is treated as a MISS, falling through to a real spawnWorker call exactly as
+        // if nothing were cached: still the live-worker guard if some OTHER worker now holds the task, or
+        // a genuine fresh spawn if none does. This is what lets the window be long without ever risking
+        // handing back a defunct session id.
         retainMs: this.spawnOpRetainMs,
-        // LIVENESS + BINDING RE-CHECK (manager review, card b1fcb6a7): a 10-minute window is long enough
-        // that the cached worker may have exited (merged, stopped, recycled away) by the time a re-call
-        // lands. Re-derive the CURRENT live-worker-for-this-task from the db (the SAME query
-        // spawnWorker's own guard uses) rather than trusting the cached value's own frozen fields — a
-        // mismatch (worker no longer live, or the task got reassigned) is treated as a MISS, falling
-        // through to a real spawnWorker call exactly as if nothing were cached: still the live-worker
-        // guard if some OTHER worker now holds the task, or a genuine fresh spawn if none does. This is
-        // what lets the window be long without ever risking handing back a defunct session id.
-        isRetainedResultUsable: (value) => value.taskId != null && this.db.liveSessionIdForTask(value.taskId) === value.id,
+        isRetainedResultUsable,
         // Card b1fcb6a7 (manager review, real gate failure): a cap-rejected spawn THROWS
         // (CapQueueRejectedError) — without this, that throw got the SAME retained-view treatment as a
         // success, so a re-spawn landing within the (now 10-minute) window after a concurrency slot freed
@@ -8282,6 +8302,12 @@ export class SessionService {
     const collision = { settled: true as const, ok: false as const, error: new Error(`worker_revive: a different spawn (a plain worker_spawn or another revive) on card '${(opts.taskId ?? "").trim()}' is in flight or holds it — wait for it, or read worker_list`) };
     const live = this.pendingOps.peek(key);
     if (live && live.state === "running" && !this.reviveInFlightKeys.has(key)) return collision;
+    // OWNERSHIP PRE-CHECK (card 656e326f): same key space as spawnWorkerTracked — refuse an attach to
+    // another manager's lineage's in-flight/still-usable-retained op before it ever reaches attach(),
+    // via the SAME `isRetainedResultUsable` shared below with attach() itself.
+    const isRetainedResultUsable = (value: ReviveResult) => this.spawnResultStillUsable(value);
+    const guard = this.foreignSpawnGuard(managerSessionId, (opts.taskId ?? "").trim(), key, isRetainedResultUsable);
+    if (guard) return guard;
     const r = await this.pendingOps.attach<ReviveResult>(
       key, "spawn", managerSessionId, this.syncAttachBudgetMs,
       async () => {
@@ -8291,7 +8317,7 @@ export class SessionService {
       undefined,
       {
         retainMs: this.spawnOpRetainMs,
-        isRetainedResultUsable: (value) => value.taskId != null && this.db.liveSessionIdForTask(value.taskId) === value.id,
+        isRetainedResultUsable,
         retainErrors: false,
       },
     );
@@ -8352,6 +8378,34 @@ export class SessionService {
    *  wrongly evicted a recycled-but-alive lineage's running op. */
   private isManagerLineageDead(managerSessionId: string): boolean {
     return liveLineageSuccessor(this.db, managerSessionId) == null;
+  }
+
+  /** @decision 656e326f — never compare ownership by exact session id here; compare by LINEAGE ROOT, or a
+   *  recycle predecessor/successor of the true owner is wrongly refused. */
+  private sameManagerLineage(aSessionId: string, bSessionId: string | null | undefined): boolean {
+    if (!bSessionId) return false;
+    const rootOf = (id: string) => lineageRootId(this.db, this.db.getSession(id) ?? { id, recycledFrom: null });
+    return rootOf(aSessionId) === rootOf(bSessionId);
+  }
+
+  /** @decision 656e326f — the SAME `isRetainedResultUsable` predicate `spawnWorkerTracked`/
+   *  `reviveWorkerTracked` pass to `pendingOps.attach()`, shared from one place so their matching
+   *  `foreignSpawnGuard` call can never silently diverge from it. */
+  private spawnResultStillUsable(value: { taskId?: string | null; id: string }): boolean {
+    return value.taskId != null && this.db.liveSessionIdForTask(value.taskId) === value.id;
+  }
+
+  /** @decision 656e326f — refuse only an op `pendingOps.attach()` would ITSELF still treat as attachable
+   *  (via `peekAttachable`, never the raw `peek()`) — else a settled op whose cached worker has since
+   *  exited/been reassigned false-refuses an unrelated manager's genuinely fresh spawn. */
+  private foreignSpawnGuard<T extends { taskId?: string | null; id: string }>(
+    managerSessionId: string, taskRef: string, key: string, isRetainedResultUsable: (value: T) => boolean,
+  ): { settled: true; ok: false; error: Error } | undefined {
+    const existing = this.pendingOps.peekAttachable<T>(key, { isRetainedResultUsable });
+    if (existing && !this.sameManagerLineage(managerSessionId, existing.managerSessionId)) {
+      return { settled: true, ok: false, error: new ForeignSpawnInFlightError(taskRef, existing.opId, existing.state === "running") };
+    }
+    return undefined;
   }
 
   /** @decision 05c36bf4 — re-resolves the settle-nudge target AT SETTLE TIME, never at attach()-call
@@ -19692,6 +19746,14 @@ export class SessionService {
       mergeGateReservation?: { release: (n?: number) => void };
     },
   ): Promise<AttachResult<ConfirmMergeResult>> {
+    // OWNERSHIP PRE-CHECK (card 656e326f — docs/decisions/656e326f-*.md): hoisted here, before ANY side
+    // effect (the dead-owner eviction sweep + supersedeQueuedSelfCheck below) and before pendingOps.attach()
+    // is ever called — an attach to an already-running op, a TTL'd retained hit, or the never-expiring
+    // until-superseded cache hit never reaches confirmWorkerMerge's own NotYourWorkerError throw, since
+    // none of those paths re-invokes its body. Compared by lineage root (sameManagerLineage), not exact id.
+    if (!this.sameManagerLineage(managerSessionId, this.db.getSession(workerSessionId)?.parentSessionId)) {
+      return { settled: true, ok: false, error: new NotYourWorkerError() };
+    }
     // LINEAGE-RESOLVED KEY (card `3a2dac9c`, DoD-2 — "resolve at the read, never rewrite at the write"
     // applied to this write path too): if a predecessor's merge op is STILL RUNNING anywhere backward in
     // this worker's `recycledFrom` chain, attach to THAT key instead of minting a fresh one under

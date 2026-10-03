@@ -522,6 +522,67 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(isRetainedResultUsable omitted) no predicate given → always served from cache, same as before this opt existed", calls === 2 && r4.value.opId === "op-2");
 }
 
+// peekAttachable (card 656e326f, Round 2 — `foreignSpawnGuard`'s false-refusal fix): asks the IDENTICAL
+// retained-hit question attach() asks, WITHOUT ever starting a run() or consuming anything — exercises
+// each branch of that shared decision directly, read-only. Each case gets its OWN block (never sharing
+// one with another case's negative check) so a pacing sleep in one case is never read as guarding a
+// different case's negative assertion.
+
+// (a) RUNNING → the projected view, exactly like peek() would return.
+{
+  const reg = new PendingOpRegistry();
+  const slow = async () => { await sleep(50); return { ok: true }; }; // TIMING-GUARD-SAFE: the op's own internal duration, not a wait gating the check below
+  const running = reg.attach("pa1", "spawn", "mgr1", 500, slow);
+  // TIMING-GUARD-SAFE: this check is POSITIVE ("still running"), not a negative assertion — a false
+  // "not yet running" read here would FAIL loud (never pass for the wrong reason), and the 10ms pacing
+  // sleep sits well inside the op's own 50ms duration (the same shape as the pre-existing EVICT-ON-SETTLE
+  // block a few dozen lines above, which paces identically against a 50ms op with a 10ms sleep).
+  await sleep(10); // still running
+  const runningView = reg.peekAttachable("pa1");
+  check("(peekAttachable running) returns the RUNNING op's view", runningView !== undefined && runningView.state === "running");
+  await running; // let it settle (no retainMs opt here, so it evicts on settle — unrelated to this case)
+}
+
+// (b) RETAINED + usable → the projected view, a genuine cache hit if attach() were called instead.
+{
+  const reg = new PendingOpRegistry();
+  const usable = (v) => v.ok === true;
+  await reg.attach("pa2", "spawn", "mgr1", 200, async () => ({ id: "w1", ok: true }), undefined, { retainMs: 200, isRetainedResultUsable: usable });
+  const usableView = reg.peekAttachable("pa2", { isRetainedResultUsable: usable });
+  check("(peekAttachable retained usable) returns the retained view, not undefined", usableView !== undefined && usableView.state === "done");
+}
+
+// (c) RETAINED + unusable → undefined, matching attach()'s own MISS treatment for an unusable value —
+// the exact gap `foreignSpawnGuard` used to miss by calling the raw, unfiltered `peek()` instead.
+{
+  const reg = new PendingOpRegistry();
+  const unusable = (v) => v.ok === false;
+  await reg.attach("pa3", "spawn", "mgr1", 200, async () => ({ id: "w2", ok: true }), undefined, { retainMs: 200, isRetainedResultUsable: unusable });
+  const unusableView = reg.peekAttachable("pa3", { isRetainedResultUsable: unusable });
+  check("(peekAttachable retained unusable) returns undefined — attach() would treat this as a MISS too", unusableView === undefined);
+}
+
+// (d) a NEVER_CACHED_OUTCOMES outcome (e.g. "cancelled") → undefined even though the retained entry is
+// technically present and unexpired — mirrors attach()'s own refusal to ever serve one of these.
+{
+  const reg = new PendingOpRegistry();
+  const classifyCancelled = (outcome) => (outcome.ok && outcome.value.cancelled ? "cancelled" : "merged");
+  await reg.attach("pa4", "merge", "mgr1", 200, async () => ({ merged: false, cancelled: true }), undefined, { retainMs: 200, classifyOutcome: classifyCancelled });
+  const cancelledView = reg.peekAttachable("pa4");
+  check("(peekAttachable NEVER_CACHED outcome) a 'cancelled' retained entry is never surfaced as attachable", cancelledView === undefined);
+}
+
+// (e) EXPIRED → undefined once the retainMs window has elapsed, same as peek()'s own expiry handling.
+// Anchored to the OBSERVABLE eviction itself (waitUntil), not a blind sleep guarding this negative
+// assertion — a fixed wait here couldn't distinguish "expired" from "hasn't expired YET", and would
+// still pass if expiry regressed to never happening at all until the predicate's own timeout fires loud.
+{
+  const reg = new PendingOpRegistry();
+  await reg.attach("pa5", "spawn", "mgr1", 200, async () => ({ id: "w3", ok: true }), undefined, { retainMs: 20 });
+  await waitUntil(() => reg.peekAttachable("pa5") === undefined, { label: "pa5 retained view no longer attachable after its retainMs window" });
+  check("(peekAttachable expired) a retained entry past its own retainMs window is never surfaced as attachable", reg.peekAttachable("pa5") === undefined);
+}
+
 // SINGLE-FLIGHT UNDER REPEATED REJECTION (card 79b0ee52 — the manager's own explicit ask before approving
 // this design): even while the retained cache is being rejected by the predicate on EVERY call, two callers
 // racing the SAME key with NO await between them (mirrors the "genuinely CONCURRENT retry-attach" block
