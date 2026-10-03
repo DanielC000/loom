@@ -13,7 +13,12 @@ export function resolveExecutable(name: string): string {
   if (name.includes("/") || name.includes("\\")) return path.resolve(name);
 
   const cached = cache.get(name);
-  if (cached) return cached;
+  if (cached) {
+    // @decision 8e08eec1 — a cached hit is re-verified with a cheap existsSync before being trusted;
+    // a moved/uninstalled/upgraded shim (fnm/nvm/volta) must not be served forever from a stale cache.
+    if (fs.existsSync(cached)) return cached;
+    cache.delete(name);
+  }
 
   const PATH = process.env.PATH || process.env.Path || "";
   const sep = process.platform === "win32" ? ";" : ":";
