@@ -529,6 +529,26 @@ export function toBoardTasks(
  * @decision 9983eed6
  */
 /**
+ * Resolve a `parentId` filter argument (full id or an unambiguous {@link MIN_ID_PREFIX_LEN}-char prefix)
+ * against this project's own tasks via the SAME {@link resolveIdPrefix} resolver `tasks_get`/
+ * `worker_spawn`'s own id-prefix args use — card d56c6ef0, replacing a raw `startsWith` that had no
+ * length floor and no ambiguity check (so a short prefix shared by two different parents silently
+ * pooled BOTH parents' children into one result). An ambiguous prefix returns `{error}` naming every
+ * candidate, mirroring {@link resolveProjectTaskId}, never a silent pick. A prefix that resolves to
+ * NOTHING (too short, or no match) is not itself an error — it's reported as `{ parentId: null }`, the
+ * same "no match ⇒ empty filter" convention `idPrefix` already documents; {@link filterProjectTasks}
+ * below turns that into zero matching children rather than throwing.
+ */
+export function resolveParentIdFilter(db: Db, projectId: string, parentId: string): { parentId: string | null } | { error: string } {
+  const r = resolveIdPrefix(db.listTasks(projectId), parentId);
+  if (r.kind === "found") return { parentId: r.record.id };
+  if (r.kind === "ambiguous") {
+    return { error: `ambiguous parent id-prefix '${parentId}' — it matches ${r.ids.join(", ")}; pass more characters or the full id` };
+  }
+  return { parentId: null };
+}
+
+/**
  * The FILTER core shared by {@link listProjectTasks} and {@link countProjectTasks} — applies every
  * column/priority/id/title filter but no pagination, projection, or merged-state enrichment.
  * @decision 9798200c
@@ -554,7 +574,16 @@ function filterProjectTasks(
     tasks = tasks.filter((t) => t.priority <= minPriority);
   }
   if (idPrefix) tasks = tasks.filter((t) => t.id.startsWith(idPrefix));
-  if (parentId) tasks = tasks.filter((t) => !!t.parentId && t.parentId.startsWith(parentId)); // card 3df86c87: full id or prefix
+  if (parentId) {
+    // card d56c6ef0: resolve to the parent's FULL id first (see resolveParentIdFilter above) and filter
+    // by EXACT equality — never a raw startsWith on the stored parentId, which could silently pool the
+    // children of two different parents sharing a short prefix. An ambiguous `parentId` is reported to
+    // the caller separately (the tasks_list tool handler checks it before ever reaching this filter);
+    // here it degrades to "no match" rather than erroring, same as a too-short/no-match prefix.
+    const resolved = resolveParentIdFilter(db, projectId, parentId);
+    const resolvedParentId = "error" in resolved ? null : resolved.parentId;
+    tasks = resolvedParentId ? tasks.filter((t) => t.parentId === resolvedParentId) : [];
+  }
   if (titleContains) {
     const needle = titleContains.toLowerCase();
     tasks = tasks.filter((t) => t.title.toLowerCase().includes(needle));

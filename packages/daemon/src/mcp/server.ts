@@ -10,7 +10,7 @@ import type { WakeService } from "../orchestration/wake.js";
 import {
   listProjectTasks, getProjectTask, createProjectTaskChecked, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP,
   listProjectTaskRequests, getProjectTaskRequest, deferTaskItem, updateDeferredItemStatus, countProjectTasks, countProjectTasksAsync,
-  spillableTaskGet, spillableTaskUpdateResult, pickFields, applyBodyExcerpt,
+  spillableTaskGet, spillableTaskUpdateResult, pickFields, applyBodyExcerpt, resolveParentIdFilter,
 } from "./tasks.js";
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
 import { registerDecisionTools } from "./decisions.js";
@@ -112,6 +112,22 @@ function taskListSpillKey(effectiveArgs: Record<string, unknown>): string {
   return `tasks-${createHash("sha1").update(stableJson(effectiveArgs)).digest("hex").slice(0, 10)}`;
 }
 
+/**
+ * `tasks_get`'s own spill KEY (card d56c6ef0) — distinguishes an EXCERPTED read (`bodyGrep`/`bodySlice`)
+ * from a plain full-body read of the SAME task, and distinguishes two different excerpt options from
+ * each other. Mirrors {@link taskListSpillKey}'s "derive from the effective args" shape, but a plain
+ * read (no excerpt option) keeps the task's own id as its key, UNCHANGED — the exact key
+ * `spillableTaskGet`/`spillableTaskUpdateResult` already use at every OTHER call site (plain reads,
+ * create, update), so those stay byte-identical. Only an excerpted read gets a distinguishing suffix, so
+ * a full-body spill and a bodyGrep/bodySlice spill for the same task can never silently overwrite each
+ * other's scratch file — the same collision class `taskListSpillKey` already fixed for `tasks_list`'s
+ * own filter/pagination combos.
+ */
+function taskGetSpillKey(taskId: string, excerpt: { bodyGrep?: string; bodySlice?: [number, number] }): string {
+  if (excerpt.bodyGrep === undefined && excerpt.bodySlice === undefined) return taskId;
+  return `${taskId}-${createHash("sha1").update(stableJson(excerpt)).digest("hex").slice(0, 10)}`;
+}
+
 /** Task priority enum, shared by the create/update/list tool schemas (rejects any other string). */
 export const prioritySchema = z.enum(["p0", "p1", "p2", "p3"]);
 
@@ -177,6 +193,13 @@ export class TaskMcpRouter {
       // key is derived from the EFFECTIVE (post-default) args (taskListSpillKey) — a repeat pull under the
       // SAME filter combo overwrites the same scratch file, but two DIFFERENT filter combos never collide.
       async (args) => {
+        // card d56c6ef0: an ambiguous `parentId` prefix is reported HERE, before either the countsOnly or
+        // the row-fetch path below ever reaches filterProjectTasks — both share the same resolver
+        // (resolveParentIdFilter), so this one check covers both.
+        if (args.parentId) {
+          const resolvedParent = resolveParentIdFilter(db, projectId, args.parentId);
+          if ("error" in resolvedParent) return ok(resolvedParent);
+        }
         // countsOnly short-circuits BEFORE the row fetch/spill machinery below — a caller asking "how many"
         // never pays for row bodies or the merged-state git enrichment (card 9798200c).
         if (args.countsOnly) return ok(await countProjectTasksAsync(db, projectId, args));
@@ -228,7 +251,7 @@ export class TaskMcpRouter {
         const excerpted = (bodyGrep !== undefined || bodySlice !== undefined)
           ? applyBodyExcerpt(result, { bodyGrep, bodySlice })
           : result;
-        const spilled = spillableTaskGet(sessionId, "tasks-get-spills", result.id, excerpted);
+        const spilled = spillableTaskGet(sessionId, "tasks-get-spills", taskGetSpillKey(result.id, { bodyGrep, bodySlice }), excerpted);
         // Card 40f4cae9: single-row use of the same `pickFields` tasks_list already reuses — wrap/unwrap a
         // one-element array rather than writing a second (row-shaped, non-array) projector.
         const [projected] = pickFields([spilled as unknown as Record<string, unknown>], fields);
