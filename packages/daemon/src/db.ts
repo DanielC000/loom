@@ -6263,7 +6263,10 @@ export class Db {
     return undefined;
   }
   /** Append an orchestration audit record (detail serialized to JSON). */
-  appendEvent(evt: OrchestrationEvent): void {
+  // Card dd494a9b: returns the assigned `seq` (was `void`) so a caller maintaining its own in-memory
+  // latest-seq map (e.g. reconcileOrchestrationOnBoot's merge_done map) can update it without a re-read.
+  // Every pre-existing caller already ignores the return value, so this is additive.
+  appendEvent(evt: OrchestrationEvent): number {
     const seq = this.nextEventSeq();
     let detail = evt.detail;
     if (DURABLE_AUDIT_EVENT_KINDS.has(evt.kind) && (detail == null || !("projectId" in detail))) {
@@ -6285,6 +6288,7 @@ export class Db {
     if (this.eventListener) {
       try { this.eventListener(evt); } catch { /* listener faults never break the audit write */ }
     }
+    return seq;
   }
   /**
    * The next value from the never-reused `orchestration_event_seq` AUTOINCREMENT counter — see the
@@ -6892,16 +6896,38 @@ export class Db {
    * @decision 9ac3a739 — never compare branch events by `ts`/rowid for an "already finalized" check:
    * `ts` collides at ms resolution and rowid is reused on delete, so only this never-reused `seq`
    * total-orders them; never drop the `repoKey` scope either, or a same-named branch re-cut in another repo answers for this one.
+   *
+   * Card dd494a9b: the repoKey-match step is {@link detailRepoKey} — the SAME function {@link
+   * buildLatestEventSeqMap} uses, so the two can never drift on how a legacy/omitted repoKey is
+   * normalized. Branch matching stays on SQL's own `json_extract` here (unchanged from before this
+   * card) — only the repoKey half was worth sharing; branch extraction is identical by construction
+   * since both this query's WHERE and the map builder's SELECT use the SAME `json_extract(detail_json,
+   * '$.branch')` expression.
    */
   latestEventSeqForBranch(branch: string, kind: OrchestrationEventKind, repoKey: string | null): number | null {
     const rows = this.db.prepare(
       "SELECT seq, detail_json AS detailJson FROM orchestration_events WHERE kind = ? AND json_extract(detail_json, '$.branch') = ? ORDER BY seq DESC",
     ).all(kind, branch) as { seq: number; detailJson: string | null }[];
     for (const r of rows) {
-      const detail = r.detailJson ? (JSON.parse(r.detailJson) as { repoKey?: string | null }) : {};
-      if ((detail.repoKey ?? null) === repoKey) return r.seq;
+      if (detailRepoKey(r.detailJson) === repoKey) return r.seq;
     }
     return null;
+  }
+  /**
+   * @decision dd494a9b — never call `latestEventSeqForBranch` per session in a loop again (that O(N×M)
+   * scan was boot-reconcile's dominant cost). Build once, look up via {@link latestEventSeqMapKey}, and
+   * keep the `merge_done` map updated on every in-run append or a sibling's crash-orphan re-finalizes.
+   */
+  buildLatestEventSeqMap(kind: OrchestrationEventKind): Map<string, number> {
+    const rows = this.db.prepare(
+      "SELECT seq, detail_json AS detailJson, json_extract(detail_json, '$.branch') AS branch FROM orchestration_events WHERE kind = ? ORDER BY seq ASC",
+    ).all(kind) as { seq: number; detailJson: string | null; branch: string | null }[];
+    const map = new Map<string, number>();
+    for (const r of rows) {
+      if (r.branch == null) continue; // mirrors latestEventSeqForBranch's own WHERE json_extract(...) = ? — never matches
+      map.set(latestEventSeqMapKey(r.branch, detailRepoKey(r.detailJson)), r.seq); // ASC + overwrite ⇒ last write = MAX seq
+    }
+    return map;
   }
   /** Card 42daa283 — every DISTINCT branch that has ever been filed a `batch_merge_branch_retained` (or, card cc9bce38, a solo `merge_branch_retained`) event (candidates for the hold). */
   listRetainedBranches(): string[] {
@@ -9386,6 +9412,28 @@ function toOrchestrationEvent(r0: unknown): OrchestrationEvent {
     kind: r.kind as OrchestrationEventKind,
     detail: r.detail_json ? (JSON.parse(r.detail_json as string) as Record<string, unknown>) : undefined,
   };
+}
+/**
+ * One row's normalized `detail.repoKey` (default/legacy-omitted → `null`, the primary-repo scope) — the
+ * SHARED read {@link Db.latestEventSeqForBranch} and {@link Db.buildLatestEventSeqMap} both use, so they
+ * can never drift on this normalization (card dd494a9b). Malformed JSON degrades to `null`, same as an
+ * absent `detail_json` — neither function's own `===` comparison can be fooled by that into a false match
+ * against a real repoKey string.
+ */
+function detailRepoKey(detailJson: string | null): string | null {
+  if (!detailJson) return null;
+  try {
+    return (JSON.parse(detailJson) as { repoKey?: string | null }).repoKey ?? null;
+  } catch {
+    return null;
+  }
+}
+/**
+ * The ONE key format {@link Db.buildLatestEventSeqMap} writes and every reader (reconcileOrchestrationOnBoot's
+ * Pass A/A2) must read with — a NUL separator so a branch name can never collide with a repoKey value.
+ */
+export function latestEventSeqMapKey(branch: string, repoKey: string | null): string {
+  return `${branch}\u0000${repoKey ?? ""}`;
 }
 // Map a schedule-fire event row (LEFT-JOINed with its schedule/agent/project — see listScheduleHistory)
 // to the enriched, UI-ready ScheduleHistoryEntry. The join columns are NULL when the schedule (or its

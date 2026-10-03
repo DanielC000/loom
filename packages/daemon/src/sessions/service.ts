@@ -16,6 +16,7 @@ import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import { agentAssignableProfileError } from "../profiles/validate.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry } from "../db.js";
+import { latestEventSeqMapKey } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
@@ -18819,7 +18820,7 @@ export class SessionService {
       // @decision 4fa36502 — a loom-tip skip CAUSED BY THE DEADLINE is not "no evidence": that signal alone catches a bypass with a porcelain-looking reflog message. Unless the verdict is already an alert, fail open (W untouched) so the next check re-reads it.
       if (facts.loomTipsDeadline && v.verdict !== "alert") throw new MainlineDeadlineError("loom-tip signal");
       const detail = { projectId: a.projectId, repoKey: a.repoKey, branch: head.branch, from: w.sha, to: head.tip, ...(boot ? { source: "boot" } : {}) };
-      const file = (extra: Record<string, unknown>): void => this.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId ?? "", ...(a.workerSessionId ? { workerSessionId: a.workerSessionId } : {}), taskId: a.taskId, kind: "mainline_moved_outside_loom", detail: { ...detail, ...extra } });
+      const file = (extra: Record<string, unknown>): void => { this.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId ?? "", ...(a.workerSessionId ? { workerSessionId: a.workerSessionId } : {}), taskId: a.taskId, kind: "mainline_moved_outside_loom", detail: { ...detail, ...extra } }); };
       if (v.verdict === "unverifiable") {
         // Only a cap/range overflow reaches here now (a positively-missing W is an alert). W is stored: re-scanning a window that stays over the cap can never get cheaper.
         file({ severity: "low", unverifiable: true, reason: "range exceeded the scan cap" });
@@ -20720,6 +20721,12 @@ export class SessionService {
     releaseHold?: boolean;
     /** Card 6796c9ea: called when the worktree removal was skipped because it holds uncommitted work (or its status was unreadable). */
     onWorktreeRetainedDirty?: (info: DirtyWorktreeRetained) => void;
+    /**
+     * @decision dd494a9b — set ONLY by boot-reconcile Pass A, which keeps its own in-memory
+     * merge_done latest-seq map live across its run. Called right after THIS call's own `merge_done`
+     * append commits, with the seq it was just assigned. Every other caller omits it — unchanged.
+     */
+    onMergeDoneAppended?: (branch: string, repoKey: string | null, seq: number) => void;
   }): Promise<{
     nestedRepoBlock?: { paths: string[]; truncated: boolean };
     /** Card 6796c9ea: the worktree was kept because it holds uncommitted work / its status was unreadable. */
@@ -20874,11 +20881,12 @@ export class SessionService {
     //     been audited for a consumer that COUNTS events rather than checking presence.
     // Audit before guarding this append too; until then, leave it firing on every finalize call, replay
     // or not.
-    this.db.appendEvent({
+    const mergeDoneSeq = this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
       taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, repoKey: args.repoKey, ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}) },
     });
+    args.onMergeDoneAppended?.(args.branch, args.repoKey, mergeDoneSeq);
     // Card 84a2eb2d: this worker's branch just objectively finalized — drop any `[loom:worker-report]`
     // nudge still queued for it (see purgeQueuedWorkerReportNudgesOnMerge's own doc for why worker-scoped
     // keying is safe here). Best-effort, right after the merge_done append above so this fires on every
@@ -21000,6 +21008,11 @@ export class SessionService {
   async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesHeld: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesPathRefused: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
+    // @decision dd494a9b — precompute both maps ONCE (not per-session) — that was the dominant cost
+    // (96% of a ~7-min boot stall). `mergeRequestSeqMap` is a safe snapshot (never appended during a
+    // run); `mergeDoneSeqMap` is NOT — keep it live via `onMergeDoneAppended` / Pass A2's own update below.
+    const mergeDoneSeqMap = this.db.buildLatestEventSeqMap("merge_done");
+    const mergeRequestSeqMap = this.db.buildLatestEventSeqMap("merge_request");
     const handledWorktrees = new Set<string>();
     // REBUILT here, not appended — this boot's Pass B is about to recompute the full retained set from
     // scratch, and a stale entry from a prior boot (e.g. a worktree since GC'd by hand) must not linger.
@@ -21209,8 +21222,8 @@ export class SessionService {
         // never on an own-row retry (`alreadyFinalized`), which must always fall through to finalizeMerge.
         if (!alreadyFinalized) {
           const repoScope = s.repoKey ?? null;
-          const latestDoneSeq = this.db.latestEventSeqForBranch(s.branch!, "merge_done", repoScope);
-          const latestRequestSeq = this.db.latestEventSeqForBranch(s.branch!, "merge_request", repoScope);
+          const latestDoneSeq = mergeDoneSeqMap.get(latestEventSeqMapKey(s.branch!, repoScope)) ?? null;
+          const latestRequestSeq = mergeRequestSeqMap.get(latestEventSeqMapKey(s.branch!, repoScope)) ?? null;
           const finalizedElsewhere = latestDoneSeq != null && (latestRequestSeq == null || latestDoneSeq > latestRequestSeq);
           if (finalizedElsewhere) {
             // Some OTHER row sharing this branch already finalized this landing — never call the full
@@ -21278,6 +21291,7 @@ export class SessionService {
           worktreePath, branch: s.branch, repoPath, projectId: project.id,
           mergedSha: landedSha, repoKey: s.repoKey ?? null,
           ...(paGuard.expectedBranchTip ? { expectedBranchTip: paGuard.expectedBranchTip } : {}), onBranchRetained: paGuard.onBranchRetained,
+          onMergeDoneAppended: (branch, repoKey, seq) => mergeDoneSeqMap.set(latestEventSeqMapKey(branch, repoKey), seq),
         });
         handledWorktrees.add(worktreePath);
         if (!paGuard.warning()) mergesFinished++; // a retained branch was NOT finished (held; its worktree stays out of Pass B's GC via handledWorktrees)
@@ -21346,12 +21360,12 @@ export class SessionService {
       // branch-presence check wrongly reads an unrelated OLDER landing (e.g. before a re-task) as having
       // resolved THIS row's own later merge_request, stranding its MERGE REQUEST alert forever.
       const repoScope = s.repoKey ?? null;
-      const latestDoneSeq = s.branch ? this.db.latestEventSeqForBranch(s.branch, "merge_done", repoScope) : null;
-      const latestRequestSeq = s.branch ? this.db.latestEventSeqForBranch(s.branch, "merge_request", repoScope) : null;
+      const latestDoneSeq = s.branch ? mergeDoneSeqMap.get(latestEventSeqMapKey(s.branch, repoScope)) ?? null : null;
+      const latestRequestSeq = s.branch ? mergeRequestSeqMap.get(latestEventSeqMapKey(s.branch, repoScope)) ?? null : null;
       const hasTerminal = evts.some((e) => e.kind === "merge_done" || e.kind === "merge_rejected")
         || (latestDoneSeq != null && (latestRequestSeq == null || latestDoneSeq > latestRequestSeq));
       if (!hasMergeRequest || hasTerminal) continue;
-      this.db.appendEvent({
+      const reconciledSeq = this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id,
         // @decision 9ac3a739 — stamp THIS row's own resolved repoKey (round 3, item 2): an omitted
@@ -21359,6 +21373,9 @@ export class SessionService {
         // wrongly match from ANY repo, defeating the scoping this fix just added above.
         taskId: s.taskId, kind: "merge_done", detail: { branch: s.branch ?? null, reconciled: true, repoKey: repoScope },
       });
+      // @decision dd494a9b — keep mergeDoneSeqMap live for this in-run append too (same reason as
+      // finalizeMerge's onMergeDoneAppended): a LATER session in this SAME pass may share this branch.
+      if (s.branch) mergeDoneSeqMap.set(latestEventSeqMapKey(s.branch, repoScope), reconciledSeq);
       staleMergesResolved++;
     }
 
