@@ -6670,6 +6670,17 @@ export class Db {
       .all(managerSessionId) as Row[]).map(toOrchestrationEvent);
   }
   /**
+   * @decision 43084723 — never re-add a per-manager fan-out for these kinds; a worker's row must stay
+   * reachable even once its FILING manager stops being live. `limit` (newest-first) is a safety ceiling
+   * sized for a rare, detector-fired kind pair — never size it down to an ordinary paging value.
+   */
+  listRecentEventsByKinds(kinds: readonly OrchestrationEventKind[], limit = 500): OrchestrationEvent[] {
+    const placeholders = kinds.map(() => "?").join(",");
+    return (this.db.prepare(
+      `SELECT * FROM orchestration_events WHERE kind IN (${placeholders}) ORDER BY ts DESC, rowid DESC LIMIT ?`,
+    ).all(...kinds, limit) as Row[]).map(toOrchestrationEvent);
+  }
+  /**
    * Most recent orchestration event of ONE kind filed under a manager — an indexed (`idx_orch_events_mgr`)
    * point lookup, in place of pulling a manager's ENTIRE event history (`listEvents`) just to check
    * whether one particular kind already fired. Used by ContextWatcher's once-per-episode blind-turn

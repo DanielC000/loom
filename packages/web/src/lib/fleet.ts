@@ -142,9 +142,8 @@ export function activeBootStuckAlerts(
   events: readonly OrchestrationEvent[],
   isLiveSessionId: (sessionId: string) => boolean,
 ): BootStuckAlert[] {
-  // @decision b1da256d — this sort relies on a stuck/resolved pair always sharing one managerSessionId
-  // (service.ts copies it from the paired stuck row, never re-derives it live) so both always arrive
-  // from the SAME per-session server query, already `ts, rowid`-ordered — don't add a client ordinal.
+  // @decision b1da256d — a stuck/resolved pair now arrives from ONE cross-session, kind-filtered query,
+  // not a per-manager fan-out — don't add a client ordinal; a plain ts sort suffices.
   const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
   const latest = new Map<string, OrchestrationEvent>();
   for (const e of sorted) {

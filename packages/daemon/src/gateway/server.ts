@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
-import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
+import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES, ALL_ORCHESTRATION_EVENT_KINDS } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { GatewayTokenSocketRegistry } from "./token-sockets.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
@@ -1192,8 +1192,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
-  app.get("/api/orchestration/events", async (req) => {
-    const { managerId } = req.query as { managerId?: string };
+  // `kinds` (card 43084723): an ALTERNATIVE, cross-session filter — comma-separated event kinds, matched
+  // across every session's events in ONE query, instead of one manager's own timeline. Mutually exclusive
+  // with `managerId`'s behaviour (existing managerId-only callers are byte-identical; `kinds` wins if both
+  // are somehow present, since there's no sane way to intersect them and no caller sends both).
+  // @decision 43084723 — kinds is validated against the real enum before touching the DB (never
+  // interpolated unchecked — this is a human-loopback route, but still outside-the-process input), and
+  // `listRecentEventsByKinds`'s own LIMIT is the cross-session read's bound — see that method's doc.
+  app.get("/api/orchestration/events", async (req, reply) => {
+    const { managerId, kinds } = req.query as { managerId?: string; kinds?: string };
+    if (kinds) {
+      const requested = kinds.split(",").map((k) => k.trim()).filter(Boolean);
+      const validKinds = new Set<string>(ALL_ORCHESTRATION_EVENT_KINDS);
+      if (requested.some((k) => !validKinds.has(k))) {
+        return reply.code(400).send({ error: "unknown event kind in 'kinds'" });
+      }
+      return requested.length ? deps.db.listRecentEventsByKinds(requested as OrchestrationEventKind[]) : [];
+    }
     return managerId ? deps.db.listEvents(managerId) : [];
   });
 

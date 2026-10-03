@@ -36,26 +36,25 @@ the resolved row carries M1, never M2.
 
 `packages/web/src/lib/fleet.ts`'s `activeBootStuckAlerts` sorts its input by `ts` alone, no extra
 rowid/seq tiebreak, on the premise that a stuck/resolved pair for one session always arrives from the
-SAME per-session server query (`GET /api/orchestration/events?managerId=`, keyed by `managerSessionId` —
-`Db.listEvents`). That premise holds only because the copy above is in place: since the resolved event
-always carries the same `managerSessionId` as the stuck row it pairs with, both are guaranteed to be
-fetched by the identical query, whose own server-side order is already `ts, rowid`. A stable sort by `ts`
-can never reorder two same-key events given that guarantee. No client-visible ordinal was added to
-`OrchestrationEvent`'s wire shape to re-derive what the copy above already guarantees.
+SAME server query. **Round 3 (card `43084723`) changed WHICH query that is — see that card's own record
+for the visibility gap this closed and the full before/after.** In short: round 2's per-session
+`managerId`-keyed fan-out (`GET /api/orchestration/events?managerId=`, `Db.listEvents`) is GONE, replaced
+by one cross-session, kind-filtered read (`kinds=claude_boot_dialog_stuck,claude_boot_dialog_resolved`,
+`Db.listRecentEventsByKinds`). The precondition holds even more strongly now: there is only ONE query,
+full stop, so there's no "did both land in the same query" question left to ask. No client-visible
+ordinal was added to `OrchestrationEvent`'s wire shape — still unnecessary.
 
 ## Membership
 
-- **Durable-audit**: YES — both kinds are in `db.ts`'s durable-audit event-kind list (the cascade-
-  exclusion set `deleteAgent` reads), so they survive agent deletion with a dangling session id, findable
-  via `detail`/`projectId` like every other durable-audit kind. See
+- **Durable-audit**: YES — both kinds are in `db.ts`'s durable-audit event-kind list (`deleteAgent`'s
+  cascade-exclusion set), so they survive agent deletion with a dangling session id. See
   `durable-audit-event-survives-agent-delete.mjs`.
-- **Event-triggers**: NO — neither kind is in `packages/shared/src/types.ts`'s `EVENT_TRIGGER_EVENT_KINDS`.
-  They're a detector's own internal lifecycle pair, not a general-purpose signal a project would react to
-  via a REST event trigger; the owner-facing path is `attention-push.ts`'s classification below.
+- **Event-triggers**: NO — neither kind is in `EVENT_TRIGGER_EVENT_KINDS` (`packages/shared/src/types.ts`).
+  A detector's own internal lifecycle pair, not a user-automation signal; the owner-facing path is
+  `attention-push.ts`'s classification below.
 - **`classify()`** (`companion/attention-push.ts`): `claude_boot_dialog_stuck` → `"escalation"` when
-  `detail.parentNudged === false` (see `e2a3c613`'s own record), else `null`. `claude_boot_dialog_resolved`
-  → `null`, unconditionally — a resolve clears an already-filed alert; it is never itself a fresh
-  owner-facing one.
+  `detail.parentNudged === false` (see `e2a3c613`'s record), else `null`. `claude_boot_dialog_resolved` →
+  `null`, unconditionally — a resolve clears an already-filed alert, never itself a fresh owner-facing one.
 
 ## Do not
 
@@ -65,8 +64,11 @@ can never reorder two same-key events given that guarantee. No client-visible or
 - Do not re-derive `managerSessionId`/`taskId` in `handleClaudeBootDialogResolved` from the session's
   current `parentSessionId`/`taskId` — copy them from the paired stuck row (`latest`), or a reparent/relink
   between the two episodes splits one logical pair across two managers.
-- Do not merge `bootStuckEventQueries`'s events into `allEvents` in `lib/attention.ts` — this was round
-  2's own `e2a3c613` bug (Code Review e5290bc2 MAJOR): a parentless session's `idle_report`/
-  `context_escalated`/`board_quiet_cause`/`merge_request` events wrongly fed `latestIdle`/`latestContext`/
-  `latestQuiet`/`latestMerge`, and a live manager (in both sets) had its events double-counted. Keep
-  `activeBootStuckAlerts` fed from its own separately flattened list, never merged into `allEvents`.
+- Do not merge `bootStuckEvents` into `allEvents` in `lib/attention.ts` — this was round 2's own
+  `e2a3c613` bug (Code Review e5290bc2 MAJOR): a parentless session's `idle_report`/`context_escalated`/
+  `board_quiet_cause`/`merge_request` events wrongly fed `latestIdle`/`latestContext`/`latestQuiet`/
+  `latestMerge`, and a live manager (in both sets) had its events double-counted. Keep
+  `activeBootStuckAlerts` fed from its own, kind-filtered `bootStuckEvents`, never merged into `allEvents`.
+- Do not re-add a per-manager/per-session fan-out (`bootStuckCandidates` + one `managerId`-keyed query per
+  candidate) to fetch these two kinds — see `43084723`'s own record for why that shape loses a worker's
+  unresolved event the moment its filing manager stops being live.

@@ -203,4 +203,38 @@ check("activeBootStuckAlerts: unsorted input is sorted internally — order of t
   assert.equal(alerts.length, 0, "still clears — sorted by ts internally, not by array position");
 });
 
+// Card 43084723 — M1 recycled → M2: the stuck worker's alert must persist while the worker is live and
+// stuck, even though its FILING manager (M1) stopped being live. `activeBootStuckAlerts` itself was never
+// the bug (it already keys/checks liveness by workerSessionId, proven above) — the bug lived entirely in
+// WHICH events `lib/attention.ts`'s useAttention fed into it. `selectByOldPerManagerFanOut` below is the
+// OLD, now-REMOVED selection logic (a `managerId`-keyed query per candidate, where a candidate was any
+// PARENTLESS live session) kept here ONLY as a regression witness — it is not imported from source
+// anymore (there is nothing left in attention.ts/fleet.ts to import; the real fix replaced it with ONE
+// unconditional, kind-filtered fetch, which this test models as "no selection at all").
+function selectByOldPerManagerFanOut(events, sessions) {
+  const candidateIds = new Set(
+    sessions.filter((s) => s.processState === "live" && !s.parentSessionId).map((s) => s.id));
+  return events.filter((e) => candidateIds.has(e.managerSessionId));
+}
+check("card 43084723 — RED: the OLD per-manager fan-out drops W's stuck alert once its filing manager M1 is recycled away", () => {
+  const sessions = [
+    { id: "M1", role: "manager", processState: "exited", parentSessionId: null }, // recycled away
+    { id: "M2", role: "manager", processState: "live", parentSessionId: null },   // W's new manager
+    { id: "W", role: "worker", processState: "live", parentSessionId: "M2" },     // still live and stuck
+  ];
+  const stuck = bootEv({ workerSessionId: "W", managerSessionId: "M1" }); // filed before the recycle; never rewritten
+  const oldSelection = selectByOldPerManagerFanOut([stuck], sessions);
+  assert.equal(oldSelection.length, 0, "RED (reproduced): M1 is no longer a live candidate, so the old fan-out never fetches this row at all");
+  const alertsFromOldSelection = activeBootStuckAlerts(oldSelection, alwaysLive);
+  assert.equal(alertsFromOldSelection.length, 0, "RED (reproduced): with nothing selected, the alert never surfaces even though W is live and stuck");
+});
+check("card 43084723 — GREEN: the fix (one unconditional, kind-filtered fetch) keeps W's alert visible after M1 recycles", () => {
+  const stuck = bootEv({ workerSessionId: "W", managerSessionId: "M1" });
+  // The real fix: useAttention no longer selects by candidate/manager liveness at all — it fetches ALL
+  // claude_boot_dialog_stuck/resolved rows across the fleet in one call and feeds them straight in.
+  const alerts = activeBootStuckAlerts([stuck], (sessionId) => sessionId === "W"); // only W is live; M1 is not
+  assert.equal(alerts.length, 1, "GREEN: W's alert surfaces — keyed/checked on W's OWN liveness, never M1's");
+  assert.equal(alerts[0].sessionId, "W");
+});
+
 console.log(`\n${pass} passed`);

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
-import { BOOT_DIALOG_DETECTOR_ROLES } from "@loom/shared";
 import { api } from "./api";
 import { activeBootStuckAlerts, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
@@ -153,26 +152,17 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   const managers = all.filter((s) => s.role === "manager" && s.processState === "live");
 
   // Card b1da256d (ported from e2a3c613's round 2-3 draft, cut at round 4): a boot-dialog-stuck session
-  // with NO live parent to notify (a manager, the platform Lead, or a parentless worker/setup/run/
-  // assistant) files its own `claude_boot_dialog_stuck` event under ITS OWN id (handleClaudeBootDialogStuck's
-  // `managerSessionId: s?.parentSessionId ?? sessionId`) — never fetched by the `managers` query above
-  // (role !== "manager", or role === "manager" but this is deliberately a SEPARATE query set so widening
-  // it can't also start surfacing Lead idle/context events, a different card's scope). "no parentSessionId"
-  // is the exact structural condition the daemon itself uses to decide nobody else was addressed. Round 2
-  // (item 4): also restrict to `BOOT_DIALOG_DETECTOR_ROLES` (imported from `@loom/shared`, never copied by
-  // hand — the daemon's own `pty/host.ts` re-exports the same constant) — a role outside that set (e.g.
-  // "operator") can never arm the detector at all, so fanning out a per-session event query for one is
-  // pure waste. `queryKey` deliberately matches the one above so a session that's in both sets (a live
-  // manager) shares one cached fetch, not two.
-  const bootStuckCandidates = all.filter((s) =>
-    s.processState === "live" && !s.parentSessionId && !!s.role && BOOT_DIALOG_DETECTOR_ROLES.includes(s.role));
-  const bootStuckEventQueries = useQueries({
-    queries: bootStuckCandidates.map((m) => ({
-      queryKey: ["orchEvents", m.id],
-      queryFn: () => api.orchestrationEvents(m.id),
-      refetchInterval: 4000,
-    })),
+  // with NO live parent to notify files its own `claude_boot_dialog_stuck` event under
+  // `s?.parentSessionId ?? sessionId` — WHICHEVER manager was live at the moment it got stuck, a value
+  // that is never rewritten later.
+  // @decision 43084723 — never re-add a per-manager fan-out for these two kinds; it made a worker's
+  // unresolved event unreachable the moment its FILING manager stopped being live (e.g. recycled).
+  const bootStuckEventsQuery = useQuery({
+    queryKey: ["orchEventsByKind", "claude_boot_dialog_stuck", "claude_boot_dialog_resolved"],
+    queryFn: () => api.orchestrationEventsByKinds(["claude_boot_dialog_stuck", "claude_boot_dialog_resolved"]),
+    refetchInterval: 4000,
   });
+  const bootStuckEvents = bootStuckEventsQuery.data ?? [];
 
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
@@ -181,15 +171,13 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
       refetchInterval: 4000,
     })),
   });
-  // Round 2 (Code Review e5290bc2 MAJOR): do NOT merge bootStuckEventQueries into allEvents — that made
-  // every bootStuckCandidate's event stream (the Platform Lead, setup, assistant, top-level runs) feed
-  // latestIdle/latestContext/latestQuiet/latestMerge below, so a parentless session's idle_report/
-  // context_escalated/board_quiet_cause/merge_request events wrongly surfaced as MANAGER ASLEEP / CONTEXT
-  // OVERFLOW / QUIET BOARD / MERGE REQUEST items — and a live manager (in BOTH sets) had its events
-  // double-counted. `allEvents` stays scoped to `managers` alone; `bootStuckEventQueries` feeds ONLY
-  // `activeBootStuckAlerts` below, from its own separate flattened list.
+  // Round 2 (Code Review e5290bc2 MAJOR), reaffirmed by card 43084723: do NOT fold bootStuckEvents into
+  // allEvents — it is already kind-filtered server-side to the two boot-dialog kinds alone, and merging it
+  // in would re-create the original bug this guarded against: a parentless session's idle_report/
+  // context_escalated/board_quiet_cause/merge_request events wrongly feeding latestIdle/latestContext/
+  // latestQuiet/latestMerge below. `allEvents` stays scoped to `managers` alone; `bootStuckEvents` feeds
+  // ONLY `activeBootStuckAlerts` below.
   const allEvents = eventQueries.flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? []);
-  const bootStuckEvents = bootStuckEventQueries.flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? []);
 
   const sortedEvents = [...allEvents].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
 
