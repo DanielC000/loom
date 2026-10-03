@@ -2204,6 +2204,11 @@ export class CodexForkUnsupportedError extends Error {
   }
 }
 
+// @decision ad131671 — card 15806f81: forkSession's own singleton refusal, mirrored on
+// MANAGER_SESSION_BARRED_ERROR's shape (a plain message string, checked by equality at the REST route).
+export const SETUP_SESSION_FORK_BARRED_ERROR =
+  "refusing to fork: a live setup session already exists for this agent (the Setup operator is a singleton — never two LIVE setup sessions)";
+
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
   /**
@@ -3560,6 +3565,12 @@ export class SessionService {
     return { ...session, processState: "live" };
   }
 
+  // @decision ad131671 — the ONE lookup for "is a live setup session already attached to this agent";
+  // startSetup's reuse and forkSession's refusal both call this, never re-derive it inline.
+  private liveSetupSession(agentId: string): Session | undefined {
+    return this.db.liveSessions(agentId).find((s) => s.role === "setup");
+  }
+
   // HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"setup"}) — no agent/MCP path mints one
   // (session_spawn on the setup surface itself REFUSES role "setup", so a setup session can't self-clone).
   // @decision ad131671 — SINGLETON = "never two LIVE", not "one row ever": reuse an already-LIVE setup
@@ -3572,8 +3583,10 @@ export class SessionService {
     if (!project) throw new Error("project not found");
 
     // Live-precedence singleton: reuse an already-LIVE setup session (never two LIVE), else fall through
-    // and INSERT+spawn a fresh one. Identical to startPlatformLead's guard (the P1 0e40dde fix).
-    const live = this.db.liveSessions(agentId).find((s) => s.role === "setup");
+    // and INSERT+spawn a fresh one. UNLIKE the Platform Lead — decision `8ddcf787` removed
+    // startPlatformLead's own equivalent guard, so multiple concurrent Leads may coexist by design; the
+    // Setup operator stays the one genuine singleton (see `liveSetupSession`'s own decision note above).
+    const live = this.liveSetupSession(agentId);
     if (live) return live; // already attached — reuse, no new row, no spawn (never two LIVE setup sessions)
 
     const config = resolveConfig(project.config);
@@ -6842,6 +6855,12 @@ export class SessionService {
     }
     const project = this.db.getProject(src.projectId);
     if (!project) throw new Error("project not found");
+    // @decision ad131671 — a fork carries `role: src.role` through unchanged (below), so a "setup"
+    // source would mint a 2nd live row exactly like a fresh spawn; refuse, same as startSetup's own
+    // singleton. "platform" is deliberately NOT checked — decision 8ddcf787 allows multiple Leads.
+    if (src.role === "setup" && this.liveSetupSession(src.agentId)) {
+      throw new Error(SETUP_SESSION_FORK_BARRED_ERROR);
+    }
     // @decision c30759a0 — mirrors recycleManager/resume's chokepoint (4b2e0146): a fork of a manager
     // source keeps role "manager" (see below), so it mints a NEW manager session exactly like a fresh
     // spawn — refuse BEFORE any row is minted if the source's project has since become barred.

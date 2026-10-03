@@ -23,7 +23,7 @@ import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
-import { filterRetainedWorktreesByProject, CodexForkUnsupportedError } from "../sessions/service.js";
+import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
@@ -80,7 +80,7 @@ import { validateProfile, capabilityGrantBindingError } from "../profiles/valida
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
-import { cloneAgentCore } from "../agents/clone-core.js";
+import { cloneAgentCore, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
 import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
@@ -5627,14 +5627,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Manual (human) resume from the UI — the ONE resume path allowed to force-resurrect a RECYCLED
   // session (allowSuperseded). The automatic paths (wake / rate-limit / boot) cannot; only the user
   // may deliberately bring a retired session back, to inspect or recover it.
-  app.post("/api/sessions/:id/resume", async (req) =>
-    deps.sessions.resume((req.params as { id: string }).id, { allowSuperseded: true }));
+  app.post("/api/sessions/:id/resume", async (req, reply) => {
+    try {
+      return await deps.sessions.resume((req.params as { id: string }).id, { allowSuperseded: true });
+    } catch (e) {
+      // Card 15806f81: mirrors the /fork route's own honest-4xx mapping below — MANAGER_SESSION_BARRED_ERROR
+      // was falling through to a generic 500 here (resume() has thrown it since 6ed0f922).
+      if (e instanceof Error && e.message === MANAGER_SESSION_BARRED_ERROR) return reply.code(409).send({ error: e.message });
+      throw e;
+    }
+  });
   app.post("/api/sessions/:id/fork", async (req, reply) => {
     try {
       return await deps.sessions.forkSession((req.params as { id: string }).id);
     } catch (e) {
       // Card 961da6c6: an honest 4xx (not a generic 500) so the UI's global mutation-error alert names the reason.
       if (e instanceof CodexForkUnsupportedError) return reply.code(409).send({ error: e.message });
+      // Card 15806f81: the same honest-4xx treatment for the two message-keyed refusals forkSession can throw.
+      if (e instanceof Error && (e.message === MANAGER_SESSION_BARRED_ERROR || e.message === SETUP_SESSION_FORK_BARRED_ERROR)) {
+        return reply.code(409).send({ error: e.message });
+      }
       throw e;
     }
   });
