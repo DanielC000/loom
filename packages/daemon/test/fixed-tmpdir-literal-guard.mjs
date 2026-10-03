@@ -90,6 +90,7 @@ const KNOWN_FIXED_LITERAL_DEBT = new Map([
   ["mainline-watch-boot.mjs", ['process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");']],
   ["mainline-watch-bounds.mjs", ['process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");']],
   ["mainline-watch-ff-unverified.mjs", ['process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");']],
+  ["mainline-watch-first-sight-no-stray-seed.mjs", ['process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");']],
   ["mainline-watch-reads.mjs", ['process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");']],
   ["mainline-watch-rebind-reset.mjs", ['process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");']],
   ["mainline-watch-spawns.mjs", ['process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");']],

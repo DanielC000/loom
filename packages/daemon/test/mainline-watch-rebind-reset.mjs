@@ -1,7 +1,9 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 84ea9f67 — a repo rebind/repath resets the mainline watermark + boot-alert marker (docs/decisions/4fa36502-mainline-move-tripwire.md). REAL git on temp repos.
 //   (A) control: WITHOUT a rebind, a real raw move on the same repo still alerts.
-//   (B) rebind repoPath to a DIFFERENT repo with the same branch name ⇒ W + marker gone, ONE low `source:"rebind"` event (from → to paths), and the next check files NO alert and re-seeds W.
+//   (B) rebind repoPath to a DIFFERENT repo with the same branch name ⇒ W + marker gone, ONE low `source:"rebind"` event (from → to paths), and the next BOOT first-sight check files NO alert and re-seeds W.
+//       (card 787dd2a7: a LANDING-shaped first-sight check — no `source` — no longer seeds by itself either;
+//       seeding on that path now defers to advanceMainlineWatermark{,ForBatch} after a verified landing.)
 //   (C) a no-op rebind (same path, and a trailing-slash spelling) does NOT reset W (a raw move cannot be laundered through it) and files nothing.
 //   (D) a `repos` registry repath resets only that key's baseline; an unchanged sibling key keeps its W.
 // Run: 1) build daemon (pnpm build), 2) node test/mainline-watch-rebind-reset.mjs
@@ -51,7 +53,7 @@ const wKey = (k) => MW.mainlineWatermarkKey(projId, k), aKey = (k) => MW.mainlin
 const setW = (k, sha) => db.setMeta(wKey(k), JSON.stringify({ branch: "main", sha }));
 const watermark = (k = "primary") => MW.parseMainlineWatermark(db.getMeta(wKey(k)));
 const allEvents = () => db.listEventsSince(0, 100000).filter((e) => e.kind === "mainline_moved_outside_loom" && e.detail?.projectId === projId);
-const runCheck = (repoKey, repoPath) => sessions.checkMainlineMove({ projectId: projId, repoKey, repoPath, managerSessionId: mgrId, workerSessionId: null, taskId: null });
+const runCheck = (repoKey, repoPath, source) => sessions.checkMainlineMove({ projectId: projId, repoKey, repoPath, managerSessionId: mgrId, workerSessionId: null, taskId: null, source });
 const warned = []; const realWarn = console.warn; console.warn = (...a) => { warned.push(a.join(" ")); };
 
 try {
@@ -73,8 +75,20 @@ try {
   check("(B1) rebind deletes the watermark AND the boot-alert marker", db.getMeta(wKey("primary")) === undefined && db.getMeta(aKey("primary")) === undefined);
   check("(B2) rebind files ONE `source:rebind` event naming from → to paths (HIGH here only because the seeded marker is undelivered; see B5/B6 for the low case)", evB.length === 1 && evB[0].detail.severity === "high" && evB[0].detail.source === "rebind" && evB[0].detail.reset === true && evB[0].detail.fromPath === repoA && evB[0].detail.toPath === repoB && evB[0].detail.repoKey === "primary");
   const nB2 = allEvents().length;
-  const rB = await runCheck("primary", repoB);
-  check("(B3) the next check in the NEW repo files NO alert and re-seeds W at its tip like a first run", rB === head(repoB) && allEvents().length === nB2 && watermark()?.sha === head(repoB));
+  // card 787dd2a7: a LANDING-shaped call (no source) no longer seeds by itself on first sight — seeding
+  // there now defers to advanceMainlineWatermark{,ForBatch} after a verified landing — so this uses the
+  // BOOT source to exercise "the rebind's reset is followed by a clean re-establishment", which is still
+  // exactly what boot does for a repo with no resolvable default (repoB here has no origin/HEAD).
+  const rB = await runCheck("primary", repoB, "boot");
+  check("(B3) the next BOOT first-sight check in the NEW repo files NO alert and re-seeds W at its tip like a first run", rB === head(repoB) && allEvents().length === nB2 && watermark()?.sha === head(repoB));
+  // card 787dd2a7: the boot check above DID seed W (confirmed by B3); delete it again here to re-create a
+  // genuine true-first-sight state, so a LANDING-shaped call can be shown returning the live tip without
+  // seeding itself (seeding on that path defers to advanceMainlineWatermark{,ForBatch}).
+  db.deleteMeta(wKey("primary"));
+  const nBland = allEvents().length;
+  const rBland = await runCheck("primary", repoB);
+  check("(B3b) a LANDING-shaped (non-boot) first-sight check returns the tip but defers seeding to advanceMainlineWatermark", rBland === head(repoB) && allEvents().length === nBland && watermark() === null);
+  await runCheck("primary", repoB, "boot"); // re-seed for the rest of this scenario, unchanged from before this addition
   // positive control for (B3): WITHOUT the reset the same situation IS the false alert this card fixes
   setW("primary", aTip); const nBc = allEvents().length;
   await runCheck("primary", repoB);

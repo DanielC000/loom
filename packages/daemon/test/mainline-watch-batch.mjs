@@ -10,6 +10,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (B3)  a human commit between batches is silent.
 //   (B4)  card 2a6a292a round 3: guard 1b exercised ALONE on advanceMainlineWatermarkForBatch — refuses a branch-mismatched W even with a fully valid (checkedTip, isAncestor) pair.
 //   (B5)  card 77b8319b: advanceMainlineWatermarkForBatch refuses to overwrite a present-but-unreadable W even with a fully valid (checkedTip, isAncestor) pair — the raw row is byte-identical afterward.
+//   (B6)  card 787dd2a7 round 2: a BATCH first-sight landing onto a branch disagreeing with a resolvable default SEEDS W anyway and files ONE addressed notice; a repeated
+//         first-sight landing on the SAME (branch, defaultBranch) fact re-seeds but dedupes the notice.
 // Run: 1) build daemon (pnpm build), 2) LOOM_CODEX_BIN=<nonexistent> node test/mainline-watch-batch.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -150,6 +152,44 @@ try {
     d1.db.setMeta(key, JSON.stringify({ branch: MAIN, sha: baseShaB5 }));
     await d1.sessions.advanceMainlineWatermarkForBatch(P.projId, "primary", P.repo, baseShaB5, baseShaB5, batchHeadShaB5);
     check("(B5) control: with a valid watermark restored, the identical call DOES advance", watermark(d1)?.branch === MAIN && watermark(d1)?.sha === batchHeadShaB5);
+  }
+
+  // ── (B6) card 787dd2a7 round 2 — a BATCH first-sight landing onto a branch disagreeing with a
+  //        resolvable default SEEDS W anyway and files ONE addressed notice; a repeat on the SAME fact
+  //        re-seeds but dedupes the notice. ──────────────────────────────────────────────────────────────
+  {
+    // Drive this through the REAL mergeBatchTracked flow (like B0), never a manual advanceMainlineWatermarkForBatch
+    // call on top of it — the real landing's own internal call IS the first-sight seed; counting events/nudges
+    // only AFTER it would silently measure a second, redundant, already-non-absent call instead.
+    const key = MW.mainlineWatermarkKey(P.projId, "primary");
+    const otherDefault = "mwbb-b6-some-other-mainline";
+    d1.db.deleteMeta(key); // force true first sight
+    git(P.repo, "symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${otherDefault}`);
+    check("(B6) setup control: the repo resolves a default that disagrees with the live checkout", git(P.repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") === `origin/${otherDefault}` && git(P.repo, "rev-parse", "--abbrev-ref", "HEAD") === MAIN);
+    const nB6 = mwEvents(d1).length, ndB6 = d1.nudges.length;
+    const oo = await addWorker(d1.db, "oo"), pp = await addWorker(d1.db, "pp");
+    const rB6 = await batch(d1, [oo, pp]);
+    check("(B6) the first-sight batch landing is NOT refused", rB6.ok === true && rB6.landed?.length === 2);
+    check("(B6) the watermark IS seeded from the live branch despite the disagreeing default", watermark(d1)?.branch === MAIN && watermark(d1)?.sha === canonHead());
+    const evB6 = mwEvents(d1).slice(nB6);
+    check("(B6) exactly ONE low-severity first-sight-seeded-stray event", evB6.length === 1 && evB6[0].detail.severity === "low" && evB6[0].detail.evidence?.includes("first-sight-seeded-stray") && evB6[0].detail.branch === MAIN && evB6[0].detail.expectedBranch === otherDefault);
+    check("(B6) exactly ONE addressed manager nudge naming both branches and the real remedy", d1.nudges.length === ndB6 + 1 && /git remote set-head origin -a/.test(d1.nudges[d1.nudges.length - 1]) && d1.nudges[d1.nudges.length - 1].includes(MAIN) && d1.nudges[d1.nudges.length - 1].includes(otherDefault));
+
+    // repeated-landing dedupe (round 3 nit 4 — label corrected): deleting W ALONE (never the alert
+    // marker too) is NOT what any production reset path does — resetMainlineWatermark (db.ts) deletes
+    // the watermark key AND the alert-marker key together. This instead proves the DEDUPE PREDICATE
+    // directly: with the delivered alert marker from the first landing still intact, a second REAL batch
+    // landing on the SAME (branch, defaultBranch) fact must not re-fire the event/nudge, while the seed
+    // itself still happens.
+    d1.db.deleteMeta(key);
+    const nB6b = mwEvents(d1).length, ndB6b = d1.nudges.length;
+    const qq = await addWorker(d1.db, "qq"), rr = await addWorker(d1.db, "rr");
+    const rB6b = await batch(d1, [qq, rr]);
+    check("(B6) DEDUPE: the repeated first-sight landing still lands", rB6b.ok === true && rB6b.landed?.length === 2);
+    check("(B6) DEDUPE: no second event/nudge for the SAME fact", mwEvents(d1).length === nB6b && d1.nudges.length === ndB6b);
+    check("(B6) DEDUPE: the watermark still correctly re-seeds despite the deduped notice", watermark(d1)?.branch === MAIN && watermark(d1)?.sha === canonHead());
+
+    git(P.repo, "symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${MAIN}`); // restore, belt-and-braces (no later scenario in this file depends on it)
   }
 
 } finally {

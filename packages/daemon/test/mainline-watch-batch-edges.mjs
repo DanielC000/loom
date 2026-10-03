@@ -4,6 +4,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 //   (B4)  TOCTOU: main moves AFTER the batch's check but BEFORE its fast-forward ⇒ the batch forfeits and the move is NOT absorbed: reported exactly once.
 //   (B5)  FAIL-OPEN: a failing reader ⇒ the batch lands exactly as today, no event, watermark not advanced past the unverified move; the next landing catches it.
+//   (B6)  card 787dd2a7 round 2 — DEFER: a TRANSIENT first-sight default-branch resolver failure never seeds AND never declines (no event, no nudge); the very
+//         next landing, once the resolver is healthy again, seeds normally.
 // Run: 1) build daemon (pnpm build), 2) LOOM_CODEX_BIN=<nonexistent> node test/mainline-watch-batch-edges.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -115,6 +117,26 @@ try {
     await confirm(d1, u);
     check("(B5) the very next landing (reader restored) still catches it: one new event", mwEvents(d1).length === before + 1);
     void t;
+  }
+
+  // ── (B6) card 787dd2a7 round 2 — DEFER: a TRANSIENT resolver failure never seeds AND never declines ──
+  {
+    const key = MW.mainlineWatermarkKey(P.projId, "primary");
+    d1.db.deleteMeta(key); // force true first sight
+    const v = await addWorker(d1.db, "v"), w = await addWorker(d1.db, "w");
+    const before = mwEvents(d1).length, nudgesBefore = d1.nudges.length;
+    const realResolver = d1.sessions.resolveMainlineBranchStateReader;
+    d1.sessions.resolveMainlineBranchStateReader = async () => ({ state: "failed" });
+    const r6 = await batch(d1, [v, w]);
+    d1.sessions.resolveMainlineBranchStateReader = realResolver;
+    check("(B6) the batch STILL lands despite the transient resolver failure (never a refusal)", r6.ok === true && r6.landed?.length === 2);
+    check("(B6) DEFER: no event, no nudge, and the watermark is left UNSEEDED (neither declined nor seeded)", mwEvents(d1).length === before && d1.nudges.length === nudgesBefore && watermark(d1) === null);
+
+    // control: the SAME still-absent state, resolver restored (no transient failure) — the very next
+    // landing seeds normally, proving the defer is a retry, not a permanent block.
+    const x = await addWorker(d1.db, "x");
+    await confirm(d1, x);
+    check("(B6) control: the next landing (resolver healthy) seeds normally once the transient failure clears", watermark(d1)?.sha === canonHead());
   }
 
 } finally {

@@ -25,7 +25,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -14808,7 +14808,7 @@ export class SessionService {
     if (watermarkReadFailed || watermarkRead.state === "unreadable") {
       const liveHead = await readMainlineHead(repoPath, this.mainlineGitMs()).catch(() => null);
       const observedBranch = liveHead?.branch ?? null;
-      const reason = `this project's stored mainline watermark record is ${watermarkReadFailed ? "unreadable (a database read failed)" : "corrupt (it does not parse as a valid {branch, sha} record)"} — refusing to pin this solo merge's squash rather than silently falling back to a live read, which would re-open the pre-existing-checkout-divert gap this pin exists to close. Canonical repo is currently checked out on "${observedBranch ?? "(detached/unreadable)"}". Ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only), which re-initializes the watermark from the current checkout, then retry.`;
+      const reason = `this project's stored mainline watermark record is ${watermarkReadFailed ? "unreadable (a database read failed)" : "corrupt (it does not parse as a valid {branch, sha} record)"} — refusing to pin this solo merge's squash rather than silently falling back to a live read, which would re-open the pre-existing-checkout-divert gap this pin exists to close. Canonical repo is currently checked out on "${observedBranch ?? "(detached/unreadable)"}". Ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only), which deletes the stored watermark; it re-seeds at the next verified landing (or at boot when the checkout matches the repo's resolvable default branch), then retry.`;
       return { merged: false, reason, notified: false, opId: thisOpId, branchDiverted: true, watermarkUnreadable: true };
     }
     const expectedMainlineBranch = watermarkRead.state === "ok" ? watermarkRead.watermark.branch : undefined;
@@ -16877,7 +16877,7 @@ export class SessionService {
     }
     const mainlineCheckedTip = await this.checkMainlineMove({ projectId: project.id, repoKey: worker.repoKey ?? "primary", repoPath, managerSessionId, workerSessionId, taskId }); // card 4fa36502: fail-open tripwire, before the squash trusts main's tip
     merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef);
-    if (mainlineCheckedTip && merge.ok && !merge.noop && merge.sha) await this.advanceMainlineWatermark(project.id, worker.repoKey ?? "primary", repoPath, mainlineCheckedTip); // card 4fa36502: a successful Loom landing is the new "explained" tip — but ONLY when this landing's check completed, so an unverified move stays catchable
+    if (mainlineCheckedTip && merge.ok && !merge.noop && merge.sha) await this.advanceMainlineWatermark(project.id, worker.repoKey ?? "primary", repoPath, mainlineCheckedTip, managerSessionId, workerSessionId, taskId); // card 4fa36502: a successful Loom landing is the new "explained" tip — but ONLY when this landing's check completed, so an unverified move stays catchable
     // Card 6f13746c: record the landing HERE — at the squash, still INSIDE the repo guard (`endSquash` / `releaseInertRepoGuard` run in the
     // `finally` below) — so the counter's order equals main's order: a later pass resets only what precedes it on main, and an ungated landing
     // that squashed after a pass is never erased by it. (Recording in `finalizeMerge`, after the guard, raced exactly that.) An inert docs-only
@@ -17880,7 +17880,7 @@ export class SessionService {
         if (watermarkReadFailed || watermarkRead.state === "unreadable") {
           const liveHead = await readMainlineHead(finalRepoPath, this.mainlineGitMs()).catch(() => null);
           const observedBranch = liveHead?.branch ?? null;
-          const reason = `this project's stored mainline watermark record is ${watermarkReadFailed ? "unreadable (a database read failed)" : "corrupt (it does not parse as a valid {branch, sha} record)"} — refusing to pin this batch's fast-forward rather than silently falling back to a live read, which would re-open the pre-existing-checkout-divert gap this pin exists to close. Canonical repo is currently checked out on "${observedBranch ?? "(detached/unreadable)"}". Ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only), which re-initializes the watermark from the current checkout, then retry.`;
+          const reason = `this project's stored mainline watermark record is ${watermarkReadFailed ? "unreadable (a database read failed)" : "corrupt (it does not parse as a valid {branch, sha} record)"} — refusing to pin this batch's fast-forward rather than silently falling back to a live read, which would re-open the pre-existing-checkout-divert gap this pin exists to close. Canonical repo is currently checked out on "${observedBranch ?? "(detached/unreadable)"}". Ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only), which deletes the stored watermark; it re-seeds at the next verified landing (or at boot when the checkout matches the repo's resolvable default branch), then retry.`;
           evtBatch("batch_merge_branch_diverted", { repoPath: finalRepoPath, expectedBranch: null, observedBranch, watermarkUnreadable: true, reason });
           const notStarted = await runFallback([
             ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: "this project's mainline watermark record is corrupt/unreadable — nothing was batched, gated or landed" })),
@@ -18222,7 +18222,7 @@ export class SessionService {
             // @decision 92eeb319 — see `onSettle`
             if (!batchGateRan && result.landed.length === 0) batchAllDropped = true;
             batchFastForwarded = result.ok;
-            if (result.ok && result.landed.length > 0) await this.advanceMainlineWatermarkForBatch(finalProjectId, batchRepoKey, finalRepoPath, batchCheckedTip, baseMainSha, result.batchHeadSha); // card 59d2577a
+            if (result.ok && result.landed.length > 0) await this.advanceMainlineWatermarkForBatch(finalProjectId, batchRepoKey, finalRepoPath, batchCheckedTip, baseMainSha, result.batchHeadSha, managerSessionId); // card 59d2577a
             // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (the `finally` below) — ONCE, with
             // the batch's final landed tip, so the counter's order equals main's order (see the solo record after `mergeBranch`).
             if (result.ok && result.landed.length > 0) {
@@ -18821,6 +18821,8 @@ export class SessionService {
   private mainlineFactsReader: typeof readMainlineFacts = readMainlineFacts;
   /** Test seam (card 59d2577a): the mainline check's head reader; a test wraps it to simulate a landing advancing W while the head is being read. */
   private mainlineHeadReader: typeof readMainlineHead = readMainlineHead;
+  /** Test seam (card 787dd2a7 round 2): the first-sight default-branch resolver; a test replaces it to simulate a TRANSIENT read failure deterministically, never a real git-level timeout. */
+  private resolveMainlineBranchStateReader: typeof resolveMainlineBranchState = resolveMainlineBranchState;
   private mainlineGitMs(): number { return Math.min(this.gitOpMs ?? 10_000, 10_000); }
   /** Aggregate budget for ONE mainline check (card 0eb7ff27): a few per-call timeouts, never more than 30s. The check holds the repo guard, so its total work must be bounded, not just each call. */
   private mainlineDeadlineMs(): number { return Math.min(this.mainlineGitMs() * 4, 30_000); }
@@ -18850,8 +18852,16 @@ export class SessionService {
       const store = (): void => { if (this.db.getMeta(key) === rawW) { this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip })); dropBootAlert(); } };
       const boot = a.source === "boot";
       // @decision 4fa36502 — TRUE first sight only: no watermark has EVER been stamped for this (project, repoKey).
-      // There is nothing yet to compare the live checkout against, so initialise silently.
-      if (watermarkRead.state === "absent") { store(); return head.tip; }
+      // @decision 787dd2a7 — a LANDING-path first sight never stores here; seeding defers to
+      // advanceMainlineWatermark{,ForBatch}. A BOOT first sight applies firstSightSeedAllowed instead.
+      if (watermarkRead.state === "absent") {
+        if (!boot) return head.tip;
+        const { outcome, defaultBranch } = await this.firstSightSeedAllowed(a.repoPath, head.branch);
+        if (outcome === "allow") { store(); return head.tip; }
+        // "defer" (a transient resolver failure) skips entirely — no event, no seed, retry at the next first sight.
+        if (outcome === "decline") this.recordFirstSightDeclined({ projectId: a.projectId, repoKey: a.repoKey, branch: head.branch, defaultBranch: defaultBranch as string, source: "boot", managerSessionId: null, workerSessionId: null, taskId: a.taskId });
+        return head.tip;
+      }
       // @decision 77b8319b — a present-but-unreadable row is never healed either: skip, fail-open, leaving
       // W (and the corrupt row) exactly as-is so the next solo/batch pin read still sees — and refuses on
       // — the same corrupt record, instead of finding it silently "fixed" onto whatever is checked out.
@@ -18991,11 +19001,78 @@ export class SessionService {
     return Promise.race([p, new Promise<T>((_, rej) => { t = setTimeout(() => rej(new MainlineDeadlineError(what)), left); })]).finally(() => clearTimeout(t));
   }
 
+  /** @decision 787dd2a7 — never mint W's FIRST value from a branch that disagrees with a resolvable
+   *  default mainline branch; a null default (no origin/HEAD — most local-only repos) seeds unconditionally.
+   *  A TRANSIENT resolver failure is `"defer"`, never `"decline"` — see {@link MainlineDefaultBranchState}. */
+  private async firstSightSeedAllowed(repoPath: string, branch: string): Promise<{ outcome: "allow" | "decline" | "defer"; defaultBranch: string | null }> {
+    const r = await this.resolveMainlineBranchStateReader(repoPath, { timeoutMs: this.mainlineGitMs() });
+    if (r.state === "failed") return { outcome: "defer", defaultBranch: null };
+    const defaultBranch = r.state === "resolved" ? r.branch : null;
+    return { outcome: defaultBranch === null || defaultBranch === branch ? "allow" : "decline", defaultBranch };
+  }
+
+  /** @decision 787dd2a7 — a declined first-sight seed files ONE low-severity event per distinct
+   *  (branch, defaultBranch) fact, never a fresh one on every boot/landing while the fact is unchanged.
+   *  BOOT-only since round 2: a LANDING decline now seeds anyway via {@link recordFirstSightSeededStray}. */
+  private recordFirstSightDeclined(a: { projectId: string; repoKey: string; branch: string; defaultBranch: string; source: "boot" | "landing"; managerSessionId: string | null; workerSessionId: string | null; taskId: string | null }): void {
+    const alertKey = mainlineBootAlertKey(a.projectId, a.repoKey);
+    const prev = parseMainlineBootAlert(this.db.getMeta(alertKey));
+    if (prev && prev.evidence.includes("first-sight-declined") && prev.to === a.branch && prev.expectedBranch === a.defaultBranch) return;
+    // @decision 787dd2a7 round 2 — an unrelated UNDELIVERED marker (any other evidence kind, nudgedAt:null)
+    // already occupies this slot: never clobber it with this purely-informational marker.
+    if (prev && prev.nudgedAt === null) return;
+    const now = new Date().toISOString();
+    this.db.appendEvent({
+      id: randomUUID(), ts: now, managerSessionId: a.managerSessionId ?? "", ...(a.workerSessionId ? { workerSessionId: a.workerSessionId } : {}), taskId: a.taskId,
+      kind: "mainline_moved_outside_loom",
+      detail: {
+        projectId: a.projectId, repoKey: a.repoKey, branch: a.branch, severity: "low", evidence: ["first-sight-declined"], expectedBranch: a.defaultBranch, source: a.source,
+        reason: `first sight ${a.source === "boot" ? "at boot" : "at a landing"}: checked-out branch "${a.branch}" does not match this repo's resolvable default mainline branch "${a.defaultBranch}" — leaving the mainline watermark unseeded until a landing lands on "${a.defaultBranch}", or run \`git remote set-head origin -a\` in the canonical repo if "${a.defaultBranch}" is simply a stale origin/HEAD`,
+      },
+    });
+    // nudgedAt is stamped immediately — this marker is informational-only (never meant to be delivered as a
+    // nudge), which keeps it out of deliverPendingBootAlerts' sweep and out of checkMainlineMove's own
+    // keepPriorMarker protection for a real, undelivered divert alert that lands in this same slot later.
+    this.db.setMeta(alertKey, JSON.stringify({ branch: a.branch, from: "", to: a.branch, evidence: ["first-sight-declined"], suspectShas: [], expectedBranch: a.defaultBranch, source: a.source, nudgedAt: now } satisfies MainlineBootAlert));
+  }
+
+  /** @decision 787dd2a7 round 2 — a LANDING-path first-sight decline SEEDS from the verified landing
+   *  anyway and files an ADDRESSED notice (reusing the SAME marker/event/nudge/fallback machinery every
+   *  other mainline-watch alert uses), rather than the passive marker a BOOT decline still uses. */
+  private recordFirstSightSeededStray(a: { projectId: string; repoKey: string; branch: string; tip: string; defaultBranch: string; managerSessionId: string | null; workerSessionId: string | null; taskId: string | null }): void {
+    const alertKey = mainlineBootAlertKey(a.projectId, a.repoKey);
+    const prev = parseMainlineBootAlert(this.db.getMeta(alertKey));
+    if (prev && prev.evidence.includes("first-sight-seeded-stray") && prev.branch === a.branch && prev.expectedBranch === a.defaultBranch) return;
+    // @decision 787dd2a7 round 3 — mirror checkMainlineMove's keepPriorMarker: an unrelated UNDELIVERED
+    // marker already occupying this slot must never block the durable event, only the marker write that
+    // would otherwise clobber it.
+    const keepPriorMarker = !!(prev && prev.nudgedAt === null);
+    const evidence = ["first-sight-seeded-stray"];
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId ?? "", ...(a.workerSessionId ? { workerSessionId: a.workerSessionId } : {}), taskId: a.taskId,
+      kind: "mainline_moved_outside_loom",
+      detail: {
+        projectId: a.projectId, repoKey: a.repoKey, branch: a.branch, severity: "low", evidence, expectedBranch: a.defaultBranch, suspectShas: [a.tip], source: "landing",
+        reason: `first sight at a landing: checked-out branch "${a.branch}" does not match this repo's resolvable default mainline branch "${a.defaultBranch}" — seeded the mainline watermark from the verified landing's own branch anyway; run \`git remote set-head origin -a\` in the canonical repo if "${a.defaultBranch}" is simply a stale origin/HEAD, or reset the watermark if the landing went to the wrong branch`,
+      },
+    });
+    if (keepPriorMarker) return; // the event above is the durable record; leave the existing undelivered marker in place
+    const text = mainlineMovedNudgeText({ branch: a.branch, repoKey: a.repoKey, from: "", to: a.tip, evidence, suspectShas: [a.tip], atBoot: false, expectedBranch: a.defaultBranch });
+    try {
+      if (!a.managerSessionId) throw new Error("no manager to nudge");
+      this.enqueueDurableMessage(a.managerSessionId, text, { sender: "system", taskId: a.taskId, kind: "warning" });
+      this.db.setMeta(alertKey, JSON.stringify({ branch: a.branch, from: "", to: a.tip, evidence, suspectShas: [a.tip], expectedBranch: a.defaultBranch, source: "landing", nudgedAt: new Date().toISOString() } satisfies MainlineBootAlert));
+    } catch {
+      // the durable event above is the record; leave nudgedAt:null so deliverPendingBootAlerts/onOrchestrationMcpFirstSeen delivers it once a manager is live.
+      this.db.setMeta(alertKey, JSON.stringify({ branch: a.branch, from: "", to: a.tip, evidence, suspectShas: [a.tip], expectedBranch: a.defaultBranch, source: "landing", nudgedAt: null } satisfies MainlineBootAlert));
+    }
+  }
+
   /**
    * Advance the watermark to the canonical branch tip after a successful Loom landing. Fail-open like {@link checkMainlineMove}.
    * Only when the landing sits DIRECTLY on `checkedTip` (the tip the check verified): a move that slipped in between the check and the squash leaves the watermark unchanged, so the next check still sees it.
    */
-  private async advanceMainlineWatermark(projectId: string, repoKey: string, repoPath: string, checkedTip: string): Promise<void> {
+  private async advanceMainlineWatermark(projectId: string, repoKey: string, repoPath: string, checkedTip: string, managerSessionId: string | null, workerSessionId: string | null, taskId: string | null): Promise<void> {
     try {
       const head = await readMainlineHead(repoPath, this.mainlineGitMs());
       if (!head || (await readFirstParent(repoPath, head.tip, this.mainlineGitMs())) !== checkedTip) return;
@@ -19007,6 +19084,14 @@ export class SessionService {
       // record visible to the next pin-read refusal, instead of silently healing it via this advance.
       if (watermarkRead.state === "unreadable") return;
       if (watermarkRead.state === "ok" && watermarkRead.watermark.branch !== head.branch) return;
+      // @decision 787dd2a7 round 2 — a verified first landing SEEDS from its own branch even when a
+      // resolvable default disagrees (files an addressed notice instead); only a TRANSIENT resolver
+      // failure defers (residual: with no resolvable default at all, it seeds unconditionally).
+      if (watermarkRead.state === "absent") {
+        const { outcome, defaultBranch } = await this.firstSightSeedAllowed(repoPath, head.branch);
+        if (outcome === "defer") return;
+        if (outcome === "decline") this.recordFirstSightSeededStray({ projectId, repoKey, branch: head.branch, tip: head.tip, defaultBranch: defaultBranch as string, managerSessionId, workerSessionId, taskId });
+      }
       this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip }));
     } catch (err) {
       console.warn(`[mainline-watch] watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
@@ -19018,7 +19103,7 @@ export class SessionService {
    * tip IS the sha the batch was cut from (`fastForwardCanonicalMain` moves main only when HEAD === baseMainSha, so an ok result means main moved from exactly that tip) AND the checked tip is an ancestor
    * of the landed tip. Anything else (a move between the check and the ff forfeits the batch; a failed read) leaves W alone so the move stays catchable. Fail-open.
    */
-  private async advanceMainlineWatermarkForBatch(projectId: string, repoKey: string, repoPath: string, checkedTip: string | null, baseMainSha: string, batchHeadSha: string | undefined): Promise<void> {
+  private async advanceMainlineWatermarkForBatch(projectId: string, repoKey: string, repoPath: string, checkedTip: string | null, baseMainSha: string, batchHeadSha: string | undefined, managerSessionId: string | null): Promise<void> {
     try {
       if (!checkedTip || !batchHeadSha || checkedTip !== baseMainSha) return;
       const ms = this.mainlineGitMs();
@@ -19033,6 +19118,12 @@ export class SessionService {
       // @decision 77b8319b — same as the solo twin: an unreadable row is never overwritten either.
       if (watermarkRead.state === "unreadable") return;
       if (watermarkRead.state === "ok" && watermarkRead.watermark.branch !== head.branch) return;
+      // @decision 787dd2a7 round 2 — same first-sight rule as the solo twin; see that method's own comment.
+      if (watermarkRead.state === "absent") {
+        const { outcome, defaultBranch } = await this.firstSightSeedAllowed(repoPath, head.branch);
+        if (outcome === "defer") return;
+        if (outcome === "decline") this.recordFirstSightSeededStray({ projectId, repoKey, branch: head.branch, tip: batchHeadSha, defaultBranch: defaultBranch as string, managerSessionId, workerSessionId: null, taskId: null });
+      }
       this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: batchHeadSha }));
     } catch (err) {
       console.warn(`[mainline-watch] batch watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);

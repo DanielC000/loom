@@ -8,7 +8,7 @@ import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError } from "./bounded.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
@@ -1537,11 +1537,21 @@ export async function isBranchMerged(repoPath: string, branch: string, base = "H
   }
 }
 
+/** @decision 787dd2a7 — distinguish a genuine no-default from a TRANSIENT read failure (a timeout, a
+ *  spawn error) by git's own message, never by the exit code — a killed child can exit non-zero with
+ *  empty stderr, which simple-git resolves as success, and that must never read as "no default". */
+export type MainlineDefaultBranchState = { state: "resolved"; branch: string } | { state: "no-default" } | { state: "failed" };
+
+const NOT_A_SYMBOLIC_REF = /fatal:\s*ref\s.*\sis not a symbolic ref/i;
+
 // @decision 09f268a5 — resolve mainline via refs/remotes/origin/HEAD, never HEAD itself (which can be
-// parked on an arbitrary branch here); FAILS CLOSED to null with NO guessed "main" fallback — a repo with
-// no resolvable origin/HEAD (a plain `git init`, no remote) is a known gap, not a bug to "fix" with a guess.
-export async function resolveMainlineBranch(repoPath: string, deps: BoundedGitDeps = {}): Promise<string | null> {
-  const { git, timeoutMs } = boundedGit(repoPath, deps);
+// parked on an arbitrary branch here); FAILS CLOSED with NO guessed "main" fallback — a repo with no
+// resolvable origin/HEAD (a plain `git init`, no remote) is a known gap, not a bug to "fix" with a guess.
+export async function resolveMainlineBranchState(repoPath: string, deps: BoundedGitDeps = {}): Promise<MainlineDefaultBranchState> {
+  const { git, timeoutMs } = boundedGit(repoPath, {
+    ...deps,
+    gitFactory: deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, localReadGitEnv(process.env, { LC_ALL: "C", LANGUAGE: "C" }))),
+  });
   try {
     const out = await withTimeout(
       git.raw(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]),
@@ -1550,17 +1560,30 @@ export async function resolveMainlineBranch(repoPath: string, deps: BoundedGitDe
     );
     const ref = out.trim(); // e.g. "origin/main"
     const branch = ref.startsWith("origin/") ? ref.slice("origin/".length) : ref;
-    return branch || null;
+    // Card 787dd2a7 round 3: empty output on a successful exit is a killed-child/transient read, never a
+    // genuine no-default — the @decision above already rules this must defer like a "failed" read, not
+    // seed like a settled "no-default" (never observed for real git; defensive only).
+    return branch ? { state: "resolved", branch } : { state: "failed" };
   } catch (e) {
     // Card f96b9d7c: this catch used to be silent, so a repo with a genuinely NO resolvable origin/HEAD
     // (the expected, permanent case) was indistinguishable from a TRANSIENT read failure (a timeout under
     // boot-time load, a git error) — both just produced `null` with zero log output. Log the real cause
-    // here; the caller still treats both as "skip this repo, fail closed" (unchanged behavior), but the
-    // reason is now visible instead of silently swallowed.
+    // here; resolveMainlineBranch below still treats both as "skip this repo, fail closed" (unchanged
+    // behavior for every one of ITS callers), but the reason is now visible instead of silently swallowed,
+    // and distinguishable by THIS function's own return state for a caller that needs the distinction.
+    const msg = e instanceof Error ? e.message : String(e);
     // eslint-disable-next-line no-console
-    console.warn(`[git] resolveMainlineBranch failed for ${repoPath}: ${(e as Error).message}`);
-    return null;
+    console.warn(`[git] resolveMainlineBranch failed for ${repoPath}: ${msg}`);
+    return NOT_A_SYMBOLIC_REF.test(msg) ? { state: "no-default" } : { state: "failed" };
   }
+}
+
+/** @decision 787dd2a7 — kept byte-identical in contract (still `string | null`) so every existing caller
+ *  stays unaffected by the tri-state split above; a caller that needs the failure modes told apart uses
+ *  {@link resolveMainlineBranchState} directly instead. */
+export async function resolveMainlineBranch(repoPath: string, deps: BoundedGitDeps = {}): Promise<string | null> {
+  const r = await resolveMainlineBranchState(repoPath, deps);
+  return r.state === "resolved" ? r.branch : null;
 }
 
 /** @decision f96b9d7c — every local `loom/*` branch merged into `mainlineBranch`, which MUST come from {@link

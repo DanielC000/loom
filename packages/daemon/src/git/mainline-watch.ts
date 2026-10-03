@@ -106,6 +106,14 @@ export function parseMainlineBootAlert(raw: string | undefined): MainlineBootAle
  */
 export function mainlineMovedNudgeText(a: { branch: string; repoKey: string; from: string; to: string; evidence: string[]; suspectShas: string[]; atBoot: boolean; expectedBranch?: string }): string {
   const suspects = a.suspectShas.map((x) => x.slice(0, 8)).join(", ") || "none";
+  // @decision 787dd2a7 round 2 — a LANDING first-sight seed onto a branch disagreeing with a resolvable
+  // default is NOT a refusal: it seeds and notifies. Own wording (no "bypass of the merge gate" framing).
+  if (a.evidence.includes("first-sight-seeded-stray")) {
+    const expected = a.expectedBranch ?? "(unknown — see the event's own expectedBranch field)";
+    return `[loom:mainline-moved] repo "${a.repoKey}" seeded its mainline watermark from "${a.branch}" (tip ${a.to.slice(0, 8)}) on this project's first landing, which disagrees with this repo's resolvable default mainline branch "${expected}" (evidence: first-sight-seeded-stray). ` +
+      `The landing itself succeeded and "${a.branch}" is now this project's trusted mainline baseline; this is a notice, not a block. The likely cause is a stale or renamed origin/HEAD, or the landing genuinely went to the wrong branch. ` +
+      `ACTION for you (the manager): if "${expected}" is simply out of date, run \`git remote set-head origin -a\` in the canonical repo to refresh it (diagnostic only — the watermark is already seeded, so this doesn't undo it); if "${a.branch}" is genuinely the wrong branch, ask the owner to reset this project's mainline baseline (POST /api/projects/:id/mainline-watermark/reset, loopback, human-only) and re-land.`;
+  }
   if (a.evidence.includes("branch-diverted")) {
     const expected = a.expectedBranch ?? "(unknown — see the event's own expectedBranch field)";
     return `[loom:mainline-moved] repo "${a.repoKey}" is checked out on "${a.branch}", not the expected mainline branch "${expected}"${a.atBoot ? " (found when the daemon started)" : ""} (evidence: branch-diverted; tip ${a.to.slice(0, 8)}). ` +

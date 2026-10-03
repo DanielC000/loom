@@ -38,7 +38,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree, resolveMainlineBranch, listCheckedOutBranches, deleteBranches, listMergedLoomBranches } = await import("../dist/git/worktrees.js");
+const { createWorktree, resolveMainlineBranch, resolveMainlineBranchState, listCheckedOutBranches, deleteBranches, listMergedLoomBranches } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -168,6 +168,36 @@ try {
   // --- direct primitive checks ---
   check("resolveMainlineBranch resolves 'main' for a repo with a symbolic origin/HEAD", await resolveMainlineBranch(R1) === "main");
   check("resolveMainlineBranch fails CLOSED (null) for a repo with no origin remote", await resolveMainlineBranch(R2) === null);
+
+  // --- Card 787dd2a7 round 2: resolveMainlineBranchState must tell a genuine no-default apart from a
+  // TRANSIENT read failure — resolveMainlineBranch itself stays byte-identical (both still collapse to null). ---
+  const stateResolved = await resolveMainlineBranchState(R1);
+  check("(787dd2a7) resolveMainlineBranchState: resolved for a repo with a symbolic origin/HEAD", stateResolved.state === "resolved" && stateResolved.branch === "main");
+  const stateNoDefault = await resolveMainlineBranchState(R2);
+  check("(787dd2a7) resolveMainlineBranchState: no-default for a repo with no origin remote (never confused with a failure)", stateNoDefault.state === "no-default");
+  const capturedWarnR = [];
+  const origWarnR = console.warn;
+  console.warn = (msg) => { capturedWarnR.push(msg); };
+  let stateFailed, legacyNullOnFailure;
+  const failingGitFactory = () => ({ raw: async () => { throw new Error("simulated transient git read failure"); } });
+  try {
+    stateFailed = await resolveMainlineBranchState(R1, { gitFactory: failingGitFactory });
+    legacyNullOnFailure = await resolveMainlineBranch(R1, { gitFactory: failingGitFactory });
+  } finally {
+    console.warn = origWarnR;
+  }
+  check("(787dd2a7) resolveMainlineBranchState: failed for a TRANSIENT read error (never read as no-default)", stateFailed.state === "failed");
+  check("(787dd2a7) the transient failure is still logged (f96b9d7c's own visibility rule)", capturedWarnR.some((m) => m.includes("resolveMainlineBranch failed") && m.includes("simulated transient git read failure")));
+  check("(787dd2a7) resolveMainlineBranch keeps BYTE-IDENTICAL behavior: a transient failure still collapses to null, same as no-default", legacyNullOnFailure === null);
+
+  // --- Card 787dd2a7 round 3, minor 1: a git call that SUCCEEDS with EMPTY output (a killed child that
+  // simple-git resolves as success — the @decision at worktrees.ts ~1540 and the 4fa36502 rule both
+  // require this NEVER read as "no-default", which would otherwise let boot seed the watermark from
+  // whatever happens to be checked out) must map to "failed" (defer), never "no-default". ---
+  const emptyGitFactory = () => ({ raw: async () => "" });
+  const stateEmptySuccess = await resolveMainlineBranchState(R1, { gitFactory: emptyGitFactory });
+  check("(787dd2a7 round 3) resolveMainlineBranchState: a successful call with EMPTY output is 'failed', never 'no-default'", stateEmptySuccess.state === "failed");
+
   let threwOnBadRepo = false;
   try { await listCheckedOutBranches(path.join(os.tmpdir(), `loom-bgc-does-not-exist-${sfx}`)); } catch { threwOnBadRepo = true; }
   check("listCheckedOutBranches THROWS (not fail-safe-empty) when it can't read worktree state", threwOnBadRepo);

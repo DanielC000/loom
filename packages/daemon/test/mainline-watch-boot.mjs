@@ -147,6 +147,29 @@ try {
   await confirm(d2, y);
   check("(D2) DEDUPE: a second boot pass and the following landing raise no further event or nudge", mwEvents(d2).length === 2 && d2.nudges.length === 1);
 
+  // (D5)/(D6) card 787dd2a7 — BOOT FIRST SIGHT with a RESOLVABLE default that DISAGREES with the checkout:
+  // unlike (D0) (no origin/HEAD — nothing to compare against, seeds unconditionally, unchanged), a repo
+  // whose `refs/remotes/origin/HEAD` names a real default branch must NOT be silently seeded from whatever
+  // else happens to be checked out at boot. No real remote is needed — resolveMainlineBranch only reads the
+  // symbolic ref.
+  const P3 = { projId: `mwbt3-proj-${sfx}`, repo: path.join(os.tmpdir(), `loom-mwbt3-repo-${sfx}`) };
+  fs.mkdirSync(P3.repo, { recursive: true }); registerForCleanup(P3.repo);
+  fs.writeFileSync(path.join(P3.repo, "README.md"), "# mwbt3\n");
+  git(P3.repo, "init", "-q"); git(P3.repo, "config", "core.autocrlf", "false"); git(P3.repo, "config", "user.email", "mw@loom"); git(P3.repo, "config", "user.name", "mw");
+  commitAll(P3.repo, "init", GIT_ID);
+  const MAIN3 = git(P3.repo, "rev-parse", "--abbrev-ref", "HEAD");
+  git(P3.repo, "symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${MAIN3}`);
+  git(P3.repo, "checkout", "-q", "-b", "boot-stray");
+  d2.db.insertProject({ id: P3.projId, name: "MWBT3", repoPath: P3.repo, vaultPath: P3.repo, config: {}, createdAt: now, archivedAt: null });
+  const w3 = () => MW.parseMainlineWatermark(d2.db.getMeta(MW.mainlineWatermarkKey(P3.projId, "primary")));
+  const ev3 = () => d2.db.listEventsSince(0, 100000).filter((e) => e.kind === "mainline_moved_outside_loom" && e.detail?.projectId === P3.projId);
+  check("(D5) setup control: the repo resolves a default that disagrees with the checkout", git(P3.repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") === `origin/${MAIN3}` && git(P3.repo, "rev-parse", "--abbrev-ref", "HEAD") === "boot-stray");
+  await d2.sessions.checkMainlineMovesOnBoot();
+  check("(D5) BOOT FIRST SIGHT, resolvable-and-disagreeing default: W stays UNSEEDED", w3() === null);
+  check("(D5) …and exactly ONE low-severity first-sight-declined event names the mismatch", ev3().length === 1 && ev3()[0].detail.severity === "low" && ev3()[0].detail.evidence?.includes("first-sight-declined") && ev3()[0].detail.branch === "boot-stray" && ev3()[0].detail.expectedBranch === MAIN3);
+  await d2.sessions.checkMainlineMovesOnBoot();
+  check("(D6) DEDUPE: a second boot pass over the SAME unresolved fact raises no further event", w3() === null && ev3().length === 1);
+
   // structural: the boot kick is fire-and-forget in index.ts (never awaited)
   const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const KICK = /void sessions\.checkMainlineMovesOnBoot\(\)\.catch\(/;
