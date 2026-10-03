@@ -1,20 +1,28 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 5ff6586d: `autoCancelSettleWakes` is supposed to reap a session's fallback wake(s) ONLY after a
-// settle nudge is SUCCESSFULLY delivered (every call site carries a comment saying exactly this). But
-// `enqueueDurableMessage` (via `PtyHost.enqueueStdin`) reports a failed delivery by RETURNING
-// `{delivered:false, reason:"session-dead"|"held", ...}` — it never throws — so the try/catch wrapped
-// around each call site's `enqueueDurableMessage(...)` + `autoCancelSettleWakes(...)` pair was DEAD for
-// a delivery outcome, and the unconditional `autoCancelSettleWakes` call reaped the wake regardless.
+// settle nudge is SUCCESSFULLY, durably handed off (every call site carries a comment saying exactly
+// this). But `enqueueDurableMessage` (via `PtyHost.enqueueStdin`) reports a failed delivery by RETURNING
+// `{delivered:false, reason:"session-dead"|"shell-terminal", deliveryState:"dropped", ...}` — it never
+// throws — so a bare try/catch around each call site's `enqueueDurableMessage(...)` +
+// `autoCancelSettleWakes(...)` pair was DEAD for a delivery outcome, and an unconditional
+// `autoCancelSettleWakes` call reaped the wake regardless.
 //
-// This test exercises `reconcileOrphanedGateOps` (one of the five affected call sites in service.ts —
-// all five now share the identical `const r = this.enqueueDurableMessage(...); if (r.delivered)
-// this.autoCancelSettleWakes(...)` shape) against BOTH non-delivery reasons:
-//   (1) SESSION-DEAD — the target was never spawned in the host at all (`live?.alive` is falsy).
-//   (2) HELD — the target IS spawned (alive) but never reaches `ready` (no SessionStart in this fake-pty
-//       fixture ever flips `live.ready`), so `enqueueStdin` takes the "held" branch instead of the
-//       immediate-submit one.
-// In both cases a fallback wake scheduled AFTER the op's own `startedAt` (the exact shape
-// `autoCancelSettleWakes` reaps) MUST survive, because the settle nudge never actually landed.
+// This test exercises `reconcileOrphanedGateOps` (one of the 6 affected call sites in service.ts — all 6
+// now share the identical `const r = this.enqueueDurableMessage(...); if
+// (this.shouldCancelSettleWakeAfter(r)) this.autoCancelSettleWakes(...)` shape) against the ONE
+// deliveryState that must still leave every fallback wake untouched:
+//   SESSION-DEAD — the target was never spawned in the host at all (`live?.alive` is falsy), so
+//   `enqueueStdin` returns `deliveryState:"dropped"`. There is no live recipient at all, so the fallback
+//   wake is this session's ONLY remaining recovery path and must survive.
+//
+// Card 646de997 CORRECTED this file's own prior "HELD" case: a target that's spawned (alive) but never
+// reaches `ready` takes `enqueueStdin`'s HELD branch, which returns `deliveryState:"queued"` — a REAL,
+// durable hand-off (it WILL land at the recipient's next turn boundary), not a failure. Before card
+// 646de997, `if (r.delivered)` alone read `deliveryState:"queued"` as false exactly like "dropped" and
+// left the fallback wake to fire pointlessly after the nudge was already durably queued — this file used
+// to assert that AS THE CORRECT BEHAVIOR, which was the bug. It now asserts the fix: a HELD result IS
+// cancelled, exactly like an immediate delivery. See wake-auto-cancel-on-queued-result.mjs for the
+// focused helper-level proof of both polarities.
 //
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/wake-survives-failed-delivery.mjs
 import fs from "node:fs";
@@ -98,8 +106,8 @@ try {
   const cleared = svc.reconcileOrphanedGateOps(new Date().toISOString());
   check("reconcileOrphanedGateOps processed both orphaned rows", cleared === 2);
 
-  check("SESSION-DEAD: fallback wake SURVIVES an undelivered (session-dead) settle nudge", db.listWakesForSession(deadTarget).some((w) => w.id === fallbackWakeId1));
-  check("HELD: fallback wake SURVIVES an undelivered (held) settle nudge", db.listWakesForSession(heldTarget).some((w) => w.id === fallbackWakeId2));
+  check("SESSION-DEAD: fallback wake SURVIVES a dropped (no live recipient at all) settle nudge", db.listWakesForSession(deadTarget).some((w) => w.id === fallbackWakeId1));
+  check("HELD (card 646de997): fallback wake IS cancelled — a durably-queued hand-off, not a failure", !db.listWakesForSession(heldTarget).some((w) => w.id === fallbackWakeId2));
 
   // Both rows still get marked orphaned regardless of delivery outcome — that side effect is untouched by this fix.
   const rows = db.listPendingGateOps();
@@ -110,6 +118,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a settle nudge's FAILED delivery (session-dead or held) leaves every pending fallback wake untouched; autoCancelSettleWakes only ever reaps after a confirmed successful delivery."
+  ? "\n✅ ALL PASS — a DROPPED (session-dead, no live recipient) settle nudge leaves every pending fallback wake untouched, while a HELD (durably queued) one now cancels the fallback wake just like an immediate delivery (card 646de997)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

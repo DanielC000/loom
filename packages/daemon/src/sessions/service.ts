@@ -8266,6 +8266,20 @@ export class SessionService {
   }
 
   /**
+   * Card 646de997: whether a settle-nudge enqueue result is a real, durable hand-off that makes the
+   * fallback `wake_me` (see {@link autoCancelSettleWakes} above) redundant. True for BOTH an immediate
+   * delivery (`deliveryState:"handed-off"`) and a held/queued one (`deliveryState:"queued"` — still
+   * durably recorded and WILL land at the recipient's next turn boundary). Only `"dropped"` (no live pty
+   * — session-dead) must stay false: there, the fallback wake is the session's sole remaining recovery
+   * path, exactly the case `autoCancelSettleWakes`'s own doc warns never to sweep. All 6 call sites used
+   * to gate on `r.delivered` alone, which is true only for the handed-off case — missing the queued/held
+   * one left a stale wake to fire after the completion nudge was already durably queued for the session.
+   */
+  private shouldCancelSettleWakeAfter(r: { deliveryState: "handed-off" | "queued" | "dropped" }): boolean {
+    return r.deliveryState !== "dropped";
+  }
+
+  /**
    * @decision 27ea069e — boot-time (and generally callable) dead-owner sweep for orphaned MERGE ops;
    *  lineage-corrected (card 257d534d, see isManagerLineageDead's own doc), belt-and-suspenders since
    *  the in-memory registry it reads resets on an actual process restart.
@@ -8340,7 +8354,7 @@ export class SessionService {
           // Card ccb407eb: a one-shot TERMINAL signal (this row is cleared right below regardless of
           // outcome — never re-sent), so it's durable like every other settle nudge.
           const r = this.enqueueDurableMessage(target, msg, { sender: "system", taskId: row.taskId, kind: "warning" });
-          if (r.delivered) this.autoCancelSettleWakes(target, row.startedAt, row.opId);
+          if (this.shouldCancelSettleWakeAfter(r)) this.autoCancelSettleWakes(target, row.startedAt, row.opId);
         } catch {
           /* owning session not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */
         }
@@ -8359,12 +8373,14 @@ export class SessionService {
       const msg = `${tag} op ${row.opId} — no gate/merge verdict was ever reached for this op (its outcome could not be recovered after a daemon restart — no durable settle record was found for it). This is NOT a failure — ${verb} to get a real result.` + attribution + this.buildStampSuffix(deployStaleness);
       try {
         const r = this.enqueueDurableMessage(target, msg, { sender: "system", taskId: row.taskId, kind: "warning" });
-        // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — if the target isn't
-        // live, the fallback wake IS the session's real recovery path; reaping it here would strand the
-        // session exactly when it most needs waking, so a failed/undelivered push leaves every pending
-        // wake untouched (see autoCancelSettleWakes's doc). The durable row already carries the op's real
-        // start instant — no in-memory PendingOpRegistry lookup needed (it was wiped by the restart).
-        if (r.delivered) this.autoCancelSettleWakes(target, row.startedAt, row.opId);
+        // AUTO-CANCEL-ON-NUDGE (card 9d521792): after a real hand-off — delivered OR durably queued/held
+        // (card 646de997: `r.delivered` alone missed the queued case) — if the target isn't live at all
+        // (dropped), the fallback wake IS the session's real recovery path; reaping it here would strand
+        // the session exactly when it most needs waking, so a dropped push leaves every pending wake
+        // untouched (see shouldCancelSettleWakeAfter/autoCancelSettleWakes's own docs). The durable row
+        // already carries the op's real start instant — no in-memory PendingOpRegistry lookup needed (it
+        // was wiped by the restart).
+        if (this.shouldCancelSettleWakeAfter(r)) this.autoCancelSettleWakes(target, row.startedAt, row.opId);
       } catch {
         /* owning session not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */
       }
@@ -14992,12 +15008,13 @@ export class SessionService {
           // event, possibly across a restart, so it needs the CURRENT build's stamp, not one captured
           // earlier in this method.
           const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(currentDeployStaleness()), { sender: "system", taskId, kind: "agent" });
-          // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — see
-          // autoCancelSettleWakes's doc for why a failed/undelivered push must leave every pending wake
-          // untouched. `opStartedAt` is the CLOSED-OVER confirmWorkerMerge param (captured by
+          // AUTO-CANCEL-ON-NUDGE (card 9d521792): after a real hand-off — delivered OR durably queued/held
+          // (card 646de997: `r.delivered` alone missed the queued case, see shouldCancelSettleWakeAfter's
+          // own doc) — see autoCancelSettleWakes's doc for why a dropped push must leave every pending
+          // wake untouched. `opStartedAt` is the CLOSED-OVER confirmWorkerMerge param (captured by
           // confirmWorkerMergeTracked before attach() ever ran) — NOT a settle-time `peek()`, which raced
           // the registry's retain-then-notify ordering under concurrent test load (op 473b8596).
-          if (r.delivered) this.autoCancelSettleWakes(target, opStartedAt, thisOpId);
+          if (this.shouldCancelSettleWakeAfter(r)) this.autoCancelSettleWakes(target, opStartedAt, thisOpId);
         } catch { /* manager not live; wakes deliberately left untouched */ }
       }
       return { suppressed, sha };
@@ -17557,13 +17574,15 @@ export class SessionService {
           const r = this.enqueueDurableMessage(target, msg, { sender: "system", taskId: args.taskId, kind: "agent" });
           // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — a failed/undelivered
           // push leaves every pending wake untouched, since the fallback wake is then the session's own
-          // real recovery path (see autoCancelSettleWakes's doc). `args.opStartedAt` is CAPTURED (not
+          // real recovery path (see autoCancelSettleWakes's doc). Card 646de997: cancels after a real
+          // hand-off — delivered OR durably queued/held (see shouldCancelSettleWakeAfter's own doc) — not
+          // `r.delivered` alone, which missed the queued case. `args.opStartedAt` is CAPTURED (not
           // peeked from the registry here) — threaded all the way from confirmWorkerMergeTracked's own
           // pre-attach() capture, the only place this op's start instant is known unconditionally; a
           // settle-time `peek()` raced the registry's retain-then-notify ordering under concurrent test
           // load (op 473b8596) even though both happen in one synchronous callback — closure capture
           // removes that race entirely instead of chasing it.
-          if (r.delivered) this.autoCancelSettleWakes(target, args.opStartedAt, args.opId);
+          if (this.shouldCancelSettleWakeAfter(r)) this.autoCancelSettleWakes(target, args.opStartedAt, args.opId);
         } catch { /* manager not live; wakes deliberately left untouched */ }
       }
       }
@@ -19698,9 +19717,10 @@ export class SessionService {
           // signal (never re-sent) — now durable like every other settle nudge.
           // Card fde10c75: same build-stamp suffix as the merge-rejected nudge above.
           const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(currentDeployStaleness()), { sender: "system", taskId, kind: "warning" });
-          // @decision 9d521792 — only reaps fallback wakes after a successful delivery; `opStartedAt` is
+          // @decision 9d521792 — reaps fallback wakes after a real hand-off (delivered OR durably
+          // queued/held — card 646de997, see shouldCancelSettleWakeAfter's own doc); `opStartedAt` is
           // the CLOSED-OVER value captured before `attach()`, never a settle-time `peek()` re-derive.
-          if (r.delivered) this.autoCancelSettleWakes(target, opStartedAt, opId);
+          if (this.shouldCancelSettleWakeAfter(r)) this.autoCancelSettleWakes(target, opStartedAt, opId);
         } catch { /* manager not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */ }
       },
       {
@@ -20432,13 +20452,13 @@ export class SessionService {
           // settle nudge.
           // Card fde10c75: same build-stamp suffix as the merge nudges above.
           const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, workerSessionId) + this.buildStampSuffix(currentDeployStaleness()), { sender: "system", taskId: worker.taskId ?? null, kind: "warning" });
-          // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — see
-          // autoCancelSettleWakes's doc for why a failed/undelivered push must leave every pending wake
-          // untouched. `opStartedAt` is the CLOSED-OVER value captured (alongside `attachedToInFlight`)
-          // right before `attach()` above — NOT a settle-time `peek(key)`, which raced the registry's
-          // retain-then-notify ordering under concurrent test load (op 473b8596) even though both happen
-          // in one synchronous callback.
-          if (r.delivered) this.autoCancelSettleWakes(target, opStartedAt, opId);
+          // AUTO-CANCEL-ON-NUDGE (card 9d521792): after a real hand-off — delivered OR durably queued/
+          // held (card 646de997: `r.delivered` alone missed the queued case — see
+          // shouldCancelSettleWakeAfter's own doc). `opStartedAt` is the CLOSED-OVER value captured
+          // (alongside `attachedToInFlight`) right before `attach()` above — NOT a settle-time
+          // `peek(key)`, which raced the registry's retain-then-notify ordering under concurrent test
+          // load (op 473b8596) even though both happen in one synchronous callback.
+          if (this.shouldCancelSettleWakeAfter(r)) this.autoCancelSettleWakes(target, opStartedAt, opId);
         } catch { /* worker not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */ }
       },
       {
