@@ -1409,7 +1409,10 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
       "Bash(git diff:*)",
     ],
     deny: [],
-    // Boot gate-free in acceptEdits, then Shift+Tab twice into the target mode (the human step).
+    // Gate-free target, 2 presses from acceptEdits (the human step) — resolves to "auto" via
+    // modeAfterCyclesFromAcceptEdits. Boot itself goes DIRECTLY to that target when expressible
+    // (computeBootMode, card 51926260, packages/daemon/src/pty/host.ts) rather than always booting at
+    // acceptEdits and climbing — read computeBootMode's own doc rather than assuming an acceptEdits boot.
     startupModeCycles: 2,
   },
   pty: { cols: 80, rows: 24 }, // fixed geometry; viewers scale by font size (no resize). 80x24 (classic terminal size) keeps scaled text comfortably readable in tiled panes.

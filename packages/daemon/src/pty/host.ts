@@ -3926,9 +3926,10 @@ export function buildSpawnArgs(o: {
   // (or, on resume, the conversation's own model from the transcript).
   if (o.model) args.push("--model", o.model);
   // Role-scoped disallow of the interactive human-prompt tools. Placed BEFORE --strict-mcp-config so its
-  // variadic value list is terminated by that flag — keeping the variadic `--mcp-config` the LAST flag,
-  // its value sitting right before the `--` separator (the H2 ordering invariant). Emitted ONLY when
-  // non-empty, so every out-of-scope role's argv is byte-identical (additive-when-applicable discipline).
+  // variadic value list is terminated by that flag — keeping the variadic `--mcp-config` the LAST real
+  // flag (card 0050a17e removed the trailing `--`/prompt that used to follow it — there is no longer a
+  // `--` separator at all). Emitted ONLY when non-empty, so every out-of-scope role's argv is
+  // byte-identical (additive-when-applicable discipline).
   if (o.disallowedTools && o.disallowedTools.length) args.push("--disallowedTools", ...o.disallowedTools);
   // Card f9b47cd1 session naming: also BEFORE --strict-mcp-config, so `-n`'s single value can never eat
   // into the variadic `--mcp-config` that follows. Emitted ONLY when present (see this param's doc).
@@ -4986,7 +4987,8 @@ export class PtyHost {
       lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       unrecognizedMismatchTimestamps: [], unrecognizedMismatchCooldownUntil: null,
       lastPasteTripwireGiveUp: null,
-      // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
+      // Boot is gate-free: it targets the resolved mode DIRECTLY when expressible (computeBootMode, card
+      // 51926260), else lands at acceptEdits and climbs via Shift+Tab once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
       startupCycleInFlight: false,
