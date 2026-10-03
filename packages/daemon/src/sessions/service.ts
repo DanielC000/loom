@@ -20726,6 +20726,123 @@ export class SessionService {
   }
 
   /**
+   * The shared worktree-removal + guarded-CAS-branch-delete tail both `finalizeMerge` and boot-reconcile
+   * Pass A's own-row/sibling cleanup-only path call.
+   *
+   * @decision e34d475c — never drop the `betweenRemovalAndDelete` seam between the removal and the
+   * delete, and never wrap that callback in a try/catch: a throw inside it must still skip the delete,
+   * exactly as it did before this method existed.
+   */
+  private async finalizeWorktreeAndBranch(args: {
+    repoPath: string; worktreePath: string; branch: string;
+    projectId: string; taskId: string | null;
+    /** Only ever set by `finalizeMerge`'s manager-facing caller (card b6d41db1); the cleanup-only/
+     *  automatic paths never set it — see `gcWorktreeDir`'s own doc for why. */
+    forceRemoveWorktree?: boolean;
+    /** Card 42daa283 — undefined only when the branch is confirmed already gone (nothing to protect). */
+    expectedBranchTip?: string;
+    onWorktreeRetainedDirty?: (info: DirtyWorktreeRetained) => void;
+    onBranchRetained?: (liveTip: string | null, phase: "ref-kept-after-finalize") => void;
+    /** `finalizeMerge`'s own crash-critical terminal bookkeeping (see this method's own doc above) —
+     *  omitted by the cleanup-only caller. */
+    betweenRemovalAndDelete?: () => void;
+    /**
+     * @decision e34d475c — never call `deleteBranch` when the branch is confirmed gone
+     * (`expectedBranchTip` undefined); only Pass A's cleanup-only caller sets this, never `finalizeMerge`.
+     */
+    skipDeleteWhenBranchGone?: boolean;
+    /** Card e34d475c (round 5, NIT): lets the cleanup-only caller log under `[reconcile]` instead of
+     *  `[finalizeMerge]` — this tail runs for both callers, and the old hardcoded prefix mislabeled every
+     *  Pass A warning as coming from a manager-facing merge confirm. Defaults to `[finalizeMerge]`,
+     *  unchanged for that caller. */
+    logPrefix?: string;
+    /** Test-only seam (card e34d475c, round 5): a `gitFactory` for THIS method's own `listCheckedOutBranches`/
+     *  `deleteBranch` calls only — lets a test spy on (or stub) exactly the git surface this tail drives,
+     *  without touching `gcWorktreeDir`'s own git ops. Omitted in production (both callers), unchanged. */
+    gitFactory?: BoundedGitDeps["gitFactory"];
+  }): Promise<{
+    nestedRepoBlock?: { paths: string[]; truncated: boolean };
+    dirtyWorktreeRetained?: DirtyWorktreeRetained;
+    worktreeGcOutcome?: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused" | "quarantined";
+    worktreeRemoved: boolean;
+  }> {
+    const logPrefix = args.logPrefix ?? "[finalizeMerge]";
+    let nestedRepoBlock: { paths: string[]; truncated: boolean } | undefined;
+    let dirtyWorktreeRetained: DirtyWorktreeRetained | undefined;
+    let worktreeGcOutcome: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused" | "quarantined" | undefined;
+    let worktreeRemoved = false;
+    try {
+      // The nested-git-repo guard (card b6d41db1) lives IN gcWorktreeDir — the single removal
+      // chokepoint every caller (this, boot-reconcile Pass B's two GC sites, the wedge sweep) shares —
+      // so it can never be bypassed via a sibling path. `forceRemoveWorktree` is threaded through ONLY
+      // from the manager-facing caller; see gcWorktreeDir's own doc for why the automatic paths never
+      // set it.
+      const result = await this.gcWorktreeDir(args.repoPath, args.worktreePath, {
+        projectId: args.projectId,
+        worktreeId: codescapeWorktreeId(args.taskId),
+      }, { forceRemoveWorktree: args.forceRemoveWorktree, branch: args.branch, retainIfUncommitted: true });
+      worktreeRemoved = result.outcome === "removed";
+      if (result.outcome === "dirty-retained") {
+        dirtyWorktreeRetained = result.dirtyWorktree;
+        args.onWorktreeRetainedDirty?.(result.dirtyWorktree!);
+      }
+      if (result.outcome === "nested-repo-blocked") {
+        nestedRepoBlock = { paths: result.nestedRepoPaths ?? [], truncated: !!result.scanTruncated };
+        // eslint-disable-next-line no-console
+        console.warn(`${logPrefix} worktree ${args.worktreePath} RETAINED (nested-repo-blocked) — ` +
+          `merge already landed, only the worktree cleanup is deferred.`);
+      } else if (result.outcome !== "removed" && result.outcome !== "dirty-retained") {
+        // Task 035fb673: this used to be console.warn-only (the daemon log), invisible to the merging
+        // manager. `worktreeGcOutcome` carries it out to the caller so it can be folded into the
+        // `worker_merge_confirm` return's `warning` field — a surface the manager already reads.
+        worktreeGcOutcome = result.outcome;
+        // eslint-disable-next-line no-console
+        console.warn(`${logPrefix} worktree ${args.worktreePath} not removed (${result.outcome}); ` +
+          `merge already landed — finishing bookkeeping regardless.`);
+      }
+    } catch (e) {
+      // gcWorktreeDir/removeWorktree are themselves best-effort and should never throw; stay defensive
+      // anyway so an unexpected throw can't abort the rest of finalizeMerge's bookkeeping.
+      // eslint-disable-next-line no-console
+      console.warn(`${logPrefix} could not remove worktree ${args.worktreePath} (dir busy?); ` +
+        `merge already landed — finishing bookkeeping, boot-reconcile Pass B will GC the dir: ${(e as Error).message}`);
+    }
+    // The ONE seam (see this method's own doc) — invoked un-wrapped so a throw propagates exactly as it
+    // did when this code ran inline in finalizeMerge, skipping the delete below entirely.
+    args.betweenRemovalAndDelete?.();
+    // A retained worktree (nested-repo guard above, hit OR inconclusively truncated) is still checked
+    // out on `branch` — `git branch -D` would only fail ("checked out at ...") and warn for a reason we
+    // already know, so skip it; the branch is deleted on a later confirm once the worktree is actually gone.
+    // @decision cc9bce38 — skip the CAS delete only while git STILL has the branch checked out ANYWHERE (`update-ref -d`, unlike `branch -D`, would drop it), whether or not THIS
+    // worktree was removed; a worktree that was not removed but is already de-registered (wedged / left-on-disk) no longer holds it, so the delete proceeds. Fail closed: an unreadable list skips.
+    let branchStillCheckedOut = false;
+    if (!nestedRepoBlock && !dirtyWorktreeRetained && args.expectedBranchTip) {
+      try { branchStillCheckedOut = (await listCheckedOutBranches(args.repoPath, { timeoutMs: this.gitOpMs, gitFactory: args.gitFactory })).has(args.branch); } catch { branchStillCheckedOut = true; }
+    }
+    // @decision e34d475c — `skipDeleteWhenBranchGone` opts OUT of `deleteBranch` entirely once the
+    // branch is confirmed gone; only the cleanup-only caller sets it, never `finalizeMerge`.
+    const skipGoneBranchDelete = !!args.skipDeleteWhenBranchGone && !args.expectedBranchTip;
+    if (!nestedRepoBlock && !dirtyWorktreeRetained && args.expectedBranchTip && branchStillCheckedOut) {
+      // `git update-ref -d` (the CAS below) — unlike `branch -D` — DELETES a branch that is still checked out in a live
+      // worktree. When the worktree was not actually removed (wedged / left-on-disk / needs-human-skip) skip the delete,
+      // matching the solo path's effective refusal: the ref goes on a later confirm once the worktree is genuinely gone.
+      // eslint-disable-next-line no-console
+      console.warn(`${logPrefix} branch ${args.branch} NOT deleted: git still has it checked out in a worktree (worktree GC: ${worktreeRemoved ? "removed" : (worktreeGcOutcome ?? "unknown")}), or that could not be verified, and a compare-and-swap ref delete would drop a checked-out branch`);
+    } else if (!nestedRepoBlock && !dirtyWorktreeRetained && !skipGoneBranchDelete) {
+      // Card 42daa283: with an expected tip this is a COMPARE-AND-SWAP delete; a refusal means the tip moved in the
+      // window since the check above. By now the worktree is gone (or not, per worktreeGcOutcome) — this is
+      // FINALIZED with only the ref kept (phase "ref-kept-after-finalize"), never reported as "not finalized".
+      const deleted = await deleteBranch(args.repoPath, args.branch, { timeoutMs: this.gitOpMs, gitFactory: args.gitFactory, ...(args.expectedBranchTip ? { expectedTip: args.expectedBranchTip } : {}) });
+      if (!deleted) {
+        let liveTip: string | null = null;
+        try { liveTip = (await resolveGitRef(args.repoPath, args.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
+        args.onBranchRetained?.(liveTip, "ref-kept-after-finalize");
+      }
+    }
+    return { ...(nestedRepoBlock ? { nestedRepoBlock } : {}), ...(dirtyWorktreeRetained ? { dirtyWorktreeRetained } : {}), ...(worktreeGcOutcome ? { worktreeGcOutcome } : {}), worktreeRemoved };
+  }
+
+  /**
    * The post-merge bookkeeping shared by confirmWorkerMerge (the interactive merge path) and
    * reconcileOrchestrationOnBoot (orphaned-merge recovery): retire the worktree, finish the task,
    * record `merge_done`, then delete the now-merged branch. Factored out so the two callers can't
@@ -20869,155 +20986,86 @@ export class SessionService {
     // (ALREADY_MERGED + Green) here once, so they can't drift; at boot-reconcile it's a no-op (recoverStale-
     // Sessions has already marked prior-run ptys exited, so the task has no live siblings).
     await this.retireSiblingSessionsForTask(args.taskId, args.workerSessionId);
-    let nestedRepoBlock: { paths: string[]; truncated: boolean } | undefined;
-    let dirtyWorktreeRetained: DirtyWorktreeRetained | undefined;
-    let worktreeGcOutcome: "wedged" | "left-on-disk" | "needs-human-skip" | "path-refused" | "quarantined" | undefined;
-    let worktreeRemoved = false;
-    try {
-      // The nested-git-repo guard (card b6d41db1) lives IN gcWorktreeDir — the single removal
-      // chokepoint every caller (this, boot-reconcile Pass B's two GC sites, the wedge sweep) shares —
-      // so it can never be bypassed via a sibling path. `forceRemoveWorktree` is threaded through ONLY
-      // from this manager-facing caller; see gcWorktreeDir's own doc for why the automatic paths never
-      // set it.
-      const result = await this.gcWorktreeDir(args.repoPath, args.worktreePath, {
-        projectId: args.projectId,
-        worktreeId: codescapeWorktreeId(args.taskId),
-      }, { forceRemoveWorktree: args.forceRemoveWorktree, branch: args.branch, retainIfUncommitted: true });
-      worktreeRemoved = result.outcome === "removed";
-      if (result.outcome === "dirty-retained") {
-        dirtyWorktreeRetained = result.dirtyWorktree;
-        args.onWorktreeRetainedDirty?.(result.dirtyWorktree!);
-      }
-      if (result.outcome === "nested-repo-blocked") {
-        nestedRepoBlock = { paths: result.nestedRepoPaths ?? [], truncated: !!result.scanTruncated };
-        // eslint-disable-next-line no-console
-        console.warn(`[finalizeMerge] worktree ${args.worktreePath} RETAINED (nested-repo-blocked) — ` +
-          `merge already landed, only the worktree cleanup is deferred.`);
-      } else if (result.outcome !== "removed" && result.outcome !== "dirty-retained") {
-        // Task 035fb673: this used to be console.warn-only (the daemon log), invisible to the merging
-        // manager. `worktreeGcOutcome` carries it out to the caller so it can be folded into the
-        // `worker_merge_confirm` return's `warning` field — a surface the manager already reads.
-        worktreeGcOutcome = result.outcome;
-        // eslint-disable-next-line no-console
-        console.warn(`[finalizeMerge] worktree ${args.worktreePath} not removed (${result.outcome}); ` +
-          `merge already landed — finishing bookkeeping regardless.`);
-      }
-    } catch (e) {
-      // gcWorktreeDir/removeWorktree are themselves best-effort and should never throw; stay defensive
-      // anyway so an unexpected throw can't abort the rest of finalizeMerge's bookkeeping.
-      // eslint-disable-next-line no-console
-      console.warn(`[finalizeMerge] could not remove worktree ${args.worktreePath} (dir busy?); ` +
-        `merge already landed — finishing bookkeeping, boot-reconcile Pass B will GC the dir: ${(e as Error).message}`);
-    }
-    // Terminal bookkeeping BEFORE the destructive deleteBranch (see the ORDER IS CRASH-CRITICAL note).
-    // Land the task in the `mergeLanding` lane if the project has one configured, else the `terminal`
-    // lane (role-resolved off its project, last-column fallback) — not the hardcoded "done" key. A
-    // project with no `mergeLanding` column resolves `undefined` here and falls through to `terminal`
-    // exactly as before this role existed. A merge always has a terminal lane (the role is required +
-    // falls back to last).
-    // ONLY on the FIRST finalize for this worker (no prior merge_done event) — a REPLAY (an idempotent
-    // worktree-GC retry, or a reconnect/boot reconciliation re-run finding the merge already landed) must
-    // never force the column back over a manual move a human made AFTER the merge landed.
-    //
-    // @decision sha:61446519 — a REPLAY silently resetting a manually-moved-to-non-terminal card
-    // back to terminal made worker_spawn wrongly refuse it as a terminal-column task; that was the bug.
-    //
-    // REPLAY DETECTION (card daaf7fc9): `hadPriorMergeDone` is TRUE the moment ANY earlier finalizeMerge
-    // call for this exact workerSessionId already recorded a merge_done event — independent of `taskId`,
-    // unlike `alreadyFinalized` below (which additionally requires one, since it exists only to gate the
-    // task column-move/ship-state write). A LATER finalizeMerge call for the SAME worker is a REPLAY of a
-    // merge that already landed — a boot-reconcile re-run re-finding the same landed squash
-    // (reconcileOrchestrationOnBoot Pass A), an idempotent worktree-GC retry, or a stale
-    // worker_merge_confirm redelivery landing on finishAlreadyMerged's own finalizeMerge call — never a
-    // call where main just advanced again. See the reingest call site below for what this gates and why.
-    //
-    // @decision daaf7fc9 — hadPriorMergeDone can also be set by reconcile Pass A2's board-state
-    // inference; a merge_request-only worker moved to terminal by hand then also skips a
-    // legitimately-due reingest. Narrow, pre-existing, low-consequence — not fixed here.
-    //
-    const hadPriorMergeDone = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
-    const alreadyFinalized = args.taskId != null && hadPriorMergeDone;
-    if (args.taskId && !alreadyFinalized) {
-      const task = this.db.getTask(args.taskId);
-      const landingKey = task
-        ? (this.columnKeyForProjectRole(task.projectId, "mergeLanding") ??
-          this.columnKeyForProjectRole(task.projectId, "terminal"))
-        : undefined;
-      // Ship-state (card 1eebc46a): persisted alongside the column move, in the SAME first-finalize-only
-      // guard (gated on `!alreadyFinalized`, i.e. no prior merge_done event for this worker) — so a
-      // REPLAY finalize (an idempotent worktree-GC retry, or a reconnect/boot reconcile re-run finding the
-      // merge already landed for the SAME worker) leaves an already-persisted mergedSha untouched, exactly
-      // like the columnKey move above it. This guard is NOT a re-task protection — a genuinely re-tasked
-      // card gets a brand-new worker/session and correctly OVERWRITES the prior landing's ship-state on
-      // ITS OWN first finalize, same as it correctly overwrites columnKey. `args.mergedSha` is shortened
-      // to 7 chars to match the MCP `merged.sha` convention (mcp/tasks.ts). Best-effort: omitted
-      // `mergedSha` (a defensive caller) just means these columns stay null, exactly as before this card.
-      const shipPatch = args.mergedSha
-        ? {
-          mergedSha: args.mergedSha.slice(0, 7), mergedRepoKey: args.repoKey ?? null, mergedDate: new Date().toISOString(),
-          mergedVerification: args.mergedVerification ?? null,
+    // @decision e34d475c — the worktree-removal + branch-delete tail is the shared `finalizeWorktreeAndBranch`
+    // helper (also used by boot-reconcile Pass A); never re-inline a second copy of its delete-skip logic.
+    let hadPriorMergeDone = false;
+    const { nestedRepoBlock, dirtyWorktreeRetained, worktreeGcOutcome } = await this.finalizeWorktreeAndBranch({
+      repoPath: args.repoPath, worktreePath: args.worktreePath, branch: args.branch,
+      projectId: args.projectId, taskId: args.taskId,
+      forceRemoveWorktree: args.forceRemoveWorktree,
+      expectedBranchTip: args.expectedBranchTip,
+      onWorktreeRetainedDirty: args.onWorktreeRetainedDirty,
+      onBranchRetained: args.onBranchRetained,
+      betweenRemovalAndDelete: () => {
+        // Terminal bookkeeping BEFORE the destructive deleteBranch (see the ORDER IS CRASH-CRITICAL note).
+        // Land the task in the `mergeLanding` lane if the project has one configured, else the `terminal`
+        // lane (role-resolved off its project, last-column fallback) — not the hardcoded "done" key. A
+        // project with no `mergeLanding` column resolves `undefined` here and falls through to `terminal`
+        // exactly as before this role existed. A merge always has a terminal lane (the role is required +
+        // falls back to last).
+        // ONLY on the FIRST finalize for this worker (no prior merge_done event) — a REPLAY (an idempotent
+        // worktree-GC retry, or a reconnect/boot reconciliation re-run finding the merge already landed) must
+        // never force the column back over a manual move a human made AFTER the merge landed.
+        //
+        // @decision sha:61446519 — a REPLAY silently resetting a manually-moved-to-non-terminal card
+        // back to terminal made worker_spawn wrongly refuse it as a terminal-column task; that was the bug.
+        //
+        // REPLAY DETECTION (card daaf7fc9): `hadPriorMergeDone` is TRUE the moment ANY earlier finalizeMerge
+        // call for this exact workerSessionId already recorded a merge_done event — independent of `taskId`,
+        // unlike `alreadyFinalized` below (which additionally requires one, since it exists only to gate the
+        // task column-move/ship-state write). A LATER finalizeMerge call for the SAME worker is a REPLAY of a
+        // merge that already landed — a boot-reconcile re-run re-finding the same landed squash
+        // (reconcileOrchestrationOnBoot Pass A), an idempotent worktree-GC retry, or a stale
+        // worker_merge_confirm redelivery landing on finishAlreadyMerged's own finalizeMerge call — never a
+        // call where main just advanced again. See the reingest call site below for what this gates and why.
+        //
+        // @decision daaf7fc9 — hadPriorMergeDone can also be set by reconcile Pass A2's board-state
+        // inference; a merge_request-only worker moved to terminal by hand then also skips a
+        // legitimately-due reingest. Narrow, pre-existing, low-consequence — not fixed here.
+        //
+        hadPriorMergeDone = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
+        const alreadyFinalized = args.taskId != null && hadPriorMergeDone;
+        if (args.taskId && !alreadyFinalized) {
+          const task = this.db.getTask(args.taskId);
+          const landingKey = task
+            ? (this.columnKeyForProjectRole(task.projectId, "mergeLanding") ??
+              this.columnKeyForProjectRole(task.projectId, "terminal"))
+            : undefined;
+          // Ship-state (card 1eebc46a): persisted alongside the column move, in the SAME first-finalize-only
+          // guard (gated on `!alreadyFinalized`, i.e. no prior merge_done event for this worker) — so a
+          // REPLAY finalize (an idempotent worktree-GC retry, or a reconnect/boot reconcile re-run finding the
+          // merge already landed for the SAME worker) leaves an already-persisted mergedSha untouched, exactly
+          // like the columnKey move above it. This guard is NOT a re-task protection — a genuinely re-tasked
+          // card gets a brand-new worker/session and correctly OVERWRITES the prior landing's ship-state on
+          // ITS OWN first finalize, same as it correctly overwrites columnKey. `args.mergedSha` is shortened
+          // to 7 chars to match the MCP `merged.sha` convention (mcp/tasks.ts). Best-effort: omitted
+          // `mergedSha` (a defensive caller) just means these columns stay null, exactly as before this card.
+          const shipPatch = args.mergedSha
+            ? {
+              mergedSha: args.mergedSha.slice(0, 7), mergedRepoKey: args.repoKey ?? null, mergedDate: new Date().toISOString(),
+              mergedVerification: args.mergedVerification ?? null,
+            }
+            : {};
+          if (landingKey || args.mergedSha) {
+            this.db.updateTask(args.taskId, { ...(landingKey ? { columnKey: landingKey } : {}), ...shipPatch });
+          }
         }
-        : {};
-      if (landingKey || args.mergedSha) {
-        this.db.updateTask(args.taskId, { ...(landingKey ? { columnKey: landingKey } : {}), ...shipPatch });
-      }
-    }
-    // Left UNCONDITIONAL deliberately (card daaf7fc9's own LEAD, not a finding): a replay finalize still
-    // appends a SECOND merge_done for this worker. The `alreadyFinalized`/`hadPriorMergeDone` guards above
-    // and below use `.some()`, so they stay correct either way. Two DIFFERENT counts matter here — don't
-    // conflate them, and don't trust a hardcoded total for either (a repo-wide grep count drifts with
-    // every edit, including edits to comments like this one that quote the pattern):
-    //   - WRITERS of the merge_done event kind — the number that actually bounds how many merge_done rows
-    //     a replay can produce. Re-derive live (this comment intentionally does NOT literally spell out
-    //     the object-shape pattern, so grepping for it never self-matches this line): search for the
-    //     TypeScript event-literal shape `kind:` immediately followed by the quoted event-kind string, in
-    //     packages/daemon/src/. As of this fix: exactly 2, both in THIS file — this call, and reconcile
-    //     Pass A2 (search for `reconciled: true` a bit further down in this same file).
-    //   - READERS (filter/some()/count consumers of the event) — the population that would need auditing
-    //     before this append could safely be guarded too. Re-derive live: `grep -rln merge_done
-    //     packages/daemon/src/`. As of this fix: this file plus db.ts, mcp/orchestration.ts,
-    //     idle-watcher.ts, companion/attention-push.ts — the overwhelming majority of individual
-    //     mentions live in THIS file, not spread across the other four. None of them, here or there, have
-    //     been audited for a consumer that COUNTS events rather than checking presence.
-    // Audit before guarding this append too; until then, leave it firing on every finalize call, replay
-    // or not.
-    const mergeDoneSeq = this.db.appendEvent({
-      id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
-      taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, repoKey: args.repoKey, ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}) },
+        // @decision e34d475c — this merge_done append stays UNCONDITIONAL on every finalize call, replay
+        // or not; do not guard it without first re-deriving AND auditing every READER of this event kind,
+        // not just the writer count — an unaudited counting reader would silently break.
+        const mergeDoneSeq = this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
+          taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, repoKey: args.repoKey, ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}) },
+        });
+        args.onMergeDoneAppended?.(args.branch, args.repoKey, mergeDoneSeq);
+        // Card 84a2eb2d: this worker's branch just objectively finalized — drop any `[loom:worker-report]`
+        // nudge still queued for it (see purgeQueuedWorkerReportNudgesOnMerge's own doc for why worker-scoped
+        // keying is safe here). Best-effort, right after the merge_done append above so this fires on every
+        // path that reaches this point (solo confirm, batch via finishAlreadyMerged, boot-reconcile Pass A).
+        try { this.purgeQueuedWorkerReportNudgesOnMerge(args.managerSessionId, args.workerSessionId); } catch { /* never let a purge fail the merge */ }
+      },
     });
-    args.onMergeDoneAppended?.(args.branch, args.repoKey, mergeDoneSeq);
-    // Card 84a2eb2d: this worker's branch just objectively finalized — drop any `[loom:worker-report]`
-    // nudge still queued for it (see purgeQueuedWorkerReportNudgesOnMerge's own doc for why worker-scoped
-    // keying is safe here). Best-effort, right after the merge_done append above so this fires on every
-    // path that reaches this point (solo confirm, batch via finishAlreadyMerged, boot-reconcile Pass A).
-    try { this.purgeQueuedWorkerReportNudgesOnMerge(args.managerSessionId, args.workerSessionId); } catch { /* never let a purge fail the merge */ }
-    // A retained worktree (nested-repo guard above, hit OR inconclusively truncated) is still checked
-    // out on `branch` — `git branch -D` would only fail ("checked out at ...") and warn for a reason we
-    // already know, so skip it; the branch is deleted on a later confirm once the worktree is actually gone.
-    // @decision cc9bce38 — skip the CAS delete only while git STILL has the branch checked out ANYWHERE (`update-ref -d`, unlike `branch -D`, would drop it), whether or not THIS
-    // worktree was removed; a worktree that was not removed but is already de-registered (wedged / left-on-disk) no longer holds it, so the delete proceeds. Fail closed: an unreadable list skips.
-    let branchStillCheckedOut = false;
-    if (!nestedRepoBlock && !dirtyWorktreeRetained && args.expectedBranchTip) {
-      try { branchStillCheckedOut = (await listCheckedOutBranches(args.repoPath, { timeoutMs: this.gitOpMs })).has(args.branch); } catch { branchStillCheckedOut = true; }
-    }
-    if (!nestedRepoBlock && !dirtyWorktreeRetained && args.expectedBranchTip && branchStillCheckedOut) {
-      // `git update-ref -d` (the CAS below) — unlike `branch -D` — DELETES a branch that is still checked out in a live
-      // worktree. When the worktree was not actually removed (wedged / left-on-disk / needs-human-skip) skip the delete,
-      // matching the solo path's effective refusal: the ref goes on a later confirm once the worktree is genuinely gone.
-      // eslint-disable-next-line no-console
-      console.warn(`[finalizeMerge] branch ${args.branch} NOT deleted: git still has it checked out in a worktree (worktree GC: ${worktreeRemoved ? "removed" : (worktreeGcOutcome ?? "unknown")}), or that could not be verified, and a compare-and-swap ref delete would drop a checked-out branch`);
-    } else if (!nestedRepoBlock && !dirtyWorktreeRetained) {
-      // Card 42daa283: with an expected tip this is a COMPARE-AND-SWAP delete; a refusal means the tip moved in the
-      // window since the check above. By now the worktree is gone, the task moved and merge_done filed — this is
-      // FINALIZED with only the ref kept (phase "ref-kept-after-finalize"), never reported as "not finalized".
-      const deleted = await deleteBranch(args.repoPath, args.branch, { timeoutMs: this.gitOpMs, ...(args.expectedBranchTip ? { expectedTip: args.expectedBranchTip } : {}) });
-      if (!deleted) {
-        let liveTip: string | null = null;
-        try { liveTip = (await resolveGitRef(args.repoPath, args.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
-        args.onBranchRetained?.(liveTip, "ref-kept-after-finalize");
-      }
-    }
     // Codescape C3: reingest main's CURRENT working tree AFTER it's been checked out above (both the
     // Green path and the ALREADY_MERGED path converge here) — fire-and-forget, NEVER awaited inline: a
     // big-repo ingest can take up to ~2 minutes, so awaiting it here would hold the merge caller for that
@@ -21209,11 +21257,12 @@ export class SessionService {
         // without that meaning "the merge needs re-finishing." Keying this off columnKey used to make
         // exactly that manual move look unreconciled on every future boot, re-running finalizeMerge and (pre
         // the finalizeMerge guard above) forcing the column back to terminal each time.
-        // @decision c1161989 — `.size > 0` preserves the exact "any merge_done ever" semantics the old
-        // `workerEvents.some(e => e.kind === "merge_done")` had; don't scope this to the current
-        // task/branch here (that's a future, separate change — see WorkerEventPresence's own doc).
+        // @decision e34d475c — never key this on bare merge_done presence; match task AND branch, except
+        // a legacy row with NO recorded branch (predates branch recording), which matches on task alone —
+        // `workerEventPresenceKey`'s own `\u0001` sentinel for a null branch answers that leg for free.
         const eventPresence = eventPresenceMap.get(s.id);
-        const alreadyFinalized = (eventPresence?.mergeDoneKeys.size ?? 0) > 0;
+        const alreadyFinalized = !!eventPresence?.mergeDoneKeys.has(workerEventPresenceKey(s.taskId, s.branch))
+          || !!eventPresence?.mergeDoneKeys.has(workerEventPresenceKey(s.taskId, null));
         // CHEAP, REPO-FREE EARLY-OUT (card c33f94b2: moved ahead of repoKey resolution too, not just the
         // squash lookup below) — "already fully reconciled" is knowable from the DB + fs alone, so a
         // session finalized by some other means (e.g. Pass A2 just below) never needs its repo resolved at
@@ -21327,20 +21376,26 @@ export class SessionService {
             ? `[reconcile] worker ${s.id} (branch ${s.branch}) is HELD by a merge retain (batch or solo) and its release could NOT be VERIFIED (a git read of main failed) — skipping its finalize this boot (branch/worktree kept; a later boot retries)`
             : `[reconcile] worker ${s.id} (branch ${s.branch}) is HELD by a merge retain (batch or solo) — skipping its finalize (branch/worktree kept for review)`);          continue;
         }
-        // @decision 9ac3a739 — never key "already finalized" on branch presence or git commit time;
-        // key it on DB event seq order (latest merge_done after latest merge_request, repo-scoped), and
-        // never on an own-row retry (`alreadyFinalized`), which must always fall through to finalizeMerge.
-        if (!alreadyFinalized) {
+        // @decision 9ac3a739 — never key "already finalized" on branch presence or git commit time; key
+        // it on DB event seq order (latest merge_done after latest merge_request, repo-scoped).
+        // @decision e34d475c — an OWN-ROW retry (`alreadyFinalized` true) now takes this EXACT SAME
+        // tip-guarded cleanup-only path as a sibling's, rather than a separate, unguarded shortcut: both
+        // need the identical protection against a late commit landing after the recorded finalize.
+        {
           const repoScope = s.repoKey ?? null;
           const latestDoneSeq = mergeDoneSeqMap.get(latestEventSeqMapKey(s.branch!, repoScope)) ?? null;
           const latestRequestSeq = mergeRequestSeqMap.get(latestEventSeqMapKey(s.branch!, repoScope)) ?? null;
           const finalizedElsewhere = latestDoneSeq != null && (latestRequestSeq == null || latestDoneSeq > latestRequestSeq);
-          if (finalizedElsewhere) {
-            // Some OTHER row sharing this branch already finalized this landing — never call the full
-            // finalizeMerge here (it would re-move the task column / re-persist ship-state / refire a
-            // reingest under THIS row's id, the original m1 bug). If this row's own worktree dir still
-            // lingers (the other row's own removal was incomplete), clean up ONLY the dir + branch ref —
-            // no task bookkeeping, no merge_done, no reingest, all already done under the other row.
+          // `alreadyFinalized` (this row's OWN recorded landing) always wins the OR — it can never be
+          // false-negatived by a newer, unrelated merge_request on the same branch the way the bare
+          // cross-row seq comparison alone could (e.g. a re-task's own later request pending resolution).
+          if (alreadyFinalized || finalizedElsewhere) {
+            // This landing (by this row OR some other row sharing the branch) already finalized — never
+            // call the full finalizeMerge here (it would re-move the task column / re-persist ship-state /
+            // refire a reingest under THIS row's id, the original m1 bug, or — for an own-row retry —
+            // duplicate the merge_done/worker_retired events forever against a dir that never clears, card
+            // e34d475c). If this row's own worktree dir still lingers, clean up ONLY the dir + branch ref —
+            // no task bookkeeping, no merge_done, no reingest, all already done (by this row or the other).
             // `retainIfUncommitted` (never `worktreeHasWork`, same reason Pass A never applies it to its
             // own finalize below: a genuinely-landed squash is still "ahead of base" by git's literal
             // ancestry, so that check would wrongly retain every real case this branch exists to clean up).
@@ -21363,25 +21418,23 @@ export class SessionService {
               }
               if (!tipMismatch) {
                 try {
-                  const { outcome } = await this.gcWorktreeDir(repoPath, worktreePath, { projectId: project.id, worktreeId: codescapeWorktreeId(s.taskId) }, { branch: s.branch, retainIfUncommitted: true });
-                  if (outcome === "removed") worktreesPruned++;
-                  else handledWorktrees.add(worktreePath); // retained (dirty/wedged/etc) — never re-decide it as a plain Pass B orphan
-                  // CAS pin is the branch's OWN tip, never landedSha (the squash commit on main — a
-                  // different object).
-                  // @decision 9ac3a739 — act on deleteBranch's own CAS refusal (round 3, item 3): `false`
-                  // means the tip moved since the check above — file the same retained event instead of
-                  // silently swallowing the refusal.
-                  if (sibGuard.expectedBranchTip) {
-                    const deleted = await deleteBranch(repoPath, s.branch, { timeoutMs: this.gitOpMs, expectedTip: sibGuard.expectedBranchTip });
-                    if (!deleted) {
-                      let liveTip2: string | null = null;
-                      try { liveTip2 = (await resolveGitRef(repoPath, s.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip2 = null; }
-                      sibGuard.onBranchRetained(liveTip2, "ref-kept-after-finalize");
-                    }
-                  }
+                  // @decision e34d475c — never run the CAS branch delete here without going through
+                  // `finalizeWorktreeAndBranch` — it gates the delete on gcWorktreeDir's own outcome;
+                  // this path previously ran deleteBranch unconditionally whenever a tip was expected.
+                  const result = await this.finalizeWorktreeAndBranch({
+                    repoPath, worktreePath, branch: s.branch,
+                    projectId: project.id, taskId: s.taskId,
+                    expectedBranchTip: sibGuard.expectedBranchTip,
+                    onBranchRetained: sibGuard.onBranchRetained,
+                    skipDeleteWhenBranchGone: true,
+                    logPrefix: "[reconcile]",
+                    gitFactory: gitDeps.gitFactory,
+                  });
+                  if (result.worktreeRemoved) worktreesPruned++;
+                  else handledWorktrees.add(worktreePath); // retained (dirty/wedged/nested/etc) — never re-decide it as a plain Pass B orphan
                 } catch (e) {
                   // eslint-disable-next-line no-console
-                  console.warn(`[reconcile] could not clean up sibling worktree/branch for worker ${s.id} (branch ${s.branch}, already finalized through another row): ${(e as Error).message}`);
+                  console.warn(`[reconcile] could not clean up worktree/branch for worker ${s.id} (branch ${s.branch}; already finalized, this row or another): ${(e as Error).message}`);
                 }
               }
               handledWorktrees.add(worktreePath);

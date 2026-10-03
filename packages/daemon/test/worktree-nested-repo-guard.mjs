@@ -38,6 +38,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       --porcelain` is blind to it and worktreeHasWork() reports false ("safe to prune"). Drives
 //       reconcileOrchestrationOnBoot() directly (mirrors boot-reconcile-keep-work.mjs) and proves the
 //       SAME chokepoint guard applies here too: the worktree + nested clone are RETAINED, not destroyed.
+//       (Card e34d475c: this SAME reconcile call also incidentally cleans up T's and E's own already-
+//       finalized-but-retained worktrees from scenarios (5)/(6) via Pass A's own-row cleanup-only retry —
+//       collateral of the shared `db` across scenarios, not this scenario's own subject; see its own
+//       checks below for why that's correct, not a regression.)
 // Run: 1) build daemon (pnpm build), 2) node test/worktree-nested-repo-guard.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -254,7 +258,19 @@ try {
   check("(boot) nested clone's OWN content is intact", fs.existsSync(path.join(kNestedDir, "unpushed.txt")));
   check("(boot) nested clone's unpushed commit is still there", git(kNestedDir, "log -1 --format=%s") === "unpushed external work");
   check("(boot) task untouched (Pass B never finalizes a task — that's Pass A's job)", db.getTask(K.taskId).columnKey === "in_progress");
-  check("(boot) reconcile did NOT count this worktree as pruned", reconcileResult.worktreesPruned === 0);
+  // Card e34d475c: this SAME reconcile call also sweeps every OTHER session this file has ever inserted
+  // into the shared `db` — including T's and E's own rows from scenarios (5)/(6) above, both already
+  // finalized (their own confirmWorkerMerge recorded a real merge_done) but left RETAINED on disk by
+  // their scenario's own fail-safe scan override. Against the MAIN `sessions` instance used here (no
+  // override), the real (unthrottled) nested-repo scan finds nothing to block on either — they have no
+  // actual nested repo — so Pass A's own-row cleanup-only retry (card e34d475c) genuinely removes BOTH
+  // during this call, and correctly counts them: `worktreesPruned` now counts every ACTUAL removal this
+  // boot from EITHER the sibling or the own-row cleanup-only path (it already counted the sibling case
+  // pre-e34d475c — see worktree-recycle-alias-protection.mjs's fixture F) — never K's retained one. This
+  // is NOT this scenario's own subject (K's own retention, asserted above, is) — it's incidental
+  // cross-scenario collateral from the shared DB.
+  check("(boot) T's and E's own already-finalized worktrees (unrelated collateral) ARE now cleaned up by this same call", !fs.existsSync(T.worktreePath) && !fs.existsSync(E.worktreePath));
+  check("(boot) reconcile counted exactly those 2 incidental removals — never K's retained worktree", reconcileResult.worktreesPruned === 2);
   check("(boot) a console warning flagged the retained nested-repo worktree", warningsK.some((w) => w.includes(K.worktreePath) && /nested/i.test(w)));
 } finally {
   db.close();

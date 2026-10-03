@@ -185,14 +185,38 @@ improvement on its own.
    `recoverCrashOrphanedWorkers` — re-derive that list the same way (`grep -rl` those names across
    `packages/daemon/test`) rather than trusting a count restated here.
 
+## Round 4 (card `e34d475c`) — the own-row exemption's MECHANISM was wrong, not its intent
+
+A worktree dir that never clears (root cause unidentified on the real host) exposed what round 2 item 2's
+"always falls through to the ordinary `finalizeMerge` call" actually costs: `finalizeMerge` appends its
+`merge_done` event unconditionally on every call (by design, for the genuine cross-row replay case), and
+`retireWorkerSession` (called unconditionally right before it) appends `worker_retired` with no replay
+guard at all. Neither is covered by the `hadPriorMergeDone` safety round 2 cited — that guard only
+protects the task-column move, ship-state, and reingest. For a worktree that clears within a boot or two
+this was invisible; for one that never clears, it replayed both events on every single boot, forever.
+
+Fixed by folding the own-row retry into the EXACT SAME tip-guarded cleanup-only path the sibling case
+already used (`if (alreadyFinalized || finalizedElsewhere) { ... }`, still AFTER the squash lookup/
+`isBranchHeld` — a first attempt that ran it BEFORE them, reasoning the own-row `merge_done` alone was
+proof enough, shipped WITHOUT a tip guard and was caught regressing fixture J below: an own-row
+`merge_done` is not proof no later commit can land on the branch before removal actually completes, the
+exact race the tip guard exists for). Calls neither `retireWorkerSession` nor `finalizeMerge`. The RETRY
+ITSELF is preserved exactly as round 2 intended (never silently dropped); only the mechanism changed.
+`alreadyFinalized` is also now scoped to the row's CURRENT task+branch, not bare `merge_done` presence
+for the worker id — closing, defensively, the single-row shape of the SAME over-broad-presence mistake
+this card's own round 2 fixed for the cross-row shape. Full detail (including the regression and its
+fix): `docs/decisions/e34d475c-pass-a-own-row-lean-cleanup-retry.md`.
+
 ## Do not
 
 - Do not run the "already finalized" check before `isBranchHeld` — a branch-name-only match (or any
   future, still-unscoped match) can swallow the held-branch skip's own `mergesHeld++`/`handledWorktrees`
   bookkeeping; `isBranchHeld` always runs first.
 - Do not apply the "already finalized" seq check to an own-row retry (`alreadyFinalized` true) — it must
-  always fall through to the ordinary `finalizeMerge` call; gating it there too silently drops Pass A's
-  deliberate own-row cleanup retry.
+  always fall through to AT LEAST a cleanup-only retry; gating it there too silently drops Pass A's
+  deliberate own-row cleanup retry. **Round 4 correction:** the retry no longer falls through to the
+  ordinary `finalizeMerge` call itself — that call's own unconditional `merge_done`/`worker_retired`
+  appends made it replay forever against a worktree dir that never clears. See Round 4 above.
 - Do not call full `finalizeMerge` for a SIBLING row already finalized through another row's id — it
   would re-move the task column / re-persist ship-state / refire a reingest under the wrong row (the
   original m1 bug). Use the cleanup-only path (`gcWorktreeDir` + a CAS `deleteBranch`) instead.
