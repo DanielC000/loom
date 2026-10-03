@@ -3924,17 +3924,14 @@ export class SessionService {
     }
     // @decision 4ee527d1 — mirrors recycle_successor_retired above, but EPOCH-scoped, not permanent: an
     // allowSuperseded resume both passes this refusal and files the lift below. See that record.
+    //
+    // @decision e7a9a884 — never file the lift write here: getProject/pty.spawn below can still throw,
+    // re-arming automatic resume for a worker that never came back. Decide the boolean here; write it below.
     const workerRetirementActive = this.db.isWorkerRetirementActive(session.id);
     if (!opts.allowSuperseded && workerRetirementActive) {
       throw new Error("session was administratively retired (worker_stop/killAllWorkers/auto-retire/merge-confirm/sibling-sweep) — only a manual (human) resume may force it");
     }
-    if (opts.allowSuperseded && workerRetirementActive) {
-      this.db.appendEvent({
-        id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId: session.parentSessionId ?? "", workerSessionId: session.id, taskId: session.taskId ?? null,
-        kind: "worker_retirement_lifted", detail: { reason: "allow_superseded_resume" },
-      });
-    }
+    const shouldLiftRetirement = opts.allowSuperseded && workerRetirementActive;
     const project = this.db.getProject(session.projectId);
     if (!project) throw new Error("project not found");
     // @decision 4b2e0146 — mirrors refuseManagerIntoReservedHome's startNew/startManager chokepoint, but
@@ -4058,9 +4055,19 @@ export class SessionService {
       throw e;
     }
     // @decision 5a56bb0a — a successful spawn proves any prior "dead" stamp wrong (mirrors
-    // crash-orphaned-workers.ts's own self-heal); it does NOT lift a retirement — the marker-only
-    // guard above still refuses automatic callers regardless of this write.
+    // crash-orphaned-workers.ts's own self-heal); it does NOT lift a retirement on its own — see
+    // shouldLiftRetirement immediately below for the write that actually does.
     if (session.resumability === "dead") this.db.setResumability(session.id, "resumable");
+    // @decision e7a9a884 — file the lift ONLY here, past the try/catch above: a throw there (getProject,
+    // restoreSession, pty.spawn) rethrows before this line, so a failed resume never re-arms automatic
+    // resume for a worker that never actually came back.
+    if (shouldLiftRetirement) {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: session.parentSessionId ?? "", workerSessionId: session.id, taskId: session.taskId ?? null,
+        kind: "worker_retirement_lifted", detail: { reason: "allow_superseded_resume" },
+      });
+    }
     // A freshly-resumed session has no turn in flight (resume injects no prompt) — clear any stale
     // busy=true carried in the DB across the restart. Without this the session shows/acts "busy"
     // forever, so enqueued worker reports queue instead of submitting and the idle guard can't fire.
