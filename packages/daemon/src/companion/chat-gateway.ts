@@ -91,6 +91,15 @@ function raceWithTimeout(prior: Promise<unknown>, ms: number): Promise<unknown> 
  *  serialization) for up to this long per message, so the bound needs to stay small, not generous. */
 export const ACK_SEND_TIMEOUT_MS = 15_000;
 
+/** Bound (ms) on a single OUTBOUND reply transport send (card b343c5f0) — `ChatGateway.sendVia`'s
+ *  `adapter.send` call, the shared primitive behind `deliverReply` (the agent's `chat_reply`) and
+ *  `sendToChannel` (the web-chat mirror). A hung send here freezes the CALLER's whole turn (the `chat_reply`
+ *  MCP tool call never returns), not a shared inbound queue — a different hazard than `ACK_SEND_TIMEOUT_MS`
+ *  (which exists to protect card 986bdddd's per-route inbound serialization), so this is its OWN constant
+ *  even though it starts at the same value: the two must be free to diverge independently and must never be
+ *  read as coupled. */
+export const REPLY_SEND_TIMEOUT_MS = 15_000;
+
 /** Distinguishable sentinel `withTimeout` resolves to when its timer wins the race — never a value a real
  *  send result could produce, so a caller can tell "timed out" apart from "resolved/rejected normally"
  *  without relying on `undefined`/`null`, which `promise` could itself legitimately produce. */
@@ -328,6 +337,11 @@ export class ChatGateway {
      *  for the rationale. Defaults to that constant; test-overridable so a hang test can prove the bound
      *  actually fires without a real 15s wait. */
     private readonly ackSendTimeoutMs: number = ACK_SEND_TIMEOUT_MS,
+    /** Card b343c5f0: bound (ms) on a single `sendVia` transport send (the OUTBOUND `chat_reply`/
+     *  `sendToChannel` path) — see `REPLY_SEND_TIMEOUT_MS`'s own doc for the rationale. Defaults to that
+     *  constant; test-overridable so a hang test can prove the bound actually fires without a real 15s
+     *  wait. */
+    private readonly sendTimeoutMs: number = REPLY_SEND_TIMEOUT_MS,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -964,6 +978,17 @@ export class ChatGateway {
         this.onReplyDelivered?.(sessionId);
         return { delivered: false, reason: result.reason };
       }
+      if (result.reason === "timeout") {
+        // Card b343c5f0 round 2 (Code Review ac892fe4, ruling a): deliberately do NOT fire onReplyDelivered
+        // here, unlike the already-diagnosed-elsewhere suppression branch just above. Those causes
+        // (route-flagged-non-private/unbound/foreign-session) are each surfaced to a human through a
+        // DIFFERENT channel already, so resetting the streak there can't hide a real silence. A timeout has
+        // no such second surface — its cause is NOT diagnosed anywhere else — so it is treated like
+        // send-failed for the zero-reply detector instead: N consecutive timeouts from a persistently hung
+        // transport must still trip companion_zero_reply_detected, not reset the streak back to zero every
+        // single turn forever.
+        return { delivered: false, reason: "timeout" };
+      }
       return { delivered: false, reason: "send-failed" };
     }
     // CHAT HISTORY record (unified cross-channel chat, card 7d63e200): recorded ONCE per logical reply,
@@ -1091,7 +1116,7 @@ export class ChatGateway {
       // card 7578dea2 / d3f9b4d2 hardening: sendVia's own per-chunk recheck caught a mid-flight flag flip
       // or unbind. Not a chat_reply, so no onReplyDelivered here — the zero-reply detector only tracks
       // chat_reply/deliverReply.
-      if (result.reason === "route-flagged-non-private" || result.reason === "route-unbound" || result.reason === "route-foreign-session") return { delivered: false, reason: result.reason };
+      if (result.reason === "route-flagged-non-private" || result.reason === "route-unbound" || result.reason === "route-foreign-session" || result.reason === "timeout") return { delivered: false, reason: result.reason };
       return { delivered: false, reason: "send-failed" };
     }
     return { delivered: true, chunks: result.chunks };
@@ -1099,16 +1124,19 @@ export class ChatGateway {
 
   /** Shared outbound send: chunk to the adapter's max length and send every part, in order. Contains a
    *  throw (never propagates) — the only failure modes are "no adapter registered for this channel", "the
-   *  adapter's send threw", and (card 7578dea2 / d3f9b4d2) "the route got flagged non-private, or lost its
-   *  live binding, mid-flight". On a mid-stream stop, `sentChunks`/`sentText` report exactly what already
-   *  reached the chat (chunks 1..k-1) — see deliverReply's partial-send record (CR#2 L1). `opts.proactive`
-   *  (proactive event-line producer) is forwarded to the adapter's `send` verbatim — `sendToChannel`'s
-   *  mirror-echo caller omits it (never proactive), only `deliverReply` passes it. `sessionId` (card
-   *  c7d7b43a) is the REQUESTING session, threaded to every per-chunk `deliveryBlockReason` recheck below. */
+   *  adapter's send threw", (card 7578dea2 / d3f9b4d2) "the route got flagged non-private, or lost its
+   *  live binding, mid-flight", and (card b343c5f0) "a chunk's send didn't settle within `sendTimeoutMs`".
+   *  On a mid-stream stop, `sentChunks`/`sentText` report exactly what already reached the chat (chunks
+   *  1..k-1) — see deliverReply's partial-send record (CR#2 L1); a TIMED-OUT chunk is never counted as
+   *  sent (it may or may not have actually landed — see `"timeout"`'s own doc on `DeliverResult`), so it
+   *  is never optimistically included in `sentText`. `opts.proactive` (proactive event-line producer) is
+   *  forwarded to the adapter's `send` verbatim — `sendToChannel`'s mirror-echo caller omits it (never
+   *  proactive), only `deliverReply` passes it. `sessionId` (card c7d7b43a) is the REQUESTING session,
+   *  threaded to every per-chunk `deliveryBlockReason` recheck below. */
   private async sendVia(sessionId: string, channel: string, chatId: string, text: string, opts?: { proactive?: boolean }): Promise<
     | { delivered: true; chunks: number }
     | { delivered: false; reason: "no-adapter" }
-    | { delivered: false; reason: "send-failed" | "route-flagged-non-private" | "route-unbound" | "route-foreign-session"; sentChunks: number; sentText: string }
+    | { delivered: false; reason: "send-failed" | "route-flagged-non-private" | "route-unbound" | "route-foreign-session" | "timeout"; sentChunks: number; sentText: string }
   > {
     const adapter = this.adapters.get(channel);
     if (!adapter) return { delivered: false, reason: "no-adapter" };
@@ -1124,7 +1152,21 @@ export class ChatGateway {
         if (blockReason) {
           return { delivered: false, reason: blockReason, sentChunks: sent, sentText: parts.slice(0, sent).join("") };
         }
-        await adapter.send(chatId, part, opts);
+        // Card b343c5f0: bound this chunk's send exactly like tryAck bounds its own (same withTimeout/
+        // AbortController shape) — a hung `chat_reply`/`sendToChannel` send must not hang the caller's
+        // whole turn. Aborting on timeout stops THIS client from waiting any longer; it does NOT guarantee
+        // the far side never received/processed the request (a "late 200" is possible) — see `"timeout"`'s
+        // own doc on `DeliverResult` for what that means for the caller.
+        const controller = new AbortController();
+        const outcome = await withTimeout(
+          adapter.send(chatId, part, { ...opts, signal: controller.signal }),
+          this.sendTimeoutMs,
+          () => controller.abort(),
+        );
+        if (outcome === TIMED_OUT) {
+          this.debug(`sendVia send timed out after ${this.sendTimeoutMs}ms (channel=${channel} chat=${chatId})`);
+          return { delivered: false, reason: "timeout", sentChunks: sent, sentText: parts.slice(0, sent).join("") };
+        }
         sent++;
       }
       return { delivered: true, chunks: parts.length };

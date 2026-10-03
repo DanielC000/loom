@@ -371,7 +371,15 @@ export type DeliverResult =
   // defense in depth given each ChatGateway instance is built per-session. See reconcile.ts's
   // companionRouteBlockReason doc for why this is checked before every other reason. Not reachable via
   // today's REST surface alone.
-  | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" | "no-target" | "route-flagged-non-private" | "route-unbound" | "route-foreign-session" };
+  // `timeout` (card b343c5f0): the transport send didn't settle within ChatGateway's `sendTimeoutMs` — the
+  // ONE reason that is NOT a known failure. The client gave up waiting and aborted the in-flight request,
+  // but the far side may already have received/processed it (a "late 200" after the abort is possible, same
+  // accepted edge case already documented for the inbound ack path, card dc5df70e) — so this is reported
+  // DISTINCTLY from `send-failed` rather than collapsed into it. `delivered:false` here means "unconfirmed",
+  // never "confirmed not delivered". The daemon never auto-retries a timed-out send (the hazard is a
+  // late-landing duplicate if the original did land) — callers must not either; see `chat_reply`'s own tool
+  // description for the agent-facing guidance.
+  | { delivered: false; reason: "unknown-session" | "no-adapter" | "send-failed" | "no-target" | "route-flagged-non-private" | "route-unbound" | "route-foreign-session" | "timeout" };
 
 /** The result of routing one inbound message. */
 export type InboundResult =

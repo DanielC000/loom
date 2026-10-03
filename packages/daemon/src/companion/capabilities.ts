@@ -320,10 +320,18 @@ export interface GrantPty {
  * for a message that must reach the human, not the untrusted LLM that originated the request).
  */
 export interface GrantOutbound {
-  /** Deliver `text` OUT to the owner's chat for `sessionId`. Returns true iff the daemon believes the send
-   *  succeeded (false on no-target/no-adapter/send-failure) — a caller MUST fail closed on false, since a
-   *  false return means there is no verified trusted channel the owner actually saw the prompt on. */
-  deliverToOwner(sessionId: string, text: string): Promise<boolean>;
+  /** Deliver `text` OUT to the owner's chat for `sessionId`. Returns `true` iff the daemon believes the
+   *  send succeeded; `false` on a CONFIRMED failure (no-target/no-adapter/send-failure/a throw) — a caller
+   *  MUST fail closed on `false`, since it means there is no verified trusted channel the owner actually
+   *  saw the prompt on. Returns the literal string `"timeout"` (card b343c5f0 round 2) when the send
+   *  didn't confirm within the bound — DISTINCT from both `true` and `false`, because a late response can
+   *  still land after the cutoff: the prompt may or may not have reached the owner. A caller must still
+   *  fail closed on `"timeout"` for its OWN pending state (never treat it as a confirmed propose — `!==
+   *  true` covers both `false` and `"timeout"`), but should tell the agent the attempt is UNKNOWN rather
+   *  than definitely failed, so it doesn't blindly re-propose into what may become a duplicate.
+   *  ⚠️ `"timeout"` is TRUTHY in JS — a caller writing `if (delivered)`/`if (!delivered)` instead of going
+   *  through `deliverToOwnerError()` below will silently fail OPEN on a timeout. */
+  deliverToOwner(sessionId: string, text: string): Promise<boolean | "timeout">;
   /**
    * Deliver the LOCAL file at `filePath` OUT to the owner's chat for `sessionId`, as a native image/
    * document — the `media-out` lever's (card 3a81b0f2) own outbound seam, resolved from the ACTIVE TURN's
@@ -335,6 +343,30 @@ export interface GrantOutbound {
    * fails closed exactly like `deliverToOwner`.
    */
   deliverMediaToOwner(sessionId: string, filePath: string): Promise<{ delivered: boolean; reason?: string }>;
+}
+
+/** Shared `ok()` result for every Primitive-C lever's `deliverToOwner` call (card b343c5f0 round 2) — ALL
+ *  eight propose-sites (decision_resolve, board_create/update/relocate, authored-content-grant,
+ *  session-spawn, git-push commit/push) share this exact three-way branch, so it lives once here instead
+ *  of being hand-copied eight times and drifting. Returns an `ok()` ERROR envelope to return immediately
+ *  when `delivered !== true`; `null` means "proceed — the send was confirmed, go ahead and record the
+ *  pending propose". `"timeout"` gets its OWN wording, distinct from a confirmed failure: the prompt may
+ *  have reached the owner late, so the agent must not read this as "try again" (that risks a duplicate
+ *  propose landing on top of one the owner already saw) — it waits for the owner to say they didn't get
+ *  it. Either branch is fail-closed the same way: the caller never reaches its `pendingXxx.set(...)` line. */
+function deliverToOwnerError(delivered: boolean | "timeout"): ReturnType<typeof ok> | null {
+  if (delivered === "timeout") {
+    return ok({
+      error:
+        "the confirmation may or may not have reached the owner's chat — the send timed out, so nothing " +
+        "is pending here. Don't re-propose; wait for the owner's next message and only try again if they " +
+        "say they didn't get it (re-proposing now risks a duplicate landing if the original arrives late)",
+    });
+  }
+  if (!delivered) {
+    return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
+  }
+  return null;
 }
 
 /** The slice of `SessionService` the `session-steer` ACT lever needs (card 305a54fb) — cross-session
@@ -870,9 +902,8 @@ const DECISIONS_RELAY: CompanionCapability = {
         // pending for them to stumble into confirming blind (the stray OwnerConfirmStore token is harmless
         // — it just expires unused, and `pendingDecisionResolves` was never set for it below).
         const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
-        if (!delivered) {
-          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
-        }
+        const deliverError = deliverToOwnerError(delivered);
+        if (deliverError) return deliverError;
         pendingDecisionResolves.set(key, { questionId, chosenOption, note: normalizedNote });
         return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
@@ -1323,9 +1354,8 @@ const BOARD_REACH: CompanionCapability = {
         // CR hardening (inherited from decision_resolve) — deliver DIRECTLY to the owner; never hand
         // promptText/the token back to the companion. Fail closed on a delivery failure.
         const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
-        if (!delivered) {
-          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
-        }
+        const deliverError = deliverToOwnerError(delivered);
+        if (deliverError) return deliverError;
         // `grantBacked` freezes THIS call's `grantAllows` verdict for the later confirm to replay — see
         // the confirm branch's own doc for why it must not be recomputed there.
         pendingBoardWrites.set(key, { action: "create", projectId: project, title, body: normalizedBody, columnKey, priority, grantBacked: grantAllows });
@@ -1536,9 +1566,8 @@ const BOARD_REACH: CompanionCapability = {
           summary: `Update board card "${task.title}" (${changes.join(", ")})?`,
         });
         const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
-        if (!delivered) {
-          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
-        }
+        const deliverError = deliverToOwnerError(delivered);
+        if (deliverError) return deliverError;
         // baseVersion captured HERE, at propose time (card 0b36702e) — see PendingBoardWrite's own doc for
         // why the confirm branch reads this back instead of re-reading `task.version` fresh.
         pendingBoardWrites.set(key, { action: "update", taskId: id, title: normalizedTitle, body: normalizedBody, appendBody: normalizedAppendBody, columnKey, priority, held, grantBacked: grantAllows, baseVersion: task.version });
@@ -1631,9 +1660,8 @@ const BOARD_REACH: CompanionCapability = {
         // CR hardening (inherited from decision_resolve/board_create) — deliver DIRECTLY to the owner;
         // never hand promptText/the token back to the companion. Fail closed on a delivery failure.
         const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
-        if (!delivered) {
-          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
-        }
+        const deliverError = deliverToOwnerError(delivered);
+        if (deliverError) return deliverError;
         pendingAuthoredGrants.set(key, { projectId: project, scope: scopeTyped });
         return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
@@ -1763,9 +1791,8 @@ const BOARD_REACH: CompanionCapability = {
         // the owner; never hand promptText/the token back to the companion. Fail closed on a delivery
         // failure (nothing is left pending for the owner to stumble into confirming blind).
         const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
-        if (!delivered) {
-          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
-        }
+        const deliverError = deliverToOwnerError(delivered);
+        if (deliverError) return deliverError;
         pendingBoardWrites.set(key, { action: "relocate", taskId, toProject, fromProject: sourceProject });
         return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
@@ -2599,9 +2626,8 @@ const SESSION_SPAWN: CompanionCapability = {
         // CR hardening (inherited from decision_resolve/board_create) — deliver DIRECTLY to the owner;
         // never hand promptText/the token back to the companion. Fail closed on a delivery failure.
         const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
-        if (!delivered) {
-          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
-        }
+        const deliverError = deliverToOwnerError(delivered);
+        if (deliverError) return deliverError;
         pendingSpawns.set(key, { project, agentId, role });
         return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
@@ -2816,9 +2842,8 @@ const GIT_PUSH: CompanionCapability = {
         // CR hardening (inherited from decision_resolve/board_create) — deliver DIRECTLY to the owner;
         // never hand promptText/the token back to the companion. Fail closed on a delivery failure.
         const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
-        if (!delivered) {
-          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
-        }
+        const deliverError = deliverToOwnerError(delivered);
+        if (deliverError) return deliverError;
         pendingGitWrites.set(key, { action: "commit", project, target, message });
         return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
@@ -2917,9 +2942,8 @@ const GIT_PUSH: CompanionCapability = {
           summary: `Push project "${p.name}"'s ${target} repo (branch ${summary?.branch ?? "?"}) to its remote? ${aheadText}${subjectText}.`,
         });
         const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
-        if (!delivered) {
-          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
-        }
+        const deliverError = deliverToOwnerError(delivered);
+        if (deliverError) return deliverError;
         pendingGitWrites.set(key, { action: "push", project, target });
         return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },

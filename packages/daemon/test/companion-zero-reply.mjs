@@ -31,6 +31,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the new `onUnboundRouteRefused` hook + a disclosure-safe console.warn fire exactly ONCE per
 //       (session, route), never once per attempt, even driven well past the threshold; a
 //       route-flagged-non-private refusal does NOT fire this new hook (the two causes stay distinct).
+//  (10) card b343c5f0 round 2 (Code Review ac892fe4, ruling a): a `timeout` is the OPPOSITE of (8)/(9) —
+//       its cause is diagnosed NOWHERE else, so onReplyDelivered must NOT fire for it, and a companion
+//       whose transport is PERSISTENTLY hung (every send times out) DOES trip
+//       companion_zero_reply_detected once driven past the threshold.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-zero-reply.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -427,7 +431,62 @@ function driveTurns(db, sessId, n) {
   cleanupEnv(e2);
 }
 
+// --- 10. card b343c5f0 round 2 (Code Review ac892fe4, ruling a): a TIMEOUT is UNLIKE every suppression
+//     cause tested in (8)/(9) above — route-flagged-non-private and route-unbound are each diagnosed and
+//     surfaced to a human through a DIFFERENT channel, so resetting the streak for them can't hide a real
+//     silence. A timeout has no such second surface: nothing else diagnoses it. So, unlike (8)/(9),
+//     onReplyDelivered must NOT fire on a timeout, and a PERSISTENTLY hung transport (every send times out)
+//     must actually TRIP companion_zero_reply_detected — this is the detector doing its job, not a misfire.
+{
+  // 10a. UNIT: onReplyDelivered does NOT fire on a timeout (the inverse of (8a)/(9a)'s "still fires").
+  const delivered10 = [];
+  const onReplyDelivered10 = (sid) => delivered10.push(sid);
+  const hangingAdapter10 = {
+    name: "telegram", maxMessageLength: 4096, start() {}, async stop() {},
+    send() { return new Promise(() => { /* never settles — simulates a persistently hung transport */ }); },
+  };
+  const timeoutGw = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: "timeout-sess", channel: "telegram", chatId: "111222333", scope: "dm" }],
+    undefined, undefined,
+    (sid) => (sid === "timeout-sess" ? { channel: "telegram", chatId: "111222333" } : null), // originResolver
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    onReplyDelivered10, undefined, undefined, undefined,
+    undefined, // inboundQueueMaxWaitMs
+    undefined, // ackSendTimeoutMs
+    20, // sendTimeoutMs — small so this test doesn't wait a real REPLY_SEND_TIMEOUT_MS (15s)
+  );
+  timeoutGw.registerAdapter(hangingAdapter10);
+  const rTimeout = await timeoutGw.deliverReply("timeout-sess", "this will time out");
+  check("(10a) deliverReply reports the distinct timeout reason", rTimeout.delivered === false && rTimeout.reason === "timeout");
+  check("(10a) onReplyDelivered does NOT fire on a timeout (unlike route-flagged/route-unbound in (8a)/(9a))", delivered10.length === 0);
+
+  // 10b. END-TO-END, REAL Db: a companion whose transport is PERSISTENTLY HUNG (every send times out) DOES
+  // trip companion_zero_reply_detected once driven past the threshold — the mirror image of (8b)/(9c),
+  // which drove the SAME shape of loop for causes that must NEVER trip it.
+  const e10 = makeEnv();
+  const gw10 = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: e10.sessId, channel: "telegram", chatId: "111222333", scope: "dm" }],
+    undefined, undefined,
+    (sid) => (sid === e10.sessId ? { channel: "telegram", chatId: "111222333" } : null),
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    (sid) => e10.db.recordChatReplyDelivered(sid), // the REAL production wiring (factory.ts)
+    undefined, undefined, undefined,
+    undefined, undefined, 20, // sendTimeoutMs
+  );
+  gw10.registerAdapter({
+    name: "telegram", maxMessageLength: 4096, start() {}, async stop() {},
+    send() { return new Promise(() => { /* every send hangs forever */ }); },
+  });
+  for (let round = 0; round < 6; round++) {
+    driveTurns(e10.db, e10.sessId, 5);
+    const rr10 = await gw10.deliverReply(e10.sessId, "trying every turn, always timing out");
+    check(`(10b) round ${round}: deliverReply times out every time (a genuine attempt that never confirms)`, rr10.delivered === false && rr10.reason === "timeout");
+  }
+  check("(10b) a companion whose transport is persistently hung DOES trip companion_zero_reply_detected — a timeout is never treated as a successful/suppressed attempt", events(e10, "companion_zero_reply_detected").length >= 1);
+  cleanupEnv(e10);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the companion zero-reply detector fires exactly once per genuine silent streak past the threshold, never fires on a periodically-replying (negative-control) or freshly-observed session, is gated to enabled companion sessions only, survives an ADD-COLUMN migration from the pre-card schema without a false alarm, its ChatGateway hook fires only on a genuine delivered reply OR a route-flagged-non-private/route-unbound suppression (all are attempts, never silence), a companion suppressed by a flagged binding or an unbound route never misfires the alarm even when driven well past the threshold, and a route-unbound refusal is now logged + durably eventED exactly once per (session, route) rather than being completely silent."
+  ? "\n✅ ALL PASS — the companion zero-reply detector fires exactly once per genuine silent streak past the threshold, never fires on a periodically-replying (negative-control) or freshly-observed session, is gated to enabled companion sessions only, survives an ADD-COLUMN migration from the pre-card schema without a false alarm, its ChatGateway hook fires only on a genuine delivered reply OR a route-flagged-non-private/route-unbound suppression (all are attempts, never silence), a companion suppressed by a flagged binding or an unbound route never misfires the alarm even when driven well past the threshold, a route-unbound refusal is now logged + durably eventED exactly once per (session, route) rather than being completely silent, and (round 2) a TIMEOUT is treated like send-failed — onReplyDelivered never fires for it and a persistently hung transport DOES trip the alarm."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

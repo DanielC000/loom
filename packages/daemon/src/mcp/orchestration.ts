@@ -1762,7 +1762,12 @@ export class OrchestrationMcpRouter {
           "is ALSO PERMANENT for this attempt: the route has no live binding at all (it was never bound, " +
           "or its binding was revoked) — if this is your configured HOME route, the fix is for a human to " +
           "change it (not re-bind), so just like `route-flagged-non-private`, tell the user on another " +
-          "channel if you're bound to one, otherwise there is nothing more to do. Mirrors " +
+          "channel if you're bound to one, otherwise there is nothing more to do. A `timeout` reason is " +
+          "DIFFERENT from all of the above: it means the send did not CONFIRM within the bound, but it may " +
+          "still have reached the chat (a late response can land after the cutoff) — treat it as UNKNOWN, " +
+          "never as a confirmed failure. Do NOT automatically resend the same text on a `timeout` — if the " +
+          "original did land late, a resend duplicates it for the user; instead wait for the user's own " +
+          "next message, and only speak again if they indicate they didn't receive it. Mirrors " +
           "worker_report: emit one clean, final reply. Optional `voice:true` asks to SPEAK this reply " +
           "instead of texting it — it only has effect when the user's voice-reply setting is 'auto' (their " +
           "own on/off choice always wins otherwise); omit it (or pass false) to send plain text.",
@@ -2064,7 +2069,11 @@ export class OrchestrationMcpRouter {
       deliverToOwner: async (sid, text) => {
         try {
           const result = await this.companion.deliverReply?.(sid, text);
-          return result?.delivered === true;
+          if (!result) return false;
+          if (result.delivered) return true;
+          // Card b343c5f0 round 2: surface a timeout DISTINCTLY from a confirmed failure — GrantOutbound's
+          // own doc on `deliverToOwner` is the contract for why (the send may have landed late).
+          return result.reason === "timeout" ? "timeout" : false;
         } catch {
           return false; // fail closed — a throwing delivery path must never look like a successful send.
         }

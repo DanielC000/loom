@@ -4357,11 +4357,16 @@ export class Db {
   }
 
   /**
-   * Zero-reply detector (card 48e8d289) — called by `chat-gateway.ts`'s `deliverReply` on a genuine
-   * successful delivery (never on a `no-target`/`no-adapter`/`send-failed` result). Resolves the
-   * session's CURRENT `turn_seq` itself (ChatGateway is deliberately db-free — see its own class doc —
-   * so this keeps that turn-counter mechanic entirely inside db.ts rather than leaking it into the
-   * gateway/factory wiring). A missing session is a no-op.
+   * Zero-reply detector (card 48e8d289) — called by `chat-gateway.ts`'s `deliverReply` on a genuine reply
+   * ATTEMPT whose cause (when it didn't deliver) is already surfaced somewhere else: a successful
+   * delivery, or a `route-flagged-non-private`/`route-unbound`/`route-foreign-session` suppression (each
+   * already explained to a human elsewhere — see `deliverReply`'s own call-site comments). Never called on
+   * `no-target`/`no-adapter`/`send-failed`, nor (since round 2 of card b343c5f0) on `timeout` — UNLIKE the
+   * suppression causes above, a timeout's cause is diagnosed nowhere else, so it is treated like
+   * `send-failed` on purpose: N consecutive timeouts must still trip `companion_zero_reply_detected`.
+   * Resolves the session's CURRENT `turn_seq` itself (ChatGateway is deliberately db-free — see its own
+   * class doc) rather than leaking that mechanic into the gateway/factory wiring. A missing session is a
+   * no-op.
    */
   recordChatReplyDelivered(sessionId: string): void {
     const session = this.getSession(sessionId);

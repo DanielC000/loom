@@ -28,6 +28,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   - a proactive turn (Primitive A null — no owner text) is rejected outright
 //   - no reply-to route ⇒ fail closed (nothing proposed, no delivery attempted)
 //   - a failed outbound delivery ⇒ fail closed (nothing left pending)
+//   - card b343c5f0 round 2: a TIMED-OUT outbound delivery ⇒ ALSO fail closed (nothing left pending), but
+//     with DISTINCT wording from a confirmed failure — "may have reached the owner", never "couldn't
+//     deliver" — so the agent doesn't blindly re-propose into a possible duplicate
 //   - the confirm prompt is delivered on the OUTBOUND rail, never returned to the companion; a companion
 //     that never received the real token cannot forge a working confirm
 // Run: 1) build (turbo builds shared first), 2) node test/companion-decision-resolve.mjs
@@ -88,13 +91,16 @@ function makeFakePty(initialOwnerText, opts = {}) {
 
 // A FAKE companion (CompanionHooks) — the ONLY method decision_resolve's outbound seam calls is
 // `deliverReply`, exactly the rail `chat_reply` uses. `shouldDeliver:false` simulates a delivery failure
-// (no adapter / send-failed / no-target) to prove the fail-closed path.
-function makeFakeCompanion(shouldDeliver = true) {
+// (no adapter / send-failed / no-target) to prove the fail-closed path. `reason` (card b343c5f0 round 2)
+// optionally shapes a false result's `reason` — pass `"timeout"` to simulate ChatGateway's sendVia timing
+// out, DISTINCT from a confirmed failure (omitted ⇒ byte-identical to the pre-round-2 shape every existing
+// call site here relies on).
+function makeFakeCompanion(shouldDeliver = true, reason) {
   const delivered = [];
   return {
     async deliverReply(sessionId, text) {
       delivered.push({ sessionId, text });
-      return { delivered: shouldDeliver };
+      return reason ? { delivered: shouldDeliver, reason } : { delivered: shouldDeliver };
     },
     delivered,
   };
@@ -380,6 +386,44 @@ try {
     db.close();
   }
 
+  // ============ card b343c5f0 round 2: a TIMED-OUT outbound delivery ⇒ fail closed, DISTINCT wording ====
+  // RED on pre-round-2 code: `deliverToOwner` collapsed a timeout to the same `false` as a confirmed
+  // failure, so the agent got the generic "couldn't deliver... try again" — inviting a re-propose that
+  // risks a duplicate landing if the original prompt arrives late. Round 2 surfaces `"timeout"` distinctly
+  // (GrantOutbound/deliverToOwnerError, capabilities.ts) so the wording tells the agent to wait instead.
+  {
+    const db = tmpDb();
+    const proj = "proj-timeoutdelivery";
+    seedProject(db, proj, "Timeout delivery");
+    const companionSess = "companion-timeoutdelivery";
+    seedSession(db, companionSess, proj, "assistant");
+    seedSession(db, "asker-timeoutdelivery", proj, "manager");
+    seedQuestion(db, "q-timeoutdelivery", "asker-timeoutdelivery", proj, { options: ["approve", "reject"] });
+    db.upsertCompanionCapabilityGrant({
+      sessionId: companionSess, capability: "decisions-relay", projectId: proj, mode: "act",
+      config: { decisionClasses: ["general"] },
+    });
+    const pty = makeFakePty("the owner said: approve it");
+    const companion = makeFakeCompanion(false, "timeout"); // simulate ChatGateway's sendVia timing out
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const res = await call(client, "decision_resolve", { questionId: "q-timeoutdelivery", chosenOption: "approve" });
+    check("timed-out delivery: rejected with an {error}, never a false 'proposed'", typeof res.error === "string" && res.status === undefined);
+    check("timed-out delivery: wording is DISTINCT from a confirmed failure — 'may have reached the owner', not 'couldn't deliver'", /may .*reached the owner/i.test(res.error) && !/couldn't deliver/i.test(res.error));
+    check("timed-out delivery: tells the agent NOT to blindly re-propose (risk of a duplicate)", /don't re-propose|do not re-propose/i.test(res.error));
+    check("timed-out delivery: question stays pending", db.getQuestion("q-timeoutdelivery").state === "pending");
+    // Same fail-closed proof as the confirmed-failure case: nothing was left pending for a guessed token.
+    const orphanConfirmAttempt = await call(client, "decision_resolve", { questionId: "q-timeoutdelivery", chosenOption: "approve" });
+    // PINNED, not falsifiable (delta Code Review bdb48960): `decision_resolve` only ever returns
+    // `{status:"proposed",...}` or `{error:string}` — this disjunction is true of EVERY response shape the
+    // tool can produce, including a genuine stale-pending-state regression that surfaces as some other
+    // error string. It is kept only as a smoke-check that the follow-up call completes without throwing,
+    // not as evidence that no stale state was left behind.
+    check("timed-out delivery (PINNED, not falsifiable): a follow-up call completes with a well-shaped response", orphanConfirmAttempt.status === "proposed" || typeof orphanConfirmAttempt.error === "string");
+    await client.close();
+    db.close();
+  }
+
   // ============ act on a read-only-granted project is rejected (mayAct false) ============
   {
     const db = tmpDb();
@@ -545,6 +589,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — decision_resolve rejects an unoffered option, a non-verbatim note, act on a read-only-granted project, a decision class outside the project's allowlist, any proactive (no-owner-text) turn, a missing reply-to route, and a failed outbound delivery; it never resolves on the first (propose) call, delivers the confirm prompt to the OWNER directly (never the companion, which receives no promptText/token), and resolves EXACTLY ONCE via the existing db.answerQuestion write once the owner's own next turn carries the confirm token — a companion that never saw the token cannot forge a confirm for a swapped action; and an irreversible/deploy (Tier X) decision NEVER takes the low-friction path even inside an otherwise-warm trust window, and its commit never arms the window for the next act (the CR fix's fail-safe dead-branch guard)."
+  ? "\n✅ ALL PASS — decision_resolve rejects an unoffered option, a non-verbatim note, act on a read-only-granted project, a decision class outside the project's allowlist, any proactive (no-owner-text) turn, a missing reply-to route, a failed outbound delivery, and (round 2) a TIMED-OUT delivery (fail closed either way, but the timeout gets DISTINCT wording telling the agent not to blindly re-propose); it never resolves on the first (propose) call, delivers the confirm prompt to the OWNER directly (never the companion, which receives no promptText/token), and resolves EXACTLY ONCE via the existing db.answerQuestion write once the owner's own next turn carries the confirm token — a companion that never saw the token cannot forge a confirm for a swapped action; and an irreversible/deploy (Tier X) decision NEVER takes the low-friction path even inside an otherwise-warm trust window, and its commit never arms the window for the next act (the CR fix's fail-safe dead-branch guard)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

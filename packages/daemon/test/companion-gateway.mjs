@@ -12,6 +12,15 @@
 //   • card dc5df70e: a HUNG tryAck transport send (never settles) does NOT hang the inbound turn — it times
 //     out (bounded by the test-overridable ackSendTimeoutMs), aborts the signal it was given, and resolves
 //     acked:false instead.
+//   • card b343c5f0: a HUNG OUTBOUND transport send (deliverReply/sendVia, and sendToChannel) does NOT hang
+//     the caller's turn — it times out (bounded by the test-overridable sendTimeoutMs), aborts the signal it
+//     was given, and resolves the DISTINCT { delivered:false, reason:"timeout" } (never collapsed into
+//     "send-failed", never a false "delivered"). A multi-chunk reply that times out on a later chunk records
+//     only the CONFIRMED-sent prefix — the timed-out chunk's own text is never optimistically included. A
+//     late resolution/rejection of an already-timed-out send changes nothing (no onReplyDelivered at all,
+//     no extra history record, no unhandled rejection) — round 2 (Code Review ac892fe4, ruling a) made
+//     onReplyDelivered NEVER fire on a timeout (unlike route-flagged/route-unbound); the zero-reply-detector
+//     trip proof for N consecutive timeouts lives in companion-zero-reply.mjs, not here.
 // Run: 1) build, 2) node test/companion-gateway.mjs
 import { ChatGateway, chunkText } from "../dist/companion/chat-gateway.js";
 
@@ -349,6 +358,192 @@ const originOf = (map) => (sid) => map[sid] ?? null;
   const res = await gw.deliverReply("sess-A", "will fail entirely");
   check("total-failure: still reports send-failed", res.delivered === false && res.reason === "send-failed");
   check("total-failure: nothing reached the chat, so nothing is recorded", recorded.length === 0);
+}
+
+// --- Card b343c5f0: a HUNG OUTBOUND send (deliverReply/sendVia) does NOT hang the caller's turn ---------
+// RED on pre-fix code: `sendVia` used to `await adapter.send(...)` with no timeout, so this block's own
+// `await gw.deliverReply(...)` would itself never settle.
+{
+  let sendCalls = 0;
+  let sawSignal = null;
+  let wasAborted = false;
+  const hangingAdapter = {
+    name: "telegram",
+    maxMessageLength: 4096,
+    start() {},
+    async stop() {},
+    send(chatId, text, opts) {
+      sendCalls++;
+      sawSignal = opts?.signal ?? null;
+      sawSignal?.addEventListener("abort", () => { wasAborted = true; });
+      return new Promise(() => { /* never settles — simulates a hung transport call */ });
+    },
+  };
+  const delivered = [];
+  const gw = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }],
+    undefined, undefined, originOf({ "sess-A": { channel: "telegram", chatId: "111" } }),
+    undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined,
+    (sid) => delivered.push(sid), // onReplyDelivered
+    undefined, undefined, undefined,
+    undefined, // inboundQueueMaxWaitMs
+    undefined, // ackSendTimeoutMs
+    20, // sendTimeoutMs
+  );
+  gw.registerAdapter(hangingAdapter);
+  const startedAt = Date.now();
+  const res = await gw.deliverReply("sess-A", "this send will hang forever");
+  const elapsedMs = Date.now() - startedAt;
+  check("outbound timeout: deliverReply resolves promptly, NOT hung on the stuck send", elapsedMs < 5000);
+  check("outbound timeout: structured { delivered:false, reason:'timeout' } (never a false 'delivered')", res.delivered === false && res.reason === "timeout");
+  check("outbound timeout: the adapter's send was actually invoked", sendCalls === 1);
+  check("outbound timeout: sendVia passed a real AbortSignal", sawSignal instanceof AbortSignal);
+  check("outbound timeout: the signal was aborted (no lingering request)", wasAborted === true);
+  // Round 2 (Code Review ac892fe4, ruling a): FLIPPED from round 1 — onReplyDelivered must NOT fire on a
+  // timeout, unlike route-flagged-non-private/route-unbound (whose cause IS surfaced elsewhere). A
+  // timeout's cause is diagnosed nowhere else, so it is treated like send-failed here; the detector-TRIP
+  // proof for N consecutive timeouts lives in companion-zero-reply.mjs.
+  check("outbound timeout: onReplyDelivered does NOT fire (unlike route-flagged/route-unbound) — a timeout's cause is undiagnosed, so it must still count toward the zero-reply streak", delivered.length === 0);
+}
+
+// --- Card b343c5f0: sendToChannel (the web-chat mirror path) reports the SAME distinct "timeout" reason,
+// never collapsed into the generic "send-failed" ----------------------------------------------------------
+{
+  const hangingAdapter = {
+    name: "telegram", maxMessageLength: 4096, start() {}, async stop() {},
+    send() { return new Promise(() => { /* never settles */ }); },
+  };
+  const gw = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }],
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, 20, // sendTimeoutMs
+  );
+  gw.registerAdapter(hangingAdapter);
+  const res = await gw.sendToChannel("sess-A", "telegram", "111", "mirrored text");
+  check("sendToChannel timeout: resolves promptly with the distinct 'timeout' reason (not 'send-failed')", res.delivered === false && res.reason === "timeout");
+}
+
+// --- Card b343c5f0: a MULTI-CHUNK reply that times out on a LATER chunk records ONLY the confirmed-sent
+// prefix — the timed-out chunk's own text is never optimistically included (unconfirmed, not known-sent) ---
+{
+  const withBreaks = ("word ".repeat(20)).trim(); // same 99-char, boundary-splitting text as the earlier partial-send test
+  const allParts = chunkText(withBreaks, 30);
+  check("partial-timeout setup: the test text chunks into >2 parts (so a 3rd-chunk timeout is genuinely PARTIAL)", allParts.length > 2);
+
+  let calls = 0;
+  const sent = [];
+  const hangOnThirdAdapter = {
+    name: "telegram", maxMessageLength: 30, start() {}, async stop() {},
+    send(chatId, text) {
+      calls++;
+      if (calls > 2) return new Promise(() => { /* chunk 3 hangs forever */ });
+      sent.push({ chatId, text });
+      return Promise.resolve();
+    },
+  };
+  const recorded = [];
+  const recorder = { record(sessionId, channel, chatId, author, text) { recorded.push({ sessionId, channel, chatId, author, text }); } };
+  const gw = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }],
+    undefined, undefined, originOf({ "sess-A": { channel: "telegram", chatId: "111" } }),
+    undefined, undefined, undefined, undefined, recorder,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, 20, // sendTimeoutMs
+  );
+  gw.registerAdapter(hangOnThirdAdapter);
+  const res = await gw.deliverReply("sess-A", withBreaks);
+  check("partial-timeout: deliverReply reports the distinct timeout reason", res.delivered === false && res.reason === "timeout");
+  check("partial-timeout: exactly the first 2 chunks reached the transport", sent.length === 2);
+  check("partial-timeout: the confirmed-sent prefix IS recorded", recorded.length === 1);
+  check("partial-timeout: recorded text is EXACTLY the confirmed prefix — the timed-out chunk's own text is NOT included", recorded[0]?.text === sent.map((s) => s.text).join(""));
+}
+
+// --- Card b343c5f0: a LATE RESOLUTION of an already-timed-out send changes NOTHING — no onReplyDelivered,
+// no (extra) history record. The SETUP checks below (the timeout itself, and that onReplyDelivered did NOT
+// fire — round 2 flip, see the "outbound timeout" block above) are ordinary falsifiable assertions against
+// `sendVia`'s own timeout branch. The POST-release checks after the late resolve are a different kind of
+// thing: `withTimeout` never reads a late settlement once its own timer has already won the race, so those
+// are PROVABLE-BY-CONSTRUCTION — PINNED, not a falsifiable regression test (round 2, Code Review ac892fe4,
+// item 3). They pass regardless of whether `sendVia`'s timeout branch is even correct; they exist to
+// document the invariant a future refactor of `withTimeout` must preserve, not to catch a regression there.
+// NOT a fixed-wait-then-negative-check: rather than sleep an arbitrary duration and hope it was "long
+// enough", this awaits the EXACT promise `sendVia` handed to `withTimeout` (captured via the adapter) —
+// `withTimeout` already attached its own `.catch(() => {})` to that SAME promise BEFORE this test's own
+// `.catch` below, so by the time this test's await resolves, that swallow has deterministically already
+// run (same microtask queue, FIFO per-promise reaction order) — no timer, no race, no guessed duration ---
+{
+  let releaseSend;
+  let capturedSendPromise;
+  const lateAdapter = {
+    name: "telegram", maxMessageLength: 4096, start() {}, async stop() {},
+    send() {
+      capturedSendPromise = new Promise((resolve) => { releaseSend = resolve; });
+      return capturedSendPromise;
+    },
+  };
+  const delivered = [];
+  const recorded = [];
+  const recorder = { record(sessionId, channel, chatId, author, text) { recorded.push({ sessionId, channel, chatId, author, text }); } };
+  const gw = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }],
+    undefined, undefined, originOf({ "sess-A": { channel: "telegram", chatId: "111" } }),
+    undefined, undefined, undefined, undefined, recorder,
+    undefined, undefined, undefined, undefined, undefined,
+    (sid) => delivered.push(sid), // onReplyDelivered
+    undefined, undefined, undefined,
+    undefined, undefined, 20, // sendTimeoutMs
+  );
+  gw.registerAdapter(lateAdapter);
+  const res = await gw.deliverReply("sess-A", "will time out, then resolve late");
+  check("late-resolution setup: the send genuinely timed out first", res.delivered === false && res.reason === "timeout");
+  check("late-resolution setup: onReplyDelivered did NOT fire (round 2 — a timeout is not a diagnosed cause)", delivered.length === 0);
+  check("late-resolution setup: nothing recorded yet (the only chunk never confirmed)", recorded.length === 0);
+
+  // Let the hung send resolve LATE — after the timeout already won the race — then wait on the SAME
+  // promise object (never a fresh timer) to prove the production swallow-handler has actually run.
+  releaseSend(undefined);
+  await capturedSendPromise.catch(() => {});
+  check("late-resolution (PINNED, not falsifiable): still no onReplyDelivered after the late success", delivered.length === 0);
+  check("late-resolution (PINNED, not falsifiable): no history record appeared after the late success", recorded.length === 0);
+}
+
+// --- Card b343c5f0: the SAME guarantee on the REJECTION side — a late-arriving throw from an
+// already-timed-out send must never surface as an unhandled rejection or double-report anything. Same
+// promise-anchored witness as the resolution case above (never a fixed sleep). Like the resolution block
+// above, the setup check is ordinary and falsifiable; the post-rejection check is PINNED, not falsifiable
+// (round 2, Code Review ac892fe4, item 3) — see that block's own comment for why ------------------------
+{
+  let releaseSend;
+  let capturedSendPromise;
+  const lateAdapter = {
+    name: "telegram", maxMessageLength: 4096, start() {}, async stop() {},
+    send() {
+      capturedSendPromise = new Promise((_resolve, reject) => { releaseSend = reject; });
+      return capturedSendPromise;
+    },
+  };
+  const delivered = [];
+  const gw = new ChatGateway(
+    () => ({ delivered: true }), [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }],
+    undefined, undefined, originOf({ "sess-A": { channel: "telegram", chatId: "111" } }),
+    undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined,
+    (sid) => delivered.push(sid),
+    undefined, undefined, undefined,
+    undefined, undefined, 20, // sendTimeoutMs
+  );
+  gw.registerAdapter(lateAdapter);
+  const res = await gw.deliverReply("sess-A", "will time out, then reject late");
+  check("late-rejection setup: the send genuinely timed out first", res.delivered === false && res.reason === "timeout");
+  check("late-rejection setup: onReplyDelivered did NOT fire (round 2 — a timeout is not a diagnosed cause)", delivered.length === 0);
+  releaseSend(new Error("late transport error, after the client already gave up"));
+  await capturedSendPromise.catch(() => {});
+  // Reaching this line at all (rather than the process crashing on an unhandled rejection) IS part of the
+  // proof — see withTimeout's own `promise.catch(() => {})` swallow, which this test's own `.catch` above
+  // is guaranteed to run AFTER (same promise, FIFO reaction order).
+  check("late-rejection (PINNED, not falsifiable): still no onReplyDelivered after the late rejection", delivered.length === 0);
 }
 
 // --- chunkText unit edges -----------------------------------------------------------------------
