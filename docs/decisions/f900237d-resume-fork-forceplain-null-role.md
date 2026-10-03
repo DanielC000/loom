@@ -7,10 +7,12 @@
 role-omitted "+New" path relies on. `resume()` and `forkSession()` both called it as
 `resolveAgentSpawn(agent, config, row.role ?? undefined)`, which collapses a row EXPLICITLY pinned to
 plain (`role === null` — a human "+New -> force plain" session) into the SAME `undefined` that means "no
-opinion, ask the profile". For an agent whose profile confers `worker`/`assistant`
-(`PROFILE_SPAWNABLE_ROLES`), this silently WIDENED a plain row on resume/fork: it picked up the profile's
-`permission.allow` delta and the worker/assistant `startupModeCycles` -> `auto` pin
-(`withRolePermissionModeCyclesPin`) — permission and mode the human never asked for when they chose plain.
+opinion, ask the profile". For an agent whose profile confers `manager`/`worker`/`assistant`
+(`PROFILE_SPAWNABLE_ROLES` — all three members, not just worker/assistant), this silently WIDENED a
+plain row on resume/fork: it picked up the profile's `permission.allow` delta (every member) and, for a
+worker/assistant profile specifically, the `startupModeCycles` -> `auto` pin
+(`withRolePermissionModeCyclesPin`, which pins only those two roles, not manager) — permission and mode
+the human never asked for when they chose plain.
 
 Audit finding, full review lane 2 (card `b14d3441`), fixed under card `f900237d`.
 
@@ -25,18 +27,25 @@ undefined; same story — the allowDelta is layered before the clamp). Both (a) 
 booted WITH the profile's allowDelta, and round 1 stripped it on every resume/fork.
 
 **Interim ruling (no schema change):** pass `forcePlain` for a role-null row ONLY when the agent's
-CURRENT profile would itself confer a `PROFILE_SPAWNABLE` role — i.e. `resolveAgentSpawn` without
-`forcePlain` would set a non-null role. That is exactly the widening this card names (a plain row on a
-worker/assistant-profile agent); cases (a) and (b) keep their allowDelta. Implemented as
-`profileConfersSpawnableRole(agent)`, reusing `resolveProfile` + `PROFILE_SPAWNABLE_ROLES` — the same
+CURRENT profile would itself confer a `PROFILE_SPAWNABLE` role (`manager`, `worker`, or `assistant` —
+all three members) — i.e. `resolveAgentSpawn` without `forcePlain` would set a non-null role. That is
+exactly the widening this card names (a plain row on a manager/worker/assistant-profile agent); cases (a)
+and (b) keep their allowDelta. Implemented as `profileConfersSpawnableRole(agent)`, reusing
+`resolveProfile` + the shared `profileSpawnRole` clamp predicate (round 3 minor 1, also used by
+`resolveAgentSpawn`'s own `profileRole` computation so the two can never independently drift) — the same
 precedence `resolveAgentSpawn` itself uses.
 
 **Accepted residual:** a human's ACTUAL `forcePlain` start on an agent whose profile itself has role
 null or a clamped role is INDISTINGUISHABLE, by row inspection alone, from cases (a)/(b) above — the row
 carries no discriminator for *why* its role is null. Such a session regains that profile's allowDelta on
 resume/fork, exactly as if it had never been forced plain (pre-existing behaviour, not newly introduced
-by round 2). Exact handling needs a persisted discriminator (a real `forcedPlain` column) — carded
-separately as `963462f5` ("persist a forced-plain flag so resume keeps a human's plain choice exactly").
+by round 2). The SAME residual also covers a `forcePlain` start on a profile that WAS spawnable at start
+time but is LATER edited to a null/clamped role, or whose `profileId` is reassigned to a null/clamped
+profile — `profileConfersSpawnableRole` re-resolves the CURRENT profile live on every resume/fork, so
+such a session regains the NEW profile's allowDelta exactly as main does today (round 3 minor 2).
+Exact handling needs a persisted discriminator (a real `forcedPlain` column) — carded separately as
+`963462f5` ("persist a forced-plain flag so resume keeps a human's plain choice exactly"), which fixes
+both the original-profile and the later-edited/reassigned case.
 
 ## Do not
 
@@ -58,5 +67,5 @@ separately as `963462f5` ("persist a forced-plain flag so resume keeps a human's
 ## Source
 
 `packages/daemon/src/sessions/service.ts`, `resume()` (`resolvedSpawn` local, just above the agent lookup),
-`forkSession()` (`forkPermission` local), and the shared `profileConfersSpawnableRole()` helper just above
-`resolveAgentSpawn`.
+`forkSession()` (`forkPermission` local), and the shared `profileConfersSpawnableRole()` and
+`profileSpawnRole()` helpers just above `resolveAgentSpawn`.

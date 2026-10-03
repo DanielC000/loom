@@ -4,10 +4,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 // a human-chosen "+New -> force plain" session), `row.role ?? undefined` collapses that explicit plain
 // pin into `undefined`, which `resolveAgentSpawn` reads as "no explicit role, consult the profile"
 // (`const role = explicitRole ?? profileRole ?? undefined`) rather than "explicitly plain". When the
-// agent's profile confers "worker"/"assistant" (PROFILE_SPAWNABLE_ROLES), the resumed/forked session is
-// silently WIDENED: it inherits the profile's permission.allow delta AND the worker/assistant
-// startupModeCycles -> "auto" pin (withRolePermissionModeCyclesPin) — permission and mode the human never
-// asked for when they started this session plain.
+// agent's profile confers "manager"/"worker"/"assistant" (PROFILE_SPAWNABLE_ROLES — all three members),
+// the resumed/forked session is silently WIDENED: it inherits the profile's permission.allow delta AND,
+// for a worker/assistant profile specifically, the startupModeCycles -> "auto" pin
+// (withRolePermissionModeCyclesPin, which pins only those two roles, not manager) — permission and mode
+// the human never asked for when they started this session plain.
 //
 // THE FIX (round 1): pass `forcePlain: row.role === null` as resolveAgentSpawn's existing 4th parameter
 // at both call sites — the SAME mechanism `startNew`'s own forcePlain path already uses (drops the
@@ -20,8 +21,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 // null, or (b) the profile's role is clamped out of PROFILE_SPAWNABLE_ROLES (platform/auditor/setup/run).
 // Both (a) and (b) legitimately booted WITH the profile's allowDelta, and round 1 stripped it on every
 // resume/fork. THE FIX (round 2): forcePlain only when the row's role is null AND the agent's CURRENT
-// profile would confer a PROFILE_SPAWNABLE role — i.e. exactly the widening this card names (a plain row
-// on a worker/assistant-profile agent); cases (a) and (b) keep their allowDelta.
+// profile would confer a PROFILE_SPAWNABLE role (manager, worker, or assistant — all three members) —
+// i.e. exactly the widening this card names (a plain row on a manager/worker/assistant-profile agent);
+// cases (a) and (b) keep their allowDelta.
+//
+// ROUND 3 (minor 4): added a plain-row case on a MANAGER- and an ASSISTANT-profile agent (the two
+// PROFILE_SPAWNABLE_ROLES members the round-1/round-2 fixtures never exercised — only "worker" had a
+// case), asserting allowDelta stays ABSENT on resume AND fork. Same shape as the existing worker case;
+// proves the fix's clamp genuinely covers all three members, not just the one the fixtures happened to use.
 //
 // PROVES:
 //   - (resume, THE BUG) a plain row (role:null) on a worker-profile-pinned agent resumes with the
@@ -36,6 +43,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //   - ROUND 2, CLAMPED-ROLE PROFILE (resume + fork): a role-null row on an agent whose profile's role is
 //     clamped out of PROFILE_SPAWNABLE_ROLES ("auditor") KEEPS that profile's allowDelta — same RED on
 //     round 1's commit.
+//   - ROUND 3, MANAGER- AND ASSISTANT-PROFILE PLAIN ROWS (resume + fork): a plain row (role:null) on a
+//     MANAGER-profile-pinned agent, and on an ASSISTANT-profile-pinned agent, both resume/fork WITHOUT
+//     that profile's allowDelta — the same widening THE BUG proves for "worker", now proven for the
+//     other two PROFILE_SPAWNABLE_ROLES members too.
 //   - ISOLATION: `model` and `restrictedTools` are READ BY resume()/forkSession() FROM THE ROW'S OWN
 //     PINNED COLUMNS, never from resolveAgentSpawn's return — so even though the test profile pins a
 //     DISTINCT model + restrictedTools:true (deliberately different from the row's own false/undefined),
@@ -116,6 +127,16 @@ db.insertAgent({ id: "agNullRoleProfile", projectId: "p1", name: "Agent NullRole
 // undefined (never auto-elevates), but the allowDelta is NOT part of that clamp.
 db.insertProfile({ id: "profAuditorClamped", name: "Clamped Auditor Rig", role: "auditor", description: "", allowDelta: [PROFILE_ALLOW_CLAMPED], skills: null, model: null, icon: null });
 db.insertAgent({ id: "agAuditorClampedProfile", projectId: "p1", name: "Agent ClampedAuditor", startupPrompt: "P", position: 2, profileId: "profAuditorClamped" });
+
+// ROUND 3 fixtures (minor 4) — the other two PROFILE_SPAWNABLE_ROLES members (round 1/2 only ever
+// exercised "worker"); a plain row pinned to either must resume/fork WITHOUT the profile's allowDelta,
+// same as the worker case above.
+const PROFILE_ALLOW_MANAGER = "Bash(echo MANAGER_OK:*)";
+const PROFILE_ALLOW_ASSISTANT = "Bash(echo ASSISTANT_OK:*)";
+db.insertProfile({ id: "profManager", name: "Manager Rig", role: "manager", description: "", allowDelta: [PROFILE_ALLOW_MANAGER], skills: null, model: null, icon: null });
+db.insertAgent({ id: "agManagerProfile", projectId: "p1", name: "Agent Manager", startupPrompt: "P", position: 3, profileId: "profManager" });
+db.insertProfile({ id: "profAssistant", name: "Assistant Rig", role: "assistant", description: "", allowDelta: [PROFILE_ALLOW_ASSISTANT], skills: null, model: null, icon: null });
+db.insertAgent({ id: "agAssistantProfile", projectId: "p1", name: "Agent Assistant", startupPrompt: "P", position: 4, profileId: "profAssistant" });
 
 /** Seed a resumable/forkable session row directly against the real agent row (bypasses spawn). Every
  *  capability column is left at its "today's plain-spawn default" value (false/null/[]/undefined) —
@@ -240,7 +261,7 @@ try {
     oNullRoleProfileResume?.permission.allow.includes(PROFILE_ALLOW_NULLROLE));
   check("(resume, ROUND 2, null-role-profile row) permission.allow still carries the task-board baseline",
     oNullRoleProfileResume?.permission.allow.includes(BASELINE));
-  check("(resume, ROUND 2, null-role-profile row) opts.role stays undefined — the profile confers no role, never auto-elevated",
+  check("(resume, ROUND 2, null-role-profile row, INVARIANT) opts.role stays undefined — a null profile role never clamps to a role, so this cannot fail via forcePlain either way; a plain regression guard, not a discriminator for this card's fix",
     oNullRoleProfileResume?.role === undefined);
 
   // ============== ROUND 2: FORK, same null-role-profile agent — KEEPS allowDelta ==============
@@ -252,7 +273,7 @@ try {
     oNullRoleProfileFork?.permission.allow.includes(PROFILE_ALLOW_NULLROLE));
   check("(fork, ROUND 2, null-role-profile row) permission.allow still carries the task-board baseline",
     oNullRoleProfileFork?.permission.allow.includes(BASELINE));
-  check("(fork, ROUND 2, null-role-profile row) opts.role stays undefined",
+  check("(fork, ROUND 2, null-role-profile row, INVARIANT) opts.role stays undefined — same non-discriminating regression guard as the resume case above",
     oNullRoleProfileFork?.role === undefined);
 
   // ============== ROUND 2: RESUME, role-null row on a CLAMPED-ROLE-PROFILE agent — KEEPS allowDelta ==============
@@ -267,7 +288,7 @@ try {
     oAuditorClampedResume?.permission.allow.includes(PROFILE_ALLOW_CLAMPED));
   check("(resume, ROUND 2, clamped-role-profile row) permission.allow still carries the task-board baseline",
     oAuditorClampedResume?.permission.allow.includes(BASELINE));
-  check("(resume, ROUND 2, clamped-role-profile row) opts.role stays undefined — never auto-elevated to 'auditor' via this path",
+  check("(resume, ROUND 2, clamped-role-profile row, INVARIANT) opts.role stays undefined — the clamp already drops 'auditor' from profileRole regardless of forcePlain, so this cannot fail via this path; a plain regression guard, not a discriminator for this card's fix",
     oAuditorClampedResume?.role === undefined);
 
   // ============== ROUND 2: FORK, same clamped-role-profile agent — KEEPS allowDelta ==============
@@ -279,8 +300,60 @@ try {
     oAuditorClampedFork?.permission.allow.includes(PROFILE_ALLOW_CLAMPED));
   check("(fork, ROUND 2, clamped-role-profile row) permission.allow still carries the task-board baseline",
     oAuditorClampedFork?.permission.allow.includes(BASELINE));
-  check("(fork, ROUND 2, clamped-role-profile row) opts.role stays undefined",
+  check("(fork, ROUND 2, clamped-role-profile row, INVARIANT) opts.role stays undefined — same non-discriminating regression guard as the resume case above",
     oAuditorClampedFork?.role === undefined);
+
+  // ============== ROUND 3 (minor 4): RESUME, plain row on a MANAGER-profile agent — allowDelta ABSENT ==============
+  // profManager's role IS a PROFILE_SPAWNABLE_ROLES member (unlike round 2's null/clamped fixtures), so a
+  // plain (role:null) row on this agent is exactly the widening THE BUG proves for "worker" — now proven
+  // for "manager" too, closing the gap where round 1/2's fixtures only ever exercised one of the three members.
+  seedSource("srcManagerProfilePlainResume", null, "agManagerProfile");
+  host.capture.length = 0;
+  const resumedManagerProfilePlain = svc.resume("srcManagerProfilePlainResume");
+  const oManagerProfilePlainResume = lastOptsFor(resumedManagerProfilePlain.id);
+  check("(resume, ROUND 3, plain row on MANAGER-profile agent) permission.allow does NOT include the profile's allowDelta",
+    !oManagerProfilePlainResume?.permission.allow.includes(PROFILE_ALLOW_MANAGER));
+  check("(resume, ROUND 3, plain row on MANAGER-profile agent) permission.allow still carries the task-board baseline",
+    oManagerProfilePlainResume?.permission.allow.includes(BASELINE));
+  check("(resume, ROUND 3, plain row on MANAGER-profile agent) opts.role stays undefined",
+    oManagerProfilePlainResume?.role === undefined);
+
+  // ============== ROUND 3: FORK, same manager-profile agent — allowDelta ABSENT ==============
+  seedSource("srcManagerProfilePlainFork", null, "agManagerProfile");
+  host.capture.length = 0;
+  const forkedManagerProfilePlain = svc.forkSession("srcManagerProfilePlainFork");
+  const oManagerProfilePlainFork = lastOptsFor(forkedManagerProfilePlain.id);
+  check("(fork, ROUND 3, plain row on MANAGER-profile agent) permission.allow does NOT include the profile's allowDelta",
+    !oManagerProfilePlainFork?.permission.allow.includes(PROFILE_ALLOW_MANAGER));
+  check("(fork, ROUND 3, plain row on MANAGER-profile agent) permission.allow still carries the task-board baseline",
+    oManagerProfilePlainFork?.permission.allow.includes(BASELINE));
+  check("(fork, ROUND 3, plain row on MANAGER-profile agent) opts.role stays undefined",
+    oManagerProfilePlainFork?.role === undefined);
+
+  // ============== ROUND 3: RESUME, plain row on an ASSISTANT-profile agent — allowDelta ABSENT ==============
+  // Same shape as the manager case above, for the third and last PROFILE_SPAWNABLE_ROLES member.
+  seedSource("srcAssistantProfilePlainResume", null, "agAssistantProfile");
+  host.capture.length = 0;
+  const resumedAssistantProfilePlain = svc.resume("srcAssistantProfilePlainResume");
+  const oAssistantProfilePlainResume = lastOptsFor(resumedAssistantProfilePlain.id);
+  check("(resume, ROUND 3, plain row on ASSISTANT-profile agent) permission.allow does NOT include the profile's allowDelta",
+    !oAssistantProfilePlainResume?.permission.allow.includes(PROFILE_ALLOW_ASSISTANT));
+  check("(resume, ROUND 3, plain row on ASSISTANT-profile agent) permission.allow still carries the task-board baseline",
+    oAssistantProfilePlainResume?.permission.allow.includes(BASELINE));
+  check("(resume, ROUND 3, plain row on ASSISTANT-profile agent) opts.role stays undefined",
+    oAssistantProfilePlainResume?.role === undefined);
+
+  // ============== ROUND 3: FORK, same assistant-profile agent — allowDelta ABSENT ==============
+  seedSource("srcAssistantProfilePlainFork", null, "agAssistantProfile");
+  host.capture.length = 0;
+  const forkedAssistantProfilePlain = svc.forkSession("srcAssistantProfilePlainFork");
+  const oAssistantProfilePlainFork = lastOptsFor(forkedAssistantProfilePlain.id);
+  check("(fork, ROUND 3, plain row on ASSISTANT-profile agent) permission.allow does NOT include the profile's allowDelta",
+    !oAssistantProfilePlainFork?.permission.allow.includes(PROFILE_ALLOW_ASSISTANT));
+  check("(fork, ROUND 3, plain row on ASSISTANT-profile agent) permission.allow still carries the task-board baseline",
+    oAssistantProfilePlainFork?.permission.allow.includes(BASELINE));
+  check("(fork, ROUND 3, plain row on ASSISTANT-profile agent) opts.role stays undefined",
+    oAssistantProfilePlainFork?.role === undefined);
 } finally {
   db.close(); // free the WAL handle before removing the temp dir (Windows)
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -288,6 +361,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a plain (role:null) row resumes/forks with the project's OWN mode knob and WITHOUT its agent's profile allowDelta, a worker-role row on the SAME agent/profile keeps both (negative control), model/restrictedTools never leak through resolvedSpawn into either case, AND (round 2) a role-null row caused by a null-role or clamped-role (non-spawnable) profile KEEPS that profile's allowDelta on resume/fork — claude-free."
+  ? "\n✅ ALL PASS — a plain (role:null) row resumes/forks with the project's OWN mode knob and WITHOUT its agent's profile allowDelta, a worker-role row on the SAME agent/profile keeps both (negative control), model/restrictedTools never leak through resolvedSpawn into either case, (round 2) a role-null row caused by a null-role or clamped-role (non-spawnable) profile KEEPS that profile's allowDelta on resume/fork, AND (round 3) a plain row on a manager- or assistant-profile agent is WITHOUT that profile's allowDelta too, covering all three PROFILE_SPAWNABLE_ROLES members — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

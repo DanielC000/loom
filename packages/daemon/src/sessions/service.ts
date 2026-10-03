@@ -2733,15 +2733,23 @@ export class SessionService {
     return this.resolveCodescapeInjectionStatus(project).text;
   }
 
+  // @decision f900237d (round 3, minor 1) — the ONE clamp predicate for "does this resolved profile
+  // role confer a PROFILE_SPAWNABLE role" (manager|worker|assistant) — shared by
+  // profileConfersSpawnableRole (forcePlain decision) below and resolveAgentSpawn's own profileRole
+  // computation, so the two predicates can never independently re-derive and drift.
+  private profileSpawnRole(role: SessionRole | null): SessionRole | undefined {
+    return role != null && PROFILE_SPAWNABLE_ROLES.has(role) ? role : undefined;
+  }
+
   // @decision f900237d — forcePlain is correct for a role-null row ONLY when the agent's CURRENT
   // profile would itself confer a spawnable role; see the decision record for why (a role-null row has
-  // more than one legitimate cause). Reuses resolveProfile + PROFILE_SPAWNABLE_ROLES; never re-derive.
+  // more than one legitimate cause). Reuses resolveProfile + profileSpawnRole; never re-derive.
   private profileConfersSpawnableRole(agent: Agent): boolean {
     if (!agent.profileId) return false;
     const profile = this.db.getProfile(agent.profileId);
     if (!profile) return false;
     const resolved = resolveProfile(agent, profile);
-    return resolved.role != null && PROFILE_SPAWNABLE_ROLES.has(resolved.role);
+    return this.profileSpawnRole(resolved.role) != null;
   }
 
   // @decision 547d5fc4 — profile-driven spawn resolution is fully additive: profileId===null is
@@ -2767,8 +2775,9 @@ export class SessionService {
     // elevated/locked profile role (platform/auditor/setup/run) is dropped to undefined here, so a role-omitted "+New"
     // spawn yields a plain session, never a silent elevation. An EXPLICIT caller role is untouched and
     // still wins below (`??`), so startPlatformLead/startAuditor/startManager are byte-identical; a
-    // manager/worker/null profile role is also unchanged (the common path).
-    const profileRole = resolved.role && !PROFILE_SPAWNABLE_ROLES.has(resolved.role) ? undefined : resolved.role;
+    // manager/worker/null profile role is also unchanged (the common path). Shared clamp predicate with
+    // profileConfersSpawnableRole — see profileSpawnRole, round 3 minor 1.
+    const profileRole = this.profileSpawnRole(resolved.role);
     // An explicit caller role still wins; then the (clamped) profile role (null under forcePlain), then
     // undefined (today's plain). The force-plain path passes no explicitRole, so it resolves null.
     const role = explicitRole ?? profileRole ?? undefined;
