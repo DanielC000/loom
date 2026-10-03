@@ -143,7 +143,7 @@ export function transcriptExists(cwd: string, conversationId: string): boolean {
  * scan re-reads every candidate rollout file's content on every fresh codex spawn (measured 74.2ms vs
  * ~5.7ms cached, 242-file corpus) — synchronous, on the spawn hot path.
  */
-const SESSION_META_CACHE_MAX = 500;
+export const SESSION_META_CACHE_MAX = 500;
 const sessionMetaCache = new Map<string, { mtimeMs: number; size: number; sessionId: string; cwd: string }>();
 function rememberSessionMeta(file: string, entry: { mtimeMs: number; size: number; sessionId: string; cwd: string }): void {
   sessionMetaCache.delete(file);
@@ -192,11 +192,16 @@ function readFirstLine(file: string): string | null {
  *  against a spawn. Confirmed shape: `session_meta` is always the first line (this file's own header).
  *  Cached (see {@link sessionMetaCache}'s own doc) and reads incrementally (see {@link readFirstLine}'s own
  *  doc), never the whole file. */
-function readSessionMeta(file: string): { sessionId: string; cwd: string } | null {
+export function readSessionMeta(file: string): { sessionId: string; cwd: string } | null {
   let stat: fs.Stats;
   try { stat = fs.statSync(file); } catch { return null; }
   const cached = sessionMetaCache.get(file);
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    // Card 677379ad: a hit must refresh recency (delete + re-set, same as a fresh insert below) or this
+    // degenerates into insertion-order FIFO — a file read on every spawn (e.g. via
+    // snapshotExistingConversationIdsForSpawn's unconditional full-corpus walk) would still get evicted
+    // on schedule just because something else was inserted after it, never because it went cold.
+    rememberSessionMeta(file, cached);
     return { sessionId: cached.sessionId, cwd: cached.cwd };
   }
   const firstLine = readFirstLine(file);
