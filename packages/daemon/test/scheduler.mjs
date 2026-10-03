@@ -68,7 +68,7 @@ function makeEnv(opts = {}) {
   const startAuditor = (tid) => {
     const id = `aud-${calls.length}`; calls.push({ via: "auditor", agentId: tid, id }); return { id };
   };
-  const scheduler = new Scheduler({ db, control, startManager, startAuditor, startWorkspaceAuditor, maxConcurrentManagers: opts.cap, maxConcurrentAuditors: opts.auditorCap });
+  const scheduler = new Scheduler({ db, control, startManager, startAuditor, startWorkspaceAuditor, maxConcurrentManagers: opts.cap, maxConcurrentAuditors: opts.auditorCap, intervalMs: opts.intervalMs });
   return { dbFile, db, projId, agentId, control, calls, scheduler };
 }
 // Seed a live MANAGER session row directly — NOT scheduler-spawned (scheduledSpawn defaults false), the
@@ -600,6 +600,51 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   check("Owner-request gate clears: fires once the request is answered", after.lastFiredAt !== null);
   check("Owner-request gate clears: lastDeferredAt/lastDeferredReason cleared back to null",
     after.lastDeferredAt === null && after.lastDeferredReason === null);
+  cleanupEnv(e);
+}
+
+// Card 9edfc663: the interval armed by start() fires `tick()` via a bare `void this.tick()` with no
+// `.catch` — since tick() is async, a throw from the TOP of tick() (above the per-schedule try/catch,
+// e.g. a db.listDueSchedules failure) became an unhandled rejection on EVERY tick, not just the first
+// (there is no immediate kick here — start() only reconciles synchronously, then arms the interval).
+// Inject a throw on exactly the first call, then let later calls behave normally; the interval must
+// survive and go on to fire a real due schedule on a later tick.
+{
+  const e = makeEnv({ intervalMs: 30 }); // short interval so a second real tick lands within the test
+  const now = new Date();
+  // nextFireAt in the NEAR FUTURE (not the past): start()'s own synchronous reconcile loop treats any
+  // PAST next_fire_at as a missed occurrence and advances it forward without firing — seeding it due
+  // is the interval's job here, exercised once real time passes this instant.
+  seedSchedule(e, "sch-tick-throws", { nextFireAt: new Date(now.getTime() + 60).toISOString() });
+
+  let calls = 0;
+  const realListDueSchedules = e.db.listDueSchedules.bind(e.db);
+  e.db.listDueSchedules = (iso) => {
+    calls++;
+    if (calls === 1) throw new Error("injected: scheduler tick db failure");
+    return realListDueSchedules(iso);
+  };
+
+  const rejections = [];
+  const onRejection = (reason) => rejections.push(reason);
+  process.on("unhandledRejection", onRejection);
+  const loggedErrors = [];
+  const origConsoleError = console.error;
+  console.error = (...args) => { loggedErrors.push(args.map(String).join(" ")); };
+
+  try {
+    e.scheduler.start(now); // arms the interval; its first fire (30ms later) hits the injected throw
+    const deadline = Date.now() + 3_000;
+    while (e.calls.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+  } finally {
+    e.scheduler.stop();
+    console.error = origConsoleError;
+    process.removeListener("unhandledRejection", onRejection);
+  }
+
+  check("scheduler-tick-throws (RED pre-fix / GREEN post-fix): no unhandledRejection fired", rejections.length === 0);
+  check("scheduler-tick-throws: the failure is logged", loggedErrors.some((m) => m.includes("injected: scheduler tick db failure")));
+  check("scheduler-tick-throws: the interval survived — a later tick still fires the due schedule", e.calls.length === 1);
   cleanupEnv(e);
 }
 

@@ -278,6 +278,57 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
   cleanupEnv(e);
 }
 
+// Card 9edfc663: start()'s initial tick is fire-and-forget (`void this.tick(now)`, never awaited by
+// start()'s own caller) — a throw from inside it must NOT become an unhandledRejection (which the real
+// daemon's process-level handler treats as fatal — see crashlog.ts), it must be LOGGED (the one tick
+// most likely to surface a boot-time wiring/config problem), and the watcher must keep ticking
+// afterward rather than wedging. Inject a throw on exactly the FIRST call to the db dependency the
+// initial tick reads first (listDueWakes), then let it behave normally on every later call.
+{
+  const e = makeEnv();
+  const t0 = new Date();
+  const { wakeId } = e.wakes.schedule(e.sessId, { delaySeconds: 60, note: "after the bad first tick" }, t0);
+
+  let calls = 0;
+  const realListDueWakes = e.db.listDueWakes.bind(e.db);
+  e.db.listDueWakes = (iso) => {
+    calls++;
+    if (calls === 1) throw new Error("injected: first-tick db failure");
+    return realListDueWakes(iso);
+  };
+
+  const rejections = [];
+  const onRejection = (reason) => rejections.push(reason);
+  process.on("unhandledRejection", onRejection);
+  const loggedErrors = [];
+  const origConsoleError = console.error;
+  console.error = (...args) => { loggedErrors.push(args.map(String).join(" ")); };
+
+  try {
+    e.wakes.start(t0); // fires the (throwing) initial tick synchronously, then arms the interval
+    // Let the microtask queue drain so a would-be unhandledRejection has every chance to surface
+    // before we assert its absence — a rejected promise's handler runs as a microtask, strictly
+    // before the next macrotask (setImmediate), so two hops here is ample without a blind sleep.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+  } finally {
+    console.error = origConsoleError;
+    process.removeListener("unhandledRejection", onRejection);
+    e.wakes.stop();
+  }
+
+  check("initial-tick-throws (RED pre-fix / GREEN post-fix): no unhandledRejection fired", rejections.length === 0);
+  check("initial-tick-throws: the failure is logged", loggedErrors.some((m) => m.includes("injected: first-tick db failure")));
+  check("initial-tick-throws: exactly one bad call happened (the injected one)", calls === 1);
+
+  // The watcher must have survived the bad first tick — a later, real tick still fires normally.
+  await e.wakes.tick(new Date(t0.getTime() + 61_000));
+  check("initial-tick-throws: the watcher kept ticking — a later wake still fires",
+    e.enqueued.length === 1 && e.enqueued[0].sessionId === e.sessId && e.db.getWake(wakeId) === undefined);
+
+  cleanupEnv(e);
+}
+
 // Route-aware fire, non-companion case: with NO active turn origin at schedule time, the wake carries
 // no route and fires [loom:wake], kind:"agent" (card 706cc6fb — one-per-turn, never coalesced).
 {

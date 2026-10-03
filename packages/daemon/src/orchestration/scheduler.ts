@@ -276,7 +276,12 @@ export class Scheduler {
         }
       }
     }
-    this.timer = setInterval(() => { void this.tick(); }, this.deps.intervalMs ?? 60_000);
+    // @decision 9edfc663 — tick() is async; an unguarded `void this.tick()` on every interval fire
+    // (not just the first) becomes an unhandled rejection on any throw above the per-schedule try/catch.
+    this.timer = setInterval(() => { void this.tick().catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error(`[scheduler] tick failed:`, (e as Error).message);
+    }); }, this.deps.intervalMs ?? 60_000);
   }
 
   stop(): void {

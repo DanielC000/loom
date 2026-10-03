@@ -257,10 +257,19 @@ export class WakeService {
   }
 
   /** Start ticking. A wake whose wake_at is already in the past (daemon was down across it) fires on
-   *  this first tick — deliver late, not never (one-shot, so no catch-up flood). */
+   *  this first tick — deliver late, not never (one-shot, so no catch-up flood).
+   *
+   * @decision 9edfc663 — the initial tick is fire-and-forget; never let it reject unhandled.
+   */
   start(now: Date = new Date()): void {
-    void this.tick(now);
-    this.timer = setInterval(() => { void this.tick().catch(() => { /* never let a bad tick kill the loop */ }); }, this.deps.intervalMs ?? 60_000);
+    void this.tick(now).catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error(`[wake] initial tick failed:`, (e as Error).message);
+    });
+    this.timer = setInterval(() => { void this.tick().catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error(`[wake] tick failed:`, (e as Error).message);
+    }); }, this.deps.intervalMs ?? 60_000);
   }
 
   stop(): void {
