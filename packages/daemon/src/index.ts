@@ -54,7 +54,7 @@ import { BusyWorkerWatcher } from "./orchestration/busy-worker-watcher.js";
 import { WorktreeVanishedWatcher } from "./orchestration/worktree-vanished-watcher.js";
 import { ResumeDocWatcher } from "./orchestration/resume-doc-watcher.js";
 import { snapshotAllResumeDocsAtBoot } from "./orchestration/resume-doc-snapshot.js";
-import { CrashRecoveryWatcher, recordUnexpectedExit } from "./orchestration/crash-recovery-watcher.js";
+import { CrashRecoveryWatcher, recordUnexpectedExit, listCrashRecoveryEligibleSessionIds } from "./orchestration/crash-recovery-watcher.js";
 import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
 import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
@@ -658,6 +658,19 @@ async function main(): Promise<void> {
   // protectedIdsFromIntent above); the only NEW behavior is on a genuine crash, where restartIntent is
   // null and this is the ONLY protection these workers get.
   for (const c of crashOrphanedWorkers) { protectedSessionIds.add(c.workerSessionId); protectedSessionIds.add(c.managerSessionId); }
+  // Card 5439b7d2: ALSO fold in every session fleet-wide that's currently crash-recovery ELIGIBLE per the
+  // ONGOING watchdog's own predicate — not just this boot's own crash victims (crashOrphanedWorkers above).
+  // A session whose pty died unexpectedly on a PRIOR, otherwise-healthy daemon instance (already `exited`,
+  // an unresolved `session_died`/`worker_report_undelivered` trigger) is invisible to
+  // `deriveCrashOrphanedWorkers` (scoped to rows THIS boot's `recoverStaleSessions()` just flipped), yet
+  // the watchdog (armed below, `crashRecoveryWatcher.start()`) will still try to resume it on its own next
+  // tick — see docs/decisions/5439b7d2-*.md. Read-only; never resumes/mutates anything itself. Best-effort:
+  // a throw here must never abort boot reconcile — fall back to the protected set as derived above.
+  try {
+    for (const id of listCrashRecoveryEligibleSessionIds(db, control)) protectedSessionIds.add(id);
+  } catch (err) {
+    console.warn(`[boot] crash-recovery-eligible worktree protection scan failed (continuing with today's protected set): ${(err as Error).message}`);
+  }
   // Agent Runs R2: fail any run interrupted by a crash/restart (runs are ephemeral and do NOT resume) and
   // sweep orphaned run-snapshot dirs. Pure DB + fs, best-effort — never gate boot. recoverStaleSessions
   // already marked each interrupted run's `run` session exited, so this only finalizes the run rows.

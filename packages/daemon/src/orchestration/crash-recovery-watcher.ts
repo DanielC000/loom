@@ -233,6 +233,25 @@ export function isCrashRecoveryEligible(
 }
 
 /**
+ * Every session CURRENTLY crash-recovery eligible fleet-wide (shares the tick's own candidate query +
+ * {@link isCrashRecoveryEligible} — no second definition), for boot-reconcile to protect before Pass B GC.
+ * PROTECTION ONLY — never resumes/mutates.
+ *
+ * @decision 5439b7d2 — do not refactor the tick's own resume-gating loop to call this helper (or
+ * `isCrashRecoveryEligible` directly) in place of its stricter position-based tie comparison — that would
+ * reintroduce the same-ms-tie under-skip card bcdea586 fixed.
+ */
+export function listCrashRecoveryEligibleSessionIds(db: Db, control: OrchestrationControl): string[] {
+  const out: string[] = [];
+  for (const id of db.listWorkerSessionIdsWithEventKind([...RECOVERY_TRIGGER_KINDS])) {
+    const s = db.getSession(id);
+    if (!s) continue; // session since hard-deleted
+    if (isCrashRecoveryEligible(db, control, s)) out.push(id);
+  }
+  return out;
+}
+
+/**
  * Crash-recovery watchdog — the THIRD of three independent resume-and-nudge paths.
  * @decision 9f7c59f1 — do not assume these three resume-and-nudge paths converge on everything: only
  * durability + the MCP-seen gate are shared (report-state handling and worker nudge text also converged,
