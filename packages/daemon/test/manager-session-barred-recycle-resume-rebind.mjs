@@ -29,6 +29,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       hits the bar — not the bare start-refusal text — naming that recycling will keep being refused
 //       and pointing at end_me/human-escalation as the caller's options; an unrelated recycle_me error
 //       is left unrewritten.
+//   (E) card c30759a0 (Code Review 70d926b8 follow-up) — forkSession refuses BEFORE any row is minted
+//       when its manager-role source's project has become barred, same as (B)/(C): the source is left
+//       completely untouched (still live, no fork row inserted at all), and files the same durable
+//       `manager_session_barred` event with detail.source:"fork" (no liveWorkerIds — a fork carries no
+//       worker lineage to report).
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + SessionService driven against a FAKE
 // pty (createPty()/onExit seam, mirroring resume-refuses-retired-recycle-successor.mjs's proven harness).
@@ -286,6 +291,58 @@ try {
   const rD2 = JSON.parse((await clientD2.callTool({ name: "recycle_me", arguments: {} })).content[0].text);
   check("(D control) an unrelated recycle_me validation error (missing continuationPrompt) is NOT rewritten",
     typeof rD2.error === "string" && rD2.error.includes("continuationPrompt") && !/recycling will keep being refused/i.test(rD2.error));
+
+  // ==================== (E) forkSession refuses once its manager source's project has become barred ====================
+  // Card c30759a0 (Code Review 70d926b8 follow-up): forkSession kept role "manager" for a manager-role
+  // source with NO managerSessionBarredFrom check — the same hazard as (B)/(C), on the sibling fork spawn
+  // path. mE must be IDLE (not busy) with a real engine transcript for forkSession to even reach the bar
+  // check, so SessionStart + writeFakeTranscript here mirror (B)/(C)'s own setup.
+  const { repo: repoE } = seedOrdinaryProject("pE");
+  const mE = sessions.startManager("pE-mgr");
+  host.deliverHook(mE.id, { hook_event_name: "SessionStart", session_id: "eng-mE" });
+  writeFakeTranscript(mE.cwd, "eng-mE");
+  db.setBusy(mE.id, false); // forkSession refuses a busy source; the fake pty never auto-flips this
+  const preForkSessionCount = db.listAllSessionsIncludingArchived().length;
+
+  db.updateProject("pE", { repoPath: tmpHome }); // simulate an already-barred project
+
+  let forkErr;
+  try { sessions.forkSession(mE.id); } catch (e) { forkErr = e; }
+  check("(E) forkSession THROWS the dedicated MANAGER_SESSION_BARRED_ERROR wording",
+    !!forkErr && /manager session can never start in this project/.test(forkErr.message));
+  check("(E) the source is completely UNTOUCHED — still processState:'live'",
+    db.getSession(mE.id)?.processState === "live");
+  check("(E) NO fork row was minted at all (refused before any insert)",
+    db.listAllSessionsIncludingArchived().length === preForkSessionCount);
+
+  const barredEventsE = db.listEventsForSession(mE.id).filter((e) => e.kind === "manager_session_barred");
+  check("(E) exactly one manager_session_barred event was filed under the source", barredEventsE.length === 1);
+  check("(E) its detail.source is \"fork\"", barredEventsE[0]?.detail?.source === "fork");
+  check("(E) its detail.projectId/repoPath name the barred project", barredEventsE[0]?.detail?.projectId === "pE" && barredEventsE[0]?.detail?.repoPath === tmpHome);
+  check("(E) its detail carries NO liveWorkerIds (a fork has no worker lineage to report, unlike resume())",
+    barredEventsE[0]?.detail?.liveWorkerIds === undefined);
+
+  // (E negative control) reverting the project to ordinary lets the SAME manager source fork successfully.
+  db.updateProject("pE", { repoPath: repoE });
+  let forkedE, forkErr2;
+  try { forkedE = sessions.forkSession(mE.id); } catch (e) { forkErr2 = e; }
+  check("(E control) once un-barred, forkSession on the SAME source succeeds",
+    !forkErr2 && !!forkedE && forkedE.processState === "live" && forkedE.role === "manager");
+
+  // (E negative control 2) a non-manager (plain) source is never subject to this bar in the first place —
+  // proves the check is keyed on role, not a blanket "any fork into a barred project" rule.
+  const { repo: repoF } = seedOrdinaryProject("pF");
+  db.insertAgent({ id: "pF-plain-agent", projectId: "pF", name: "Plain", startupPrompt: "P", position: 2, profileId: null });
+  const plainF = sessions.startNew("pF-plain-agent");
+  host.deliverHook(plainF.id, { hook_event_name: "SessionStart", session_id: "eng-plainF" });
+  writeFakeTranscript(plainF.cwd, "eng-plainF");
+  db.setBusy(plainF.id, false); // forkSession refuses a busy source; the fake pty never auto-flips this
+  db.updateProject("pF", { repoPath: tmpHome }); // simulate an already-barred project
+  let plainForkErr;
+  let plainForked;
+  try { plainForked = sessions.forkSession(plainF.id); } catch (e) { plainForkErr = e; }
+  check("(E control) forking a NON-manager source into the SAME barred project is NOT refused by this gate",
+    !plainForkErr && !!plainForked && plainForked.role !== "manager");
 } catch (e) {
   console.error("UNCAUGHT:", e);
   failures++;
@@ -295,6 +352,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — checkRepoRebind refuses rebinding an ordinary project to a barred target while it has a live manager (naming it, and only while live); recycleManager and resume() both refuse a fresh-spawn/resume once their project has become barred, leaving the affected row(s) completely untouched and filing a durable manager_session_barred event (resume()'s also naming any live workers it cannot itself stop); every refusal is reversible once the project is un-barred again; resume()'s thrown message survives the resume-nudge allowlist verbatim (round 2); and recycle_me's MCP-facing error is now actionable rather than the bare start-refusal text (round 2)."
+  ? "\n✅ ALL PASS — checkRepoRebind refuses rebinding an ordinary project to a barred target while it has a live manager (naming it, and only while live); recycleManager, resume() and forkSession all refuse a fresh-spawn/resume/fork once their project has become barred, leaving the affected row(s) completely untouched and filing a durable manager_session_barred event (resume()'s also naming any live workers it cannot itself stop); every refusal is reversible once the project is un-barred again; a non-manager fork is never subject to the forkSession bar; resume()'s thrown message survives the resume-nudge allowlist verbatim (round 2); and recycle_me's MCP-facing error is now actionable rather than the bare start-refusal text (round 2)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

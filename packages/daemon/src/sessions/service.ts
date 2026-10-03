@@ -6737,6 +6737,17 @@ export class SessionService {
     }
     const project = this.db.getProject(src.projectId);
     if (!project) throw new Error("project not found");
+    // @decision c30759a0 — mirrors recycleManager/resume's chokepoint (4b2e0146): a fork of a manager
+    // source keeps role "manager" (see below), so it mints a NEW manager session exactly like a fresh
+    // spawn — refuse BEFORE any row is minted if the source's project has since become barred.
+    if (src.role === "manager" && managerSessionBarredFrom(project)) {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: src.id,
+        kind: "manager_session_barred",
+        detail: { source: "fork", projectId: project.id, repoPath: project.repoPath, reserved: !!project.reserved },
+      });
+      throw new Error(MANAGER_SESSION_BARRED_ERROR);
+    }
     const config = resolveConfig(project.config);
 
     // Pre-assign the fork's engine id (--session-id) and persist it up front. --fork-session mints
