@@ -1218,6 +1218,17 @@ clearWatcherEnvs();
   check("(22) env 0 treated as unset → default", resolveConfig(undefined).updateCheckIntervalMs === 21600000);
   delete process.env.LOOM_UPDATE_CHECK_INTERVAL_MS;
 
+  // Card d74086f5: a positive env value is clamped to the SAME 1h-24h bound
+  // (PLATFORM_MS_BOUNDS.updateCheckIntervalMs) the human validator below enforces — it used to pass
+  // through unclamped, letting an env value drift arbitrarily far outside the validated range.
+  process.env.LOOM_UPDATE_CHECK_INTERVAL_MS = "1000"; // 1s — well under the 1h floor
+  check("(22) env below the 1h floor clamps up to 3600000", resolveConfig(undefined).updateCheckIntervalMs === 3600000);
+  process.env.LOOM_UPDATE_CHECK_INTERVAL_MS = "999999999999"; // way over the 24h ceiling
+  check("(22) env above the 24h ceiling clamps down to 86400000", resolveConfig(undefined).updateCheckIntervalMs === 86400000);
+  process.env.LOOM_UPDATE_CHECK_INTERVAL_MS = "7200000"; // in-range value is passed through unchanged
+  check("(22) env within bounds is NOT altered by the clamp", resolveConfig(undefined).updateCheckIntervalMs === 7200000);
+  delete process.env.LOOM_UPDATE_CHECK_INTERVAL_MS;
+
   // --- validatePlatformConfigOverride: 3600000(1h)-86400000(24h) ---
   check("(22) accepts updateCheckIntervalMs:3600000 (1h floor)", validatePlatformConfigOverride({ updateCheckIntervalMs: 3600000 }).ok === true);
   check("(22) accepts updateCheckIntervalMs:86400000 (24h ceiling)", validatePlatformConfigOverride({ updateCheckIntervalMs: 86400000 }).ok === true);

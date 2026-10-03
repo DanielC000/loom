@@ -70,6 +70,14 @@ process.env[ENV] = "not-a-number";
 check("(A) non-numeric env ignored → default 45", resolveConfig(undefined).orchestration.idleNudgeMinutes === 45);
 clearEnv();
 
+// Card d74086f5: a negative env value floor-clamps to 0 — the SAME floor the daemon's human validator
+// enforces on a per-project `idleNudgeMinutes` override (`z.number().int().min(0)`). It used to pass
+// through unclamped (any finite number was honored), drifting from the validator's floor.
+process.env[ENV] = "-5";
+check("(A) negative env LOOM_IDLE_NUDGE_MINUTES clamps up to 0 (not honored as negative)",
+  resolveConfig(undefined).orchestration.idleNudgeMinutes === 0);
+clearEnv();
+
 // ============================ (B) DB ============================
 const { Db } = await import("../dist/db.js");
 

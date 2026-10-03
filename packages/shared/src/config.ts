@@ -320,6 +320,16 @@ export const PLATFORM_MS_BOUNDS = {
 } as const satisfies Record<string, MsBounds | Record<string, MsBounds>>;
 
 /**
+ * Floor of the per-project `orchestration.idleNudgeMinutes` field (`mcp/platform.ts` ›
+ * `orchestrationOverride`, `z.number().int().min(IDLE_NUDGE_MINUTES_MIN)`) — the SAME floor
+ * `envIdleNudgeMinutes` below clamps the `LOOM_IDLE_NUDGE_MINUTES` daemon-global env override to, so
+ * the two can never drift apart (card d74086f5: the env reader used to accept any finite number,
+ * including a negative one, while the validator already rejected a negative human-set value). 0 is a
+ * real, honored value (disables the watcher); a negative one is nonsensical.
+ */
+export const IDLE_NUDGE_MINUTES_MIN = 0;
+
+/**
  * Outbound alert webhook (Richer-notifications, external delivery). When set, the daemon POSTs a
  * small JSON payload to `url` on each orchestration event whose `kind` is in `events`, so the human
  * is alerted OUTSIDE the UI (a generic webhook works for Slack/Discord incoming-webhook URLs + any
@@ -1361,13 +1371,14 @@ type NullableFields<T> = { [K in keyof T]?: T[K] | null };
  * field is ALSO individually nullable (card ba9ccd75): a per-field `null` clears just that field, while
  * an OMITTED field (whether at the top level or nested inside a submitted group) means "not being
  * edited, leave whatever is already persisted alone" — the PATCH handler DEEP-merges these 3 groups onto
- * the persisted override, so "omitted = leave alone" now holds uniformly at both levels. Every other key
- * (`connections`/`integrations`/`remoteAccess`/`companionVoiceEnabled`) has no client-facing
- * blank-to-inherit control today, so it keeps its plain optional (present-or-absent) shape here too.
+ * the persisted override, so "omitted = leave alone" now holds uniformly at both levels. `remoteAccess`
+ * (card 074e16fd) is per-field-nullable too, but its WHOLE-GROUP `null` stays rejected — only a sub-key
+ * nested inside a submitted `remoteAccess` object may be `null`. Every other key (`connections`/
+ * `integrations`/`companionVoiceEnabled`) has no blank-to-inherit control at all, plain optional shape.
  */
 export type PlatformConfigPatch = Omit<
   PlatformConfigOverride,
-  "rateLimit" | "watchers" | "timeouts" | "backup" | "gateRetry" | "harness" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs"
+  "rateLimit" | "watchers" | "timeouts" | "backup" | "gateRetry" | "harness" | "remoteAccess" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs"
 > & {
   rateLimit?: NullableFields<RateLimitConfig> | null;
   watchers?: NullableFields<WatcherConfig> | null;
@@ -1375,6 +1386,10 @@ export type PlatformConfigPatch = Omit<
   backup?: NullableFields<BackupConfig> | null;
   gateRetry?: NullableFields<GateRetryConfig> | null;
   harness?: NullableFields<HarnessConfig> | null;
+  /** No `| null` here, unlike the groups above — whole-group `null` stays rejected by the daemon
+   *  validator (`remoteAccessPatchOverride` is NOT wrapped in `.nullable()`); only a sub-key nested
+   *  inside this object may be `null` (see the type doc above). */
+  remoteAccess?: NullableFields<RemoteAccessConfig>;
   coalesceAgentMessages?: boolean | null;
   operatorEnabled?: boolean | null;
   schedulerEnabled?: boolean | null;
@@ -1636,13 +1651,15 @@ export function resolveProfile(
  * default applies; an explicit "0" is honored as a real value (0 disables the watcher) — which is why
  * we parse explicitly instead of the `Number(...) || default` idiom (that would swallow 0). Guarded
  * for `process`-less environments (shared is also bundled into the browser web app, which never sets
- * this var).
+ * this var). Floor-clamped to {@link IDLE_NUDGE_MINUTES_MIN} — the SAME floor the daemon's human
+ * validator enforces on a per-project `idleNudgeMinutes` override (card d74086f5: this env reader used
+ * to accept any finite number, including a negative one, with no floor at all).
  */
 function envIdleNudgeMinutes(): number | undefined {
   const raw = typeof process !== "undefined" ? process.env?.LOOM_IDLE_NUDGE_MINUTES : undefined;
   if (raw == null || raw.trim() === "") return undefined;
   const n = Number(raw);
-  return Number.isFinite(n) ? n : undefined;
+  return Number.isFinite(n) ? Math.max(n, IDLE_NUDGE_MINUTES_MIN) : undefined;
 }
 
 /**
@@ -1691,13 +1708,18 @@ function envGateRetrySettleMs(): number | undefined {
  * envIdleNudgeMinutes/envBackupIntervalMinutes, a non-positive value (0 or negative) is treated as unset
  * (returns undefined) rather than honored — this preserves the pre-existing `Number(env) || undefined`
  * behavior at the index.ts call site this replaces (0 was never a meaningful interval here; it would
- * hand `setInterval` a 0ms tick).
+ * hand `setInterval` a 0ms tick). A positive value is then clamped to `PLATFORM_MS_BOUNDS.
+ * updateCheckIntervalMs` — the SAME bound the daemon's human validator enforces on a platform-set
+ * `updateCheckIntervalMs` override (card d74086f5: this env reader used to accept any positive value
+ * with no floor/ceiling at all, drifting from the validator's 1h–24h range).
  */
 function envUpdateCheckIntervalMs(): number | undefined {
   const raw = typeof process !== "undefined" ? process.env?.LOOM_UPDATE_CHECK_INTERVAL_MS : undefined;
   if (raw == null || raw.trim() === "") return undefined;
   const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  const { min, max } = PLATFORM_MS_BOUNDS.updateCheckIntervalMs;
+  return Math.min(Math.max(n, min), max);
 }
 
 /**
