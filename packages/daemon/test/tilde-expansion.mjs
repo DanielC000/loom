@@ -45,6 +45,7 @@ const { expandTilde } = await import("../dist/paths.js");
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
+const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -195,11 +196,49 @@ try {
     await client.close();
     db.close();
   }
+
+  // =====================================================================================================
+  // PART E — Platform Lead project_create + project_update (mcp/platform.ts) applies expandTilde
+  // (card a1d74686: these two previously passed repoPath through WITHOUT expansion, unlike REST/setup)
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "platform.db"));
+    class SeamHost extends createSeamHost(PtyHost) {
+      stop() {}
+    }
+    const events = { onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); }, onBusy(id, busy) { db.setBusy(id, busy); }, onContextStats() {}, onRateLimited() {}, onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); } };
+    const host = new SeamHost(events);
+    const svc = new SessionService(db, host, new OrchestrationControl());
+    const router = new PlatformMcpRouter(db, svc);
+    const server = router.buildServer();
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const client = new Client({ name: "tilde-test-platform", version: "0" });
+    await client.connect(clientT);
+    const parse = (res) => JSON.parse(res.content[0].text);
+
+    // (E1) project_create with a '~/…' repoPath/vaultPath
+    const created = await parse(await client.callTool({ name: "project_create", arguments: { name: "PlatformTilde", repoPath: "~/projects/myrepo", vaultPath: "~/projects/myvault" } }));
+    check("(E1) platform project_create with a '~/…' repoPath resolves (no error)", !created.error);
+    check("(E1) stored repoPath is the EXPANDED absolute path", created.repoPath === primary);
+    check("(E1) stored vaultPath is the EXPANDED absolute path", created.vaultPath === vaultDir);
+    check("(E1) persisted to the Db", db.getProject(created.id)?.repoPath === primary);
+
+    // (E2) project_update repoPath REBIND with a '~/…' path
+    const now2 = new Date().toISOString();
+    db.insertProject({ id: "pPlatPatch", name: "PlatPatchMe", repoPath: refRepo, vaultPath: "", config: {}, createdAt: now2, archivedAt: null, reserved: false, referenceRepos: [], vaultOnly: false });
+    const updated = await parse(await client.callTool({ name: "project_update", arguments: { projectId: "pPlatPatch", repoPath: "~/projects/myrepo" } }));
+    check("(E2) platform project_update repoPath rebind with a '~/…' path resolves (no error)", !updated.error);
+    check("(E2) stored repoPath is the EXPANDED absolute path", db.getProject("pPlatPatch")?.repoPath === primary);
+
+    await client.close();
+    db.close();
+  }
 } finally {
   fs.rmSync(tmpHome, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — expandTilde correctly resolves '~'/'~/…' to the home dir (leaving '~otheruser/…' and non-tilde paths unchanged), and every user-supplied host-path boundary (POST /api/projects, PATCH /api/projects/:id, setup operator project_create) applies it BEFORE validation, so a Linux/macOS user's '~'-repo path binds instead of 400ing — claude-free, network-free."
+  ? "\n✅ ALL PASS — expandTilde correctly resolves '~'/'~/…' to the home dir (leaving '~otheruser/…' and non-tilde paths unchanged), and every user-supplied host-path boundary (POST /api/projects, PATCH /api/projects/:id, setup operator project_create, platform Lead project_create/project_update) applies it BEFORE validation, so a Linux/macOS user's '~'-repo path binds instead of 400ing — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

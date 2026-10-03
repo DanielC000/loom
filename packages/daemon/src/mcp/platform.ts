@@ -1194,6 +1194,9 @@ export class PlatformMcpRouter {
         // full validator). Create-then-configure keeps the host-RCE/exfil keys off the creation flow.
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
+        // Expand a leading `~` (shell expansion Node never sees) BEFORE isGitRepo, so the STORED repoPath
+        // is already the expanded absolute one — matches the REST create path and setup.ts's project_create.
+        repoPath = expandTilde(repoPath);
         if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
         let vault = vaultPath ? expandTilde(vaultPath) : "";
         if (vault) {
@@ -2568,6 +2571,9 @@ export class PlatformMcpRouter {
         }
         // repoPath REBIND (elevated/human-only): fronted by the SHARED guard (isGitRepo + live-worktree
         // refusal), identical to the human REST PATCH path. Non-repo or a live worktree → reject, no write.
+        // Expand a leading `~` (shell expansion Node never sees) BEFORE checkRepoRebind (which does not
+        // expand it itself) — mirrors gateway/server.ts's PATCH path, so the STORED repoPath is expanded.
+        if (repoPath !== undefined) repoPath = expandTilde(repoPath);
         if (repoPath !== undefined) {
           const check = await checkRepoRebind(db, projectId, repoPath);
           if (!check.ok) return ok({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
