@@ -71,13 +71,18 @@ const now = new Date().toISOString();
 const db = new Db();
 // The reserved "Getting Started" home (E1-4 seeds this; here we just need a project to host the agents).
 db.insertProject({ id: "pHome", name: "Getting Started", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: true });
+// A second, ORDINARY (non-reserved) project to host the manager-role scenario: `managerSessionBarredFrom`
+// (card d25e4ea7) refuses a manager session in ANY reserved project, so agentMgr must NOT live in pHome —
+// the manager scaffolding here is unrelated to the setup-singleton assertions, just needs a project a
+// manager CAN start in.
+db.insertProject({ id: "pMgr", name: "Mgr Project", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 // One agent per scenario so each starts from a clean slate.
 db.insertAgent({ id: "agentShape", projectId: "pHome", name: "SetupShape", startupPrompt: "SETUP", position: 0, profileId: null });
 db.insertAgent({ id: "agentLive", projectId: "pHome", name: "SetupLive", startupPrompt: "SETUP", position: 1, profileId: null });
 db.insertAgent({ id: "agentExited", projectId: "pHome", name: "SetupExited", startupPrompt: "SETUP", position: 2, profileId: null });
 db.insertAgent({ id: "agentNone", projectId: "pHome", name: "SetupNone", startupPrompt: "SETUP", position: 3, profileId: null });
 db.insertAgent({ id: "agentAud", projectId: "pHome", name: "Auditor", startupPrompt: "AUDIT", position: 4, profileId: null });
-db.insertAgent({ id: "agentMgr", projectId: "pHome", name: "Mgr", startupPrompt: "MGR", position: 5, profileId: null });
+db.insertAgent({ id: "agentMgr", projectId: "pMgr", name: "Mgr", startupPrompt: "MGR", position: 5, profileId: null });
 
 // Fake pty: capture createPty (spawn) + stop calls; no real claude, no real signals.
 class SeamHost extends createSeamHost(PtyHost) {
