@@ -590,7 +590,7 @@ export class IdleWatcher {
       this.lastSkipReason.set(m.id, "nudged"); // same sentinel rationale as above
     }
 
-    this.tickIdleWorkers(nowMs, nowIso);
+    this.tickIdleWorkers(nowMs, nowIso, usageLimited);
     this.tickAnsweredStuckQuestions(nowMs);
     this.tickStaleRequests(nowMs, nowIso);
   }
@@ -830,11 +830,15 @@ export class IdleWatcher {
    * when: the worker is busy (BusyWorkerWatcher's concern), parentless/taskless, already reported/merged
    * (its task left the active lane — the SAME proxy notifyManagerOfIdleWorker itself re-checks, so this
    * is just a cheap pre-filter that avoids touching idle_nudge_state for an obviously-done worker), the
-   * worker or its owning manager is human-paused, the worker isn't actually alive, or the project
-   * disabled it (`idleWorkerMinutes === 0`). Otherwise re-nudges once per `idleWorkerMinutes` window via
-   * `notifyIdleWorker` — never re-implementing its reconciliation (board card 99efaab3 requirement).
+   * worker or its owning manager is human-paused, the worker isn't actually alive, the account is likely
+   * near a Claude usage limit (card bf4c9cf5 — a worker re-nudge spends a turn of an exhausted allowance
+   * exactly like the manager nudge card 86c9bdbd already suppresses; THE SAME `usageLimited` value
+   * computed once per tick() above is passed in here rather than re-derived, so there is only ever one
+   * notion of "usage-limited" per tick), or the project disabled it (`idleWorkerMinutes === 0`).
+   * Otherwise re-nudges once per `idleWorkerMinutes` window via `notifyIdleWorker` — never re-implementing
+   * its reconciliation (board card 99efaab3 requirement).
    */
-  private tickIdleWorkers(nowMs: number, nowIso: string): void {
+  private tickIdleWorkers(nowMs: number, nowIso: string, usageLimited: boolean): void {
     const { db, pty, control } = this.deps;
     for (const w of db.listLiveWorkers()) {
       if (w.busy) continue;                                    // BusyWorkerWatcher's concern
@@ -859,6 +863,9 @@ export class IdleWatcher {
       if (!task || task.columnKey !== activeKey) continue;
 
       if (control.isPaused(w.id) || control.isPaused(w.parentSessionId)) continue; // human-paused
+      // Card bf4c9cf5: mirrors the manager loop's own usage-limit skip (card 86c9bdbd) — a worker re-nudge
+      // during the limit just burns another turn of an already-exhausted allowance.
+      if (usageLimited) continue;
       if (!pty.isAlive(w.id)) continue;
 
       const state = db.getIdleNudgeState(w.id);

@@ -1026,6 +1026,32 @@ const DROPPED_BOARD = {
   check("(15f) a worker re-nudged 10m ago is NOT re-nudged again within the leash window", e.idleWorkerNudges.length === 0);
   cleanup(e);
 }
+// ...usage-limited (card bf4c9cf5, follow-up to 86c9bdbd): a worker that would otherwise be re-nudged is
+// silently skipped while the account is likely near a Claude usage limit — mirrors the manager loop's own
+// (24a) skip, driven through the SAME injectable `isUsageLimited` seam (never a second notion).
+{
+  const e = makeEnv({ isUsageLimited: () => true });
+  seedManager(e, "mgr-15g", { busy: true });
+  seedWorker(e, "wkr-15g", "mgr-15g", { live: true, busy: false, idleMin: 50 }); // stale 50m > default 45m window
+  seedWorkerTask(e, "wkr-15g");
+  e.watcher.tick(NOW);
+  check("(15g) usage-limited: an otherwise-eligible idle worker is NOT re-nudged", e.idleWorkerNudges.length === 0);
+  const s = e.db.getIdleNudgeState("wkr-15g");
+  check("(15g) usage-limited: last_idle_nudge_at on the worker's own row is untouched (nothing was sent)", s?.lastIdleNudgeAt === null);
+  cleanup(e);
+}
+// Negative control for (15g): an otherwise-IDENTICAL worker, with the seam explicitly returning false,
+// still gets re-nudged — proves the new skip is gated on the signal's actual value, not a blanket
+// suppression of tickIdleWorkers.
+{
+  const e = makeEnv({ isUsageLimited: () => false });
+  seedManager(e, "mgr-15h", { busy: true });
+  seedWorker(e, "wkr-15h", "mgr-15h", { live: true, busy: false, idleMin: 50 });
+  seedWorkerTask(e, "wkr-15h");
+  e.watcher.tick(NOW);
+  check("(15h) NOT usage-limited (negative control): the otherwise-identical worker IS re-nudged", e.idleWorkerNudges.includes("wkr-15h"));
+  cleanup(e);
+}
 
 // ============================ (16) PLATFORM (Lead) coverage — card 98b3725c ============================
 // The SAME manager-loop code path now also iterates listLivePlatformSessions() — proving a platform
@@ -1669,6 +1695,6 @@ const otherCausesAreZero = (cc, expectedKey) => CAUSE_KEYS.filter((k) => k !== e
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged; a PLATFORM (Lead) session (card 98b3725c) gets the SAME full-trigger/silent/escalate coverage a manager does, alongside a manager in the same project/tick without interference; a platform-role session now gets its OWN idle-nudge copy (no orchestration-loop/pick-up-next/N-actionable framing) and discounts parked-lane (decision-gated/owner-flow) cards from its actionable count, while the manager's copy and parked-lane counting stay byte-identical (card f98f3e43); and a session's OWN open (pending) owner question_ask — regardless of taskId — suppresses ITS idle nudge ONLY when there's no other actionable work (card cb56cf80, narrowed to SESSION-scoped + no-other-actionable-work by card 8e87f3b5), resuming normally once answered, when there's no pending own-Request, when other actionable work exists despite the pending Request, or for a fresh non-recycle successor that never filed the Request itself — without being fooled by an unrelated agent/session's pending Request; the reset-on-activity check now anchors on the LATER of last_idle_nudge_at and idle_disposition_at (card 86c9bdbd), so genuine orchestration activity that predates a manager's own idle_report('waiting') call can no longer defeat the snooze that call just set, while activity genuinely AFTER that call still resets it as before; and while the account is likely near a Claude usage limit (the SAME signal worker_spawn's refusal reads), the idle nudge — and the escalate-at-cap branch — are silently suppressed instead of firing into an already-exhausted allowance."
+  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged; a PLATFORM (Lead) session (card 98b3725c) gets the SAME full-trigger/silent/escalate coverage a manager does, alongside a manager in the same project/tick without interference; a platform-role session now gets its OWN idle-nudge copy (no orchestration-loop/pick-up-next/N-actionable framing) and discounts parked-lane (decision-gated/owner-flow) cards from its actionable count, while the manager's copy and parked-lane counting stay byte-identical (card f98f3e43); and a session's OWN open (pending) owner question_ask — regardless of taskId — suppresses ITS idle nudge ONLY when there's no other actionable work (card cb56cf80, narrowed to SESSION-scoped + no-other-actionable-work by card 8e87f3b5), resuming normally once answered, when there's no pending own-Request, when other actionable work exists despite the pending Request, or for a fresh non-recycle successor that never filed the Request itself — without being fooled by an unrelated agent/session's pending Request; the reset-on-activity check now anchors on the LATER of last_idle_nudge_at and idle_disposition_at (card 86c9bdbd), so genuine orchestration activity that predates a manager's own idle_report('waiting') call can no longer defeat the snooze that call just set, while activity genuinely AFTER that call still resets it as before; and while the account is likely near a Claude usage limit (the SAME signal worker_spawn's refusal reads), the idle nudge — and the escalate-at-cap branch — are silently suppressed instead of firing into an already-exhausted allowance; and the SAME usage-limit skip now ALSO covers the periodic idle-WORKER re-nudge (card bf4c9cf5), through the same injectable seam, with a negative control proving it isn't a blanket suppression."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
