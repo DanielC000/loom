@@ -35,6 +35,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (G) END-TO-END through the real production call path: a REAL mergeBranch() success/conflict both leave
 //       NO latch file behind afterward (extends merge-danger-window.mjs's in-memory assertion to the
 //       durable side of the SAME enter/exit calls).
+//   (H) card 0a103a27 — stale `.json.tmp-<pid>` residue (a writeMergeDangerLatch call that crashed
+//       between its writeFileSync and renameSync) is swept by readAndClearMergeDangerLatches: a FOREIGN
+//       pid's tmp file older than the safe bound is removed; a foreign pid's tmp file that is too RECENT
+//       is kept (never trust a pid match alone); and the CURRENT process's own tmp file is kept
+//       regardless of age (a live writer is identified by pid match, never by time).
 // Run: 1) build daemon (pnpm build), 2) node test/merge-danger-latch.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -84,6 +89,22 @@ if (scenario) {
     // the writer must swallow it, and this child must still exit 0 (never throw/crash).
     const { writeMergeDangerLatch } = await import("../dist/git/merge-danger-latch.js");
     writeMergeDangerLatch("/tmp/loom-mdl-unwritable", "loom/mdl-branch-u", "op-mdl-u");
+    process.exit(0);
+  } else if (scenario === "sweep-tmp-residue") {
+    // PARENT pre-seeded MERGE_DANGER_LATCH_DIR with two FOREIGN-pid fixtures before spawning this child
+    // (one with a stale mtime, one too recent to trust). This child additionally creates its OWN-pid tmp
+    // file — deliberately with an OLD mtime too, to prove pid-match alone (never age) is what protects a
+    // live writer — then runs the real readAndClearMergeDangerLatches() (which now sweeps internally) and
+    // reports what's left, plus its own pid so the parent can name that fixture correctly.
+    const { readAndClearMergeDangerLatches, MERGE_DANGER_LATCH_DIR } = await import("../dist/git/merge-danger-latch.js");
+    fs.mkdirSync(MERGE_DANGER_LATCH_DIR, { recursive: true });
+    const ownTmp = path.join(MERGE_DANGER_LATCH_DIR, `ownpidfixture0000000000.json.tmp-${process.pid}`);
+    fs.writeFileSync(ownTmp, "{}");
+    const oldSeconds = (Date.now() - 10 * 60 * 1000) / 1000;
+    fs.utimesSync(ownTmp, oldSeconds, oldSeconds);
+    readAndClearMergeDangerLatches();
+    const filesAfter = fs.readdirSync(MERGE_DANGER_LATCH_DIR);
+    console.log(`RESULT:${JSON.stringify({ filesAfter, ownPid: process.pid })}`);
     process.exit(0);
   } else if (scenario === "e2e-merge") {
     // END-TO-END through the REAL production call path (DoD-3): a genuine mergeBranch() success against a
@@ -270,11 +291,39 @@ try {
     check("[G] the real merge succeeded (sanity check on the fixture)", res?.ok === true);
     check("[G] NO durable latch file left behind after a real successful mergeBranch()", Array.isArray(res?.latchFiles) && res.latchFiles.length === 0);
   }
+
+  // ── H: card 0a103a27 — stale .json.tmp-<pid> residue sweep. A foreign pid's tmp file older than the
+  //      safe bound is removed; a foreign pid's tmp file that is too RECENT is kept; the current
+  //      process's OWN tmp file is kept regardless of age (pid match, never a timer, protects a live
+  //      writer) ───────────────────────────────────────────────────────────────────────────────────────
+  {
+    const home = freshHome("tmp-residue");
+    const latchDir = path.join(home, "merge-danger-latches");
+    fs.mkdirSync(latchDir, { recursive: true });
+
+    const staleForeignName = "stalefixture0000000000.json.tmp-999999999";
+    const staleForeign = path.join(latchDir, staleForeignName);
+    fs.writeFileSync(staleForeign, "{}");
+    const staleSeconds = (Date.now() - 10 * 60 * 1000) / 1000;
+    fs.utimesSync(staleForeign, staleSeconds, staleSeconds);
+
+    const freshForeignName = "freshfixture0000000000.json.tmp-999999998";
+    const freshForeign = path.join(latchDir, freshForeignName);
+    fs.writeFileSync(freshForeign, "{}"); // mtime defaults to "now" — too recent to trust as dead residue
+
+    const r = runChild("sweep-tmp-residue", home);
+    const res = parseResult(r.stdout);
+    check("[H] sweep child exited cleanly (0)", r.code === 0);
+    const after = new Set(res?.filesAfter ?? []);
+    check("[H] a STALE foreign-pid tmp file is swept at boot", !after.has(staleForeignName));
+    check("[H] a TOO-RECENT foreign-pid tmp file is kept (age bound protects against a slow in-progress write)", after.has(freshForeignName));
+    check("[H] the current process's OWN tmp file is kept regardless of age (pid match, never time, identifies a live writer)", after.has(`ownpidfixture0000000000.json.tmp-${res?.ownPid}`));
+  }
 } finally {
   // freshHome()-created dirs are registered via mkdtempManaged — swept by the exit backstop below.
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the durable merge-danger latch survives a simulated hard death across a process boundary, consumes itself on read, stays clean on a graceful exit, writes atomically, never throws, and its boot-time classifier correctly attributes both a dirty and a clean tree against a REAL residue scan."
+  ? "\n✅ ALL PASS — the durable merge-danger latch survives a simulated hard death across a process boundary, consumes itself on read, stays clean on a graceful exit, writes atomically, never throws, its boot-time classifier correctly attributes both a dirty and a clean tree against a REAL residue scan, and stale tmp-write residue is swept without ever touching a live writer's own file."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

@@ -71,15 +71,59 @@ export function clearMergeDangerLatch(repoPath: string): void {
 }
 
 /**
+ * How old a leftover `<hash>.json.tmp-<pid>` must be before boot will sweep it, in ms.
+ * `writeMergeDangerLatch`'s write-then-rename is synchronous and effectively instantaneous, so real
+ * crash residue is always far older than this by the time any later boot runs; the bound exists only to
+ * guard against trusting a pid comparison alone — see `sweepStaleMergeDangerLatchTmpResidue` below.
+ */
+const STALE_TMP_RESIDUE_MS = 5 * 60 * 1000;
+
+/**
+ * Best-effort sweep of leftover `<hash>.json.tmp-<pid>` residue: a `writeMergeDangerLatch` call that
+ * crashed between its `writeFileSync` and `renameSync` leaves a tmp file that `readAndClearMergeDangerLatches`
+ * below never picks up (it only reads files ending `.json`) — without this, such a file accumulates forever.
+ *
+ * Does NOT rely on pid liveness to protect a live writer's own in-progress file — a tmp's embedded pid
+ * can belong to a long-dead process that Windows has since reassigned, so a pid match alone is unsound.
+ * Instead: (1) skip this process's own pid outright, and (2) require the file's mtime to be older than
+ * `STALE_TMP_RESIDUE_MS` — long enough that no real in-progress write (microseconds) is ever mistaken
+ * for residue, whoever's pid it carries. Called from `readAndClearMergeDangerLatches`. Never throws.
+ */
+export function sweepStaleMergeDangerLatchTmpResidue(): void {
+  let files: string[];
+  try {
+    files = fs.readdirSync(MERGE_DANGER_LATCH_DIR);
+  } catch {
+    return; // directory doesn't exist yet (or unreadable) — nothing to sweep
+  }
+  const now = Date.now();
+  for (const f of files) {
+    const m = /\.json\.tmp-(\d+)$/.exec(f);
+    if (!m) continue;
+    if (Number(m[1]) === process.pid) continue; // never this process's own (possibly still in-flight) write
+    const full = path.join(MERGE_DANGER_LATCH_DIR, f);
+    try {
+      const stat = fs.statSync(full);
+      if (now - stat.mtimeMs < STALE_TMP_RESIDUE_MS) continue; // too recent to be confident it's dead residue
+      fs.unlinkSync(full);
+    } catch {
+      /* a stat/unlink race (already gone) or a transient fs error — best-effort, never throws */
+    }
+  }
+}
+
+/**
  * Boot-time, CONSUME-ON-READ (read every latch file present, then delete it) — same pattern as
  * shutdown-marker.ts's `readAndClearShutdownMarker`, for the same reason: a latch must never outlive the
  * boot it was meant to be reported on, or a stale leftover could mislabel a LATER, unrelated stop. Called
  * ONCE per boot. Corrupt/unreadable entries are skipped (and still removed) rather than crashing boot.
- * Never throws.
+ * Also sweeps stale `.tmp-<pid>` residue (see `sweepStaleMergeDangerLatchTmpResidue` above) — never a
+ * live writer's. Never throws.
  */
 export function readAndClearMergeDangerLatches(): MergeDangerLatchRecord[] {
   try {
     fs.mkdirSync(MERGE_DANGER_LATCH_DIR, { recursive: true });
+    sweepStaleMergeDangerLatchTmpResidue();
     const files = fs.readdirSync(MERGE_DANGER_LATCH_DIR).filter((f) => f.endsWith(".json"));
     const out: MergeDangerLatchRecord[] = [];
     for (const f of files) {
