@@ -28,6 +28,7 @@ import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { computeGateTimingBand, readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
 import { deferredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
+import { MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
 import { CapQueueRejectedError } from "../orchestration/cap-queue.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
@@ -5261,7 +5262,23 @@ export class OrchestrationMcpRouter {
           }
           return ok({ newManagerSessionId: fresh.id, gen: fresh.gen });
         } catch (e) {
-          return ok({ error: (e as Error).message });
+          const message = (e as Error).message;
+          // Round 2 (Code Review 70d926b8, suggestion): the bare start-refusal text ("refusing to start a
+          // manager session: ...") reads like a transient tool failure — give an ACTIONABLE message
+          // instead: this is permanent for the current project, recycling will keep refusing, and the
+          // caller's own options are end_me (once safe) or escalating to a human/the Lead to rebind the
+          // project. resume()/startNew/startManager's OWN refusal text is left untouched — only this
+          // caller-facing wrapper is reworded.
+          if (message === MANAGER_SESSION_BARRED_ERROR) {
+            return ok({
+              error: `${message} — this project is barred for manager sessions (a reserved/system project, ` +
+                `or its repoPath is the workspace home or an ancestor of it); recycling will keep being ` +
+                `refused until a human rebinds the project's repoPath or un-reserves it. You are NOT closed ` +
+                `and remain fully live. If your live workers can be safely stopped/handed off, consider ` +
+                `end_me once that's done; otherwise escalate this to the human/Platform Lead.`,
+            });
+          }
+          return ok({ error: message });
         }
       },
     );

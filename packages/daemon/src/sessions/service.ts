@@ -3788,6 +3788,20 @@ export class SessionService {
     }
     const project = this.db.getProject(session.projectId);
     if (!project) throw new Error("project not found");
+    // @decision 4b2e0146 — mirrors refuseManagerIntoReservedHome's startNew/startManager chokepoint, but
+    // for every resume caller (all funnel through this one method): a manager's project may have been
+    // rebound to a barred path since it last started — refuse before any state mutation.
+    if (session.role === "manager" && managerSessionBarredFrom(project)) {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: session.id,
+        kind: "manager_session_barred",
+        detail: {
+          source: "resume", projectId: project.id, repoPath: project.repoPath, reserved: !!project.reserved,
+          liveWorkerIds: this.db.listWorkers(session.id).filter((w) => w.processState === "live").map((w) => w.id),
+        },
+      });
+      throw new Error(MANAGER_SESSION_BARRED_ERROR);
+    }
     const config = resolveConfig(project.config);
     // @decision e98877b1 — on agent-row-missing resume, still apply the role-keyed pin via
     // withRolePermissionModeCyclesPin(config.permission, session.role), keyed off the row's PINNED role
@@ -12933,6 +12947,17 @@ export class SessionService {
     const agent = this.db.getAgent(old.agentId);
     const project = this.db.getProject(old.projectId);
     if (!project) throw new Error("project not found");
+    // @decision 4b2e0146 — refuse BEFORE any teardown/insert, same placement as the two guards above:
+    // this leaves the predecessor fully live + untouched rather than spawning a successor somewhere a
+    // manager can never start (its repoPath may have been rebound to a barred path after it started).
+    if (managerSessionBarredFrom(project)) {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldManagerId,
+        kind: "manager_session_barred",
+        detail: { source: "recycle", projectId: project.id, repoPath: project.repoPath, reserved: !!project.reserved },
+      });
+      throw new Error(MANAGER_SESSION_BARRED_ERROR);
+    }
     const config = resolveConfig(project.config);
     // Re-resolve the manager's spawn so the recycled successor keeps the profile's LAYERED allowlist +
     // model pin (mirrors recycleWorker; recycle used to drop them to bare config.permission / no model).

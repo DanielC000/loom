@@ -23,6 +23,9 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-schedrc-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// A SIBLING of tmpHome, never os.tmpdir() itself — see peer-message-inbound-stamp.mjs's identical note
+// (card 4b2e0146).
+const ordinaryRepo = path.join(os.tmpdir(), `loom-schedrc-repo-${Date.now()}-${process.pid}`);
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -44,7 +47,7 @@ class PtyStub {
 
 const db = new Db();
 const proj = `sr-proj-${sfx}`, agent = `sr-ag-${sfx}`;
-db.insertProject({ id: proj, name: proj, repoPath: os.tmpdir(), vaultPath: os.tmpdir(), config: {}, createdAt: now, archivedAt: null });
+db.insertProject({ id: proj, name: proj, repoPath: ordinaryRepo, vaultPath: ordinaryRepo, config: {}, createdAt: now, archivedAt: null });
 db.insertAgent({ id: agent, projectId: proj, name: "t", startupPrompt: "BRIEF", position: 0 });
 const mkSession = (o) => db.insertSession({
   id: o.id, projectId: proj, agentId: agent, engineSessionId: `eng-${o.id}`, title: null, cwd: os.tmpdir(),

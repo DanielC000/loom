@@ -4,6 +4,7 @@ import type { Project } from "@loom/shared";
 import { isGitRepo } from "../git/reader.js";
 import { branchExistsInRepo } from "../git/worktrees.js";
 import { resolveRepoByKey, UnknownRepoKeyError } from "./resolve-repo.js";
+import { managerSessionBarredFrom } from "../agents/clone-core.js";
 
 /**
  * Result of a live-worktree-session guard (repoPath rebind, `repos` registry edit, or `task.repoKey`
@@ -12,7 +13,7 @@ import { resolveRepoByKey, UnknownRepoKeyError } from "./resolve-repo.js";
  */
 export type RebindCheck =
   | { ok: true }
-  | { ok: false; error: string; liveSessions?: Array<{ sessionId: string; branch: string | null; worktreePath: string }> };
+  | { ok: false; error: string; liveSessions?: Array<{ sessionId: string; branch: string | null; worktreePath: string | null }> };
 
 /** The `{sessionId, branch, worktreePath}` projection {@link checkLiveWorktreeSessions} reports. */
 function liveWorktreeSessionsFor(db: Db, projectId: string) {
@@ -116,7 +117,11 @@ export async function checkTaskRepoKeyRebind(db: Db, project: Project, taskId: s
  *      `@decision` tag on this function below for the full rationale.
  *  (1) `repoPath` MUST be an existing git repository (`isGitRepo`) — EXACTLY like project_create /
  *      POST /api/projects validate it; a non-repo is rejected before binding.
- *  (2) Refuse while the project has any LIVE session occupying a worktree ({@link checkLiveWorktreeSessions},
+ *  (2) Refuse rebinding to a target that would bar a manager session ({@link managerSessionBarredFrom})
+ *      while the project has any LIVE manager session ({@link Db.listLiveManagersInProject}). Unlike
+ *      gate (0), this is UNCONDITIONAL — no `humanAuthorized` override — same structural-safety posture
+ *      as gate (3) below, not a permission check. See the `@decision 4b2e0146` tag below.
+ *  (3) Refuse while the project has any LIVE session occupying a worktree ({@link checkLiveWorktreeSessions},
  *      unscoped — see its doc). Rebinding the repo would strand those worktrees (they hang off the OLD
  *      repo); the offending sessions are named so the operator can stop them first. This is a
  *      structural-safety block, not a permission check — the surface is already human/elevated-only.
@@ -124,6 +129,12 @@ export async function checkTaskRepoKeyRebind(db: Db, project: Project, taskId: s
  * @decision d25e4ea7 — gate (0) refuses a reserved project's rebind unless `opts.humanAuthorized`
  * (same family pattern as `3de74275`'s field check); the Platform Lead's `project_update` passes no
  * flag (fail-closed), the REST PATCH path passes `humanAuthorized: true`.
+ *
+ * Gate (2) closes the "under-protection" direction d25e4ea7 deliberately left open (an ORDINARY
+ * project rebound to a barred repoPath while a live manager already runs there).
+ *
+ * @decision 4b2e0146 — call `managerSessionBarredFrom` for gate (2); never re-derive
+ * `isLoomHomeOrAncestor` separately here.
  */
 export async function checkRepoRebind(db: Db, projectId: string, repoPath: string, opts?: { humanAuthorized?: boolean }): Promise<RebindCheck> {
   const project = db.getProject(projectId);
@@ -132,6 +143,20 @@ export async function checkRepoRebind(db: Db, projectId: string, repoPath: strin
   }
   if (!(await isGitRepo(repoPath))) {
     return { ok: false, error: `repoPath is not an existing git repository: ${repoPath}` };
+  }
+  if (project && managerSessionBarredFrom({ reserved: project.reserved, repoPath })) {
+    const liveManagers = db.listLiveManagersInProject(projectId);
+    if (liveManagers.length > 0) {
+      return {
+        ok: false,
+        // Round 2 (Code Review 70d926b8, MINOR): "recycle or stop them first" was wrong — recycling a
+        // barred manager mints a live successor (via `managerSessionBarredFrom`-unaware recycle, pre-fix)
+        // or is itself refused (post-fix, 4b2e0146's recycleManager change), so it can never clear this
+        // gate. Only stopping actually clears it.
+        error: `cannot rebind repoPath to a reserved/system home (or an ancestor of it) while ${liveManagers.length} live manager session(s) exist for this project — stop them first (${liveManagers.map((s) => s.id).join(", ")})`,
+        liveSessions: liveManagers.map((s) => ({ sessionId: s.id, branch: null, worktreePath: s.worktreePath ?? null })),
+      };
+    }
   }
   const check = checkLiveWorktreeSessions(db, projectId);
   if (!check.ok) {

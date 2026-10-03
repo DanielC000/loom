@@ -102,7 +102,13 @@ db.insertAgent({ id: "agentWorker", projectId: "p1", name: "Worker", startupProm
 db.insertAgent({ id: "agentLead", projectId: "p1", name: "Lead", startupPrompt: "L", position: 2, profileId: null });
 db.insertAgent({ id: "agentRun", projectId: "p1", name: "Run", startupPrompt: "R", position: 3, profileId: null, endpoint: true, ioSchema: null });
 db.insertSession({ id: "mgr1", projectId: "p1", agentId: "agentMgr1", engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
-db.insertSession({ id: "mgrRig", projectId: "p1", agentId: "agentMgr1", engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+// card 4b2e0146: `p1` is deliberately RESERVED (shared with the startPlatformLead/recyclePlatformLead
+// scenarios below) — recycleManager now correctly REFUSES a manager-role recycle there (reserved IS
+// managerSessionBarredFrom), so the recycleManager-role scenario needs its OWN ORDINARY project rather
+// than sharing p1 with the Lead scenario.
+db.insertProject({ id: "p1ord", name: "P-ord", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+db.insertAgent({ id: "agentMgr1Ord", projectId: "p1ord", name: "Mgr1Ord", startupPrompt: "M", position: 0, profileId: null });
+db.insertSession({ id: "mgrRigOrd", projectId: "p1ord", agentId: "agentMgr1Ord", engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
 const tW = "22222222-2222-4222-8222-222222222222";
 db.insertTask({ id: tW, projectId: "p1", title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
@@ -172,7 +178,7 @@ try {
 
   // --- recycleManager (role "manager", hardcoded) — card d78f8217: NOW blanket-denied ---
   host.capture.length = 0;
-  const rm = await svc.recycleManager("mgrRig", "CONTINUE: pick up the fleet.");
+  const rm = await svc.recycleManager("mgrRigOrd", "CONTINUE: pick up the fleet.");
   check("(recycleManager) opts.role === 'manager'", lastOptsFor(rm.id)?.role === "manager");
   check("(recycleManager) chokepoint deny DOES include the transcript-root rule (d78f8217 blanket)", finalDeny(lastOptsFor(rm.id)).includes(ROLE_DENY));
 

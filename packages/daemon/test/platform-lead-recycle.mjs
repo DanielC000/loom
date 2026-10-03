@@ -74,7 +74,12 @@ const db = new Db();
 // checks' pre-existing 8s budget below.
 db.insertProject({ id: "pHome", name: "Loom Platform", repoPath: repo, vaultPath: repo, config: { permission: { startupModeCycles: 0 } }, createdAt: now, archivedAt: null, reserved: true });
 db.insertAgent({ id: "agentLead", projectId: "pHome", name: "Platform", startupPrompt: "LEAD WARMUP BRIEF", position: 0, profileId: null });
-db.insertAgent({ id: "agentMgr", projectId: "pHome", name: "Mgr", startupPrompt: "MGR", position: 1, profileId: null });
+// card 4b2e0146: the (4) "non-platform caller refused" scenario's manager gets its OWN ORDINARY
+// (non-reserved, non-barred) project — `pHome` is RESERVED, and startManager now correctly refuses a
+// manager session there (d25e4ea7/4b2e0146's managerSessionBarredFrom) BEFORE recyclePlatformLead ever
+// gets a chance to refuse it for being non-platform. Sharing pHome would test the wrong refusal.
+db.insertProject({ id: "pOrd", name: "Ordinary", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+db.insertAgent({ id: "agentMgr", projectId: "pOrd", name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
 
 // Fake pty: capture createPty (spawn) + stop calls; no real claude, no real signals.
 class SeamHost extends createSeamHost(PtyHost) {

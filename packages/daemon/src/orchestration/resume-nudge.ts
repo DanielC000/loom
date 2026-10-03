@@ -1,3 +1,5 @@
+import { MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
+
 /**
  * The shared tail appended to EVERY auto-resume nudge — both the daemon-restart fleet resume
  * (`resumeFleetOnBoot` in sessions/service.ts) AND the crash-recovery watchdog's bounded auto-resume
@@ -126,6 +128,10 @@ export const RESUME_KNOWN_SAFE_REASONS: ReadonlySet<string> = new Set([
   "session was recycled — a successor exists; only a manual (human) resume may force it",
   "session was administratively retired (its recycle successor was superseded by the predecessor) — only a manual (human) resume may force it",
   "project not found",
+  // @decision 4b2e0146 — a manager's own resume() throws this verbatim (identity-free); without this
+  // entry it was silently rewritten to RESUME_UNKNOWN_REASON_FALLBACK, masking a barred-project resume
+  // as a generic fault in fleet_resume_failed/manager_crash_resume_failed and the Lead's nudge.
+  MANAGER_SESSION_BARRED_ERROR,
 ]);
 
 /** The sanitized stand-in for any resume-failure reason NOT on {@link RESUME_KNOWN_SAFE_REASONS}. */

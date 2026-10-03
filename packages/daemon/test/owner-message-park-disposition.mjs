@@ -360,7 +360,11 @@ try {
 
     // --- (C1) recycleManager ---
     {
-      db.insertProject({ id: "pC1", name: "PC1", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+      // card 4b2e0146: repoPath is a SUBdirectory of tmpHome, never tmpHome itself — tmpHome IS LOOM_HOME,
+      // and managerSessionBarredFrom (now consulted by recycleManager too) bars a project whose repoPath
+      // is LOOM_HOME or an ANCESTOR of it; a descendant is explicitly not barred.
+      const pC1Repo = path.join(tmpHome, "pC1-repo");
+      db.insertProject({ id: "pC1", name: "PC1", repoPath: pC1Repo, vaultPath: pC1Repo, config: {}, createdAt: now, archivedAt: null });
       db.insertAgent({ id: "aC1", projectId: "pC1", name: "Manager", startupPrompt: "BRIEF", position: 0 });
       const oldId = "mgrC1-old";
       db.insertSession({

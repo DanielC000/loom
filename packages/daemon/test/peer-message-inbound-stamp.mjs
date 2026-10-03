@@ -34,6 +34,10 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-peer-inbound-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// A SIBLING of tmpHome, never os.tmpdir() itself — os.tmpdir() is tmpHome's own PARENT, i.e. an ANCESTOR
+// of LOOM_HOME, so every "ordinary" project below would be wrongly managerSessionBarredFrom()-flagged
+// now that recycleManager/resume() consult it too (card 4b2e0146's own widening).
+const ordinaryRepo = path.join(os.tmpdir(), `loom-peer-inbound-repo-${Date.now()}-${process.pid}`);
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -75,7 +79,7 @@ const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const db = new Db();
 
-const mkProject = (id, name) => db.insertProject({ id, name, repoPath: os.tmpdir(), vaultPath: os.tmpdir(), config: {}, createdAt: now, archivedAt: null });
+const mkProject = (id, name) => db.insertProject({ id, name, repoPath: ordinaryRepo, vaultPath: ordinaryRepo, config: {}, createdAt: now, archivedAt: null });
 const mkAgent = (id, projectId) => db.insertAgent({ id, projectId, name: "t", startupPrompt: "BRIEF", position: 0 });
 const mkSession = (o) => db.insertSession({
   id: o.id, projectId: o.projectId, agentId: o.agentId, engineSessionId: `eng-${o.id}`, title: null, cwd: os.tmpdir(),

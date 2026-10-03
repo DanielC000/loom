@@ -155,10 +155,12 @@ function parseLines(text: string): string[] {
 // Repository binding — the one place a project's `repoPath` changes after creation. Distinct from the
 // machine config (ConfigEditor below): it PATCHes the human STRUCTURAL path (api.updateProject), fronted
 // by the daemon's shared rebind guard — isGitRepo validation (a non-repo 400s) + a refusal while any live
-// worktree session exists (returns the named liveSessions[]). Rebinding repoints ALL of the project's git
-// operations, so the field carries a loud warning and both rejection paths surface INLINE (no alert): a
-// non-repo shows the reason, the live-worktree refusal shows the reason + lists the sessions to stop —
-// neither ever looks saved. Keyed by project id so a project switch re-seeds the field.
+// worktree session exists, OR (4b2e0146) a rebind target that would bar a manager session while one is
+// live in this project (that session has no worktree at all) — both return the named liveSessions[].
+// Rebinding repoints ALL of the project's git operations, so the field carries a loud warning and both
+// rejection paths surface INLINE (no alert): a non-repo shows the reason, a live-session refusal shows
+// the reason + lists the sessions to stop — neither ever looks saved. Keyed by project id so a project
+// switch re-seeds the field.
 function RepoPathEditor({ project }: { project: Project }) {
   const qc = useQueryClient();
   const [repoPath, setRepoPath] = useState(project.repoPath);
@@ -213,10 +215,13 @@ function RepoPathEditor({ project }: { project: Project }) {
         )}
       </div>
 
-      {/* Live-worktree refusal: list the sessions the user must stop first (the write did NOT land). */}
+      {/* Live-session refusal: list the sessions the user must stop first (the write did NOT land).
+          Round 2 (Code Review 70d926b8): this also renders 4b2e0146's gate-2 refusal, which names LIVE
+          MANAGER sessions (no worktree at all, worktreePath:null) — kept role-neutral rather than
+          "worktree session(s)" so it reads correctly for either refusal. */}
       {liveSessions && liveSessions.length > 0 && (
         <div style={{ marginTop: 10, padding: 10, background: color.panel2, border: `1px solid ${color.red}`, borderRadius: 6 }}>
-          <Hint>stop these live worktree session(s) first, then retry:</Hint>
+          <Hint>stop these live session(s) first, then retry:</Hint>
           <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: color.text, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6 }}>
             {liveSessions.map((s) => (
               <li key={s.sessionId}>

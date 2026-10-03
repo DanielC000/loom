@@ -1713,6 +1713,18 @@ export type OrchestrationEventKind =
   // specifically BECAUSE revocation is decoupled from that session's own row, so its absence must never
   // block the audit write.
   | "credential_revoked"
+  // Card 4b2e0146 — a `recycleManager`/`resume` fresh-spawn refused by `managerSessionBarredFrom`
+  // (agents/clone-core.ts): the project's repoPath became reserved/an operational-home ancestor (e.g. a
+  // repoPath rebind) while a manager session already existed there. Filed under the REFUSED session's
+  // own id (the predecessor for `source:"recycle"`, the row itself for `source:"resume"`) — never
+  // batched, mirroring `manager_crash_resume_failed`'s per-manager filing (card 0c90ebe4). `detail`
+  // carries { source: "recycle" | "resume", projectId, repoPath, reserved, liveWorkerIds? } — `liveWorkerIds`
+  // (the refused manager's own live worker sessions at the moment of refusal) is present only for
+  // `source:"resume"`, where the manager genuinely fails to come back (so those workers, if they
+  // independently resume, are left parented to a non-live row); a `source:"recycle"` refusal leaves the
+  // PREDECESSOR fully live with its workers untouched (the throw fires before any teardown), so there is
+  // nothing orphaned to enumerate there.
+  | "manager_session_barred"
   // Card f44cc187: audits a delivered credential whose `credentialEnvVar` a LATER deny-list widening made
   // reserved/invalid — `resolveCredentialSessionEnv`'s backstop (`keys/credentialSessionEnv.ts`) drops it
   // from every spawn from that point on, silently, unless this fires. AUDIT-ONLY, same posture as
@@ -1773,6 +1785,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   credential_undeliverable: true,
   worker_retired: true,
   worker_retirement_lifted: true,
+  manager_session_barred: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

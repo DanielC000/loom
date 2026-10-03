@@ -313,7 +313,9 @@ async function putErr<T>(url: string, body: unknown): Promise<T> {
 
 // One live worktree session blocking a repoPath rebind (the daemon's shared rebind guard). Surfaced
 // in the Settings UI so the user can name + stop them before retrying.
-export interface LiveWorktreeSession { sessionId: string; branch: string | null; worktreePath: string; }
+// Round 2 (Code Review 70d926b8): a manager session named here (4b2e0146's checkRepoRebind gate 2) has
+// no worktree at all — `worktreePath: null`, matching the server's own RebindCheck type (projects/rebind.ts).
+export interface LiveWorktreeSession { sessionId: string; branch: string | null; worktreePath: string | null; }
 // An Error from a project PATCH that, on the live-worktree rebind refusal, also carries the named
 // liveSessions[] the daemon returned alongside `{ error }` — so the UI lists them, not just the message.
 export interface ProjectPatchError extends Error { liveSessions?: LiveWorktreeSession[]; }
