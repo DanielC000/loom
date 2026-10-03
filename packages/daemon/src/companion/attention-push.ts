@@ -187,6 +187,18 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
       return "escalation";
     case "session_rate_limited":
       return "usage-limit";
+    // Card e2a3c613: only when nobody else was addressed (`parentNudged:false` — a manager, the platform
+    // Lead, or a parentless worker/setup/run/assistant; a covered case with a live manager parent is
+    // handled by that parent's own nudge instead, matching 01160ae3's scope).
+    // Round 2 ruling (ownership-reversible): this event is BY DEFINITION the no-manager-addressed case —
+    // the one party left to tell is the owner. "worker-crashed" is a FLEET_OPS class (see
+    // FLEET_OPS_ALERT_CLASSES above), EXCLUDED from Companion lead-mode's `"*"` wildcard push subscription
+    // — a lead-mode companion, the surface most likely to be the owner's actual attention channel here,
+    // would silently never see it unless they'd also explicitly enumerated the class. Reuses "escalation"
+    // instead (platform_escalate's class, not FLEET_OPS) — the same shape: nothing automated is left to
+    // resolve this, a human must. See docs/decisions/e2a3c613-*.md for the full reasoning.
+    case "claude_boot_dialog_stuck":
+      return detail?.parentNudged === false ? "escalation" : null;
     default:
       return null;
   }
@@ -400,6 +412,12 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
     case "recycle_fleet_stranded_across_restart":
       line = `${projectName}: manager/Lead recycle settle lost to a daemon restart — no automatic owner exists for its fleet, human intervention needed — ${m8}`;
       break;
+    case "claude_boot_dialog_stuck": {
+      const sigName = typeof detail.signatureName === "string" ? detail.signatureName : "none recognized";
+      const roleLabel = typeof detail.role === "string" ? detail.role : "session";
+      line = `${projectName}: ${roleLabel} never reached SessionStart — possible blocking CLI dialog (${sigName}) — ${who}`;
+      break;
+    }
     default:
       line = `${projectName}: ${alertClass} — ${m8}`;
   }
@@ -503,14 +521,21 @@ export class AttentionPushWatcher {
       // (tickImmediate/tickDigest's emit calls) — never here — so a digest's "not yet due" re-scan of the
       // SAME not-yet-flushed row (tickDigest keeps it visible until the flush) isn't wrongly self-suppressed
       // before it's ever actually delivered.
-      if (cls === "escalation" && e.taskId && this.escalationSurfaced.get(e.taskId) === this.escalationSignature(e.detail)) {
+      // Card e2a3c613 round 3: scoped to `e.kind === "platform_escalate"`, NOT `cls === "escalation"` —
+      // since round 2, `claude_boot_dialog_stuck` also classifies into "escalation" but its detail carries
+      // no title/severity, so `escalationSignature` always returns the same "|" for it; keying the dedup on
+      // `cls` let a worker's FIRST boot-stuck episode stamp taskId→"|" and silently suppress every LATER
+      // episode for that same task forever. `platform_escalate` is the only kind this title+severity
+      // signature was ever designed to fingerprint.
+      if (e.kind === "platform_escalate" && e.taskId && this.escalationSurfaced.get(e.taskId) === this.escalationSignature(e.detail)) {
         continue;
       }
       const projectName = db.getProject(projectId)?.name ?? "?";
-      // Card 91b9105e: `cls === "escalation"` is ONLY ever `platform_escalate` (see classify()'s 1:1
-      // mapping) — its taskId lives on the Platform HOME project, not the origin project just scoped-
-      // checked above, so a separate resolvability check is needed before the id is safe to render.
-      const taskIdResolvable = cls === "escalation" ? this.canResolveEscalationTask(session.projectId, e.detail) : true;
+      // Card 91b9105e: `cls === "escalation"` is NOT only ever `platform_escalate` any more — round 2
+      // (card e2a3c613) added `claude_boot_dialog_stuck` to the same class. Only `platform_escalate`'s
+      // taskId lives on the Platform HOME project (not the origin project just scoped-checked above), so
+      // the resolvability check below must stay keyed on the KIND, not the class.
+      const taskIdResolvable = e.kind === "platform_escalate" ? this.canResolveEscalationTask(session.projectId, e.detail) : true;
       qualifying.push({ e, cls, projectName, taskIdResolvable });
     }
 
@@ -625,7 +650,7 @@ export class AttentionPushWatcher {
       this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home, "agent", undefined, undefined, true);
       this.deferredSinceLastPush = false;
       for (const { e, cls } of qualifying) {
-        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e, cls) });
+        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e) });
       }
     } else if (qualifying.length > 0) {
       // Same in-app fallback as the digest branch above.
@@ -635,7 +660,7 @@ export class AttentionPushWatcher {
         // proactive:true — see the digest branch above.
         this.deps.pty.enqueueStdin(this.deps.sessionId, framedAlert(alertLine(e, cls, projectName, taskIdResolvable)), "system", undefined, home, "agent", undefined, undefined, true);
         this.deferredSinceLastPush = false;
-        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e, cls) });
+        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e) });
       }
     }
     this.watermark = scanned[scanned.length - 1]!.seq; // consume the WHOLE scanned window — see doc above.
@@ -674,18 +699,20 @@ export class AttentionPushWatcher {
     this.lastDigestFlushAt = now.getTime();
     this.deferredSinceLastPush = false;
     for (const { e, cls } of qualifying) {
-      this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e, cls) });
+      this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e) });
     }
     this.watermark = scanned[scanned.length - 1]!.seq;
   }
 
-  /** Stamps `escalationSurfaced` at the moment an "escalation"-class event is ACTUALLY pushed (never at
+  /** Stamps `escalationSurfaced` at the moment a `platform_escalate` event is ACTUALLY pushed (never at
    *  classification time — see the suppression check in `tick()`), and returns the extra
    *  `companion_alert_pushed` detail fields (`escalationTaskId`/`escalationSignature`) that let a restart's
    *  `seedWatermark` reconstruct the map from the durable log alone, with no new table/column. A no-op
-   *  (returns `{}`) for every other class or a taskId-less event. */
-  private stampEscalation(e: EventWithSeq, cls: AttentionAlertClass): { escalationTaskId?: string; escalationSignature?: string } {
-    if (cls !== "escalation" || !e.taskId) return {};
+   *  (returns `{}`) for every other kind (including `claude_boot_dialog_stuck`, which shares the
+   *  "escalation" CLASS since round 2 but has no title/severity to fingerprint — card e2a3c613 round 3) or
+   *  a taskId-less event. */
+  private stampEscalation(e: EventWithSeq): { escalationTaskId?: string; escalationSignature?: string } {
+    if (e.kind !== "platform_escalate" || !e.taskId) return {};
     const signature = this.escalationSignature(e.detail);
     this.escalationSurfaced.set(e.taskId, signature);
     return { escalationTaskId: e.taskId, escalationSignature: signature };

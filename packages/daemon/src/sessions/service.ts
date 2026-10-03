@@ -35,7 +35,7 @@ import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
+import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, isLoomDev } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import type { RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
 import type { HaltedRecycleEarlyResult } from "./halted-recycle-reconcile.js";
@@ -9518,15 +9518,99 @@ export class SessionService {
     const sigLabel = info.signatureName ?? "none recognized";
     const parentLiveAndPreBoot = !!s?.parentSessionId && this.pty.isLiveAndPreBoot(s.parentSessionId);
     const parentNudged = !!s?.parentSessionId && !parentLiveAndPreBoot;
+    // Card e2a3c613: a stuck MANAGER has no parentSessionId to nudge at all (confirmed: no spawn path
+    // ever sets one for role "manager"), so route it through the Platform Lead instead — see that
+    // method's own doc. No-op (both false/undefined) for every other role.
+    const { leadNotified, leadBoardTaskId } = info.role === "manager"
+      ? this.notifyLeadOfStuckManager(sessionId, s, info, sigLabel)
+      : { leadNotified: false, leadBoardTaskId: undefined };
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
       workerSessionId: sessionId, taskId: s?.taskId ?? null,
-      kind: "claude_boot_dialog_stuck", detail: { timeoutMs: info.timeoutMs, signatureName: info.signatureName, role: info.role, parentNudged },
+      kind: "claude_boot_dialog_stuck",
+      detail: {
+        timeoutMs: info.timeoutMs, signatureName: info.signatureName, role: info.role, parentNudged,
+        ...(info.role === "manager" ? { leadNotified, ...(leadBoardTaskId ? { leadBoardTaskId } : {}) } : {}),
+      },
     });
+    // @decision e2a3c613 — never add a second owner-attention write here: attention-push.ts / web's
+    // lib/attention.ts both derive the owner alert from THIS event via `parentNudged===false`. For a
+    // manager this means BOTH the Lead nudge above AND the owner alert always fire, never an either/or.
     if (parentNudged) {
       const senderMsg = `[loom:claude-boot-dialog-stuck] your ${info.role ?? "unattended"} session ${sessionId}${s?.taskId ? ` (task ${s.taskId})` : ""} never reached SessionStart within ${info.timeoutMs}ms — possible blocking CLI dialog (${sigLabel}). It will not resolve on its own; check the session's live screen and, if it's genuinely stuck on a dialog, worker_stop + respawn.`;
       this.enqueueSystemNudge(s!.parentSessionId!, senderMsg, { kind: "warning", taskId: s?.taskId ?? null });
     }
+  }
+
+  /**
+   * Card e2a3c613 — a stuck MANAGER has no parentSessionId to nudge, so this mirrors `platformEscalate`'s
+   * own pattern instead of the parent-nudge path above: best-effort live-nudge a live Platform Lead
+   * (suppressed if the Lead is itself live-and-pre-boot on the same dialog family — the identical hazard
+   * 850eb55c already guards for a manager parent), AND file a durable task onto the reserved Platform-
+   * home board so an offline/not-yet-live Lead still sees it later. LOOM_DEV-gated: on a non-dev install
+   * there is no reserved Platform project at all, so this is a no-op — the owner-attention path is the
+   * only one for that case, and it still fires regardless (see the caller).
+   */
+  private notifyLeadOfStuckManager(
+    sessionId: string,
+    s: Session | undefined,
+    info: { timeoutMs: number; signatureName: string | null },
+    sigLabel: string,
+  ): { leadNotified: boolean; leadBoardTaskId?: string } {
+    if (!isLoomDev()) return { leadNotified: false };
+    const home = this.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+    if (!home) return { leadNotified: false };
+
+    // Dedup the BOARD TASK per session id (never per timer fire/boot): a resumed session that gets stuck
+    // again re-fires this handler for the SAME session id, and must reuse its prior task rather than
+    // file a duplicate; a recycle successor is a NEW session id and may file its own.
+    // Card e2a3c613 round 2: reuse ONLY while that prior task is still OPEN (same `columnEscalationStatus
+    // !== "resolved"` check platformEscalate uses for its own dedup) — a prior task the Lead already
+    // closed (or that was deleted) must not silently absorb a NEW stuck episode's nudge; file a fresh task
+    // instead so the Lead actually sees it.
+    // Card e2a3c613 round 3: `listEventsForWorker` returns ts-ASC, so a plain `.find()` picked the OLDEST
+    // prior `leadBoardTaskId`-carrying event — across three-plus stuck episodes on a resumed session, every
+    // later check re-derived the FIRST episode's task rather than the most recently filed one. `findLast`
+    // walks from the end, so this always resolves to the LATEST matching event.
+    const priorWithTask = this.db.listEventsForWorker(sessionId).findLast(
+      (e) => e.kind === "claude_boot_dialog_stuck" && typeof (e.detail as Record<string, unknown> | undefined)?.leadBoardTaskId === "string",
+    );
+    const priorTaskId = priorWithTask ? (priorWithTask.detail as Record<string, unknown>).leadBoardTaskId as string : undefined;
+    const priorTask = priorTaskId ? this.db.getTask(priorTaskId) : undefined;
+    let leadBoardTaskId = priorTask && this.columnEscalationStatus(home.id, priorTask.columnKey) !== "resolved"
+      ? priorTask.id
+      : undefined;
+    if (!leadBoardTaskId) {
+      const now = new Date().toISOString();
+      const originProject = s?.projectId ? this.db.getProject(s.projectId) : undefined;
+      const body = [
+        "**A project manager never reached SessionStart — possibly stuck on a blocking CLI dialog.**",
+        "",
+        `- **Manager session:** \`${sessionId}\``,
+        `- **Origin project:** ${originProject?.name ?? s?.projectId ?? "unknown"} (\`${s?.projectId ?? "unknown"}\`)`,
+        `- **Timeout:** ${info.timeoutMs}ms`,
+        `- **Signature:** ${sigLabel}`,
+        "",
+        "It will not resolve on its own; check the session's live screen and, if it's genuinely stuck on a dialog, session_stop + respawn.",
+      ].join("\n");
+      const task: Task = {
+        id: randomUUID(), projectId: home.id, title: `[Manager boot stuck] ${sessionId.slice(0, 8)}`, body,
+        columnKey: this.columnKeyForProjectRole(home.id, "defaultLanding") ?? "backlog",
+        position: Date.now(), priority: DEFAULT_TASK_PRIORITY,
+        createdAt: now, updatedAt: now, version: 1,
+      };
+      this.db.insertTask(task);
+      leadBoardTaskId = task.id;
+    }
+
+    const liveLead = this.db.listAllSessions().find((x) => x.role === "platform" && x.processState === "live" && !this.db.hasSuccessor(x.id));
+    let leadNotified = false;
+    if (liveLead && !this.pty.isLiveAndPreBoot(liveLead.id)) {
+      const senderMsg = `[loom:claude-boot-dialog-stuck] manager session ${sessionId}${s?.taskId ? ` (task ${s.taskId})` : ""} never reached SessionStart within ${info.timeoutMs}ms — possible blocking CLI dialog (${sigLabel}). Filed as Platform task ${leadBoardTaskId}. Check the session's live screen and, if genuinely stuck, session_stop + respawn.`;
+      this.enqueueSystemNudge(liveLead.id, senderMsg, { kind: "warning", taskId: null });
+      leadNotified = true;
+    }
+    return { leadNotified, leadBoardTaskId };
   }
 
   /**

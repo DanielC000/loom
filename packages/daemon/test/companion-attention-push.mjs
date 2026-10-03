@@ -464,6 +464,17 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   check("classify: idle_report(waiting) → null (not a manager-idle alert)", classify("idle_report", { state: "waiting" }) === null);
   check("classify: idle_report(done) → manager-idle", classify("idle_report", { state: "done" }) === "manager-idle");
   check("classify: platform_escalate → escalation", classify("platform_escalate", { title: "x" }) === "escalation");
+  // Card e2a3c613 round 2: claude_boot_dialog_stuck is gated strictly on detail.parentNudged === false —
+  // reclassified from "worker-crashed" (a FLEET_OPS_ALERT_CLASSES member, excluded from Companion
+  // lead-mode's "*" wildcard) to "escalation" (not FLEET_OPS) so the wildcard still reaches it; this event
+  // is by definition the no-manager-addressed case, so excluding it from lead-mode would defeat "always
+  // routed to the owner."
+  check("classify: claude_boot_dialog_stuck(parentNudged:true) → null (a covered case; the parent's own nudge handles it)",
+    classify("claude_boot_dialog_stuck", { parentNudged: true, role: "worker" }) === null);
+  check("classify: claude_boot_dialog_stuck(parentNudged:false) → escalation (nobody else was addressed)",
+    classify("claude_boot_dialog_stuck", { parentNudged: false, role: "manager" }) === "escalation");
+  check("classify: claude_boot_dialog_stuck(no parentNudged field) → null (defensive default, never a false positive)",
+    classify("claude_boot_dialog_stuck", { role: "worker" }) === null);
   check("classify: an unrelated kind → null", classify("spawn_worker", {}) === null);
   const line = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "context_escalated", detail: {} }, "context-overflow", "Proj Z");
   check("alertLine: terse, names the project + an m: id slice", line.includes("Proj Z") && line.includes("m:mgr-1234"));
@@ -802,7 +813,59 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   cleanupEnv(e);
 }
 
-// --- 27. Card c5415a04: fleet_resume_entry_failed — resumeFleetOnBoot's per-entry sibling of
+// --- 27. Card e2a3c613 round 2: claude_boot_dialog_stuck (parentNudged:false) end-to-end — pushes through
+//     the "escalation" class and the alert line names the role + signature, unlike the generic fallback. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "claude_boot_dialog_stuck", e.mgrA, { timeoutMs: 150_000, signatureName: "external-imports", role: "manager", parentNudged: false }, { workerSessionId: "wkr-e2e-boot-stuck" });
+  e.watcher.tick(new Date());
+  check("e2e: a claude_boot_dialog_stuck(parentNudged:false) event pushes exactly one turn", e.enqueued.length === 1);
+  check("e2e: framed [loom:alert]", e.enqueued.length === 1 && e.enqueued[0].text.startsWith(ALERT_TAG));
+  check("e2e: the pushed turn names the role + recognized signature, not a generic fallback line",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("manager never reached SessionStart") && e.enqueued[0].text.includes("external-imports"));
+  const pushed = events(e, "companion_alert_pushed");
+  check("e2e: emits one companion_alert_pushed audit row", pushed.length === 1 && pushed[0].detail.sourceKind === "claude_boot_dialog_stuck");
+  cleanupEnv(e);
+}
+
+// --- 28. Card e2a3c613 round 2: claude_boot_dialog_stuck(parentNudged:true) never reaches the owner —
+//     the parent's own nudge (sessions/service.ts) handles this case; attention-push must stay silent. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "claude_boot_dialog_stuck", e.mgrA, { timeoutMs: 150_000, signatureName: "external-imports", role: "worker", parentNudged: true }, { workerSessionId: "wkr-e2e-covered" });
+  e.watcher.tick(new Date());
+  check("e2e negative: a covered (parentNudged:true) case pushes nothing", e.enqueued.length === 0);
+  check("e2e negative: no companion_alert_pushed row for the covered case", events(e, "companion_alert_pushed").length === 0);
+  cleanupEnv(e);
+}
+
+// --- 29. Card e2a3c613 round 3 (item 2): claude_boot_dialog_stuck shares the "escalation" CLASS with
+//     platform_escalate (test 20 above), but its detail carries no title/severity — escalationSignature
+//     always returns the constant "|" for it. The pre-fix dedup was keyed on `cls === "escalation"`, so a
+//     worker's FIRST boot-stuck episode would stamp taskId → "|" and silently suppress every LATER episode
+//     for that SAME taskId forever (unlike platform_escalate, where an unchanged repeat for the same
+//     taskId SHOULD be suppressed — test 20's own point). Two boot-stuck episodes, same taskId: BOTH must
+//     push, proving the dedup is scoped to `e.kind === "platform_escalate"` and never reaches this kind. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "claude_boot_dialog_stuck", e.mgrA, { timeoutMs: 150_000, signatureName: "external-imports", role: "manager", parentNudged: false }, { workerSessionId: "wkr-e2e-boot-dedup", taskId: "task-boot-dedup" });
+  e.watcher.tick(new Date());
+  check("boot-stuck-not-deduped: the first episode pushes", e.enqueued.length === 1);
+  e.clearPending();
+
+  // A second, independent episode for the SAME taskId (e.g. the session was resumed and got stuck again)
+  // — must ALSO push. A pre-fix dedup keyed on `cls` would have silently suppressed this.
+  fire(e, "claude_boot_dialog_stuck", e.mgrA, { timeoutMs: 150_000, signatureName: "external-imports", role: "manager", parentNudged: false }, { workerSessionId: "wkr-e2e-boot-dedup", taskId: "task-boot-dedup" });
+  e.watcher.tick(new Date());
+  check("boot-stuck-not-deduped: a SECOND episode for the SAME taskId still pushes — never suppressed", e.enqueued.length === 2);
+  check("boot-stuck-not-deduped: two companion_alert_pushed rows recorded, one per episode", events(e, "companion_alert_pushed").filter((ev) => ev.detail.sourceKind === "claude_boot_dialog_stuck").length === 2);
+  cleanupEnv(e);
+}
+
+// --- 30. Card c5415a04: fleet_resume_entry_failed — resumeFleetOnBoot's per-entry sibling of
 //     fleet_resume_failed. Gated on `detail.resumeFailed`, NEVER on matching `detail.reason`'s free
 //     text — a GENUINE resume failure (resumeFailed:true) alerts as worker-crashed; a resumed-but-
 //     nudge-not-delivered entry (resumeFailed:false) is a live, healthy session and must NOT alert. ---
@@ -826,7 +889,7 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
     lineNoDetail.includes("plain entry failed to resume") && !lineNoDetail.includes("undefined"));
 }
 
-// --- 28. END-TO-END (card c5415a04): a real fleet_resume_entry_failed event with resumeFailed:true pushes
+// --- 31. END-TO-END (card c5415a04): a real fleet_resume_entry_failed event with resumeFailed:true pushes
 //     a turn; the resumeFailed:false sibling (a healthy, resumed entry) must NOT push anything at all. ---
 {
   const e = makeEnv({ configA: { alertClasses: ["worker-crashed"] } });
@@ -845,6 +908,6 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead, and a late-resolved manager/Lead recycle (recycle_fleet_resolved) reaches the same human surface as its unresolved sibling instead of being silently dropped."
+  ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead, a late-resolved manager/Lead recycle (recycle_fleet_resolved) reaches the same human surface as its unresolved sibling instead of being silently dropped, and claude_boot_dialog_stuck reaches the owner via the non-FLEET_OPS 'escalation' class exactly when nobody else was addressed (parentNudged:false), never otherwise."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

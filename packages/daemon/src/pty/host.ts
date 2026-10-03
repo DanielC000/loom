@@ -3634,10 +3634,13 @@ export const TASK_TRACKING_TOOLS: readonly string[] = ["TaskCreate", "TaskGet", 
  */
 export const HARNESS_SCHEDULING_TOOLS: readonly string[] = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger"];
 
-/** @decision 8dd1dd1c — Loom-driven roles whose stdin nobody watches live: a human-prompt tool would
- *  block forever, and a stuck-dialog detector (card 01160ae3) has nobody present to notice. Shared by
- *  disallowedToolsForRole below and that detector's spawn-time gate — one source, not a second copy. */
+/** @decision 8dd1dd1c — human-prompt disallow gate ONLY; see {@link BOOT_DIALOG_DETECTOR_ROLES} for the
+ *  stuck-dialog detector's own, deliberately separate, role set. */
 export const LOOM_DRIVEN_ROLES: readonly SessionRole[] = ["worker", "setup", "auditor", "workspace-auditor", "run", "assistant"];
+
+/** @decision e2a3c613 — the boot-dialog-stuck detector's own role set, kept separate from
+ *  {@link LOOM_DRIVEN_ROLES} so manager/platform coverage here never leaks into disallowedToolsForRole. */
+export const BOOT_DIALOG_DETECTOR_ROLES: readonly SessionRole[] = [...LOOM_DRIVEN_ROLES, "manager", "platform"];
 
 /** @decision 8dd1dd1c — human-prompt disallow: Loom-driven roles only (see {@link LOOM_DRIVEN_ROLES}),
  *  never manager/platform. Task-tracking (card 33f9f181) and harness-scheduling
@@ -5079,10 +5082,11 @@ export class PtyHost {
     // Card 01160ae3: bounded, one-shot detector for an unattended spawn stuck on a blocking CLI dialog
     // (workspace-trust / MCP-server-enable / external-@import / a future unknown one with the same shape)
     // BEFORE SessionStart ever fires — DETECT + NOTIFY ONLY, never auto-answered. Role-gated to
-    // LOOM_DRIVEN_ROLES: only those roles have nobody watching a live terminal who'd otherwise notice.
+    // BOOT_DIALOG_DETECTOR_ROLES (card e2a3c613 — manager/platform also boot unattended with nobody
+    // watching a live terminal; see that constant's own doc for why this is NOT LOOM_DRIVEN_ROLES).
     // Deliberately keyed on `sessionStartObserved`, NEVER `ready` — see CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS's
     // own doc for why the missed-hook readiness fallback above must not silence this alarm.
-    if (live.role && (LOOM_DRIVEN_ROLES as readonly string[]).includes(live.role)) {
+    if (live.role && (BOOT_DIALOG_DETECTOR_ROLES as readonly string[]).includes(live.role)) {
       live.dialogStuckTimer = setTimeout(() => {
         const l = this.live.get(opts.sessionId);
         if (!l) return;
@@ -9175,20 +9179,22 @@ export class PtyHost {
   /**
    * Card 850eb55c: true while this session is still pre-boot (see `isPastBoot`) AND currently showing a
    * recognized blocking-dialog signature (card 01160ae3's `detectBlockingDialogSignature`/`collapseBoot`
-   * — reused verbatim, no second matcher), for a LOOM_DRIVEN_ROLES session — the same role gate the
-   * boot-dialog-stuck detector itself uses, since those are the only roles with nobody watching a live
-   * terminal who'd otherwise notice. Gates all three kickoff-delivery write paths
-   * (`scheduleKickoffGuarantee`'s direct submit(), `enqueueStdin`'s own immediate-submit conjunction, and
-   * this general queued-turn drain) so none of them ever types a turn + its terminating Enter into a
-   * dialog whose highlighted option nobody has reviewed — the READY_FALLBACK "missed hook" assumption is
-   * wrong exactly when this is true. HOLDS, never drops: the instant SessionStart genuinely fires,
-   * `sessionStartObserved` flips true and `dialogStuckScan` is cleared (see the `SessionStart` hook case),
-   * so this reads false again and `releaseBootModeCycle`'s own drain (or, failing that, reconcile()'s
-   * periodic tick) delivers whatever was held.
+   * — reused verbatim, no second matcher), for a `BOOT_DIALOG_DETECTOR_ROLES` session. Gates all three
+   * kickoff-delivery write paths (`scheduleKickoffGuarantee`'s direct submit(), `enqueueStdin`'s own
+   * immediate-submit conjunction, and this general queued-turn drain) so none of them ever types a turn +
+   * its terminating Enter into a dialog whose highlighted option nobody has reviewed. HOLDS, never drops:
+   * the instant SessionStart genuinely fires, `sessionStartObserved` flips true and `dialogStuckScan` is
+   * cleared (see the `SessionStart` hook case — this is equally true of a RESUME, since `createPty` resets
+   * `sessionStartObserved` to false on every spawn call and the resumed engine fires its own fresh
+   * SessionStart), so this reads false again and `releaseBootModeCycle`'s own drain (or, failing that,
+   * reconcile()'s periodic tick) delivers whatever was held.
+   *
+   * @decision e2a3c613 — manager/platform coverage here is deliberate and has no "human is watching live"
+   * carve-out: there is no reliable live-attention signal, and the hold only ever costs bounded latency.
    */
   private isBlockedOnUnresolvedBootDialog(live: Live): boolean {
     return !this.isPastBoot(live)
-      && !!live.role && (LOOM_DRIVEN_ROLES as readonly string[]).includes(live.role)
+      && !!live.role && (BOOT_DIALOG_DETECTOR_ROLES as readonly string[]).includes(live.role)
       && detectBlockingDialogSignature(collapseBoot(live.dialogStuckScan)) !== null;
   }
 

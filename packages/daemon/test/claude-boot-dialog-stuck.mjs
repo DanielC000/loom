@@ -78,7 +78,8 @@ process.env.LOOM_READY_FALLBACK_MS = "60000"; // comfortably longer than any sce
 process.env.LOOM_MCP_DISMISS_INITIAL_DELAY_MS = "20";
 
 const {
-  PtyHost, detectBlockingDialogSignature, collapseBoot, LOOM_DRIVEN_ROLES, isMcpServerEnableSignature,
+  PtyHost, detectBlockingDialogSignature, collapseBoot, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES,
+  isMcpServerEnableSignature, disallowedToolsForRole, HUMAN_PROMPT_TOOLS,
 } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
@@ -102,6 +103,28 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
   check("detectBlockingDialogSignature: negative control — empty buffer never matches", detectBlockingDialogSignature("") === null);
   check("(setup) 'worker' is in LOOM_DRIVEN_ROLES; 'manager' is not",
     LOOM_DRIVEN_ROLES.includes("worker") && !LOOM_DRIVEN_ROLES.includes("manager"));
+}
+
+// --- Card e2a3c613: BOOT_DIALOG_DETECTOR_ROLES is a SEPARATE, wider constant from LOOM_DRIVEN_ROLES ----
+// --- (manager/platform coverage), and disallowedToolsForRole is UNCHANGED by that widening — pins the ---
+// --- split decision 8dd1dd1c requires (manager/platform must keep AskUserQuestion/ExitPlanMode/ ----------
+// --- EnterPlanMode; widening the detector's own role gate must never touch that). ------------------------
+{
+  check("(e2a3c613) BOOT_DIALOG_DETECTOR_ROLES includes every LOOM_DRIVEN_ROLES member",
+    LOOM_DRIVEN_ROLES.every((r) => BOOT_DIALOG_DETECTOR_ROLES.includes(r)));
+  check("(e2a3c613) BOOT_DIALOG_DETECTOR_ROLES ALSO includes manager and platform",
+    BOOT_DIALOG_DETECTOR_ROLES.includes("manager") && BOOT_DIALOG_DETECTOR_ROLES.includes("platform"));
+  check("(e2a3c613) LOOM_DRIVEN_ROLES itself is UNTOUCHED — still excludes manager/platform",
+    !LOOM_DRIVEN_ROLES.includes("manager") && !LOOM_DRIVEN_ROLES.includes("platform"));
+  // Manager sign-off condition 1: disallowedToolsForRole("manager"/"platform") must still OMIT every
+  // HUMAN_PROMPT_TOOLS entry (AskUserQuestion/ExitPlanMode/EnterPlanMode stay USABLE for both roles) even
+  // though BOOT_DIALOG_DETECTOR_ROLES now covers them for the stuck-dialog detector/hold.
+  const mgrDisallowed = disallowedToolsForRole("manager");
+  const leadDisallowed = disallowedToolsForRole("platform");
+  check("(e2a3c613) disallowedToolsForRole('manager') carries NONE of HUMAN_PROMPT_TOOLS — unchanged by this card",
+    HUMAN_PROMPT_TOOLS.every((t) => !mgrDisallowed.includes(t)));
+  check("(e2a3c613) disallowedToolsForRole('platform') carries NONE of HUMAN_PROMPT_TOOLS — unchanged by this card",
+    HUMAN_PROMPT_TOOLS.every((t) => !leadDisallowed.includes(t)));
 }
 
 // --- Unit-level: isMcpServerEnableSignature (positive + negative controls) ------------------------------
@@ -182,13 +205,17 @@ try {
   host.deliverHook(C, { hook_event_name: "SessionStart", session_id: "eng-C" });
   check("3: a SessionStart arriving AFTER the alarm already fired produces NO further event (checked synchronously, same call)", stuckEvents.filter((e) => e.sessionId === C).length === 1);
 
-  // ============ 4) Role gating: manager is not in LOOM_DRIVEN_ROLES ⇒ the timer is never armed at all =====
-  const D = "sess-manager-not-gated-D";
+  // ============ 4) Role gating (card e2a3c613): manager/platform are NOW in BOOT_DIALOG_DETECTOR_ROLES ===
+  // ============    ⇒ ARMED (was: manager never armed, pre-e2a3c613) — plain stays ungated throughout =====
+  const D = "sess-manager-gated-D";
   spawnOne(D, "manager");
-  check("4: a manager-role spawn never arms dialogStuckTimer (structural — not a timing wait)", host.live.get(D).dialogStuckTimer === null);
+  check("4: a manager-role spawn NOW arms dialogStuckTimer (card e2a3c613 — manager coverage)", host.live.get(D).dialogStuckTimer !== null);
+  const D2 = "sess-platform-gated-D2";
+  spawnOne(D2, "platform");
+  check("4: a platform(Lead)-role spawn ALSO arms dialogStuckTimer (card e2a3c613 — Lead coverage)", host.live.get(D2).dialogStuckTimer !== null);
   const E = "sess-plain-not-gated-E";
   spawnOne(E, null);
-  check("4: a role-less (plain) spawn never arms dialogStuckTimer either", host.live.get(E).dialogStuckTimer === null);
+  check("4: a role-less (plain) spawn still never arms dialogStuckTimer", host.live.get(E).dialogStuckTimer === null);
 
   // ============ 5) A resume spawn (fresh Live) re-arms the timer too ======================================
   const F = "sess-resume-rearms-F";
@@ -350,23 +377,26 @@ try {
     try { host.stop(M, "hard"); } catch { /* ignore */ }
   }
 
-  // ============ 13) round 3's own Minor fix: the single Esc fires for EVERY role, worker AND manager ====
-  // ============      alike — the OLD retry loop was unintentionally NOT role-gated (only dialogStuckTimer/
-  // ============      the hold itself are, via LOOM_DRIVEN_ROLES), so a non-driven role could get up to ===
-  // ============      3 Escs pre-fix; a single write is role-uniform by construction post-fix ==============
+  // ============ 13) round 3's own Minor fix: the single Esc fires for EVERY role, worker AND a role the ===
+  // ============      alarm doesn't even arm for alike — the OLD retry loop was unintentionally NOT ========
+  // ============      role-gated (only dialogStuckTimer/the hold itself are), so a non-driven role could ===
+  // ============      get up to 3 Escs pre-fix; a single write is role-uniform by construction post-fix ====
+  // ============      (card e2a3c613: "manager" now ALSO arms the alarm, so the still-ungated contrast =====
+  // ============      role used here is "plain" (role:null) instead, to keep proving the Esc write is =====
+  // ============      independent of whether the alarm armed at all) =========================================
   {
     const WR = "sess-exactly-one-esc-worker-WR";
-    const MG = "sess-exactly-one-esc-manager-MG";
+    const MG = "sess-exactly-one-esc-plain-MG";
     const fwr = spawnOne(WR, "worker");
-    const fmg = spawnOne(MG, "manager");
-    check("13: (setup) the manager role never arms dialogStuckTimer — the ALARM stays role-gated, unaffected by this fix",
+    const fmg = spawnOne(MG, null);
+    check("13: (setup) a role-less (plain) spawn never arms dialogStuckTimer — the ALARM stays role-gated, unaffected by this fix",
       host.live.get(MG).dialogStuckTimer === null);
     fwr.feed(MCP_PROMPT_TEXT);
     fmg.feed(MCP_PROMPT_TEXT);
     const bothWrote = await waitUntil(() => countEsc(fwr) >= 1 && countEsc(fmg) >= 1, 3000);
-    check("13a: both the worker AND the manager session receive the single Esc write (not role-gated)", bothWrote);
+    check("13a: both the worker AND the plain session receive the single Esc write (not role-gated)", bothWrote);
     check("13b: exactly one Esc for the worker role", countEsc(fwr) === 1);
-    check("13c: exactly one Esc for the manager role too — the round-3 fix (round 2's retry loop could reach 3 on a non-driven role, not main)", countEsc(fmg) === 1);
+    check("13c: exactly one Esc for the plain (ungated) role too — the round-3 fix (round 2's retry loop could reach 3 on a non-driven role, not main)", countEsc(fmg) === 1);
     try { host.stop(WR, "hard"); } catch { /* ignore */ }
     try { host.stop(MG, "hard"); } catch { /* ignore */ }
   }
@@ -423,11 +453,12 @@ try {
   }
 } finally {
   for (const id of [
-    "sess-dialog-stuck-A", "sess-slow-healthy-B", "sess-late-sessionstart-C", "sess-manager-not-gated-D",
-    "sess-plain-not-gated-E", "sess-resume-rearms-F", "sess-overwrite-resume-G", "sess-dies-before-sessionstart-H",
-    "sess-first-turn-started-no-sessionstart-I", "sess-any-hook-observed-no-sessionstart-J",
-    "sess-mcp-prompt-single-chunk-K", "sess-post-write-noise-still-held-L", "sess-sessionstart-after-esc-releases-M",
-    "sess-exactly-one-esc-worker-WR", "sess-exactly-one-esc-manager-MG", "sess-respawn-during-delay-D1",
+    "sess-dialog-stuck-A", "sess-slow-healthy-B", "sess-late-sessionstart-C", "sess-manager-gated-D",
+    "sess-platform-gated-D2", "sess-plain-not-gated-E", "sess-resume-rearms-F", "sess-overwrite-resume-G",
+    "sess-dies-before-sessionstart-H", "sess-first-turn-started-no-sessionstart-I",
+    "sess-any-hook-observed-no-sessionstart-J", "sess-mcp-prompt-single-chunk-K",
+    "sess-post-write-noise-still-held-L", "sess-sessionstart-after-esc-releases-M",
+    "sess-exactly-one-esc-worker-WR", "sess-exactly-one-esc-plain-MG", "sess-respawn-during-delay-D1",
     "sess-sessionstart-during-delay-still-escapes-N",
   ]) {
     try { host.stop(id, "hard"); } catch { /* ignore */ }

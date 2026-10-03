@@ -15,10 +15,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Card 850eb55c, scenario (3): the OTHER way READY_FALLBACK can fire without SessionStart — a session
 // genuinely STUCK on a blocking boot dialog (card 01160ae3), not merely slow. Proves neither
 // scheduleKickoffGuarantee's direct submit() NOR drainPending's queued-entry path ever writes into that
-// dialog, for a LOOM_DRIVEN_ROLES session, for as long as the dialog signature is on screen — and that
-// delivery proceeds normally, exactly once, the instant SessionStart actually resolves it. Two controls:
-// the SAME role with no dialog (unchanged), and the SAME dialog with a role the detector doesn't watch
-// (unchanged — the intended scope, matching LOOM_DRIVEN_ROLES exactly).
+// dialog, for a BOOT_DIALOG_DETECTOR_ROLES session, for as long as the dialog signature is on screen —
+// and that delivery proceeds normally, exactly once, the instant SessionStart actually resolves it. Two
+// controls: the SAME role with no dialog (unchanged), and (card e2a3c613 round 2, (3c2)) a role genuinely
+// OUTSIDE BOOT_DIALOG_DETECTOR_ROLES with the SAME dialog on screen — the control this file used to run
+// against "manager" pre-e2a3c613, restored against "plain" (role:null) now that manager is in scope.
+// Card e2a3c613 (3d)-(3g): a manager (and, by the same role set, platform/Lead) is now ALSO held by this
+// gate — not the "unchanged, out of scope" control this file asserted pre-e2a3c613 — including via a
+// RESUME spawn, never just a fresh one.
 //
 // Card 850eb55c, scenario (4) (round 2, item 1): a Code Review finding on scenario (3) itself — the hold
 // had no STRUCTURAL release. Once `ready` is latched by the fallback, a late SessionStart's own
@@ -336,14 +340,33 @@ try {
     check("(3c) control: the delivered text is the ORIGINAL kickoff", writtenOf(fd).includes(KICKOFF3C));
     try { host.stop(D, "hard"); } catch { /* ignore */ }
 
-    // ---- (3d) control: the SAME dialog, but a role the detector does not watch — INTENDED SCOPE: --------
-    // ---- unchanged, exactly like pre-fix behaviour. "manager" is not in LOOM_DRIVEN_ROLES (card ----------
-    // ---- 01160ae3's own role gate, reused verbatim by isBlockedOnUnresolvedBootDialog) — a human-driven -
-    // ---- manager has someone to notice/intervene on its own boot; card 850eb55c item 2 separately --------
-    // ---- protects a manager as a NOTIFICATION recipient (handleClaudeBootDialogStuck), not as a ----------
-    // ---- kickoff-delivery subject, which is a DIFFERENT mechanism than this gate. -----------------------
-    const E = "fallback-E-manager-role-control";
-    const KICKOFF3D = "manager kickoff via the readiness fallback — dialog on screen, role out of scope";
+    // ---- (3c2) card e2a3c613 round 2: RESTORED role-scope negative control — the SAME dialog, but a role -
+    // ---- genuinely OUTSIDE BOOT_DIALOG_DETECTOR_ROLES (role:null, "plain"). Round 1 widened the gate to --
+    // ---- cover manager/platform and repurposed the OLD (3d) control (which used role:"manager") into an -
+    // ---- in-scope POSITIVE case, leaving no test proving an out-of-scope role is still NOT held at all. --
+    const D2 = "fallback-D2-plain-role-control";
+    const KICKOFF3C2 = "plain-role kickoff via the readiness fallback — same dialog, role out of scope";
+    host.spawn({
+      sessionId: D2, cwd: tmpHome, startupPrompt: KICKOFF3C2, role: null,
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    const fd2 = fakes[fakes.length - 1];
+    fd2.feed(DIALOG_TEXT); // the SAME dialog signature — but "plain" (role:null) is not in BOOT_DIALOG_DETECTOR_ROLES
+    await waitUntil(() => countIn(fd2, PASTE_START) === 1, { label: "(3c2) control: an out-of-scope role delivers via the fallback unchanged, even with the dialog on screen", timeoutMs: 5000 });
+    check("(3c2) control: a role OUTSIDE BOOT_DIALOG_DETECTOR_ROLES is NOT held by isBlockedOnUnresolvedBootDialog — same dialog, unchanged", countIn(fd2, PASTE_START) === 1);
+    check("(3c2) control: the delivered text is the ORIGINAL kickoff", writtenOf(fd2).includes(KICKOFF3C2));
+    try { host.stop(D2, "hard"); } catch { /* ignore */ }
+
+    // ---- (3d)/(3e) card e2a3c613: manager (and platform/Lead) are NOW held by this gate too — SAME ------
+    // ---- shape as (3a)/(3b), not "unchanged" the way this control used to assert pre-e2a3c613. ----------
+    // ---- BOOT_DIALOG_DETECTOR_ROLES (pty/host.ts) now covers manager/platform for BOTH the detector's ---
+    // ---- own arm check AND isBlockedOnUnresolvedBootDialog — deliberately a SEPARATE constant from ------
+    // ---- LOOM_DRIVEN_ROLES (never widened — see that constant's own doc), so disallowedToolsForRole is --
+    // ---- untouched (pinned in claude-boot-dialog-stuck.mjs). card 850eb55c item 2's PARENT-NOTIFICATION -
+    // ---- mechanism (handleClaudeBootDialogStuck) is unrelated and unaffected either way. ----------------
+    const E = "fallback-E-manager-role-now-held";
+    const KICKOFF3D = "manager kickoff via the readiness fallback — stuck behind the same blocking dialog";
     host.spawn({
       sessionId: E, cwd: tmpHome, startupPrompt: KICKOFF3D, role: "manager",
       permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
@@ -351,11 +374,66 @@ try {
     });
     host.markMcpSeen(E); // "manager" also mounts loom-orchestration MCP (usesOrchestrationMcp)
     const fe = fakes[fakes.length - 1];
-    fe.feed(DIALOG_TEXT); // the SAME dialog signature — but "manager" is not in LOOM_DRIVEN_ROLES
-    await waitUntil(() => countIn(fe, PASTE_START) === 1, { label: "(3d) control: a non-LOOM_DRIVEN role delivers via the fallback unchanged, even with the dialog on screen", timeoutMs: 5000 });
-    check("(3d) control: a non-LOOM_DRIVEN role (manager) is NOT held by this gate — same dialog, unchanged (intended scope)", countIn(fe, PASTE_START) === 1);
-    check("(3d) control: the delivered text is the ORIGINAL kickoff", writtenOf(fe).includes(KICKOFF3D));
+    fe.feed(DIALOG_TEXT); // card e2a3c613: manager is now in BOOT_DIALOG_DETECTOR_ROLES too
+
+    await waitUntil(() => host.hasReachedReady(E), { label: "(3d) READY_FALLBACK_MS still marks the manager ready despite the dialog", timeoutMs: 5000 });
+    const noWriteE = await assertNeverWithControl({
+      label: "(3d) nothing written to a MANAGER's pty while stuck pre-SessionStart on a recognized dialog (card e2a3c613)",
+      check: () => countIn(fe, PASTE_START) >= 1,
+      windowMs: NEGATIVE_WINDOW_MS,
+      positiveControl: async () => {
+        const { id, fake } = await spawnControlDelivery("(3d) manager dialog-stuck positive control");
+        const went = await observeOnce({ check: () => countIn(fake, PASTE_START) >= 1, windowMs: NEGATIVE_WINDOW_MS });
+        try { host.stop(id, "hard"); } catch { /* ignore */ }
+        return went;
+      },
+    });
+    check("(3d) ready, but NOTHING written for a MANAGER's kickoff while stuck on the dialog (card e2a3c613 extends the hold to manager/platform)", noWriteE);
+
+    host.deliverHook(E, { hook_event_name: "SessionStart", session_id: "eng-E" }); // the dialog resolves
+    await waitUntil(() => { host.reconcile(); return countIn(fe, PASTE_START) >= 1; },
+      { label: "(3e) delivery proceeds once SessionStart resolves the dialog, for a manager too", timeoutMs: 3000 });
+    check("(3e) exactly ONE kickoff delivery once SessionStart resolves the dialog (manager)", countIn(fe, PASTE_START) === 1);
+    check("(3e) the delivered text is the ORIGINAL kickoff (manager)", writtenOf(fe).includes(KICKOFF3D));
     try { host.stop(E, "hard"); } catch { /* ignore */ }
+
+    // ---- (3f)/(3g) card e2a3c613 condition 2: a RESUMED manager also reaches isPastBoot normally — ------
+    // ---- createPty resets sessionStartObserved/dialogStuckScan on EVERY spawn call (fresh/resume/fork/ --
+    // ---- recycle alike), so a resumed engine's own fresh SessionStart hook releases the hold + drains ---
+    // ---- a queued continuation note exactly like a fresh spawn — no special-casing needed for resume. --
+    const F2 = "fallback-F2-manager-resume-dialog-stuck";
+    host.spawn({
+      sessionId: F2, cwd: tmpHome, resumeId: "engine-F2-prior", role: "manager", // RESUME, not fresh — no startupPrompt
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    const ff2 = fakes[fakes.length - 1];
+    ff2.feed(DIALOG_TEXT);
+    const QUEUED_ENTRY_F2 = "a continuation note sitting behind the same dialog, after a manager resume";
+    host.enqueueStdin(F2, QUEUED_ENTRY_F2, "system", undefined, undefined, "agent");
+
+    await waitUntil(() => host.hasReachedReady(F2), { label: "(3f) READY_FALLBACK_MS still marks the RESUMED manager ready despite the dialog", timeoutMs: 5000 });
+    const noWriteF2 = await assertNeverWithControl({
+      label: "(3f) a RESUMED manager: the queued continuation note is never drained while stuck on the dialog",
+      check: () => countIn(ff2, PASTE_START) >= 1,
+      windowMs: NEGATIVE_WINDOW_MS,
+      positiveControl: async () => {
+        const { id, fake } = await spawnControlDelivery("(3f) manager-resume dialog-stuck drain positive control");
+        const went = await observeOnce({ check: () => countIn(fake, PASTE_START) >= 1, windowMs: NEGATIVE_WINDOW_MS });
+        try { host.stop(id, "hard"); } catch { /* ignore */ }
+        return went;
+      },
+    });
+    check("(3f) ready, but the queued continuation note is NEVER drained while a RESUMED manager is stuck on the dialog", noWriteF2);
+
+    host.deliverHook(F2, { hook_event_name: "SessionStart", session_id: "eng-F2-new" }); // the RESUMED engine's own fresh SessionStart
+    check("(3g) a fresh SessionStart on RESUME reaches isPastBoot the same way a fresh spawn's does (sessionStartObserved flips true, dialogStuckScan clears)",
+      host.live.get(F2).sessionStartObserved === true && host.live.get(F2).dialogStuckScan === "");
+    host.reconcile();
+    await waitUntil(() => countIn(ff2, PASTE_START) >= 1, { label: "(3g) delivery proceeds once the RESUMED manager's own SessionStart resolves the dialog", timeoutMs: 3000 });
+    check("(3g) exactly ONE delivery of the queued continuation note once SessionStart resolves the dialog (manager resume)", countIn(ff2, PASTE_START) === 1);
+    check("(3g) the delivered text is the ORIGINAL queued continuation note", writtenOf(ff2).includes(QUEUED_ENTRY_F2));
+    try { host.stop(F2, "hard"); } catch { /* ignore */ }
   }
 
   // ============ (4) Card 850eb55c round 2 (item 1): READY_FALLBACK_MS latches `ready` FIRST (behind a =====
@@ -551,7 +629,7 @@ try {
     try { host.stop(I, "hard"); } catch { /* ignore */ }
   }
 } finally {
-  for (const id of ["fallback-A", "fallback-B", "fallback-C-dialog-stuck", "fallback-D-no-dialog-control", "fallback-E-manager-role-control", "fallback-F-dialog-stuck-drain", "fallback-G-dialog-stuck-mode-cycle", "fallback-H-drainpending-cycle-guard", "fallback-I-mcp-dialog-stuck"]) { try { host.stop(id, "hard"); } catch { /* ignore */ } }
+  for (const id of ["fallback-A", "fallback-B", "fallback-C-dialog-stuck", "fallback-D-no-dialog-control", "fallback-D2-plain-role-control", "fallback-E-manager-role-now-held", "fallback-F-dialog-stuck-drain", "fallback-F2-manager-resume-dialog-stuck", "fallback-G-dialog-stuck-mode-cycle", "fallback-H-drainpending-cycle-guard", "fallback-I-mcp-dialog-stuck"]) { try { host.stop(id, "hard"); } catch { /* ignore */ } }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
