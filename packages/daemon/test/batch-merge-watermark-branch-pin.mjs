@@ -1,39 +1,36 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Card b801bad0 (fix round 3) — REVERTED: a prior round of this fix (Code Review MINOR 4) made the branch
-// half of the batch fast-forward's pin (`expectedBaseBranch`) prefer the STORED mainline watermark over a
-// LIVE read of canonical HEAD taken at batch-cut time (sessions/service.ts ~17268). That caught a divert
-// that PREDATED the batch's own dispatch — but it also made the pin vulnerable to a separate, pre-existing
-// quirk: `checkMainlineMove` (sessions/service.ts) re-stamps the watermark to WHATEVER branch is currently
-// checked out on any branch CHANGE, silently, on "first sight" of that branch — including the very stray
-// branch a batch's own divert refusal just correctly caught, since that check runs mid-batch (after the
-// gate closure, before the fast-forward) while canonical is still diverted. A watermark-preferred pin
-// therefore lasts exactly ONE batch: the NEXT batch's cut reads the now-corrupted watermark and either
-// spuriously refuses (canonical is actually back on mainline, the stale pin still says stray) or
-// fast-forwards onto the stray branch (canonical is still diverted, the stale pin now agrees with it).
+// Card ba663984 — REINTRODUCES the watermark-preferred pin `b801bad0` round 3 reverted (see that record's
+// own "Round 4" correction), now that card `2a6a292a` has closed `checkMainlineMove`'s silent re-stamp of
+// the watermark onto a stray checkout. The branch half of the batch fast-forward's pin
+// (`expectedBaseBranch`, sessions/service.ts's `mergeBatchTracked`) again prefers the STORED mainline
+// watermark over a LIVE read of canonical HEAD taken at batch-cut time — catching a divert that PREDATES
+// the batch's own dispatch, which a live read alone cannot see (it would capture the already-diverted
+// branch as "expected" and agree with itself).
 //
-// THIS FILE NOW PROVES THE REVERT, not the watermark-preferring behavior it used to prove:
+// THIS FILE NOW PROVES THE REINTRODUCTION:
 //
-//   (W1) the stored watermark has NO bearing on the pin any more — corrupt it to a branch that doesn't even
-//        exist, confirm an ordinary (non-diverted) batch still lands normally (the pin comes from the LIVE
-//        read alone, never consulting the stale/corrupted watermark).
-//   (P1) a divert BEFORE the batch is even dispatched (no divert during the gate itself) is — by design of
-//        this revert — NOT caught: the live read at cut time captures the STRAY branch as "expected", so
-//        the pre-check agrees with itself and the batch proceeds, landing onto the stray branch rather than
-//        mainline. This is the exact self-defeating case the watermark-preferred pin existed to catch, and
-//        reintroducing it is the deliberate, accepted cost of this revert — the LANDING itself is owned by
-//        the pin and stays unfixed here; card ba663984 (reintroducing a watermark-preferred pin) is what
-//        closes THAT. What card 2a6a292a round 2 DOES close, and this file now also asserts: the stored
-//        WATERMARK itself must never be re-stamped to the stray branch by this landing — `checkMainlineMove`
-//        observes the SAME mismatch mid-gate (before the fast-forward) and now returns `null` (not a tip) on
-//        it, and `advanceMainlineWatermarkForBatch` independently refuses to move `W.branch` off an existing
-//        baseline too, so the watermark stays at MAIN even though the content lands on the stray branch.
-//   (P2) control: a divert DURING the gate run (after cut, before the fast-forward) is UNAFFECTED by this
-//        revert and is still caught — the live read at cut time pins the real branch, and the fast-forward
-//        later finds canonical checked out elsewhere. (Already covered end-to-end by
+//   (W1) a stored watermark that disagrees with the LIVE checkout (corrupted/stale via a direct db.setMeta,
+//        standing in for an out-of-band write — 2a6a292a's own fix means an ORDINARY landing can no longer
+//        produce this organically) is now TRUSTED over the live read: the batch REFUSES, naming the
+//        expected branch (the watermark's), the observed branch (the live checkout), and the human-only
+//        mainline-watermark reset route as the remedy if the disagreement is actually a deliberate rename.
+//   (P1) a divert BEFORE the batch is even dispatched (no divert during the gate itself) is now CAUGHT —
+//        this is the whole point of the card, and the exact self-defeating case `b801bad0` round 3 accepted
+//        as the cost of its revert. The refusal fires at the PRE-ff check (before anything is cherry-picked
+//        or merged), so neither mainline's own ref NOR the stray branch is touched.
+//   (P2) control: a divert DURING the gate run (after cut, before the fast-forward) was already caught
+//        before this card (the live read at cut time pins the real branch) and is UNCHANGED by it — both
+//        the live read and the watermark agree at cut time in this scenario. (Already covered end-to-end by
 //        batch-merge-branch-diverted-no-fallback.mjs; this is a brief confirming control, not a duplicate.)
-//   (P3) no live branch available (canonical HEAD is DETACHED) — neither the live read nor (now) any
-//        watermark fallback exists: this is LOGGED (not silently degraded), and the batch still proceeds
-//        WITHOUT a branch-divert check (the sha-only forfeit check alone still applies).
+//   (P3) no live branch available (canonical HEAD is DETACHED) AND no watermark exists yet (true first
+//        sight): this is LOGGED (not silently degraded), and the batch still proceeds WITHOUT a
+//        branch-divert check (the sha-only forfeit check alone still applies) — unchanged by this card.
+//   (U1) the watermark row EXISTS but fails to parse (non-JSON content) on an otherwise-undiverted
+//        canonical: the batch REFUSES outright (before any worktree is cut or gate run) rather than
+//        silently falling back to the live read, which would reopen the exact pre-existing-divert gap this
+//        pin exists to close for the case most likely to be tampering.
+//   (U2) the watermark's `getMeta` read THROWS (monkey-patched for the one key under test): refused the
+//        same fail-closed way as (U1), never treated as "no watermark".
 //
 // Run: 1) build daemon (pnpm build), 2) LOOM_CODEX_BIN=<nonexistent> node test/batch-merge-watermark-branch-pin.mjs
 import fs from "node:fs";
@@ -103,27 +100,30 @@ try {
   check("seed: the first batch lands normally", seedResult.ok === true && seedResult.landed?.length === 2);
   check("seed: the watermark is now stored at branch MAIN", watermark()?.branch === MAIN);
 
-  // ── (W1) the stored watermark is IGNORED for the pin: corrupt it to a branch that doesn't exist ─────────
+  // ── (W1) the stored watermark is now TRUSTED for the pin: a branch that doesn't exist disagrees with the
+  //        live checkout, and the batch REFUSES rather than silently proceeding ──────────────────────────
   const bogusBranch = `bmwp-bogus-watermark-branch-${sfx}`;
   const w1CorruptSha = canonHead();
   db.setMeta(KEY, JSON.stringify({ branch: bogusBranch, sha: w1CorruptSha }));
   check("(W1) precondition: canonical is genuinely on MAIN (no divert in effect)", canonBranch() === MAIN);
   const w1a = await addWorker("w1a"), w1b = await addWorker("w1b");
   const rw1 = await batch([w1a, w1b]);
-  check("(W1) a corrupted/stale stored watermark does NOT cause a spurious branchDiverted refusal — the pin comes from the LIVE read, never the watermark", rw1.ok === true && rw1.landed?.length === 2 && rw1.branchDiverted === undefined);
+  check("(ba663984) (W1) a stored watermark that disagrees with the live checkout now REFUSES — the pin prefers the watermark over the live read", rw1.ok === false && rw1.branchDiverted === true && rw1.landed?.length === 0);
+  check("(ba663984) (W1) mainline's own ref was NOT advanced", canonHead() === w1CorruptSha);
+  check("(ba663984) (W1) nothing was started (no fallback ran): both candidates report started:false", rw1.fallback?.every((f) => f.started !== true));
+  check("(ba663984) (W1) REFUSAL TEXT names the expected branch (the watermark's)", rw1.reason?.includes(`"${bogusBranch}"`));
+  check("(ba663984) (W1) REFUSAL TEXT names the observed branch (the live checkout)", rw1.reason?.includes(`"${MAIN}"`));
+  check("(ba663984) (W1) REFUSAL TEXT names the human-only mainline-watermark reset route as the remedy", rw1.reason?.includes("POST /api/projects/:id/mainline-watermark/reset"));
   // @decision 2a6a292a round 2 — a corrupted watermark BRANCH no longer self-corrects via an ordinary
-  // landing: `checkMainlineMove` sees the SAME mismatch (W says `bogusBranch`, live HEAD is really on
-  // MAIN) and alerts without advancing, exactly as it would for a genuine divert — a rebind is now the
-  // only exit. Reset it directly here (simulating that rebind) so the rest of this file tests against a
-  // known-sane baseline, rather than relying on a self-correction that no longer happens.
-  check("(2a6a292a) THE FIX also covers a merely-corrupted watermark branch: it is NOT silently self-corrected by an ordinary landing any more — it stays stuck at the bogus branch until explicitly corrected", watermark()?.branch === bogusBranch && watermark()?.sha === w1CorruptSha);
+  // landing — unchanged by ba663984, since this refusal never reaches advanceMainlineWatermarkForBatch at
+  // all (result.ok is false). Reset it directly here (simulating a human reset) so the rest of this file
+  // tests against a known-sane baseline.
+  check("(2a6a292a) a merely-corrupted watermark branch is NOT silently self-corrected — it stays stuck at the bogus branch until explicitly corrected", watermark()?.branch === bogusBranch && watermark()?.sha === w1CorruptSha);
   db.setMeta(KEY, JSON.stringify({ branch: MAIN, sha: canonHead() }));
 
   // ── (P1) divert BEFORE dispatching the next batch — no divert during the gate this time ────────────────
-  // By design of this revert, this is the SELF-DEFEATING case: the live read at cut time captures the
-  // ALREADY-diverted stray branch as "expected", so the pre-check agrees with itself and the batch proceeds
-  // — landing its content onto the stray branch instead of refusing. Accepted regression; see this file's
-  // own header.
+  // THE CARD THIS FIX CLOSES: the watermark-preferred pin now catches this — a live read at cut time alone
+  // could never see it (it would capture the already-diverted branch as "expected" and agree with itself).
   const preCutSha = canonHead();
   const strayBranch = `bmwp-stray-${sfx}`;
   git(P.repo, "checkout", "-q", "-b", strayBranch); // same-commit divert, entirely before the batch call
@@ -132,13 +132,17 @@ try {
   const w1 = await addWorker("p1a"), w2 = await addWorker("p1b");
   const r1 = await sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
   const v1 = r1.settled && r1.ok ? r1.value : { __unsettled: r1 };
-  check("(P1) the batch does NOT refuse — the live-read-only pin agrees with the already-diverted checkout", v1.ok === true && v1.landed?.length === 2 && v1.branchDiverted === undefined);
-  check("(P1) mainline's own ref was NOT advanced — the content landed on the stray branch instead", git(P.repo, "rev-parse", MAINREF) === preCutSha);
-  check("(P1) the stray branch WAS advanced (this is the accepted, reverted-to-pre-MINOR-4 behavior)", git(P.repo, "rev-parse", `refs/heads/${strayBranch}`) !== preCutSha);
-  // @decision 2a6a292a round 2 — THE FIX under test here: even though the landing itself proceeds onto the
-  // stray branch (above, unchanged), the stored watermark must NOT be re-stamped to it one step later.
-  check("(2a6a292a) THE FIX: the watermark's branch is still MAIN despite a real landing on the stray branch", watermark()?.branch === MAIN);
-  check("(2a6a292a) THE FIX: the watermark's sha is unchanged too (a divert is never \"safe to land\" for W)", watermark()?.sha === preCutSha);
+  check("(ba663984) (P1) the batch now REFUSES — the watermark-preferred pin catches a divert that predates the cut", v1.ok === false && v1.branchDiverted === true);
+  check("(ba663984) (P1) mainline's own ref was NOT advanced", git(P.repo, "rev-parse", MAINREF) === preCutSha);
+  check("(ba663984) (P1) the stray branch was ALSO untouched — the refusal fires at the PRE-ff check, before anything is cherry-picked or merged", git(P.repo, "rev-parse", `refs/heads/${strayBranch}`) === preCutSha);
+  check("(ba663984) (P1) nothing was started (no fallback ran)", v1.fallback?.every((f) => f.started !== true));
+  check("(ba663984) (P1) REFUSAL TEXT names the expected branch (MAIN, the watermark's)", v1.reason?.includes(`"${MAIN}"`));
+  check("(ba663984) (P1) REFUSAL TEXT names the observed branch (the stray branch)", v1.reason?.includes(`"${strayBranch}"`));
+  check("(ba663984) (P1) REFUSAL TEXT names the human-only mainline-watermark reset route as the remedy", v1.reason?.includes("POST /api/projects/:id/mainline-watermark/reset"));
+  // @decision 2a6a292a round 2 — the watermark was never at risk here either: this refusal never reaches
+  // advanceMainlineWatermarkForBatch (result.ok is false), so both fields stay exactly as seeded.
+  check("(2a6a292a) the watermark's branch is still MAIN (never touched by a refusal)", watermark()?.branch === MAIN);
+  check("(2a6a292a) the watermark's sha is unchanged too", watermark()?.sha === preCutSha);
 
   // ── (P2) control: a divert DURING the gate (after cut, before the fast-forward) is unaffected by this
   //         revert and is still caught — confirming the pin itself still works, just not for a pre-existing
@@ -160,6 +164,48 @@ try {
   check("(P2) the stray branch was NOT advanced (refused pre-mutation)", git(P.repo, "rev-parse", `refs/heads/${strayBranch2}`) === preCutSha2);
   git(P.repo, "checkout", "-q", MAIN);
   git(P.repo, "branch", "-q", "-D", strayBranch2);
+
+  // ── (U1) the watermark row EXISTS but fails to parse (non-JSON content), canonical is genuinely
+  //         undiverted: refuses outright rather than silently falling back to the live read ────────────────
+  const u1PreSha = canonHead();
+  db.setMeta(KEY, "this is not json at all");
+  check("(U1) precondition: canonical is genuinely on MAIN (no divert in effect)", canonBranch() === MAIN && canonHead() === u1PreSha);
+  const u1a = await addWorker("u1a"), u1b = await addWorker("u1b");
+  const ru1 = await batch([u1a, u1b]);
+  check("(ba663984) (U1) an unparseable watermark row REFUSES outright — never falls back to the live read", ru1.ok === false && ru1.branchDiverted === true && ru1.landed?.length === 0);
+  check("(ba663984) (U1) mainline's own ref was NOT advanced", canonHead() === u1PreSha);
+  check("(ba663984) (U1) nothing was started (no fallback ran)", ru1.fallback?.every((f) => f.started !== true));
+  check("(ba663984) (U1) REFUSAL TEXT names the record as corrupt", ru1.reason?.includes("corrupt"));
+  check("(ba663984) (U1) REFUSAL TEXT names the observed (live) branch", ru1.reason?.includes(`"${MAIN}"`));
+  check("(ba663984) (U1) REFUSAL TEXT names the human-only mainline-watermark reset route as the remedy", ru1.reason?.includes("POST /api/projects/:id/mainline-watermark/reset"));
+  check("(ba663984) (U1) the unparseable row itself is left untouched (never silently repaired)", db.getMeta(KEY) === "this is not json at all");
+  // Code Review minor 1 (card ba663984): this early refusal must settle with a REAL verdict, never a bare row.
+  const stU1 = ru1.opId ? sessions.gateStatus(ru1.opId) : undefined;
+  check("(ba663984) (U1) gate_status resolves this refusal as settled, never a bare row", stU1?.state === "settled" && stU1?.passed === false);
+  check("(ba663984) (U1) gate_status carries the same reason", stU1?.reason === ru1.reason);
+  db.setMeta(KEY, JSON.stringify({ branch: MAIN, sha: canonHead() })); // simulate the human reset route
+
+  // ── (U2) the watermark's own `getMeta` read THROWS (monkey-patched for the one key under test): refused
+  //         the same fail-closed way as (U1), never treated as "no watermark" ──────────────────────────────
+  const u2PreSha = canonHead();
+  const realGetMeta = db.getMeta.bind(db);
+  db.getMeta = (k) => { if (k === KEY) throw new Error("simulated db read failure"); return realGetMeta(k); };
+  try {
+    check("(U2) precondition: canonical is genuinely on MAIN (no divert in effect)", canonBranch() === MAIN && canonHead() === u2PreSha);
+    const u2a = await addWorker("u2a"), u2b = await addWorker("u2b");
+    const ru2 = await batch([u2a, u2b]);
+    check("(ba663984) (U2) a watermark read that THROWS REFUSES outright — never falls back to the live read", ru2.ok === false && ru2.branchDiverted === true && ru2.landed?.length === 0);
+    check("(ba663984) (U2) mainline's own ref was NOT advanced", canonHead() === u2PreSha);
+    check("(ba663984) (U2) nothing was started (no fallback ran)", ru2.fallback?.every((f) => f.started !== true));
+    check("(ba663984) (U2) REFUSAL TEXT names the record as unreadable", ru2.reason?.includes("unreadable"));
+    check("(ba663984) (U2) REFUSAL TEXT names the human-only mainline-watermark reset route as the remedy", ru2.reason?.includes("POST /api/projects/:id/mainline-watermark/reset"));
+    // Code Review minor 1 (card ba663984): this early refusal must settle with a REAL verdict, never a bare row.
+    const stU2 = ru2.opId ? sessions.gateStatus(ru2.opId) : undefined;
+    check("(ba663984) (U2) gate_status resolves this refusal as settled, never a bare row", stU2?.state === "settled" && stU2?.passed === false);
+    check("(ba663984) (U2) gate_status carries the same reason", stU2?.reason === ru2.reason);
+  } finally {
+    db.getMeta = realGetMeta;
+  }
 } finally {
   try { db.close(); } catch { /* already closed */ }
 }
@@ -212,6 +258,6 @@ function canonBranchOf(repo) { try { return execFileSync("git", ["symbolic-ref",
 
 console.warn = realWarn;
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the batch's branch-divert pin now comes from a LIVE read alone (the stored mainline watermark is never consulted, so a stale/corrupted watermark cannot cause a spurious refusal or a wrong-branch landing), still catches a divert that happens DURING a batch's own gate run, accepts the reintroduced self-defeating case for a divert that PREDATES dispatch (the LANDING still proceeds onto the stray branch), but the stored WATERMARK is never re-stamped to it (card 2a6a292a round 2), and this file logs (never silently degrades) when no live branch is available."
+  ? "\n✅ ALL PASS — the batch's branch-divert pin now PREFERS the stored mainline watermark over a live read (card ba663984): a stale/corrupted watermark branch (W1) and a divert that PREDATES the batch's own dispatch (P1) both REFUSE outright, each naming the expected branch, the observed branch and the human-only reset route; a divert DURING the gate run (P2) is still caught as before; a watermark row that exists but fails to parse, or whose read throws (U1/U2), refuses fail-closed rather than silently falling back; and this file still logs (never silently degrades) when no live branch AND no watermark are available (P3)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

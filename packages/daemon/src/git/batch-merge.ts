@@ -893,7 +893,11 @@ export async function fastForwardCanonicalMain(
           // ordinary forfeit (above), a branchDiverted refusal runs NO per-candidate fallback at all (the
           // solo path pins only a sha, never a branch, and would risk landing onto this same stray branch)
           // — see the caller's own `result.branchDiverted` handling, sessions/service.ts.
-          reason: `canonical repo is checked out on "${entry.branch ?? "(detached)"}", not the expected mainline branch "${deps.expectedBaseBranch}" — something diverted the checkout since this batch was cut`,
+          // Card ba663984 — name BOTH remedies, mirroring the solo squash path's identical pre-squash
+          // refusal wording (`requireCanonicalHead`'s branch check, git/worktrees.ts): restore the checkout,
+          // or — if the observed branch is actually a deliberate mainline rename — reset the project's
+          // mainline baseline via the human-only route (2a6a292a).
+          reason: `canonical repo is checked out on "${entry.branch ?? "(detached)"}", not the expected mainline branch "${deps.expectedBaseBranch}" — something diverted the checkout since this batch was cut. Check out "${deps.expectedBaseBranch}" again in the canonical repo and re-confirm; if "${entry.branch ?? "(detached)"}" is actually a deliberate mainline rename, ask the owner to reset this project's mainline baseline first (POST /api/projects/:id/mainline-watermark/reset, loopback, human-only).`,
         };
       }
       if (targetSha === expectedBaseSha) return { ok: true }; // nothing landed on top — no-op fast-forward
@@ -919,7 +923,8 @@ export async function fastForwardCanonicalMain(
           return { ok: false, branchDiverted: true, observedBranch: post.branch, reason: `fast-forward appeared to succeed but canonical HEAD reads ${post.sha}, not the expected ${targetSha} — refusing to report success` };
         }
         if (post.branch !== deps.expectedBaseBranch) {
-          return { ok: false, branchDiverted: true, observedBranch: post.branch, reason: `fast-forward landed on "${post.branch ?? "(detached)"}", not the expected mainline branch "${deps.expectedBaseBranch}" — refusing to report success` };
+          // Card ba663984 — same two-remedy wording as the pre-ff refusal above.
+          return { ok: false, branchDiverted: true, observedBranch: post.branch, reason: `fast-forward landed on "${post.branch ?? "(detached)"}", not the expected mainline branch "${deps.expectedBaseBranch}" — refusing to report success. Restore the canonical checkout to "${deps.expectedBaseBranch}" before any worker_merge_confirm; if "${post.branch ?? "(detached)"}" is actually a deliberate mainline rename, ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only) first.` };
         }
         return { ok: true };
       };

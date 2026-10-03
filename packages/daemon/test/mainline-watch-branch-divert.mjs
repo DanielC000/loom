@@ -22,7 +22,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        stray branch — this file's own concern (does checkMainlineMove's tripwire still fire + leave the
 //        watermark untouched) is unaffected either way, since checkMainlineMove runs before d69d4858's own
 //        check and never depends on whether the squash itself proceeds. See `batch-merge-watermark-branch-pin.mjs`'s
-//        (P1) for the still-unfixed batch-side equivalent (card ba663984).
+//        (P1) for the identical batch-side fix (card ba663984, landed the same way).
 //   (D6) MARKER SHARING: an undelivered sha-level alert marker (different evidence, coincidentally the same
 //        (from, to) as a later divert — a same-commit checkout never moves the tip) is never clobbered.
 //   (D7) THE NUDGE TEXT for a divert names the expected/observed branch and a checkout/reset-route remedy, never

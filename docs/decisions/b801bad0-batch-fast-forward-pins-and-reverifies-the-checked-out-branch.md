@@ -148,3 +148,12 @@ finalizes the branch).
   live read at cut time) until card `2a6a292a` closes `checkMainlineMove`'s silent re-stamp of that same
   watermark on a stray checkout — reintroducing it first reopens the one-batch-lifetime corruption this
   round reverted.
+
+## Round 4 (card `ba663984`) — the deferred reintroduction has landed
+
+`2a6a292a` closed the re-stamp gap this bullet was waiting on, and card `ba663984` has reintroduced the
+watermark-preferred pin exactly as anticipated — see `docs/decisions/ba663984-reintroduce-watermark-preferred-batch-branch-pin.md`
+for the full design, including a fail-closed refusal (never a silent live-read fallback) on a watermark row
+that EXISTS but fails to parse. **The bullet above is now historical, not a standing prohibition** — do not
+read it as still forbidding the pin going forward, and read `ba663984`'s own "Do not" list before touching
+this code again. `batch-merge-watermark-branch-pin.mjs`'s (P1)/(W1) cases are flipped accordingly.

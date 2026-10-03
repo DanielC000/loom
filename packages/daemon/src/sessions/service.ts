@@ -601,6 +601,10 @@ type MergeBatchResult = {
    *  lists each candidate as `started:false` — and a durable `batch_merge_branch_diverted` event is filed.
    *  Absent on every other outcome. */
   branchDiverted?: boolean;
+  /** @decision ba663984 — set alongside `branchDiverted:true` ONLY on the early watermark-corrupt/unreadable
+   *  refusal: the checkout may be fine, it's the STORED RECORD that's untrustworthy, so the settle-nudge and
+   *  tombstone-verdict synthesis (`onSettle` below) branch on this first — "restore the checkout" is wrong here. */
+  watermarkUnreadable?: boolean;
   /** Card b801bad0 (fix round) — the fast-forward's `--ff-only` call did not throw, but the POST-ff
    *  re-read that confirms WHERE it landed could not be completed (see `FastForwardResult.unverified`) —
    *  distinct from a confirmed `branchDiverted`: the landing most likely happened, it just could not be
@@ -17782,24 +17786,45 @@ export class SessionService {
           projectId: finalProjectId, taskId: null, branch: null, startedAt: opMintedAt,
           state: "pending", surfacedPending: false,
         });
+        // @decision ba663984 — the branch half of the pin prefers the STORED watermark over a live read
+        // (reintroducing b801bad0 round 3's reverted preference, safe now that 2a6a292a stopped the
+        // re-stamp): fall back to a live read only when the row is genuinely ABSENT, never present-but-corrupt.
+        //
+        // A watermark row that EXISTS but fails to parse, or whose read throws, is refused OUTRIGHT below —
+        // never silently treated as "no watermark" (which would fall back to the live read and reopen the
+        // same pre-existing-divert gap for the case most likely to BE tampering: a hand-edited/corrupted
+        // record). Only a genuinely ABSENT row (true first sight, mirroring `checkMainlineMove`'s own `!w`)
+        // falls back to the live branch, unchanged from before this card.
+        const watermarkKey = mainlineWatermarkKey(finalProjectId, batchRepoKey);
+        let watermarkRaw: string | undefined;
+        let watermarkReadFailed = false;
+        try {
+          watermarkRaw = this.db.getMeta(watermarkKey);
+        } catch {
+          watermarkReadFailed = true;
+        }
+        const watermark = watermarkReadFailed ? null : parseMainlineWatermark(watermarkRaw);
+        if (watermarkReadFailed || (watermarkRaw !== undefined && !watermark)) {
+          const liveHead = await readMainlineHead(finalRepoPath, this.mainlineGitMs()).catch(() => null);
+          const observedBranch = liveHead?.branch ?? null;
+          const reason = `this project's stored mainline watermark record is ${watermarkReadFailed ? "unreadable (a database read failed)" : "corrupt (it does not parse as a valid {branch, sha} record)"} — refusing to pin this batch's fast-forward rather than silently falling back to a live read, which would re-open the pre-existing-checkout-divert gap this pin exists to close. Canonical repo is currently checked out on "${observedBranch ?? "(detached/unreadable)"}". Ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only), which re-initializes the watermark from the current checkout, then retry.`;
+          evtBatch("batch_merge_branch_diverted", { repoPath: finalRepoPath, expectedBranch: null, observedBranch, watermarkUnreadable: true, reason });
+          const notStarted = await runFallback([
+            ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: "this project's mainline watermark record is corrupt/unreadable — nothing was batched, gated or landed" })),
+            ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+            ...strandedFallback,
+          ], opId, undefined, "restore or reset the mainline watermark (see reason) BEFORE any worker_merge_confirm");
+          return { ok: false, opId, landed: [], fallback: notStarted, branchDiverted: true, watermarkUnreadable: true, reason };
+        }
         // Card b801bad0 — also pin the BRANCH canonical HEAD is checked out on right now (not just its
         // sha), so `fastForwardCanonicalMain` can refuse a fast-forward that lands on a different branch
         // (e.g. a same-commit `GitWriter.createBranch()` checkout) — see that function's own doc.
         const baseMainHead = await readMainlineHead(finalRepoPath, this.mainlineGitMs()).catch(() => null);
         const baseMainSha = baseMainHead?.tip ?? ((await resolveGitRef(finalRepoPath, "HEAD", { timeoutMs: this.gitOpMs })) ?? "");
-        // Card b801bad0 (fix round 3) — REVERTED: a prior round of this fix preferred the STORED mainline
-        // watermark over this LIVE read for the branch half of the pin (catching a divert that predates the
-        // cut, at the cost of the self-defeating case where the live read alone would have agreed with
-        // itself). That preference was undone because `checkMainlineMove` used to re-stamp the watermark to
-        // WHATEVER branch was currently checked out on any branch CHANGE, silently — card 2a6a292a has since
-        // fixed that re-stamp (checkMainlineMove now alerts and leaves the watermark untouched on a branch
-        // mismatch, and the advance helpers below also refuse to move the watermark's branch away from an
-        // existing baseline) — but the watermark-preferred pin is NOT reintroduced here as part of that fix;
-        // it is separate follow-up work, owned by card ba663984, once this one has landed. Pin from the live
-        // read alone — the branch canonical was checked out on right now, at cut time — and LOG (never
-        // silently degrade to an unpinned, sha-only batch) when it is unavailable (detached HEAD / a read
-        // failure).
-        const expectedBaseBranch = baseMainHead?.branch;
+        // @decision ba663984 — the branch half of the pin: the watermark resolved above (`undefined` only
+        // on a genuinely absent row, handled above) beats this live read. `baseMainSha` (the sha-only
+        // forfeit check) stays live-read-based, unchanged — only the branch half of the pin changes.
+        const expectedBaseBranch = watermark?.branch ?? baseMainHead?.branch;
         if (expectedBaseBranch === undefined) {
           // eslint-disable-next-line no-console
           console.warn(`[merge-batch] no mainline branch available to pin for ${finalRepoPath} (repoKey ${batchRepoKey}) — canonical HEAD is detached/unreadable; this batch's fast-forward runs WITHOUT a branch-divert check (the sha-only forfeit check still applies)`);
@@ -18518,6 +18543,13 @@ export class SessionService {
           ? `[loom:merge-batch-cancelled] merge_batch [op ${opId}] was cancelled before its gate ran (${outcome.value.reason ?? "cancelled"}). This is NOT a failure — no verdict was reached and NOTHING was started: no candidate was routed to an individual worker_merge_confirm. Re-run merge_batch if you still want it.`
           // Card b801bad0 (fix round 3) — dedicated branches, never the generic "landed nothing" wording
           // below: both carry their own manager guidance (see runFallback's own matching tail, above).
+          //
+          // Card ba663984 — checked BEFORE the generic `branchDiverted` branch below: the checkout itself may
+          // be perfectly fine here, it is the STORED WATERMARK RECORD that is untrustworthy, so this must
+          // NEVER claim a divert or say "a solo confirm now would land off mainline" — the remedy is the
+          // human-only reset route (or fixing whatever corrupted the record), not restoring a checkout.
+          : outcome.value.watermarkUnreadable
+          ? `[loom:merge-batch-watermark-unreadable] merge_batch [op ${opId}] refused: ${outcome.value.reason ?? "the stored mainline watermark record is unreadable"}. The canonical checkout itself may be fine — it is the STORED RECORD this project's watermark pin relies on that could not be trusted. Ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only) if the record is genuinely stale/wrong, then retry. NOTHING was started: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
           : outcome.value.branchDiverted
           ? `[loom:merge-batch-diverted] merge_batch [op ${opId}] refused: ${outcome.value.reason ?? "canonical checkout diverted to an unexpected branch"}. Restore the canonical checkout to the expected mainline branch BEFORE any worker_merge_confirm — a solo confirm now would land off mainline. NOTHING was started: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
           : outcome.value.unverified
@@ -18593,12 +18625,9 @@ export class SessionService {
         // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
         //  settled, never the gate's own inner resolve.
         //
-        // @decision 92eeb319 — the tombstone is minted at the top of the closure, so this write always has a row. `batchGateVerdict` is
-        //  undefined only when NO gate verdict was recorded: (a) `batchAllDropped` — POSITIVELY set when `runBatchedMerge` returned with
-        //  nothing assembled and `runGate` never entered — settled with the explicit verdict below, NEVER a bare row and NEVER the
-        //  `skipReason:"gate-disabled"|"gate-interval"` an ungated LANDING carries (the gate was not switched off); or (b) a throw before
-        //  the gate closure recorded anything (the worktree cut) — settled as `"error"` from the real thrown value. A cancelled batch always
-        //  recorded `"cancelled"` itself (the `GateCancelledError` catch inside `runGate`), so no cancelled verdict is synthesized here.
+        // @decision 92eeb319 — the tombstone is minted at the top of the closure, so this write always has a row: `batchGateVerdict`
+        //  undefined means NO gate verdict was recorded, synthesized explicitly below instead — see each branch's own doc comment for
+        //  which no-gate-ran case it covers (never a bare row, never the `skipReason:"gate-disabled"|"gate-interval"` an ungated LANDING carries).
         onSettle: (outcome, opId) => {
           let verdict = batchGateVerdict;
           if (!verdict) {
@@ -18606,6 +18635,8 @@ export class SessionService {
             const timing = { settledAt: new Date(nowMs).toISOString(), ...(batchMintedAtMs !== undefined ? { totalDurationMs: nowMs - batchMintedAtMs } : {}) };
             if (!outcome.ok) verdict = { kind: "error", payload: { reason: outcome.error instanceof Error ? outcome.error.message : String(outcome.error), ...timing } };
             else if (batchAllDropped) verdict = { kind: "skipped", payload: { reason: "the batch gate never ran: every candidate was dropped at assembly and handed to its own worker_merge_confirm (read that op's own gate_status for whether it landed); totalDurationMs includes those fallback runs", skipReason: "all-candidates-dropped", batchBranchCount: 0, batchLanded: false, ...timing } };
+            // Card ba663984's own early refusal (before any worktree cut) — same no-gate-ran shape as batchAllDropped above.
+            else if (outcome.value.watermarkUnreadable) verdict = { kind: "skipped", payload: { reason: outcome.value.reason ?? "the stored mainline watermark record is unreadable", skipReason: "watermark-unreadable", batchBranchCount: 0, batchLanded: false, ...timing } };
           }
           this.db.settlePendingGateOp(opId, verdict);
         },

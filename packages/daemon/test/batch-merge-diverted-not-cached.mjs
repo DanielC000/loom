@@ -35,6 +35,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // though the checkout was already restored. Confirmed RED on that reverted build, confirmed GREEN again
 // after restoring "branch-diverted" to the set and rebuilding.
 //
+// @decision ba663984 — a dedicated, always-pass `sessionsSeed` instance now lands ONE ordinary seed batch
+// before (1) below, establishing a trustworthy watermark first; see that decision's own comment further
+// down for why this became necessary (unrelated to this file's own divert/cache mechanism).
+//
 // Run: 1) build daemon (pnpm build), 2) LOOM_CODEX_BIN=<nonexistent> node test/batch-merge-diverted-not-cached.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -69,7 +73,6 @@ commitAll(P.repo, "init", GIT_ID);
 const MAIN = git(P.repo, "rev-parse", "--abbrev-ref", "HEAD");
 const canonBranch = () => git(P.repo, "rev-parse", "--abbrev-ref", "HEAD");
 const strayName = `bmdc-stray-${sfx}`;
-const baseSha = git(P.repo, "rev-parse", "HEAD");
 
 let gateCalls = 0;
 const db = new Db();
@@ -82,6 +85,14 @@ const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
     return { passed: true, steps: [{ step: "gate", durationMs: 1, status: 0 }] };
   },
 });
+// @decision ba663984 — a SEPARATE, always-pass SessionService (same shared db/repo) for ONE ordinary seed
+// landing, establishing a TRUSTWORTHY watermark BEFORE the divert scenario below ever runs. Without this,
+// `checkMainlineMove`'s own pre-existing "true first sight" (card 4fa36502/2a6a292a — unrelated to this
+// card, already landed) would absorb WHATEVER call #1's own mid-gate divert leaves checked out as the new
+// trusted baseline, since nothing would yet exist to compare it against — not a defect this file's
+// divert/cache mechanism owns; see docs/decisions/ba663984-*.md's own "Round 1 correction". A dedicated
+// instance keeps `gateCalls` counting ONLY the two calls this file is actually about, unchanged.
+const sessionsSeed = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000, runGate: async () => ({ passed: true, steps: [{ step: "gate", durationMs: 1, status: 0 }] }), reapWorktreeProcesses: noReap });
 db.insertProject({ id: P.projId, name: "BMDC", repoPath: P.repo, vaultPath: P.repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
 db.insertAgent({ id: P.agentId, projectId: P.projId, name: "t", startupPrompt: "", position: 0 });
 db.insertSession({ id: P.mgrId, projectId: P.projId, agentId: P.agentId, engineSessionId: null, title: null, cwd: P.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
@@ -98,6 +109,14 @@ async function addWorker(tag) {
 }
 
 try {
+  // ── seed: an ordinary first landing, via the ALWAYS-PASS instance (never touches `gateCalls`) — see the
+  //         @decision ba663984 comment above for why this is now needed ──────────────────────────────────
+  const s1 = await addWorker("seed1"), s2 = await addWorker("seed2");
+  const seedResult = await sessionsSeed.mergeBatchTracked(P.mgrId, [s1.workerId, s2.workerId]);
+  check("seed: an ordinary first landing establishes the watermark", seedResult.settled === true && seedResult.ok === true && seedResult.value.ok === true);
+  check("seed: gateCalls is still 0 (the dedicated seed instance never touches it)", gateCalls === 0);
+  const baseSha = git(P.repo, "rev-parse", "HEAD"); // the PRE-BATCH sha for the real test below, taken AFTER the seed
+
   const w1 = await addWorker("a"), w2 = await addWorker("b");
   const tipBefore1 = { a: git(P.repo, "rev-parse", w1.branch), b: git(P.repo, "rev-parse", w2.branch) };
 

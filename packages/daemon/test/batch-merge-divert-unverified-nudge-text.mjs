@@ -18,6 +18,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       batch-merge-ff-unverified-no-fallback.mjs): the nudge is `[loom:merge-batch-unverified]` and
 //       carries round 4's new addition — "confirm canonical is checked out on the mainline branch before
 //       any worker_merge_confirm" — alongside the pre-existing "check git log ... ALREADY_MERGED" guidance.
+//   (C) card ba663984, Code Review minor 2 — watermark-unreadable (a corrupt, unparseable stored watermark
+//       row on an otherwise perfectly fine checkout, no live divert at all): the nudge is
+//       `[loom:merge-batch-watermark-unreadable]`, a DEDICATED tag distinct from (A)'s `-diverted` one —
+//       it must NEVER claim "a solo confirm now would land off mainline" (the checkout is fine; nothing
+//       diverted), and must name the human-only mainline-watermark reset route as the remedy instead.
 //
 // Run: 1) build daemon (pnpm build), 2) LOOM_CODEX_BIN=<nonexistent> node test/batch-merge-divert-unverified-nudge-text.mjs
 import fs from "node:fs";
@@ -37,6 +42,7 @@ const { createWorktree } = await import("../dist/git/worktrees.js");
 const { GitWriter } = await import("../dist/git/writer.js");
 const { boundedSimpleGit } = await import("../dist/git/bounded.js");
 const { nonInteractiveEnv } = await import("../dist/git/writer.js");
+const MW = await import("../dist/git/mainline-watch.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -138,11 +144,55 @@ try {
 
     db.close();
   }
+
+  // ── (C) watermark-unreadable — the [loom:merge-batch-watermark-unreadable] nudge (card ba663984) ───────
+  {
+    const sfx = `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const repo = makeRepo(sfx);
+    const P = { projId: `bmdun-c-proj-${sfx}`, agentId: `bmdun-c-agent-${sfx}`, mgrId: `bmdun-c-mgr-${sfx}` };
+    const nudges = [];
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const db = new Db();
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      syncAttachBudgetMs: 1, reapWorktreeProcesses: noReap, runGate: async () => ({ passed: true, steps: [{ step: "gate", durationMs: 1, status: 0 }] }),
+    });
+    const orig = sessions.enqueueDurableMessage.bind(sessions);
+    sessions.enqueueDurableMessage = (target, text, ...rest) => { nudges.push({ target, text: String(text) }); return orig(target, text, ...rest); };
+    db.insertProject({ id: P.projId, name: "BMDUN-C", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: P.agentId, projectId: P.projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertSession({ id: P.mgrId, projectId: P.projId, agentId: P.agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    // No live divert anywhere — the checkout stays exactly on mainline throughout. Only the STORED
+    // watermark row is corrupt (non-JSON), present but unreadable.
+    db.setMeta(MW.mainlineWatermarkKey(P.projId, "primary"), "this is not json at all");
+    const w1 = await addWorker(db, repo, P.projId, P.agentId, P.mgrId, "a", sfx), w2 = await addWorker(db, repo, P.projId, P.agentId, P.mgrId, "b", sfx);
+
+    const r = await sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
+    check("(C) precondition: the batch degraded to pending (tiny syncAttachBudgetMs)", r.settled === false);
+    await waitUntil(() => nudges.some((n) => n.target === P.mgrId && /\[loom:merge-batch-watermark-unreadable\]/.test(n.text)), { timeoutMs: 30_000, intervalMs: 50, label: "merge-batch-watermark-unreadable settle nudge" });
+    const nudge = nudges.find((n) => n.target === P.mgrId && /\[loom:merge-batch-watermark-unreadable\]/.test(n.text)).text;
+    check("(C) the nudge uses its OWN dedicated tag, never the generic -diverted one", !/\[loom:merge-batch-diverted\]/.test(nudge));
+    check("(C) the nudge names the human-only mainline-watermark reset route", /POST \/api\/projects\/:id\/mainline-watermark\/reset/.test(nudge));
+    check("(C) the nudge NEVER claims a solo confirm now would land off mainline", !/a solo confirm now would land off mainline/.test(nudge));
+    check("(C) the nudge NEVER says \"Restore the canonical checkout\" (nothing diverted)", !/Restore the canonical checkout/.test(nudge));
+    check("(C) the nudge says the checkout itself may be fine", /canonical checkout itself may be fine/.test(nudge));
+    check("(C) the nudge states NOTHING was started", /NOTHING was started/.test(nudge));
+
+    // DoD (Code Review minor 1): gate_status(opId) for this refusal shows a real verdict and reason, never a bare settled row.
+    // The opId is in the nudge text itself (`merge_batch [op <id>]`) — the simplest, most direct extraction.
+    const opId = nudge.match(/\[op ([0-9a-f-]+)\]/)?.[1];
+    check("(C) precondition: resolved a real opId for this refusal from the nudge text", typeof opId === "string" && opId.length > 0);
+    const st = opId ? sessions.gateStatus(opId) : undefined;
+    check("(C) (DoD) gate_status resolves this refusal as settled", st?.state === "settled");
+    check("(C) (DoD) gate_status carries passed:false, never a bare row (no bare pass/fail omission)", st?.passed === false);
+    check("(C) (DoD) gate_status carries a real, non-empty reason naming the watermark record", typeof st?.reason === "string" && /watermark record/.test(st.reason));
+
+    db.close();
+  }
 } finally {
   // (db instances closed above)
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — both async merge_batch settle nudges ([loom:merge-batch-diverted] and [loom:merge-batch-unverified]) carry their own dedicated manager guidance, including round 4's checkout-confirmation addition to the unverified nudge."
+  ? "\n✅ ALL PASS — the three async merge_batch settle nudges ([loom:merge-batch-diverted], [loom:merge-batch-unverified], [loom:merge-batch-watermark-unreadable]) each carry their own dedicated manager guidance: round 4's checkout-confirmation addition on the unverified nudge, and card ba663984's watermark-unreadable nudge naming the reset route while never claiming a divert or a bare settled gate_status row."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

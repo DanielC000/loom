@@ -101,6 +101,15 @@ then also point at the stray branch, so both checks could pass while landing off
   `batch-merge-watermark-branch-pin.mjs`'s (P1) case back) is separate follow-up work, owned by whoever next
   touches `batch-merge.ts`, once this fix has landed.
 
+**CORRECTION — that follow-up has landed as card `ba663984`:** the pin IS now reintroduced (`sessions/service.ts`'s
+`mergeBatchTracked`), exactly as this bullet anticipated, plus a fail-closed refusal for a present-but-corrupt
+watermark row that a straight reintroduction would have missed — see
+`docs/decisions/ba663984-reintroduce-watermark-preferred-batch-branch-pin.md`. That same record also notes a
+related, UNFIXED latent gap: `checkMainlineMove`'s own "TRUE first sight = `!w`" test (this file's own design
+section above) does not distinguish an absent watermark from a present-but-unparseable one either — flagged
+there for a follow-up card, not fixed by `ba663984` (out of scope: that card owns the batch fast-forward pin
+only).
+
 ## Tests
 
 `packages/daemon/test/mainline-watch-branch-divert.mjs` — real git: a transient same-commit divert (`git
