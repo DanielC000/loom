@@ -85,6 +85,39 @@ function raceWithTimeout(prior: Promise<unknown>, ms: number): Promise<unknown> 
   return Promise.race([prior, timeout]).finally(() => clearTimeout(timer));
 }
 
+/** Bound (ms) on a single ack transport send (card dc5df70e) — `ChatGateway.tryAck`'s `adapter.send` call.
+ *  An ack is a tiny, single sendMessage, not a download, so this is deliberately far below
+ *  `DOWNLOAD_TIMEOUT_MS`: a hung ack now freezes that chat's whole per-route inbound queue (card 986bdddd's
+ *  serialization) for up to this long per message, so the bound needs to stay small, not generous. */
+export const ACK_SEND_TIMEOUT_MS = 15_000;
+
+/** Distinguishable sentinel `withTimeout` resolves to when its timer wins the race — never a value a real
+ *  send result could produce, so a caller can tell "timed out" apart from "resolved/rejected normally"
+ *  without relying on `undefined`/`null`, which `promise` could itself legitimately produce. */
+const TIMED_OUT = Symbol("withTimeout:timed-out");
+
+/**
+ * Race `promise` against a `ms` timer. Resolves `TIMED_OUT` if the timer wins first; otherwise
+ * resolves/rejects exactly like `promise`. `onTimeout` (if given) runs the instant the timer fires, BEFORE
+ * this resolves — the caller's one chance to abort whatever's still in flight (e.g. via an AbortController
+ * threaded into `promise`) so a hung socket doesn't linger after the race settles, not just stop being
+ * awaited. Never cancels `promise` itself — `Promise.race` has no way to (same limitation `raceWithTimeout`
+ * above documents) — so a late rejection arriving after the timeout already won is swallowed here (never
+ * re-thrown, never left to surface as an unhandled rejection); `onTimeout` is the real mitigation for that,
+ * when the caller can supply one. Clears its own timer either way, same as `raceWithTimeout`.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout?: () => void): Promise<T | typeof TIMED_OUT> {
+  promise.catch(() => { /* a late rejection after TIMED_OUT already won must never go unhandled */ });
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => {
+      onTimeout?.();
+      resolve(TIMED_OUT);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Split `text` into chunks no longer than `max` chars, preferring a newline then a whitespace boundary so
  * a reply splits somewhere sensible; falls back to a hard cut when there is no boundary in range. Every
@@ -291,6 +324,10 @@ export class ChatGateway {
      *  the rationale. Defaults to that constant; test-overridable so a serialization test can prove the
      *  bound actually fires without a real 150s wait. */
     private readonly inboundQueueMaxWaitMs: number = INBOUND_QUEUE_MAX_WAIT_MS,
+    /** Card dc5df70e: bound (ms) on a single `tryAck` transport send — see `ACK_SEND_TIMEOUT_MS`'s own doc
+     *  for the rationale. Defaults to that constant; test-overridable so a hang test can prove the bound
+     *  actually fires without a real 15s wait. */
+    private readonly ackSendTimeoutMs: number = ACK_SEND_TIMEOUT_MS,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -568,6 +605,9 @@ export class ChatGateway {
       // conversation-boundary marker (resetConversation's doc), so it alone is persisted, on EVERY channel.
       const isConversationBoundary = parsed.name === "new" || parsed.name === "reset";
       const acked = await this.tryAck(binding, ack, { record: isConversationBoundary });
+      // Card dc5df70e: a send that actually DELIVERED but whose response arrived after ackSendTimeoutMs
+      // also comes back acked:false here, so the boundary marker goes unrecorded below — an accepted edge
+      // case, pre-existing for a send that throws after delivery (e.g. a dropped connection post-200).
       if (isConversationBoundary && acked) {
         // tryAck's record:true only persists it for an adapter that self-records on send (in-app); a
         // channel like Telegram never records inside `send`, so record it here too via the SAME generic
@@ -801,6 +841,11 @@ export class ChatGateway {
    * `/export`/`/help` — can exceed a platform cap like Telegram's 4096 chars just as easily as a real
    * reply). No `maxMessageLength` (in-app) ⇒ `chunkText` is never invoked, so this is byte-identical for
    * in-app and for any ack that already fits in one chunk.
+   *
+   * Card dc5df70e: each chunk's `adapter.send` is bounded by `ackSendTimeoutMs` — `tryAck` runs inside
+   * `processInboundOnce`, which card 986bdddd serializes per (channel, chatId) route, so an UNBOUNDED hang
+   * here would freeze that whole chat's inbound queue, not just leak one promise. A timeout degrades exactly
+   * like a thrown send (logged, `false` returned) — never fails the inbound turn.
    */
   private async tryAck(binding: SessionBinding, text: string, opts?: { record?: boolean }): Promise<boolean> {
     const adapter = this.adapters.get(binding.channel);
@@ -808,7 +853,16 @@ export class ChatGateway {
     const parts = adapter.maxMessageLength ? chunkText(text, adapter.maxMessageLength) : [text];
     try {
       for (const part of parts) {
-        await adapter.send(binding.chatId, part, { record: opts?.record === true });
+        const controller = new AbortController();
+        const outcome = await withTimeout(
+          adapter.send(binding.chatId, part, { record: opts?.record === true, signal: controller.signal }),
+          this.ackSendTimeoutMs,
+          () => controller.abort(),
+        );
+        if (outcome === TIMED_OUT) {
+          this.debug(`ack send timed out after ${this.ackSendTimeoutMs}ms (channel=${binding.channel} chat=${binding.chatId})`);
+          return false;
+        }
       }
       return true;
     } catch (err) {

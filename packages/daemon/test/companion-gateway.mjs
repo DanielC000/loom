@@ -8,7 +8,10 @@
 //   • chat_reply → the CORRECT adapter + chat id (multi-adapter registry routing);
 //   • an outbound reply >4096 chars is CHUNKED into multiple sends (each ≤ the adapter's max);
 //   • a transport-failure (send throws) → STRUCTURED { delivered:false, reason:"send-failed" }, no throw;
-//   • adapter lifecycle: gateway.start()/stop() drive adapter.start()/stop().
+//   • adapter lifecycle: gateway.start()/stop() drive adapter.start()/stop();
+//   • card dc5df70e: a HUNG tryAck transport send (never settles) does NOT hang the inbound turn — it times
+//     out (bounded by the test-overridable ackSendTimeoutMs), aborts the signal it was given, and resolves
+//     acked:false instead.
 // Run: 1) build, 2) node test/companion-gateway.mjs
 import { ChatGateway, chunkText } from "../dist/companion/chat-gateway.js";
 
@@ -98,6 +101,70 @@ const inbound = (channel, chatId, body) => ({ channel, chatId, body, chatIsDirec
   check("dead session: reported as session-dead", r.accepted === false && r.reason === "session-dead" && r.sessionId === "sess-A");
   check("dead session: ack was sent", r.acked === true && tg.sent.length === 1 && tg.sent[0].chatId === "111");
   check("dead session: ack text is a user-facing error", /currently running/i.test(tg.sent[0].text));
+}
+
+// --- tryAck ack-send timeout (card dc5df70e): a HUNG adapter.send never blocks the inbound turn --------
+// RED on pre-fix code: `tryAck` used to `await adapter.send(...)` with no timeout, so this script's own
+// top-level `await gw.handleInbound(...)` below would itself never settle. With nothing else left
+// pending in the event loop, Node detects that unsettled top-level await and exits with code 13 — it
+// does NOT hang the process forever.
+{
+  let sendCalls = 0;
+  let sawSignal = null;
+  let wasAborted = false;
+  const hangingAdapter = {
+    name: "telegram",
+    maxMessageLength: 4096,
+    start() {},
+    async stop() {},
+    send(chatId, text, opts) {
+      sendCalls++;
+      sawSignal = opts?.signal ?? null;
+      sawSignal?.addEventListener("abort", () => { wasAborted = true; });
+      return new Promise(() => { /* never settles — simulates a hung transport call */ });
+    },
+  };
+  // delivered:false WITHOUT a position → dead session → tryAck fires the error ack (same path as the
+  // "dead session" block above), except this adapter's send never resolves.
+  // inboundQueueMaxWaitMs is left at its DEFAULT (~150s, see INBOUND_QUEUE_MAX_WAIT_MS) deliberately: it
+  // is the per-route fallback card 986bdddd already guarantees, and a prompt result below could otherwise
+  // be explained by THAT bound instead of the ack bound this test actually targets (Task 1, card
+  // dc5df70e). Only ackSendTimeoutMs is overridden, to a tiny value, so the test doesn't wait a real
+  // ACK_SEND_TIMEOUT_MS (15s).
+  const gw = new ChatGateway(
+    () => ({ delivered: false }),
+    [{ sessionId: "sess-A", channel: "telegram", chatId: "111" }],
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined,
+    undefined, // inboundQueueMaxWaitMs — default, see comment above
+    20, // ackSendTimeoutMs
+  );
+  gw.registerAdapter(hangingAdapter);
+  const startedAt = Date.now();
+  const r = await gw.handleInbound(inbound("telegram", "111", "anyone home?"));
+  const elapsedMs = Date.now() - startedAt;
+  check("ack timeout: the inbound turn resolves promptly, NOT hung on the stuck send", elapsedMs < 5000);
+  check("ack timeout: the turn still reports session-dead, with acked:false (never thrown)", r.accepted === false && r.reason === "session-dead" && r.acked === false);
+  check("ack timeout: the adapter's send was actually invoked", sendCalls === 1);
+  check("ack timeout: tryAck passed a real AbortSignal", sawSignal instanceof AbortSignal);
+  check("ack timeout: the signal was aborted (no lingering request)", wasAborted === true);
+
+  // --- Task 1 (card dc5df70e): the CARD'S MAIN CLAIM, tested directly — a hung ack must not freeze the
+  // per-route queue (card 986bdddd) for a LATER message on the SAME route. Fire a second inbound on route
+  // ("telegram","111") WITHOUT awaiting the first — so it genuinely queues behind the first's still-hung
+  // ack — and confirm it resolves promptly instead of waiting out the much larger inboundQueueMaxWaitMs
+  // fallback above. RED on pre-fix code: an unbounded tryAck send never settles processInboundOnce(msg1),
+  // so msg2 would sit blocked until the ~150s fallback elapses, not resolve promptly like this.
+  const queueStartedAt = Date.now();
+  const p1 = gw.handleInbound(inbound("telegram", "111", "first on the route, again"));
+  const p2 = gw.handleInbound(inbound("telegram", "111", "second on the SAME route, queued behind p1"));
+  const [r1, r2] = await Promise.all([p1, p2]);
+  const queueElapsedMs = Date.now() - queueStartedAt;
+  check("queue not frozen: both same-route inbounds settle promptly (well under the ~150s fallback)", queueElapsedMs < 5000);
+  check("queue not frozen: the first (queued ahead) still resolves session-dead/acked:false", r1.accepted === false && r1.reason === "session-dead" && r1.acked === false);
+  check("queue not frozen: the SECOND, same-route message also resolves session-dead/acked:false", r2.accepted === false && r2.reason === "session-dead" && r2.acked === false);
+  check("queue not frozen: the second message's own ack send was actually attempted (route genuinely advanced, not just timed out waiting)", sendCalls === 3);
 }
 
 // --- Submit primitive THROWS → contained (a racy inbound can't crash the daemon) ----------------

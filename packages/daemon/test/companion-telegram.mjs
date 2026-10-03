@@ -72,7 +72,7 @@ function makeFakeBot({ startResolves = false } = {}) {
     get hasErrorHandler() { return errorHandler !== null; },
     fireMessage(update) { return messageHandler?.({ update }); },
     bot: {
-      api: { async sendMessage(chatId, text) { sends.push({ chatId, text }); } },
+      api: { async sendMessage(chatId, text, ...rest) { sends.push({ chatId, text, args: [chatId, text, ...rest] }); } },
       on(_filter, h) { messageHandler = h; },
       catch(h) { errorHandler = h; },
       async start(opts) { startCalls++; running = true; opts?.onStart?.({ username: "loombot" }); if (!startResolves) await new Promise(() => {}); },
@@ -96,6 +96,14 @@ function makeFakeBot({ startResolves = false } = {}) {
   // send → bot.api.sendMessage
   await adapter.send("555", "outbound text");
   check("adapter.send: routes to the bot API with chat id + text", fake.sends.length === 1 && fake.sends[0].chatId === "555" && fake.sends[0].text === "outbound text");
+
+  // card dc5df70e: send(..., {signal}) threads the AbortSignal through to grammY's sendMessage as its
+  // 4th positional argument (args[3]) — chatId, text, the unused `other` options slot (undefined), signal.
+  const controller = new AbortController();
+  await adapter.send("556", "with signal", { signal: controller.signal });
+  const lastCall = fake.sends[fake.sends.length - 1];
+  check("adapter.send: threads the AbortSignal to bot.api.sendMessage as args[3]", lastCall.args[3] === controller.signal);
+  check("adapter.send: args[2] (grammY's unused options slot) stays undefined", lastCall.args[2] === undefined);
 
   // inbound: a bot message event → onInbound(normalized)
   await fake.fireMessage({ message: { chat: { id: 12345 }, text: "ping" } });

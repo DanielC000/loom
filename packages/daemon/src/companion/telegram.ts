@@ -47,7 +47,10 @@ const TELEGRAM_PHOTO_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".we
 /** The minimal grammY Bot surface the adapter uses — lets a test inject a fake (no live network). */
 export interface TelegramBotLike {
   api: {
-    sendMessage(chatId: string | number, text: string): Promise<unknown>;
+    /** `other` mirrors grammY's own real signature (an options object, never used here — always `undefined`);
+     *  `signal` (card dc5df70e) lets the adapter's `send` abort a hung request once `tryAck`'s own timeout
+     *  fires, so a dead socket doesn't linger after the caller stops waiting on it. */
+    sendMessage(chatId: string | number, text: string, other?: undefined, signal?: AbortSignal): Promise<unknown>;
     /** Register the native "/" command menu (Companion Voice epic, VOICE-P1). Optional on the seam so an
      *  existing test fake bot (no `setMyCommands`) stays valid — the call site guards with `?.`. */
     setMyCommands?(commands: { command: string; description: string }[]): Promise<unknown>;
@@ -215,8 +218,11 @@ export function createTelegramAdapter(
       stopped = true;
       try { await bot.stop(); } catch { /* best-effort on shutdown */ }
     },
-    async send(chatId, text) {
-      await bot.api.sendMessage(chatId, text);
+    async send(chatId, text, opts) {
+      // `other` stays `undefined` (grammY's own options slot — never used here); `opts?.signal` lets the
+      // caller's own timeout (ChatGateway.tryAck, card dc5df70e) actually abort this request instead of
+      // merely giving up waiting on it.
+      await bot.api.sendMessage(chatId, text, undefined, opts?.signal);
     },
     async sendVoice(chatId, audioFilePath) {
       if (!bot.api.sendVoice) throw new Error("sendVoice not supported by this bot");

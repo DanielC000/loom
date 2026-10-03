@@ -122,8 +122,14 @@ export interface ChannelAdapter {
    *   can tag its OWN frame + history row. A channel with no separate record hook (Telegram) ignores this;
    *   its outbound turn is tagged generically via chat-gateway's recordOutboundSafely instead. Default
    *   (omitted/false) ⇒ an ordinary reply, byte-identical to before this field existed.
+   * @param opts.signal  OPTIONAL abort signal (card dc5df70e — bounding `tryAck`'s send so a hung transport
+   *   call can't freeze that chat's per-route inbound queue). An adapter whose underlying transport call
+   *   accepts a signal (Telegram's grammY API does) should thread it through so the caller's timeout can
+   *   actually abort the in-flight request, not just stop waiting on it; an adapter that can't honor it
+   *   (in-app — no network call to abort) ignores it, exactly like an adapter that doesn't implement
+   *   `downloadAttachment`.
    */
-  send(chatId: string, text: string, opts?: { record?: boolean; proactive?: boolean }): Promise<void>;
+  send(chatId: string, text: string, opts?: { record?: boolean; proactive?: boolean; signal?: AbortSignal }): Promise<void>;
   /**
    * OPTIONAL: download a non-text attachment to a local temp file (Companion Voice epic, VOICE-P2). Only
    * the adapter that emitted the attachment knows how to resolve it (wire-format-specific — e.g. Telegram's
