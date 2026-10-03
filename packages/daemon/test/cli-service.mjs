@@ -51,6 +51,35 @@ check("startArgv bakes start --no-open --port", svc.startArgv(4317).join(" ") ==
   check("linux unit: custom LOOM_HOME baked when set", withHome.includes("Environment=LOOM_HOME=/tmp/lh"));
   check("linux unit: no LOOM_HOME line when unset", !unit.includes("LOOM_HOME"));
 
+  // --- (3b) systemd quoting/escaping per systemd.syntax(7) — card db3b731f ------------------------
+  // The regression: ExecStart=/Environment= lines were unquoted, so a value with a space, `%`, or `$`
+  // broke the unit (space splits a token early; `%`/`$` get read as a systemd specifier/variable).
+  const homeWithSpace = svc.linuxUnitText({ node: NODE, loomBin: LOOM_BIN, port: PORT, loomHome: "/home/u/my home" });
+  check("linux unit: LOOM_HOME with a space is quoted as the whole assignment",
+    homeWithSpace.includes('Environment="LOOM_HOME=/home/u/my home"'));
+
+  const homeWithPercent = svc.linuxUnitText({ node: NODE, loomBin: LOOM_BIN, port: PORT, loomHome: "/home/u/50%off" });
+  check("linux unit: LOOM_HOME with a literal % is specifier-escaped (%%), and not spuriously quoted",
+    homeWithPercent.includes("Environment=LOOM_HOME=/home/u/50%%off") && !homeWithPercent.includes('Environment="LOOM_HOME'));
+
+  const homeWithDollar = svc.linuxUnitText({ node: NODE, loomBin: LOOM_BIN, port: PORT, loomHome: "/home/u/$literal" });
+  check("linux unit: LOOM_HOME with a literal $ stays a single $ (Environment= is never $-expanded)",
+    homeWithDollar.includes("Environment=LOOM_HOME=/home/u/$literal") && !homeWithDollar.includes("$$literal"));
+
+  const binWithDollar = svc.linuxUnitText({ node: NODE, loomBin: "/home/u/$special/loom.mjs", port: PORT, loomHome: null });
+  check("linux unit: an ExecStart token with a literal $ IS doubled ($$) — ExecStart= performs $-expansion",
+    binWithDollar.includes(`ExecStart=${NODE} /home/u/$$special/loom.mjs start --no-open --port ${PORT}`));
+
+  const binWithSpace = svc.linuxUnitText({ node: NODE, loomBin: "/home/u/my loom/loom.mjs", port: PORT, loomHome: null });
+  check("linux unit: an ExecStart token with a space is quoted",
+    binWithSpace.includes(`ExecStart=${NODE} "/home/u/my loom/loom.mjs" start --no-open --port ${PORT}`));
+
+  // Negative control: the ordinary no-special-characters case (already asserted above, restated here
+  // explicitly) must stay byte-identical/unquoted — proves quoting only fires when actually needed.
+  check("linux unit: negative control — plain values stay unquoted (no spurious quoting/escaping)",
+    unit.includes(`ExecStart=${NODE} ${LOOM_BIN} start --no-open --port ${PORT}`) &&
+    !unit.includes('"') && !unit.includes("%%") && !unit.includes("$$"));
+
   const plan = svc.servicePlan({ platform: "linux", node: NODE, loomBin: LOOM_BIN, port: PORT, homedir: HOMEDIR, loomHome: null, userId: "" });
   check("linux plan: unit path under ~/.config/systemd/user", plan.artifactPath === path.join(HOMEDIR, ".config/systemd/user/loom.service"));
   check("linux plan: install runs daemon-reload then enable --now (idempotent)",
@@ -89,16 +118,28 @@ check("startArgv bakes start --no-open --port", svc.startArgv(4317).join(" ") ==
 
 // --- (5) Windows: Task Scheduler logon task XML ---------------------------------------------------
 {
-  const xml = svc.windowsTaskXml({ node: WIN_NODE, loomBin: WIN_BIN, port: PORT, workingDir: "C:\\pkg", userId: "MACHINE\\u" });
+  // card db3b731f regression: windowsTaskXml took no loomHome at all, so a custom LOOM_HOME never
+  // reached the autostarted daemon (it always booted on the DEFAULT ~/.loom). Task Scheduler's Exec
+  // action has no native env-var slot, so the fix routes the launch through cmd.exe + `set`.
+  const xml = svc.windowsTaskXml({ node: WIN_NODE, loomBin: WIN_BIN, port: PORT, workingDir: "C:\\pkg", userId: "MACHINE\\u", loomHome: null });
   check("win xml: declares UTF-16 (schtasks requirement)", xml.includes('encoding="UTF-16"'));
   check("win xml: LogonTrigger (autostart at logon)", xml.includes("<LogonTrigger>"));
   check("win xml: principal LeastPrivilege + InteractiveToken (no admin)", xml.includes("<RunLevel>LeastPrivilege</RunLevel>") && xml.includes("<LogonType>InteractiveToken</LogonType>"));
-  check("win xml: Command is the node exe", xml.includes(`<Command>${WIN_NODE}</Command>`));
-  // Quotes around loomBin are XML-escaped (&quot;) in the file; Task Scheduler decodes them back to ".
-  check("win xml: Arguments = (escaped-)quoted loomBin + start --no-open --port", xml.includes(`<Arguments>&quot;${WIN_BIN}&quot; start --no-open --port ${PORT}</Arguments>`));
+  check("win xml: Command is cmd.exe (Task Scheduler has no native env-var slot for Exec actions)", xml.includes("<Command>C:\\Windows\\System32\\cmd.exe</Command>"));
+  // Quotes are XML-escaped (&quot;) in the file and `&` as &amp;; Task Scheduler/cmd.exe decode both back.
+  check("win xml (no custom home): Arguments sets LOOM_PORT then execs quoted node + quoted loomBin",
+    xml.includes(`<Arguments>/d /c set &quot;LOOM_PORT=${PORT}&quot;&amp;&quot;${WIN_NODE}&quot; &quot;${WIN_BIN}&quot; start --no-open --port ${PORT}</Arguments>`));
+  check("win xml (no custom home): no LOOM_HOME set when unset", !xml.includes("LOOM_HOME"));
+  check("win xml: WorkingDirectory preserved", xml.includes("<WorkingDirectory>C:\\pkg</WorkingDirectory>"));
   check("win xml: RestartOnFailure (keep-alive)", xml.includes("<RestartOnFailure>"));
   check("win xml: no execution time limit (PT0S — daemon runs forever)", xml.includes("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
   check("win xml: userId XML-escaped backslash preserved", xml.includes("<UserId>MACHINE\\u</UserId>"));
+
+  // --- the actual regression: a custom LOOM_HOME (with a space, the exec-path-with-spaces case) ----
+  const winHomeWithSpace = "C:\\Users\\u\\custom home";
+  const xmlWithHome = svc.windowsTaskXml({ node: WIN_NODE, loomBin: WIN_BIN, port: PORT, workingDir: "C:\\pkg", userId: "MACHINE\\u", loomHome: winHomeWithSpace });
+  check("win xml: custom LOOM_HOME (incl. a space) is baked as a quoted `set` before the exec",
+    xmlWithHome.includes(`<Arguments>/d /c set &quot;LOOM_PORT=${PORT}&quot;&amp;set &quot;LOOM_HOME=${winHomeWithSpace}&quot;&amp;&quot;${WIN_NODE}&quot; &quot;${WIN_BIN}&quot; start --no-open --port ${PORT}</Arguments>`));
 
   const plan = svc.servicePlan({ platform: "win32", node: WIN_NODE, loomBin: WIN_BIN, port: PORT, homedir: WIN_HOME, loomHome: null, userId: "MACHINE\\u" });
   check("win plan: artifact under <loomHome>/service/Loom.xml", plan.artifactPath === path.join(WIN_HOME, ".loom", "service", "Loom.xml"));
@@ -109,6 +150,10 @@ check("startArgv bakes start --no-open --port", svc.startArgv(4317).join(" ") ==
   check("win plan: uninstall is schtasks /delete /tn Loom /f best-effort",
     plan.uninstallCmds[0].args.join(" ") === "/delete /tn Loom /f" && plan.uninstallCmds[0].ignoreFailure === true);
   check("win plan: queryCmd is schtasks /query /tn Loom", plan.queryCmd.args.join(" ") === "/query /tn Loom");
+
+  const planWithHome = svc.servicePlan({ platform: "win32", node: WIN_NODE, loomBin: WIN_BIN, port: PORT, homedir: WIN_HOME, loomHome: "C:\\Users\\u\\.loom", userId: "MACHINE\\u" });
+  check("win plan: servicePlan actually threads loomHome through to windowsTaskXml (the card's own regression)",
+    planWithHome.artifactContent.includes("LOOM_HOME=C:\\Users\\u\\.loom"));
 }
 
 // --- (6) unsupported platform throws --------------------------------------------------------------

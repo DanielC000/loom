@@ -48,13 +48,49 @@ export function startArgv(port) {
 
 // --- artifact text generators (PURE) ----------------------------------------------------------------
 
+// --- systemd value quoting/escaping (systemd.syntax(7)) ---------------------------------------------
+// Both ExecStart= and Environment= lines go through systemd's own SPECIFIER expansion — any bare `%` can
+// be read as the start of a %i/%n/... specifier (systemd.unit(5) "Specifiers": "to insert a literal %
+// character, write %%") — and ExecStart= additionally performs shell-style `$VAR`/`${VAR}` expansion
+// (systemd.service(5) "Command lines": "$$ is replaced by a single dollar sign"), so a literal `$` in an
+// ExecStart= token must ALSO be doubled. Environment= assignments are NOT $-expanded, so a `$` in a
+// LOOM_HOME value must be left alone there — doubling it would store the wrong value.
+function systemdEscapePercent(s) {
+  return s.replace(/%/g, "%%");
+}
+function systemdEscapeDollarForExec(s) {
+  return s.replace(/\$/g, "$$$$"); // replacement "$$$$" -> two literal $ per match, per String#replace rules
+}
+// True if `s` needs systemd's own shell-style double-quoting to survive whitespace/quote tokenizing.
+function systemdNeedsQuoting(s) {
+  return /[\s"'\\]/.test(s);
+}
+// Backslash-escape for the inside of a systemd double-quoted token (backslash first, then the quote).
+function systemdBackslashEscape(s) {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+// One ExecStart= word: specifier/variable-escaped, then quoted only if it actually needs to be — keeps
+// the common no-special-character case byte-identical to the unquoted form every existing caller expects.
+function systemdExecToken(raw) {
+  const escaped = systemdEscapeDollarForExec(systemdEscapePercent(raw));
+  return systemdNeedsQuoting(escaped) ? `"${systemdBackslashEscape(escaped)}"` : escaped;
+}
+// One Environment= assignment ("KEY=value"): % escaped (specifiers), $ left alone (no expansion here),
+// the WHOLE assignment quoted (per systemd.exec(5)'s own `Environment="VAR=word1 word2"` form) only if
+// the value needs it.
+function systemdEnvAssignment(key, rawValue) {
+  const value = systemdEscapePercent(rawValue);
+  const assignment = `${key}=${value}`;
+  return systemdNeedsQuoting(assignment) ? `"${systemdBackslashEscape(assignment)}"` : assignment;
+}
+
 // systemd --user unit. Restart=on-failure gives the keep-alive the supervisor would otherwise provide.
 // WantedBy=default.target makes `enable` autostart it on the next login (the --user manager starts at
 // login, so this is "on login" — exactly the supervisor-free model the Lead chose).
 export function linuxUnitText({ node, loomBin, port, loomHome }) {
-  const exec = `${node} ${loomBin} ${startArgv(port).join(" ")}`;
-  const envLines = [`Environment=LOOM_PORT=${port}`];
-  if (loomHome) envLines.push(`Environment=LOOM_HOME=${loomHome}`);
+  const exec = [node, loomBin, ...startArgv(port)].map(systemdExecToken).join(" ");
+  const envLines = [`Environment=${systemdEnvAssignment("LOOM_PORT", String(port))}`];
+  if (loomHome) envLines.push(`Environment=${systemdEnvAssignment("LOOM_HOME", loomHome)}`);
   return `[Unit]
 Description=Loom — local-first AI project workspace
 After=network.target
@@ -121,9 +157,22 @@ ${envXml}
 // Windows Task Scheduler logon task (schema v1.2). LogonTrigger fires at the user's logon; the
 // principal runs as that interactive user with LeastPrivilege (no admin / no service wrapper).
 // ExecutionTimeLimit PT0S = no time limit (the daemon runs as long as the session). RestartOnFailure
-// gives the keep-alive. The Command is node; the daemon script + flags are the Arguments.
-export function windowsTaskXml({ node, loomBin, port, workingDir, userId }) {
-  const argsStr = `"${loomBin}" ${startArgv(port).join(" ")}`;
+// gives the keep-alive.
+//
+// Task Scheduler's Exec action (TaskSchema.xsd) has only Command/Arguments/WorkingDirectory — no
+// Environment element — so, unlike systemd/launchd above, there is no native way to hand this process a
+// custom LOOM_HOME/LOOM_PORT. The Command is therefore cmd.exe, and node + the daemon script become part
+// of the Arguments, preceded by `set "VAR=value"` for each env var. Quoting the WHOLE assignment (not
+// just the value) is the standard robust `set` form: it survives spaces, and since cmd.exe treats a
+// quoted region's contents as literal, it also protects against `&`/`|`/`<`/`>` inside the value being
+// read as a new command — a literal `"` can never appear in a Windows path (NTFS forbids it), so no
+// further escaping is needed. `/d` skips registry AutoRun commands for this one launch.
+export function windowsTaskXml({ node, loomBin, port, workingDir, userId, loomHome }) {
+  const cmdExe = "C:\\Windows\\System32\\cmd.exe";
+  const setters = [`set "LOOM_PORT=${port}"`];
+  if (loomHome) setters.push(`set "LOOM_HOME=${loomHome}"`);
+  const execLine = `"${node}" "${loomBin}" ${startArgv(port).join(" ")}`;
+  const argsStr = `/d /c ${[...setters, execLine].join("&")}`;
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -166,7 +215,7 @@ export function windowsTaskXml({ node, loomBin, port, workingDir, userId }) {
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>${xmlEscape(node)}</Command>
+      <Command>${xmlEscape(cmdExe)}</Command>
       <Arguments>${xmlEscape(argsStr)}</Arguments>
       <WorkingDirectory>${xmlEscape(workingDir)}</WorkingDirectory>
     </Exec>
@@ -237,7 +286,7 @@ export function servicePlan(opts) {
       platform,
       manager: "Task Scheduler (logon task)",
       artifactPath,
-      artifactContent: windowsTaskXml({ node, loomBin, port, workingDir, userId }),
+      artifactContent: windowsTaskXml({ node, loomBin, port, workingDir, userId, loomHome }),
       // schtasks /create /xml requires a UTF-16 file (with BOM) — see runService.
       artifactEncoding: "utf16le",
       // /f forces overwrite → idempotent re-install.
