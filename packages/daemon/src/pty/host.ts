@@ -4600,6 +4600,45 @@ export async function attributeProcessesToWorktree(
 }
 
 /**
+ * Card cdd8ec44: a per-session log file exceeding this many bytes AT OPEN TIME gets rotated to
+ * `<id>.log.1` (one prior generation kept, the rest dropped) before the fresh append-mode stream opens —
+ * see {@link openSessionLogStream}. Picked as a simple, generous ceiling; not meant to be precise.
+ * Env-overridable (matches this file's own convention for test-tunable thresholds, e.g.
+ * CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS) so a test can force rotation without writing 20MB of fixture data.
+ */
+export const SESSION_LOG_ROTATE_BYTES = Number(process.env.LOOM_SESSION_LOG_ROTATE_BYTES) || 20 * 1024 * 1024;
+
+/**
+ * Open a per-session on-disk log in APPEND mode (card cdd8ec44) — `fs.createWriteStream`'s bare default
+ * ("w") TRUNCATES on every open, so every resume (including crash-recovery resume) used to wipe the
+ * pre-crash log exactly when it's needed for forensics. Append means the file can now grow across a
+ * session's whole lifetime instead of resetting each respawn, so this also enforces the one size bound
+ * these logs had never had: if the existing file has already crossed {@link SESSION_LOG_ROTATE_BYTES},
+ * it's shifted to `<id>.log.1` (overwriting any previous `.1`) before the new stream opens, so disk usage
+ * stays bounded at roughly 2x the cap rather than growing unboundedly. A rotation failure (or no existing
+ * file at all) is swallowed — never block opening the stream over a rotation problem; a genuine open
+ * failure is still surfaced via the real `createWriteStream` call below and handled by the caller's
+ * {@link attachLogErrorGuard}. Writes a short separator line naming why the stream was (re)opened so a
+ * forensic read can tell a real respawn boundary apart from a mid-session gap.
+ */
+export function openSessionLogStream(sessionId: string, reason: string): fs.WriteStream {
+  const logPath = path.join(LOGS_DIR, `${sessionId}.log`);
+  try {
+    const { size } = fs.statSync(logPath);
+    if (size > SESSION_LOG_ROTATE_BYTES) {
+      const rotatedPath = `${logPath}.1`;
+      fs.rmSync(rotatedPath, { force: true }); // Windows renameSync fails if the destination already exists
+      fs.renameSync(logPath, rotatedPath);
+    }
+  } catch { /* no existing file (ENOENT), or the stat/rotate itself failed — see this function's own doc */ }
+  const stream = fs.createWriteStream(logPath, { flags: "a" });
+  try {
+    stream.write(`\n--- session log reopened ${new Date().toISOString()} (${reason}) ---\n`);
+  } catch { /* a real open failure is handled by the caller's attachLogErrorGuard 'error' listener */ }
+  return stream;
+}
+
+/**
  * Attach the fail-safe 'error' listener every per-session log WriteStream MUST have (card 7a6cc239): a
  * Node writable that emits 'error' with zero listeners throws it back out of `.emit()` — unhandled, that
  * crashes the ENTIRE daemon process (every live manager/worker pty lost), not just this one session's
@@ -4860,6 +4899,9 @@ export class PtyHost {
     // See Live.mcpToken's own doc + the record for why.
     const mcpToken = randomUUID();
     const pty = this.createPty(opts, hookToken, mcpToken);
+    // Card cdd8ec44: the respawn reason for the log separator openSessionLogStream writes below — best
+    // effort from the fields spawn() already has, not a dedicated plumbed-through label.
+    const spawnLogReason = opts.fork ? "fork" : opts.resumeId ? "resume" : "fresh spawn";
     const live: Live = {
       pty, pid: pty.pid, cwd: opts.cwd,
       kind: "claude",
@@ -4874,7 +4916,7 @@ export class PtyHost {
       alive: true,
       killed: false,
       startedAt: Date.now(),
-      logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
+      logStream: openSessionLogStream(opts.sessionId, spawnLogReason),
       logBroken: false,
       busy: false,
       ready: false, // flipped on the first SessionStart (after mode-cycles) — see Live.ready / markReady
@@ -5199,7 +5241,7 @@ export class PtyHost {
       alive: true,
       killed: false,
       startedAt: Date.now(),
-      logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
+      logStream: openSessionLogStream(opts.id, "shell spawn"),
       logBroken: false,
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
@@ -5559,7 +5601,7 @@ export class PtyHost {
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
       alive: true, killed: false, startedAt: Date.now(),
-      logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
+      logStream: openSessionLogStream(opts.sessionId, isCodexResumeSpawn ? "codex resume" : "codex fresh spawn"),
       logBroken: false,
       busy: false,
       pending: [], stopping: false, drainHeld: false,
@@ -6415,7 +6457,7 @@ export class PtyHost {
       alive: true,
       killed: false,
       startedAt: Date.now(),
-      logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
+      logStream: openSessionLogStream(opts.id, "canned test seed"),
       logBroken: false,
       busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
