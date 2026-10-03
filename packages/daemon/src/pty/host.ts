@@ -7075,9 +7075,11 @@ export class PtyHost {
             // @decision 850eb55c — `startupCycleInFlight` brackets the cycle itself (set true here, cleared
             // in onDone BEFORE releasing) so no write path can interleave with its Shift+Tab/footer reads.
             live.startupCycleInFlight = true;
+            // @decision 096231e8 — compare against THIS `live` by identity, not just `this.live.get`'s
+            // existence, before touching startupCycleInFlight/releaseBootModeCycle. See record.
             this.cycleToMode(sessionId, target, () => {
-              const l = this.live.get(sessionId);
-              if (l) l.startupCycleInFlight = false;
+              if (this.live.get(sessionId) !== live) return;
+              live.startupCycleInFlight = false;
               this.releaseBootModeCycle(sessionId);
             });
           } else {
@@ -10969,7 +10971,10 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live) { onDone(); return; }
     const runQueued = (): Promise<void> => new Promise((resolveChain) => {
-      this.runCycleToMode(sessionId, target, () => {
+      // @decision 096231e8 — pass THIS `live` (captured at QUEUE time, above) as startLive; never let
+      // runCycleToMode re-derive it when the queued link actually RUNS, which can be after a respawn
+      // has already overwritten the map entry. See record.
+      this.runCycleToMode(sessionId, target, live, () => {
         onDone();
         resolveChain();
       });
@@ -10980,8 +10985,13 @@ export class PtyHost {
   }
 
   /** The actual press-and-verify cycle loop, run EXCLUSIVELY (see cycleToMode's queueing above) — never
-   *  call this directly; go through `cycleToMode`. */
-  private runCycleToMode(sessionId: string, target: LandedMode, onDone: () => void): void {
+   *  call this directly; go through `cycleToMode`.
+   *
+   * @decision 096231e8 — compare `live` to `startLive` by IDENTITY before pressing Shift+Tab or reading
+   * the footer; never act on a session whose Live was replaced by a same-id respawn mid-cycle. `startLive`
+   * is a PARAMETER, bound by the caller at queue time — never re-derived here. See record.
+   */
+  private runCycleToMode(sessionId: string, target: LandedMode, startLive: Live, onDone: () => void): void {
     let presses = 0;
     let finished = false;
     const finish = (reason: string, mode: LandedMode): void => {
@@ -11000,6 +11010,7 @@ export class PtyHost {
       // doc), so a kill() landing while the cycle is mid-poll could still issue this Shift+Tab into an
       // already-destroyed socket.
       if (!live?.alive || live.killed) { finish(live?.killed ? "killed" : "pty-gone", cur); return; }
+      if (live !== startLive) { finish("respawned", cur); return; }
       const action = nextCycleAction({ current: cur, target, presses, maxPresses: RESUME_MODE_MAX_PRESSES });
       if (action === "done") { finish("reached", cur); return; }
       if (action === "giveup") { finish("press-cap", cur); return; }
@@ -11013,6 +11024,7 @@ export class PtyHost {
     const awaitChange = (prev: LandedMode, polls: number): void => {
       const live = this.live.get(sessionId);
       if (!live?.alive) { finish("pty-gone", prev); return; }
+      if (live !== startLive) { finish("respawned", prev); return; }
       const cur = this.readFooterMode(live);
       if (cur !== "unknown" && cur !== prev) { decide(cur); return; }
       if (polls < RESUME_MODE_CHANGE_MAX_POLLS) { setTimeout(() => awaitChange(prev, polls + 1), RESUME_MODE_READ_POLL_MS); return; }
@@ -11023,6 +11035,7 @@ export class PtyHost {
     const awaitReadable = (polls: number): void => {
       const live = this.live.get(sessionId);
       if (!live?.alive) { finish("pty-gone", "unknown"); return; }
+      if (live !== startLive) { finish("respawned", "unknown"); return; }
       const cur = this.readFooterMode(live);
       if (cur !== "unknown") { decide(cur); return; }
       if (polls < RESUME_MODE_CHANGE_MAX_POLLS) { setTimeout(() => awaitReadable(polls + 1), RESUME_MODE_READ_POLL_MS); return; }
@@ -11171,7 +11184,7 @@ export class PtyHost {
     // @decision c22f6cb8 — the `footer-unchanged` give-up branch is a best-effort exception to that
     // structural guarantee: `RESUME_MODE_CHANGE_MAX_POLLS` can exhaust with the just-written Shift+Tab
     // still unconfirmed, so a queued Shift+Tab can in principle still land mid-paste there.
-    this.logLandedMode(sessionId, () => { if (kickoff != null) this.scheduleKickoffGuarantee(sessionId, kickoff); });
+    this.logLandedMode(sessionId, live, () => { if (kickoff != null) this.scheduleKickoffGuarantee(sessionId, kickoff, live); });
   }
 
   // @decision 0050a17e — kickoff text must never ride spawn argv (Windows CreateProcess's 32766-char
@@ -11212,8 +11225,11 @@ export class PtyHost {
    *
    * @decision a57b07af — turn-1 kickoff delivery gates on `waitForMcpSeen` for any role mounting
    * loom-orchestration, closing the asymmetry with the resume-continuation nudge's own gate.
+   *
+   * @decision 096231e8 — `boundLive` is the Live `markReady` ran on; `proceed` re-checks identity before
+   * any write, so a respawn during this function's own delays can't deliver gen1's kickoff into gen2.
    */
-  private scheduleKickoffGuarantee(sessionId: string, kickoff: string): void {
+  private scheduleKickoffGuarantee(sessionId: string, kickoff: string, boundLive: Live): void {
     setTimeout(() => {
       // @decision a57b07af — turn-1 kickoff delivery gates on `waitForMcpSeen` (MEASURED 494/494 real
       // production spawns already `mcpSeen`-true at this tick) before writing — bounded by
@@ -11226,6 +11242,13 @@ export class PtyHost {
       const gateOnMcp = usesOrchestrationMcp(l0?.role ?? null);
       const proceed = (): void => {
         const l = this.live.get(sessionId);
+        // @decision 096231e8 — identity, not existence: a respawned gen2 is `alive` with
+        // `firstTurnStarted:false` too, so only this identity check stops gen1's kickoff reaching it.
+        if (l !== boundLive) {
+          // eslint-disable-next-line no-console
+          console.log(`[pty] ${sessionId} kickoff-guarantee: skipped — respawned since markReady (bound generation no longer live)`);
+          return;
+        }
         // Re-checked here (not just before the wait) because `waitForMcpSeen` can take up to
         // MCP_READY_TIMEOUT_MS — anything could have happened to this pty in the meantime.
         if (!l?.alive || l.firstTurnStarted) return; // something else already started a turn (see this function's own doc) — no-op
@@ -11370,10 +11393,20 @@ export class PtyHost {
    * splices the heal's Shift+Tab writes into the kickoff's own writeChunked/Enter-retry chain (the
    * frame-splice class of cards 3ce3fa39/78a16dc5). Every early-return path below still calls `onSettled`
    * — there is nothing left to gate on once this function has decided there's no read/heal to run.
+   *
+   * @decision 096231e8 (round 2) — `boundLive` is the Live `markReady` actually ran on. `tryRead`
+   * re-checks identity on every poll: a same-id respawn during this read (or the heal it can trigger)
+   * must leave gen2 untouched, and must never let `onSettled` release gen1's kickoff onto gen2.
    */
-  private logLandedMode(sessionId: string, onSettled: () => void): void {
+  private logLandedMode(sessionId: string, boundLive: Live, onSettled: () => void): void {
     const live = this.live.get(sessionId);
-    if (!live || live.kind !== "claude" || live.modeLogged) { onSettled(); return; }
+    if (live !== boundLive) {
+      // eslint-disable-next-line no-console
+      console.log(`[resume-mode] ${sessionId} logLandedMode: skipped — respawned since markReady (bound generation no longer live)`);
+      onSettled();
+      return;
+    }
+    if (live.kind !== "claude" || live.modeLogged) { onSettled(); return; }
     live.modeLogged = true; // claim it once, up front — a repeat markReady won't re-schedule this
     const isResume = live.isResume;
     const role = live.role;
@@ -11389,7 +11422,12 @@ export class PtyHost {
     let attempts = 0;
     const tryRead = (): void => {
       const l = this.live.get(sessionId);
-      if (!l) { onSettled(); return; }
+      if (l !== boundLive) {
+        // eslint-disable-next-line no-console
+        console.log(`[resume-mode] ${sessionId} logLandedMode: tryRead skipped — respawned mid-read (bound generation no longer live)`);
+        onSettled();
+        return;
+      }
       attempts++;
       const recent = Buffer.concat(l.ring.chunks).toString("utf8").slice(-8192);
       const { mode, matchedToken } = detectPermissionMode(recent);
@@ -11773,15 +11811,22 @@ export class PtyHost {
    * one-off dropped keystroke self-corrects instead of surfacing a non-target neighbor on the first try.
    * Stops immediately on an exact match or an "unknown" (dead session — retrying can't help). Bounded, so
    * a genuinely wedged footer still reports the honest landed mode rather than looping forever.
+   *
+   * @decision 096231e8 — `boundLive` (re-threaded on every retry) is the Live this request started on;
+   * a mode request bound to one generation never carries over to a same-id respawn. See record.
    */
-  private cycleToModeWithRetries(sessionId: string, target: LandedMode, attemptsLeft: number): Promise<LandedMode> {
+  private cycleToModeWithRetries(sessionId: string, target: LandedMode, attemptsLeft: number, boundLive?: Live): Promise<LandedMode> {
     return new Promise((resolve) => {
-      if (!this.live.get(sessionId)?.alive) { resolve("unknown"); return; }
+      const live = this.live.get(sessionId);
+      if (!live?.alive) { resolve("unknown"); return; }
+      if (boundLive && live !== boundLive) { resolve("unknown"); return; }
+      const bound = boundLive ?? live;
       this.cycleToMode(sessionId, target, () => {
-        const live = this.live.get(sessionId);
-        const landed: LandedMode = live?.alive ? this.readFooterMode(live) : "unknown";
+        const cur = this.live.get(sessionId);
+        if (cur !== bound) { resolve("unknown"); return; }
+        const landed: LandedMode = cur.alive ? this.readFooterMode(cur) : "unknown";
         if (landed === target || landed === "unknown" || attemptsLeft <= 1) { resolve(landed); return; }
-        resolve(this.cycleToModeWithRetries(sessionId, target, attemptsLeft - 1));
+        resolve(this.cycleToModeWithRetries(sessionId, target, attemptsLeft - 1, bound));
       });
     });
   }
