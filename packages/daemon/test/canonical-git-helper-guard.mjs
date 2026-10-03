@@ -44,6 +44,7 @@ const ALLOWLIST = {
   "deploy-staleness.ts": "deploy-time staleness diff over the running daemon's own checkout (execFileSync); reads only, not a merge",
   "skills/assets-git-status.ts": "reads the assets tree status for the Skills UI (execFileSync); not a merge",
   "mcp/decisions.ts": "resolves a cited `sha:` anchor via rev-parse --verify (execFileSync); a comment-anchor lookup, not a merge",
+  "pty/codex-doctrine.ts": "read-only `git ls-files` tracked-status probe in a worker's own worktree (isAgentsMdTracked); off the canonical merge path",
 };
 
 // `canonicalRaw(` is the exported test seam that takes a caller-supplied prefix-builder: no production caller may use it (canonicalGit's own `raw` is the only one).
