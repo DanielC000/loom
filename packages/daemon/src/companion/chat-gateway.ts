@@ -367,6 +367,19 @@ export class ChatGateway {
      *  own doc for the rationale. Defaults to that constant; test-overridable so a hang test can prove the
      *  bound actually fires without a real 120s wait. */
     private readonly mediaSendTimeoutMs: number = MEDIA_SEND_TIMEOUT_MS,
+    /** REQUIRED (card 98ac6687) — the ONE companion session this gateway instance belongs to (mirrors the
+     *  session-scoped binding load factory.ts already does; see that file's own doc: "one ChatGateway
+     *  instance per companion session"). Threaded into a `dm-bind` pairing redemption's `bindingSessionId`
+     *  (below) so the db layer can refuse a code minted for a DIFFERENT session — closing the gap where a
+     *  dm-bind code sent to the wrong companion's bot silently bound that bot's chat to the code's own
+     *  (foreign) session. Deliberately REQUIRED, not defaulted like every other hook above: an optional arg
+     *  here could silently go unset at a future construction site and reopen the gap with no signal. The
+     *  ONE production construction site (factory.ts) always has a real `cfg.sessionId` to pass, so this is
+     *  typed as a plain `string` to hold every TS caller to that. A `.mjs` test fixture that intentionally
+     *  drives more than one session through a single shared gateway (no single "this gateway's session"
+     *  exists for it) can still pass `undefined` at runtime — `.mjs` isn't type-checked — and db.ts's own
+     *  dm-bind check is "checked when supplied", so that stays a deliberate opt-out, not an oversight. */
+    private readonly ownSessionId: string,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -501,7 +514,10 @@ export class ChatGateway {
       // body. The bound id is the AUTHENTICATED chat.id (never a body-supplied one). On success the code
       // text NEVER reaches submitTurn — we bind + live-sync + ack "paired" and return here. On ANY failure
       // (incl. a code-shaped body that doesn't redeem) we fall through to the SAME silent reject below.
-      const red = this.pairing.redeem({ grantType: "dm-bind", channel: msg.channel, chatId: msg.chatId, senderId: msg.sender?.id, body: msg.body, chatIsDirect: msg.chatIsDirect });
+      // card 98ac6687: bindingSessionId here is THIS gateway's own session (never an existing binding's —
+      // there isn't one yet, this is the no-binding branch) so a code minted for a DIFFERENT session is
+      // refused rather than silently binding this chat to that foreign session.
+      const red = this.pairing.redeem({ grantType: "dm-bind", channel: msg.channel, chatId: msg.chatId, senderId: msg.sender?.id, body: msg.body, chatIsDirect: msg.chatIsDirect, bindingSessionId: this.ownSessionId });
       if (red.outcome === "bound") {
         this.bind(red.binding); // live-sync the routing map so this chat routes immediately (no restart)
         // Companion Trust Window close path (Framework Card 0): a fresh re-pair changes WHO may drive this

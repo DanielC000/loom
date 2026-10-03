@@ -19,6 +19,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -40,6 +41,7 @@ const { Db } = await import("../dist/db.js");
 const { ChatGateway } = await import("../dist/companion/chat-gateway.js");
 const { createDbCompanionAuth } = await import("../dist/companion/auth.js");
 const { createDbCompanionPairing } = await import("../dist/companion/pairing.js");
+const { createCompanionGateway } = await import("../dist/companion/factory.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { normalizeTelegramMessage } = await import("../dist/companion/telegram.js");
 const { IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
@@ -55,6 +57,14 @@ const toBinding = (b) => ({ sessionId: b.sessionId, channel: b.channel, chatId: 
 const allSubmittedTexts = [];
 // Build a gateway wired to `db` with an INJECTED clock (`clock.t`, mutable) + a small attempt budget so the
 // lockout is quick to exercise. Returns the submit + ack spies.
+//
+// card 98ac6687: this fixture deliberately opts OUT of the new REQUIRED `ownSessionId` ctor param — it
+// drives MANY different sessions' dm-bind codes through ONE shared gateway (sess-D, sess-T, sess-L, ...),
+// so there is no single "this gateway's own session" for it to pass. ChatGateway's ctor type requires the
+// arg in TS (the real, production-only construction site — factory.ts — always supplies cfg.sessionId),
+// but this is a plain .mjs test file driving compiled dist/ JS, which enforces no such arity; every call
+// below still lands `ownSessionId === undefined` at its positional slot exactly as before this change, and
+// db.ts's own check is "checked when supplied" — undefined is a deliberate opt-out, not an oversight.
 function makeGateway(db, clock, policy = {}) {
   const submitted = [];
   const submit = (sid, text) => { submitted.push({ sid, text }); allSubmittedTexts.push(text); return { delivered: true }; };
@@ -179,6 +189,20 @@ try {
     check("group-sender: a code for session A cannot grant into group B", rX.accepted === false && rX.reason === "sender-not-authorized");
     check("group-sender: carol was NOT added to the wrong group's allowlist", db.isSenderAllowed("sess-H", "telegram", "carol") === false);
     check("group-sender: the cross-session mismatch left the code UNCONSUMED", db.getPairingCodeById(gcode2Id)?.consumed_at == null);
+
+    // card 98ac6687 Minor: group-sender must stay FAIL-CLOSED even when the caller omits bindingSessionId —
+    // only dm-bind may skip the check. Exercised directly against the db redemption unit (not the gateway,
+    // which always supplies the matched existing group binding's session) to prove the db-layer default.
+    const gcode3 = db.mintPairingCode({ sessionId: "sess-G", channel: "telegram", grantType: "group-sender", ttlMs: TTL_MS }, clock.t);
+    const [gcode3Id, gcode3Secret] = [gcode3.codeId, gcode3.code.slice(gcode3.code.indexOf(".") + 1)];
+    const rNoBindingSid = db.redeemPairingCode({
+      codeId: gcode3Id, secret: gcode3Secret, channel: "telegram", senderId: "dave", chatId: "group-1",
+      expectedGrantType: "group-sender", bindingSessionId: undefined,
+      maxAttempts: 5, windowMs: 10 * 60_000, lockoutMs: LOCKOUT_MS,
+    }, clock.t);
+    check("group-sender: a redeem WITHOUT bindingSessionId is REJECTED (fail-closed)", rNoBindingSid.outcome === "rejected");
+    check("group-sender: dave was NOT added to the allowlist", db.isSenderAllowed("sess-G", "telegram", "dave") === false);
+    check("group-sender: the omitted-bindingSessionId code stayed UNCONSUMED", db.getPairingCodeById(gcode3Id)?.consumed_at == null);
 
     db.close();
   }
@@ -358,6 +382,68 @@ try {
     check("real-dm: the binding is the genuinely private chat.id, dm scope", db.listCompanionBindings().find((b) => b.sessionId === "sess-Grp")?.chatId === "810810008");
     check("real-dm: the code is NOW consumed", db.getPairingCodeById(codeId)?.consumed_at != null);
     check("group/supergroup/unknown attacks never submitted a turn", submitted.length === 0);
+
+    db.close();
+  }
+
+  // ============ Part H — PRODUCTION-PATH: card 98ac6687 cross-session dm-bind refusal ============
+  // Every earlier dm-bind Part drives either ONE shared multi-session ChatGateway (makeGateway, built with
+  // no `ownSessionId`) or db.redeemPairingCode directly — neither exercises the REAL per-session factory
+  // wiring (factory.ts createCompanionGateway -> cfg.sessionId -> ChatGateway's ownSessionId) production
+  // actually uses. This builds TWO REAL, SEPARATE gateways via createCompanionGateway — one per session,
+  // exactly like index.ts/controller.ts do — to prove cfg.sessionId is genuinely threaded end to end, not
+  // just reachable in principle. "Session Y's bot" = gwY below; "the wrong bot" = redeeming X's code there.
+  {
+    const db = new Db(dbFile("H.db"));
+    const now = new Date().toISOString();
+    // createCompanionGateway's real chat-history recorder has a sessions(id) FK (mirrors
+    // companion-outbound-suppression.mjs's own seedSession helper).
+    function seedSession(id) {
+      const projectId = randomUUID();
+      db.insertProject({ id: projectId, name: id, repoPath: projectId, vaultPath: projectId, config: {}, createdAt: now, archivedAt: null });
+      const agentId = randomUUID();
+      db.insertAgent({ id: agentId, projectId, name: "Companion", startupPrompt: "", position: 0 });
+      db.insertSession({
+        id, projectId, agentId, engineSessionId: `eng-${id}`, title: null, cwd: projectId,
+        processState: "live", resumability: "resumable", busy: false,
+        createdAt: now, lastActivity: now, lastError: null, role: "assistant", taskId: null,
+      });
+    }
+    seedSession("sess-X");
+    seedSession("sess-Y");
+
+    const sentX = []; const sentY = [];
+    const submittedX = []; const submittedY = [];
+    // botToken:null — skip createCompanionGateway's OWN env-bootstrap seed (which would pre-bind each
+    // session's allowedChatId and trip the UNRELATED same-channel takeover refusal, card 4c9ef86d, the
+    // moment a second telegram chat tries to dm-bind the same session). Each session starts with ZERO
+    // bindings, same as a freshly-provisioned in-app-only companion that later adds a Telegram dm-bind —
+    // registerAdapter below still arms inbound/outbound on "telegram" regardless of botToken.
+    const cfgX = { botToken: null, allowedChatId: "810810101", sessionId: "sess-X", chatScope: "dm", homeChannel: "telegram", homeChatId: "810810101", heartbeatIntervalMinutes: 0, heartbeatPrompt: "" };
+    const cfgY = { botToken: null, allowedChatId: "810810202", sessionId: "sess-Y", chatScope: "dm", homeChannel: "telegram", homeChatId: "810810202", heartbeatIntervalMinutes: 0, heartbeatPrompt: "" };
+    const gwX = createCompanionGateway(cfgX, (sid, text) => { submittedX.push({ sid, text }); return { delivered: true }; }, db);
+    gwX.registerAdapter(fakeAdapter("telegram", sentX));
+    const gwY = createCompanionGateway(cfgY, (sid, text) => { submittedY.push({ sid, text }); return { delivered: true }; }, db);
+    gwY.registerAdapter(fakeAdapter("telegram", sentY));
+    check("prod-path setup: no pre-existing bindings for either session", db.listCompanionBindings().length === 0);
+
+    // Owner mints a dm-bind code intending it for sess-X's own bot...
+    const codeForX = db.mintPairingCode({ sessionId: "sess-X", channel: "telegram", grantType: "dm-bind", ttlMs: TTL_MS }, Date.now()).code;
+    const codeForXId = codeForX.slice("pair_".length).split(".")[0];
+
+    // ...but it lands on Y's bot instead (wrong bot) — a BRAND-NEW chat, never bound to anything.
+    const rWrong = await gwY.handleInbound({ channel: "telegram", chatId: "999000111", body: codeForX, sender: { id: "confused-owner" }, chatIsDirect: true });
+    check("cross-session(prod-path): a dm-bind code minted for X is REFUSED through Y's own gateway", rWrong.accepted === false && rWrong.reason === "chat-not-allowlisted");
+    check("cross-session(prod-path): NO binding was written for Y's (wrong-bot) chat", !db.listCompanionBindings().some((b) => b.chatId === "999000111"));
+    check("cross-session(prod-path): nothing was acked to Y's chat", sentY.length === 0);
+    check("cross-session(prod-path): Y's gateway did not come to know about session X at all", gwY.bindingsForSession("sess-X").length === 0);
+    check("cross-session(prod-path): the code stayed UNCONSUMED (the owner can still redeem it on the right bot)", db.getPairingCodeById(codeForXId)?.consumed_at == null);
+
+    // The SAME, still-unconsumed code redeemed through its OWN session's (X's) gateway still succeeds.
+    const rRight = await gwX.handleInbound({ channel: "telegram", chatId: "810810105", body: codeForX, sender: { id: "owner" }, chatIsDirect: true });
+    check("cross-session(prod-path): the SAME code through its OWN session's gateway SUCCEEDS", rRight.accepted === false && rRight.reason === "paired-dm" && rRight.sessionId === "sess-X");
+    check("cross-session(prod-path): the code is now consumed", db.getPairingCodeById(codeForXId)?.consumed_at != null);
+    check("cross-session(prod-path): the binding landed on X with X's real chat id", db.listCompanionBindings().find((b) => b.sessionId === "sess-X" && b.chatId === "810810105")?.scope === "dm");
 
     db.close();
   }

@@ -244,7 +244,9 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // card 1b0df437: see ChatGateway's onUnboundRouteRefused doc — records the durable half of
   // warnUnboundRouteRefused's once-per-(session,route) console warning.
   const onUnboundRouteRefused = (sessionId: string, channel: string, chatId: string) => db.recordCompanionUnboundRouteRefused(sessionId, channel, chatId);
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow, onReplyDelivered, flagNonPrivateBinding, reconcileBindingChange, onUnboundRouteRefused);
+  // cfg.sessionId is this gateway's REQUIRED ownSessionId (card 98ac6687) — the one companion session this
+  // instance belongs to, so a dm-bind redemption can refuse a code minted for a different session.
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow, onReplyDelivered, flagNonPrivateBinding, reconcileBindingChange, onUnboundRouteRefused, undefined, undefined, undefined, undefined, undefined, cfg.sessionId);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

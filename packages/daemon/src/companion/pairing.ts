@@ -44,8 +44,11 @@ export interface RedeemAttempt {
    *  the grantType==="dm-bind" gate below). Irrelevant to `group-sender` (already scoped to an existing
    *  group binding). */
   chatIsDirect?: boolean;
-  /** group-sender only: the matched group binding's session id — the code's session MUST equal it (a code
-   *  for session A must not grant into group B). */
+  /** The session the code's own `session_id` MUST equal, when supplied (card 98ac6687) — the db layer
+   *  checks this for EITHER grant type whenever it's present, skipping the check only when omitted. For
+   *  group-sender: the matched EXISTING group binding's session id (a code for session A must not grant
+   *  into group B). For dm-bind (no existing binding yet): the REDEEMING GATEWAY's own session id (a code
+   *  minted for session A must not bind session A into a DIFFERENT companion's chat). */
   bindingSessionId?: string;
 }
 

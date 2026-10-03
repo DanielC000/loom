@@ -4055,7 +4055,16 @@ export class Db {
         && nowMs < (code.expires_at as number)
         && (code.channel as string) === input.channel
         && (code.grant_type as string) === input.expectedGrantType
-        && (input.expectedGrantType !== "group-sender" || (code.session_id as string) === input.bindingSessionId)
+        // card 98ac6687: checked whenever the caller supplies one, for EITHER grant type — group-sender's
+        // caller always supplies the existing group binding's session; dm-bind's caller (chat-gateway.ts)
+        // now supplies the redeeming gateway's OWN session, so a code minted for a different session is
+        // refused rather than silently binding a foreign session into this chat. group-sender stays
+        // FAIL-CLOSED even when `bindingSessionId` is undefined (never skip the check for that grant
+        // type); `undefined` only opts OUT the check for dm-bind, where a test fixture may deliberately
+        // drive many sessions through one shared gateway.
+        && ((input.expectedGrantType === "group-sender" || input.bindingSessionId !== undefined)
+          ? (code.session_id as string) === input.bindingSessionId
+          : true)
         && verifySecret(input.secret, code.code_salt as string, code.code_hash as string);
       if (!valid) {
         this.recordPairingFailure(input.channel, input.senderId, nowMs, input.maxAttempts, input.windowMs, input.lockoutMs, attempt);
