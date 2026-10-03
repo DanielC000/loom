@@ -102,10 +102,13 @@ export function createAgentCore(
 
 // Least-privilege ROLE guard shared by every clone call site (incl. the human-only REST companion
 // auto-clone, gateway/server.ts): a clone carries the source agent's profileId through VERBATIM, so an
-// operator/platform/auditor source must be refused the same way assigning that profileId directly would
-// be. FIELD-only (agentAssignableProfileError's own human-only-field list): see cloneSourceFieldError
-// below, NOT here — this function's own narrower role check is the ONLY role axis for every
-// cloneAgentCore caller, agent-facing or not; it never calls the shared predicate at all.
+// operator/platform/auditor source is refused here UNCONDITIONALLY — including for the Platform Lead's
+// own agent_clone/agent_clone_batch (mcp/platform.ts), which do NOT get the `allowElevatedRoles` opt-out
+// its sibling tools (agent_create/agent_update/profile_assign) do; see the 3de74275 record's own
+// "card c8f1d9b7" amendment for why clone stays deliberately stricter than those three on the same router.
+// FIELD-only (agentAssignableProfileError's own human-only-field list): see cloneSourceFieldError below,
+// NOT here — this function's own narrower role check is the ONLY role axis for every cloneAgentCore
+// caller, agent-facing or not; it never calls the shared predicate at all.
 //
 // @decision 3de74275 — clone's ROLE axis stays its OWN narrower, pre-existing check, never the shared
 // predicate's full locked-role set — a non-elevated role here (incl. "assistant") is load-bearing.
@@ -122,7 +125,7 @@ export function clonedProfileRoleError(db: Db, sourceProfileId: string | null): 
     return `cannot clone agent: its profile role is "operator" — cloning the own-workspace-confined Elevated Operator rig into another project is never allowed`;
   }
   if (isPlatformProfile(profile)) {
-    return `cannot clone agent: its profile role is "${profile.role}" — cloning an elevated platform/auditor rig into another project is never allowed (mirrors the least-privilege guard on assigning one directly)`;
+    return `cannot clone agent: its profile role is "${profile.role}" — cloning an elevated platform/auditor rig into another project is never allowed (this is stricter than assigning the same profile directly, which the Platform Lead's own agent_create/agent_update/profile_assign permit — see docs/decisions/3de74275)`;
   }
   return null;
 }

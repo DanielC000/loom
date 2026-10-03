@@ -1358,9 +1358,11 @@ export class PlatformMcpRouter {
           "and promptPatch (else keeps the source startupPrompt VERBATIM — promptPatch REPLACES the prompt " +
           "text, it is not a diff), and creates the clone in targetProjectId through the SAME validated " +
           "core agent_create uses (createAgentCore) — no forked create path. LEAST-PRIVILEGE (load-bearing, " +
-          "mirrors the guard on assigning an elevated profile directly): REFUSED if the source agent's " +
-          "profile role is platform/auditor — cloning an elevated rig into another project is never " +
-          "allowed. ALSO REFUSED, regardless of role, if the source agent's profile carries a human-only " +
+          "STRICTER than assigning an elevated profile directly via agent_create/agent_update/profile_assign, " +
+          "which this surface permits): REFUSED if the source agent's profile role is operator/platform/" +
+          "auditor — cloning an elevated rig into another project is never allowed, even though this same " +
+          "router's own direct-assign tools may bind one (see docs/decisions/3de74275 for why clone stays " +
+          "stricter). ALSO REFUSED, regardless of role, if the source agent's profile carries a human-only " +
           "field (see agentAssignableProfileError in profiles/validate.ts) — human-only, via the Profiles " +
           "UI / REST. 404 (\"source agent not found\") if sourceAgentId is unknown; \"project not found\" if " +
           "targetProjectId is unknown (same as agent_create); \"profile not found\" is impossible here (the " +
@@ -1392,8 +1394,8 @@ export class PlatformMcpRouter {
           "agent_clone, for standing up a per-family role across N sibling projects (a tool-site roster, a " +
           "portfolio of similar repos) without N hand-written agent_clone round-trips. Each entry in " +
           "`targets` is applied INDEPENDENTLY through the exact same agent_clone core (same validation, " +
-          "same least-privilege platform/auditor-role guard, same REJECTION of a human-only-field-carrying " +
-          "source profile regardless of role — see agentAssignableProfileError in profiles/validate.ts) " +
+          "same least-privilege operator/platform/auditor-role guard, same REJECTION of a human-only-field-" +
+          "carrying source profile regardless of role — see agentAssignableProfileError in profiles/validate.ts) " +
           "— a bad entry (unknown targetProjectId) surfaces its own { error } and does NOT block the " +
           "other targets; nothing is transactional. " +
           "Returns one result per target, in the given order: { targetProjectId, agent } on success or " +
