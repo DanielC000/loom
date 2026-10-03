@@ -30,7 +30,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     redactedExcerpt(...) of the diverged+intended characters together, alongside two unconditional
 //     classifyDroppedChar() class labels),
 //     [codex-engine-id] give-up screen tail= (card 6654a47c — codex's ANSI-stripped on-screen tail, which
-//     includes the echoed prompt; logged alongside allowlisted marker LABELS only, never matched text).
+//     includes the echoed prompt; logged alongside allowlisted marker LABELS only, never matched text),
+//     parseWin32CimStdout's parse-failure excerpt= (card 56f711bf — windowed win32 CIM stdout, which can
+//     carry a process's CommandLine verbatim; redacted at this one source, read by both the [reap] and
+//     [attribution] loggers that log this error's .message to the shared daemon log).
 //   sessions/service.ts: [give-up] … PARKED head.
 // Run: 1) build daemon (pnpm build from packages/daemon), 2) node test/log-message-content-gate.mjs
 import fs from "node:fs";
@@ -105,7 +108,7 @@ try {
     const serviceSrc = stripComments(fs.readFileSync(new URL("../src/sessions/service.ts", import.meta.url), "utf8"));
     const hostCalls = (hostSrc.match(/redactedExcerpt\(/g) ?? []).length - 1; // -1 for the function's own declaration line
     const serviceCalls = (serviceSrc.match(/redactedExcerpt\(/g) ?? []).length;
-    // 13 call sites: the shared `around` helper (feeds BOTH reportedAround= and intendedAround=), the shared
+    // 14 call sites: the shared `around` helper (feeds BOTH reportedAround= and intendedAround=), the shared
     // `excerpt` helper (feeds BOTH leadingRemainder= and trailingRemainder=), sanitized-nudge, missing-tag,
     // submit-write head=, stdin-write head=, resume-mode footer= (added after manager review found
     // collapseFooter does not actually isolate a footer region — see done-report), (card b1cc4f01) the
@@ -122,8 +125,11 @@ try {
     // (classifyDroppedChar per side) — and (card 6654a47c) the codex engine-id give-up `screen tail=`: the
     // ANSI-stripped, 600-char-capped tail of the codex ring (contains the echoed prompt, so it must be
     // redacted by default), logged next to allowlisted marker labels that never carry matched text —
-    // see done-report for the enumerating grep + per-site anchors.
-    check("(4) pty/host.ts: exactly 14 redactedExcerpt call sites", hostCalls === 14);
+    // and (card 56f711bf) `parseWin32CimStdout`'s parse-failure excerpt= — windowed win32 CIM stdout that
+    // can carry a process's CommandLine verbatim, redacted at this one source rather than at each of the
+    // two downstream loggers ([reap]/[attribution]) that log this error's .message to the shared daemon
+    // log — see done-report for the enumerating grep + per-site anchors.
+    check("(4) pty/host.ts: exactly 15 redactedExcerpt call sites", hostCalls === 15);
     check("(4) sessions/service.ts: exactly 1 redactedExcerpt call site ([give-up] PARKED head)", serviceCalls === 1);
     // Negative control on the census itself: a nonexistent function name must find ZERO call sites, proving
     // this isn't a pattern that matches everything.

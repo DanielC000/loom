@@ -4235,7 +4235,8 @@ export const CONTROL_CHAR_RE = new RegExp(`[${String.fromCharCode(0)}-${String.f
 
 /** @decision sha:16b7c38c — THROWS on a malformed CIM payload, never silently drops to `[]`: a non-UTF8
  * console codepage once corrupted ConvertTo-Json's own output mid-array, so the query now forces UTF8 —
- * any remaining surprise must still throw, or 7 sessions/service.ts call sites no-op as "nothing to kill". */
+ * any remaining surprise must still throw, or 7 sessions/service.ts call sites no-op as "nothing to kill".
+ * @decision 56f711bf — the parse-failure excerpt is redacted at this one source, not at each logger. */
 export function parseWin32CimStdout(raw: string): WorktreeProcess[] {
   const withoutBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
   const sanitized = withoutBom.replace(CONTROL_CHAR_RE, " ");
@@ -4248,7 +4249,7 @@ export function parseWin32CimStdout(raw: string): WorktreeProcess[] {
     const offsetMatch = /position (\d+)/.exec(message);
     const offset = offsetMatch ? Number(offsetMatch[1]) : null;
     const excerpt = offset != null ? text.slice(Math.max(0, offset - 60), offset + 60) : text.slice(0, 120);
-    throw new Error(`${message} (payload length ${text.length}; excerpt around the failure: ${JSON.stringify(excerpt)})`);
+    throw new Error(`${message} (payload length ${text.length}; excerpt around the failure: ${redactedExcerpt(excerpt)})`);
   }
   const arr = Array.isArray(parsed) ? parsed : [parsed];
   return arr.map((r: Record<string, unknown>) => ({

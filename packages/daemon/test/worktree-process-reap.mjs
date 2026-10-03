@@ -148,6 +148,52 @@ if (process.platform === "win32") {
   check("(unit) parseWin32CimStdout THROWS on a malformed CIM payload (never silently returns [])", threw);
 }
 
+// ============================== (unit) card 56f711bf: parse-failure excerpt is REDACTED, not leaked ==============================
+// A malformed CIM payload whose CommandLine carries a token-like string (the real-world shape: a process's
+// argv holding an auth header/token) must not let that string reach the thrown Error's own message, which
+// reapProcessesRootedInWorktree/attributeProcessesToWorktree log straight to the shared daemon log via
+// `[reap]`/`[attribution]`. RED-FIRST: asserted against the REAL `parseWin32CimStdout`/`reapProcesses
+// RootedInWorktree` (never a hand-rolled re-implementation) — reverting the `redactedExcerpt(excerpt)` fix
+// back to the pre-fix `JSON.stringify(excerpt)` makes every check in this block fail, since the token-like
+// string is still present verbatim in `text` at the point the excerpt is sliced out.
+{
+  const SECRET = "Bearer sk-ABCDEF1234567890ABCDEF1234567890";
+  const MALFORMED_WITH_SECRET = `[{"ProcessId":424243,"ExecutablePath":null,"CommandLine":"node --token "${SECRET}" "unterminated because a stray quote broke this value""}]`;
+  let caughtMessage = null;
+  try {
+    parseWin32CimStdout(MALFORMED_WITH_SECRET);
+  } catch (err) {
+    caughtMessage = err.message;
+  }
+  check("(unit) card 56f711bf: setup — the malformed payload DOES still throw", caughtMessage !== null);
+  check("(unit) card 56f711bf: the malformed payload's raw text DOES contain the secret (proves the excerpt window could have captured it)",
+    MALFORMED_WITH_SECRET.includes(SECRET));
+  check("(unit) card 56f711bf: THE FIX — parseWin32CimStdout's thrown Error message does NOT contain the raw secret",
+    caughtMessage != null && !caughtMessage.includes(SECRET));
+  check("(unit) card 56f711bf: the thrown message still carries a redacted placeholder (diagnostic value survives redaction)",
+    caughtMessage != null && /<redacted len=\d+(?: hash=[0-9a-f]+)?>/.test(caughtMessage));
+
+  if (process.platform === "win32") {
+    // End-to-end through the REAL reap catch path: the logged [reap] line (what actually reaches the
+    // shared daemon log) must not carry the secret either.
+    const WT_SECRET = "/home/x/.loom/worktrees/proj1/deadbeefSECRET";
+    const errors = [];
+    const origConsoleError = console.error;
+    console.error = (msg) => { errors.push(String(msg)); };
+    try {
+      await reapProcessesRootedInWorktree(WT_SECRET, {
+        enumerate: async () => { throw classifyWin32EnumerationClose(MALFORMED_WITH_SECRET, ""); },
+      });
+    } finally {
+      console.error = origConsoleError;
+    }
+    check("(unit) card 56f711bf: setup — a [reap] error line was actually logged",
+      errors.some((e) => e.includes("[reap]") && e.includes(WT_SECRET)));
+    check("(unit) card 56f711bf: THE FIX, end-to-end — the logged [reap] line does NOT contain the raw secret",
+      !errors.some((e) => e.includes(SECRET)));
+  }
+}
+
 {
   const WT2 = "/home/x/.loom/worktrees/proj1/deadbeef9999";
   const errors = [];
