@@ -16,7 +16,7 @@ import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import { agentAssignableProfileError } from "../profiles/validate.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry } from "../db.js";
-import { latestEventSeqMapKey } from "../db.js";
+import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
@@ -10906,8 +10906,12 @@ export class SessionService {
    * non-required role, in which case the caller leaves the card in its current (valid) column — so a
    * board edit can never make a move orphan a card onto a non-existent key.
    */
-  private columnKeyForProjectRole(projectId: string, role: ColumnRole): string | undefined {
-    return columnKeyForRole(resolveConfig(this.db.getProject(projectId)?.config).kanbanColumns, role);
+  // @decision c1161989 — accepts an already-resolved Project too, so a hot loop iterating a precomputed
+  // project map (reconcile's Pass A/A2) can skip the per-call getProject; every existing
+  // `projectId: string` call site is untouched (a strict widening).
+  private columnKeyForProjectRole(projectOrId: string | Project | undefined, role: ColumnRole): string | undefined {
+    const project = typeof projectOrId === "string" ? this.db.getProject(projectOrId) : projectOrId;
+    return columnKeyForRole(resolveConfig(project?.config).kanbanColumns, role);
   }
 
   /**
@@ -21065,6 +21069,13 @@ export class SessionService {
     // git awaits run (reconcile is un-awaited, card 460d3178) — Pass A2 rebuilds its own fresh pair.
     const mergeDoneSeqMap = this.db.buildLatestEventSeqMap("merge_done");
     const mergeRequestSeqMap = this.db.buildLatestEventSeqMap("merge_request");
+    // @decision c1161989 — `projectMap` is Pass A's OWN snapshot, not shared by every pass (a project can
+    // be deleted/rebound by a live external handler during Pass A's git awaits, card 460d3178). Pass A2
+    // and Pass B each rebuild their own fresh project map below — never reuse this one past Pass A.
+    const projectMap = new Map(this.db.listAllProjectsIncludingArchived().map((p) => [p.id, p]));
+    const distinctTaskIds = [...new Set(all.map((s) => s.taskId).filter((id): id is string => !!id))];
+    const taskColumnKeyMap = this.db.getTaskColumnKeysByIds(distinctTaskIds);
+    const eventPresenceMap = this.db.buildWorkerEventPresenceMap();
     const handledWorktrees = new Set<string>();
     // REBUILT here, not appended — this boot's Pass B is about to recompute the full retained set from
     // scratch, and a stale entry from a prior boot (e.g. a worktree since GC'd by hand) must not linger.
@@ -21145,7 +21156,7 @@ export class SessionService {
       // keep `protectedSessionIds.has(s.id)` alongside it so a protected row with no resolvable
       // worktreePath still can't fall through unprotected.
       if (protectedSessionIds.has(s.id) || (worktreePath && protectedWorktreePaths.has(worktreePath))) continue;
-      const project = this.db.getProject(s.projectId);
+      const project = projectMap.get(s.projectId);
       if (!project) continue;
       try {
         const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
@@ -21154,8 +21165,11 @@ export class SessionService {
         // without that meaning "the merge needs re-finishing." Keying this off columnKey used to make
         // exactly that manual move look unreconciled on every future boot, re-running finalizeMerge and (pre
         // the finalizeMerge guard above) forcing the column back to terminal each time.
-        const workerEvents = this.db.listEventsForWorker(s.id);
-        const alreadyFinalized = workerEvents.some((e) => e.kind === "merge_done");
+        // @decision c1161989 — `.size > 0` preserves the exact "any merge_done ever" semantics the old
+        // `workerEvents.some(e => e.kind === "merge_done")` had; don't scope this to the current
+        // task/branch here (that's a future, separate change — see WorkerEventPresence's own doc).
+        const eventPresence = eventPresenceMap.get(s.id);
+        const alreadyFinalized = (eventPresence?.mergeDoneKeys.size ?? 0) > 0;
         // CHEAP, REPO-FREE EARLY-OUT (card c33f94b2: moved ahead of repoKey resolution too, not just the
         // squash lookup below) — "already fully reconciled" is knowable from the DB + fs alone, so a
         // session finalized by some other means (e.g. Pass A2 just below) never needs its repo resolved at
@@ -21189,9 +21203,9 @@ export class SessionService {
         // read as "terminal" for the wrong reason on that (rare, but real) double-degenerate
         // combination; the explicit guard keeps this fail-closed on its own terms rather than on the
         // accident of both sides going missing together.
-        const terminalKey = this.columnKeyForProjectRole(s.projectId, "terminal");
-        const isTerminalTask = terminalKey !== undefined && this.db.getTask(s.taskId)?.columnKey === terminalKey;
-        const neverRequestedMerge = !workerEvents.some((e) => e.kind === "merge_request");
+        const terminalKey = this.columnKeyForProjectRole(project, "terminal");
+        const isTerminalTask = terminalKey !== undefined && taskColumnKeyMap.get(s.taskId) === terminalKey;
+        const neverRequestedMerge = !eventPresence?.hasMergeRequest;
         if (neverRequestedMerge && !worktreeOnDisk && isTerminalTask) {
           this.db.clearMergeReconcileWedge(s.id); // no longer wedged (or never was), whatever its repoKey now says
           // eslint-disable-next-line no-console
@@ -21343,7 +21357,18 @@ export class SessionService {
           worktreePath, branch: s.branch, repoPath, projectId: project.id,
           mergedSha: landedSha, repoKey: s.repoKey ?? null,
           ...(paGuard.expectedBranchTip ? { expectedBranchTip: paGuard.expectedBranchTip } : {}), onBranchRetained: paGuard.onBranchRetained,
-          onMergeDoneAppended: (branch, repoKey, seq) => mergeDoneSeqMap.set(latestEventSeqMapKey(branch, repoKey), seq),
+          // @decision c1161989 — keep taskColumnKeyMap/eventPresenceMap live too: a LATER row in THIS
+          // SAME loop sharing s.taskId (a re-task/recycle sibling) must see this finalize's writes fresh.
+          onMergeDoneAppended: (branch, repoKey, seq) => {
+            mergeDoneSeqMap.set(latestEventSeqMapKey(branch, repoKey), seq);
+            // A fallback entry's `hasMergeRequest` is the SNAPSHOT's own answer for a session with no
+            // existing entry — no `merge_request` was ever observed for it, so `false`, never `true`.
+            const entry = eventPresenceMap.get(s.id) ?? { hasMergeRequest: false, mergeDoneKeys: new Set<string>(), hasMergeRejected: false };
+            entry.mergeDoneKeys.add(workerEventPresenceKey(s.taskId ?? null, branch));
+            eventPresenceMap.set(s.id, entry);
+            const freshColumnKey = this.db.getTask(s.taskId!)?.columnKey;
+            if (freshColumnKey !== undefined) taskColumnKeyMap.set(s.taskId!, freshColumnKey);
+          },
         });
         handledWorktrees.add(worktreePath);
         if (!paGuard.warning()) mergesFinished++; // a retained branch was NOT finished (held; its worktree stays out of Pass B's GC via handledWorktrees)
@@ -21395,6 +21420,12 @@ export class SessionService {
     // card 460d3178). One extra O(M) scan restores the old per-session fresh-read semantics for A2.
     const a2MergeDoneSeqMap = this.db.buildLatestEventSeqMap("merge_done");
     const a2MergeRequestSeqMap = this.db.buildLatestEventSeqMap("merge_request");
+    // @decision c1161989 — same reasoning as the two maps above: REBUILD fresh for A2, never reuse Pass
+    // A's own projectMap/taskColumnKeyMap/eventPresenceMap. A2 never writes any of the three, so no
+    // live-callback is needed here.
+    const a2ProjectMap = new Map(this.db.listAllProjectsIncludingArchived().map((p) => [p.id, p]));
+    const a2TaskColumnKeyMap = this.db.getTaskColumnKeysByIds(distinctTaskIds);
+    const a2EventPresenceMap = this.db.buildWorkerEventPresenceMap();
     for (const s of all) {
       if (s.role !== "worker" || !s.taskId) continue;
       if (protectedSessionIds.has(s.id)) continue; // about to be resumed — leave its lifecycle intact
@@ -21409,17 +21440,17 @@ export class SessionService {
       // `undefined !== undefined` read `false` — "not a mismatch" — and wrongly treat a deleted task on
       // an empty-board project as a demonstrably-landed merge, fabricating a merge_done for a session
       // nothing actually confirms landed.
-      const terminalKey = this.columnKeyForProjectRole(s.projectId, "terminal");
-      if (terminalKey === undefined || this.db.getTask(s.taskId)?.columnKey !== terminalKey) continue; // not a demonstrably-landed merge
-      const evts = this.db.listEventsForWorker(s.id);
-      const hasMergeRequest = evts.some((e) => e.kind === "merge_request");
+      const terminalKey = this.columnKeyForProjectRole(a2ProjectMap.get(s.projectId), "terminal");
+      if (terminalKey === undefined || a2TaskColumnKeyMap.get(s.taskId) !== terminalKey) continue; // not a demonstrably-landed merge
+      const a2Presence = a2EventPresenceMap.get(s.id);
+      const hasMergeRequest = !!a2Presence?.hasMergeRequest;
       // @decision 9ac3a739 — the branch leg is DB event seq order, repo-scoped, never bare presence: a
       // branch-presence check wrongly reads an unrelated OLDER landing (e.g. before a re-task) as having
       // resolved THIS row's own later merge_request, stranding its MERGE REQUEST alert forever.
       const repoScope = s.repoKey ?? null;
       const latestDoneSeq = s.branch ? a2MergeDoneSeqMap.get(latestEventSeqMapKey(s.branch, repoScope)) ?? null : null;
       const latestRequestSeq = s.branch ? a2MergeRequestSeqMap.get(latestEventSeqMapKey(s.branch, repoScope)) ?? null : null;
-      const hasTerminal = evts.some((e) => e.kind === "merge_done" || e.kind === "merge_rejected")
+      const hasTerminal = (a2Presence?.mergeDoneKeys.size ?? 0) > 0 || !!a2Presence?.hasMergeRejected
         || (latestDoneSeq != null && (latestRequestSeq == null || latestDoneSeq > latestRequestSeq));
       if (!hasMergeRequest || hasTerminal) continue;
       const reconciledSeq = this.db.appendEvent({
@@ -21453,6 +21484,10 @@ export class SessionService {
     // `protectedWorktreePaths` is the SAME set computed once near the top of this method (card
     // 9ac3a739) — Pass A now consults it too, so whichever row either pass visits first for a shared
     // path, the decision is identical.
+    // @decision c1161989 — REBUILD the project map fresh here too, same reasoning as Pass A2's own
+    // rebuild above: Pass A's `projectMap` is stale by the time Pass B runs (a project deleted/rebound
+    // during Pass A's git awaits must read as gone, not as Pass A's pre-deletion snapshot).
+    const bProjectMap = new Map(this.db.listAllProjectsIncludingArchived().map((p) => [p.id, p]));
     for (const s of all) {
       const worktreePath = s.worktreePath;
       if (!worktreePath || handledWorktrees.has(worktreePath)) continue;
@@ -21462,7 +21497,7 @@ export class SessionService {
       // once` below actually hold for the protected case too).
       if (protectedWorktreePaths.has(worktreePath)) { handledWorktrees.add(worktreePath); continue; }
       if (!fs.existsSync(worktreePath)) continue;
-      const project = this.db.getProject(s.projectId);
+      const project = bProjectMap.get(s.projectId);
       if (!project) continue;
       // Multi-repo epic (49136451) phase 2: resolve THIS session's OWN target repo (Session.repoKey), not
       // project.repoPath. UNLIKE Pass A (which has a per-session try/catch that already counts+warns on

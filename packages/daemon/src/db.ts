@@ -6929,6 +6929,52 @@ export class Db {
     }
     return map;
   }
+  /**
+   * @decision c1161989 — a `.get()` miss means `{hasMergeRequest:false, mergeDoneKeys:<empty>,
+   * hasMergeRejected:false}`; never throw on it. Keep `mergeDoneKeys` a `${taskId}|${branch}` set, never
+   * collapse it to a bare boolean — a future task+branch-scoped check needs the keys, not a presence bit.
+   */
+  buildWorkerEventPresenceMap(): Map<string, WorkerEventPresence> {
+    const rows = this.db.prepare(
+      `SELECT worker_session_id AS workerSessionId, task_id AS taskId, kind,
+              json_extract(detail_json, '$.branch') AS branch
+         FROM orchestration_events
+        WHERE kind IN ('merge_request', 'merge_done', 'merge_rejected') AND worker_session_id IS NOT NULL`,
+    ).all() as { workerSessionId: string; taskId: string | null; kind: string; branch: string | null }[];
+    const map = new Map<string, WorkerEventPresence>();
+    for (const r of rows) {
+      let entry = map.get(r.workerSessionId);
+      if (!entry) { entry = { hasMergeRequest: false, mergeDoneKeys: new Set<string>(), hasMergeRejected: false }; map.set(r.workerSessionId, entry); }
+      if (r.kind === "merge_request") entry.hasMergeRequest = true;
+      else if (r.kind === "merge_done") entry.mergeDoneKeys.add(workerEventPresenceKey(r.taskId, r.branch));
+      else if (r.kind === "merge_rejected") entry.hasMergeRejected = true;
+    }
+    return map;
+  }
+  /**
+   * @decision c1161989 — never filter this, not even archived/reserved: `getProject(id)` (the
+   * per-session call a precomputed Map stands in for during boot reconcile) never excluded either.
+   */
+  listAllProjectsIncludingArchived(): Project[] {
+    return this.db.prepare("SELECT * FROM projects ORDER BY name").all().map(toProject);
+  }
+  /**
+   * @decision c1161989 — `columnKey` only, never the full {@link Task} row: `getTask` pays a second
+   * query per call (`deferralBlockerIds`) that no caller of this bulk form needs.
+   */
+  getTaskColumnKeysByIds(ids: readonly string[]): Map<string, string> {
+    const map = new Map<string, string>();
+    if (ids.length === 0) return map;
+    const CHUNK = 300;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = this.db.prepare(`SELECT id, column_key AS columnKey FROM tasks WHERE id IN (${placeholders})`)
+        .all(...chunk) as { id: string; columnKey: string }[];
+      for (const r of rows) map.set(r.id, r.columnKey);
+    }
+    return map;
+  }
   /** Card 42daa283 — every DISTINCT branch that has ever been filed a `batch_merge_branch_retained` (or, card cc9bce38, a solo `merge_branch_retained`) event (candidates for the hold). */
   listRetainedBranches(): string[] {
     return (this.db.prepare("SELECT DISTINCT json_extract(detail_json, '$.branch') AS b FROM orchestration_events WHERE kind IN ('batch_merge_branch_retained', 'merge_branch_retained')")
@@ -9436,6 +9482,21 @@ function detailRepoKey(detailJson: string | null): string | null {
  */
 export function latestEventSeqMapKey(branch: string, repoKey: string | null): string {
   return repoKey === null ? `\u0001${branch}\u0000` : `\u0002${branch}\u0000${repoKey}`;
+}
+/** One session's merge-event presence, as {@link Db.buildWorkerEventPresenceMap} returns it — see that method's own doc. */
+export interface WorkerEventPresence {
+  hasMergeRequest: boolean;
+  /** `${taskId}|${branch}` (via {@link workerEventPresenceKey}) per `merge_done` event; check `.size > 0` for presence. */
+  mergeDoneKeys: Set<string>;
+  hasMergeRejected: boolean;
+}
+/**
+ * The key format {@link Db.buildWorkerEventPresenceMap}'s `mergeDoneKeys` entries use — mirrors
+ * {@link latestEventSeqMapKey}'s own NUL-separated, sentinel-prefixed shape so a taskId can never
+ * collide with a branch value, and a `null` taskId/branch gets its own sentinel distinct from "".
+ */
+export function workerEventPresenceKey(taskId: string | null, branch: string | null): string {
+  return `${taskId === null ? "\u0001" : `\u0002${taskId}`}\u0000${branch === null ? "\u0001" : `\u0002${branch}`}`;
 }
 // Map a schedule-fire event row (LEFT-JOINed with its schedule/agent/project — see listScheduleHistory)
 // to the enriched, UI-ready ScheduleHistoryEntry. The join columns are NULL when the schedule (or its
