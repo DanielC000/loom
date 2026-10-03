@@ -10,7 +10,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Run: 1) build (turbo builds shared first), 2) node test/codex-doctrine-injection.mjs
 import fs from "node:fs";
 import path from "node:path";
-import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { execSync } from "node:child_process";
+import { mkdtempManaged, registerForCleanup, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -68,6 +69,38 @@ let firstBlock = null;
   let excludeContent = "";
   try { excludeContent = fs.readFileSync(excludePath, "utf8"); } catch { /* asserted false below */ }
   check("git info/exclude gains a '/AGENTS.md' entry after injection", excludeContent.split(/\r?\n/).includes("/AGENTS.md"));
+}
+
+// --- card 25389c3c: a submodule-shaped canonical repo (`.git` is a gitfile with NO `commondir` file —
+// the shape hideCodexDoctrineFromGit's prior local resolver returned null for, silently never excluding
+// AGENTS.md) must still get the exclude entry via the shared resolveGitDirsSync fallback -----------------
+{
+  const cwd = mkdtempManaged("loom-codex-doctrine-submodule-");
+  const externalGitDir = path.join(cwd, "..", "loom-codex-doctrine-submodule-external-gitdir");
+  registerForCleanup(externalGitDir); // sibling of cwd, outside its own mkdtemp'd dir — not auto-swept otherwise
+  const git = (args) => execSync(`git ${args}`, { cwd, stdio: "pipe" }).toString();
+  git("init -q");
+  git('config user.email "test@test.com"');
+  git('config user.name "test"');
+  fs.writeFileSync(path.join(cwd, "README.md"), "hi");
+  git("add README.md");
+  git('commit -q -m "init"');
+  fs.renameSync(path.join(cwd, ".git"), externalGitDir);
+  fs.writeFileSync(path.join(cwd, ".git"), `gitdir: ${externalGitDir}\n`);
+  // git init's own template writes a default info/exclude — remove it so "was created" actually discriminates.
+  fs.rmSync(path.join(externalGitDir, "info", "exclude"), { force: true });
+  check("submodule fixture: .git is a FILE", fs.statSync(path.join(cwd, ".git")).isFile());
+  check("submodule fixture: no commondir file (the shape under test)", !fs.existsSync(path.join(externalGitDir, "commondir")));
+
+  injectCodexDoctrine(cwd, "worker");
+  check("AGENTS.md still created for a submodule-shaped repo", fs.existsSync(path.join(cwd, "AGENTS.md")));
+  const excludePath = path.join(externalGitDir, "info", "exclude");
+  let excludeContent = "";
+  try { excludeContent = fs.readFileSync(excludePath, "utf8"); } catch { /* asserted false below */ }
+  check("info/exclude is created in the submodule's own gitdir (privateDir == commonDir fallback)", excludeContent !== "");
+  check("info/exclude carries the '/AGENTS.md' entry for a submodule-shaped repo", excludeContent.split(/\r?\n/).includes("/AGENTS.md"));
+  const status = git("status --porcelain -uall");
+  check("git status shows NO untracked AGENTS.md for a submodule-shaped repo", !/\?\? AGENTS\.md/.test(status));
 }
 
 // --- never clobbers a repo's OWN real, pre-existing AGENTS.md (mirrors skills/inject.ts's rule) --------

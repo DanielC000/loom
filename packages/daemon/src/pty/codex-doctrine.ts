@@ -7,6 +7,7 @@ import chokidar, { type FSWatcher } from "chokidar";
 import { resolveExecutable } from "./resolve-bin.js";
 import { SKILLS_DIR } from "../paths.js";
 import { roleDoctrineSkillName } from "../skills/inject.js";
+import { resolveGitDirsSync } from "../git/repo-lock.js";
 
 /**
  * HarnessAdapter seam (multi-harness epic df1f94b0, Phase 1, card 353f6dc4): the codex adapter's
@@ -543,32 +544,13 @@ export function withCodexRoleDoctrine(prompt: string, role: string | null | unde
   return [pointer, note, adapted].filter((p): p is string => p !== null).join("\n\n");
 }
 
-/**
- * Resolve the git dir `info/exclude` actually lives in for `cwd` — duplicated from
- * `skills/inject.ts#resolveGitCommonDir` (small + self-contained; kept local rather than cross-imported so
- * this file's git-hygiene concern doesn't create a new pty↔skills coupling for one helper). See that
- * function's own doc for the full worktree-indirection reasoning.
- */
-function resolveGitCommonDirForDoctrine(cwd: string): string | null {
-  const gitPath = path.join(cwd, ".git");
-  let stat: fs.Stats;
-  try { stat = fs.statSync(gitPath); } catch { return null; }
-  if (stat.isDirectory()) return gitPath;
-  let pointer: string;
-  try { pointer = fs.readFileSync(gitPath, "utf8"); } catch { return null; }
-  const m = pointer.match(/^gitdir:\s*(.+?)\s*$/m);
-  if (!m || !m[1]) return null;
-  const privateDir = path.resolve(cwd, m[1]);
-  let commondirRaw: string;
-  try { commondirRaw = fs.readFileSync(path.join(privateDir, "commondir"), "utf8").trim(); }
-  catch { return null; }
-  return path.resolve(privateDir, commondirRaw);
-}
-
 /** Hide the injected `AGENTS.md` from `git status` via the shared `.git/info/exclude` (local only; never
- *  edits a tracked `.gitignore`) — mirrors `skills/inject.ts#hideFromGit`'s discipline for `.claude/`. */
+ *  edits a tracked `.gitignore`) — mirrors `skills/inject.ts#hideFromGit`'s discipline for `.claude/`.
+ *  Resolves the common dir via {@link resolveGitDirsSync} (git/repo-lock.ts) — a prior local copy of this
+ *  resolution duplicated skills/inject.ts's own (and shared its missing-commondir bug); card 25389c3c
+ *  consolidated both onto this neutral shared helper instead of either file importing the other. */
 function hideCodexDoctrineFromGit(cwd: string): void {
-  const gitDir = resolveGitCommonDirForDoctrine(cwd);
+  const gitDir = resolveGitDirsSync(cwd)?.commonDir ?? null;
   if (!gitDir) return;
   const infoDir = path.join(gitDir, "info");
   try { fs.mkdirSync(infoDir, { recursive: true }); } catch { /* ignore */ }

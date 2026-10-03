@@ -33,19 +33,22 @@ instead would make every submodule/`--separate-git-dir` canonical repo's ref res
 resolve (permanent cache-bypass or permanent `"-"`-key staleness, depending on the caller), even though
 the real answer is sitting right there in `privateDir`.
 
-Consolidation note (declined here, flagged for its own card): four other fs-only gitdir-then-commondir
-walks already exist in this codebase — `skills/inject.ts`'s `resolveGitCommonDir`,
-`vault/versioner.ts`'s `resolveLeaseGitDir`, `git/repo-lock.ts`'s `resolveGitMainCheckoutRootSync`, and
-`pty/codex-doctrine.ts`'s `resolveGitCommonDirForDoctrine` (a literal duplicate of the `skills/inject.ts`
-one). None return both `privateDir` and `commonDir` together, none are `async`, and none share this
-fallback: `resolveGitCommonDir` and `resolveGitCommonDirForDoctrine` return `null` on a missing
-`commondir` file (so a submodule-shaped repo silently gets no `info/exclude` hiding — a pre-existing,
-unrelated limitation, out of scope here); `resolveLeaseGitDir` returns `privateDir` with no commondir
-indirection at all (correct for ITS use — a per-worktree pause-lease file — wrong for ref resolution);
-`resolveGitMainCheckoutRootSync` returns a CHECKOUT ROOT (a directory above the git dir, with its own
-basename-is-`.git`/nested-`.git` disambiguation), not a readable-files dir, and falls back to the
-worktree's own toplevel rather than `null`. None was reused; migrating any of them was ruled explicit
-scope creep for this card.
+Consolidation (card 25389c3c, done): of the four other fs-only gitdir-then-commondir walks that existed
+alongside this one — `skills/inject.ts`'s `resolveGitCommonDir`, `vault/versioner.ts`'s
+`resolveLeaseGitDir`, `git/repo-lock.ts`'s `resolveGitMainCheckoutRootSync`, and `pty/codex-doctrine.ts`'s
+`resolveGitCommonDirForDoctrine` (a literal duplicate of the `skills/inject.ts` one) — only the two
+literal duplicates genuinely wanted this function's own semantics (commonDir, with the privateDir
+fallback) and have been migrated onto a shared SYNC twin, `git/repo-lock.ts`'s `resolveGitDirsSync`
+(both of their own local copies had exactly this function's pre-fix bug: `null` instead of `privateDir`
+on a missing `commondir` file, so `info/exclude` hiding silently no-opped for a submodule-shaped canonical
+repo — real, though narrow: only a repoPath-cwd session, manager/platform/setup/auditor, bound to a repo
+that is itself a submodule or `--separate-git-dir` checkout; never a worker, whose worktree always has a
+`commondir` file). `resolveLeaseGitDir` and `resolveGitMainCheckoutRootSync` were NOT migrated — each
+genuinely wants different semantics (see their own doc comments): a per-worktree pause-lease file must
+stay in `privateDir` with no commondir indirection, and the main-checkout-root resolver returns a
+different shape (a directory, not a readable-files dir) with its own claude-CLI-mirroring disambiguation.
+`resolveGitDirsSync` and this function (`resolveGitDirs`) must stay byte-identical in behavior —
+`test/gitdirs-sync-async-parity.mjs` asserts this directly across the same fixture matrix.
 
 ## Do not
 
@@ -53,11 +56,12 @@ scope creep for this card.
   this record exists to prevent: a submodule or `--separate-git-dir` canonical repo has no `commondir`
   file BY DESIGN (there is no indirection to follow), and `null` there would make its ref resolution
   permanently fail instead of correctly resolving in `privateDir`.
-- Do not migrate `skills/inject.ts#resolveGitCommonDir`, `vault/versioner.ts#resolveLeaseGitDir`,
-  `git/repo-lock.ts#resolveGitMainCheckoutRootSync`, or `pty/codex-doctrine.ts#resolveGitCommonDirForDoctrine`
-  onto this helper as a side effect of an unrelated change — each has its own call-site-specific
-  behavior (see Design above); a real consolidation needs its own card that audits all four behavioral
-  differences at once, not a drive-by swap.
+- Do not migrate `vault/versioner.ts#resolveLeaseGitDir` or `git/repo-lock.ts#resolveGitMainCheckoutRootSync`
+  onto this helper (or its sync twin) — each has its own call-site-specific behavior (see Design above),
+  already audited once by card 25389c3c and found genuinely different.
+- Do not reintroduce a local gitdir/commondir-walking copy in `skills/inject.ts` or `pty/codex-doctrine.ts`
+  — both now call `git/repo-lock.ts`'s `resolveGitDirsSync` (card 25389c3c); a new local copy would just
+  regrow the exact missing-commondir bug this record exists to prevent.
 - Do not add a `git` subprocess call anywhere in this resolution — it sits on the merged-map/diff-cache
   hot path specifically to avoid one; see `readBaseSha`'s own doc for why a non-`"HEAD"` unresolvable
   base bypasses the cache entirely instead.
@@ -69,3 +73,8 @@ identical to pre-fix behavior), a linked-worktree fixture (gitfile + `commondir`
 relative `gitdir:` forms), and a submodule/`--separate-git-dir` fixture (gitfile, no `commondir`) —
 each proving the merged-map cache invalidates after a simulated new commit (a changed `refs/heads/<branch>`
 sha), plus a packed-refs-only variant resolved through `commonDir`.
+
+Card 25389c3c added: `test/gitdirs-sync-async-parity.mjs` (the same fixture matrix run through both
+`resolveGitDirs` and `resolveGitDirsSync`, asserting identical results), `test/skills-inject-submodule-exclude.mjs`
+(RED-first: a submodule-shaped canonical repo's `.claude/skills` was never excluded before the fix), and
+the equivalent addition to `test/codex-doctrine-injection.mjs` for `AGENTS.md`.

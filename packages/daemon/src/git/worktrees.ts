@@ -5383,11 +5383,17 @@ async function readRefSha(gitDir: string, refName: string): Promise<string | nul
  * is `privateDir`; if it has its own `commondir` file (a linked worktree), `commonDir` resolves from it;
  * otherwise (a submodule or `--separate-git-dir` repo) `commonDir` is `privateDir` itself.
  *
+ * STAYS ASYNC (never wrapped around the sync twin): sits on the merged-map/worker-diff cache hot path,
+ * where this repo's event-loop discipline bans blocking I/O. `git/repo-lock.ts`'s `resolveGitDirsSync` is
+ * the SYNC TWIN, for callers (skills/inject.ts, pty/codex-doctrine.ts) that can't go async — the two must
+ * stay byte-identical in behavior; `test/gitdirs-sync-async-parity.mjs` asserts this directly, and a
+ * future edit to either must update the other. Exported (card 25389c3c) solely so that test can import it.
+ *
  * @decision 472f14d1 — do not change that fallback to `null`: a submodule/`--separate-git-dir` repo has
  * no `commondir` file by design, and `HEAD`/`refs/**`/`packed-refs` all live directly in `privateDir`;
  * `null` would make such a repo's ref resolution permanently fail instead of correctly resolving.
  */
-async function resolveGitDirs(repoPath: string): Promise<{ privateDir: string; commonDir: string } | null> {
+export async function resolveGitDirs(repoPath: string): Promise<{ privateDir: string; commonDir: string } | null> {
   const gitPath = path.join(repoPath, ".git");
   let stat: import("node:fs").Stats;
   try { stat = await fs.promises.stat(gitPath); } catch { return null; }

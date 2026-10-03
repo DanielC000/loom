@@ -707,7 +707,9 @@ const PAUSE_LEASE_FILENAME = "loom-vault-pause.json";
  * `null` when `commitPath` isn't a git repo at all (no `.git` of either shape): there is no lease to
  * write or read, so the caller must skip it rather than create a nested `.git` directory that would
  * make a non-repo path look like a repo to `isGitRepo`-style checks and worktree cleanup (card 40dd6b62).
- * Never creates anything — pure resolution, same shape as `skills/inject.ts`'s `resolveGitCommonDir`.
+ * Never creates anything — pure resolution. DELIBERATELY NOT `git/repo-lock.ts`'s `resolveGitDirsSync`
+ * (card 25389c3c): a pause lease is scoped to THIS checkout's own `privateDir`, never indirected through a
+ * linked worktree's `commonDir` — the lease must not leak across worktrees sharing one common git dir.
  *
  * Resolves `commitPath` to its git TOPLEVEL first (`resolveGitToplevelSync`, shared with
  * `canonicalRepoLockKey`), rather than statting `<commitPath>/.git` directly: a GitWriter op's own

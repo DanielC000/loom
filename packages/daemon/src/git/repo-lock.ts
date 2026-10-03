@@ -100,6 +100,44 @@ export function canonicalRepoLockKey(repoPath: string): string {
 }
 
 /**
+ * Resolve the two git-dir roles `repoPath`'s `.git` entry actually implies, fs-only sync, no `git` spawn —
+ * the SYNC TWIN of `git/worktrees.ts`'s `resolveGitDirs` (that one stays async: it sits on the merged-map/
+ * worker-diff cache hot path, where this repo's event-loop discipline bans blocking I/O — see
+ * `CLAUDE.md`'s python-venv section). `privateDir` is where THIS checkout's own per-checkout files live
+ * (`HEAD`, `index`, `logs/HEAD`); `commonDir` is where SHARED refs live (`refs/**`, `packed-refs`).
+ *
+ * `.git` a DIRECTORY: both roles are that same directory. `.git` a FILE (`gitdir: <path>`): that target is
+ * `privateDir`; if it has its own `commondir` file (a linked worktree), `commonDir` resolves from it;
+ * otherwise (a submodule or `--separate-git-dir` repo) `commonDir` is `privateDir` itself.
+ *
+ * Both functions must stay byte-identical in behavior — `test/gitdirs-sync-async-parity.mjs` runs the same
+ * fixture matrix through both and asserts identical results; a future edit to either must update the
+ * other, or that test goes red.
+ *
+ * @decision 472f14d1 — do not change the missing-`commondir` fallback to `null`: a submodule/
+ * `--separate-git-dir` repo has no `commondir` file by design, and `null` would make resolution
+ * permanently fail instead of correctly resolving in `privateDir`.
+ */
+export function resolveGitDirsSync(repoPath: string): { privateDir: string; commonDir: string } | null {
+  const gitPath = path.join(repoPath, ".git");
+  let stat: fs.Stats;
+  try { stat = fs.statSync(gitPath); } catch { return null; }
+  if (stat.isDirectory()) return { privateDir: gitPath, commonDir: gitPath };
+  let pointer: string;
+  try { pointer = fs.readFileSync(gitPath, "utf8"); } catch { return null; }
+  const m = pointer.match(/^gitdir:\s*(.+?)\s*$/m);
+  if (!m || !m[1]) return null; // not the `gitdir: <path>` shape every real .git FILE has
+  const privateDir = path.resolve(repoPath, m[1]);
+  try { fs.statSync(path.join(privateDir, "HEAD")); } catch { return null; } // bad pointer target
+  try {
+    const commondirRaw = fs.readFileSync(path.join(privateDir, "commondir"), "utf8").trim();
+    return { privateDir, commonDir: path.resolve(privateDir, commondirRaw) };
+  } catch {
+    return { privateDir, commonDir: privateDir }; // submodule / --separate-git-dir: no indirection
+  }
+}
+
+/**
  * Resolve the git MAIN WORKING TREE root for `bp` — the directory holding a real `.git` DIRECTORY, never
  * a linked worktree's own root. This is DELIBERATELY DIFFERENT from {@link resolveGitToplevelSync}'s
  * TOPLEVEL: for an ordinary repo the two agree, but for a LINKED WORKTREE the toplevel is the worktree's
@@ -114,17 +152,20 @@ export function canonicalRepoLockKey(repoPath: string): string {
  * Walk: start at `resolveGitToplevelSync(bp)` (same existence-tolerant ancestor walk, inclusive, up to the
  * nearest `.git` entry). If that `.git` is a real DIRECTORY, the toplevel itself IS the main checkout. If
  * it is a FILE (a linked worktree or submodule pointer, `gitdir: <path>`), follow it to its own private
- * dir and that dir's `commondir` file (mirrors `git rev-parse --git-common-dir`, same resolution
- * `skills/inject.ts`'s local `resolveGitCommonDir` already performs for a different purpose) to the shared
- * common `.git` path. If that common path's basename IS `.git`, return ITS PARENT (the ordinary
- * `<repo>/.git/worktrees/<name>` layout). Otherwise — a bare repo or a `--separate-git-dir` repo, whose
- * git directory can be named anything — return the common path ITSELF, UNLESS `<commonDir>/.git` itself
- * exists, in which case return the WORKTREE's own toplevel instead (the common-dir indirection landed on
- * an ordinary working-tree root, not a true independent git dir). This mirrors the installed `claude`
- * CLI's own equivalent branch (`he(c)!==".git" ? (Ne(_(c,".git"),c) ? e : Nn(c)) : dirname(c)` in its
- * decompiled bundle — card `17237fba` fixed the basename branch after finding it unconditionally returned
- * the parent instead; card `6f52c3f5` (Code Review `24e5a263`) added the `<commonDir>/.git` guard, whose
- * triggering layout could not be reproduced via plain `git` commands — see
+ * dir and that dir's `commondir` file (mirrors `git rev-parse --git-common-dir`, the same resolution
+ * {@link resolveGitDirsSync} performs for a different purpose — NOT reused here: this function's return
+ * value is a CHECKOUT ROOT directory with its own basename-is-`.git`/nested-`.git` disambiguation below,
+ * not a readable-files dir, and it falls back to the toplevel rather than the private dir on a missing
+ * `commondir` — see card 25389c3c, which audited this against resolveGitDirsSync and declined to merge it)
+ * to the shared common `.git` path. If that common path's basename IS `.git`, return ITS PARENT (the
+ * ordinary `<repo>/.git/worktrees/<name>` layout). Otherwise — a bare repo or a `--separate-git-dir` repo,
+ * whose git directory can be named anything — return the common path ITSELF, UNLESS `<commonDir>/.git`
+ * itself exists, in which case return the WORKTREE's own toplevel instead (the common-dir indirection
+ * landed on an ordinary working-tree root, not a true independent git dir). This mirrors the installed
+ * `claude` CLI's own equivalent branch (`he(c)!==".git" ? (Ne(_(c,".git"),c) ? e : Nn(c)) : dirname(c)` in
+ * its decompiled bundle — card `17237fba` fixed the basename branch after finding it unconditionally
+ * returned the parent instead; card `6f52c3f5` (Code Review `24e5a263`) added the `<commonDir>/.git`
+ * guard, whose triggering layout could not be reproduced via plain `git` commands — see
  * `test/repo-lock-subdir-toplevel.mjs`'s own fixture comment for the manually-crafted `commondir` pointer
  * used to exercise it); see docs/decisions/37310431-loom-home-write-deny.md § "ROUND 2 FIX" for the
  * citation. The CLI's own walk additionally verifies the private worktree dir sits directly under
