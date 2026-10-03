@@ -184,8 +184,19 @@ function writeRollout(conversationId, cwd, mtimeMs) {
     `captured=${JSON.stringify(captured)}`);
 }
 
-// --- Scenario B: REGRESSION GUARD — a resume spawn must NOT receive an exclusion set, and must still
-// correctly re-discover its OWN pre-existing rollout file. -------------------------------------------------
+// --- Scenario B: REGRESSION GUARD — a resume spawn must NOT receive an exclusion set, and its own
+// conversation id must be correct. -------------------------------------------------------------------------
+//
+// UPDATED (card 60aff555): this used to assert the resumed id was re-DISCOVERED via the capture scan (the
+// SAME `findConversationIdForSpawn` rescan a fresh spawn uses) — but that scan runs with NO sibling
+// exclusion on the resume path (this card's own finding: a sibling codex session's rollout file, written
+// into the same cwd with a fresher mtime, could be wrongly adopted instead). The fix seeds
+// `CodexLive.engineSessionId` directly from the already-known `opts.resumeId` at spawn time instead, which
+// makes `captureCodexEngineSessionId`'s own `if (live.engineSessionId || !live.alive) return;` guard skip
+// the scan ENTIRELY for a resume — so `onEngineSessionId` now correctly never fires for a resume at all.
+// See `codex-resume-engine-id-sibling-isolation.mjs` for the dedicated sibling-collision coverage; this
+// scenario stays here only as the narrower "resume still ends up with the right id, exclusion still null"
+// regression guard its own section header already promised.
 {
   const cwd = "/fake/codex/cwd-resume-no-exclusion";
   const resumedId = "resumed-conversation-id";
@@ -198,20 +209,29 @@ function writeRollout(conversationId, cwd, mtimeMs) {
   const sinceMs = live?.startedAt ?? null;
 
   check("(B) a RESUME spawn's excludeEngineSessionIds is null — never excludes its own pre-existing file", live?.excludeEngineSessionIds === null);
+  check("(B) a RESUME spawn's engineSessionId is seeded directly from opts.resumeId, synchronously at spawn — no scan needed",
+    live?.engineSessionId === resumedId, `live.engineSessionId=${live?.engineSessionId}`);
 
-  // Land a fresh write on the resumed file (mirrors a resume session appending on wake) so the discovery
-  // scan's own mtime>=sinceMs-tolerance filter is satisfied, same as production.
+  // Land a fresh write on the resumed file (mirrors a resume session appending on wake) — kept from the
+  // original fixture so this scenario still exercises the ready-marker path end to end, even though the
+  // capture it used to wait on no longer runs.
   const resumedFile = path.join(dayDirFor(tmpCodexHome), `rollout-2026-09-08T00-00-00-${resumedId}.jsonl`);
   const freshMs = sinceMs + 5;
   fs.utimesSync(resumedFile, freshMs / 1000, freshMs / 1000);
 
   fakePty.push(`codex TUI booted\n${READY}\n`);
   await waitUntil(
-    () => engineSessionIdEvents.some((e) => e.sessionId === sessionId),
-    { label: "(B) a resume spawn still re-discovers its own pre-existing conversation id" },
+    () => live?.engineSessionIdCaptureAttempted === true,
+    { label: "(B) the resume's onData handler runs its one-shot capture-attempt branch (ready marker seen)" },
   );
-  const captured = engineSessionIdEvents.find((e) => e.sessionId === sessionId);
-  check("(B) the resumed session's own id is correctly captured (unaffected by the new exclusion mechanism)", captured?.engineId === resumedId);
+  // `findConversationIdForSpawn` is a plain synchronous scan with no async scheduling of its own — so by
+  // the time the wait above resolves, `captureCodexEngineSessionId`'s early return (id already known) has
+  // already run, in the SAME tick. No further wait is needed to assert the (now permanently) final state.
+  check("(B) no onEngineSessionId event fires for a resume — the scan never runs because the id was already known",
+    !engineSessionIdEvents.some((e) => e.sessionId === sessionId),
+    `events=${JSON.stringify(engineSessionIdEvents.filter((e) => e.sessionId === sessionId))}`);
+  check("(B) the resumed session's own id is still correct after the ready marker (unaffected by the new exclusion mechanism)",
+    live?.engineSessionId === resumedId);
 }
 
 // --- Scenario C: ORDERING-SENSITIVE PROOF (code review [4]) — the whole "by construction" argument rests

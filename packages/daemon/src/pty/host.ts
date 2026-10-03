@@ -5608,7 +5608,10 @@ export class PtyHost {
       kind: "codex", pty, pid: pty.pid, cwd: opts.cwd, geometry: opts.geometry,
       hookToken: "", // codex has no hook relay — never checked (mirrors shell/canned's own convention)
       mcpToken,
-      engineSessionId: null,
+      // @decision 60aff555 — seeds from opts.resumeId for a resume (never fork), closing a sibling-
+      // collision scan race; rests on an UNVERIFIED premise (codex resume keeps the same conversation id)
+      // — if wrong, this id goes permanently stale: stale transcript reads, future resumes fail hard.
+      engineSessionId: isCodexResumeSpawn ? opts.resumeId! : null,
       excludeEngineSessionIds,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
