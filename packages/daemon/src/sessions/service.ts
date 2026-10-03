@@ -2733,6 +2733,17 @@ export class SessionService {
     return this.resolveCodescapeInjectionStatus(project).text;
   }
 
+  // @decision f900237d — forcePlain is correct for a role-null row ONLY when the agent's CURRENT
+  // profile would itself confer a spawnable role; see the decision record for why (a role-null row has
+  // more than one legitimate cause). Reuses resolveProfile + PROFILE_SPAWNABLE_ROLES; never re-derive.
+  private profileConfersSpawnableRole(agent: Agent): boolean {
+    if (!agent.profileId) return false;
+    const profile = this.db.getProfile(agent.profileId);
+    if (!profile) return false;
+    const resolved = resolveProfile(agent, profile);
+    return resolved.role != null && PROFILE_SPAWNABLE_ROLES.has(resolved.role);
+  }
+
   // @decision 547d5fc4 — profile-driven spawn resolution is fully additive: profileId===null is
   // byte-identical to before; an explicit caller role ALWAYS wins over the profile's role. Never
   // re-resolve the profile's skills subset on resume/fork/recycle — read the PINNED value off the row.
@@ -3839,10 +3850,13 @@ export class SessionService {
     // withRolePermissionModeCyclesPin(config.permission, session.role), keyed off the row's PINNED role
     // (not the deleted agent's profile) — never fall back to bare config.permission alone.
     //
-    // @decision f900237d — never pass `session.role ?? undefined` to resolveAgentSpawn alone for a
-    // row pinned to plain; also pass forcePlain, or a profile-conferred role silently widens permission/mode.
+    // @decision f900237d — forcePlain a role-null row ONLY when its profile would itself confer a
+    // spawnable role (profileConfersSpawnableRole); a role-null row can also be a legitimate
+    // profile-less/clamped-role start, which must keep its allowDelta on resume.
     const agent = this.db.getAgent(session.agentId);
-    const resolvedSpawn = agent ? this.resolveAgentSpawn(agent, config, session.role ?? undefined, session.role === null) : undefined;
+    const resolvedSpawn = agent
+      ? this.resolveAgentSpawn(agent, config, session.role ?? undefined, session.role === null && this.profileConfersSpawnableRole(agent))
+      : undefined;
     if (forcedRoleFreshStart) {
       return this.resumeForcedRoleAsFreshClaude(session, project, config, agent, resolvedSpawn);
     }
@@ -6974,11 +6988,11 @@ export class SessionService {
     // is the source row's role (carried onto the fork below). Model is DELIBERATELY omitted — like
     // resume, --fork-session inherits the source transcript's model. Agent-missing (deleted) ⇒ fall back
     // to bare config.permission so the fork still works.
-    // @decision f900237d — never pass `src.role ?? undefined` to resolveAgentSpawn alone for a source
-    // pinned to plain; also pass forcePlain, or a profile-conferred role silently widens permission/mode.
+    // @decision f900237d — forcePlain a role-null source row ONLY when its profile would itself confer
+    // a spawnable role (profileConfersSpawnableRole); see resume()'s identical reasoning above.
     const agent = this.db.getAgent(session.agentId);
     const forkPermission = agent
-      ? this.resolveAgentSpawn(agent, config, src.role ?? undefined, src.role === null).permission
+      ? this.resolveAgentSpawn(agent, config, src.role ?? undefined, src.role === null && this.profileConfersSpawnableRole(agent)).permission
       : config.permission;
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
