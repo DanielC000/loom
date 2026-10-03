@@ -107,10 +107,13 @@ so a throw there IS caught here. Actually DISPATCHING that nudge to an orchestra
 long since returned, so this per-entry try/catch structurally cannot and does not cover it.
 
 This guard also does NOT cover a dead DB, by design: `recordEntryCrash` itself calls
-`captureFailureDetail`, whose `this.db.getSession(e.sessionId)` is unguarded. A throw there escapes
-`recordEntryCrash` uncaught — it has no try of its own; it IS the catch handler — and from there escapes
-`resumeFleetOnBoot` entirely. Not re-guarded: a genuinely dead DB is unrecoverable regardless of how many
-try/catch layers wrap it, so an extra layer here would just relocate where the escape happens, not
+`captureFailureDetail`, whose `this.db.getSession(e.sessionId)` is unguarded, AND (card `c5415a04`) its
+own parent-nudge condition, `isParked(e.parentSessionId)`, which likewise calls `this.db.getSession`
+bare — a second, independent unguarded call inside the SAME catch handler, not merely the same call
+repeated. A throw from either escapes `recordEntryCrash` uncaught — it has no try of its own; it IS the
+catch handler — and from there escapes `resumeFleetOnBoot` entirely. Not re-guarded: a genuinely dead DB
+is unrecoverable regardless of how many try/catch layers wrap it, so an extra layer here would just
+relocate where the escape happens, not
 prevent it.
 
 ## Do not (2)

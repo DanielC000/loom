@@ -869,6 +869,94 @@ try {
   check("(8vi) the Lead's identified nudge names the failed session", !!failureMsg8vi);
   check("(8vi) the Lead's identified nudge carries the sanitized failure reason (DoD-2 RED assertion)",
     !!failureMsg8vi && /session not found/i.test(failureMsg8vi));
+
+  // ============================ (9) AGGREGATE FILED ON EVERY REQUESTER OUTCOME (card c5415a04) ============
+  // Before this card, the fleet_resume_failed aggregate fired ONLY inside the requester-resumed-and-
+  // unparked branch — so a requester that itself failed ordinarily (9i) or was parked (9ii), with another
+  // entry ALSO failing, left that other failure with no fleet-wide owner at all.
+
+  // (9i) The requester's OWN resumeOne call returns {ok:false} (an ordinary failure, not a crash), while
+  // a DIFFERENT entry also fails. RED before the fix: no fleet_resume_failed event at all under d9i.mgr.
+  const D9i = { proj: `rf-D9i-${sfx}`, agent: `rf-D9i-ag-${sfx}` };
+  mkProject(D9i.proj, "/tmp/rf-D9i"); mkAgent(D9i.agent, D9i.proj);
+  const d9i = { mgr: `rf-D9i-mgr-${sfx}`, dead: `rf-D9i-dead-${sfx}` };
+  mkSession({ id: d9i.mgr, projId: D9i.proj, agentId: D9i.agent, role: "manager" });
+  mkSession({ id: d9i.dead, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, busy: false });
+  const pty9i = new PtyStub();
+  const sessions9i = new SessionService(db, pty9i, new OrchestrationControl());
+  const result9i = sessions9i.resumeFleetOnBoot(
+    { reason: "deploy", managerSessionId: d9i.mgr, requestedAt: now, resume: [
+      { sessionId: d9i.mgr, role: "manager", parentSessionId: null },
+      { sessionId: d9i.dead, role: "worker", parentSessionId: id.mgrB, busy: false },
+    ] },
+    { resumeOne: (sid) => sid === d9i.mgr ? { ok: false, reason: "session has no engine id to resume" } : false, deployStaleness: CLEAN_STALENESS },
+  );
+  await flush();
+  check("(9i) the requester itself is counted as failed", result9i.failed.includes(d9i.mgr));
+  check("(9i) the OTHER entry is also counted as failed", result9i.failed.includes(d9i.dead));
+  check("(9i) the requester gets NO nudge at all (it never resumed, nothing to nudge)", pty9i.getPending(d9i.mgr).length === 0);
+  const agg9i = db.listEvents(d9i.mgr).filter((ev) => ev.kind === "fleet_resume_failed");
+  check("(9i) the aggregate IS filed (the fix) — count 2, both identities present", agg9i.length === 1 &&
+    agg9i[0].detail?.count === 2 &&
+    agg9i[0].detail.failed.some((f) => f.sessionId === d9i.mgr && f.reason === "session has no engine id to resume") &&
+    agg9i[0].detail.failed.some((f) => f.sessionId === d9i.dead));
+
+  // (9ii) The requester is PARKED (rate-limited), while a DIFFERENT entry fails. The park must still be
+  // honored (zero messages to the parked requester), but the aggregate must now ALSO fire, and a live
+  // Lead must still be notified — none of that depended on the requester's own park state.
+  const D9ii = { proj: `rf-D9ii-${sfx}`, agent: `rf-D9ii-ag-${sfx}` };
+  mkProject(D9ii.proj, "/tmp/rf-D9ii"); mkAgent(D9ii.agent, D9ii.proj);
+  const d9ii = { mgr: `rf-D9ii-mgr-${sfx}`, dead: `rf-D9ii-dead-${sfx}` };
+  mkSession({ id: d9ii.mgr, projId: D9ii.proj, agentId: D9ii.agent, role: "manager", parkedUntil: future });
+  mkSession({ id: d9ii.dead, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, busy: false });
+  const pty9ii = new PtyStub();
+  const sessions9ii = new SessionService(db, pty9ii, new OrchestrationControl());
+  const result9ii = sessions9ii.resumeFleetOnBoot(
+    { reason: "deploy", managerSessionId: d9ii.mgr, requestedAt: now, resume: [
+      { sessionId: d9ii.mgr, role: "manager", parentSessionId: null },
+      { sessionId: d9ii.dead, role: "worker", parentSessionId: id.mgrB, busy: false },
+    ] },
+    { resumeOne: (sid) => sid === d9ii.dead ? { ok: false, reason: "session not found" } : true, deployStaleness: CLEAN_STALENESS },
+  );
+  await flush();
+  check("(9ii) the requester IS in skippedParked (park honored)", result9ii.skippedParked.includes(d9ii.mgr));
+  check("(9ii) the requester gets ZERO messages — park honored, no nudge pushed into its cap", pty9ii.getPending(d9ii.mgr).length === 0);
+  const agg9ii = db.listEvents(d9ii.mgr).filter((ev) => ev.kind === "fleet_resume_failed");
+  check("(9ii) the aggregate IS filed (the fix) — count 1, the OTHER entry's identity present", agg9ii.length === 1 &&
+    agg9ii[0].detail?.count === 1 && agg9ii[0].detail.failed.some((f) => f.sessionId === d9ii.dead));
+  // Minor-5 (round 2): the comment above claims "a live Lead must still be notified" — d2.lead (from 8ii)
+  // is still live in this shared `db`, and nothing in this scenario touches it, so assert the claim
+  // instead of just stating it.
+  const leadMsgs9ii = pty9ii.getPending(d2.lead);
+  const failureMsg9ii = leadMsgs9ii.find((m) => m.includes("[loom:fleet-resume-failure]") && m.includes(d9ii.dead));
+  check("(9ii) the live Lead IS notified despite the requester being parked (Minor-5)", !!failureMsg9ii);
+
+  // (9iii) The requester IS a retired recycle successor (card c5415a04: "the requester is gone"), while a
+  // DIFFERENT entry fails. Minor-4 (round 2): the OLD record claimed no test seam exists for
+  // `retiredRecycleSuccessorIds` without driving the whole recycle-settle machinery — FALSE. It is
+  // TypeScript-`private` only at the type level; at runtime it's an ordinary Set property, so a plain
+  // .mjs test can set it directly. The aggregate must still fire, exactly once.
+  const D9iii = { proj: `rf-D9iii-${sfx}`, agent: `rf-D9iii-ag-${sfx}` };
+  mkProject(D9iii.proj, "/tmp/rf-D9iii"); mkAgent(D9iii.agent, D9iii.proj);
+  const d9iii = { mgr: `rf-D9iii-mgr-${sfx}`, dead: `rf-D9iii-dead-${sfx}` };
+  mkSession({ id: d9iii.mgr, projId: D9iii.proj, agentId: D9iii.agent, role: "manager" });
+  mkSession({ id: d9iii.dead, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, busy: false });
+  const pty9iii = new PtyStub();
+  const sessions9iii = new SessionService(db, pty9iii, new OrchestrationControl());
+  sessions9iii.retiredRecycleSuccessorIds.add(d9iii.mgr);
+  const result9iii = sessions9iii.resumeFleetOnBoot(
+    { reason: "deploy", managerSessionId: d9iii.mgr, requestedAt: now, resume: [
+      { sessionId: d9iii.mgr, role: "manager", parentSessionId: null },
+      { sessionId: d9iii.dead, role: "worker", parentSessionId: id.mgrB, busy: false },
+    ] },
+    { resumeOne: (sid) => sid === d9iii.dead ? { ok: false, reason: "session not found" } : true, deployStaleness: CLEAN_STALENESS },
+  );
+  await flush();
+  check("(9iii) the requester is retiredSkipped (the retired-successor exclusion)", result9iii.retiredSkipped.includes(d9iii.mgr));
+  check("(9iii) the requester gets ZERO messages (retired, never resumed, nothing to nudge)", pty9iii.getPending(d9iii.mgr).length === 0);
+  const agg9iii = db.listEvents(d9iii.mgr).filter((ev) => ev.kind === "fleet_resume_failed");
+  check("(9iii) the aggregate IS filed exactly once — the OTHER entry's identity present", agg9iii.length === 1 &&
+    agg9iii[0].detail?.count === 1 && agg9iii[0].detail.failed.some((f) => f.sessionId === d9iii.dead));
 } finally {
   db.close();
   for (const repo of repoRoots) {

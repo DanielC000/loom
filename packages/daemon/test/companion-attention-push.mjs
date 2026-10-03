@@ -802,6 +802,48 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   cleanupEnv(e);
 }
 
+// --- 27. Card c5415a04: fleet_resume_entry_failed — resumeFleetOnBoot's per-entry sibling of
+//     fleet_resume_failed. Gated on `detail.resumeFailed`, NEVER on matching `detail.reason`'s free
+//     text — a GENUINE resume failure (resumeFailed:true) alerts as worker-crashed; a resumed-but-
+//     nudge-not-delivered entry (resumeFailed:false) is a live, healthy session and must NOT alert. ---
+{
+  check("classify: fleet_resume_entry_failed(resumeFailed:true) → worker-crashed (genuine failure)",
+    classify("fleet_resume_entry_failed", { role: "worker", reason: "unexpected error during resume", resumeFailed: true }) === "worker-crashed");
+  check("classify: fleet_resume_entry_failed(resumeFailed:false) → null (resumed, nudge just didn't deliver — not a crash)",
+    classify("fleet_resume_entry_failed", { role: "worker", reason: "resumed, but its continuation nudge could not be delivered", resumeFailed: false }) === null);
+  check("classify: fleet_resume_entry_failed with resumeFailed omitted entirely → null (fail-closed, never infer from reason text)",
+    classify("fleet_resume_entry_failed", { role: "worker", reason: "unexpected error during resume" }) === null);
+
+  const line = alertLine(
+    { id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", workerSessionId: "wkr-87654321", taskId: "task-aaaaaaaa", kind: "fleet_resume_entry_failed", detail: { role: "worker", reason: "unexpected error during resume", resumeFailed: true } },
+    "worker-crashed", "Proj Z",
+  );
+  check("fleet_resume_entry_failed alert line: names the project, the role, the worker id + task, and the reason",
+    line.includes("Proj Z") && line.includes("worker entry failed to resume") && line.includes("w:wkr-8765") && line.includes("task:task-aaa") && line.includes("unexpected error during resume"));
+  // A missing/malformed detail degrades to a bare role fallback + no reason suffix, never throws.
+  const lineNoDetail = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "fleet_resume_entry_failed", detail: {} }, "worker-crashed", "Proj Z");
+  check("fleet_resume_entry_failed alert line: a missing role/reason degrades to 'plain', never throws",
+    lineNoDetail.includes("plain entry failed to resume") && !lineNoDetail.includes("undefined"));
+}
+
+// --- 28. END-TO-END (card c5415a04): a real fleet_resume_entry_failed event with resumeFailed:true pushes
+//     a turn; the resumeFailed:false sibling (a healthy, resumed entry) must NOT push anything at all. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["worker-crashed"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "fleet_resume_entry_failed", e.mgrA, { role: "worker", reason: "unexpected error during resume", resumeFailed: true }, { workerSessionId: "wkr-e2e-crashed1" });
+  e.watcher.tick(new Date());
+  check("e2e: a genuine fleet_resume_entry_failed(resumeFailed:true) event pushes exactly one turn", e.enqueued.length === 1);
+  check("e2e: framed [loom:alert]", e.enqueued.length === 1 && e.enqueued[0].text.startsWith(ALERT_TAG));
+  check("e2e: the pushed turn identifies the worker entry + its failure", e.enqueued.length === 1 &&
+    e.enqueued[0].text.includes("worker entry failed to resume") && e.enqueued[0].text.includes("wkr-e2e-"));
+
+  fire(e, "fleet_resume_entry_failed", e.mgrA, { role: "worker", reason: "resumed, but its continuation nudge could not be delivered", resumeFailed: false }, { workerSessionId: "wkr-e2e-healthy1" });
+  e.watcher.tick(new Date());
+  check("e2e: a resumeFailed:false fleet_resume_entry_failed event pushes NOTHING (it is a healthy, resumed session)", e.enqueued.length === 1);
+  cleanupEnv(e);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead, and a late-resolved manager/Lead recycle (recycle_fleet_resolved) reaches the same human surface as its unresolved sibling instead of being silently dropped."
   : `\n❌ ${failures} FAILURE(S).`);

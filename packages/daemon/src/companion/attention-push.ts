@@ -138,6 +138,14 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // receive a direct nudge, and no platform-role session may exist to receive a Lead-only notice.
     case "manager_crash_resume_failed":
       return "worker-crashed";
+    // Card c5415a04: the per-entry sibling of `fleet_resume_failed` above — gated on `detail.resumeFailed`
+    // (set by `recordEntryCrash`, sessions/service.ts), NEVER on matching `detail.reason`'s free text,
+    // which is free to keep changing wording. `resumeFailed:true` means a GENUINE resume failure; `false`
+    // means the entry actually resumed and only its continuation nudge failed to compose/deliver — that
+    // case is already a live, healthy session (its manager gets a targeted worker_message prompt instead,
+    // via the parent-nudge text) and must never alert as "crashed".
+    case "fleet_resume_entry_failed":
+      return detail?.resumeFailed === true ? "worker-crashed" : null;
     // Card e07b1b1a: a manager/platform recycle whose successor died before SessionStart — the fleet was
     // either recovered back onto the (still-live) predecessor or left in an unresolved state; either way
     // this is the same "unexpected fleet-ownership fault, human should know" shape as fleet_resume_failed.
@@ -356,6 +364,16 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
     case "session_rate_limited":
       line = `${projectName}: usage limit reached, parked — s:${e.managerSessionId.slice(0, 8)}`;
       break;
+    // Card c5415a04: only reaches alertLine at all when classify() returned non-null, i.e.
+    // detail.resumeFailed===true (a genuine per-entry resume failure) — never the resumed-but-nudge-
+    // not-delivered case. Same id-before-truncatable-reason discipline as fleet_resume_failed above.
+    case "fleet_resume_entry_failed": {
+      const roleStr = typeof detail.role === "string" ? detail.role : "plain";
+      const reasonSuffix3 = typeof detail.reason === "string" && detail.reason
+        ? ` (${truncateText(detail.reason, ALERT_RESUME_REASON_MAX_CHARS)})` : "";
+      line = `${projectName}: ${roleStr} entry failed to resume after a restart — ${who}${reasonSuffix3}`;
+      break;
+    }
     // Card e07b1b1a: named explicitly as a MANAGER/PLATFORM recycle failure, never as "worker crashed" —
     // reusing the worker-crashed CLASS (above) is fine, but this event's own subject is the predecessor
     // manager/Lead named by managerSessionId, not a worker.

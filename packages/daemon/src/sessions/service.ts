@@ -5647,8 +5647,12 @@ export class SessionService {
         `${resumeOk ? "it was already resumed; only its continuation nudge is affected" : "skipping it"}, ` +
         `continuing with the rest of the fleet: ${(err as Error)?.message ?? err}`,
       );
+      // Card c5415a04 (e): renamed from "...could not be composed" — the companion/human-facing wording
+      // now matches the parent-nudge text below, even though the per-entry guard technically only ever
+      // catches a SYNCHRONOUS composition throw (see 09e9ba29's own scope-correction note) — "delivered"
+      // reads better to a human than "composed" and is the wording both texts now share.
       const reason = resumeOk
-        ? "resumed, but its continuation nudge could not be composed"
+        ? "resumed, but its continuation nudge could not be delivered"
         : RESUME_UNKNOWN_REASON_FALLBACK;
       if (!resumeOk) {
         failed.push(e.sessionId);
@@ -5661,7 +5665,11 @@ export class SessionService {
           workerSessionId: e.parentSessionId ? e.sessionId : undefined,
           taskId: e.parentSessionId ? (this.db.getSession(e.sessionId)?.taskId ?? null) : undefined,
           kind: "fleet_resume_entry_failed",
-          detail: { role: e.role, reason },
+          // Card c5415a04 (DoD-2): `resumeFailed` is the explicit discriminator classify() (attention-push.ts)
+          // gates on — true only for a GENUINE resume failure, false for the resumed-but-nudge-not-delivered
+          // case. Never infer this from matching `reason`'s text — that string is free to keep changing
+          // wording (see the rename above) without silently flipping this field.
+          detail: { role: e.role, reason, resumeFailed: !resumeOk },
         });
       } catch (appendErr) {
         console.warn(`[restart] appendEvent(fleet_resume_entry_failed) failed for ${e.sessionId.slice(0, 8)}: ${(appendErr as Error)?.message ?? appendErr}`);
@@ -5674,9 +5682,15 @@ export class SessionService {
           const parentRole = this.db.getSession(e.parentSessionId)?.role ?? "manager";
           this.enqueueDurableNudge(
             e.parentSessionId, parentRole,
-            `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} One of your workers (${e.sessionId}) hit an ` +
-            `unexpected error while being resumed after this restart and may not be fully resumed — check ` +
-            `worker_list for its state.`,
+            // Card c5415a04 (a): when resumeOk is true, the worker DID resume — say so, and point the
+            // manager at the one concrete action (worker_message), instead of the genuine-failure wording
+            // ("may not be fully resumed — check worker_list") which no longer applies to this case.
+            resumeOk
+              ? `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} One of your workers (${e.sessionId}) was ` +
+                `resumed, but its continuation nudge was not delivered — send it a specific worker_message.`
+              : `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} One of your workers (${e.sessionId}) hit an ` +
+                `unexpected error while being resumed after this restart and may not be fully resumed — check ` +
+                `worker_list for its state.`,
           );
         } catch (nudgeErr) {
           console.warn(`[restart] resumeFleetOnBoot: failed to notify parent ${e.parentSessionId.slice(0, 8)} about entry ${e.sessionId.slice(0, 8)}'s crash: ${(nudgeErr as Error)?.message ?? nudgeErr}`);
@@ -5988,17 +6002,104 @@ export class SessionService {
     const reqEntry: RestartResumeEntry = entries.find((e) => e.sessionId === reqId) ??
       { sessionId: reqId, role: this.db.getSession(reqId)?.role ?? "manager", parentSessionId: null };
     let reqResumeOk = false;
+    // @decision c5415a04 — file `fleet_resume_failed` (+ Lead notification) on EVERY requester outcome
+    //  (ok, parked, failed, retired, or crashed), never only the resumed-and-unparked branch.
+    let aggregateFiled = false;
+    let cachedLeadNotified = false;
+    let cachedLeadOwnFailureDetail: string | null = null;
+    const fileFleetResumeFailedAggregate = (): { leadNotified: boolean; leadOwnFailureDetail: string | null } => {
+      if (aggregateFiled || failed.length === 0) {
+        return { leadNotified: cachedLeadNotified, leadOwnFailureDetail: cachedLeadOwnFailureDetail };
+      }
+      aggregateFiled = true;
+      // Card 9e4205f5: a durable, ONE-per-restart aggregate event — the human-facing owner of a
+      // fleet-resume failure in EVERY configuration, not just when a (LOOM_DEV-only) platform Lead
+      // happens to be live. Filed under `reqId` (a manager/platform session that always exists)
+      // regardless of the `liveLead` branch below, which is unchanged: this is an ADDITIVE backstop,
+      // never a replacement for the identified Lead nudge when one IS live. Full cross-project
+      // identity in `detail` is deliberate — see the kind's own doc in shared/src/types.ts.
+      try {
+        this.db.appendEvent({
+          id: randomUUID(), ts: now.toISOString(), managerSessionId: reqId, kind: "fleet_resume_failed",
+          detail: { count: failed.length, failed: failedDetail },
+        });
+      } catch (appendErr) {
+        console.warn(`[restart] appendEvent(fleet_resume_failed) failed: ${(appendErr as Error)?.message ?? appendErr}`);
+      }
+      try {
+        // Card 8457d0ed (DoD-3 sweep, mirrors e79e2956): exclude a session with a live successor — a
+        // recycling predecessor stays "live" until its successor settles, so a bare scan here could
+        // notify the about-to-retire predecessor of this fleet-resume failure instead of its successor.
+        const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live" && !this.db.hasSuccessor(s.id));
+        if (liveLead) {
+          // Card 06aa82a7: carry the already-sanitized (normalizeResumeOneResult/RESUME_KNOWN_SAFE_REASONS)
+          // failure reason into the Lead's own line — `d.reason` never a re-captured raw error (see the
+          // card's HARD DEPENDENCY on ee05750e's B1 allowlist).
+          const detailLines = failedDetail.map((d) =>
+            `project ${d.projectId ?? "unknown"} / session ${d.sessionId} / role ${d.role ?? "plain"}` +
+            `${d.taskId ? ` / task ${d.taskId}` : ""} — ${d.wasBusy ? "BUSY at capture (work may have been in flight)" : "idle at capture"}` +
+            `${d.reason ? ` (${d.reason})` : ""}`,
+          );
+          const failureNoticeText =
+            `${failed.length} session(s) elsewhere in the fleet failed to resume after this restart. You are ` +
+            `the only party with cross-project reach (list_all_sessions) to investigate: ${detailLines.join("; ")}.`;
+          if (liveLead.id === reqId) {
+            // The Lead IS the requester — fold the detail straight into its own reqText below instead
+            // of sending it a redundant second nudge (only reachable when the requester also resumed ok
+            // and unparked; on any other requester outcome the detail is simply never consumed).
+            cachedLeadOwnFailureDetail = failureNoticeText;
+          } else {
+            this.enqueueDurableNudge(liveLead.id, "platform", `[loom:fleet-resume-failure] ${failureNoticeText}`);
+          }
+          cachedLeadNotified = true;
+        }
+      } catch (leadErr) {
+        console.warn(`[restart] fleet-resume-failure Lead notification failed: ${(leadErr as Error)?.message ?? leadErr}`);
+      }
+      return { leadNotified: cachedLeadNotified, leadOwnFailureDetail: cachedLeadOwnFailureDetail };
+    };
+    // Card c5415a04 (d): set once the real "code is live" nudge is actually enqueued, so the catch
+    // block's fallback self-nudge below never double-sends if the crash happened AFTER that point.
+    let reqNudgeSent = false;
+    // Round 2 Minor-2: set ONLY right after `isParked(reqId)` has actually returned `false` — never
+    // inferred from `reqResumeOk`/`reqNudgeSent` alone. If `isParked` itself throws, this stays `false`
+    // and the catch block's fallback below must not fire: the requester might genuinely BE parked, and a
+    // thrown park-check is not evidence it isn't — sending any nudge at all in that case would push a
+    // turn into a parked cap the park exists to prevent.
+    let reqParkCheckedFalse = false;
     try {
     if (isRetired(reqId)) {
       // Round 5 nit: distinct from an ordinary resume failure — do NOT also push to `failed` (the final
       // `else` below is what handles a genuine `resumeOne` failure; this is a different, counted outcome).
+      // Card c5415a04: "the requester is gone" — still goes through the SAME aggregate closure below, so
+      // another entry's genuine failure isn't silently unowned just because the requester itself was a
+      // retired recycle successor.
       retiredSkipped.push(reqId);
-    } else if (normalizeResumeOneResult(resumeOne(reqId)).ok) {
-      resumed.push(reqId);
-      reqResumeOk = true;
+    } else {
+      const reqAttempt = normalizeResumeOneResult(resumeOne(reqId));
+      if (reqAttempt.ok) {
+        resumed.push(reqId);
+        reqResumeOk = true;
+      } else {
+        // Card c5415a04 (DoD-1): capture the real reason for the requester's OWN ordinary resume failure —
+        // previously dropped entirely (`failed.push(reqId)` with nothing in `failedDetail`).
+        failed.push(reqId);
+        failedDetail.push(captureFailureDetail(reqEntry, reqAttempt.reason));
+      }
+    }
+    // Card c5415a04 (DoD-1): file the aggregate (+ Lead notification) as soon as the requester's own
+    // outcome is known, regardless of whether it resumed, failed, or was retired-skipped — BEFORE the
+    // throw-prone text composition below, so a later crash doesn't skip it. `leadNotified`/
+    // `leadOwnFailureDetail` here are consumed by the success+unparked branch's own text below; on any
+    // other outcome they're simply unused (no text is built to fold them into).
+    const { leadNotified, leadOwnFailureDetail } = fileFleetResumeFailedAggregate();
+    if (reqResumeOk) {
       if (isParked(reqId)) {
         skippedParked.push(reqId);
       } else {
+        // Round 2 Minor-2: only now has `isParked` actually returned `false` — this is what the catch
+        // block's fallback gate below requires before it may ever fire.
+        reqParkCheckedFalse = true;
         replayPending(reqId);
         const reqWorkersResumed = reqWorkers.filter((id) => resumed.includes(id)).length;
         const reqDraftNote = entries.find((e) => e.sessionId === reqId)?.hadUnsentDraft ? DRAFT_LOSS_NOTE : "";
@@ -6015,45 +6116,6 @@ export class SessionService {
         // zero-failure case, keeping today's wording byte-identical; named otherwise.
         const fleetOk = failed.length === 0;
         // @decision 5a9a963b — a manager requester's fleet-resume-failure notice gets at most a count + "the Lead has been notified", NEVER cross-project session identity; the Lead alone gets the full detail.
-        let leadNotified = false;
-        let leadOwnFailureDetail: string | null = null;
-        if (!fleetOk) {
-          // Card 9e4205f5: a durable, ONE-per-restart aggregate event — the human-facing owner of a
-          // fleet-resume failure in EVERY configuration, not just when a (LOOM_DEV-only) platform Lead
-          // happens to be live. Filed under `reqId` (a manager/platform session that always exists)
-          // regardless of the `liveLead` branch below, which is unchanged: this is an ADDITIVE backstop,
-          // never a replacement for the identified Lead nudge when one IS live. Full cross-project
-          // identity in `detail` is deliberate — see the kind's own doc in shared/src/types.ts.
-          this.db.appendEvent({
-            id: randomUUID(), ts: now.toISOString(), managerSessionId: reqId, kind: "fleet_resume_failed",
-            detail: { count: failed.length, failed: failedDetail },
-          });
-          // Card 8457d0ed (DoD-3 sweep, mirrors e79e2956): exclude a session with a live successor — a
-          // recycling predecessor stays "live" until its successor settles, so a bare scan here could
-          // notify the about-to-retire predecessor of this fleet-resume failure instead of its successor.
-          const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live" && !this.db.hasSuccessor(s.id));
-          if (liveLead) {
-            // Card 06aa82a7: carry the already-sanitized (normalizeResumeOneResult/RESUME_KNOWN_SAFE_REASONS)
-            // failure reason into the Lead's own line — `d.reason` never a re-captured raw error (see the
-            // card's HARD DEPENDENCY on ee05750e's B1 allowlist).
-            const detailLines = failedDetail.map((d) =>
-              `project ${d.projectId ?? "unknown"} / session ${d.sessionId} / role ${d.role ?? "plain"}` +
-              `${d.taskId ? ` / task ${d.taskId}` : ""} — ${d.wasBusy ? "BUSY at capture (work may have been in flight)" : "idle at capture"}` +
-              `${d.reason ? ` (${d.reason})` : ""}`,
-            );
-            const failureNoticeText =
-              `${failed.length} session(s) elsewhere in the fleet failed to resume after this restart. You are ` +
-              `the only party with cross-project reach (list_all_sessions) to investigate: ${detailLines.join("; ")}.`;
-            if (liveLead.id === reqId) {
-              // The Lead IS the requester — fold the detail straight into its own reqText below instead
-              // of sending it a redundant second nudge.
-              leadOwnFailureDetail = failureNoticeText;
-            } else {
-              this.enqueueDurableNudge(liveLead.id, "platform", `[loom:fleet-resume-failure] ${failureNoticeText}`);
-            }
-            leadNotified = true;
-          }
-        }
         const fleetParenthetical = fleetOk
           ? `the rest of the fleet across all projects was resumed too`
           : leadNotified
@@ -6103,19 +6165,62 @@ export class SessionService {
             `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote + reqCapNote;
         // Card fde10c75: the SAME `deployStaleness` this method already computed for `liveClaim` above —
         // not a fresh read, so the two can never disagree with each other on the same nudge.
+        // Round 2 Minor-2: set BEFORE the call, not after — for an immediate-dispatch (non-orchestration-
+        // MCP) requester, `enqueueDurableNudge` can persist the durable row and then throw on its own
+        // dispatch; setting the flag only after a clean return would leave it `false` on that throw, and
+        // the catch block's fallback below would then send a SECOND, contradictory "composing your
+        // confirmation failed" nudge on top of a message that's already queued/persisted.
+        reqNudgeSent = true;
         this.enqueueDurableNudge(reqId, reqRole, reqText + this.buildStampSuffix(deployStaleness));
+        // Card c5415a04 (b): reworded — this only proves the `enqueueDurableNudge` CALL has returned, not
+        // that delivery happened. For a manager/platform recipient (`usesOrchestrationMcp`) that call's
+        // own dispatch is still asynchronous (`waitForMcpSeen().then(dispatch)`), so a SHA can still be
+        // marked delivered slightly before the recipient's pty actually receives it — an accepted,
+        // deliberately NOT closed residual (closing it would mean threading that promise all the way back
+        // out of `enqueueDurableNudge`, which every other call site here also relies on staying fire-and-
+        // forget). What this ordering DOES still guarantee: a throw between the old earlier call site and
+        // this one no longer marks a SHA delivered with no nudge even requested.
         // @decision 5907b71e — the requester's nudge always names the reason, so record its SHA too.
-        // @decision 066d317c — recorded only AFTER the nudge above has actually been enqueued (moved
-        // here, round 2 — a throw between the old earlier call site and the enqueue would have marked
-        // this SHA delivered with no nudge ever sent).
         this.recordDeployShasDelivered(reqId, reasonShas);
       }
-    } else {
-      failed.push(reqId);
     }
     } catch (err) {
       recordEntryCrash(reqEntry, err, reqResumeOk);
+      // Card c5415a04 (d): the requester has no `parentSessionId` (recordEntryCrash's own parent-nudge
+      // branch above is therefore always a no-op for it), so without this it is left live with NOTHING
+      // injected — no "code is live" text, no per-entry crash notice either, idle until something else
+      // (e.g. the idle watchdog) eventually notices. Fires ONLY when the requester genuinely resumed and
+      // its real nudge was never sent (guarded by `reqNudgeSent`, so this can never double-nudge if the
+      // crash happened AFTER the real nudge already went out, e.g. inside recordDeployShasDelivered).
+      // Best-effort + its own try/catch, same posture as every other notification in this function — if
+      // composing or enqueueing THIS fails too (e.g. a genuinely dead DB), fail silently; never let it
+      // escape and take down the rest of boot-resume with it.
+      // Round 2 Minor-2: also require `reqParkCheckedFalse` — a thrown `isParked(reqId)` leaves that
+      // `false`, and the requester might genuinely be parked; this fallback must never fire on an
+      // unconfirmed park state.
+      if (reqResumeOk && !reqNudgeSent && reqParkCheckedFalse) {
+        try {
+          // Round 2 Minor-6: when the Lead IS the requester, fold its own already-looked-up fleet-resume-
+          // failure detail into this fallback too — `fileFleetResumeFailedAggregate` already ran (before
+          // this crash) and cached it, so the Lead doesn't lose that detail just because composing the
+          // real "code is live" text crashed afterward.
+          this.enqueueDurableNudge(
+            reqId, reqEntry.role,
+            `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed, but an unexpected error ` +
+            `occurred composing your post-restart "code is live" confirmation — verify directly (e.g. check ` +
+            `served_status) whether your merged code is now live, then continue.` +
+            (cachedLeadOwnFailureDetail ? ` ${cachedLeadOwnFailureDetail}` : ""),
+          );
+        } catch (selfNudgeErr) {
+          console.warn(`[restart] resumeFleetOnBoot: failed to send the requester (${reqId.slice(0, 8)}) a fallback self-nudge after its own continuation-nudge composition crashed: ${(selfNudgeErr as Error)?.message ?? selfNudgeErr}`);
+        }
+      }
     }
+    // Card c5415a04 (DoD-1): fallback — covers the one case the in-try call above can never reach:
+    // `resumeOne(reqId)` itself throwing before its outcome is even known, which jumps straight to the
+    // catch block above without ever calling `fileFleetResumeFailedAggregate`. A no-op whenever the first
+    // call already ran (idempotent via `aggregateFiled`) or nothing in the fleet failed.
+    fileFleetResumeFailedAggregate();
 
     return { resumed, skippedParked, failed, retiredSkipped };
   }

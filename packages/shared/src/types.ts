@@ -1640,7 +1640,17 @@ export type OrchestrationEventKind =
   | "parked_manager_workers_unresumed"
   // @decision 09e9ba29 — never let a throw in one resumeFleetOnBoot entry escape uncaught (it would
   // strand every later entry); catch it per-entry and file it HERE under the failed entry's own
-  // identity, never batched like `fleet_resume_failed` — `detail.reason` is always the generic fallback.
+  // identity, never batched like `fleet_resume_failed`.
+  //
+  // Card c5415a04 — `detail.reason` is NOT always the generic fallback: it's `RESUME_UNKNOWN_REASON_FALLBACK`
+  // for a genuine resume failure, or "resumed, but its continuation nudge could not be delivered" when the
+  // entry actually resumed and only the nudge composition/dispatch crashed. `detail.resumeFailed: boolean`
+  // is the explicit discriminator between the two (true only for the former) — classify() (attention-push.ts)
+  // gates its "worker-crashed" mapping on this field, never on matching `reason`'s free text.
+  // Round 2 Minor-3: an `EventTrigger` matches on `kind` ALONE (never on `detail`), so a trigger configured
+  // for this kind fires on EVERY entry, including the resumed-but-nudge-not-delivered (`resumeFailed:false`)
+  // case classify() above deliberately does NOT alert on — unlike attention-push, an event trigger has no
+  // equivalent `resumeFailed` filter.
   | "fleet_resume_entry_failed"
   // Canonical main advanced between a batch worktree being cut and its post-gate fast-forward, so the
   // batch's single gate never validated main's real current tree — abandoned, every candidate falls
@@ -3176,7 +3186,7 @@ export interface PollJob {
 export const EVENT_TRIGGER_EVENT_KINDS = [
   "merge_rejected", "merge_request",
   "worker_stuck", "worktree_vanished", "worker_report", "worker_exited_without_report", "session_recovery_abandoned",
-  "fleet_resume_failed", "manager_crash_resume_failed",
+  "fleet_resume_failed", "manager_crash_resume_failed", "fleet_resume_entry_failed",
   "question_asked", "question_amended", "request_escalated",
   "idle_escalated", "idle_report",
   "context_escalated", "context_blind_turn", "context_emergency_interrupt",
