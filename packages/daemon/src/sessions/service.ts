@@ -3894,10 +3894,17 @@ export class SessionService {
 
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
+    // @decision 819407e4 — initializer-free declaration (live-flip-reconcile-guard.mjs requires it: the
+    // assignment itself happens INSIDE the try, below, so it can't throw uncaught between flip and try).
+    // The `!` is a definite-assignment assertion, not an initializer — TS still sees no `initializer`.
+    let wasArchived!: boolean;
     // Card 6ca4155f: wrapped through pty.spawn so a synchronous throw in this window (restoreSession or
     // createPty itself) reconciles the row to 'exited' instead of leaving it phantom-live — see
     // reconcileFailedSpawn's own doc.
     try {
+      // @decision 819407e4 — captured BEFORE restoreSession clears archived_at; an unconditional
+      // re-archive on failure would wrongly archive a row that was never archived to begin with.
+      wasArchived = session.archivedAt != null;
       // Auto-archive model (card b37750a4): resuming a stopped session CLEARS archived_at, returning it
       // to the live rail (the inverse of auto-archive-on-exit). Cleared HERE, before pty.spawn — so a
       // fast-failing spawn's onExit re-archives it (the M5 ordering above) rather than this clearing a
@@ -3956,6 +3963,12 @@ export class SessionService {
       });
     } catch (e) {
       this.reconcileFailedSpawn(session.id, e);
+      // @decision 819407e4 — restore the archive state restoreSession cleared above, but ONLY when this
+      // row was actually archived before this resume attempt; see the full record for why unconditional
+      // re-archiving is wrong. Best-effort: a DB error here must never mask the original spawn failure.
+      if (wasArchived) {
+        try { this.db.archiveSession(session.id); } catch { /* best-effort — never mask the original spawn failure */ }
+      }
       throw e;
     }
     // @decision 5a56bb0a — a successful spawn proves any prior "dead" stamp wrong (mirrors
