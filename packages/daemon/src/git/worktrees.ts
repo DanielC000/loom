@@ -127,6 +127,25 @@ export interface BoundedGitDeps {
    * resolves) and prove removeWorktree still returns within `timeoutMs` either way.
    */
   removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
+  /**
+   * Card 7e5b23e7 — TEST SEAM ONLY: overrides {@link mergeMainIntoWorktree}'s own dedicated
+   * `UNION_MERGE_TIMEOUT_FLOOR_MS` floor for its two mutating merge calls. Production code never sets
+   * this (so the floor always applies); a test shrinks it to make a real slow-hook repro settle in a
+   * reasonable wall-clock time instead of waiting out the real 45s+ floor on every case.
+   */
+  unionMergeTimeoutFloorMs?: number;
+  /**
+   * Card 7e5b23e7 round 2 — gates {@link mergeMainIntoWorktree}'s own one-bounded-retry (both the plain
+   * union and owed-landing branches) OFF. Defaults to `true` (every existing caller unaffected) except
+   * `reunionAtAdmission`'s own call (sessions/service.ts), which passes `false`: that call runs INSIDE
+   * `runExclusive`, holding a scarce, fleet-shared GateSemaphore slot — a retry there would double the
+   * worst-case time ANY OTHER queued merge on the fleet is blocked behind (recomputed ~195s/attempt,
+   * ~390s for two — see that card's own decision record), for a failure a plain re-confirm can recover
+   * from more cheaply (it just re-queues this op, it doesn't hold the slot). The pre-admission union-merge
+   * call and the inert-reclassification re-union (only a repo-guard-only hold, not a semaphore slot) both
+   * keep the retry, unaffected.
+   */
+  allowRetry?: boolean;
 }
 
 // @decision 0f965ab7 — catch simple-git's synchronous construct throw once, centrally, via this stub
@@ -6152,10 +6171,29 @@ async function hasConfiguredGitIdentity(git: Pick<SimpleGit, "raw">): Promise<bo
 // `owedBase` (card 13fc5227): set ONLY for a HELD (batch-retained) branch, whose earlier commits main already carries as the batch's own cherry-picks. A plain `git merge` would
 // resurrect main's copy of a file the branch's LATE commit deleted, so the union commit's tree is main plus the branch's still-owed COMMITS ({@link computeOwedLanding}), and the
 // ordinary squash that follows lands exactly those. {@link verifyReviewedTipChain}'s `extraUnionBases` accepts a merge built this way.
+//
+// @decision 7e5b23e7 — this floor applies ONLY to the two mutating merge calls below, never the cheap
+// reads elsewhere in this function or the shared per-call `gitOpMs` other callers pass as `timeoutMs`;
+// do not raise 44c28799's file-wide 15s ceiling instead of this dedicated one.
+const UNION_MERGE_TIMEOUT_FLOOR_MS = 45_000;
+
+/** Matches the SHAPE of a `withTimeout`/`withTimeoutKillingChild` timeout rejection ("<label> exceeded
+ *  <n>ms …") regardless of whether a real child was spawned (production) or the test-seam `gitFactory` was
+ *  used (no real child to kill, so `withTimeout` alone produces this shape) — never an ordinary git
+ *  conflict/refusal, whose text is git's own stderr instead. Checked ONLY after {@link treeDeathUnconfirmed}
+ *  has already ruled out the unconfirmed-kill shape (a DIFFERENT, more specific message), so a match here
+ *  always means either "confirmed dead" (a real spawn) or "abandoned, nothing left to confirm" (the test
+ *  seam) — never a still-possibly-alive orphan. */
+const TIMEOUT_SHAPED_RE = /exceeded \d+ms/;
+
 export async function mergeMainIntoWorktree(
-  repoPath: string, worktreePath: string, deps: BoundedGitDeps = {}, owedBase?: string,
-): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string }> {
+  repoPath: string, worktreePath: string, deps: BoundedGitDeps = {}, owedBase?: string, branch?: string,
+): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string; quarantined?: boolean }> {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
+  // @decision 7e5b23e7 — only the two mutating merge calls below use this floor; every other git call in
+  // this function (the cheap reads above/below, and computeOwedLanding's own merge-tree probes) keeps the
+  // plain `timeoutMs` — see this constant's own doc for why.
+  const mergeTimeoutMs = Math.max(timeoutMs, deps.unionMergeTimeoutFloorMs ?? UNION_MERGE_TIMEOUT_FLOOR_MS);
   const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
   const repoGit = makeGit(repoPath, timeoutMs);
   const wtGit = makeGit(worktreePath, timeoutMs);
@@ -6192,64 +6230,244 @@ export async function mergeMainIntoWorktree(
     ? []
     : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
 
+  // @decision 7e5b23e7 — every mutating call below pins `quarantineRepoPath` to the CANONICAL `repoPath`,
+  // never this worktree: a linked worktree shares the canonical repo's hooks dir + object database, so an
+  // orphan here is the same hazard batch-merge.ts's own worktree calls already quarantine canonical for.
+  let raisedToken: string | undefined;
+  const onTreeDeathSettled = (confirmed: boolean): void => {
+    if (confirmed && raisedToken) clearMergeQuarantineByToken(repoPath, raisedToken);
+  };
+  const quarantineLabel = branch ?? `(worktree union-merge: ${path.basename(worktreePath)})`;
+
   if (owedBase) {
     // @decision 13fc5227 — a HELD branch's union is built from the COMMITS it still owes (computeOwedLanding), never from a chosen merge base: the commit is (tip, main) with tree = main + those commits.
     // The commit is made by hand (commit-tree, then a fast-forward of the worktree) because `git merge` cannot produce that tree.
+    let tip: string;
+    let landing: OwedLanding;
+    let commit: string;
     try {
       const wtRaw = (args: string[]) => withTimeout(wtGit.raw(args), timeoutMs, `git ${args[0]} (owed landing)`);
-      const tip = (await wtRaw(["rev-parse", "--verify", "HEAD"])).trim();
-      const landing = await computeOwedLanding(wtRaw, owedBase, tip, mainSha, timeoutMs);
+      tip = (await wtRaw(["rev-parse", "--verify", "HEAD"])).trim();
+      landing = await computeOwedLanding(wtRaw, owedBase, tip, mainSha, timeoutMs);
       if (!landing.ok) return { ok: false, ...(landing.kind === "conflict" ? { conflict: true } : {}), reason: describeOwedFailure(landing) };
       const tipTree = (await wtRaw(["rev-parse", `${tip}^{tree}`])).trim();
       const mainIsAncestor = (await wtRaw(["merge-base", tip, mainSha])).trim() === mainSha;
       if (mainIsAncestor && landing.tree === tipTree) return { ok: true, merged: false, mainSha }; // the branch already IS main plus its owed commits
-      const commit = (await wtRaw([...identityArgs, "commit-tree", landing.tree, "-p", tip, "-p", mainSha, "-m", `Merge main into branch (owed commits over ${owedBase.slice(0, 8)})`])).trim();
-      await wtRaw(["merge", "--ff-only", commit]);
+      commit = (await wtRaw([...identityArgs, "commit-tree", landing.tree, "-p", tip, "-p", mainSha, "-m", `Merge main into branch (owed commits over ${owedBase.slice(0, 8)})`])).trim();
     } catch (e) {
       const d = describeGitFailure(e);
       return { ok: false, reason: d.refusal ? `refused, nothing changed: ${d.text}` : `late-range union of main into the worktree failed: ${d.text}` };
     }
+
+    // `--ff-only` either lands instantly or fails with NO merge in progress (no MERGE_HEAD, no partial
+    // index) — there is no conflict-cleanup step here, only verify-landed (did it land right at the kill
+    // boundary?) and verify-clean (is it safe to retry?).
+    const verifyOwedLanded = async (): Promise<boolean> => {
+      try { return (await withTimeout(wtGit.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (owed landing, verify)")).trim() === commit; }
+      catch { return false; }
+    };
+    const verifyOwedCleanAt = async (expectedHead: string): Promise<boolean> => {
+      try {
+        const head = (await withTimeout(wtGit.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (owed landing, clean-check)")).trim();
+        const dirty = (await withTimeout(wtGit.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (owed landing, clean-check)")).trim();
+        return head === expectedHead && dirty === "";
+      } catch { return false; }
+    };
+
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await killableCanonicalRaw(worktreePath, ["merge", "--ff-only", commit], mergeTimeoutMs, "git merge --ff-only (owed landing)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
+        return { ok: true, merged: true, mainSha };
+      } catch (e) {
+        if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
+        if (treeDeathUnconfirmed(e)) {
+          raisedToken = enterMergeQuarantine(repoPath, quarantineLabel, unconfirmedKillReason("owed-landing fast-forward could not be confirmed dead after a kill"));
+          return { ok: false, quarantined: true, reason: `owed-landing fast-forward's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it: ${(e as Error).message}` };
+        }
+        const d = describeGitFailure(e);
+        const isConfirmedKillTimeout = !d.refusal && TIMEOUT_SHAPED_RE.test(d.text);
+        if (isConfirmedKillTimeout && (await verifyOwedLanded())) return { ok: true, merged: true, mainSha };
+        // Card 7e5b23e7 — ONE bounded retry, gated on all three: (i) a confirmed-kill timeout (never
+        // treeDeathUnconfirmed/a refusal, both already returned above), (ii) verify-landed just said no,
+        // (iii) the worktree is independently verified back at its pre-attempt state.
+        // Card 7e5b23e7 round 2 — `deps.allowRetry === false` (set only by `reunionAtAdmission`'s own
+        // call, which holds a scarce fleet-shared gate slot) skips the retry outright; see BoundedGitDeps.
+        if (deps.allowRetry !== false && isConfirmedKillTimeout && attempt === 1 && (await verifyOwedCleanAt(tip))) {
+          // eslint-disable-next-line no-console
+          console.log(`[union-merge] owed-landing fast-forward timed out (confirmed dead), worktree verified clean — retrying once (${worktreePath})`);
+          continue;
+        }
+        return { ok: false, reason: d.refusal ? `refused, nothing changed: ${d.text}` : `late-range union of main into the worktree failed: ${d.text}` };
+      }
+    }
+  }
+
+  // Plain union producer. `verifyUnionLanded`/the post-abort clean-check below mirror
+  // fastForwardCanonicalMain's own post-failure HEAD re-read (batch-merge.ts) — a hung post-merge hook can
+  // outlive the timeout AFTER the merge commit already landed; re-verify before reporting a false failure.
+  //
+  // Card 7e5b23e7 — deliberately NOT gated on `MERGE_HEAD` absence: VERIFIED directly against real git
+  // (2.47) that `MERGE_HEAD` is still present while `post-merge` itself is running, even though HEAD has
+  // already moved to the real merge commit — checking it here would misreport an already-landed merge as
+  // still mid-merge whenever the kill lands during a slow post-merge hook (exactly the case this check
+  // exists to catch). `merge-base(HEAD, mainSha) === mainSha` alone is the correct, sufficient signal: a
+  // genuinely unfinished/conflicted merge leaves HEAD at its OLD tip, which this can never satisfy.
+  const verifyUnionLanded = async (): Promise<boolean> => {
+    try {
+      return (await withTimeout(wtGit.raw(["merge-base", "HEAD", mainSha]), timeoutMs, "git merge-base (verify landed)")).trim() === mainSha;
+    } catch { return false; }
+  };
+  const verifyWorktreeCleanAt = async (expectedHead: string): Promise<boolean> => {
+    let mergeHeadPresent = false;
+    try {
+      mergeHeadPresent = (await withTimeout(wtGit.raw(["rev-parse", "-q", "--verify", "MERGE_HEAD"]), timeoutMs, "git rev-parse MERGE_HEAD (post-abort clean-check)")).trim() !== "";
+    } catch { /* absent, as expected after a clean abort */ }
+    if (mergeHeadPresent) return false;
+    try {
+      const head = (await withTimeout(wtGit.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (post-abort clean-check)")).trim();
+      const dirty = (await withTimeout(wtGit.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (post-abort clean-check)")).trim();
+      return head === expectedHead && dirty === "";
+    } catch { return false; }
+  };
+  let preAttemptHead: string | undefined;
+  try {
+    preAttemptHead = (await withTimeout(wtGit.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (pre-merge)")).trim();
+  } catch { /* best-effort; undefined ⇒ the retry's clean-check below can never be satisfied, so no retry is attempted rather than risk comparing against an unknown baseline */ }
+
+  for (let attempt = 1; ; attempt++) {
+    let mergeThrew = false;
+    let mergeErr = "";
+    let mergeRefused = false;
+    try {
+      await killableCanonicalRaw(worktreePath, [...identityArgs, "merge", "--no-edit", mainSha], mergeTimeoutMs, "git merge main into worktree", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
+    } catch (e) {
+      if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
+      if (treeDeathUnconfirmed(e)) {
+        raisedToken = enterMergeQuarantine(repoPath, quarantineLabel, unconfirmedKillReason("git merge main into worktree could not be confirmed dead after a kill"));
+        return { ok: false, quarantined: true, reason: `git merge main into worktree's process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it: ${(e as Error).message}` };
+      }
+      mergeThrew = true; // a conflict OR a real failure — the explicit checks below decide which
+      const d = describeGitFailure(e); // surfaced in the reason: a canonicalGit refusal (unblankable merge driver) must not read as a bare "failed"
+      mergeErr = d.text;
+      mergeRefused = d.refusal;
+    }
+
+    const isConfirmedKillTimeout = mergeThrew && !mergeRefused && TIMEOUT_SHAPED_RE.test(mergeErr);
+    if (isConfirmedKillTimeout && (await verifyUnionLanded())) {
+      // @decision 7e5b23e7 — a kill during a slow `post-merge` hook can leave MERGE_HEAD/MERGE_MSG/
+      // MERGE_MODE/AUTO_MERGE behind after a landed merge; clear with `--quit` ONLY when they provably
+      // belong to THIS merge, never some other, unrelated in-progress one.
+      // @decision 7e5b23e7 round 3 — tri-state read: a read failure (e.g. a timeout) is never "absent".
+      const readMergeHead = async (): Promise<{ state: "absent" } | { state: "present"; sha: string } | { state: "unreadable"; error: string }> => {
+        try {
+          const out = (await withTimeout(wtGit.raw(["rev-parse", "-q", "--verify", "MERGE_HEAD"]), timeoutMs, "git rev-parse MERGE_HEAD (post-kill cleanup check)")).trim();
+          return out === "" ? { state: "absent" } : { state: "present", sha: out };
+        } catch (e) { return { state: "unreadable", error: (e as Error).message }; }
+      };
+      const mergeHeadRead = await readMergeHead();
+      if (mergeHeadRead.state === "unreadable") {
+        // Same rule as the `--quit` failure below: never silently report ok:true over something we could
+        // not actually confirm — a failed read is not evidence of absence.
+        return { ok: false, reason: `union merge landed but MERGE_HEAD could not be read to confirm whether cleanup is needed: ${mergeHeadRead.error}` };
+      }
+      if (mergeHeadRead.state === "absent") return { ok: true, merged: true, mainSha }; // the common case: nothing left to clean up
+      const mergeHeadSha = mergeHeadRead.sha;
+      if (mergeHeadSha === mainSha) {
+        let headSecondParent: string | undefined;
+        try {
+          const out = (await withTimeout(wtGit.raw(["rev-parse", "-q", "--verify", "HEAD^2"]), timeoutMs, "git rev-parse HEAD^2 (post-kill cleanup check)")).trim();
+          headSecondParent = out === "" ? undefined : out;
+        } catch { /* unreadable — leave MERGE_HEAD in place rather than guess; the re-check below still fires */ }
+        if (headSecondParent === mainSha) {
+          try {
+            await killableCanonicalRaw(worktreePath, ["merge", "--quit"], timeoutMs, "git merge --quit (post-kill MERGE_HEAD cleanup)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
+          } catch (e) {
+            if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
+            if (treeDeathUnconfirmed(e)) {
+              raisedToken = enterMergeQuarantine(repoPath, quarantineLabel, unconfirmedKillReason("post-kill MERGE_HEAD cleanup (merge --quit) could not be confirmed dead after a kill"));
+              return { ok: false, quarantined: true, reason: `post-kill MERGE_HEAD cleanup (merge --quit)'s process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it: ${(e as Error).message}` };
+            }
+            // @decision 7e5b23e7 — deliberately NOT swallowed: silently reporting ok:true with MERGE_HEAD
+            // still present would reinstate the bug this fix closes. Fall through to the re-check below.
+          }
+        }
+      }
+      // @decision 7e5b23e7 — MERGE_HEAD is only safe to call "cleared" once re-verified absent; a leftover
+      // here means the NEXT mergeMainIntoWorktree call would hit "You have not concluded your merge" —
+      // report that now, loudly, instead of a false ok:true.
+      const mergeHeadAfterRead = await readMergeHead();
+      if (mergeHeadAfterRead.state === "unreadable") {
+        return { ok: false, reason: `union merge landed but could not confirm MERGE_HEAD was cleared afterward: ${mergeHeadAfterRead.error}` };
+      }
+      if (mergeHeadAfterRead.state === "present") {
+        return { ok: false, reason: `union merge landed but its in-progress merge state (MERGE_HEAD) could not be cleared: MERGE_HEAD still present (${mergeHeadAfterRead.sha.slice(0, 8)})` };
+      }
+      return { ok: true, merged: true, mainSha };
+    }
+
+    let conflicted: boolean;
+    try {
+      conflicted = (await withTimeout(wtGit.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (worktree)")).trim() !== "";
+    } catch (e) {
+      // Can't even determine the merge state — fail closed rather than assert a false "clean".
+      return { ok: false, reason: `failed to inspect worktree merge state: ${(e as Error).message}` };
+    }
+
+    if (conflicted) {
+      try {
+        await killableCanonicalRaw(worktreePath, ["merge", "--abort"], timeoutMs, "git merge --abort (worktree)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
+      } catch (e) {
+        if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, conflict: true, reason: `conflict cleanup (merge --abort) refused — canonical repo is quarantined: ${e.message}` };
+        if (treeDeathUnconfirmed(e)) {
+          raisedToken = enterMergeQuarantine(repoPath, quarantineLabel, unconfirmedKillReason("conflict cleanup (merge --abort) could not be confirmed dead after a kill"));
+          return { ok: false, quarantined: true, conflict: true, reason: `conflict cleanup (merge --abort)'s process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it: ${(e as Error).message}` };
+        }
+        return { ok: false, conflict: true, reason: `conflict cleanup (merge --abort) failed — worktree may have unmerged residue: ${(e as Error).message}` };
+      }
+      return { ok: false, conflict: true };
+    }
+    if (mergeThrew) {
+      // Symmetric with the conflict cleanup above: `merge --abort` also resets the working tree, and
+      // additionally clears a stale MERGE_HEAD if the errored merge happened to leave one (a plain
+      // `reset --hard HEAD` would not) — `git merge --abort` is a no-op error when there's nothing to
+      // abort, so its failure here is swallowed exactly like the conflict path's own best-effort intent,
+      // UNLESS it's itself a quarantine-worthy outcome (already-quarantined, or a fresh unconfirmed kill).
+      let abortQuarantined = false;
+      let abortQuarantineReason = "";
+      try {
+        await killableCanonicalRaw(worktreePath, ["merge", "--abort"], timeoutMs, "git merge --abort (worktree)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
+      } catch (e) {
+        if (e instanceof RepoQuarantinedError) { abortQuarantined = true; abortQuarantineReason = e.message; }
+        else if (treeDeathUnconfirmed(e)) {
+          raisedToken = enterMergeQuarantine(repoPath, quarantineLabel, unconfirmedKillReason("post-failure cleanup (merge --abort) could not be confirmed dead after a kill"));
+          abortQuarantined = true;
+          abortQuarantineReason = `post-failure cleanup (merge --abort)'s process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it: ${(e as Error).message}`;
+        }
+        /* otherwise best-effort, as before: expected when there's nothing to abort */
+      }
+      if (abortQuarantined) return { ok: false, quarantined: true, reason: abortQuarantineReason };
+      if (mergeRefused) return { ok: false, reason: `refused, nothing changed: ${mergeErr}` };
+
+      // Card 7e5b23e7 — ONE bounded retry, gated on all three: (i) a confirmed-kill timeout, (ii)
+      // verify-landed already said no (checked above), (iii) the worktree is independently verified back
+      // at ITS OWN pre-attempt HEAD (never racing whatever the abort may or may not have cleaned up).
+      // Card 7e5b23e7 round 2 — `deps.allowRetry === false` (set only by `reunionAtAdmission`'s own
+      // call, which holds a scarce fleet-shared gate slot) skips the retry outright; see BoundedGitDeps.
+      if (deps.allowRetry !== false && isConfirmedKillTimeout && attempt === 1 && preAttemptHead !== undefined && (await verifyWorktreeCleanAt(preAttemptHead))) {
+        // eslint-disable-next-line no-console
+        console.log(`[union-merge] git merge main into worktree timed out (confirmed dead), worktree verified clean after abort — retrying once (${worktreePath})`);
+        continue;
+      }
+      // @decision 7e5b23e7 — a confirmed-kill timeout reaching here may be a kill during `pre-merge-commit`
+      // that left STAGED merge content with no MERGE_HEAD (so `merge --abort` above had nothing to act
+      // on) — name that possibility rather than a bare "failed".
+      const residueNote = isConfirmedKillTimeout
+        ? " (a confirmed-kill timeout here can leave staged, uncommitted merge content in the worktree with no MERGE_HEAD to abort — merge --abort had nothing to act on; inspect/reset the worktree before retrying)"
+        : "";
+      return { ok: false, reason: (mergeErr ? `git merge main into worktree failed: ${mergeErr}` : "git merge main into worktree failed") + residueNote };
+    }
     return { ok: true, merged: true, mainSha };
   }
-
-  let mergeThrew = false;
-  let mergeErr = "";
-  let mergeRefused = false;
-  try {
-    await withTimeout(wtGit.raw([...identityArgs, "merge", "--no-edit", mainSha]), timeoutMs, "git merge main into worktree");
-  } catch (e) {
-    mergeThrew = true; // a conflict OR a real failure — the explicit checks below decide which
-    const d = describeGitFailure(e); // surfaced in the reason: a canonicalGit refusal (unblankable merge driver) must not read as a bare "failed"
-    mergeErr = d.text;
-    mergeRefused = d.refusal;
-  }
-
-  let conflicted: boolean;
-  try {
-    conflicted = (await withTimeout(wtGit.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (worktree)")).trim() !== "";
-  } catch (e) {
-    // Can't even determine the merge state — fail closed rather than assert a false "clean".
-    return { ok: false, reason: `failed to inspect worktree merge state: ${(e as Error).message}` };
-  }
-
-  if (conflicted) {
-    try {
-      await withTimeout(wtGit.raw(["merge", "--abort"]), timeoutMs, "git merge --abort (worktree)");
-    } catch (e) {
-      return { ok: false, conflict: true, reason: `conflict cleanup (merge --abort) failed — worktree may have unmerged residue: ${(e as Error).message}` };
-    }
-    return { ok: false, conflict: true };
-  }
-  if (mergeThrew) {
-    // Symmetric with the conflict cleanup above: `merge --abort` also resets the working tree, and
-    // additionally clears a stale MERGE_HEAD if the errored merge happened to leave one (a plain
-    // `reset --hard HEAD` would not) — `git merge --abort` is a no-op error when there's nothing to
-    // abort, so its failure here is swallowed exactly like the conflict path's own best-effort intent.
-    try { await withTimeout(wtGit.raw(["merge", "--abort"]), timeoutMs, "git merge --abort (worktree)"); } catch { /* best-effort cleanup */ }
-    if (mergeRefused) return { ok: false, reason: `refused, nothing changed: ${mergeErr}` };
-    return { ok: false, reason: mergeErr ? `git merge main into worktree failed: ${mergeErr}` : "git merge main into worktree failed" };
-  }
-  return { ok: true, merged: true, mainSha };
 }
 
 /**

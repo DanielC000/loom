@@ -18,9 +18,20 @@ Originally this re-derivation covered the main endpoint only; card `db413510` la
 
 The proof, as of the third assignment: `gateRan = !reuseResult` first; then, inside `if (gate)`, `if (inertSkip) gateRan = false;`; then, ONLY inside that same inert-diff-skip branch, this card's own post-guard reclassification can set `gateRan = true` again — but only in the same code path that also resets `inertSkip = false` alongside it (falling through to a real gate requires both flips together). The third assignment therefore re-widens `gateRan` in LOCKSTEP with `inertSkip` being reset, never independently: `gateRan === true` at the squash call iff BOTH `reuseResult` was falsy AND `inertSkip` was falsy at that point, regardless of which of the three assignments last set it — exactly the condition under which the gate's `runExclusive(...)` branch was actually evaluated. `gateRan` remains a precise, structural proxy for "this call reached `runExclusive` at least once": never true for the REUSE path, never true for an INERT-DIFF SKIP that stayed inert, never true for a GATELESS project/repo.
 
+## Round 2 (card `7e5b23e7`) — the `git merge` sub-step's own bound is no longer `gitOpMs`
+
+`mergeMainIntoWorktree`'s own mutating merge call (invoked here via the reap-then-reunion path) no longer
+shares the caller's plain `gitOpMs` timeout: card `7e5b23e7` gave it a dedicated floor
+(`UNION_MERGE_TIMEOUT_FLOOR_MS = 45_000`, `Math.max(timeoutMs, that floor)`) plus one bounded retry gated on
+a confirmed-kill timeout — see `docs/decisions/7e5b23e7-kill-confirm-worker-worktree-union-merge.md` for the
+full mechanism and worst-case arithmetic (~180s for that one sub-step alone, not the 15s this record
+originally cited). The reap and `git diff` steps here are unaffected and remain bounded by `gitOpMs`. The
+"Do not" bullet below is corrected accordingly — re-derive the `git merge` sub-step's own bound from that
+record, not from this one, if `UNION_MERGE_TIMEOUT_FLOOR_MS` or the retry policy changes again.
+
 ## Do not
 
-- Do not assume a repo-guard-only hold settles near-instantly when reasoning about queue wait — since card `ac7aad04`, a holder can run a real reap + `git merge` + `git diff` while holding it, measured ~1.5s typical, bounded by `gitOpMs` (15s default) worst-case.
+- Do not assume a repo-guard-only hold settles near-instantly when reasoning about queue wait — since card `ac7aad04`, a holder can run a real reap + `git merge` + `git diff` while holding it; the reap/diff stay bounded by `gitOpMs` (15s default), but since card `7e5b23e7` the `git merge` sub-step (`mergeMainIntoWorktree`) is bounded by its OWN dedicated floor instead (45s, plus one bounded retry — see that card's own record for the worst case).
 - Do not assume the post-guard re-derivation `ac7aad04` introduced covers only `gateBaseMainHead` — since `db413510`, it also re-derives the branch tip; skipping the branch check would let a same-repo sibling's stale main-only proof ride through a branch that moved during the wait.
 - Do not "simplify" `gateRan`'s three assignment sites into one, or restate their count, without re-verifying the invariant above by reading the actual sites — this exact comment has already rotted twice (once → twice → three times).
 

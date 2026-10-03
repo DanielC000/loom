@@ -758,6 +758,11 @@ type ConfirmMergeResult = {
   gateOwedRefusal?: boolean;
   /** Card bbccf470: refused BEFORE any gate/union/squash because the branch tip moved after the manager's last worker_merge review (classified `"reviewed-tip-moved"`, never cached — a re-review changes the answer). */
   reviewedTipMoved?: boolean;
+  /** Card 7e5b23e7: set on a union-merge (pre-gate) rejection caused by `mergeMainIntoWorktree` raising —
+   *  or hitting an already-raised — canonical-repo quarantine (an unconfirmed-kill after a timeout on one
+   *  of its own mutating merge calls). Distinct from an ordinary `union_conflict`/`union_merge_failed`:
+   *  the canonical repo refuses EVERY merge until a human clears it, not just this one. */
+  quarantined?: boolean;
   /** Card 344ce950 (bounded multi-file since card 67030bb9): the bare name(s) of the test file(s) this
    *  merge's gate retried together in isolation before reaching this verdict (see gate-runner.ts's
    *  `identifyRetriableTestFiles`) — `undefined` when no such retry fired (the overwhelming majority of
@@ -2171,8 +2176,12 @@ class GateWorktreeDirtyError extends Error {
 
 class AdmissionReunionFailedError extends Error {
   constructor(
-    public readonly failReason: "union_conflict_at_admission" | "union_merge_failed_at_admission",
+    public readonly failReason: "union_conflict_at_admission" | "union_merge_failed_at_admission" | "union_merge_quarantined_at_admission",
     public readonly why: string,
+    // Card 7e5b23e7: set only for the quarantined case — the canonical repo now refuses EVERY merge until
+    // a human clears it, not just this one. Carried separately from `why` (this op's own operation-specific
+    // reason) so the handler can append the repo-wide remedy text without hand-writing it.
+    public readonly quarantined?: boolean,
   ) {
     super(`admission-time re-union failed (${failReason}): ${why}`);
     this.name = "AdmissionReunionFailedError";
@@ -15286,7 +15295,9 @@ export class SessionService {
       if (!quarantineCheck.ok) {
         const { suppressed, sha } = await rejectNotify("quarantined", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${quarantineCheck.reason}`);
         evt("merge_rejected", { reason: "quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: quarantineCheck.reason, notified: !suppressed, opId: thisOpId, gateRan: false };
+        // @decision 7e5b23e7 — `quarantined:true` here (previously omitted) so `classifyOutcome` routes
+        // this through "quarantined" (NEVER_CACHED_OUTCOMES), not a plain cached "rejected".
+        return { merged: false, reason: quarantineCheck.reason, notified: !suppressed, opId: thisOpId, gateRan: false, quarantined: true };
       }
     }
 
@@ -15775,8 +15786,19 @@ export class SessionService {
       // Card 13fc5227: a HELD branch (owedBase set) is never "already landed" as a whole — its late range is still owed, so it must not take the already-landed shortcut.
       const preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs });
       if (!preLanded) {
-        const union = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs }, owedBase);
+        const union = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs }, owedBase, branch);
         if (!union.ok) {
+          // Card 7e5b23e7: a quarantine raised (or already in force) by the union-merge's own kill-confirm
+          // is NOT an ordinary union failure — the canonical repo now refuses EVERY merge until a human
+          // clears it. Reuse `assertRepoNotQuarantined`'s own text for that repo-wide remedy (never
+          // hand-write it here) rather than reporting only this op's own operation-specific reason.
+          if (union.quarantined) {
+            const quarantineCheck = assertRepoNotQuarantined(repoPath);
+            const detailText = `${union.reason ?? "union-merge raised a canonical-repo quarantine"}${quarantineCheck.ok ? "" : ` ${quarantineCheck.reason}`}; squash phase never reached, canonical repo untouched, worktree retained.`;
+            const { suppressed, sha } = await rejectNotify("union_merge_quarantined", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+            evt("merge_rejected", { reason: "union_merge_quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
+            return { merged: false, reason: union.reason, detailText, notified: !suppressed, opId: thisOpId, quarantined: true };
+          }
           const why = union.conflict ? (union.reason ?? "branch conflicts with current main — rebase/resolve before merge") : (union.reason ?? "union merge failed");
           const failReason = union.conflict ? "union_conflict" : "union_merge_failed";
           // Card 522cf573 DoD 4: squash phase never reached — the union-merge (a pre-gate step) failed
@@ -16136,7 +16158,7 @@ export class SessionService {
               } catch {
                 // Best-effort, same guard as every other reap call in this method.
               }
-              const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs }, owedBase);
+              const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs }, owedBase, branch);
               if (reunion.ok) {
                 // Keep `gateBaseMainHead` current regardless of the inert verdict below: if this ends up
                 // NOT provably inert, the real-gate path's own `reunionAtAdmission` reads this value and
@@ -16144,6 +16166,15 @@ export class SessionService {
                 // union a second time.
                 reclassifyBase = reunion.mainSha;
                 gateBaseMainHead = reunion.mainSha;
+              } else if (reunion.quarantined) {
+                // @decision 7e5b23e7 — do NOT fall through to the real gate on a quarantine here: that
+                // burns a full gate lane before the squash's own entry check refuses anyway. Return the
+                // same quarantined rejection shape the pre-gate union-merge uses, immediately.
+                const quarantineCheck = assertRepoNotQuarantined(repoPath);
+                const detailText = `${reunion.reason ?? "re-union raised a canonical-repo quarantine"}${quarantineCheck.ok ? "" : ` ${quarantineCheck.reason}`}; squash phase never reached, canonical repo untouched, worktree retained.`;
+                const { suppressed, sha } = await rejectNotify("union_merge_quarantined", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+                evt("merge_rejected", { reason: "union_merge_quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
+                return { merged: false, reason: reunion.reason, detailText, notified: !suppressed, opId: thisOpId, quarantined: true };
               } else {
                 // Conflict or a real git failure — do NOT try to resolve it here. Fall through to "not
                 // provably inert" below and let the ordinary real-gate path's own `reunionAtAdmission`
@@ -16451,17 +16482,18 @@ export class SessionService {
       // can before the first attempt — the same staleness gap, the same fix, applied uniformly rather than
       // leaving the retry as a silent asymmetric gap.
       //
-      // ⚠️ TIMING-PROFILE NOTE FOR `gate_queue`/`idleMs` READERS (card b798e706): this call runs INSIDE the
-      // gate's `runExclusive` slot, BEFORE `runGateSeq` is ever invoked — so a merge gate's live registry
-      // entry can now show `phase:"running"` with `idleMs` already growing (no gate-step output has been
-      // produced yet) for a short window right after admission. This is EXPECTED, not a wedge: the window
-      // is bounded by nothing more than this function's own git subprocess calls (one `rev-parse`, and — on
-      // the branch where main actually moved — one `merge`), nowhere near `gateCommandTimeoutMs` or
-      // `GATE_EXTEND_IDLE_MS`'s auto-extend threshold. Before this card, a merge/deploy gate's callback
-      // called `runGateSeq` immediately on admission (see `gate-idle-liveness.mjs`'s CARD 33aa0291 doc,
-      // written for the analogous — and already-expected — `runWorkerGate` gap this one now mirrors) — a
-      // manager reading `gate_queue`'s `idleMs` to judge "working hard" vs. "hung" on a merge entry should
-      // read a small, early, non-growing-past-a-couple-seconds `idleMs` as this window, not a stall.
+      // ⚠️ TIMING-PROFILE NOTE FOR `gate_queue`/`idleMs` READERS (card b798e706, UPDATED by card 7e5b23e7
+      // round 2 — this paragraph previously understated the bound): this call runs INSIDE the gate's
+      // `runExclusive` slot, BEFORE `runGateSeq` is ever invoked — so a merge gate's live registry entry
+      // can now show `phase:"running"` with `idleMs` already growing (no gate-step output has been
+      // produced yet) for a window right after admission. This is EXPECTED, not a wedge — but since card
+      // 7e5b23e7 the re-union call below is no longer a cheap "one rev-parse, one merge": its two
+      // mutating merge calls are bounded by a dedicated 45s floor plus a kill-grace window, and (per that
+      // card's own record) the recomputed worst case for ONE attempt here (this call passes
+      // `allowRetry:false`, so it never retries) is approximately 195s. A manager reading `gate_queue`'s
+      // `idleMs` on this window should expect it to possibly reach the low minutes before the gate itself
+      // ever starts — only growth well past that bound (and `GATE_EXTEND_IDLE_MS`'s own auto-extend
+      // threshold) without settling should read as a genuine stall, not growth past a couple of seconds.
       //
       // @decision b798e706 — before this, a queued merge ran its full gate against the pre-queue base and
       //  self-aborted at squash time on ANY main movement during the wait, re-paying the entire gate cost.
@@ -16486,11 +16518,15 @@ export class SessionService {
             } catch {
               // Best-effort, same guard as the pre-gate sweep above.
             }
-            const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs }, owedBase);
+            // @decision 7e5b23e7 — `allowRetry:false`: this call holds a scarce, fleet-shared gate slot;
+            // the one-bounded-retry elsewhere in `mergeMainIntoWorktree` would double the worst-case time
+            // every other queued merge on the fleet is blocked behind.
+            const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, allowRetry: false }, owedBase, branch);
             if (!reunion.ok) {
               const why = reunion.conflict
                 ? (reunion.reason ?? "branch conflicts with current main — rebase/resolve before merge")
                 : (reunion.reason ?? "union merge failed");
+              if (reunion.quarantined) throw new AdmissionReunionFailedError("union_merge_quarantined_at_admission", why, true);
               throw new AdmissionReunionFailedError(reunion.conflict ? "union_conflict_at_admission" : "union_merge_failed_at_admission", why);
             }
             gateBaseMainHead = reunion.mainSha;
@@ -16606,6 +16642,17 @@ export class SessionService {
       //  non-conflict failure: only `union_conflict_at_admission` proves that; misattributing the other
       //  reason sends a manager chasing the wrong fix.
       const rejectAdmissionReunionFailure = async (err: AdmissionReunionFailedError): Promise<ConfirmMergeResult> => {
+        // Card 7e5b23e7: the quarantined case is NOT "main advanced, re-confirm once resolved" — the
+        // canonical repo now refuses EVERY merge until a human clears it. Reuse `assertRepoNotQuarantined`'s
+        // own text for that repo-wide remedy (never hand-write it here) rather than this method's ordinary
+        // conflict/non-conflict causation wording below.
+        if (err.quarantined) {
+          const quarantineCheck = assertRepoNotQuarantined(repoPath);
+          const detailText = `${err.why}${quarantineCheck.ok ? "" : ` ${quarantineCheck.reason}`}; squash phase never reached, canonical repo untouched, worktree retained.`;
+          const { suppressed, sha } = await rejectNotify(err.failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+          evt("merge_rejected", { reason: err.failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
+          return { merged: false, reason: err.why, detailText, notified: !suppressed, opId: thisOpId, quarantined: true };
+        }
         const cause = err.failReason === "union_conflict_at_admission"
           ? " (canonical main advanced while this merge waited in the gate queue, and the advance conflicts with this branch's own content — re-confirm once resolved.)"
           : " (an admission-time re-union with canonical main, which had moved during the queue wait, failed for a reason unrelated to a content conflict — see the error above; this may be a transient git/filesystem issue, not necessarily main's advance itself.)";
@@ -20029,7 +20076,11 @@ export class SessionService {
         //
         // Card 6325bc74 — a `NotYourWorkerError` throw classifies as "not-your-worker", not "unknown": it
         // is a fact about the CALLING MANAGER, a dimension `NEVER_CACHED_OUTCOMES` excludes from caching.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.merged ? "merged" : "rejected"),
+        //
+        // @decision 7e5b23e7 — `quarantined` classifies distinctly from an ordinary "rejected", checked
+        // before the plain merged-else-rejected fallback: a human clearing the quarantine must see a
+        // fresh re-confirm, never a stale cached refusal from before the clear.
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.
