@@ -8,6 +8,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       totalDurationMs === settledAt - admittedAt.
 //   (2) a NORMAL gated batch is unchanged: pass verdict, durationMs = the gate run (not assembly), admissionWaitMs excludes the worktree
 //       cut + assembly, and totalDurationMs still covers cut + assembly + queue + gate.
+//   (3) card 0d372516 round 2, test gap 2(b): a batch whose ASSEMBLY ABORTS early (a candidate's own rollback can't be
+//       verified clean, mirroring batch-merge-rollback-abort.mjs's unit-level (A)/(B)/(C)) must settle gate_status with
+//       its OWN skipReason — "assembly-aborted-rollback-unverified" — never the "all-candidates-dropped" shape (1) above
+//       settles with, and must route EVERY original candidate through the REAL per-candidate solo fallback
+//       (`started:true`), never leave the batch worktree behind for a human (that's `quarantined`'s job, not this one's).
+//       THIS is the SERVICE-level case round 2's Code Review named as the one that would have caught item 1's bug: with
+//       `landed.length > 0` (e/f already landed before g's rollback fails), pre-fix code wrote a BARE settled row —
+//       no verdict, no reason — because `batchAllDropped`'s own `landed.length === 0` test never fires here.
 // Run: 1) pnpm build, 2) node packages/daemon/test/merge-batch-all-dropped-gate-status.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -27,6 +35,8 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
+const { boundedSimpleGit } = await import("../dist/git/bounded.js");
+const { nonInteractiveEnv } = await import("../dist/git/writer.js");
 
 const GIT_ID = "-c user.email=mbag@loom -c user.name=mbag";
 const now = new Date().toISOString();
@@ -89,7 +99,34 @@ try {
     await new Promise((r) => setTimeout(r, GATE_MS)); // TIMING-GUARD-SAFE: a fixed gate duration to size durationMs against, not a negative assertion
     return { passed: true };
   };
-  const svc = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0, syncAttachBudgetMs: 120_000 });
+  // (3)'s own test seam: section (3) alone cuts a candidate whose commit message contains
+  // "rollback-unverified-c" (never any other section's candidates), so gating the throw on that literal
+  // leaves sections (1)/(2) byte-identical. `resetSucceededByPath` is keyed by the git child's OWN
+  // repoPath (the batch worktree a given call targets) rather than one shared flag, so a flag set by one
+  // batch's rollback can never leak into an unrelated later batch's own earlier (pre-rollback) reads —
+  // same hazard `batch-merge-rollback-abort.mjs`'s own per-call `makeProbeThrowsGitFactory()` guards against.
+  const resetSucceededByPath = new Map();
+  const rollbackUnverifiedGitFactory = (repoPath, blockTimeoutMs) => {
+    const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
+    return {
+      raw: async (args) => {
+        if (Array.isArray(args) && args.includes("commit") && args.includes("--author") &&
+            args.some((x) => typeof x === "string" && x.includes("rollback-unverified-c"))) {
+          throw new Error("simulated commit failure (service-level rollback-unverified, section 3)");
+        }
+        if (Array.isArray(args) && args.includes("reset") && args.includes("--hard")) {
+          const out = await real.raw(args); // the REAL reset — succeeds, genuinely clean afterward
+          resetSucceededByPath.set(repoPath, true);
+          return out;
+        }
+        if (resetSucceededByPath.get(repoPath) && args[0] === "rev-parse" && args[1] === "HEAD") {
+          throw new Error("simulated rev-parse HEAD failure (service-level rollback probe, section 3)");
+        }
+        return real.raw(args);
+      },
+    };
+  };
+  const svc = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0, syncAttachBudgetMs: 120_000, batchFfGitFactory: rollbackUnverifiedGitFactory });
 
   // ── (1) ALL-DROPPED batch (same shape as merge-batch-drop-reasons.mjs scenario 1) ──
   const c = await addWorker("res", "shared.txt", "worker version\n");
@@ -140,6 +177,35 @@ try {
   check("(2) admissionWaitMs is queue wait only: it excludes the worktree cut + assembly (an empty queue waits ~nothing)", bg?.detail.admissionWaitMs >= 0 && bg?.detail.admissionWaitMs < 250);
   check("(2) totalDurationMs (settledAt - admittedAt) covers cut + assembly + queue + gate",
     g2.totalDurationMs === Date.parse(g2.settledAt) - Date.parse(g2.admittedAt) && g2.totalDurationMs >= bg.detail.worktreeCutMs + bg.detail.assemblyMs + bg.detail.admissionWaitMs + bg.detail.durationMs - 5);
+
+  // ── (3) ROLLBACK-UNVERIFIED batch (card 0d372516 round 2, test gap 2(b)): e/f land, g's own rollback
+  //     can't be verified clean — assembly aborts BEFORE the batch gate ever runs, with landed.length > 0 ──
+  const e = await addWorker("rollback-a", "rollback-e-only.txt", "from e\n");
+  const f = await addWorker("rollback-b", "rollback-f-only.txt", "from f\n");
+  const g = await addWorker("rollback-unverified-c", "rollback-g-only.txt", "from g\n");
+  known.add(e.worktreePath); known.add(f.worktreePath); known.add(g.worktreePath);
+  const r3 = await batchUntilSettled(svc, mgrId, [e.workerId, f.workerId, g.workerId]);
+  const v3 = r3.value ?? r3;
+  const opId3 = v3.opId;
+  check("(3) precondition: assembly aborted on the unverified rollback, ok:false, landed:[] (the service's own generic !result.ok return, never a partial landed list)",
+    r3.settled === true && v3.ok === false && v3.landed.length === 0 && typeof opId3 === "string");
+  check("(3) EVERY original candidate was routed to the REAL per-candidate solo fallback (started:true) — never leave the batch for a human",
+    Array.isArray(v3.fallback) && v3.fallback.length === 3 &&
+    [e.workerId, f.workerId, g.workerId].every((id) => v3.fallback.some((x) => x.workerSessionId === id && x.started === true)));
+  const g3 = svc.gateStatus(opId3);
+  console.log("gate_status(rollback-unverified opId) =", JSON.stringify(g3));
+  check("(3) gate_status(opId) is settled, NOT a bare row (outcome skipped, passed false) — THE bug this round fixes",
+    g3.state === "settled" && g3.gateType === "merge" && g3.outcome === "skipped" && g3.passed === false);
+  check("(3) it says plainly that assembly aborted early (never 'landed nothing'/'every candidate was dropped')",
+    typeof g3.reason === "string" && /assembly aborted early because a candidate's own rollback could not be verified clean/.test(g3.reason) &&
+    !/landed nothing/.test(g3.reason) && !/every candidate was dropped at assembly/.test(g3.reason));
+  check("(3) skipReason is assembly-aborted-rollback-unverified — NEVER all-candidates-dropped (that means something narrower)",
+    g3.skipReason === "assembly-aborted-rollback-unverified");
+  check("(3) batchBranchCount:0 and batchLanded:false are the measured negatives, same shape as (1)", g3.batchBranchCount === 0 && g3.batchLanded === false);
+  check("(3) no gate-run facts are fabricated (no steps, no durationMs, no outputTail)", g3.steps === undefined && g3.durationMs === undefined && g3.outputTail === undefined);
+  check("(3) admittedAt/settledAt present and totalDurationMs === settledAt - admittedAt exactly",
+    typeof g3.admittedAt === "string" && typeof g3.settledAt === "string" && g3.totalDurationMs === Date.parse(g3.settledAt) - Date.parse(g3.admittedAt));
+  check("(3) no build_gate event exists for the op (the BATCH gate never ran)", !db.listEvents(mgrId).some((e2) => e2.kind === "build_gate" && e2.detail?.opId === opId3));
 } finally {
   if (db) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }

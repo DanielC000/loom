@@ -2404,7 +2404,11 @@ export interface PendingGateOpVerdict {
    *  skip is NOT stamped here (read `GateHistoryRow.skipReason`, which covers both causes).
    *  Card 92eeb319: a `merge_batch` op whose BATCH gate never ran — every candidate was dropped at assembly and handed to its
    *  own `worker_merge_confirm` (each a real solo op with its own opId; read that op's `gate_status` for whether it landed) —
-   *  settles `outcome:"skipped"` with `skipReason:"all-candidates-dropped"` (NOT the gate switched off). */
+   *  settles `outcome:"skipped"` with `skipReason:"all-candidates-dropped"` (NOT the gate switched off).
+   *  Card 0d372516 (round 2): a `merge_batch` op whose BATCH gate never ran because assembly ABORTED EARLY on a
+   *  candidate's own unverified rollback settles the SAME `outcome:"skipped"` way with `skipReason:
+   *  "assembly-aborted-rollback-unverified"` — distinct from `"all-candidates-dropped"` (some candidates here may
+   *  never have been attempted at all, not just dropped). */
   skipReason?: string;
   /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
    *  the `gate_status(opId)` half of the same fix DoD-1 applied to the `[loom:merge-done]` nudge text.

@@ -156,6 +156,11 @@ export interface BatchAssembleResult {
    *  (`runBatchedMerge`) must treat this as an abort of the WHOLE batch — no gate, no fast-forward, no
    *  worktree removal — never a per-candidate drop it can shrug off and continue past. */
   quarantined?: boolean;
+  /** True iff assembly STOPPED EARLY because a candidate's own FAILED rollback left this batch worktree's
+   *  state unverified (see {@link LandResult.rollbackUnverified}). Same "stop early, no gate, no
+   *  fast-forward" treatment as `quarantined` — but the canonical repo is never implicated, so the caller
+   *  (`runBatchedMerge`) must NOT skip worktree removal or the per-candidate fallback on this flag. */
+  rollbackUnverified?: boolean;
 }
 
 /** K = min(ready, maxWorkers) — FIXED, never adaptive. The owner ruled out an adaptive-K policy: batch
@@ -191,6 +196,15 @@ interface LandResult {
    *  range (or an earlier candidate's) may still be unconfirmed-alive, so nothing already landed in this
    *  batch worktree can be trusted to gate/fast-forward safely. */
   quarantined?: boolean;
+  /** True iff `ok:false` because a FAILED rollback left the batch worktree unverified (not provably back at
+   *  `batchHeadBefore`) for a reason short of a tree-kill. {@link assembleBatchBranches} still aborts the
+   *  whole batch on this, but — unlike `quarantined` — the mess is confined to a discarded worktree, never
+   *  the canonical repo, so the caller MAY still fall back to gating every candidate individually. Precisely:
+   *  the batch worktree shares canonical's ref/object store (same `.git`), but every mutating call in this
+   *  function targets ONLY that worktree's own branch (`loom/batch-${opId}`, cut from its own throwaway
+   *  taskId) — mainline, the canonical checkout, and its index are never touched here.
+   *  @decision 0d372516 — never conflate this with `quarantined`; their callers react differently. */
+  rollbackUnverified?: boolean;
 }
 
 /**
@@ -386,6 +400,9 @@ async function landBranchCommitsIndividually(
   // Set true the moment rollback's OWN mutating calls hit an unconfirmed tree-kill — folded into `fail`'s
   // returned LandResult below so a caller sees the TYPED flag, never just reason text.
   let quarantinedByRollback = false;
+  // @decision 0d372516 — true iff the post-reset verification can't confirm a clean `batchHeadBefore` for a
+  // reason SHORT of an unconfirmed tree-kill. Distinct from `quarantinedByRollback`: never fold the two.
+  let rollbackVerificationFailed = false;
   // Auto-clear hook: once a kill's real confirmation eventually settles — regardless of whether the outer
   // `killableCanonicalRaw` call already gave up first — lift a quarantine THIS invocation may have
   // entered, against the CANONICAL repo (never the batch worktree path).
@@ -415,6 +432,7 @@ async function landBranchCommitsIndividually(
       }
       /* otherwise best-effort, as before: expected when no cherry-pick is in progress */
     }
+    let resetError: unknown;
     try {
       await killableCanonicalRaw(batchWorktreePath, ["reset", "--hard", batchHeadBefore], timeoutMs, "git reset --hard (batch land rollback)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
     } catch (e) {
@@ -423,21 +441,30 @@ async function landBranchCommitsIndividually(
         raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("batch rollback (reset --hard) could not be confirmed dead after a kill"));
         quarantinedByRollback = true; rollbackIssue = describeGitFailure(e).text; return;
       }
-      // The failed reset only matters if there was something to roll back: a canonicalGit refusal thrown at the FIRST git call of a candidate changed nothing.
-      // Both probes are pure reads (never refused), so this stays truthful either way.
-      try {
-        const head = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch rollback probe)")).trim();
-        const dirty = (await withTimeout(git.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (batch rollback probe)")).trim();
-        // An EMPTY cherry-pick leaves CHERRY_PICK_HEAD behind with a clean tree, so that must be absent too (`-q --verify` prints nothing when it is).
-        const inProgress = (await withTimeout(git.raw(["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"]), timeoutMs, "git rev-parse CHERRY_PICK_HEAD (batch rollback probe)")).trim();
-        if (head === batchHeadBefore && dirty === "" && inProgress === "") return;
-      } catch { /* cannot prove it clean — fall through and report the failure */ }
-      rollbackIssue = describeGitFailure(e).text;
+      resetError = e;
+    }
+    // @decision 0d372516 — verify HEAD == batchHeadBefore UNCONDITIONALLY, whether or not reset --hard
+    // itself threw: a non-throwing reset is not itself proof the worktree is clean. Both probes are pure
+    // reads (never refused), so this stays truthful either way.
+    try {
+      const head = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch rollback probe)")).trim();
+      const dirty = (await withTimeout(git.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (batch rollback probe)")).trim();
+      // An EMPTY cherry-pick leaves CHERRY_PICK_HEAD behind with a clean tree, so that must be absent too (`-q --verify` prints nothing when it is).
+      const inProgress = (await withTimeout(git.raw(["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"]), timeoutMs, "git rev-parse CHERRY_PICK_HEAD (batch rollback probe)")).trim();
+      if (head === batchHeadBefore && dirty === "" && inProgress === "") return;
+      rollbackVerificationFailed = true;
+      rollbackIssue = resetError ? describeGitFailure(resetError).text : `batch worktree is not clean after rollback (HEAD=${head || "?"}, expected ${batchHeadBefore})`;
+    } catch (e) {
+      // cannot prove it clean — fail closed, whether or not reset --hard itself threw.
+      rollbackVerificationFailed = true;
+      rollbackIssue = resetError ? describeGitFailure(resetError).text : `failed to verify the rollback left a clean tree: ${(e as Error).message}`;
     }
   };
-  const fail = <T extends { reason?: string }>(r: T): T & { quarantined?: boolean } => {
+  const fail = <T extends { reason?: string }>(r: T): T & { quarantined?: boolean; rollbackUnverified?: boolean } => {
     const withReason = rollbackIssue ? { ...r, reason: `${r.reason} (ROLLBACK FAILED — the batch worktree may hold residue: ${rollbackIssue})` } : r;
-    return quarantinedByRollback ? { ...withReason, quarantined: true } : withReason;
+    if (quarantinedByRollback) return { ...withReason, quarantined: true };
+    if (rollbackVerificationFailed) return { ...withReason, rollbackUnverified: true };
+    return withReason;
   };
 
   let strippedTrailerCount = 0;
@@ -790,6 +817,10 @@ export async function assembleBatchBranches(
       //
       // @decision 24c0bdba (round 4)
       if (r.quarantined) return { landed, dropped, quarantined: true };
+      // @decision 0d372516 — same stop-the-whole-batch treatment, but NEVER folded into `quarantined`:
+      // the mess here is confined to this one batch worktree, not the canonical repo (see
+      // LandResult.rollbackUnverified's own doc) — the caller still falls back to per-candidate solo.
+      if (r.rollbackUnverified) return { landed, dropped, rollbackUnverified: true };
       continue;
     }
     if (r.noop) {
@@ -1025,6 +1056,14 @@ export interface RunBatchedMergeResult {
    *  actually found checked out on when `branchDiverted` fired. Absent on `unverified` (that outcome is
    *  specifically the case where this could not be read). */
   observedBranch?: string | null;
+  /** TYPED (card 0d372516 round 2) — `"rollback-unverified"` iff this is the `rollbackUnverified` early
+   *  return just below (card 0d372516's own rollback-verification check). Assembly stopped because a
+   *  candidate's own failed rollback left the batch worktree unverified. NEVER inferred from `reason`
+   *  text — the caller (`mergeBatchTracked`, sessions/service.ts) reads this directly to settle its own
+   *  gate-op tombstone honestly (a no-gate-ran `"skipped"` verdict) regardless of whether `landed.length`
+   *  is zero or positive; see that call site's own `batchAssemblyAborted` comment for why `landed.length`
+   *  alone can't tell this apart from `batchAllDropped`. */
+  assemblyAborted?: "rollback-unverified";
   reason?: string;
   gateDetail?: BatchGateResult;
   /** Set iff `forfeited` is true — the canonical HEAD `fastForwardCanonicalMain` observed instead of
@@ -1082,12 +1121,17 @@ export async function runBatchedMerge(
     return { ok: false, landed: [], dropped: [], baseMainSha, quarantined: true, reason: quarantineCheck.reason };
   }
   const assembleStartMs = Date.now();
-  const { landed, dropped, quarantined } = await assembleBatchBranches(repoPath, batchWorktreePath, candidates, deps);
+  const { landed, dropped, quarantined, rollbackUnverified } = await assembleBatchBranches(repoPath, batchWorktreePath, candidates, deps);
   const assemblyMs = Date.now() - assembleStartMs;
   // A candidate quarantining the repo mid-assembly ABORTS THE WHOLE BATCH (round 4, ruling 1c): no gate,
   // no fast-forward, no per-candidate fallback — the caller must also skip worktree removal on this flag.
   if (quarantined) {
     return { ok: false, landed, dropped, baseMainSha, assemblyMs, quarantined: true, reason: "a candidate's own unconfirmed tree-kill quarantined the canonical repo mid-assembly — aborting the whole batch" };
+  }
+  // @decision 0d372516 — checked BEFORE `landed.length === 0` (fires even when something already landed);
+  // deliberately NOT `quarantined:true` — the caller's ordinary per-candidate solo fallback still applies.
+  if (rollbackUnverified) {
+    return { ok: false, landed, dropped, baseMainSha, assemblyMs, assemblyAborted: "rollback-unverified", reason: "batch assembly aborted: a candidate's rollback could not be verified clean" };
   }
   if (landed.length === 0) {
     return { ok: false, landed, dropped, baseMainSha, assemblyMs, reason: "nothing landed cleanly into the batch — every candidate was dropped" };

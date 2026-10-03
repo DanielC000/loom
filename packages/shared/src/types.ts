@@ -2086,7 +2086,9 @@ export interface GateHistoryRow {
    *  merge gate off), `"gate-interval"` (card 6f13746c: gate off + an interval set, and it was not this landing's turn) or `"inert-docs-only-diff"`; `null` for every non-skipped row and any row that predates
    *  this field. Read `outcome:"skipped"` first; this only names the cause.
    *  Card 92eeb319: a `merge_batch` that landed nothing (every candidate dropped at assembly) settles `gate_status` with
-   *  `skipReason:"all-candidates-dropped"` but never writes a row here — no gate ran, so no `build_gate` event exists. */
+   *  `skipReason:"all-candidates-dropped"` but never writes a row here — no gate ran, so no `build_gate` event exists.
+   *  Card 0d372516 (round 2): same "never writes a row here" shape for a `merge_batch` whose assembly ABORTED EARLY
+   *  on a candidate's own unverified rollback — `gate_status` settles `skipReason:"assembly-aborted-rollback-unverified"`. */
   skipReason: string | null;
   /** @decision 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; VACUOUS ON ONE
    *  OF TWO ARMS — never read alone, always alongside `emitCompareTestFiles` (below).

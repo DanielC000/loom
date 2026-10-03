@@ -4693,8 +4693,12 @@ export class SessionService {
     /** Card e8df2659: `"gate-disabled"` on a merge that landed with the human-only merge gate switched off
      *  (`outcome:"skipped"`, `gateRan:false`) — never a pass; `"gate-interval"` (card 6f13746c) when the interval let it
      *  land ungated. Card 92eeb319: `"all-candidates-dropped"` on a merge_batch whose BATCH gate never ran (see
-     *  {@link PendingGateOpVerdict.skipReason}). Absent otherwise (an inert docs-only skip carries no `skipReason` here;
-     *  `gate_history`'s row `skipReason` names the landing causes only — a batch that never gated writes no row). */
+     *  {@link PendingGateOpVerdict.skipReason}). Card 0d372516 (round 2): `"assembly-aborted-rollback-unverified"`
+     *  on a merge_batch whose BATCH gate never ran because a candidate's own rollback couldn't be verified clean —
+     *  DISTINCT from `"all-candidates-dropped"` (that one means every candidate was dropped and never attempted
+     *  together; this one means assembly stopped EARLY, so some candidates may never have been attempted at all).
+     *  Absent otherwise (an inert docs-only skip carries no `skipReason` here; `gate_history`'s row `skipReason`
+     *  names the landing causes only — a batch that never gated writes no row). */
     skipReason?: string;
     /** @decision 9f6598dd — outcome surfaces the same pass/fail/error/cancelled classification as one
      *  literal string, purely additive
@@ -4702,7 +4706,10 @@ export class SessionService {
      *  never collapse it into "pass".
      *  @decision 92eeb319 — a batch whose BATCH gate never ran (every candidate dropped at assembly and handed to its own solo
      *  worker_merge_confirm) is also "skipped", told apart by `skipReason:"all-candidates-dropped"` + `batchLanded:false`; the
-     *  candidates' own solo ops may still have landed, and `totalDurationMs` includes those fallback runs */
+     *  candidates' own solo ops may still have landed, and `totalDurationMs` includes those fallback runs.
+     *  @decision 0d372516 — a batch whose assembly ABORTED EARLY on a candidate's own unverified rollback is
+     *  also "skipped" this same no-gate-ran way, told apart by `skipReason:"assembly-aborted-rollback-unverified"`
+     *  — never folded into `"all-candidates-dropped"`, which means something narrower (see that field's own doc). */
     outcome?: PendingGateOpVerdictKind;
     /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
      *  the documented "if you need the answer sooner" poll for a QUEUED merge, which previously could not
@@ -18070,6 +18077,10 @@ export class SessionService {
     //
     let batchGateVerdict: { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined;
     let batchAllDropped = false; // set positively when runBatchedMerge assembled nothing and never entered runGate
+    // @decision 0d372516 — set from `result.assemblyAborted`, checked BEFORE `batchAllDropped` in
+    // `onSettle` below: it can fire with `landed.length > 0` (a case `batchAllDropped` never covers) and
+    // must never be misreported under `batchAllDropped`'s own "all-candidates-dropped" skipReason.
+    let batchAssemblyAborted: "rollback-unverified" | undefined;
     let batchMintedAtMs: number | undefined; // set by the closure's own mint; `onSettle` derives a no-gate verdict's timing from it
     return this.pendingOps.attach<MergeBatchResult>(
       batchKey, "merge", managerSessionId, this.syncAttachBudgetMs,
@@ -18466,6 +18477,8 @@ export class SessionService {
             batchQuarantined = !!result.quarantined; // round 4: read by the outer `finally`'s worktree-removal guard
             // @decision 92eeb319 — see `onSettle`
             if (!batchGateRan && result.landed.length === 0) batchAllDropped = true;
+            // @decision 0d372516 (round 2) — see `batchAssemblyAborted`'s own declaration above and `onSettle` below.
+            if (result.assemblyAborted) batchAssemblyAborted = result.assemblyAborted;
             batchFastForwarded = result.ok;
             if (result.ok && result.landed.length > 0) await this.advanceMainlineWatermarkForBatch(finalProjectId, batchRepoKey, finalRepoPath, batchCheckedTip, baseMainSha, result.batchHeadSha, managerSessionId); // card 59d2577a
             // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (the `finally` below) — ONCE, with
@@ -18952,6 +18965,10 @@ export class SessionService {
             const nowMs = Date.now();
             const timing = { settledAt: new Date(nowMs).toISOString(), ...(batchMintedAtMs !== undefined ? { totalDurationMs: nowMs - batchMintedAtMs } : {}) };
             if (!outcome.ok) verdict = { kind: "error", payload: { reason: outcome.error instanceof Error ? outcome.error.message : String(outcome.error), ...timing } };
+            // @decision 0d372516 (round 2) — checked BEFORE `batchAllDropped`: it fires regardless of `landed.length`
+            // (a candidate may have already landed before the one whose rollback failed), which is exactly why it
+            // must never be shadowed by (or folded into) the `landed.length === 0` check `batchAllDropped` uses.
+            else if (batchAssemblyAborted === "rollback-unverified") verdict = { kind: "skipped", payload: { reason: "the batch gate never ran: assembly aborted early because a candidate's own rollback could not be verified clean — any remaining candidates were never attempted; the batch's own candidates each went to their own worker_merge_confirm (read that op's own gate_status for whether it landed); totalDurationMs includes those fallback runs", skipReason: "assembly-aborted-rollback-unverified", batchBranchCount: 0, batchLanded: false, ...timing } };
             else if (batchAllDropped) verdict = { kind: "skipped", payload: { reason: "the batch gate never ran: every candidate was dropped at assembly and handed to its own worker_merge_confirm (read that op's own gate_status for whether it landed); totalDurationMs includes those fallback runs", skipReason: "all-candidates-dropped", batchBranchCount: 0, batchLanded: false, ...timing } };
             // Card ba663984's own early refusal (before any worktree cut) — same no-gate-ran shape as batchAllDropped above.
             else if (outcome.value.watermarkUnreadable) verdict = { kind: "skipped", payload: { reason: outcome.value.reason ?? "the stored mainline watermark record is unreadable", skipReason: "watermark-unreadable", batchBranchCount: 0, batchLanded: false, ...timing } };
