@@ -5,10 +5,12 @@ import { LOOM_HOME } from "../paths.js";
 
 /**
  * Loom's ONE shared, Loom-MANAGED Python virtualenv — the single home for every Python tool Loom provisions
- * (markitdown today; future Python features reuse the SAME venv, never a venv-per-tool). It lives under
- * `<LOOM_HOME>/python/venv`, so it's daemon-owned state like everything else under ~/.loom and is wiped with
- * it. Loom installs PACKAGES into it; it NEVER installs the interpreter — the user supplies a base Python
- * (≥3.10) on PATH or via the human-only `python.interpreterPath` config (see {@link discoverBasePythonAsync}).
+ * (markitdown, companion STT, companion TTS today — every one of them a SEPARATE consumer module, each with
+ * its own in-flight dedupe for its OWN package, see `companion/stt.ts` / `companion/tts.ts` / `pty/host.ts`;
+ * future Python features reuse the SAME venv, never a venv-per-tool). It lives under `<LOOM_HOME>/python/venv`,
+ * so it's daemon-owned state like everything else under ~/.loom and is wiped with it. Loom installs PACKAGES
+ * into it; it NEVER installs the interpreter — the user supplies a base Python (≥3.10) on PATH or via the
+ * human-only `python.interpreterPath` config (see {@link discoverBasePythonAsync}).
  *
  * EVENT-LOOP DISCIPLINE: creating a venv + `pip install markitdown[all]` takes minutes, so provisioning is
  * fully ASYNC (`child_process.spawn`, promisified) and best-effort — it must NEVER block the daemon's event
@@ -22,6 +24,14 @@ import { LOOM_HOME } from "../paths.js";
  * venv hits a fast path), and NEVER throws — it resolves a CLASSIFIED {@link EnsurePythonResult} (the
  * absolute binary on success, else `{ binary:null, outcome, errorTail? }` naming the specific failure) so the
  * caller can log the real reason + surface it to a status/REST layer, then degrade (warn + skip).
+ *
+ * CROSS-CONSUMER SAFETY: each consumer module dedupes only ITS OWN in-flight install — nothing above them
+ * stopped markitdown/STT/TTS from each independently racing `python -m venv` into the SAME directory on a
+ * cold boot, or running `pip install` concurrently into the SAME site-packages once the venv existed. This
+ * module is the one place that sees every consumer, so it owns BOTH guards itself: {@link ensureLoomVenvAsync}
+ * shares ONE in-flight venv-create promise (keyed by venv dir) across every caller, and
+ * {@link ensurePythonPackageAsync}'s own pip-install step runs behind a per-venv-dir serialization queue so
+ * concurrent installs for different packages never run `pip` at the same time against the same venv.
  */
 export function loomVenvDir(): string {
   return path.join(LOOM_HOME, "python", "venv");
@@ -47,6 +57,18 @@ function venvPython(platform: NodeJS.Platform = process.platform): string {
   return platform === "win32"
     ? path.join(dir, "Scripts", "python.exe")
     : path.join(dir, "bin", "python");
+}
+
+/**
+ * The venv's OWN pip console script. `python -m venv` bootstraps pip as part of creating the interpreter, so
+ * its presence (alongside {@link venvPython}) is what distinguishes a genuinely-finished venv from one whose
+ * create was interrupted partway (python unpacked, pip never finished) — see {@link ensureLoomVenvAsync}.
+ */
+function venvPipScript(platform: NodeJS.Platform = process.platform): string {
+  const dir = loomVenvDir();
+  return platform === "win32"
+    ? path.join(dir, "Scripts", "pip.exe")
+    : path.join(dir, "bin", "pip");
 }
 
 /** Bound (ms) for the quick `--version` / `import` probes. */
@@ -109,6 +131,13 @@ interface RunResult {
   output: string;
 }
 
+/** TEST SEAM: swap node:child_process.spawn — lets a hermetic test drive {@link runAsync} (and everything
+ *  built on it: venv create, pip install, the base-Python probe) against a fake child with NO real process,
+ *  venv, pip, or network. Mirrors `companion/tts.ts`'s own `__setSpawnForTest` seam. */
+type SpawnFn = typeof spawn;
+let spawnImpl: SpawnFn = spawn;
+export function __setSpawnForTest(fn?: SpawnFn): void { spawnImpl = fn ?? spawn; }
+
 /**
  * Run a child process to completion ASYNCHRONOUSLY (never blocks the event loop), resolving a {@link RunResult}.
  * NEVER rejects — a spawn error, non-zero exit, or timeout all resolve `ok:false` (best-effort, the
@@ -139,7 +168,7 @@ function runAsync(command: string, args: string[], timeoutMs: number): Promise<R
     };
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+      child = spawnImpl(command, args, { stdio: ["ignore", "pipe", "pipe"] });
     } catch {
       finish(false, null);
       return;
@@ -186,24 +215,84 @@ interface VenvEnsureResult {
 }
 
 /**
- * Ensure the shared venv exists, returning the ABSOLUTE path to its python interpreter, or a CLASSIFIED
- * failure (no base Python / venv-create non-zero / timeout) with the captured output tail. Idempotent: if
- * the venv python is already present this is a fast no-op. ASYNC + bounded + never throws. Loom creates ONLY
- * the venv — never the interpreter.
+ * ONE shared in-flight venv-CREATE promise per venv directory. markitdown / companion STT / companion TTS
+ * (and any future Python-backed capability) each call {@link ensurePythonPackageAsync} independently with no
+ * knowledge of one another — without this, a cold boot that wants more than one of them races multiple
+ * concurrent `python -m venv <dir>` invocations into the SAME directory. Keyed by dir (rather than a single
+ * module-level variable) so a hermetic test can run more than one venv dir in the same process; in production
+ * there is exactly one key, since {@link loomVenvDir} is fixed for the life of the daemon.
  */
-async function ensureLoomVenvAsync(interpreterOverride?: string): Promise<VenvEnsureResult> {
-  const py = venvPython();
-  if (fs.existsSync(py)) return { py, outcome: "ready" }; // fast path: already provisioned
+const venvCreateInFlight = new Map<string, Promise<VenvEnsureResult>>();
+
+/**
+ * Actually create the venv at `dir` (called at most once per in-flight window via {@link ensureLoomVenvAsync}'s
+ * dedupe above). If `py` exists but `pip` doesn't, the venv is a HALF-BUILT remnant of an interrupted create
+ * (python unpacked, pip never finished) — `python -m venv` does not repair an existing, non-empty target
+ * directory, so the only reliable fix is to wipe it and create fresh.
+ *
+ * The wipe is ASYNC (`fs.promises.rm`), never `rmSync` — a half-built venv can still hold thousands of files
+ * (onnxruntime et al. partially unpacked), and a synchronous recursive delete of that many files would block
+ * the event loop, exactly the freeze-the-daemon failure mode this whole module exists to avoid. Best-effort,
+ * a SINGLE attempt, deliberately NO retry loop: retrying a HUNG `fs.rm` leaks libuv threadpool threads and can
+ * wedge the daemon on its own (the `worktree-gc-threadpool-leak` incident) — a failed wipe here just falls
+ * through to the create below, which will surface its own real failure against the leftover directory.
+ */
+async function createVenvOnce(dir: string, py: string, pip: string, interpreterOverride?: string): Promise<VenvEnsureResult> {
+  if (fs.existsSync(py) && !fs.existsSync(pip)) {
+    try { await fs.promises.rm(dir, { recursive: true, force: true }); } catch { /* best-effort — the create below will surface any real failure */ }
+  }
   const base = await discoverBasePythonAsync(interpreterOverride);
   if (!base) return { py: null, outcome: "no-base-python" };
   try {
-    fs.mkdirSync(path.dirname(loomVenvDir()), { recursive: true }); // `python -m venv` makes the leaf, not parents
+    fs.mkdirSync(path.dirname(dir), { recursive: true }); // `python -m venv` makes the leaf, not parents
   } catch {
     /* best-effort */
   }
-  const r = await runAsync(base.command, [...base.args, "-m", "venv", loomVenvDir()], VENV_CREATE_TIMEOUT_MS);
+  const r = await runAsync(base.command, [...base.args, "-m", "venv", dir], VENV_CREATE_TIMEOUT_MS);
   if (!r.ok) return { py: null, outcome: r.timedOut ? "timeout" : "venv-create-failed", errorTail: r.output || undefined };
-  return fs.existsSync(py) ? { py, outcome: "ready" } : { py: null, outcome: "venv-create-failed" };
+  return fs.existsSync(py) && fs.existsSync(pip) ? { py, outcome: "ready" } : { py: null, outcome: "venv-create-failed" };
+}
+
+/**
+ * Ensure the shared venv exists, returning the ABSOLUTE path to its python interpreter, or a CLASSIFIED
+ * failure (no base Python / venv-create non-zero / timeout) with the captured output tail. Idempotent: if the
+ * venv is already fully provisioned (both python AND pip present — see {@link createVenvOnce}) this is a fast,
+ * synchronous no-op. ASYNC + bounded + never throws. Loom creates ONLY the venv — never the interpreter.
+ *
+ * Concurrent callers (markitdown / STT / TTS provisioning all cold at once) share ONE create via
+ * {@link venvCreateInFlight} rather than each racing their own `python -m venv` into the same directory.
+ */
+async function ensureLoomVenvAsync(interpreterOverride?: string): Promise<VenvEnsureResult> {
+  const py = venvPython();
+  const pip = venvPipScript();
+  if (fs.existsSync(py) && fs.existsSync(pip)) return { py, outcome: "ready" }; // fast path: fully provisioned
+
+  const dir = loomVenvDir();
+  let task = venvCreateInFlight.get(dir);
+  if (!task) {
+    task = createVenvOnce(dir, py, pip, interpreterOverride);
+    venvCreateInFlight.set(dir, task);
+    task.finally(() => {
+      if (venvCreateInFlight.get(dir) === task) venvCreateInFlight.delete(dir);
+    });
+  }
+  return task;
+}
+
+/**
+ * Per-venv-dir pip-install SERIALIZATION queue — the tail of a promise chain per dir, never rejecting (so one
+ * consumer's failure can't wedge another's turn). Concurrent consumers (markitdown / STT / TTS) each resolve
+ * the SAME shared venv and, once it exists, each still needs to `pip install` its own package into the SAME
+ * site-packages — running those concurrently risks pip's own lock/metadata contention. This queues them to
+ * run one at a time instead, in arrival order, without blocking the event loop (each still awaits async).
+ */
+const installQueueByDir = new Map<string, Promise<void>>();
+
+function runSerializedInstall<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  const prevTail = installQueueByDir.get(dir) ?? Promise.resolve();
+  const result = prevTail.then(fn, fn);
+  installQueueByDir.set(dir, result.then(() => undefined, () => undefined));
+  return result;
 }
 
 export interface EnsurePythonPackageOpts {
@@ -261,11 +350,22 @@ export async function ensurePythonPackageAsync(opts: EnsurePythonPackageOpts): P
     if (await probeOk(venv.py)) return { binary: bin, outcome: "ready" };
 
     const pkgs = Array.isArray(opts.package) ? opts.package : [opts.package];
-    const r = await runAsync(venv.py, ["-m", "pip", "install", ...pkgs], opts.timeoutMs ?? PIP_INSTALL_TIMEOUT_MS);
+    // Serialized behind every OTHER consumer's own pip install into this SAME venv dir — never concurrent.
+    const r = await runSerializedInstall(loomVenvDir(), () =>
+      runAsync(venv.py!, ["-m", "pip", "install", ...pkgs], opts.timeoutMs ?? PIP_INSTALL_TIMEOUT_MS)
+    );
     if (!r.ok) return { binary: null, outcome: r.timedOut ? "timeout" : "pip-failed", errorTail: r.output || undefined };
     // Installed but the import probe still fails → a half-built install; classify as pip-failed.
     return (await probeOk(venv.py)) ? { binary: bin, outcome: "ready" } : { binary: null, outcome: "pip-failed" };
   } catch {
     return { binary: null, outcome: "pip-failed" }; // belt-and-suspenders: this surface NEVER throws
   }
+}
+
+/** TEST-ONLY: reset the shared venv-create / install-serialization state (and the spawn seam) between
+ *  hermetic test cases — never used in production. */
+export function __resetVenvProvisionStateForTest(): void {
+  venvCreateInFlight.clear();
+  installQueueByDir.clear();
+  spawnImpl = spawn;
 }
