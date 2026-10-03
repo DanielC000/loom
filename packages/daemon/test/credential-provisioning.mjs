@@ -150,6 +150,31 @@ function cleanup(e) {
     ["http_proxy", "exact reserved name, lowercase — case-insensitive match"],
     ["NODE_EXTRA_CA_CERTS", "exact reserved name — CA interception"],
     ["node_extra_ca_certs", "exact reserved name, lowercase — case-insensitive match"],
+    // card f44cc187 — TLS/CA/proxy-bypass additions: each one bypasses the SAME interception class the
+    // HTTP(S)_PROXY/NODE_EXTRA_CA_CERTS entries above already deny, via a different tool's own env config.
+    ["SSL_CERT_FILE", "exact reserved name — OpenSSL-consuming tools' own CA override"],
+    ["SSL_CERT_DIR", "exact reserved name — OpenSSL-consuming tools' own CA override"],
+    ["REQUESTS_CA_BUNDLE", "exact reserved name — Python requests' own CA override"],
+    ["CURL_CA_BUNDLE", "exact reserved name — curl's own CA override"],
+    ["NODE_TLS_REJECT_UNAUTHORIZED", "exact reserved name — disables Node's own TLS verification"],
+    ["NODE_USE_ENV_PROXY", "exact reserved name — Node's own env-driven proxy opt-in"],
+    ["npm_config_https_proxy", "NPM_CONFIG_ prefix, lowercase — bypasses the HTTP(S)_PROXY deny via npm's own config"],
+    ["NPM_CONFIG_REGISTRY", "NPM_CONFIG_ prefix — redirects every npm install to an attacker-controlled registry"],
+    ["NPM_CONFIG_CAFILE", "NPM_CONFIG_ prefix — npm's own CA override"],
+    ["NPM_CONFIG_STRICT_SSL", "NPM_CONFIG_ prefix — disables npm's own TLS verification"],
+    ["PIP_INDEX_URL", "PIP_ prefix — redirects every pip install to an attacker-controlled index"],
+    ["pip_cert", "PIP_ prefix, lowercase — pip's own CA override"],
+    // card f44cc187 — the load-bearing-clobber class, siblings of HOME/USERPROFILE above (see that card's
+    // own decision record, docs/decisions/f44cc187-*.md, for the per-name evidence).
+    ["SHELL", "exact reserved name — the POSIX default-shell resolver for a shell-kind pty"],
+    ["COMSPEC", "exact reserved name — Node's own shell:true resolution on win32"],
+    ["SYSTEMROOT", "exact reserved name — Windows networking/crypto API requirement"],
+    ["TEMP", "exact reserved name — Node's os.tmpdir() on win32"],
+    ["TMP", "exact reserved name — Node's os.tmpdir() on win32"],
+    ["TMPDIR", "exact reserved name — Node's os.tmpdir() on POSIX"],
+    ["APPDATA", "exact reserved name — Windows per-user app-data root"],
+    ["LOCALAPPDATA", "exact reserved name — Windows per-user app-data root"],
+    ["temp", "exact reserved name, lowercase — case-insensitive match"],
   ];
   for (const [envVar, reason] of rejected) {
     const built = buildQuestionAsk(
@@ -178,6 +203,30 @@ function cleanup(e) {
     { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
   );
   check("(A2) a name merely CONTAINING \"anthropic\" (not the ANTHROPIC_ prefix) is ACCEPTED, no false refusal", "question" in legitAnthropicLike);
+
+  // card f44cc187 — the same near-miss control for the two new prefixes: a name merely CONTAINING
+  // "npm_config"/"pip" (not the real NPM_CONFIG_/PIP_ PREFIX, i.e. not starting with it) must still be
+  // accepted, no false refusal.
+  const legitNpmConfigLike = buildQuestionAsk(
+    { type: "credential", title: "t", body: "b", envVar: "MY_NPM_CONFIG_LIKE_TOKEN" },
+    { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+  );
+  check("(A2) a name merely CONTAINING \"npm_config\" (not the NPM_CONFIG_ prefix) is ACCEPTED, no false refusal", "question" in legitNpmConfigLike);
+  const legitPipLike = buildQuestionAsk(
+    { type: "credential", title: "t", body: "b", envVar: "MY_PIPELINE_TOKEN" },
+    { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+  );
+  check("(A2) a name merely CONTAINING \"pip\" (not the PIP_ prefix) is ACCEPTED, no false refusal", "question" in legitPipLike);
+
+  // card f44cc187 — the error text used to hand-copy the denylist as a literal string; it is now built
+  // from the real RESERVED_ENV_VAR_EXACT/PREFIXES sets via describeReservedEnvVarNames(), so prove the two
+  // can never again disagree: every rejected name above must be NAMED in the error text too.
+  const rejectedBad = buildQuestionAsk(
+    { type: "credential", title: "t", body: "b", envVar: "SYSTEMROOT" },
+    { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+  );
+  check("(A2) the generated error text names SYSTEMROOT", "error" in rejectedBad && rejectedBad.error.includes("SYSTEMROOT"));
+  check("(A2) the generated error text names the NPM_CONFIG_ prefix", "error" in rejectedBad && rejectedBad.error.includes("NPM_CONFIG_"));
 
   cleanup(e);
 }

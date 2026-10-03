@@ -19,15 +19,17 @@ trace"). It is **session-scoped bookkeeping** iff its only real readers are live
 it strictly during the episode (nudge/dedupe/backoff state, poll/schedule/wake mechanics) — once the
 session/agent is gone, nothing of record is lost by its disappearing.
 
-## The classification (48 of 102 `OrchestrationEventKind` members as of card c965fe76 — the "46 of 79" figure this heading originally carried was ALREADY stale before that card touched it; re-measured directly against the live `DURABLE_AUDIT_EVENT_KINDS`/`ORCHESTRATION_EVENT_KIND_MEMBERSHIP` sets rather than incrementing the old number)
+## The classification (61 of 122 `OrchestrationEventKind` members as of card f44cc187 — the "48 of 102" figure this heading previously carried was ALREADY stale before that card touched it; re-measured directly against the live `DURABLE_AUDIT_EVENT_KINDS`/`ORCHESTRATION_EVENT_KIND_MEMBERSHIP` sets rather than incrementing the old number)
 
 Derived by reading every kind's own doc comment in `packages/shared/src/types.ts` plus the four existing
 kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVITY_KINDS`,
 `REPORT_RESOLVED_EVENT_KINDS`) as corroborating signal (several kinds already self-describe as
 "audit-only").
 
-- **Security / trust-boundary:** `credential_revoked`, `manager_manage`, `deploy`, `worker_gate`,
-  `discovery_block_injection`, `engine_session_rotated`, `codex_auto_commit`.
+- **Security / trust-boundary:** `credential_revoked`, `credential_undeliverable` (card f44cc187 — a
+  reserved-name deny-list widening silently de-provisioning an already-live credential, same evidentiary
+  shape and same `managerSessionId:""` filing posture as `credential_revoked`), `manager_manage`,
+  `deploy`, `worker_gate`, `discovery_block_injection`, `engine_session_rotated`, `codex_auto_commit`.
 - **Cross-board / cross-project escalation trail** (the event is the audit LINK to another durable
   record; losing it breaks traceability even though the target task survives): `platform_escalate`,
   `escalation_triaged`, `audit_finding`, `workspace_audit_suggestion`, `cross_project_message`,

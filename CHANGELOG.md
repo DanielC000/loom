@@ -4,6 +4,9 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+### Fixed
+- **The stored-credential env-var deny list closes more gaps, and a credential it silently de-provisions is now surfaced.** The deny list used by a credential's env-var name (both at ask time and as a resolve-time backstop) now also blocks TLS/CA/proxy-bypass names (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_USE_ENV_PROXY`, and the `NPM_CONFIG_`/`PIP_` prefixes) and a load-bearing-clobber class (`SHELL`, `COMSPEC`, `SYSTEMROOT`, `TEMP`/`TMP`/`TMPDIR`, `APPDATA`/`LOCALAPPDATA`). Widening the list can silently stop delivering an existing credential that was valid under the old rules — `GET /api/projects/:id/delivered-credentials` now marks such a row `deliverable:false, reason:"reserved-name"`, and the daemon files one durable audit event per row (never repeats on a later spawn). If one of your own credentials is affected, revoke it and re-ask under a project-specific name (e.g. `MYAPP_ANTHROPIC_KEY` in place of `ANTHROPIC_API_KEY`).
+
 ## [0.30.0] — 2026-09-28
 
 **A Codex-harness, merge-integrity and decision-record release.** A profile can now run the Codex CLI instead of `claude` (experimental, off by default), the merge path was hardened so a gate pass is tied to the exact commit it ran on, decision records became a first-class part of the doctrine and tooling, and the board gained parent links and typed relations. Remote access grew a Tailscale Serve path, and project secrets are now masked in API and MCP responses.

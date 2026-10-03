@@ -1712,7 +1712,19 @@ export type OrchestrationEventKind =
   // `managerSessionId ?? ""` fallback for a filing identity that may not exist) — this event exists
   // specifically BECAUSE revocation is decoupled from that session's own row, so its absence must never
   // block the audit write.
-  | "credential_revoked";
+  | "credential_revoked"
+  // Card f44cc187: audits a delivered credential whose `credentialEnvVar` a LATER deny-list widening made
+  // reserved/invalid — `resolveCredentialSessionEnv`'s backstop (`keys/credentialSessionEnv.ts`) drops it
+  // from every spawn from that point on, silently, unless this fires. AUDIT-ONLY, same posture as
+  // `credential_revoked`/`engine_session_rotated`/`discovery_block_injection` (deliberately excluded from
+  // EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS — no live
+  // orchestration decision follows from one row going undeliverable). Filed under `managerSessionId: ""`
+  // (mirrors `credential_revoked`'s own fallback — this fires from inside env resolution at spawn time,
+  // with no asking-session identity in scope at all, not merely one that may have gone stale). Fires
+  // EXACTLY ONCE per row, gated on `Db.markCredentialUndeliverableNotified` (never re-fires on a later
+  // spawn/resume for the same row — see that method's own doc). `detail` carries { deliveredCredentialId,
+  // projectId, credentialEnvVar, reason: "reserved-name" }.
+  | "credential_undeliverable";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -1758,6 +1770,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
   codex_auto_commit: true,
   credential_revoked: true,
+  credential_undeliverable: true,
   worker_retired: true,
   worker_retirement_lifted: true,
 };
@@ -3495,6 +3508,20 @@ export interface DeliveredCredentialSummary {
    *  `shadowedBy`-set row as if revoking it alone would stop delivery of its env var — it would not; the
    *  effective sibling would keep delivering, and revocation is bulk-by-env-var precisely to prevent that. */
   shadowedBy: string | null;
+  /** Card f44cc187 — computed LIVE (every read) from `credentialEnvVar` via `isValidCredentialEnvVarName`,
+   *  never from whether the once-per-row `credential_undeliverable` audit event has fired: a deny-list
+   *  widening can silently de-provision a row that was perfectly valid when it was asked, under a name
+   *  it no longer recognizes, and this is the one field a human-facing UI can trust to say so without
+   *  waiting on that row's next spawn to resolve (and thus notify) it. `false` means this row's
+   *  `credentialEnvVar` is now reserved/invalid and will never again reach a spawn's env, REGARDLESS of
+   *  `revokedAt`/`effective` — and `effective` is itself defined to AND this field in (db.ts's
+   *  `toDeliveredCredentialSummary`), so a reserved row always reads `effective:false` too; this field is
+   *  what SAYS why. */
+  deliverable: boolean;
+  /** Null when `deliverable` is true. `"reserved-name"` is the one reason this card adds — remedy is to
+   *  revoke this row and re-ask under a project-specific name (e.g. `MYAPP_ANTHROPIC_KEY` for a credential
+   *  whose natural name collides with a reserved one like `ANTHROPIC_API_KEY`). */
+  reason: "reserved-name" | null;
 }
 
 /**

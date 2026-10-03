@@ -154,15 +154,160 @@ function askAndAnswer(proj, { id, envVar, secret, provisionTo, answeredAt }) {
   // dropped WITHOUT taking its sibling down with it.
   askAndAnswer(proj, { id: "cse-c2-good", envVar: "SAFE_VAR", secret: "safe-value", answeredAt: now2 });
 
+  // Card f44cc187, item 4: the backstop above only ever exercised ONE exact-match, uppercase name (PATH).
+  // Seed two more legacy rows in LOWERCASE, one hitting the ANTHROPIC_ PREFIX class and one hitting the
+  // HTTP_PROXY EXACT class (both added by the prior card, 08f2c7ce) — proving the lowercase-normalization
+  // + prefix-match paths are ALSO covered by this backstop, not just the uppercase-exact case.
+  function seedLegacyReserved(id, envVar, secret) {
+    db.insertQuestion({
+      id, sessionId: proj.mgrId, filedBySessionId: proj.mgrId, projectId: proj.projectId,
+      type: "credential", title: "t", body: "b", options: null, recommendation: null, taskId: null,
+      permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null,
+      decidedScope: null, decidedExpiresAt: null,
+      credentialEnvVar: envVar, credentialByteLength: null, provisionTarget: null, fulfillmentTarget: null,
+      provisionConnectionId: null, provisionBindingState: "none",
+      state: "pending", chosenOption: null, note: null, createdAt: now2, answeredAt: null, consumedAt: null,
+      cancelledReason: null, cancelledBy: null, cancelledAt: null, escalatedAt: null, acknowledgedUntil: null,
+    });
+    db.answerCredentialQuestion(id, { secretBlob: encryptSecret(secret), answeredAt: now2 });
+  }
+  seedLegacyReserved("cse-c3-anthropic-lower", "anthropic_api_key", "sk-ant-should-not-appear");
+  seedLegacyReserved("cse-c4-httpproxy-lower", "http_proxy", "http://evil:8080");
+
   const resolvedBackstop = resolveCredentialSessionEnv(db, proj.projectId);
   check("(C) a legacy row with a reserved env-var name (PATH) is NEVER surfaced by the resolver", !("PATH" in resolvedBackstop));
   check("(C) its sibling, well-formed credential still resolves", resolvedBackstop.SAFE_VAR === "safe-value");
+  check("(C) a lowercase legacy row hitting the ANTHROPIC_ prefix (anthropic_api_key) is dropped", !("anthropic_api_key" in resolvedBackstop) && !("ANTHROPIC_API_KEY" in resolvedBackstop));
+  check("(C) a lowercase legacy row hitting the HTTP_PROXY exact name (http_proxy) is dropped", !("http_proxy" in resolvedBackstop) && !("HTTP_PROXY" in resolvedBackstop));
+}
+
+// ===== (D) card f44cc187 item 2: the owner-visible undeliverable signal =====
+{
+  const proj = mkProject("cse-undeliverable");
+  const now3 = new Date().toISOString();
+
+  // A normal, well-formed credential: must read deliverable:true, reason:null — unaffected by this card.
+  askAndAnswer(proj, { id: "cse-d1-good", envVar: "GOOD_SIGNAL_VAR", secret: "fine", answeredAt: now3 });
+
+  // A legacy row carrying a NOW-reserved name (same shape as section (C)'s seeding — bypasses
+  // buildQuestionAsk's ask-time rejection to simulate a row answered BEFORE the deny-list widened).
+  db.insertQuestion({
+    id: "cse-d2-bad", sessionId: proj.mgrId, filedBySessionId: proj.mgrId, projectId: proj.projectId,
+    type: "credential", title: "t", body: "b", options: null, recommendation: null, taskId: null,
+    permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null,
+    decidedScope: null, decidedExpiresAt: null,
+    credentialEnvVar: "SYSTEMROOT", credentialByteLength: null, provisionTarget: null, fulfillmentTarget: null,
+    provisionConnectionId: null, provisionBindingState: "none",
+    state: "pending", chosenOption: null, note: null, createdAt: now3, answeredAt: null, consumedAt: null,
+    cancelledReason: null, cancelledBy: null, cancelledAt: null, escalatedAt: null, acknowledgedUntil: null,
+  });
+  db.answerCredentialQuestion("cse-d2-bad", { secretBlob: encryptSecret("C:\\Windows-evil"), answeredAt: now3 });
+
+  const goodRowId = db.db.prepare("SELECT id FROM delivered_credentials WHERE source_question_id = ?").get("cse-d1-good").id;
+  const badRowId = db.db.prepare("SELECT id FROM delivered_credentials WHERE source_question_id = ?").get("cse-d2-bad").id;
+
+  // (D1) deliverable/reason are computed LIVE from the stored name — correct even BEFORE any spawn ever
+  // resolves this project's env (i.e. before resolveCredentialSessionEnv has run at all for this project).
+  const goodSummaryPre = db.getDeliveredCredential(goodRowId);
+  const badSummaryPre = db.getDeliveredCredential(badRowId);
+  check("(D1) a normal row reads deliverable:true BEFORE any resolve", goodSummaryPre.deliverable === true);
+  check("(D1) a normal row reads reason:null BEFORE any resolve", goodSummaryPre.reason === null);
+  check("(D1) a reserved-name row reads deliverable:false BEFORE any resolve", badSummaryPre.deliverable === false);
+  check("(D1) a reserved-name row reads reason:\"reserved-name\" BEFORE any resolve", badSummaryPre.reason === "reserved-name");
+  const listed = db.listDeliveredCredentials(proj.projectId);
+  const goodListed = listed.find((r) => r.id === goodRowId);
+  const badListed = listed.find((r) => r.id === badRowId);
+  check("(D1) listDeliveredCredentials agrees: good row deliverable:true", goodListed?.deliverable === true);
+  check("(D1) listDeliveredCredentials agrees: bad row deliverable:false, reason:\"reserved-name\"", badListed?.deliverable === false && badListed?.reason === "reserved-name");
+
+  // (D1b) Code Review follow-up (card f44cc187, round 3): `effective` must AND in `deliverable` — a
+  // reserved-name row is the SOLE live row for its env var (so it "wins" among siblings by construction)
+  // but must still read effective:false, since nothing actually delivers it. Before this fix, `effective`
+  // was computed purely from "wins among live siblings," so this would have read true — the REST summary
+  // would have said a reserved row was the one currently delivering.
+  check("(D1b) a normal row reads effective:true BEFORE any resolve", goodSummaryPre.effective === true);
+  check("(D1b) a reserved-name row (sole live row for its env var) reads effective:false, not true just because it has no sibling to lose to", badSummaryPre.effective === false);
+  check("(D1b) listDeliveredCredentials agrees: good row effective:true", goodListed?.effective === true);
+  check("(D1b) listDeliveredCredentials agrees: bad row effective:false", badListed?.effective === false);
+
+  // (D2) markCredentialUndeliverableNotified is a GENERIC dedupe primitive — it has no opinion on whether
+  // a row is actually reserved (that's resolveCredentialSessionEnv's job, which only ever calls it for a
+  // row it already found invalid — proven separately in (D3) below). So it returns true the FIRST call for
+  // ANY row whose undeliverable_notified_at is still NULL — bad or good — and false every call after.
+  check("(D2) markCredentialUndeliverableNotified returns true the first time for the bad row", db.markCredentialUndeliverableNotified(badRowId) === true);
+  check("(D2) markCredentialUndeliverableNotified returns false the second time for the SAME row", db.markCredentialUndeliverableNotified(badRowId) === false);
+  check("(D2) markCredentialUndeliverableNotified returns true the first time for ANY untouched row, good or bad (it does not itself judge reservedness)", db.markCredentialUndeliverableNotified(goodRowId) === true);
+  check("(D2) a missing row id is a no-op false, never throws", db.markCredentialUndeliverableNotified("no-such-row") === false);
+
+  // (D3) the durable event fires EXACTLY ONCE across TWO resolver calls — proving the dedupe actually
+  // dedupes, not merely that it fires at all (the negative control: a THIRD call must still not add a second).
+  function eventCountFor(deliveredCredentialId) {
+    return db.db.prepare(
+      "SELECT COUNT(*) AS n FROM orchestration_events WHERE kind = 'credential_undeliverable' AND json_extract(detail_json, '$.deliveredCredentialId') = ?",
+    ).get(deliveredCredentialId).n;
+  }
+  // badRowId already has undeliverable_notified_at set from (D2) above — reset it to NULL so this section
+  // proves the event-filing path fresh, independent of (D2)'s own direct markCredentialUndeliverableNotified calls.
+  db.db.prepare("UPDATE delivered_credentials SET undeliverable_notified_at = NULL WHERE id = ?").run(badRowId);
+  check("(D3) no credential_undeliverable event exists yet for the bad row", eventCountFor(badRowId) === 0);
+  resolveCredentialSessionEnv(db, proj.projectId);
+  check("(D3) exactly one credential_undeliverable event after the FIRST resolve", eventCountFor(badRowId) === 1);
+  resolveCredentialSessionEnv(db, proj.projectId);
+  resolveCredentialSessionEnv(db, proj.projectId);
+  check("(D3) STILL exactly one credential_undeliverable event after TWO MORE resolves (deduped, not re-fired)", eventCountFor(badRowId) === 1);
+  check("(D3) a normal row never gets a credential_undeliverable event", eventCountFor(goodRowId) === 0);
+  const firedEvent = db.db.prepare("SELECT detail_json FROM orchestration_events WHERE kind = 'credential_undeliverable' AND json_extract(detail_json, '$.deliveredCredentialId') = ?").get(badRowId);
+  const firedDetail = JSON.parse(firedEvent.detail_json);
+  check("(D3) the fired event's detail carries the real projectId", firedDetail.projectId === proj.projectId);
+  check("(D3) the fired event's detail carries the real credentialEnvVar", firedDetail.credentialEnvVar === "SYSTEMROOT");
+  check("(D3) the fired event's detail carries reason:\"reserved-name\"", firedDetail.reason === "reserved-name");
+
+  // (D4) Code Review follow-up (card f44cc187, round 3): mark-then-append used to be two separate calls
+  // outside any transaction — if appendEvent ever threw, the row would be left permanently marked with NO
+  // audit event, and the once-per-row gate would then never let a later resolve retry either half. Proves
+  // the fix: a thrown appendEvent must roll the mark back too (row stays unmarked), the reserved row must
+  // still be DROPPED regardless (that happens unconditionally, before this try/catch), its sibling must
+  // still be DELIVERED, and a later resolve (once the fault clears) must retry BOTH halves successfully.
+  db.insertQuestion({
+    id: "cse-d4-bad-txn", sessionId: proj.mgrId, filedBySessionId: proj.mgrId, projectId: proj.projectId,
+    type: "credential", title: "t", body: "b", options: null, recommendation: null, taskId: null,
+    permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null,
+    decidedScope: null, decidedExpiresAt: null,
+    credentialEnvVar: "LOCALAPPDATA", credentialByteLength: null, provisionTarget: null, fulfillmentTarget: null,
+    provisionConnectionId: null, provisionBindingState: "none",
+    state: "pending", chosenOption: null, note: null, createdAt: now3, answeredAt: null, consumedAt: null,
+    cancelledReason: null, cancelledBy: null, cancelledAt: null, escalatedAt: null, acknowledgedUntil: null,
+  });
+  db.answerCredentialQuestion("cse-d4-bad-txn", { secretBlob: encryptSecret("C:\\evil"), answeredAt: now3 });
+  const txnBadRowId = db.db.prepare("SELECT id FROM delivered_credentials WHERE source_question_id = ?").get("cse-d4-bad-txn").id;
+
+  const originalAppendEvent = db.appendEvent.bind(db);
+  db.appendEvent = () => { throw new Error("(D4) simulated appendEvent fault"); };
+  let d4Resolved;
+  let d4Threw = false;
+  try {
+    d4Resolved = resolveCredentialSessionEnv(db, proj.projectId);
+  } catch {
+    d4Threw = true;
+  }
+  check("(D4) resolveCredentialSessionEnv never throws even when appendEvent itself throws", !d4Threw);
+  check("(D4) the reserved row is still DROPPED despite the audit fault", !("LOCALAPPDATA" in (d4Resolved ?? {})));
+  check("(D4) its sibling, well-formed credential STILL resolves despite the audit fault", d4Resolved?.GOOD_SIGNAL_VAR === "fine");
+  check("(D4) the row stays UNMARKED — the transaction rolled the mark back along with the failed append",
+    db.db.prepare("SELECT undeliverable_notified_at FROM delivered_credentials WHERE id = ?").get(txnBadRowId).undeliverable_notified_at === null);
+  check("(D4) no credential_undeliverable event was recorded for this row (the append that would have written it threw)", eventCountFor(txnBadRowId) === 0);
+
+  db.appendEvent = originalAppendEvent;
+  resolveCredentialSessionEnv(db, proj.projectId);
+  check("(D4) once the fault clears, a later resolve retries BOTH halves: the row is now marked",
+    db.db.prepare("SELECT undeliverable_notified_at FROM delivered_credentials WHERE id = ?").get(txnBadRowId).undeliverable_notified_at !== null);
+  check("(D4) ...and the audit event now fires exactly once", eventCountFor(txnBadRowId) === 1);
 }
 
 try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Db.listCredentialSessionEnvSources scopes strictly to answered/consumed, un-provisioned, project-owned credential rows, and resolveCredentialSessionEnv decrypts them into a flat env map that is fail-closed per row (a corrupt blob is dropped, never thrown, never blocking a sibling) and resolves a rotated env-var name to its most recent answer."
+  ? "\n✅ ALL PASS — Db.listCredentialSessionEnvSources scopes strictly to answered/consumed, un-provisioned, project-owned credential rows, resolveCredentialSessionEnv decrypts them into a flat env map that is fail-closed per row (a corrupt blob is dropped, never thrown, never blocking a sibling) and resolves a rotated env-var name to its most recent answer, the resolve-time backstop drops a reserved legacy row regardless of case or exact-vs-prefix match, and the card f44cc187 undeliverable signal (deliverable/reason fields + the once-per-row credential_undeliverable audit event) is correct and deduped."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { decryptSecret } from "./envelope.js";
 
 /**
@@ -6,11 +7,29 @@ import { decryptSecret } from "./envelope.js";
  * `listCredentialSessionEnvSources`. `id` here is a `delivered_credentials` row id (card af08f7e8) — NOT a
  * `questions` row id, since that card decoupled the two; a caller chasing this id back to a table must look
  * in `delivered_credentials`, not `questions`.
+ *
+ * Card f44cc187 widens this with the once-per-row undeliverable-notice gate: `markCredentialUndeliverableAndAudit`
+ * returns `true` only the FIRST time it's called for a given row id (the real `Db` method's own doc has
+ * the mechanics) and pairs that with the same durable-audit write every other orchestration event uses,
+ * both inside ONE transaction so a thrown append can never leave the row marked with no audit trail. Stays
+ * narrow/duck-typed rather than importing `OrchestrationEvent`'s full shape or the real `Db` type, for the
+ * same "decryption-only, no pty import" testability reason the module doc below already gives for the
+ * resolver itself.
  */
 export interface CredentialSessionEnvDbStore {
   listCredentialSessionEnvSources(
     projectId: string,
   ): Array<{ id: string; credentialEnvVar: string; secretBlob: string; deliveredAt: string }>;
+  markCredentialUndeliverableAndAudit(
+    id: string,
+    evt: {
+      id: string;
+      ts: string;
+      managerSessionId: string;
+      kind: "credential_undeliverable";
+      detail: { deliveredCredentialId: string; projectId: string; credentialEnvVar: string; reason: "reserved-name" };
+    },
+  ): boolean;
 }
 
 /**
@@ -30,13 +49,22 @@ export interface CredentialSessionEnvDbStore {
  * GIT_, LOOM_, PYTHON and CLAUDE_ prefixes; Anthropic's own: ANTHROPIC_ — billing/API-redirect; network
  * interception: HTTP(S)_PROXY/ALL_PROXY/NO_PROXY and NODE_EXTRA_CA_CERTS) and will always be one
  * unenumerated var behind. Adding a name here narrows the gap; it never closes it.
+ *
+ * @decision f44cc187 — do not remove APPDATA/LOCALAPPDATA for having no single verified in-repo/Node-core
+ *   consumer (weakest evidence of this widening): denying a name only blocks STORING a credential under
+ *   it, so the cost of a low-confidence addition here is effectively zero.
  */
 const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const RESERVED_ENV_VAR_EXACT = new Set([
   "PATH", "NODE_OPTIONS", "NODE_PATH", "HOME", "USERPROFILE", "PAGER", "CLAUDECODE",
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+  "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_USE_ENV_PROXY",
+  "SHELL", "COMSPEC", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA",
 ]);
-const RESERVED_ENV_VAR_PREFIXES = ["GIT_", "LOOM_", "PYTHON", "CLAUDE_", "LD_", "DYLD_", "ANTHROPIC_"];
+const RESERVED_ENV_VAR_PREFIXES = [
+  "GIT_", "LOOM_", "PYTHON", "CLAUDE_", "LD_", "DYLD_", "ANTHROPIC_", "NPM_CONFIG_", "PIP_",
+];
 
 /** True for a well-formed, DENYLIST-CLEAR env-var name (see the honest-limit note above — the regex half
  *  is absolute, the denylist half is best-effort) — the ONE check shared by the ask-time rejection
@@ -48,6 +76,18 @@ export function isValidCredentialEnvVarName(name: string): boolean {
   const upper = name.toUpperCase();
   if (RESERVED_ENV_VAR_EXACT.has(upper)) return false;
   return !RESERVED_ENV_VAR_PREFIXES.some((p) => upper.startsWith(p));
+}
+
+/**
+ * Card f44cc187 — the ask-time rejection text (`mcp/questionTool.ts`) used to hand-copy this denylist as a
+ * literal string, which drifted the moment a name was added here without a matching edit there (exactly
+ * the class of bug this card exists to fix). Built from the SAME two sets `isValidCredentialEnvVarName`
+ * reads, sorted for a stable, diffable message — so the two can never again disagree about what's denied.
+ */
+export function describeReservedEnvVarNames(): string {
+  const exact = [...RESERVED_ENV_VAR_EXACT].sort().join("/");
+  const prefixes = RESERVED_ENV_VAR_PREFIXES.join("/");
+  return `must not be ${exact} or start with ${prefixes}`;
 }
 
 /**
@@ -79,8 +119,28 @@ export function resolveCredentialSessionEnv(db: CredentialSessionEnvDbStore, pro
   }
   for (const row of rows) {
     if (!isValidCredentialEnvVarName(row.credentialEnvVar)) {
-      // eslint-disable-next-line no-console
-      console.error(`[credential-session-env] refusing to deliver reserved/invalid env-var name "${row.credentialEnvVar}" (delivered credential ${row.id}, project ${projectId}) — dropped, not delivered.`);
+      // Card f44cc187: a deny-list widening can silently de-provision a row that was perfectly valid when
+      // it was asked — markCredentialUndeliverableAndAudit gates BOTH this log and the durable audit event
+      // on the SAME once-per-row boolean, inside ONE transaction, so a thrown append rolls the mark back
+      // too (never a half-marked row with no audit trail) and neither re-fires on a later spawn/resume for
+      // the same row — the dedupe survives a daemon restart. Best-effort: a mark/append fault must never
+      // block delivery of this row's siblings (same fail-closed posture as every other failure mode in
+      // this loop) — the console log below still fires unconditionally in that case, so the operator never
+      // loses the ONE trace this card's own triage found missing.
+      try {
+        const marked = db.markCredentialUndeliverableAndAudit(row.id, {
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "",
+          kind: "credential_undeliverable",
+          detail: { deliveredCredentialId: row.id, projectId, credentialEnvVar: row.credentialEnvVar, reason: "reserved-name" },
+        });
+        if (marked) {
+          // eslint-disable-next-line no-console
+          console.error(`[credential-session-env] refusing to deliver reserved/invalid env-var name "${row.credentialEnvVar}" (delivered credential ${row.id}, project ${projectId}) — dropped, not delivered. (logged once; see delivered-credentials list for ongoing status)`);
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[credential-session-env] failed to record the undeliverable notice for "${row.credentialEnvVar}" (delivered credential ${row.id}, project ${projectId}): ${(err as Error).message}`);
+      }
       continue;
     }
     try {

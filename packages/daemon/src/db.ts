@@ -10,6 +10,7 @@ import type { EmitCompareNotApplicableKind } from "./git/worktrees.js";
 // see toQuestion's own comment at `credentialByteLength` for why this stays consistent with "this layer
 // never decrypts, logs, or otherwise touches the plaintext" (answerCredentialQuestion's doc, above).
 import { secretEnvelopeByteLength } from "./keys/envelope.js";
+import { isValidCredentialEnvVarName } from "./keys/credentialSessionEnv.js";
 
 /**
  * The REAL production database — `~/.loom/loom.db`, independent of any LOOM_HOME override. A worker
@@ -1339,7 +1340,14 @@ CREATE TABLE IF NOT EXISTS delivered_credentials (
   delivered_at TEXT NOT NULL,              -- = the answering question's answered_at
   revoked_at TEXT,
   revoked_by TEXT,                         -- 'human' — this row is only ever revoked human-side
-  revoked_reason TEXT
+  revoked_reason TEXT,
+  -- Card f44cc187: set ONCE, permanently, the first time resolveCredentialSessionEnv finds this row's
+  -- credential_env_var reserved/invalid (a deny-list widening can silently de-provision an already-live
+  -- credential). Dedupe key for BOTH the once-per-row durable credential_undeliverable event and the
+  -- per-spawn console log (see markCredentialUndeliverableNotified's own doc) -- never cleared, never
+  -- re-fires for the same row. NULL for every row that has never hit the backstop. Added to existing DBs by
+  -- migrateDeliveredCredentialsAddedColumns() below (fresh installs already have it via this CREATE TABLE).
+  undeliverable_notified_at TEXT
 );
 -- Serves the live-delivery read (resolveCredentialSessionEnv's project_id + revoked_at IS NULL scan) and
 -- the human-only list surface.
@@ -1620,7 +1628,7 @@ const GATE_HISTORY_KINDS = ["worker_gate", "build_gate", "build_gate_retry", "de
 // projectId derivation goes unfindable the instant its session is gone (deleteProject still purges all of it).
 const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<OrchestrationEventKind>([
   // Security / trust-boundary
-  "credential_revoked", "manager_manage", "deploy", "worker_gate", "discovery_block_injection",
+  "credential_revoked", "credential_undeliverable", "manager_manage", "deploy", "worker_gate", "discovery_block_injection",
   "engine_session_rotated", "codex_auto_commit", "mainline_moved_outside_loom",
   // Cross-board / cross-project escalation trail
   "platform_escalate", "escalation_triaged", "audit_finding", "workspace_audit_suggestion",
@@ -2186,6 +2194,13 @@ const CONNECTION_ADDED_COLUMNS: Record<string, string> = {
   project_id: "TEXT",
 };
 
+/** Column added to `delivered_credentials` by card f44cc187; applied to existing DBs by
+ *  migrateDeliveredCredentialsAddedColumns() (fresh installs already have it via CREATE TABLE). Nullable,
+ *  no index/constraint — see that column's own doc comment on the CREATE TABLE above. */
+const DELIVERED_CREDENTIALS_ADDED_COLUMNS: Record<string, string> = {
+  undeliverable_notified_at: "TEXT",
+};
+
 type Row = Record<string, unknown>;
 
 /**
@@ -2536,6 +2551,7 @@ export class Db {
     this.migrateCompanionConversations();
     this.migrateOrchestrationEvents();
     this.migrateQuestions();
+    this.migrateDeliveredCredentialsAddedColumns();
     this.migrateDeliveredCredentials();
     this.migrateConnections();
     this.migrateProjectMemory();
@@ -3028,6 +3044,24 @@ export class Db {
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS idx_questions_pending_unescalated ON questions(created_at) WHERE state = 'pending' AND escalated_at IS NULL",
     );
+  }
+
+  /**
+   * Idempotent additive migration for `delivered_credentials` (card f44cc187): ADD COLUMN any of
+   * DELIVERED_CREDENTIALS_ADDED_COLUMNS missing from an existing DB (fresh installs already have them via
+   * CREATE TABLE). The one column added so far (`undeliverable_notified_at`) is nullable with no index or
+   * constraint, so every existing row backfills to NULL in place — byte-identical read/write behavior for
+   * every row that predates this card. Runs BEFORE migrateDeliveredCredentials() below purely for
+   * readability (schema shape first, then data population) — the two migrations touch disjoint columns, so
+   * their relative order has no functional effect on each other.
+   */
+  private migrateDeliveredCredentialsAddedColumns(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(delivered_credentials)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(DELIVERED_CREDENTIALS_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE delivered_credentials ADD COLUMN ${name} ${type}`);
+    }
   }
 
   /**
@@ -8475,6 +8509,48 @@ export class Db {
     return r ? toDeliveredCredentialSummary(r, this.effectiveShadowFor(r as unknown as { id: string; project_id: string; credential_env_var: string; revoked_at: string | null })) : undefined;
   }
   /**
+   * Card f44cc187 — the once-per-row dedupe gate for a reserved/invalid credential env-var name
+   * (`resolveCredentialSessionEnv`'s backstop in `keys/credentialSessionEnv.ts`): marks `id` as having
+   * had its undeliverable notice filed and returns `true` ONLY the first time this fires for that row —
+   * every later call for the same row is a no-op returning `false`. The caller gates BOTH the once-per-row
+   * durable `credential_undeliverable` event AND the per-spawn console log on this same boolean, so
+   * neither re-fires on a later spawn/resume and the dedupe survives a daemon restart (unlike an
+   * in-memory Set). The `AND undeliverable_notified_at IS NULL` guard makes first-call-wins the SQL's own
+   * behavior, not an extra check — mirrors `revokeDeliveredCredential`'s own idempotent-UPDATE pattern. A
+   * missing `id` is also a no-op `false` (nothing to mark). Exposed standalone (still called directly by
+   * tests as a generic dedupe primitive) but `resolveCredentialSessionEnv`'s real caller goes through
+   * `markCredentialUndeliverableAndAudit` below instead, which pairs this with the audit write atomically.
+   */
+  markCredentialUndeliverableNotified(id: string): boolean {
+    const result = this.db.prepare(
+      "UPDATE delivered_credentials SET undeliverable_notified_at = ? WHERE id = ? AND undeliverable_notified_at IS NULL",
+    ).run(new Date().toISOString(), id);
+    return result.changes > 0;
+  }
+  /**
+   * Card f44cc187, Code Review round 3: `markCredentialUndeliverableNotified` + the durable
+   * `credential_undeliverable` audit event used to be two separate calls outside any transaction — if
+   * `appendEvent` ever threw, the row was left permanently marked with NO audit event, and the once-per-row
+   * gate above meant a later resolve would never retry either half for that row again. Wrapping both in ONE
+   * `db.transaction()` means a thrown append rolls the mark back too, so the row reads
+   * `undeliverable_notified_at IS NULL` again afterward and a later spawn's resolve naturally retries both
+   * halves together. Returns the same boolean `markCredentialUndeliverableNotified` would have — `true`
+   * only the first time this fires for `id` — and only appends the event when that's `true`.
+   */
+  markCredentialUndeliverableAndAudit(
+    id: string,
+    evt: {
+      id: string; ts: string; managerSessionId: string; kind: "credential_undeliverable";
+      detail: { deliveredCredentialId: string; projectId: string; credentialEnvVar: string; reason: "reserved-name" };
+    },
+  ): boolean {
+    return this.db.transaction(() => {
+      const marked = this.markCredentialUndeliverableNotified(id);
+      if (marked) this.appendEvent(evt as OrchestrationEvent);
+      return marked;
+    })();
+  }
+  /**
    * Card af08f7e8, REVISED by Code Review (the rotation blocker): revoke every LIVE row sharing `id`'s own
    * `(project_id, credential_env_var)` — NOT just `id` itself. Rows sharing an env var are mutually
    * exclusive at delivery time BY CONSTRUCTION (`listCredentialSessionEnvSources`'s last-write-wins merge
@@ -10267,6 +10343,18 @@ function winnerOfLiveDeliveredCredentials(a: Row, b: Row): number {
 // condition — no value that could reconstruct or approximate the secret).
 function toDeliveredCredentialSummary(r0: unknown, effShadow: { effective: boolean; shadowedBy: string | null }): DeliveredCredentialSummary {
   const r = r0 as Row;
+  // Card f44cc187 — computed LIVE from the stored name on every read, independent of whether the
+  // once-per-row `credential_undeliverable` notice (markCredentialUndeliverableNotified) has fired yet:
+  // a widened deny list can silently de-provision a row that was perfectly valid when it was asked, and
+  // this is how a human sees that WITHOUT waiting for the next spawn to resolve (and thus notify) it.
+  const deliverable = isValidCredentialEnvVarName(r.credential_env_var as string);
+  // Code Review follow-up (card f44cc187, round 3): `effShadow.effective` alone only says "wins among its
+  // live siblings" — it says nothing about whether this row's own name is one `resolveCredentialSessionEnv`
+  // will actually deliver. ANDing `deliverable` in here means the REST summary can never say a reserved row
+  // is the one "effective"ly delivering: a winner whose name is reserved reads `effective:false` too, same
+  // as every sibling sharing that now-invalid name (deliverable depends only on the shared env-var string,
+  // so this never disagrees with a sibling's own deliverable value).
+  const effective = effShadow.effective && deliverable;
   return {
     id: r.id as string, projectId: r.project_id as string, credentialEnvVar: r.credential_env_var as string,
     sourceQuestionId: (r.source_question_id as string | null) ?? null,
@@ -10274,7 +10362,8 @@ function toDeliveredCredentialSummary(r0: unknown, effShadow: { effective: boole
     revokedAt: (r.revoked_at as string | null) ?? null,
     revokedBy: (r.revoked_by as "human" | null) ?? null,
     revokedReason: (r.revoked_reason as string | null) ?? null,
-    effective: effShadow.effective, shadowedBy: effShadow.shadowedBy,
+    deliverable, reason: deliverable ? null : "reserved-name",
+    effective, shadowedBy: effShadow.shadowedBy,
   };
 }
 // NOTE: intentionally does NOT map `secret_blob` — the envelope-encrypted credential ciphertext must

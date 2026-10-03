@@ -5,7 +5,7 @@ import { resolveIdPrefix } from "../id-prefix.js";
 import type { Db } from "../db.js";
 import { resolveAlias } from "./arg-alias.js";
 import { PROFILE_FIELD_NAMES } from "../profiles/validate.js";
-import { isValidCredentialEnvVarName } from "../keys/credentialSessionEnv.js";
+import { isValidCredentialEnvVarName, describeReservedEnvVarNames } from "../keys/credentialSessionEnv.js";
 import { SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
 /** Roles allowed to set `provisionTo` on a `type:"credential"` ask (card 193de09e Q1) — manager and
@@ -115,13 +115,14 @@ export function buildQuestionAsk(
   // Loom's own credential UI ever presents it to a human as a legitimate destination for their secret.
   // `isValidCredentialEnvVarName` is the SAME check `resolveCredentialSessionEnv` re-applies as a backstop
   // (a row written before this check existed still gets caught there); see that function's own doc.
+  // Card f44cc187: the error text used to hand-copy the denylist as a literal string here, which drifted
+  // the moment a name was added to the real sets without a matching edit to this message — now built from
+  // those same sets via `describeReservedEnvVarNames()`, so the two can never again disagree.
   if (type === "credential" && input.envVar !== undefined && !isValidCredentialEnvVarName(input.envVar.trim())) {
     return {
       error: `envVar "${input.envVar}" is not a valid credential env-var name — it must match ` +
-        "^[A-Za-z_][A-Za-z0-9_]*$ and must not be PATH/NODE_OPTIONS/NODE_PATH/HOME/USERPROFILE/PAGER/" +
-        "CLAUDECODE/HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY/NODE_EXTRA_CA_CERTS or start with " +
-        "GIT_/LOOM_/PYTHON/CLAUDE_/LD_/DYLD_/ANTHROPIC_ (load-bearing, host-launch, native/JS " +
-        "code-injection, billing/API-redirect, or network-interception names)",
+        `^[A-Za-z_][A-Za-z0-9_]*$ and ${describeReservedEnvVarNames()} (load-bearing, host-launch, ` +
+        "native/JS code-injection, billing/API-redirect, or network-interception names)",
     };
   }
   if (type === "credential" && input.provisionTo) {
