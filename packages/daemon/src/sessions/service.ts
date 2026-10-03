@@ -25,7 +25,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -14924,6 +14924,35 @@ export class SessionService {
     return this.reapSessionStraysCore(session);
   }
 
+  /** {@link resolveMainlineWatermarkRef}'s result: `"ok"` with `ref: undefined` means no watermark has
+   *  ever been stamped for this (project, repoKey) — every caller falls back to `"HEAD"`, unchanged from
+   *  before any of this existed. `"unreadable"` means the stored row is corrupt or the read itself threw
+   *  (`cause` distinguishes the two for a caller that crafts a human-facing message, e.g.
+   *  confirmWorkerMerge, without a second `getMeta` read).
+   *
+   *  @decision 77b8319b — never fall back to a live/bare-HEAD read for this state; the caller must refuse
+   *  (confirmWorkerMerge) or skip the landed-lookup for that session outright (every other caller). */
+  private resolveMainlineWatermarkRef(
+    projectId: string, repoKey: string | null | undefined,
+  ): { state: "ok"; branch: string | undefined; ref: string | undefined } | { state: "unreadable"; cause: "read-failed" | "corrupt" } {
+    const watermarkKey = mainlineWatermarkKey(projectId, repoKey ?? "primary");
+    let watermarkRaw: string | undefined;
+    let watermarkReadFailed = false;
+    try {
+      watermarkRaw = this.db.getMeta(watermarkKey);
+    } catch {
+      watermarkReadFailed = true;
+    }
+    if (watermarkReadFailed) return { state: "unreadable", cause: "read-failed" };
+    const watermarkRead = readMainlineWatermarkStrict(watermarkRaw);
+    if (watermarkRead.state === "unreadable") return { state: "unreadable", cause: "corrupt" };
+    const branch = watermarkRead.state === "ok" ? watermarkRead.watermark.branch : undefined;
+    // Code Review round 2 (card dd36012a): a BARE branch name handed to `git log <base>` is ambiguous
+    // against a same-named top-level file/dir (fails closed to null, i.e. "not landed") or a same-named
+    // tag (silently scans the wrong history) — fully qualify it ONCE here.
+    return { state: "ok", branch, ref: branch ? `refs/heads/${branch}` : undefined };
+  }
+
   /**
    * Step 2: run the build/DoD gate, and ONLY if green merge the branch as ONE squash commit, remove the
    * worktree, and move the task to done. FAIL-CLOSED — a failed gate or a merge conflict leaves
@@ -15015,32 +15044,21 @@ export class SessionService {
     }
     const gate = targetRepo.gateCommand;
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
-    // @decision d69d4858 — the stored watermark's OWN `branch` (2a6a292a), resolved ONCE, threaded
-    // through every already-landed lookup and the squash. `undefined` (no watermark yet) ⇒ unchanged.
+    // @decision d69d4858 — the stored watermark's OWN `branch` (2a6a292a), resolved ONCE via the shared
+    // {@link resolveMainlineWatermarkRef}, threaded through every already-landed lookup and the squash.
+    // `undefined` (no watermark yet) ⇒ unchanged.
     // @decision 77b8319b — fail CLOSED on a present-but-unreadable row (corrupt JSON/shape, or a `getMeta`
     // throw): refuse this confirm outright, mirroring the batch pin's own early refusal (`ba663984`),
     // rather than falling back to a live read — only a genuinely ABSENT row (true first sight) falls back.
-    const watermarkKey = mainlineWatermarkKey(project.id, worker.repoKey ?? "primary");
-    let watermarkRaw: string | undefined;
-    let watermarkReadFailed = false;
-    try {
-      watermarkRaw = this.db.getMeta(watermarkKey);
-    } catch {
-      watermarkReadFailed = true;
-    }
-    const watermarkRead = watermarkReadFailed ? { state: "unreadable" as const } : readMainlineWatermarkStrict(watermarkRaw);
-    if (watermarkReadFailed || watermarkRead.state === "unreadable") {
+    const watermarkResolution = this.resolveMainlineWatermarkRef(project.id, worker.repoKey);
+    if (watermarkResolution.state === "unreadable") {
       const liveHead = await readMainlineHead(repoPath, this.mainlineGitMs()).catch(() => null);
       const observedBranch = liveHead?.branch ?? null;
-      const reason = `this project's stored mainline watermark record is ${watermarkReadFailed ? "unreadable (a database read failed)" : "corrupt (it does not parse as a valid {branch, sha} record)"} — refusing to pin this solo merge's squash rather than silently falling back to a live read, which would re-open the pre-existing-checkout-divert gap this pin exists to close. Canonical repo is currently checked out on "${observedBranch ?? "(detached/unreadable)"}". Ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only), which deletes the stored watermark; it re-seeds at the next verified landing (or at boot when the checkout matches the repo's resolvable default branch), then retry.`;
+      const reason = `this project's stored mainline watermark record is ${watermarkResolution.cause === "read-failed" ? "unreadable (a database read failed)" : "corrupt (it does not parse as a valid {branch, sha} record)"} — refusing to pin this solo merge's squash rather than silently falling back to a live read, which would re-open the pre-existing-checkout-divert gap this pin exists to close. Canonical repo is currently checked out on "${observedBranch ?? "(detached/unreadable)"}". Ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only), which deletes the stored watermark; it re-seeds at the next verified landing (or at boot when the checkout matches the repo's resolvable default branch), then retry.`;
       return { merged: false, reason, notified: false, opId: thisOpId, branchDiverted: true, watermarkUnreadable: true };
     }
-    const expectedMainlineBranch = watermarkRead.state === "ok" ? watermarkRead.watermark.branch : undefined;
-    // Code Review round 2 (card dd36012a): a BARE branch name handed to `git log <base>` is ambiguous
-    // against a same-named top-level file/dir (fails closed to null, i.e. "not landed") or a same-named
-    // tag (silently scans the wrong history) — fully qualify it ONCE here; `expectedMainlineBranch` above
-    // stays the short name for the pin comparison and human-facing messages.
-    const expectedMainlineRef = expectedMainlineBranch ? `refs/heads/${expectedMainlineBranch}` : undefined;
+    const expectedMainlineBranch = watermarkResolution.branch;
+    const expectedMainlineRef = watermarkResolution.ref;
     // Card e8df2659: the HUMAN-only per-project `orchestration.mergeGate:"off"` switch. Routed through the
     // inert-diff-skip machinery below (same repo-guard-only admission, `gateRan:false`, `skipped:true`) with
     // `skipReason:"gate-disabled"`; ONLY the gate command is skipped — the union-merge/conflict refusal, the
@@ -19654,21 +19672,15 @@ export class SessionService {
             // Code Review round 2 (card dd36012a, MAJOR): this path FINALIZES on a hit (worktree removed,
             // branch deleted, task merged) — scanning bare "HEAD" would trust whatever the canonical
             // checkout happens to be sitting on after a post-squash divert, landing the exact silent-loss
-            // bug this card exists to close. Scan the stored watermark's branch instead, fully qualified
-            // to avoid a same-named file/dir/tag ambiguity; `undefined` (no watermark yet) ⇒ "HEAD", unchanged.
-            let crWatermarkRaw: string | undefined;
-            let crWatermarkReadFailed = false;
-            try {
-              crWatermarkRaw = this.db.getMeta(mainlineWatermarkKey(project.id, worker.repoKey ?? "primary"));
-            } catch {
-              crWatermarkReadFailed = true;
-            }
-            const crWatermarkRead = crWatermarkReadFailed ? { state: "unreadable" as const } : readMainlineWatermarkStrict(crWatermarkRaw);
+            // bug this card exists to close. Scan the stored watermark's branch instead (the SAME shared
+            // {@link resolveMainlineWatermarkRef} confirmWorkerMerge itself resolves — card eb58b8bd: no
+            // second hand-copied derivation), fully qualified to avoid a same-named file/dir/tag ambiguity;
+            // `undefined` (no watermark yet) ⇒ "HEAD", unchanged.
+            const crWatermarkResolution = this.resolveMainlineWatermarkRef(project.id, worker.repoKey);
             // @decision 77b8319b — an unreadable row must never fall back to scanning bare "HEAD" either:
             // skip the already-landed finalize outright and let the original error propagate instead.
-            if (crWatermarkRead.state !== "unreadable") {
-              const crExpectedBranch = crWatermarkRead.state === "ok" ? crWatermarkRead.watermark.branch : undefined;
-              const crExpectedRef = crExpectedBranch ? `refs/heads/${crExpectedBranch}` : undefined;
+            if (crWatermarkResolution.state !== "unreadable") {
+              const crExpectedRef = crWatermarkResolution.ref;
               const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, crExpectedRef ?? "HEAD", { timeoutMs: this.gitOpMs }).catch(() => null));
               const landedSha = crLooked.result;
               if (landedSha) {
@@ -21487,6 +21499,18 @@ export class SessionService {
     const distinctTaskIds = [...new Set(all.map((s) => s.taskId).filter((id): id is string => !!id))];
     const taskColumnKeyMap = this.db.getTaskColumnKeysByIds(distinctTaskIds);
     const eventPresenceMap = this.db.buildWorkerEventPresenceMap();
+    // Card eb58b8bd: Pass A's own memo for {@link resolveMainlineWatermarkRef}, keyed `${projectId}:${repoKey}`
+    // — same "Pass A's own snapshot, rebuilt fresh" posture as projectMap/taskColumnKeyMap/eventPresenceMap
+    // above (a cheap sqlite getMeta read, not a git spawn, so this is about avoiding a redundant read per
+    // session on a shared project+repoKey, not the git-subprocess-stampede problem those three exist for).
+    const mainlineRefCache = new Map<string, ReturnType<SessionService["resolveMainlineWatermarkRef"]>>();
+    // Card eb58b8bd round 2 (Code Review 509f716a minor 1): whether THIS pass's cached mainlineRefCache
+    // ref actually resolves in the canonical repo right now — a renamed/deleted branch still parses fine
+    // as a stored watermark row (resolveMainlineWatermarkRef's "ok" state only reads the DB row, no git)
+    // but no longer names a real ref. Memoized alongside mainlineRefCache, same key, same "once per
+    // (project,repoKey) this pass" posture — N sessions sharing one project+repoKey pay for the fs-only
+    // readBaseSha check once, not once per session.
+    const mainlineRefResolvesCache = new Map<string, boolean>();
     const handledWorktrees = new Set<string>();
     // REBUILT here, not appended — this boot's Pass B is about to recompute the full retained set from
     // scratch, and a stale entry from a prior boot (e.g. a worktree since GC'd by hand) must not linger.
@@ -21552,6 +21576,9 @@ export class SessionService {
     //     bigger than the limit degrades gracefully back to per-session fallback walks, unchanged from
     //     before this fix, never a false "not landed".
     let noPathSetTrailerNoticeCount = 0; // aggregated across this whole pass — see findLandedSquashCommit's onPreFixTrailerNotice param. Renamed from `preFixTrailerNoticeCount` (card 6801c0a1): counts a trailer-absence signal with TWO possible causes now, not one — see the once-per-pass log below.
+    let unreadableWatermarkSkipCount = 0; // card eb58b8bd: sessions skipped THIS pass (landed-lookup/finalize only) because their project+repoKey's stored mainline watermark is unreadable — aggregated once per pass, same convention as noPathSetTrailerNoticeCount above.
+    let unresolvableWatermarkRefSkipCount = 0; // card eb58b8bd round 2: sessions skipped THIS pass (landed-lookup/finalize only) because their project+repoKey's stored mainline watermark names a branch that no longer resolves (renamed/deleted) — aggregated once per pass, same convention as unreadableWatermarkSkipCount above, but see the once-per-pass log below for why this one ALSO names each affected project/repoKey.
+    const unresolvableWatermarkRefLabels = new Set<string>(); // dedup'd `${project.name} (${projectId}) repoKey=<repoKey> branch=<branch>` labels for the once-per-pass log — a renamed/deleted branch is a structurally permanent condition (not a transient corrupt read), so naming it is what lets an operator actually act on it.
     // Card c33f94b2 DoD-1: every failed-to-finish reconciliation this boot, named (worker/branch/task/
     // project) — not just a bare count. `wedged:true` entries are the structurally-permanent repoKey
     // class (see below); `wedged:false` are ordinary/transient failures ("retry next boot" is honest for
@@ -21652,6 +21679,58 @@ export class SessionService {
           continue;
         }
         this.db.clearMergeReconcileWedge(s.id); // resolved again (e.g. a human fixed the registry) — stop tracking
+        // Card eb58b8bd: resolve the stored mainline watermark ref ONCE per (project, repoKey) this pass —
+        // the same shared {@link resolveMainlineWatermarkRef} confirmWorkerMerge itself uses — and thread
+        // it into the squash-detection lookup below instead of the bare "HEAD" that used to scan whatever
+        // the canonical checkout happens to be sitting on (the same post-squash-divert hazard d69d4858
+        // closed for the solo confirm path). This `continue` sits BEFORE the squash lookup even runs, so on
+        // an "unreadable" resolution it skips nothing a session that scanned and came up "not landed"
+        // wouldn't already skip at the `if (!landedSha) continue;` below (the held check, the sibling-
+        // cleanup branch, and finalizeMerge are all reachable ONLY from a positive landedSha) — the
+        // wedge-clear just above already ran either way, so that bookkeeping is preserved regardless.
+        //
+        // @decision 77b8319b — an unreadable row must never fall back to scanning bare "HEAD": skip only
+        // this session's landed-lookup/finalize (worktree/branch/task left as-is, retried next pass).
+        const mainlineRefCacheKey = `${project.id}:${s.repoKey ?? "primary"}`;
+        let mainlineRefResolution = mainlineRefCache.get(mainlineRefCacheKey);
+        if (!mainlineRefResolution) {
+          mainlineRefResolution = this.resolveMainlineWatermarkRef(project.id, s.repoKey);
+          mainlineRefCache.set(mainlineRefCacheKey, mainlineRefResolution);
+        }
+        if (mainlineRefResolution.state === "unreadable") {
+          unreadableWatermarkSkipCount++;
+          continue;
+        }
+        const expectedMainlineRef = mainlineRefResolution.ref;
+        // Card eb58b8bd round 2 (Code Review 509f716a minor 1): a stored watermark row can be perfectly
+        // well-formed JSON and still name a branch that no longer exists (a master->main rename, a
+        // manually deleted branch) — "ok" above only read the DB row, it never checked the branch is a
+        // real ref. Scanning that unresolvable ref (expectedMainlineRef ?? "HEAD" below) would just error
+        // out inside scanMergedCommitMap/findLandedSquashCommit and fail SAFE to "not landed" — correct,
+        // but SILENT: a genuinely-landed orphan would simply stop finalizing for this project+repoKey,
+        // forever, with no signal anywhere that anything is wrong. Check resolvability explicitly here so
+        // it gets its OWN counted, named skip instead of hiding behind the ordinary "no trailer found"
+        // path. Reuses {@link readBaseSha} (fs-only, no git subprocess) — the SAME resolver
+        // findLandedSquashCommitViaMap's own cache-bypass path already uses for an unresolvable non-HEAD
+        // base — rather than a second hand-derived check.
+        //
+        // @decision 77b8319b — same fail-CLOSED posture as the unreadable-row case just above: never fall
+        // back to scanning bare "HEAD" here either. worktree/branch/task are left as-is, retried next pass
+        // (a human fixing the watermark, e.g. via the mainline-watermark/reset route, resolves it then).
+        if (expectedMainlineRef) {
+          let refResolves = mainlineRefResolvesCache.get(mainlineRefCacheKey);
+          if (refResolves === undefined) {
+            refResolves = (await readBaseSha(repoPath, expectedMainlineRef)) !== null;
+            mainlineRefResolvesCache.set(mainlineRefCacheKey, refResolves);
+          }
+          if (!refResolves) {
+            unresolvableWatermarkRefSkipCount++;
+            unresolvableWatermarkRefLabels.add(
+              `${project.name} (${project.id}) repoKey=${s.repoKey ?? "primary"} branch=${mainlineRefResolution.branch}`,
+            );
+            continue;
+          }
+        }
         // SQUASH detection (the CRUX): the worker branch is NOT in main's ancestry, so the old
         // isBranchMerged is always false and worktreeHasWork (branch-ahead) cannot tell a landed-squash
         // orphan from a live worker. findLandedSquashCommit keys on the deterministic `Loom-Worker-Branch`
@@ -21672,12 +21751,12 @@ export class SessionService {
         // uncapped single-branch walk, so full-history detection is never silently narrowed.
         // Card cc9bce38: the branch tip is read around the whole lookup (`tipAcrossLandedCheck`) so the finalize below can CAS-delete at exactly the tip it was content-checked at.
         const paLooked = await this.tipAcrossLandedCheck(repoPath, s.branch!, async () => {
-          const viaMap = await findLandedSquashCommitViaMap(repoPath, s.branch!, { timeoutMs: this.gitOpMs, ...gitDeps });
+          const viaMap = await findLandedSquashCommitViaMap(repoPath, s.branch!, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps });
           return viaMap.hit
             ? viaMap.sha
             : viaMap.scanComplete
               ? null
-              : await findLandedSquashCommit(repoPath, s.branch!, "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps }, () => { noPathSetTrailerNoticeCount++; });
+              : await findLandedSquashCommit(repoPath, s.branch!, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps }, () => { noPathSetTrailerNoticeCount++; });
         });
         const landedSha = paLooked.result;
         if (!landedSha) continue;
@@ -21822,6 +21901,30 @@ export class SessionService {
         "Loom-Worker-PathSet trailer (pre-f621f185 legacy history, or a best-effort Base/PathSet stamp " +
         "that failed to land — logged at the stamp site when it happens) — trusted Loom-Worker-Branch " +
         "presence alone");
+    }
+    // Card eb58b8bd: aggregated ONCE per pass, same convention as noPathSetTrailerNoticeCount above — a
+    // boot with several affected projects can't flood the log the way a per-session warn would.
+    if (unreadableWatermarkSkipCount > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] ${unreadableWatermarkSkipCount} worker(s) skipped the landed-lookup/finalize ` +
+        "this pass because their project's stored mainline watermark record is unreadable (corrupt, or a " +
+        "database read failure) — never falling back to scanning bare HEAD for these; worktree/branch/task " +
+        "left as-is, retried next pass. Ask the owner to reset the affected project's mainline baseline " +
+        "via POST /api/projects/:id/mainline-watermark/reset if this persists.");
+    }
+    // Card eb58b8bd round 2: aggregated ONCE per pass too, same convention as unreadableWatermarkSkipCount
+    // just above — but unlike that corrupt-row case (which can't name a specific cause), THIS case names
+    // every affected (project, repoKey, branch) explicitly: a renamed/deleted branch is a structurally
+    // permanent condition (not a transient corrupt read) until a human re-points the watermark at a real
+    // ref, so naming it is what lets an operator actually act on it rather than just knowing a count.
+    if (unresolvableWatermarkRefSkipCount > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] ${unresolvableWatermarkRefSkipCount} worker(s) skipped the landed-lookup/` +
+        "finalize this pass because their project's stored mainline watermark names a branch that no " +
+        "longer resolves (renamed or deleted) — never falling back to scanning bare HEAD for these; " +
+        `worktree/branch/task left as-is, retried next pass. Affected: ${[...unresolvableWatermarkRefLabels].join("; ")}. ` +
+        "Ask the owner to reset the affected project's mainline baseline via " +
+        "POST /api/projects/:id/mainline-watermark/reset.");
     }
 
     // A2. Resolve branch-gone dangling merges from the EVENT trail (the residual PRE-squash-era shape

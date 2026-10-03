@@ -5386,6 +5386,24 @@ async function readHeadSha(repoPath: string): Promise<string | null> {
 }
 
 /**
+ * Card eb58b8bd: the merged-commit map cache's freshness-key sha for an arbitrary scan `base`, not just
+ * `"HEAD"`. `base === "HEAD"` is BYTE-IDENTICAL to the pre-card behavior — `readHeadSha`'s own `?? "-"`
+ * degrade happens HERE, so a missing/unreadable HEAD (a fake repoPath, as several hermetic tests use)
+ * still resolves to the cacheable constant `"-"`, never `null`. For any other `base` (a
+ * `refs/heads/<branch>` ref), this resolves via {@link readRefSha} (reads packed-refs too) and returns
+ * `null` — never the literal `base` string — when unresolvable: a constant key would serve a stale map
+ * forever for that base. `null` is returned ONLY for a non-`"HEAD"` base; the caller treats it as "bypass
+ * the cache for this call", never cache it.
+ *
+ * Exported (card eb58b8bd round 2) so boot-reconcile Pass A can reuse this SAME fs-only resolvability
+ * check for its own stored-watermark-ref liveness guard, rather than hand-deriving a second one.
+ */
+export async function readBaseSha(repoPath: string, base: string): Promise<string | null> {
+  if (base === "HEAD") return (await readHeadSha(repoPath)) ?? "-";
+  return readRefSha(path.join(repoPath, ".git"), base);
+}
+
+/**
  * Bounded, git-free recursive fingerprint of a worktree's files (path + mtime + size + mode), so a
  * repeat poll can PROVE no uncommitted edit happened without shelling out to git. Returns null if the
  * walk exceeds {@link DIFF_FINGERPRINT_MAX_ENTRIES} (can't cheaply prove unchanged -> caller always
@@ -5645,8 +5663,15 @@ async function scanMergedCommitMap(
   return { map, truncated: recordCount >= MERGED_LOOKUP_SCAN_LIMIT };
 }
 
-/** Keyed per REPO (not per branch/task like {@link diffCache}), so its entry count is bounded by the
- *  number of distinct repos Loom touches, never by board/task size. */
+/** Keyed per (REPO, scan BASE) pair (not per branch/task like {@link diffCache}) — card eb58b8bd widened
+ *  this from per-REPO-alone once a caller (boot-reconcile Pass A) could request a scan base OTHER than
+ *  `"HEAD"` for the same repoPath. Entry count is still bounded — by distinct (repo, base) pairs, never by
+ *  board/task size, and in practice a repo has at most a small, fixed number of distinct bases ever
+ *  requested (`"HEAD"` plus, at most, one stored mainline watermark ref per repoKey).
+ *
+ *  @decision eb58b8bd — the composite key's load-bearing job is protecting {@link mergedMapInFlight}'s
+ *  dedup race, not `mergedMapCache`'s answer (which the sha freshness check already protects); never
+ *  simplify it back to bare repoPath. */
 const MERGED_MAP_CACHE_MAX_ENTRIES = 100;
 
 interface MergedMapCacheEntry {
@@ -5655,45 +5680,61 @@ interface MergedMapCacheEntry {
   truncated: boolean;
 }
 
+/** Card eb58b8bd: a NUL can't appear in a real filesystem path or git ref name, so it's a safe join for a
+ *  composite (repoPath, base) cache key without a collision risk a printable delimiter would carry. */
+const mergedMapCacheKey = (repoPath: string, base: string): string => `${repoPath}\u0000${base}`;
+
 const mergedMapCache = new Map<string, MergedMapCacheEntry>();
 
 /**
- * In-flight scan promises, keyed by repoPath — CR follow-up (card 9983eed6): a cold cache invalidates on
- * EVERY HEAD move, i.e. every merge, which is exactly when a manager/companion board read fans out across
- * many tasks (`listProjectTasks`'s `Promise.all` over a project's tasks, or `list_all_tasks` over many
- * projects, or a companion + a manager reading concurrently). Without this map, ALL of those callers would
- * pass the `mergedMapCache` miss check before any of them finishes scanning (`readHeadSha`'s fs read
- * resolves far faster than the `git log -n 5000` subprocess), each spawning its OWN full scan — N
- * concurrent git-log-5000 processes on one repo instead of one. Registering the promise HERE,
- * SYNCHRONOUSLY, before any await (see {@link getOrStartMergedMapScan}), closes that race: every caller
- * that arrives while a scan is in flight joins the SAME promise instead of starting a new one.
+ * In-flight scan promises, keyed by {@link mergedMapCacheKey} — CR follow-up (card 9983eed6): a cold cache
+ * invalidates on EVERY HEAD move, i.e. every merge, which is exactly when a manager/companion board read
+ * fans out across many tasks (`listProjectTasks`'s `Promise.all` over a project's tasks, or
+ * `list_all_tasks` over many projects, or a companion + a manager reading concurrently). Without this map,
+ * ALL of those callers would pass the `mergedMapCache` miss check before any of them finishes scanning
+ * (`readHeadSha`'s fs read resolves far faster than the `git log -n 5000` subprocess), each spawning its
+ * OWN full scan — N concurrent git-log-5000 processes on one repo instead of one. Registering the promise
+ * HERE, SYNCHRONOUSLY, before any await (see {@link getOrStartMergedMapScan}), closes that race: every
+ * caller that arrives while a scan is in flight joins the SAME promise instead of starting a new one.
  */
 const mergedMapInFlight = new Map<string, Promise<MergedMapCacheEntry>>();
 
 /**
- * Synchronous check-and-register: returns the ALREADY in-flight promise for `repoPath` if one exists,
- * else starts exactly one and registers it before returning — so two calls issued back-to-back (as
- * `Array.prototype.map`/`Promise.all` do) can never both see "no scan in flight" and each start their own.
- * Not `async` itself — the async work lives in the IIFE, whose synchronous prefix (up to its first
+ * Synchronous check-and-register: returns the ALREADY in-flight promise for this (repoPath, base) pair if
+ * one exists, else starts exactly one and registers it before returning — so two calls issued back-to-back
+ * (as `Array.prototype.map`/`Promise.all` do) can never both see "no scan in flight" and each start their
+ * own. Not `async` itself — the async work lives in the IIFE, whose synchronous prefix (up to its first
  * `await`) still runs before this function returns, but the `mergedMapInFlight.set` below happens with NO
  * await in between the `.get` check and the `.set`, which is what makes the dedup race-free.
+ *
+ * `base === "HEAD"` is unchanged from before card eb58b8bd. For any other `base`, {@link readBaseSha} can
+ * come back `null` (the ref genuinely doesn't resolve, e.g. a stored watermark branch that no longer
+ * exists) — that call BYPASSES the cache entirely rather than caching under a constant key, which would
+ * otherwise serve a stale scan forever for that base (see {@link readBaseSha}'s own doc).
  */
-function getOrStartMergedMapScan(repoPath: string, deps: BoundedGitDeps): Promise<MergedMapCacheEntry> {
-  const existing = mergedMapInFlight.get(repoPath);
+function getOrStartMergedMapScan(repoPath: string, base: string, deps: BoundedGitDeps): Promise<MergedMapCacheEntry> {
+  const cacheKey = mergedMapCacheKey(repoPath, base);
+  const existing = mergedMapInFlight.get(cacheKey);
   if (existing) return existing;
   const scan = (async (): Promise<MergedMapCacheEntry> => {
     try {
-      const headSha = (await readHeadSha(repoPath)) ?? "-";
-      const cached = mergedMapCache.get(repoPath);
+      const headSha = await readBaseSha(repoPath, base);
+      if (headSha === null) {
+        // Unresolvable non-HEAD base: never read from or write to mergedMapCache for this call — see
+        // readBaseSha's doc for why a fallback key would be wrong, not merely imprecise.
+        const { map, truncated } = await scanMergedCommitMap(repoPath, base, deps);
+        return { headSha: "-", map, truncated };
+      }
+      const cached = mergedMapCache.get(cacheKey);
       if (cached && cached.headSha === headSha) {
-        mergedMapCache.delete(repoPath);
-        mergedMapCache.set(repoPath, cached); // move to the Map's end (most-recently-used)
+        mergedMapCache.delete(cacheKey);
+        mergedMapCache.set(cacheKey, cached); // move to the Map's end (most-recently-used)
         return cached;
       }
-      const { map, truncated } = await scanMergedCommitMap(repoPath, "HEAD", deps);
+      const { map, truncated } = await scanMergedCommitMap(repoPath, base, deps);
       const entry: MergedMapCacheEntry = { headSha, map, truncated };
-      mergedMapCache.delete(repoPath);
-      mergedMapCache.set(repoPath, entry);
+      mergedMapCache.delete(cacheKey);
+      mergedMapCache.set(cacheKey, entry);
       while (mergedMapCache.size > MERGED_MAP_CACHE_MAX_ENTRIES) {
         const oldest = mergedMapCache.keys().next().value;
         if (oldest === undefined) break;
@@ -5702,27 +5743,29 @@ function getOrStartMergedMapScan(repoPath: string, deps: BoundedGitDeps): Promis
       return entry;
     } finally {
       // Always clear, even on an (unexpected — scanMergedCommitMap itself never throws) failure, so a
-      // one-off error can't permanently wedge every future read of this repo behind a dead in-flight slot.
-      mergedMapInFlight.delete(repoPath);
+      // one-off error can't permanently wedge every future read of this (repo, base) pair behind a dead
+      // in-flight slot.
+      mergedMapInFlight.delete(cacheKey);
     }
   })();
-  mergedMapInFlight.set(repoPath, scan);
+  mergedMapInFlight.set(cacheKey, scan);
   return scan;
 }
 
 /**
  * Cached wrapper around {@link scanMergedCommitMap}: reuses the map (and its `truncated` flag — see
- * {@link MergedCommitScan}) across repeat reads of the same repo state, keyed on the canonical repo's
- * current HEAD sha (fs-only, no subprocess — the SAME freshness-key idiom as {@link getWorkerDiffCached}'s
- * `diffCache`). A merge landing on main advances HEAD, which invalidates the cache on the VERY NEXT read
- * — a just-merged task resolves as soon as HEAD moves, never stale. Concurrent callers on a cold/stale
- * entry are deduped onto ONE scan by {@link getOrStartMergedMapScan} — see its comment for why that dedup
- * has to be synchronous.
+ * {@link MergedCommitScan}) across repeat reads of the same repo state for the same scan `base` (default
+ * `"HEAD"`, unchanged for every caller that doesn't pass one), keyed on that base's own current sha
+ * (fs-only, no subprocess — the SAME freshness-key idiom as {@link getWorkerDiffCached}'s `diffCache`). A
+ * merge landing on `base` advances its sha, which invalidates the cache on the VERY NEXT read for that
+ * base — a just-merged task resolves as soon as its base moves, never stale. Concurrent callers on a
+ * cold/stale entry are deduped onto ONE scan by {@link getOrStartMergedMapScan} — see its comment for why
+ * that dedup has to be synchronous, and for the non-`"HEAD"`-base cache-bypass case.
  */
 export async function getMergedCommitMapCached(
-  repoPath: string, deps: BoundedGitDeps = {},
+  repoPath: string, base = "HEAD", deps: BoundedGitDeps = {},
 ): Promise<MergedCommitScan> {
-  const entry = await getOrStartMergedMapScan(repoPath, deps);
+  const entry = await getOrStartMergedMapScan(repoPath, base, deps);
   return { map: entry.map, truncated: entry.truncated };
 }
 
@@ -5777,16 +5820,19 @@ async function resolveMergedCommitMapHit(
   }
 }
 
-/** @decision 6ee48e4d — batch-primitive sibling of {@link findLandedSquashCommit}: looks `branch` up against
- *  the shared cached map instead of paying its own `--grep` walk.
+/** Batch-primitive sibling of {@link findLandedSquashCommit}: looks `branch` up against the shared cached
+ *  map instead of paying its own `--grep` walk. `base` (card eb58b8bd) matches `findLandedSquashCommit`'s
+ *  own `(repoPath, branch, base, deps)` convention — default `"HEAD"`, unchanged for every caller that
+ *  doesn't pass one; a caller holding a resolved mainline watermark ref can pin the scan to it instead, to
+ *  avoid trusting whatever the canonical checkout happens to be sitting on.
  *
- *  Never treat `{hit:false}` as authoritative
- *  without checking `scanComplete` first — a `false` (truncated/errored scan) MUST fall back to {@link
- *  findLandedSquashCommit} directly. */
+ *  @decision 6ee48e4d — never treat `{hit:false}` as authoritative without checking `scanComplete` first —
+ *  a `false` (truncated/errored scan) MUST fall back to {@link findLandedSquashCommit} directly (with the
+ *  SAME `base`). */
 export async function findLandedSquashCommitViaMap(
-  repoPath: string, branch: string, deps: BoundedGitDeps = {},
+  repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
 ): Promise<{ hit: true; sha: string | null } | { hit: false; scanComplete: boolean }> {
-  const { map, truncated } = await getMergedCommitMapCached(repoPath, deps);
+  const { map, truncated } = await getMergedCommitMapCached(repoPath, base, deps);
   const entry = map.get(branch);
   if (!entry) return { hit: false, scanComplete: !truncated };
   const resolved = await resolveMergedCommitMapHit(repoPath, branch, entry, deps);
@@ -5821,7 +5867,7 @@ export async function resolveWorkerBranchInfo(
   deps: BoundedGitDeps = {},
 ): Promise<WorkerBranchInfo[]> {
   return Promise.all(branches.map(async (branch) => {
-    const result = await findLandedSquashCommitViaMap(repoPath, branch, deps);
+    const result = await findLandedSquashCommitViaMap(repoPath, branch, "HEAD", deps);
     return {
       branch,
       taskTitle: taskMap.get(branch)?.taskTitle ?? null,
@@ -5840,7 +5886,7 @@ export async function getTaskMergedInfo(
   repoPath: string, taskId: string, deps: BoundedGitDeps = {},
 ): Promise<MergedCommitInfo | null> {
   const branch = `loom/${taskKey(taskId)}`;
-  const { map } = await getMergedCommitMapCached(repoPath, deps);
+  const { map } = await getMergedCommitMapCached(repoPath, "HEAD", deps);
   const hit = map.get(branch);
   if (!hit) return null;
   // Verification delegated to {@link resolveMergedCommitMapHit} (card 6ee48e4d factored this out of a
