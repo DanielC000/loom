@@ -11250,6 +11250,19 @@ export class PtyHost {
    * @decision 096231e8 — `boundLive` is the Live `markReady` ran on; `proceed` re-checks identity before
    * any write, so a respawn during this function's own delays can't deliver gen1's kickoff into gen2.
    */
+  /**
+   * @decision 39b0e9b7 — shared by BOTH scheduleKickoffGuarantee branches so their give-up wiring can't drift apart again.
+   */
+  private buildKickoffGiveUpOptions(sessionId: string, kickoff: string): { kickoffMsgId: string; kickoffLogicalId: string; onGiveUpExhausted: () => void } {
+    const kickoffMsgId = randomUUID();
+    const kickoffLogicalId = randomUUID();
+    return {
+      kickoffMsgId,
+      kickoffLogicalId,
+      onGiveUpExhausted: () => this.events.onKickoffGiveUpExhausted?.(sessionId, kickoffMsgId, kickoffLogicalId, kickoff),
+    };
+  }
+
   private scheduleKickoffGuarantee(sessionId: string, kickoff: string, boundLive: Live): void {
     setTimeout(() => {
       // @decision a57b07af — turn-1 kickoff delivery gates on `waitForMcpSeen` (MEASURED 494/494 real
@@ -11309,10 +11322,14 @@ export class PtyHost {
         // Card 850eb55c (round 2): also defer while the boot mode-cycle itself is mid-flight — see
         // `Live.startupCycleInFlight`'s own doc; `dialogStuck` above already reads false by the time the
         // cycle is running (SessionStart flips `sessionStartObserved` before the cycle starts).
+        // @decision 39b0e9b7 — minted ONCE, before the branch split, so the deferred queue path below and
+        // the direct submit() path further down share the identical give-up msgId/logicalId/hook wiring
+        // instead of (as before this card) only the direct path carrying it.
+        const { kickoffMsgId, kickoffLogicalId, onGiveUpExhausted } = this.buildKickoffGiveUpOptions(sessionId, kickoff);
         if (submitOutstanding || l.stopping || l.drainHeld || l.rateLimited || dialogStuck || l.startupCycleInFlight) {
           // eslint-disable-next-line no-console
           console.log(`[pty] ${sessionId} ready with no turn started, but unsafe to write directly (submitOutstanding=${submitOutstanding} stopping=${l.stopping} drainHeld=${l.drainHeld} rateLimited=${l.rateLimited} dialogStuck=${dialogStuck} startupCycleInFlight=${l.startupCycleInFlight}) — queuing the kickoff for atomic delivery instead of racing an in-flight write`);
-          this.enqueueStdin(sessionId, kickoff, "system", undefined, undefined, "agent");
+          this.enqueueStdin(sessionId, kickoff, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, { onGiveUpExhausted, logicalId: kickoffLogicalId });
           return;
         }
         // eslint-disable-next-line no-console
@@ -11340,17 +11357,14 @@ export class PtyHost {
         // same layering PtyHost already uses for `onGiveUpConfirmed`) so the higher layer can decide what to
         // do — card 7772176d: that is now a bounded re-mint before park+notify, not park+notify immediately;
         // see `SessionService.handleKickoffGiveUpExhausted`'s own doc for the current shape.
-        // Card 00bd3b4a: `kickoffMsgId`/`kickoffLogicalId` captured into locals (not inlined twice) so the
-        // give-up hook reports the EXACT SAME ids the QueuedMessage itself carries — this is what lets the
-        // implementer record a durable "parked" event keyed to the same `rootMsgId` a later content-matched
-        // `onGiveUpConfirmed` will report, closing the retraction gap `onKickoffGiveUpExhausted`'s own doc
-        // describes.
-        const kickoffMsgId = randomUUID();
-        const kickoffLogicalId = randomUUID();
+        // Card 00bd3b4a: `kickoffMsgId`/`kickoffLogicalId` (now minted once, pre-branch-split, by
+        // `buildKickoffGiveUpOptions`, see that method's own anchor) are the EXACT SAME ids the
+        // QueuedMessage itself carries — this is what lets the implementer record a durable "parked"
+        // event keyed to the same `rootMsgId` a later content-matched `onGiveUpConfirmed` will report.
         this.submit(sessionId, kickoff, undefined, undefined, undefined, undefined, "kickoff-guarantee",
           [{
             id: kickoffMsgId, text: kickoff, source: "system", kind: "agent", logicalId: kickoffLogicalId,
-            onGiveUpExhausted: () => this.events.onKickoffGiveUpExhausted?.(sessionId, kickoffMsgId, kickoffLogicalId, kickoff),
+            onGiveUpExhausted,
           }]);
         // Deferred one tick past this function's OWN call site (see this function's own doc) — defense in
         // depth, not load-bearing. Card 0050a17e.
