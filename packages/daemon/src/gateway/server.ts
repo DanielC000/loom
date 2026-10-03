@@ -4617,7 +4617,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Platform home (mirroring the DELETE/archive reserved refusals below). Benign metadata edits
       // (name / vaultPath) stay allowed on a reserved project.
       if (p.reserved) return reply.code(400).send({ error: "cannot rebind the repoPath of the reserved Loom Platform project" });
-      const check = await checkRepoRebind(deps.db, id, repoPath);
+      // @decision d25e4ea7 — humanAuthorized:true is a no-op here today (the reserved refusal just
+      // above always fires first for a reserved project) but keeps this call correct in isolation
+      // should that inline guard ever be refactored away.
+      const check = await checkRepoRebind(deps.db, id, repoPath, { humanAuthorized: true });
       if (!check.ok) return reply.code(400).send({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
     }
     // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and refuse an

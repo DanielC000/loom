@@ -23,6 +23,7 @@ import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProce
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
+import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
@@ -3046,9 +3047,12 @@ export class SessionService {
    * @decision 37e15c26 — round 2: refuse any session whose RESOLVED role is `"manager"` into a reserved
    * home (shared chokepoint — `startNew`'s profile-resolved role can be `"manager"` too, not just
    * `startManager`'s explicit one). Raw path only (no git call yet); see the decision record.
+   * @decision d25e4ea7 — key on `managerSessionBarredFrom` (reserved OR home-path), never either half
+   * alone, and throw `MANAGER_SESSION_BARRED_ERROR`, never `OPERATIONAL_HOME_GIT_WRITE_ERROR` — the
+   * latter wrongly asserts the repoPath itself resolves to the operational home.
    */
   private refuseManagerIntoReservedHome(role: SessionRole | undefined, project: Project): void {
-    if (role === "manager" && isLoomHomeOrAncestor(project.repoPath)) throw new Error(OPERATIONAL_HOME_GIT_WRITE_ERROR);
+    if (role === "manager" && managerSessionBarredFrom(project)) throw new Error(MANAGER_SESSION_BARRED_ERROR);
   }
 
   /**
@@ -13698,6 +13702,8 @@ export class SessionService {
    * MUST resolve (else reject) and must pass `agentAssignableProfileError` at its default (strict).
    *
    * @decision 3de74275 — Option B's "every assignable profile is human-blessed" premise no longer holds.
+   * @decision d25e4ea7 — also refuses a manager-role profile when the agent's project is barred
+   * (`managerSessionBarredFrom`) — defense-in-depth; not reachable via a live manager spawn today.
    */
   assignAgentProfile(managerSessionId: string, agentId: string, profileId: string | null): Agent {
     this.requireManager(managerSessionId, "agent_assign_profile");
@@ -13708,6 +13714,8 @@ export class SessionService {
       if (!profile) throw new Error("profile not found");
       const assignErr = agentAssignableProfileError(profile);
       if (assignErr) throw new Error(assignErr);
+      const reservedErr = reservedProjectManagerProfileError(this.db.getProject(agent.projectId), profile);
+      if (reservedErr) throw new Error(reservedErr);
     }
     this.db.updateAgent(agent.id, { profileId });
     this.auditManage(managerSessionId, "agent_assign_profile", { agentId: agent.id, profileId });

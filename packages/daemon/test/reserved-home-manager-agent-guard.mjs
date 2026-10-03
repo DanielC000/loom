@@ -51,7 +51,14 @@ try {
   const db = new Db(path.join(tmpHome, "loom.db"));
   const now = new Date().toISOString();
   db.insertProject({ id: "pReserved", name: "Loom Platform", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
-  db.insertProject({ id: "pOrdinary", name: "Ordinary Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  // card d25e4ea7: pOrdinary's repoPath must NOT alias LOOM_HOME itself (unlike pReserved's) — the
+  // unified managerSessionBarredFrom predicate now bars a project whose repoPath IS LOOM_HOME regardless
+  // of `reserved`, so a project meant to be genuinely "ordinary" needs a repoPath that is neither equal
+  // to, nor an ancestor of, LOOM_HOME. A SUBdirectory of tmpHome is fine (isLoomHomeOrAncestor only bars
+  // equal-to-or-an-ancestor-of LOOM_HOME, never a descendant — see 37e15c26's "nested project" carve-out).
+  const ordinaryRepo = path.join(tmpHome, "ordinary-repo");
+  fs.mkdirSync(ordinaryRepo, { recursive: true });
+  db.insertProject({ id: "pOrdinary", name: "Ordinary Project", repoPath: ordinaryRepo, vaultPath: ordinaryRepo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 
   db.insertProfile({ id: "profManager", name: "Manager Rig", role: "manager", description: "", allowDelta: [], skills: null, model: null, icon: null });
   db.insertProfile({ id: "profWorker", name: "Worker Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });

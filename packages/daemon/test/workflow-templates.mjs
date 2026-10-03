@@ -55,8 +55,15 @@ try {
   const db = new Db(path.join(tmpHome, "fresh.db"));
   seedDefaultProfiles(db);
 
+  // card d25e4ea7: repoPath must NOT alias LOOM_HOME itself — the unified managerSessionBarredFrom
+  // predicate now bars a project whose repoPath IS LOOM_HOME regardless of `reserved`, and this file
+  // applies the "Software team (orchestrated)" preset (an Orchestrator/manager-role agent) to this
+  // project below. A SUBdirectory of tmpHome is fine (isLoomHomeOrAncestor bars equal-to-or-an-ancestor-
+  // of LOOM_HOME only, never a descendant).
+  const projectRepo = path.join(tmpHome, "project-repo");
+  fs.mkdirSync(projectRepo, { recursive: true });
   const project = {
-    id: randomUUID(), name: "Test Project", repoPath: tmpHome, vaultPath: tmpHome,
+    id: randomUUID(), name: "Test Project", repoPath: projectRepo, vaultPath: projectRepo,
     config: {}, createdAt: new Date().toISOString(), archivedAt: null, reserved: false,
   };
   db.insertProject(project);

@@ -4,15 +4,31 @@ import type { Db } from "../db.js";
 import { isPlatformProfile } from "../profiles/seed.js";
 import { agentAssignableProfileError } from "../profiles/validate.js";
 import { agentCreatePromptWarning } from "./promptLint.js";
+import { isLoomHomeOrAncestor } from "../vault/versioner.js";
+
+// @decision d25e4ea7 — the ONE predicate for "may a manager session ever start/bind here": call this,
+// never re-derive `project.reserved` or `isLoomHomeOrAncestor` separately, or the two can drift apart
+// again (ced4285e's "Predicate divergence").
+export function managerSessionBarredFrom(project: Pick<Project, "reserved" | "repoPath"> | undefined): boolean {
+  if (!project) return false;
+  return project.reserved === true || isLoomHomeOrAncestor(project.repoPath);
+}
+
+// @decision d25e4ea7 — dedicated session-start refusal text for `managerSessionBarredFrom`; see the
+// record's "Session-start refusal text" section for why it replaced OPERATIONAL_HOME_GIT_WRITE_ERROR here.
+export const MANAGER_SESSION_BARRED_ERROR =
+  "refusing to start a manager session: a manager session can never start in this project (it is a reserved/system project, or its repoPath is the workspace home or an ancestor of it)";
 
 // @decision ced4285e — shared by createAgentCore AND the Platform Lead's reassignment surfaces so the
 // create-time and reassign-time reserved-project/manager-role checks cannot drift apart.
+// @decision d25e4ea7 — keys on the unified `managerSessionBarredFrom`, not `project.reserved` alone, so
+// a non-reserved project whose repoPath IS an operational-home path is barred too.
 export function reservedProjectManagerProfileError(
-  project: Pick<Project, "reserved"> | undefined,
+  project: Pick<Project, "reserved" | "repoPath"> | undefined,
   profile: Pick<Profile, "role"> | null | undefined,
 ): string | null {
-  if (project?.reserved && profile?.role === "manager") {
-    return "cannot bind a manager-role profile to an agent in a reserved/system project (the workspace home) — a manager session can never start there (see the session-start reserved-home guard); only a human may do this.";
+  if (managerSessionBarredFrom(project) && profile?.role === "manager") {
+    return "cannot bind a manager-role profile to an agent in a project a manager session can never start in (a reserved/system project, or one whose repoPath is the workspace home or an ancestor of it) — only a human may do this.";
   }
   return null;
 }
@@ -20,9 +36,11 @@ export function reservedProjectManagerProfileError(
 // @decision ced4285e — the SECOND reachable route to the same hazard (profile_update flipping an
 // EXISTING shared profile's role to "manager" strands every agent bound to it, without touching any
 // agent row). A reserved project can never be archived (mcp/setup.ts's project_archive refuses it).
+// @decision d25e4ea7 — scans via `managerSessionBarredFrom`, not `project.reserved` alone, so a
+// non-reserved project whose repoPath IS an operational-home path is scanned too.
 export function reservedProjectAgentBoundToProfile(db: Db, profileId: string): { agent: Agent; project: Project } | null {
   for (const project of db.listAllProjects()) {
-    if (!project.reserved) continue;
+    if (!managerSessionBarredFrom(project)) continue;
     const hit = db.listAgents(project.id).find((a) => a.profileId === profileId);
     if (hit) return { agent: hit, project };
   }

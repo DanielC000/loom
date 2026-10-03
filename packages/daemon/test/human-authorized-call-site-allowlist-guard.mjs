@@ -2,16 +2,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // STANDING GUARD — card a06650d2's delta-review ruling on the 3de74275 decision record (fix round 2): the
 // createAgentCore/cloneAgentCore/applyWorkflowTemplate FIELD check (connections/capabilities/vaultWrite) is
 // fail-closed by default on every caller; `opts.humanAuthorized: true` is the ONLY opt-out, and it must be
-// set by EXACTLY TWO call sites — both human-only (bearer/gateway-token) REST routes in gateway/server.ts
-// (the companion-provision auto-clone, and the /api/setup/templates/apply route) — never by an agent-facing
-// MCP tool or any other caller. A THIRD site (a refactor, a new REST route, a careless copy-paste) granting
-// this flag would silently widen the field-check bypass with no agent-facing symptom to notice it by (the
-// human-only-surface-leak-guard's own check only proves `humanAuthorized` never appears under
-// src/mcp/*.ts — it does NOT bound how many OTHER places outside mcp/ may grant it). This guard closes
-// that gap: a corpus-wide, comment-stripped scan of every LITERAL `humanAuthorized: true` grant (never a
-// type declaration `humanAuthorized?: boolean`, and never an internal forwarding call like
-// `humanAuthorized: opts?.humanAuthorized`, which only propagates an ALREADY-granted value rather than
-// minting a new one) against a fixed two-site allowlist.
+// set by EXACTLY THREE call sites — all human-only (bearer/gateway-token) REST routes in gateway/server.ts
+// (the companion-provision auto-clone; the /api/setup/templates/apply route; and, since card d25e4ea7, the
+// PATCH /api/projects/:id repoPath-rebind route's `checkRepoRebind` call — a DIFFERENT opt-out on a
+// DIFFERENT guard, `projects/rebind.ts`'s reserved-project rebind refusal, that happens to reuse the same
+// flag name/shape for the same reason: a human-only REST route exempted from an agent-facing fail-closed
+// default) — never by an agent-facing MCP tool or any other caller. A FOURTH site (a refactor, a new REST
+// route, a careless copy-paste) granting this flag would silently widen one of these bypasses with no
+// agent-facing symptom to notice it by (the human-only-surface-leak-guard's own check only proves
+// `humanAuthorized` never appears under src/mcp/*.ts — it does NOT bound how many OTHER places outside
+// mcp/ may grant it). This guard closes that gap: a corpus-wide, comment-stripped scan of every LITERAL
+// `humanAuthorized: true` grant (never a type declaration `humanAuthorized?: boolean`, and never an
+// internal forwarding call like `humanAuthorized: opts?.humanAuthorized`, which only propagates an
+// ALREADY-granted value rather than minting a new one) against a fixed three-site allowlist.
 //
 // ⚠ THIS GUARD IS A TRIPWIRE AGAINST THE OBVIOUS MISTAKE, NOT A PROOF OF THE INVARIANT — it is a per-line
 // LITERAL-text regex scan, not a type-checker or a dataflow analysis. Real agent-unreachability of
@@ -108,19 +111,20 @@ function scanGrants(baseDir) {
 const ALLOWLIST = [
   { file: "gateway/server.ts", mustContain: "cloneAgentCore(" },
   { file: "gateway/server.ts", mustContain: "applyWorkflowTemplate(" },
+  { file: "gateway/server.ts", mustContain: "checkRepoRebind(" },
 ];
 const realHits = scanGrants(SRC_DIR);
 check(`the real corpus scan found at least one humanAuthorized:true grant (found ${realHits.length})`, realHits.length > 0);
 
 const offenders = realHits.filter((h) => !ALLOWLIST.some((a) => a.file === h.file && h.text.includes(a.mustContain)));
-check(`every humanAuthorized:true grant is one of the two allowlisted sites (offenders: ${offenders.map((h) => `${h.file}:${h.line}`).join(", ") || "none"})`,
+check(`every humanAuthorized:true grant is one of the three allowlisted sites (offenders: ${offenders.map((h) => `${h.file}:${h.line}`).join(", ") || "none"})`,
   offenders.length === 0);
 
 for (const { file, mustContain } of ALLOWLIST) {
   const found = realHits.some((h) => h.file === file && h.text.includes(mustContain));
   check(`positive control: the allowlisted ${file} site (containing "${mustContain}") IS found by the scan`, found);
 }
-check("exactly two real grants exist (no accidental 3rd+ duplicate at one of the two allowlisted shapes)", realHits.length === 2);
+check("exactly three real grants exist (no accidental 4th+ duplicate at one of the three allowlisted shapes)", realHits.length === 3);
 
 // ── forwarding sites are NOT flagged (clone-core.ts / setup/templates.ts propagate an ALREADY-granted
 // value, never mint a new one — distinguishing these from a real grant is this guard's whole point) ──────

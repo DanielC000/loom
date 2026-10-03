@@ -14,6 +14,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       (which the REST PATCH path uses verbatim);
 //   (4) the HARD CONSTRAINT: repoPath is NOT on the agent-facing loom-setup surface — its project_update
 //       inputSchema has no repoPath, and passing one is ignored (repoPath unchanged).
+//   (5) card d25e4ea7: a RESERVED project's repoPath rebind is REFUSED via the elevated platform
+//       project_update (fail-closed, no humanAuthorized flag on that call path) and via the shared
+//       checkRepoRebind guard directly (refused with no flag, PASSES with { humanAuthorized: true }) —
+//       an ordinary project's rebind stays unaffected (control). See
+//       docs/decisions/d25e4ea7-unify-reserved-and-operational-home-manager-predicates.md.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/project-rebind.mjs
 import fs from "node:fs";
@@ -151,6 +156,33 @@ try {
   const ok3 = await plat.call("project_update", { projectId: "pProj", repoPath: repoB });
   check("(3c) rebind succeeds again after the worker exits", ok3.repoPath === repoB && !ok3.error);
 
+  // (5) card d25e4ea7 — a RESERVED project's repoPath rebind is refused via the elevated platform MCP.
+  const reservedBefore = db.getProject("pHome").repoPath;
+  const reservedRebind = await plat.call("project_update", { projectId: "pHome", repoPath: repoB });
+  check("(5) project_update REFUSES rebinding the RESERVED project's repoPath",
+    typeof reservedRebind.error === "string" && /reserved/.test(reservedRebind.error));
+  check("(5) the refused rebind left the reserved project's repoPath UNCHANGED",
+    db.getProject("pHome").repoPath === reservedBefore);
+
+  // (5b) the shared checkRepoRebind guard refuses the SAME reserved rebind with no humanAuthorized flag...
+  const guardReservedRefused = await checkRepoRebind(db, "pHome", repoB);
+  check("(5b) checkRepoRebind REFUSES a reserved project's repoPath rebind with no humanAuthorized flag",
+    guardReservedRefused.ok === false && /reserved/.test(guardReservedRefused.error));
+  // (5c) ...but PASSES it with { humanAuthorized: true } (the REST-path shape) — proves the escape
+  // hatch works, even though REST's OWN call site never actually needs it today: its independent,
+  // unconditional inline refusal (gateway/server.ts) intercepts a reserved rebind before ever reaching
+  // checkRepoRebind — see docs/decisions/d25e4ea7-*.md.
+  const guardReservedAuthorized = await checkRepoRebind(db, "pHome", repoB, { humanAuthorized: true });
+  check("(5c) checkRepoRebind PASSES a reserved project's repoPath rebind when humanAuthorized:true",
+    guardReservedAuthorized.ok === true);
+  check("(5c) ...and checkRepoRebind itself never mutates anything (read-only check)",
+    db.getProject("pHome").repoPath === reservedBefore);
+
+  // (5d) NEGATIVE CONTROL: an ORDINARY project's repoPath rebind is unaffected — not a blanket ban.
+  const ordinaryStillOk = await plat.call("project_update", { projectId: "pProj", repoPath: repoA });
+  check("(5d) NEGATIVE CONTROL: project_update still rebinds an ORDINARY project's repoPath fine",
+    ordinaryStillOk.repoPath === repoA && !ordinaryStillOk.error);
+
   await plat.client.close();
 
   // (4) HARD CONSTRAINT — repoPath is NOT on the agent-facing loom-setup surface.
@@ -176,6 +208,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — repoPath is editable ONLY on the elevated platform MCP + human REST (shared checkRepoRebind: isGitRepo + live-worktree guard), a non-repo and a live-worktree rebind are refused without mutating the binding, and repoPath is absent from the agent-facing loom-setup surface — claude-free, network-free."
+  ? "\n✅ ALL PASS — repoPath is editable ONLY on the elevated platform MCP + human REST (shared checkRepoRebind: isGitRepo + live-worktree + reserved-project guards), a non-repo/live-worktree/reserved-project rebind is refused without mutating the binding (the reserved refusal is escapable only via humanAuthorized:true), an ordinary project's rebind stays unaffected, and repoPath is absent from the agent-facing loom-setup surface — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -110,16 +110,26 @@ export async function checkTaskRepoKeyRebind(db: Db, project: Project, taskId: s
 /**
  * The SHARED guard for rebinding a project's `repoPath` — used by BOTH the elevated platform MCP
  * (project_update) and the human REST PATCH path so they validate identically. repoPath is otherwise
- * create-time-only; this is the one place it changes, and both gates are fail-closed:
+ * create-time-only; this is the one place it changes, and every gate is fail-closed:
  *
+ *  (0) refuse rebinding a RESERVED project's repoPath, unless `opts.humanAuthorized`. See the
+ *      `@decision` tag on this function below for the full rationale.
  *  (1) `repoPath` MUST be an existing git repository (`isGitRepo`) — EXACTLY like project_create /
  *      POST /api/projects validate it; a non-repo is rejected before binding.
  *  (2) Refuse while the project has any LIVE session occupying a worktree ({@link checkLiveWorktreeSessions},
  *      unscoped — see its doc). Rebinding the repo would strand those worktrees (they hang off the OLD
  *      repo); the offending sessions are named so the operator can stop them first. This is a
  *      structural-safety block, not a permission check — the surface is already human/elevated-only.
+ *
+ * @decision d25e4ea7 — gate (0) refuses a reserved project's rebind unless `opts.humanAuthorized`
+ * (same family pattern as `3de74275`'s field check); the Platform Lead's `project_update` passes no
+ * flag (fail-closed), the REST PATCH path passes `humanAuthorized: true`.
  */
-export async function checkRepoRebind(db: Db, projectId: string, repoPath: string): Promise<RebindCheck> {
+export async function checkRepoRebind(db: Db, projectId: string, repoPath: string, opts?: { humanAuthorized?: boolean }): Promise<RebindCheck> {
+  const project = db.getProject(projectId);
+  if (project?.reserved && !opts?.humanAuthorized) {
+    return { ok: false, error: "cannot rebind repoPath for a reserved/system project (the workspace home) — only a human may do this" };
+  }
   if (!(await isGitRepo(repoPath))) {
     return { ok: false, error: `repoPath is not an existing git repository: ${repoPath}` };
   }
