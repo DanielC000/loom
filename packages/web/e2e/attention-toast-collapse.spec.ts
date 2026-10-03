@@ -27,7 +27,7 @@ test.describe("attention toast collapse (card 0d27f20c)", () => {
     ];
     await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: titles[0], type: "decision", options: ["Keep warm", "Fail fast"] });
     await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: titles[1], type: "input" });
-    await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: titles[2], type: "credential", credentialEnvVar: "OPENAI_API_KEY" });
+    await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: titles[2], type: "credential", credentialEnvVar: "MYAPP_OPENAI_KEY" });
     await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: titles[3], type: "permission", permissionAction: "git push --force" });
 
     // (1) On /platform (NOT in the pill's suppression set) the four requests collapse to ONE count pill.

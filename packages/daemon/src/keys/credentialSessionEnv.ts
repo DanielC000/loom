@@ -44,27 +44,51 @@ export interface CredentialSessionEnvDbStore {
  *
  * ⚠️ HONEST LIMIT (code-review round 2): the REGEX below is a strong guarantee — it bounds the shape of
  * every accepted name absolutely, no exceptions. The DENYLIST is NOT — it is a best-effort enumeration of
- * known code-injection/host-launch vectors (JS: NODE_OPTIONS, NODE_PATH; native: the LD_ and DYLD_
- * prefixes — Loom ships to Linux/macOS via `loomctl`, not just this Windows dev host; Loom's own: the
- * GIT_, LOOM_, PYTHON and CLAUDE_ prefixes; Anthropic's own: ANTHROPIC_ — billing/API-redirect; network
- * interception: HTTP(S)_PROXY/ALL_PROXY/NO_PROXY and NODE_EXTRA_CA_CERTS) and will always be one
- * unenumerated var behind. Adding a name here narrows the gap; it never closes it.
+ * known code-injection/host-launch vectors and will always be one unenumerated var behind. Adding a name
+ * here narrows the gap; it never closes it. See `docs/decisions/f44cc187-*.md` and
+ * `docs/decisions/0ab1593a-*.md` for the per-class rationale and evidence behind the current enumeration
+ * — read those rather than restating an example list here, which would otherwise drift the moment a class
+ * is added or an exception is carved out without updating it (exactly the drift that happened before this
+ * note was rewritten to point here instead).
  *
  * @decision f44cc187 — do not remove APPDATA/LOCALAPPDATA for having no single verified in-repo/Node-core
  *   consumer (weakest evidence of this widening): denying a name only blocks STORING a credential under
  *   it, so the cost of a low-confidence addition here is effectively zero.
+ * @decision 0ab1593a — do not fold NODE_* into a `NODE_` prefix, and do not widen
+ *   `RESERVED_ENV_VAR_ALLOW_EXACT` below into a pattern — both stay exact-name-only carve-outs for a
+ *   family's one legitimate human-typed auth token, never a redirect/config name in that same family.
  */
 const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const RESERVED_ENV_VAR_EXACT = new Set([
   "PATH", "NODE_OPTIONS", "NODE_PATH", "HOME", "USERPROFILE", "PAGER", "CLAUDECODE",
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS",
   "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-  "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_USE_ENV_PROXY",
+  "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_USE_ENV_PROXY", "NODE_REPL_EXTERNAL_MODULE",
   "SHELL", "COMSPEC", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA",
+  // TLS/shell/interpreter-injection class widening
+  "SSLKEYLOGFILE", "BASH_ENV", "ENV", "ZDOTDIR",
+  "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+  "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+  "XDG_CONFIG_HOME", "PATHEXT", "WINDIR",
+  "CARGO_HTTP_CAINFO", "BUNDLE_SSL_CA_CERT",
 ]);
 const RESERVED_ENV_VAR_PREFIXES = [
   "GIT_", "LOOM_", "PYTHON", "CLAUDE_", "LD_", "DYLD_", "ANTHROPIC_", "NPM_CONFIG_", "PIP_",
+  // codex-harness/package-manager/OpenSSL prefix widening
+  "CODEX_", "OPENAI_", "YARN_", "UV_", "BUN_CONFIG_", "OPENSSL_",
 ];
+/** Round-2 exact-name carve-out: each of these is the ONE legitimate, widely-used human-typed auth-TOKEN
+ *  name for a family that is otherwise PREFIX-denied above — same reasoning as `NODE_AUTH_TOKEN` staying
+ *  an accepted exact name rather than being folded into a `NODE_` prefix (see the decision note on the
+ *  interface/export above). Exact-name only, never a pattern: a near-sibling redirect/config name in the
+ *  same family (e.g. `UV_INDEX_URL`, `YARN_NPM_REGISTRY_SERVER`, `CODEX_HOME`) stays denied by the prefix.
+ *  Checked AFTER the exact-deny set and BEFORE the prefix-deny list below, so an exact deny always wins
+ *  (no current name overlaps both sets, but the check order enforces the precedence structurally).
+ */
+const RESERVED_ENV_VAR_ALLOW_EXACT = new Set([
+  "YARN_NPM_AUTH_TOKEN", "UV_PUBLISH_TOKEN", "UV_PUBLISH_PASSWORD",
+  "BUN_CONFIG_TOKEN", "CODEX_GITHUB_PERSONAL_ACCESS_TOKEN",
+]);
 
 /** True for a well-formed, DENYLIST-CLEAR env-var name (see the honest-limit note above — the regex half
  *  is absolute, the denylist half is best-effort) — the ONE check shared by the ask-time rejection
@@ -75,6 +99,7 @@ export function isValidCredentialEnvVarName(name: string): boolean {
   if (!ENV_VAR_NAME_RE.test(name)) return false;
   const upper = name.toUpperCase();
   if (RESERVED_ENV_VAR_EXACT.has(upper)) return false;
+  if (RESERVED_ENV_VAR_ALLOW_EXACT.has(upper)) return true;
   return !RESERVED_ENV_VAR_PREFIXES.some((p) => upper.startsWith(p));
 }
 

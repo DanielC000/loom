@@ -175,6 +175,38 @@ function cleanup(e) {
     ["APPDATA", "exact reserved name — Windows per-user app-data root"],
     ["LOCALAPPDATA", "exact reserved name — Windows per-user app-data root"],
     ["temp", "exact reserved name, lowercase — case-insensitive match"],
+    // card 0ab1593a — the codex harness's own auth/config vectors, package-manager registry/auth
+    // classes, and the interpreter/shell-injection + config-root + Windows classes. See that card's own
+    // decision record, docs/decisions/0ab1593a-*.md, for the per-name evidence.
+    ["CODEX_API_KEY", "CODEX_ prefix — codex auth bypass"],
+    ["CODEX_HOME", "CODEX_ prefix — moves codex's entire config/auth root"],
+    ["codex_access_token", "CODEX_ prefix, lowercase — case-insensitive match"],
+    ["OPENAI_API_KEY", "OPENAI_ prefix — OpenAI auth bypass"],
+    ["OPENAI_BASE_URL", "OPENAI_ prefix — redirects OpenAI API traffic"],
+    ["openai_organization", "OPENAI_ prefix, lowercase — case-insensitive match"],
+    ["YARN_NPM_REGISTRY_SERVER", "YARN_ prefix — redirects yarn's package registry"],
+    ["UV_INDEX_URL", "UV_ prefix — redirects uv's package index"],
+    ["UV_INSECURE_HOST", "UV_ prefix — disables uv's TLS host verification"],
+    ["BUN_CONFIG_REGISTRY", "BUN_CONFIG_ prefix — redirects bun's package registry"],
+    ["SSLKEYLOGFILE", "exact reserved name — writes decryptable TLS session secrets to a file"],
+    ["OPENSSL_CONF", "OPENSSL_ prefix — loads an arbitrary OpenSSL provider/engine config"],
+    ["OPENSSL_MODULES", "OPENSSL_ prefix — provider shared-library search directory"],
+    ["BASH_ENV", "exact reserved name — auto-sourced before ANY non-interactive bash script"],
+    ["ENV", "exact reserved name — POSIX sh's startup-file analogue (low-confidence addition)"],
+    ["ZDOTDIR", "exact reserved name — redirects zsh's startup-file root (macOS default shell)"],
+    ["JAVA_TOOL_OPTIONS", "exact reserved name — JVM startup-options injection, incl. -javaagent"],
+    ["_JAVA_OPTIONS", "exact reserved name — HotSpot's own JVM startup-options injection"],
+    ["JDK_JAVA_OPTIONS", "exact reserved name — JDK9+ JVM startup-options injection"],
+    ["PERL5OPT", "exact reserved name — perl interpreter-option injection (incl. -M autoload)"],
+    ["PERL5LIB", "exact reserved name — perl module search-path injection"],
+    ["RUBYOPT", "exact reserved name — ruby interpreter-option injection (incl. -r require)"],
+    ["RUBYLIB", "exact reserved name — ruby $LOAD_PATH injection"],
+    ["XDG_CONFIG_HOME", "exact reserved name — redirects git's global config root"],
+    ["PATHEXT", "exact reserved name — changes which binary resolveExecutable() resolves to"],
+    ["WINDIR", "exact reserved name — legacy duplicate of the already-denied SYSTEMROOT"],
+    ["CARGO_HTTP_CAINFO", "exact reserved name — cargo's own CA override"],
+    ["BUNDLE_SSL_CA_CERT", "exact reserved name — Ruby Bundler's own CA override"],
+    ["NODE_REPL_EXTERNAL_MODULE", "exact reserved name — Node REPL external-module hijack"],
   ];
   for (const [envVar, reason] of rejected) {
     const built = buildQuestionAsk(
@@ -218,6 +250,60 @@ function cleanup(e) {
   );
   check("(A2) a name merely CONTAINING \"pip\" (not the PIP_ prefix) is ACCEPTED, no false refusal", "question" in legitPipLike);
 
+  // card 0ab1593a — near-miss "still accepted" controls for every new prefix added above: a name merely
+  // containing the substring (never starting with the real PREFIX) must still be accepted.
+  for (const envVar of [
+    "MY_CODEX_LIKE_TOKEN", "MY_OPENAI_LIKE_TOKEN", "MY_YARN_LIKE_TOKEN",
+    "MY_UV_LIKE_TOKEN", "MY_BUN_CONFIG_LIKE_TOKEN", "MY_OPENSSL_LIKE_TOKEN",
+  ]) {
+    const legit = buildQuestionAsk(
+      { type: "credential", title: "t", body: "b", envVar },
+      { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+    );
+    check(`(A2) "${envVar}" (substring only, not the real prefix) is ACCEPTED, no false refusal`, "question" in legit);
+  }
+
+  // owner ruling (card 0ab1593a approval): NODE_* stays EXACT names, never a NODE_ prefix, specifically
+  // because NODE_AUTH_TOKEN is a legitimate, widely-used credential name (setup-node / .npmrc's
+  // ${NODE_AUTH_TOKEN}) a prefix would silently block. Prove it's still accepted.
+  const nodeAuthToken = buildQuestionAsk(
+    { type: "credential", title: "t", body: "b", envVar: "NODE_AUTH_TOKEN" },
+    { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+  );
+  check("(A2) NODE_AUTH_TOKEN is ACCEPTED — NODE_* stays exact names, never folded into a NODE_ prefix", "question" in nodeAuthToken);
+
+  // owner ruling: the OPENAI_ prefix is a deliberate, non-free tradeoff (blocks a user's own
+  // OPENAI_API_KEY) — the documented remedy is a project-specific name. Prove the remedy actually works.
+  const myOwnOpenaiKey = buildQuestionAsk(
+    { type: "credential", title: "t", body: "b", envVar: "MYAPP_OPENAI_KEY" },
+    { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+  );
+  check("(A2) MYAPP_OPENAI_KEY (the documented re-ask remedy for OPENAI_*) is ACCEPTED", "question" in myOwnOpenaiKey);
+
+  // card 0ab1593a round 2 (Code Review 98ff4f22) — RESERVED_ENV_VAR_ALLOW_EXACT carves five exact names
+  // back out of the YARN_/UV_/BUN_CONFIG_/CODEX_ prefix denies above: the ONE legitimate, human-typed
+  // auth-token name each family has, same reasoning as NODE_AUTH_TOKEN above. Each must be ACCEPTED even
+  // though it starts with an otherwise-denied prefix.
+  for (const envVar of [
+    "YARN_NPM_AUTH_TOKEN", "UV_PUBLISH_TOKEN", "UV_PUBLISH_PASSWORD",
+    "BUN_CONFIG_TOKEN", "CODEX_GITHUB_PERSONAL_ACCESS_TOKEN",
+  ]) {
+    const allowed = buildQuestionAsk(
+      { type: "credential", title: "t", body: "b", envVar },
+      { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+    );
+    check(`(A2) "${envVar}" (round-2 exact-name allow list) is ACCEPTED`, "question" in allowed);
+  }
+
+  // Near-sibling control: the allow list is EXACT-NAME only, never a pattern — a per-index uv credential
+  // name that shares the "_PASSWORD" suffix with the allowed UV_PUBLISH_PASSWORD, but is not that exact
+  // name, must still be DENIED under the UV_ prefix (see docs/decisions/0ab1593a-*.md's "Round 2" note).
+  const uvIndexPassword = buildQuestionAsk(
+    { type: "credential", title: "t", body: "b", envVar: "UV_INDEX_MYINDEX_PASSWORD" },
+    { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+  );
+  check("(A2) UV_INDEX_MYINDEX_PASSWORD (near-sibling of the allowed UV_PUBLISH_PASSWORD, not exact) is still REJECTED", "error" in uvIndexPassword);
+
   // card f44cc187 — the error text used to hand-copy the denylist as a literal string; it is now built
   // from the real RESERVED_ENV_VAR_EXACT/PREFIXES sets via describeReservedEnvVarNames(), so prove the two
   // can never again disagree: every rejected name above must be NAMED in the error text too.
@@ -227,6 +313,9 @@ function cleanup(e) {
   );
   check("(A2) the generated error text names SYSTEMROOT", "error" in rejectedBad && rejectedBad.error.includes("SYSTEMROOT"));
   check("(A2) the generated error text names the NPM_CONFIG_ prefix", "error" in rejectedBad && rejectedBad.error.includes("NPM_CONFIG_"));
+  check("(A2) the generated error text names the CODEX_ prefix", "error" in rejectedBad && rejectedBad.error.includes("CODEX_"));
+  check("(A2) the generated error text names the OPENAI_ prefix", "error" in rejectedBad && rejectedBad.error.includes("OPENAI_"));
+  check("(A2) the generated error text names PATHEXT", "error" in rejectedBad && rejectedBad.error.includes("PATHEXT"));
 
   cleanup(e);
 }

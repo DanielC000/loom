@@ -173,12 +173,19 @@ function askAndAnswer(proj, { id, envVar, secret, provisionTo, answeredAt }) {
   }
   seedLegacyReserved("cse-c3-anthropic-lower", "anthropic_api_key", "sk-ant-should-not-appear");
   seedLegacyReserved("cse-c4-httpproxy-lower", "http_proxy", "http://evil:8080");
+  // card 0ab1593a — same backstop proof for the newly-widened CODEX_ prefix and one of the new exact
+  // names, confirming the resolve-time backstop catches these too, not just the ask-time rejection
+  // credential-provisioning.mjs already covers.
+  seedLegacyReserved("cse-c5-codex-lower", "codex_api_key", "sk-codex-should-not-appear");
+  seedLegacyReserved("cse-c6-pathext", "PATHEXT", ".EXE;.COM;.EVIL");
 
   const resolvedBackstop = resolveCredentialSessionEnv(db, proj.projectId);
   check("(C) a legacy row with a reserved env-var name (PATH) is NEVER surfaced by the resolver", !("PATH" in resolvedBackstop));
   check("(C) its sibling, well-formed credential still resolves", resolvedBackstop.SAFE_VAR === "safe-value");
   check("(C) a lowercase legacy row hitting the ANTHROPIC_ prefix (anthropic_api_key) is dropped", !("anthropic_api_key" in resolvedBackstop) && !("ANTHROPIC_API_KEY" in resolvedBackstop));
   check("(C) a lowercase legacy row hitting the HTTP_PROXY exact name (http_proxy) is dropped", !("http_proxy" in resolvedBackstop) && !("HTTP_PROXY" in resolvedBackstop));
+  check("(C) a lowercase legacy row hitting the CODEX_ prefix (codex_api_key) is dropped", !("codex_api_key" in resolvedBackstop) && !("CODEX_API_KEY" in resolvedBackstop));
+  check("(C) a legacy row hitting the PATHEXT exact name is dropped", !("PATHEXT" in resolvedBackstop));
 }
 
 // ===== (D) card f44cc187 item 2: the owner-visible undeliverable signal =====

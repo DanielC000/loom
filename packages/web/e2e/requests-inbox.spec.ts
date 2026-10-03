@@ -30,7 +30,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
     const decTitle = uniq("decision-ask");
     const credTitle = uniq("credential-ask");
     await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: decTitle, type: "decision", options: ["A", "B"] });
-    await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: credTitle, type: "credential", credentialEnvVar: "OPENAI_API_KEY" });
+    await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: credTitle, type: "credential", credentialEnvVar: "MYAPP_OPENAI_KEY" });
 
     await page.goto(`${loomDaemon.baseURL}/inbox`);
     const main = page.locator("main");
