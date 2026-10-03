@@ -130,10 +130,11 @@ const readLog = (dedupeDir) => {
   // decisions_for no-query: recordsByStore + injections from the DEFAULT log path (the hook's real sink)
   fs.mkdirSync(path.dirname(DECISION_RECORD_INJECTION_LOG), { recursive: true });
   fs.writeFileSync(DECISION_RECORD_INJECTION_LOG, row(REPO) + row(REPO) + row(REPO));
-  const all = decisionsFor(REPO);
+  const all = await decisionsFor(REPO);
   check("(6d) decisions_for index: recordCount + recordsByStore per store", all.recordCount === 3 && all.recordsByStore.adr === 1 && all.recordsByStore.decisions === 2 && all.recordsByStore.investigations === 0);
   check("(6e) decisions_for index: injections read from the hook's real log path", all.injections.total === 3);
-  check("(6f) a repo with records but no injections reads injections.total 0", decisionsFor(OTHER).injections.total === 0 && decisionsFor(OTHER).recordCount === 1);
+  const otherAll = await decisionsFor(OTHER);
+  check("(6f) a repo with records but no injections reads injections.total 0", otherAll.injections.total === 0 && otherAll.recordCount === 1);
 }
 
 // (7) name pin

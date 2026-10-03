@@ -1,6 +1,7 @@
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { strictShape } from "./arg-alias.js";
@@ -30,23 +31,57 @@ function parseAnchorMatch(m: RegExpMatchArray): { ns: AnchorNs; id: string } {
   return m[1] ? { ns: "sha", id: m[1].toLowerCase() } : { ns: "card", id: (m[2] ?? "").toLowerCase() };
 }
 
-/** True iff `sha` resolves to a real, existing commit in `repoRoot`'s git history — mirrors
- * decision-records.mjs's own `verifyCommitSha` (same doc/rationale there). Bounded by a short `timeout`
- * (card 969b0e1c review S2 — this repo's standing posture is every git call is timeout-bounded; this one
- * is a per-request MCP-tool subprocess, so a hang can't wedge the daemon, but there's no reason to leave
- * it unbounded either) — a timeout throws, and this function's own `catch` already reads that as
- * UNVERIFIED, the documented refuse-rather-than-fall-through behavior, not a special case to add. */
-function verifyCommitSha(repoRoot: string, sha: string): boolean {
-  try {
-    execFileSync("git", ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], {
-      cwd: repoRoot,
-      stdio: ["ignore", "ignore", "ignore"],
-      timeout: 5000,
+/** @decision 32baca66 — verify MANY ids in ONE subprocess, never one blocking `execFileSync` child per
+ * id; never key cat-file's output off its first field — on a resolved id that field is the RESOLVED
+ * sha, not the queried one, so a naive match silently reports every real id as unverified. */
+function verifyCommitShas(repoRoot: string, ids: readonly string[], timeoutMs = 20_000): Promise<Map<string, boolean>> {
+  const result = new Map<string, boolean>(ids.map((id) => [id, false]));
+  if (ids.length === 0) return Promise.resolve(result);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => { if (!settled) { settled = true; resolve(result); } };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn("git", ["cat-file", "--batch-check=%(objectname) %(objecttype) %(rest)"], {
+        cwd: repoRoot,
+        stdio: ["pipe", "pipe", "ignore"],
+        windowsHide: true,
+      });
+    } catch {
+      finish();
+      return;
+    }
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* best effort */ }
+      finish();
+    }, timeoutMs);
+    let out = "";
+    child.stdout?.on("data", (d: Buffer) => { out += d; });
+    child.on("error", () => { clearTimeout(timer); finish(); });
+    child.stdin?.on("error", () => { /* EPIPE if the child exited early — close below still settles */ });
+    child.on("close", () => {
+      clearTimeout(timer);
+      for (const rawLine of out.split("\n")) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        if (line.endsWith(" missing") || line.endsWith(" ambiguous")) {
+          const expr = line.slice(0, line.lastIndexOf(" "));
+          const id = expr.endsWith("^{commit}") ? expr.slice(0, -"^{commit}".length) : expr;
+          if (result.has(id)) result.set(id, false);
+          continue;
+        }
+        const parts = line.split(" ");
+        if (parts.length < 3) continue; // malformed/unexpected line — leave unverified
+        const [, objecttype, id] = parts;
+        if (id !== undefined && result.has(id)) result.set(id, objecttype === "commit");
+      }
+      finish();
     });
-    return true;
-  } catch {
-    return false;
-  }
+    try {
+      child.stdin?.write(ids.map((id) => `${id}^{commit} ${id}\n`).join(""));
+      child.stdin?.end();
+    } catch { /* EPIPE — close handler still fires and settles with whatever was parsed */ }
+  });
 }
 
 const FLAT_STORES = ["adr", "decisions"] as const;
@@ -101,36 +136,38 @@ function extractTitle(text: string, fallback: string): string {
 
 /** Resolve one anchored `{ns, id}` to its record's {path, title}, across all three stores — null if none.
  * Card 969b0e1c: for `ns:"sha"`, `id` is FIRST verified against this repo's real git history
- * (`verifyCommitSha`) — an unverifiable sha REFUSES outright, before ever attempting the file lookup
+ * (`verifyCommitShas`) — an unverifiable sha REFUSES outright, before ever attempting the file lookup
  * below, mirroring decision-records.mjs's own `resolveRecord` gate exactly (same file lookup either way —
- * only the admission gate differs). `ns:"card"` skips verification entirely, unchanged from before. */
-function resolveRecordMeta(repoRoot: string, ns: AnchorNs, id: string): RecordMeta | null {
-  if (ns === "sha" && !verifyCommitSha(repoRoot, id)) return null;
+ * only the admission gate differs). `ns:"card"` skips verification entirely, unchanged from before.
+ * Card 32baca66: async (fs.promises) — this is still a single-id call site, so it just feeds a one-
+ * element array into the batched verifier; the batching machinery is unconditional, not a separate path. */
+async function resolveRecordMeta(repoRoot: string, ns: AnchorNs, id: string): Promise<RecordMeta | null> {
+  if (ns === "sha" && !(await verifyCommitShas(repoRoot, [id])).get(id)) return null;
   for (const store of FLAT_STORES) {
     const dir = path.join(repoRoot, "docs", store);
     let entries: string[];
-    try { entries = fs.readdirSync(dir); } catch { continue; }
+    try { entries = await fsp.readdir(dir); } catch { continue; }
     const hit = entries
       .filter((n) => n.toLowerCase().endsWith(".md") && idBoundaryMatch(n.toLowerCase(), id))
       .sort()[0];
     if (hit) {
       const full = path.join(dir, hit);
       try {
-        const text = fs.readFileSync(full, "utf8");
+        const text = await fsp.readFile(full, "utf8");
         return { id, rel: relPosix(repoRoot, full), title: extractTitle(text, hit), store };
       } catch { /* fall through to next store */ }
     }
   }
   const invDir = path.join(repoRoot, "docs", "investigations");
   let entries: fs.Dirent[];
-  try { entries = fs.readdirSync(invDir, { withFileTypes: true }); } catch { entries = []; }
+  try { entries = await fsp.readdir(invDir, { withFileTypes: true }); } catch { entries = []; }
   const hitDir = entries
     .filter((e) => e.isDirectory() && idBoundaryMatch(e.name.toLowerCase(), id))
     .sort((a, b) => a.name.localeCompare(b.name))[0];
   if (hitDir) {
     const full = path.join(invDir, hitDir.name, "findings.md");
     try {
-      const text = fs.readFileSync(full, "utf8");
+      const text = await fsp.readFile(full, "utf8");
       return { id, rel: relPosix(repoRoot, full), title: extractTitle(text, hitDir.name), store: "investigations" };
     } catch { /* no findings.md at that dir — no record */ }
   }
@@ -139,13 +176,14 @@ function resolveRecordMeta(repoRoot: string, ns: AnchorNs, id: string): RecordMe
 
 /** Every `<id>*.md` / `<id>-<slug>/findings.md` record this convention can resolve, across all three stores —
  * mirrors `comment-anchor-lint.mjs`'s own `listRecordIds` (used here for the reverse "which records have
- * no inbound anchor" check, DoD-4's second half). */
-function listAllRecords(repoRoot: string): RecordMeta[] {
+ * no inbound anchor" check, DoD-4's second half). Card 32baca66: async (fs.promises) — part of the same
+ * no-query synchronous cost this card fixed. */
+async function listAllRecords(repoRoot: string): Promise<RecordMeta[]> {
   const records: RecordMeta[] = [];
   for (const store of FLAT_STORES) {
     const dir = path.join(repoRoot, "docs", store);
     let entries: string[];
-    try { entries = fs.readdirSync(dir); } catch { continue; }
+    try { entries = await fsp.readdir(dir); } catch { continue; }
     for (const name of entries) {
       const lower = name.toLowerCase();
       if (!lower.endsWith(".md") || lower === "template.md") continue;
@@ -153,36 +191,39 @@ function listAllRecords(repoRoot: string): RecordMeta[] {
       if (!m || !idBoundaryMatch(lower, m[1]!)) continue;
       const full = path.join(dir, name);
       let title = name;
-      try { title = extractTitle(fs.readFileSync(full, "utf8"), name); } catch { /* keep filename fallback */ }
+      try { title = extractTitle(await fsp.readFile(full, "utf8"), name); } catch { /* keep filename fallback */ }
       records.push({ id: m[1]!, rel: relPosix(repoRoot, full), title, store });
     }
   }
   const invDir = path.join(repoRoot, "docs", "investigations");
   let entries: fs.Dirent[];
-  try { entries = fs.readdirSync(invDir, { withFileTypes: true }); } catch { entries = []; }
+  try { entries = await fsp.readdir(invDir, { withFileTypes: true }); } catch { entries = []; }
   for (const e of entries) {
     if (!e.isDirectory()) continue;
     const lower = e.name.toLowerCase();
     const m = /^([0-9a-f]{8})-/.exec(lower);
     if (!m) continue;
     const full = path.join(invDir, e.name, "findings.md");
-    if (!fs.existsSync(full)) continue;
+    try { await fsp.access(full); } catch { continue; }
     let title = e.name;
-    try { title = extractTitle(fs.readFileSync(full, "utf8"), e.name); } catch { /* keep fallback */ }
+    try { title = extractTitle(await fsp.readFile(full, "utf8"), e.name); } catch { /* keep fallback */ }
     records.push({ id: m[1]!, rel: relPosix(repoRoot, full), title, store: "investigations" });
   }
   return records;
 }
 
 /** Walk every regular file under `root`, skipping SKIP_DIRS + symlinks, bounded by MAX_WALK_FILES — a
- * generic, repo-layout-agnostic sweep (parity with comment-anchor-lint.mjs's own layout-agnostic walk since card 03fbb126). */
-function* walkFiles(root: string): Generator<string> {
+ * generic, repo-layout-agnostic sweep (parity with comment-anchor-lint.mjs's own layout-agnostic walk since card 03fbb126).
+ * Card 32baca66: an ASYNC generator over `fs.promises.readdir` — each `yield` is still processed
+ * SEQUENTIALLY by every caller (never concurrently), so walk order is unchanged; what changes is that the
+ * `await` between files hands control back to the event loop instead of blocking it for the whole walk. */
+async function* walkFiles(root: string): AsyncGenerator<string> {
   let count = 0;
   const stack: string[] = [root];
   while (stack.length > 0) {
     const dir = stack.pop()!;
     let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { continue; }
     for (const e of entries) {
       if (e.isSymbolicLink()) continue;
       const full = path.join(dir, e.name);
@@ -202,13 +243,13 @@ type AnchorScan = { anchors: Array<{ ns: AnchorNs; id: string; line: number }>; 
  * 2b2d9a47 DoD-1) marks a file that exceeded MAX_FILE_BYTES and was NOT scanned — kept distinct from an
  * unreadable/binary file (`anchors:[]`, `skippedForSize:false`) so every caller can tell "genuinely no
  * anchors here" from "did not look here at all" instead of collapsing both into an empty result. */
-function findAnchorsInFile(absPath: string): AnchorScan {
+async function findAnchorsInFile(absPath: string): Promise<AnchorScan> {
   let stat: fs.Stats;
-  try { stat = fs.statSync(absPath); } catch { return { anchors: [], skippedForSize: false }; }
+  try { stat = await fsp.stat(absPath); } catch { return { anchors: [], skippedForSize: false }; }
   if (!stat.isFile()) return { anchors: [], skippedForSize: false };
   if (stat.size > MAX_FILE_BYTES) return { anchors: [], skippedForSize: true };
   let content: string;
-  try { content = fs.readFileSync(absPath, "utf8"); } catch { return { anchors: [], skippedForSize: false }; }
+  try { content = await fsp.readFile(absPath, "utf8"); } catch { return { anchors: [], skippedForSize: false }; }
   if (containsNul(content)) return { anchors: [], skippedForSize: false };
   const found: Array<{ ns: AnchorNs; id: string; line: number }> = [];
   content.split(/\r?\n/).forEach((line, i) => {
@@ -227,11 +268,11 @@ type AnchorIndexResult = { index: Map<string, AnchorSite[]>; skippedFiles: strin
  * walk could NOT scan (MAX_FILE_BYTES) — sorted for a deterministic result, since walkFiles' own DFS
  * order isn't. Every caller of this index (id reverse-lookup, no-query enumerate-all) surfaces this list
  * so an `orphan` verdict it computes is interpretable rather than a silent false assertion. */
-function buildAnchorIndex(repoRoot: string): AnchorIndexResult {
+async function buildAnchorIndex(repoRoot: string): Promise<AnchorIndexResult> {
   const idx = new Map<string, AnchorSite[]>();
   const skippedFiles: string[] = [];
-  for (const full of walkFiles(repoRoot)) {
-    const { anchors, skippedForSize } = findAnchorsInFile(full);
+  for await (const full of walkFiles(repoRoot)) {
+    const { anchors, skippedForSize } = await findAnchorsInFile(full);
     const rel = relPosix(repoRoot, full);
     if (skippedForSize) { skippedFiles.push(rel); continue; }
     if (anchors.length === 0) continue;
@@ -292,20 +333,20 @@ function parseIdQuery(query: string): { ns: AnchorNs; id: string } {
  * symbol table: an overloaded/re-exported/method-only name can resolve to zero or several files, both
  * reported rather than guessed at.
  */
-function findSymbolDefinitionFiles(repoRoot: string, symbol: string): string[] {
+async function findSymbolDefinitionFiles(repoRoot: string, symbol: string): Promise<string[]> {
   const esc = escapeRegExp(symbol);
   const defRe = new RegExp(
     `\\b(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?(?:function\\*?|class|interface|type|enum)\\s+${esc}\\b` +
     `|\\b(?:export\\s+)?(?:const|let|var)\\s+${esc}\\b\\s*[:=]`,
   );
   const hits: string[] = [];
-  for (const full of walkFiles(repoRoot)) {
+  for await (const full of walkFiles(repoRoot)) {
     if (hits.length >= MAX_SYMBOL_HITS) break;
     let stat: fs.Stats;
-    try { stat = fs.statSync(full); } catch { continue; }
+    try { stat = await fsp.stat(full); } catch { continue; }
     if (stat.size > MAX_FILE_BYTES) continue;
     let content: string;
-    try { content = fs.readFileSync(full, "utf8"); } catch { continue; }
+    try { content = await fsp.readFile(full, "utf8"); } catch { continue; }
     if (containsNul(content)) continue;
     if (defRe.test(content)) hits.push(relPosix(repoRoot, full));
   }
@@ -317,13 +358,17 @@ type DecisionItem = { ns: AnchorNs; id: string; line: number; record: { path: st
 /** Core of the `path` mode — every anchor in ONE file, each resolved (or flagged orphan: DoD-4).
  * `skippedForSize:true` (card 2b2d9a47) means this file exceeded MAX_FILE_BYTES and was NOT scanned —
  * `anchorCount:0`/`decisions:[]` in that case means "did not look", not "genuinely has none", and this
- * flag is what lets a caller tell the two apart instead of trusting a false-empty result. */
-function decisionsForFile(repoRoot: string, abs: string): { path: string; anchorCount: number; orphanAnchorCount: number; decisions: DecisionItem[]; skippedForSize: boolean } {
-  const { anchors, skippedForSize } = findAnchorsInFile(abs);
-  const decisions: DecisionItem[] = anchors.map((a) => {
-    const rec = resolveRecordMeta(repoRoot, a.ns, a.id);
+ * flag is what lets a caller tell the two apart instead of trusting a false-empty result. Card 32baca66:
+ * per-anchor resolution runs via `Promise.all` (bounded by how many anchors ONE file has, typically a
+ * handful) — this preserves the SAME output order as the old sequential `.map()` (`Promise.all` resolves
+ * into an array indexed by its input array, regardless of per-promise completion order), never a
+ * speed-motivated reorder. */
+async function decisionsForFile(repoRoot: string, abs: string): Promise<{ path: string; anchorCount: number; orphanAnchorCount: number; decisions: DecisionItem[]; skippedForSize: boolean }> {
+  const { anchors, skippedForSize } = await findAnchorsInFile(abs);
+  const decisions: DecisionItem[] = await Promise.all(anchors.map(async (a) => {
+    const rec = await resolveRecordMeta(repoRoot, a.ns, a.id);
     return { ns: a.ns, id: a.id, line: a.line, record: rec ? { path: rec.rel, title: rec.title } : null, orphan: !rec };
-  });
+  }));
   return {
     path: relPosix(repoRoot, abs),
     anchorCount: decisions.length,
@@ -333,13 +378,13 @@ function decisionsForFile(repoRoot: string, abs: string): { path: string; anchor
   };
 }
 
-function decisionsForPath(repoRoot: string, rel: string): { mode: "path"; error: string } | ({ mode: "path" } & ReturnType<typeof decisionsForFile>) {
+async function decisionsForPath(repoRoot: string, rel: string): Promise<{ mode: "path"; error: string } | ({ mode: "path" } & Awaited<ReturnType<typeof decisionsForFile>>)> {
   const abs = resolveWithinRepo(repoRoot, rel);
   if (!abs) return { mode: "path", error: "path escapes the repo root or is not a relative path" };
   let stat: fs.Stats;
-  try { stat = fs.statSync(abs); } catch { return { mode: "path", error: "file not found" }; }
+  try { stat = await fsp.stat(abs); } catch { return { mode: "path", error: "file not found" }; }
   if (!stat.isFile()) return { mode: "path", error: "not a file" };
-  return { mode: "path", ...decisionsForFile(repoRoot, abs) };
+  return { mode: "path", ...(await decisionsForFile(repoRoot, abs)) };
 }
 
 /** Reverse lookup: "what does this record govern" — every anchor site citing `{ns, id}`, plus the record
@@ -356,9 +401,9 @@ function decisionsForPath(repoRoot: string, rel: string): { mode: "path"; error:
  * confirms (e.g. `git grep`) that none of `skippedFiles` cite this id.
  * Card 2c387896: `orphan:true` here means only "not anchored+recorded in this project's own repoPath" —
  * `scopeNote` (below) discloses that on every orphan result instead of leaving it implicit. */
-function decisionsForId(repoRoot: string, ns: AnchorNs, id: string) {
-  const record = resolveRecordMeta(repoRoot, ns, id);
-  const { index, skippedFiles } = buildAnchorIndex(repoRoot);
+async function decisionsForId(repoRoot: string, ns: AnchorNs, id: string) {
+  const record = await resolveRecordMeta(repoRoot, ns, id);
+  const { index, skippedFiles } = await buildAnchorIndex(repoRoot);
   const anchoredIn = index.get(`${ns}:${id}`) ?? [];
   const orphan = !record || anchoredIn.length === 0;
   return {
@@ -380,8 +425,8 @@ function decisionsForId(repoRoot: string, ns: AnchorNs, id: string) {
 }
 
 /** Symbol mode: resolve to file(s) via the trivial heuristic, then run the `path` mode on each. */
-function decisionsForSymbol(repoRoot: string, symbol: string) {
-  const resolvedFiles = findSymbolDefinitionFiles(repoRoot, symbol);
+async function decisionsForSymbol(repoRoot: string, symbol: string) {
+  const resolvedFiles = await findSymbolDefinitionFiles(repoRoot, symbol);
   if (resolvedFiles.length === 0) {
     return { mode: "symbol" as const, symbol, resolvedFiles: [], error: "no definition found for this symbol (trivial heuristic — declarations only, not references/methods)" };
   }
@@ -390,7 +435,7 @@ function decisionsForSymbol(repoRoot: string, symbol: string) {
     symbol,
     resolvedFiles,
     ambiguous: resolvedFiles.length > 1,
-    results: resolvedFiles.map((rel) => decisionsForFile(repoRoot, path.join(repoRoot, rel))),
+    results: await Promise.all(resolvedFiles.map((rel) => decisionsForFile(repoRoot, path.join(repoRoot, rel)))),
   };
 }
 
@@ -441,11 +486,21 @@ export function readInjectionStats(repoRoot: string, logFile: string = DECISION_
   return stats;
 }
 
-function decisionsForAll(repoRoot: string) {
-  const { index: idx, skippedFiles } = buildAnchorIndex(repoRoot);
-  const records = listAllRecords(repoRoot);
+async function decisionsForAll(repoRoot: string) {
+  const { index: idx, skippedFiles } = await buildAnchorIndex(repoRoot);
+  const records = await listAllRecords(repoRoot);
   const recordIds = new Set(records.map((r) => r.id));
-  const shaVerifyCache = new Map<string, boolean>();
+  // Card 32baca66: collect every sha-namespaced id that NEEDS verification first, then verify the WHOLE
+  // batch in one subprocess (verifyCommitShas) — replaces the old per-id `shaVerifyCache` loop that still
+  // spawned one blocking `execFileSync` child per unique miss.
+  const shaIdsToVerify: string[] = [];
+  for (const [key] of idx) {
+    const sep = key.indexOf(":");
+    const ns = key.slice(0, sep) as AnchorNs;
+    const id = key.slice(sep + 1);
+    if (ns === "sha" && recordIds.has(id)) shaIdsToVerify.push(id);
+  }
+  const shaVerified = await verifyCommitShas(repoRoot, shaIdsToVerify);
   const anchoredRecordIds = new Set<string>();
   const orphanAnchors: Array<{ ns: AnchorNs; id: string; sites: AnchorSite[] }> = [];
   for (const [key, sites] of idx) {
@@ -453,10 +508,7 @@ function decisionsForAll(repoRoot: string) {
     const ns = key.slice(0, sep) as AnchorNs;
     const id = key.slice(sep + 1);
     let resolves = recordIds.has(id);
-    if (resolves && ns === "sha") {
-      if (!shaVerifyCache.has(id)) shaVerifyCache.set(id, verifyCommitSha(repoRoot, id));
-      resolves = shaVerifyCache.get(id)!;
-    }
+    if (resolves && ns === "sha") resolves = shaVerified.get(id) ?? false;
     if (resolves) anchoredRecordIds.add(id);
     else orphanAnchors.push({ ns, id, sites });
   }
@@ -477,7 +529,7 @@ function decisionsForAll(repoRoot: string) {
 /** Dispatch on the shape of `query`: an 8-hex id (bare -> card, `sha:`-sigil'd -> commit, card 969b0e1c)
  * -> reverse lookup; a path-shaped string -> file lookup; anything else -> best-effort symbol resolution;
  * omitted/blank -> full-repo enumeration. */
-export function decisionsFor(repoRoot: string, query?: string) {
+export async function decisionsFor(repoRoot: string, query?: string) {
   const q = (query ?? "").trim();
   if (!q) return decisionsForAll(repoRoot);
   if (looksLikeId(q)) { const { ns, id } = parseIdQuery(q); return decisionsForId(repoRoot, ns, id); }
@@ -545,7 +597,7 @@ export function registerDecisionTools(server: McpServer, resolveRepoRoot: () => 
     async ({ query }) => {
       const repoRoot = resolveRepoRoot();
       if (!repoRoot) return ok({ error: "this project has no repoPath to read source/docs from" });
-      try { return ok(decisionsFor(realRoot(repoRoot), query)); }
+      try { return ok(await decisionsFor(realRoot(repoRoot), query)); }
       catch (e) { return ok({ error: (e as Error).message }); }
     },
   );
