@@ -78,21 +78,40 @@ function setupLockedRoleError(role: string | null | undefined, subject: string):
 }
 
 /**
+ * ONE predicate for "may the ungated setup surface touch this project's structure/config AT ALL" —
+ * refuses every reserved/system project (the Setup Assistant's own "Platform" home, or the dev-only
+ * "Loom Platform" home) outright, for every setup write surface that targets a project directly:
+ * project_update, project_configure, agent_create, template_apply, project_archive.
+ * `setupMayTouchAgentError` (below) delegates to this for the project-reserved half of ITS OWN check —
+ * so there is exactly ONE predicate and ONE message for "reserved project" across every setup write,
+ * never a second hand-copied `project.reserved` check free to drift from it (card ccd373cc, closing the
+ * gap where project_update/project_configure had no reserved check at all while the other three did,
+ * each with its own near-duplicate inline message). Returns an error string, or null when the project
+ * is safe to touch.
+ */
+function setupMayTouchProjectError(project: Project): string | null {
+  if (!project.reserved) return null;
+  return "the setup surface cannot touch a reserved/system project (the workspace home — the Setup Assistant's own home, or the dev-only \"Loom Platform\" home). Only a human (Projects/Agents UI or REST) may do this.";
+}
+
+/**
  * ONE predicate for "may the ungated setup surface touch this EXISTING agent AT ALL" — ANY edit,
  * including a bare rename (card 4d70cc06, B2 + M1 + the code-review's reserved-home name-hijack finding:
  * renaming the real "Companion" away and `agent_create`-ing an impostor under that name would DoS
  * `gateway/server.ts`'s by-NAME default-companion resolution, so a rename can never be the exempt case).
  * Refuses when the agent's CURRENT rig role is locked (`SETUP_LOCKED_ROLES` above) — regardless of what
- * NEW profile the caller is trying to assign, that's `agentAssignableProfileError`'s job — or when the agent lives in a
- * reserved/system project (the Setup Assistant's own home, or the dev-only "Loom Platform" home): every
- * standing agent seeded there (Setup Assistant, Companion, Workspace Auditor, Elevated Operator, and
- * under LOOM_DEV the Platform Lead/Audit) is one of Loom's own agents, never a user's, even on the rare
- * occasion one carries no profile at all. Returns an error string, or null when the agent is safe to touch.
+ * NEW profile the caller is trying to assign, that's `agentAssignableProfileError`'s job — or when the
+ * agent lives in a reserved/system project: every standing agent seeded there (Setup Assistant, Companion,
+ * Workspace Auditor, Elevated Operator, and under LOOM_DEV the Platform Lead/Audit) is one of Loom's own
+ * agents, never a user's, even on the rare occasion one carries no profile at all. The reserved-project
+ * half of this check DELEGATES to `setupMayTouchProjectError` above (one predicate, one message) rather
+ * than re-deriving `project?.reserved` here. Returns an error string, or null when the agent is safe to touch.
  */
 function setupMayTouchAgentError(db: Db, agent: Agent): string | null {
   const project = db.getProject(agent.projectId);
-  if (project?.reserved) {
-    return "the setup surface cannot edit an agent that lives in a reserved/system project (the workspace home) — this may be the Setup Assistant, Companion, Workspace Auditor, Elevated Operator, or (dev-only) a Platform Lead/Audit agent. Only a human (Profiles/Agents UI or REST) may edit it.";
+  if (project) {
+    const projectErr = setupMayTouchProjectError(project);
+    if (projectErr) return projectErr;
   }
   const role = agent.profileId != null ? db.getProfile(agent.profileId)?.role : null;
   return setupLockedRoleError(role, "an agent (via its current rig)");
@@ -301,7 +320,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian (autoStart only — obsidian.path is human-only, see below), python (accepted, but currently has no agent-settable fields — python.interpreterPath is human-only, see below), memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The human-only orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil), obsidian.path and python.interpreterPath (host-launch), sessionEnv (the internal transport those same host-launch fields ride in as env vars — allowing it would re-open the same capability), and harness (the default vendor CLI a worker spawns) — and any unknown key — are REJECTED and the stored config is left unchanged. The returned config MASKS sessionEnv values (same-length filler, never the real secret) — a pre-existing human-set value never round-trips here as plaintext, even on a patch that never touched it.",
+        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). REJECTED outright when projectId is a reserved/system project (the workspace home) — only a human (Projects UI or REST) may configure it. Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian (autoStart only — obsidian.path is human-only, see below), python (accepted, but currently has no agent-settable fields — python.interpreterPath is human-only, see below), memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The human-only orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil), obsidian.path and python.interpreterPath (host-launch), sessionEnv (the internal transport those same host-launch fields ride in as env vars — allowing it would re-open the same capability), and harness (the default vendor CLI a worker spawns) — and any unknown key — are REJECTED and the stored config is left unchanged. The returned config MASKS sessionEnv values (same-length filler, never the real secret) — a pre-existing human-set value never round-trips here as plaintext, even on a patch that never touched it.",
         inputSchema: strictShape({
           projectId: z.string(),
           config: z.object({}).passthrough(),
@@ -315,6 +334,10 @@ export class SetupMcpRouter {
         if ("error" in resolved) return ok(resolved);
         const project = resolved;
         const resolvedProjectId = project.id;
+        // Card ccd373cc: reserved/system projects (the workspace home) are never setup-configurable —
+        // ONE shared predicate, see setupMayTouchProjectError's own doc.
+        const reservedErr = setupMayTouchProjectError(project);
+        if (reservedErr) return ok({ error: reservedErr });
         // FAIL-CLOSED: the AGENT validator — gateCommand/alertWebhook are rejected (unlike the Lead's
         // project_configure, which uses the full human-equivalent validator). This is the load-bearing
         // posture difference of the setup surface.
@@ -371,7 +394,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_update",
       {
-        description: "Structural edit of a project by id — name and/or vaultPath, and/or its config override (omitted fields left as-is). repoPath, referenceRepos, repos (the writable multi-repo registry), and denyGlobs are not editable here (human-only, via the REST/UI). config (when given) is validated against the AGENT project-config schema, so orchestration.gateCommand and alertWebhook — and unknown keys — are REJECTED. 404 if the project is unknown. Returns the updated project. The returned config's sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
+        description: "Structural edit of a project by id — name and/or vaultPath, and/or its config override (omitted fields left as-is). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get/project_configure). repoPath, referenceRepos, repos (the writable multi-repo registry), and denyGlobs are not editable here (human-only, via the REST/UI). config (when given) is validated against the AGENT project-config schema, so orchestration.gateCommand and alertWebhook — and unknown keys — are REJECTED. REJECTED outright when projectId is a reserved/system project (the workspace home) — only a human (Projects UI or REST) may update it. 404 if the project is unknown. Returns the updated project. The write is ATOMIC: a config write and a name/vaultPath write either both land or neither does. The returned config's sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
         inputSchema: strictShape({
           projectId: z.string(),
           name: z.string().optional(),
@@ -380,8 +403,16 @@ export class SetupMcpRouter {
         }),
       },
       async ({ projectId, name, vaultPath, config }) => {
-        const project = db.getProject(projectId);
-        if (!project) return ok({ error: "project not found" });
+        // Card ccd373cc: resolve by prefix like project_configure (getByIdPrefix), not a plain db.getProject
+        // — a prefix that reads fine on project_get/project_configure used to silently 404 here.
+        const resolved = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+        if ("error" in resolved) return ok(resolved);
+        const project = resolved;
+        const resolvedProjectId = project.id;
+        // Card ccd373cc: reserved/system projects (the workspace home) are never setup-updatable — ONE
+        // shared predicate, see setupMayTouchProjectError's own doc.
+        const reservedErr = setupMayTouchProjectError(project);
+        if (reservedErr) return ok({ error: reservedErr });
         // SHARED update guard (card 6a48b759): trim/expand/absolute-validate a real rebind, and refuse an
         // explicit "" that would strand a VAULT-ONLY project — the same guard the human REST PATCH path,
         // the manager's project_update, and platform's project_update all now share. Runs FIRST, before
@@ -410,8 +441,9 @@ export class SetupMcpRouter {
         // between — so nothing can land between reading and writing. (The vaultPath validation above
         // still ran against the PRE-await snapshot — a narrower, single-await residual, not something
         // this re-read closes; see checkVaultPathUpdate's own doc for what it checks and when.)
-        const fresh = db.getProject(projectId);
+        const fresh = db.getProject(resolvedProjectId);
         if (!fresh) return ok({ error: "project not found" });
+        let merged: ProjectConfigOverride | undefined;
         if (config !== undefined) {
           const v = validateAgentProjectConfigOverride(config);
           if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
@@ -424,13 +456,27 @@ export class SetupMcpRouter {
           // whole isn't re-validated (a preserved pre-existing human key would falsely fail the agent validator).
           // additiveOnlyRotationGuard (card 1069c8e1) + additiveOnlyPermissionDenyGuard (card f021e26d):
           // same reasoning as project_configure above.
-          const merged = mergeConfigOverride(fresh.config, v.value, { additiveOnlyRotationGuard: true, additiveOnlyPermissionDenyGuard: true });
-          // actor (card a0cafef2): agent-facing surface, same reasoning as project_configure above.
-          const wrote = setProjectConfigSafe(db, projectId, merged, callerSessionId ? `setup:${callerSessionId}` : "setup");
-          if (!wrote.ok) return ok({ error: wrote.error });
+          merged = mergeConfigOverride(fresh.config, v.value, { additiveOnlyRotationGuard: true, additiveOnlyPermissionDenyGuard: true });
         }
-        if (name !== undefined || vaultPath !== undefined) db.updateProject(projectId, { name, vaultPath, vaultOnly: vaultOnlyPatch });
-        return ok(projectFields(db.getProject(projectId)));
+        // Card ccd373cc: ATOMIC write — everything above is validation-only (no write has happened yet),
+        // and the two writes below (config, then name/vaultPath) now land inside ONE db.runInTransaction
+        // so a throw between them rolls back whichever already landed, instead of leaving a partial apply.
+        let txResult: { ok: true } | { ok: false; error: string };
+        try {
+          txResult = db.runInTransaction((): { ok: true } | { ok: false; error: string } => {
+            if (merged !== undefined) {
+              // actor (card a0cafef2): agent-facing surface, same reasoning as project_configure above.
+              const wrote = setProjectConfigSafe(db, resolvedProjectId, merged, callerSessionId ? `setup:${callerSessionId}` : "setup");
+              if (!wrote.ok) return { ok: false, error: wrote.error };
+            }
+            if (name !== undefined || vaultPath !== undefined) db.updateProject(resolvedProjectId, { name, vaultPath, vaultOnly: vaultOnlyPatch });
+            return { ok: true };
+          });
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+        if (!txResult.ok) return ok({ error: txResult.error });
+        return ok(projectFields(db.getProject(resolvedProjectId)));
       },
     );
 
@@ -448,8 +494,10 @@ export class SetupMcpRouter {
       async ({ projectId }) => {
         const p = db.getProject(projectId);
         if (!p) return ok({ error: "project not found" });
-        // Guard: never let the operator archive a reserved/system home (the "Getting Started" / "Loom Platform" home).
-        if (p.reserved) return ok({ error: "cannot archive a reserved/system project (the workspace home)" });
+        // Guard: never let the operator archive a reserved/system home (the "Getting Started" / "Loom
+        // Platform" home) — ONE shared predicate, see setupMayTouchProjectError's own doc (card ccd373cc).
+        const reservedErr = setupMayTouchProjectError(p);
+        if (reservedErr) return ok({ error: reservedErr });
         db.archiveProject(projectId);
         return ok({ archived: true, projectId });
       },
@@ -471,8 +519,10 @@ export class SetupMcpRouter {
         if (!project) return ok({ error: "project not found" });
         // card 4d70cc06 (code review, reserved-home name-hijack): refuse creating ANY agent into a
         // reserved/system project — otherwise a same-named impostor (e.g. "Companion") could be minted
-        // there to collide with gateway/server.ts's by-NAME resolution of the real one.
-        if (project.reserved) return ok({ error: "the setup surface cannot create an agent in a reserved/system project (the workspace home) — only a human (Agents UI or REST) may add an agent there." });
+        // there to collide with gateway/server.ts's by-NAME resolution of the real one. ONE shared
+        // predicate, see setupMayTouchProjectError's own doc (card ccd373cc).
+        const reservedErr = setupMayTouchProjectError(project);
+        if (reservedErr) return ok({ error: reservedErr });
         if (profileId !== undefined) {
           const profile = db.getProfile(profileId);
           if (!profile) return ok({ error: "profile not found" });
@@ -625,8 +675,10 @@ export class SetupMcpRouter {
         const project = db.getProject(projectId);
         if (!project) return ok({ error: "project not found" });
         // card 4d70cc06 (code review): same reserved-home refusal as agent_create — a template's own
-        // agent-create writes are NOT exempt from the name-hijack this closes.
-        if (project.reserved) return ok({ error: "the setup surface cannot apply a workflow template to a reserved/system project (the workspace home) — only a human (Agents UI or REST) may add agents there." });
+        // agent-create writes are NOT exempt from the name-hijack this closes. ONE shared predicate, see
+        // setupMayTouchProjectError's own doc (card ccd373cc).
+        const reservedErr = setupMayTouchProjectError(project);
+        if (reservedErr) return ok({ error: reservedErr });
         const template = findWorkflowTemplate(templateName);
         if (!template) return ok({ error: `unknown workflow template: "${templateName}"` });
         // @decision 3de74275 — this EARLY pre-check gives a clearer error at the point of the actual

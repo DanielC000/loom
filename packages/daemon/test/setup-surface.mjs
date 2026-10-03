@@ -752,6 +752,27 @@ try {
   check("(m) template_apply REJECTS applying to a reserved/system project", typeof taReserved.error === "string" && /reserved\/system project/.test(taReserved.error));
   check("(m) template_apply: the rejected reserved-home apply made NO agent", db.listAgents("pHome").length === nAgentsBeforeReservedTemplate);
 
+  // Card ccd373cc: the reserved-home refusal ALSO now covers project_update/project_configure — previously
+  // the only two setup writers with NO reserved check at all. A setup-surface rename of the reserved home
+  // would have let the next boot's seedSetupHome (name-scoped) mint a SECOND reserved home. ONE shared
+  // predicate (setupMayTouchProjectError) now backs every one of these refusals, so the error text matches
+  // the agent_create/template_apply refusals above byte-for-byte (same regex).
+  const pHomeNameBefore = db.getProject("pHome").name;
+  const puReserved = await call("project_update", { projectId: "pHome", name: "Hijacked Platform Home" });
+  check("(m) project_update REJECTS editing a reserved/system project", typeof puReserved.error === "string" && /reserved\/system project/.test(puReserved.error) && !puReserved.id);
+  check("(m) project_update: the reserved home's name is UNCHANGED", db.getProject("pHome").name === pHomeNameBefore);
+
+  const pHomeConfigBefore = JSON.stringify(db.getProject("pHome").config);
+  const pcReserved = await call("project_configure", { projectId: "pHome", config: { docLint: true } });
+  check("(m) project_configure REJECTS configuring a reserved/system project", typeof pcReserved.error === "string" && /reserved\/system project/.test(pcReserved.error) && pcReserved.ok !== true);
+  check("(m) project_configure: the reserved home's config is UNCHANGED", JSON.stringify(db.getProject("pHome").config) === pHomeConfigBefore);
+
+  // project_update now resolves projectId by prefix too (card ccd373cc), matching project_configure/
+  // project_get — a prefix that reads fine on those used to silently 404 here.
+  const puByPrefix = await call("project_update", { projectId: created.id.slice(0, 8), name: "Renamed via prefix" });
+  check("(m) project_update: resolves projectId by an unambiguous 8-char id-prefix", puByPrefix.id === created.id && puByPrefix.name === "Renamed via prefix" && !puByPrefix.error);
+  check("(m) project_update: the prefix-resolved rename actually persisted", db.getProject(created.id)?.name === "Renamed via prefix");
+
   // Card ced4285e (round 2, Code Review 04e0e82c, MAJOR): profile_update can flip an EXISTING profile's
   // role to "manager" while that profile is already bound to an agent in the reserved "pHome" project — a
   // DIFFERENT route to the same stranded-row hazard than the profile_assign/agent_update cases above (it
