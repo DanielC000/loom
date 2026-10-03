@@ -942,7 +942,19 @@ export async function runGateSequential(
   // Card a16c580b: mirrors `lastOutputTail` immediately above — every step shares the SAME `spillFile`
   // (appended to in execution order), so this is just "did any step ever actually spill".
   let lastOutputFile: string | undefined;
-  for (const step of splitGateSteps(gate)) {
+  const gateSteps = splitGateSteps(gate);
+  // Card e022b05b: a `gateCommand` that is whitespace-only or `&&`-only (non-empty text, but splits into
+  // ZERO real steps) must never fall through to the `passed:true` return below — nothing ever spawned to
+  // actually verify anything. The `for` loop below simply never runs for an empty `gateSteps`, so without
+  // this explicit check this function would silently return a clean pass for a gate that checked nothing.
+  if (gateSteps.length === 0) {
+    return {
+      passed: false,
+      outputTail: `gateCommand produced zero steps after splitting on top-level "&&" joins (empty, whitespace-only, or "&&"-only) — refusing to treat an empty gate as a pass`,
+      steps,
+    };
+  }
+  for (const step of gateSteps) {
     // Card 8d585277: checked BEFORE spawning each step too — a cancel arriving in the gap BETWEEN two
     // steps (this run has already settled one step and hasn't started the next) must not spawn a step
     // that was never going to be waited for.

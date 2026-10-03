@@ -23,6 +23,12 @@ check("(split) a `&&` INSIDE quotes is not a split point",
   JSON.stringify(splitGateSteps('node -e "1 && 2" && node -e "3"')) === JSON.stringify(['node -e "1 && 2"', 'node -e "3"']));
 check("(split) stray whitespace around `&&` is trimmed off each step",
   JSON.stringify(splitGateSteps("  a   &&   b  ")) === JSON.stringify(["a", "b"]));
+check("(split) a whitespace-only gate command splits into ZERO steps",
+  JSON.stringify(splitGateSteps("   ")) === JSON.stringify([]));
+check("(split) an \"&&\"-only gate command splits into ZERO steps",
+  JSON.stringify(splitGateSteps("&&")) === JSON.stringify([]));
+check("(split) a chained \"&& &&\"-only gate command ALSO splits into ZERO steps",
+  JSON.stringify(splitGateSteps(" && && ")) === JSON.stringify([]));
 
 // --- runGateSequential: each step is its OWN call to the injected runner (a real runner = a real
 // separate child process — this proves the call boundary, i.e. no single shared `&&` spawn) ---
@@ -49,6 +55,41 @@ const spawnErrorRunner = (command) => command === "pnpm lint" ? { status: 0 } : 
 const errRed = await runGateSequential("pnpm lint && pnpm test", "/work/tree", 5000, spawnErrorRunner);
 check("(spawn error) a runner-reported spawn error fails the gate closed",
   errRed.passed === false && errRed.failedStep === "pnpm test");
+
+// --- card e022b05b: a gateCommand that SPLITS INTO ZERO STEPS (whitespace-only, "&&"-only, or several
+// chained "&&" with nothing between them) must NEVER report passed:true — the `for` loop over an empty
+// step list simply never runs, so before this fix the function fell through to the green `{passed:true}`
+// return having spawned nothing at all. These checks use a runner that records every invocation, so they
+// prove the runner is never even CALLED for a zero-step gate, not merely that the final verdict reads
+// false (a verdict-only check could pass for the wrong reason if some other code path happened to flip
+// `passed`). ---
+const zeroStepCalls = [];
+const zeroStepRunner = (command) => { zeroStepCalls.push(command); return { status: 0 }; };
+const wsOnly = await runGateSequential("   ", "/work/tree", 5000, zeroStepRunner);
+check("(zero-step, whitespace-only) RED-FIRST: a whitespace-only gateCommand is refused, never passed:true",
+  wsOnly.passed === false);
+check("(zero-step, whitespace-only) the runner was NEVER invoked — nothing was ever spawned",
+  zeroStepCalls.length === 0);
+check("(zero-step, whitespace-only) steps[] is empty, not fabricated",
+  Array.isArray(wsOnly.steps) && wsOnly.steps.length === 0);
+
+const andOnly = await runGateSequential("&&", "/work/tree", 5000, zeroStepRunner);
+check('(zero-step, "&&"-only) RED-FIRST: an "&&"-only gateCommand is refused, never passed:true',
+  andOnly.passed === false);
+
+const andChainOnly = await runGateSequential(" && && ", "/work/tree", 5000, zeroStepRunner);
+check('(zero-step, chained "&& &&") RED-FIRST: a gateCommand of only chained "&&" is refused, never passed:true',
+  andChainOnly.passed === false);
+check("(zero-step) the runner was NEVER invoked across ANY of the three zero-step cases above",
+  zeroStepCalls.length === 0);
+
+// --- negative control: an ORDINARY non-empty single-step gate is UNAFFECTED by the fix above — proves
+// the zero-step refusal is scoped to the empty-split case, not a blanket regression on every gate ---
+const realSingleStepCalls = [];
+const realSingleStepRunner = (command) => { realSingleStepCalls.push(command); return { status: 0 }; };
+const realSingleStep = await runGateSequential("pnpm build", "/work/tree", 5000, realSingleStepRunner);
+check("(zero-step, negative control) an ordinary non-empty single-step gate still runs its step and passes",
+  realSingleStep.passed === true && realSingleStepCalls.length === 1);
 
 // --- allowExtend (card 24642c3d) is forwarded to EVERY step's own runStep call, trailing after
 // envOverride, so a caller can disable the one-time auto-extend for a whole gate run (e.g. the merge

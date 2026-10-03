@@ -127,6 +127,26 @@ try {
       check("(A3c) POST with a non-boolean per-entry noGateByDesign -> 400", badNoGate.statusCode === 400);
       check("(A3c) error names the noGateByDesign boolean rule", /noGateByDesign must be a boolean/.test(badNoGate.json().error ?? ""));
 
+      // (A3d) card e022b05b — a per-repo gateCommand that is non-blank TEXT but splits into ZERO real
+      // steps ("&&"-only) is REJECTED (400) — the old `.trim()`-only check in validateRepoRegistry
+      // couldn't see this, since "&&" is non-blank text. Previously never exercised by any test; RED
+      // before the fix (would have 201'd and stored a gateCommand that never actually runs anything).
+      const beforeCountD = db.listAllProjects().length;
+      const badGate = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "BadGate", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "svc-a", path: svcA, gateCommand: "&&" }] },
+      });
+      check("(A3d) POST with an \"&&\"-only per-entry gateCommand -> 400", badGate.statusCode === 400);
+      check("(A3d) error names the zero-step rule", /must split into at least one non-empty step/.test(badGate.json().error ?? ""));
+      check("(A3d) no project row was created", db.listAllProjects().length === beforeCountD);
+      // POSITIVE CONTROL: the SAME shape with a real, non-empty gateCommand is accepted — proves the
+      // rejection above is scoped to the zero-step case, not a blanket regression on this entry shape.
+      const goodGate = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "GoodGate", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "svc-a", path: svcA, gateCommand: "npm test" }] },
+      });
+      check("(A3d, control) the SAME entry shape with a real gateCommand -> 201", goodGate.statusCode === 201);
+
       // (A4) a NON-REPO entry path is REJECTED (400), no project row created.
       const beforeCount = db.listAllProjects().length;
       const badCreate = await app.inject({

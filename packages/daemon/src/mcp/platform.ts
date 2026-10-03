@@ -28,6 +28,7 @@ import { writeVaultFile, ensureVaultRoot } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { recordBoardReadForProjects } from "../orchestration/board-read.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
+import { splitGateSteps } from "../orchestration/gate-runner.js";
 import { validateProfile, agentProfileKeyError, agentAssignableProfileError, HARNESS_ID_SCHEMA } from "../profiles/validate.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { createAgentCore, cloneAgentCore, cloneSourceFieldError, reservedProjectManagerProfileError, reservedProjectAgentBoundToProfile } from "../agents/clone-core.js";
@@ -181,8 +182,18 @@ const rotationMarkerSchema = z
 // re-checked against the MERGED result, not just each incoming patch.
 const ROTATION_MARKERS_MAX_LEN = 200;
 
+// Card e022b05b: a non-empty gateCommand can still split into ZERO real steps (whitespace-only "&&"
+// joins, e.g. "&&" or "&& &&") — splitGateSteps strips/filters top-level `&&`-joins down to nothing, and
+// the gate runner used to silently record that as a clean pass. An empty string stays accepted
+// unchanged (it is the EXISTING "no gateCommand configured" / gateless sentinel, resolved elsewhere —
+// NEVER treat it as a validation failure here), but any other value must split into at least one step.
+const gateCommandSchema = z.string().optional().refine(
+  (v) => v === undefined || v === "" || splitGateSteps(v).length > 0,
+  { message: 'gateCommand must split into at least one non-empty step (via top-level "&&" joins) — a whitespace-only or "&&"-only command is not a valid gate; use an empty string to disable the gate instead' },
+);
+
 const orchestrationOverride = z.object({
-  gateCommand: z.string().optional(),
+  gateCommand: gateCommandSchema,
   // Per-project, HUMAN-only merge-gate switch (card e8df2659): "off" makes worker_merge_confirm/merge_batch
   // skip gateCommand. Omitted from the agent path (see agentOrchestrationOverride) so `.strict()` rejects it.
   mergeGate: z.enum(["on", "off"]).optional(),

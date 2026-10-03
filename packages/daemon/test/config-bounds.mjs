@@ -129,6 +129,31 @@ for (const key of ["idleNudgeMinutes", "maxUnansweredNudges", "idleDefaultSnooze
   check("human path: both timeouts round-trip unchanged", human.ok && human.value.orchestration?.gateCommandTimeoutMs === 90000 && human.value.orchestration?.alertWebhookTimeoutMs === 8000);
 }
 
+// --- gateCommand: a non-empty value must split into at least one real step (card e022b05b) ----------
+// splitGateSteps strips/filters top-level "&&" joins down to nothing for a whitespace-only or
+// "&&"-only string — the gate runner used to silently record that as a clean pass, having spawned
+// nothing. The validator now refuses to STORE such a value in the first place. An empty string "" stays
+// accepted unchanged (the pre-existing "no gateCommand configured" / gateless sentinel) — this is NOT
+// the same defect, and must never be rejected here.
+{
+  check('gateCommand:"" (the gateless sentinel) is STILL accepted — never conflate with the zero-step defect',
+    validateProjectConfigOverride(orch({ gateCommand: "" })).ok === true);
+  check('gateCommand:"   " (whitespace-only) rejected', validateProjectConfigOverride(orch({ gateCommand: "   " })).ok === false);
+  check('gateCommand:"&&" ("&&"-only) rejected', validateProjectConfigOverride(orch({ gateCommand: "&&" })).ok === false);
+  check('gateCommand:" && && " (chained "&&"-only) rejected', validateProjectConfigOverride(orch({ gateCommand: " && && " })).ok === false);
+  const rejected = validateProjectConfigOverride(orch({ gateCommand: "&&" }));
+  check('the rejection names the zero-step rule, not a generic type error',
+    !rejected.ok && /must split into at least one non-empty step/.test(rejected.error));
+  // POSITIVE CONTROL: an ordinary non-empty command (single-step and multi-step) is accepted and
+  // round-trips — proves the rejection above is scoped to the zero-step case, not a blanket regression.
+  const goodSingle = validateProjectConfigOverride(orch({ gateCommand: "pnpm build" }));
+  check('gateCommand:"pnpm build" (control, single step) accepted and round-trips',
+    goodSingle.ok === true && goodSingle.value.orchestration?.gateCommand === "pnpm build");
+  const goodMulti = validateProjectConfigOverride(orch({ gateCommand: "pnpm build && pnpm test" }));
+  check('gateCommand:"pnpm build && pnpm test" (control, multi-step) accepted and round-trips',
+    goodMulti.ok === true && goodMulti.value.orchestration?.gateCommand === "pnpm build && pnpm test");
+}
+
 // --- daemon-GLOBAL `platform` key is human-only: REJECTED by BOTH project validators ---------------
 // The per-project schemas are .strict() and carry NO `platform` key, so an agent (or a fat-fingered
 // human PATCH) putting `platform:{}` on a PROJECT override is auto-rejected as an unknown key. The

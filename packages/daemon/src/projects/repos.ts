@@ -3,6 +3,7 @@ import path from "node:path";
 import type { RepoRegistryEntry } from "@loom/shared";
 import { isGitRepo } from "../git/reader.js";
 import { expandTilde } from "../paths.js";
+import { splitGateSteps } from "../orchestration/gate-runner.js";
 
 /**
  * Canonicalize a path that is KNOWN (or expected) to exist on disk, for both COMPARISON and STORAGE.
@@ -150,6 +151,13 @@ export async function validateRepoRegistry(
     if (entry.gateCommand !== undefined) {
       if (typeof entry.gateCommand !== "string" || !entry.gateCommand.trim()) {
         return { ok: false, error: `repos entry "${key}" gateCommand must be a non-empty string when given` };
+      }
+      // Card e022b05b: a non-blank string can still split into ZERO real steps (whitespace-only `&&`
+      // joins, e.g. "&&" or "&& &&") — the `.trim()` check above can't see that, since it only looks at
+      // the raw text. Reject it here too, or a registry entry can carry a gateCommand that LOOKS
+      // configured but never actually spawns anything at merge time.
+      if (splitGateSteps(entry.gateCommand).length === 0) {
+        return { ok: false, error: `repos entry "${key}" gateCommand must split into at least one non-empty step (via top-level "&&" joins) — a whitespace-only or "&&"-only command is not a valid gate` };
       }
       gateCommand = entry.gateCommand;
     }
