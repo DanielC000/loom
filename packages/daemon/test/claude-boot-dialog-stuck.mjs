@@ -30,12 +30,31 @@
 //      (a real UserPromptSubmit hook) or `anyHookObserved` (ANY other hook at all) suppresses the alarm.
 //      Proven by letting the real timer actually fire (confirmed via dialogStuckTimer nulling itself)
 //      and then asserting no event was recorded — not a blind sleep with no corroborating signal.
+//   10-14. Card e29923e3 round 3 (Code Review 7d53af22 — SCOPE CUT): the MCP-enable-prompt dismiss is a
+//      SINGLE Esc write, never a retry loop, and never infers dismissal from screen output — two rounds
+//      of "how much/what kind of post-write output counts as evidence" each reproduced the same failure
+//      one level up (see docs/decisions/e29923e3-hold-boot-dialog-kickoff-until-sessionstart.md). (10) a
+//      dropped Esc + a genuinely static dialog stays held forever, exactly one Esc ever written. (11) ANY
+//      post-write output — sync-frame markers, OSC frames, a tick, or even a full substantial clean
+//      repaint — never releases the hold; only SessionStart does. (12) a SessionStart arriving after the
+//      Esc releases the hold AND delivers a queued entry. (13) the single Esc fires for EVERY role, worker
+//      and manager alike (round 3's own Minor fix: the old retry loop was unintentionally NOT role-gated,
+//      so a non-driven role could get up to 3 Escs; a single write is role-uniform by construction). (14)
+//      migrated from round 1's own (d1): a same-id respawn DURING the deferred write's settle delay must
+//      never let the stale generation's write land on, or be attributed to, the new generation (card
+//      096231e8 identity discipline) — this is the one race that survives the retry loop's removal, since
+//      the single write is still deferred by `MCP_DISMISS_INITIAL_DELAY_MS`.
+//   15. Round 4 (delta Code Review 07a334ed, Minor 1): removed the round-3 `isPastBoot` bail from
+//      `dismissMcpPrompt` — a SessionStart landing DURING the deferred delay (before the Esc write ever
+//      fires) no longer suppresses it; the single Esc still fires exactly once, session kept alive
+//      throughout so the identity/liveness guards can't mask the removal.
 //
 // RUN: pnpm build (repo root) then `node test/claude-boot-dialog-stuck.mjs` from packages/daemon.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { assertNeverWithControl } from "./_timing-guard.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -53,8 +72,14 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 process.env.LOOM_CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS = "250"; // real setTimeout, kept short for the test
 process.env.LOOM_READY_FALLBACK_MS = "60000"; // comfortably longer than any scenario — never let it interfere
+// Card e29923e3 round 3: the single Esc write fires MCP_DISMISS_INITIAL_DELAY_MS after detection and
+// nothing is ever scheduled after it — 20ms, comfortably under the 250ms stuck-timeout above, so none of
+// the scenarios below ever race that OTHER one-shot timer.
+process.env.LOOM_MCP_DISMISS_INITIAL_DELAY_MS = "20";
 
-const { PtyHost, detectBlockingDialogSignature, collapseBoot, LOOM_DRIVEN_ROLES } = await import("../dist/pty/host.js");
+const {
+  PtyHost, detectBlockingDialogSignature, collapseBoot, LOOM_DRIVEN_ROLES, isMcpServerEnableSignature,
+} = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // --- Unit-level: detectBlockingDialogSignature (positive + negative controls) -------------------------
@@ -79,21 +104,36 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
     LOOM_DRIVEN_ROLES.includes("worker") && !LOOM_DRIVEN_ROLES.includes("manager"));
 }
 
+// --- Unit-level: isMcpServerEnableSignature (positive + negative controls) ------------------------------
+{
+  check("isMcpServerEnableSignature: positive control", isMcpServerEnableSignature(collapseBoot("2 new MCP servers found\n❯ Enable\n  Reject all")));
+  check("isMcpServerEnableSignature: negative control — a different dialog's own text never matches", !isMcpServerEnableSignature(collapseBoot("Is this a project you trust?\n❯ Yes, I trust this folder\n  No\nEnter to confirm · Esc to cancel")));
+}
+
 // --- Fake-pty harness ------------------------------------------------------------------------------
 const fakes = new Map(); // sessionId -> fake pty
 class TestPtyHost extends createSeamHost(PtyHost) {
   createPty(opts) {
     const base = super.createPty(opts);
+    const writes = [];
     let dataCb = null;
     const fake = {
       ...base,
+      write: (d) => writes.push(d),
       onData: (cb) => { dataCb = cb; return { dispose() {} }; },
       feed: (s) => { if (dataCb) dataCb(s); },
+      writes,
     };
     fakes.set(opts.sessionId, fake);
     return fake;
   }
 }
+const ESC_KEY = "\x1b";
+const countEsc = (fake) => fake.writes.filter((w) => w === ESC_KEY).length;
+// A realistic, substantial post-dialog repaint — used in scenario 11 below to prove that even output this
+// size (round 2's now-deleted 96-char "substantial" threshold would have treated it as dismissal evidence)
+// never releases the hold post round 3; only a real SessionStart does.
+const CLEAN_DISMISS_TEXT = "Welcome back! How can I help you today?\nAsk Claude to write, fix, or explain code, run commands, or manage files in this project, and it will dive right in.\n> ";
 const stuckEvents = [];
 const events = {
   onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {},
@@ -216,40 +256,179 @@ try {
   check("9: (setup) the real timer fired (nulled itself) for J", nulledJ);
   check("9: anyHookObserved true (a non-SessionStart hook) ⇒ no stuck event either", stuckEvents.filter((e) => e.sessionId === J).length === 0);
 
-  // ============ 10) Card 850eb55c (round 3, item 1): the MCP-prompt Esc-dismiss's OWN `dialogStuckScan` ====
-  // ============      clear must survive being fed as ONE SINGLE CHUNK in the SAME onData callback — on =====
-  // ============      448cf361 the clear ran BEFORE the unconditional dialogStuckTimer-gated feed in that ===
-  // ============      SAME callback, so the triggering chunk was immediately re-appended right back, =======
-  // ============      leaving the hold engaged even though Loom itself had JUST dismissed the dialog. Also ==
-  // ============      covers REPAINT RESIDUE: a chunk re-showing the same dialog text during the 300ms wait =
-  // ============      before the scheduled Esc keystroke actually fires must not leave the hold engaged =====
-  // ============      past that dismissal either. Asserted directly on `detectBlockingDialogSignature( =======
-  // ============      collapseBoot(dialogStuckScan))` — the SAME expression `isBlockedOnUnresolvedBootDialog`
-  // ============      (private, not exported) computes — rather than re-deriving a second check. ============
+  // ============ 10) Card e29923e3 round 3 (SCOPE CUT): a dropped Esc + a genuinely static dialog stays ===
+  // ============      held FOREVER — exactly one Esc ever written, no retry loop left to exhaust ==========
   const K = "sess-mcp-prompt-single-chunk-K";
   const fk = spawnOne(K, "worker");
   const MCP_PROMPT_TEXT = "2 new MCP servers found\n❯ Enable\n  Reject all";
   check("10: (setup) the signature is recognized when fed in isolation (positive control for the assertions below)",
     detectBlockingDialogSignature(collapseBoot(MCP_PROMPT_TEXT)) === "mcp-server-enable");
-  fk.feed(MCP_PROMPT_TEXT); // ONE single chunk — the exact shape 448cf361 mishandled (clear-then-re-feed)
-  check("10: mcpPromptHandled flips true and the Esc dismiss is scheduled", host.live.get(K).mcpPromptHandled === true);
-  check("10: the hold releases IMMEDIATELY (synchronously, same tick) — dialogStuckScan no longer matches any known signature right after Loom's own clear",
-    detectBlockingDialogSignature(collapseBoot(host.live.get(K).dialogStuckScan)) === null);
 
-  // Repaint residue: the terminal redraws the SAME dialog text again during the 300ms wait before the
-  // scheduled Esc keystroke actually fires (mcpPromptHandled is already true, so this does NOT re-trigger
-  // the detection branch — only the unconditional dialogStuckTimer-gated feed runs for it).
-  fk.feed(MCP_PROMPT_TEXT);
-  check("10: (setup) the repaint DOES re-populate the scan (proves this isn't a vacuous scenario)",
+  // Shared helpers for scenarios 10/14 below: the ONLY two ways left to observe something flip in this
+  // state machine are (a) a real SessionStart hook clearing dialogStuckScan, and (b) a fresh, never-
+  // respawned session actually receiving its single scheduled Esc write.
+  const sessionStartReleaseControl = async (label) => {
+    const id = `sess-${label}-sessionstart-control`;
+    const f = spawnOne(id, "worker");
+    f.feed(MCP_PROMPT_TEXT);
+    host.deliverHook(id, { hook_event_name: "SessionStart", session_id: `eng-${id}` });
+    const went = detectBlockingDialogSignature(collapseBoot(host.live.get(id)?.dialogStuckScan ?? "")) === null;
+    try { host.stop(id, "hard"); } catch { /* ignore */ }
+    return went;
+  };
+  const escWriteControl = async (label) => {
+    const id = `sess-${label}-esc-write-control`;
+    const f = spawnOne(id, "worker");
+    f.feed(MCP_PROMPT_TEXT);
+    const went = await waitUntil(() => countEsc(f) >= 1, 3000).then(() => true).catch(() => false);
+    try { host.stop(id, "hard"); } catch { /* ignore */ }
+    return went;
+  };
+
+  fk.feed(MCP_PROMPT_TEXT); // detected ⇒ mcpPromptHandled=true, dismissMcpPrompt scheduled exactly once
+  check("10a: mcpPromptHandled flips true and the single Esc dismiss is scheduled", host.live.get(K).mcpPromptHandled === true);
+  check("10b: the hold does NOT release synchronously at detection — dialogStuckScan still matches right after",
     detectBlockingDialogSignature(collapseBoot(host.live.get(K).dialogStuckScan)) === "mcp-server-enable");
-  const residueCleared = await waitUntil(() => detectBlockingDialogSignature(collapseBoot(host.live.get(K)?.dialogStuckScan ?? "")) === null, 1000);
-  check("10: once the scheduled Esc write actually fires (~300ms later), the scan is cleared again — repaint residue does not outlive the dismissal", residueCleared);
+  check("10c: the single scheduled Esc write fires", await waitUntil(() => countEsc(fk) >= 1, 3000));
+
+  // Never feed anything else on K — a genuinely static dialog, exactly the "dropped Esc" shape the card's
+  // own body describes. With no retry loop left to exhaust, the hold must survive indefinitely past the
+  // one write — nothing but a real SessionStart (sessionStartReleaseControl, above) can ever clear it.
+  const stillHeldAfterTheOneWrite = await assertNeverWithControl({
+    label: "10d: the hold never releases after the single write — no retry loop left to eventually exhaust",
+    check: () => detectBlockingDialogSignature(collapseBoot(host.live.get(K)?.dialogStuckScan ?? "")) === null,
+    windowMs: Number(process.env.LOOM_MCP_DISMISS_INITIAL_DELAY_MS) + 200,
+    positiveControl: () => sessionStartReleaseControl("10d"),
+  });
+  check("10d: the hold stays engaged forever once the single write lands on a genuinely static dialog", stillHeldAfterTheOneWrite);
+  check("10e: exactly ONE Esc was ever written on K — no retry loop to fire a second", countEsc(fk) === 1);
+  try { host.stop(K, "hard"); } catch { /* ignore */ }
+
+  // ============ 11) ANY post-write screen output — sync-frame markers, OSC frames, a tick, or even a ====
+  // ============      FULL substantial clean repaint — never releases the hold; only SessionStart does ====
+  // Two rounds of "how much/what kind of post-write output counts as evidence" each independently
+  // reproduced the same bug one level up (see the record). Round 3 deletes the whole mechanism: feed
+  // every kind of post-write noise this card's own history names — including a genuinely clean repaint
+  // well over the now-DELETED 96-char "substantial" threshold — and confirm NONE of it clears the scan.
+  {
+    const L = "sess-post-write-noise-still-held-L";
+    const fl = spawnOne(L, "worker");
+    fl.feed(MCP_PROMPT_TEXT);
+    await waitUntil(() => countEsc(fl) >= 1, 3000);
+    fl.feed("\x1b[?2026h\x1b[?2026l"); // pure sync-frame markers
+    fl.feed("\x1b]8;;https://example.invalid\x1b\\link\x1b]8;;\x1b\\"); // OSC hyperlink frame
+    fl.feed("3s"); // a tiny status/clock tick
+    fl.feed(CLEAN_DISMISS_TEXT); // a FULL, substantial, signature-free repaint — would have released round 2's fix
+    // Sampled over a real window (not a bare synchronous snapshot) — round 2's own evidence check ran
+    // inside a DEFERRED verify callback, so a release that round 3 no longer performs would only show up
+    // after that callback's delay, not instantly after feed().
+    const neverReleasedByOutput = await assertNeverWithControl({
+      label: "11a: no post-write screen output of any kind — including a full clean repaint — ever releases the hold",
+      check: () => detectBlockingDialogSignature(collapseBoot(host.live.get(L)?.dialogStuckScan ?? "")) === null,
+      windowMs: 300,
+      positiveControl: () => sessionStartReleaseControl("11a"),
+    });
+    check("11a: every kind of post-write output — including a full clean repaint — never releases the hold", neverReleasedByOutput);
+    check("11b: no second Esc was ever written either — there is nothing left to retry on", countEsc(fl) === 1);
+    try { host.stop(L, "hard"); } catch { /* ignore */ }
+  }
+
+  // ============ 12) A SessionStart arriving after the Esc write RELEASES the hold AND DELIVERS a queued ==
+  // ============      entry — the only release path that exists post round 3 ===============================
+  {
+    const M = "sess-sessionstart-after-esc-releases-M";
+    const fm = spawnOne(M, "worker");
+    const ENTRY = "queued entry behind the MCP dialog, released only by SessionStart";
+    host.enqueueStdin(M, ENTRY, "system", undefined, undefined, "agent");
+    fm.feed(MCP_PROMPT_TEXT);
+    await waitUntil(() => countEsc(fm) >= 1, 3000); // the single Esc fires
+    check("12a: still held right after the Esc write — SessionStart hasn't fired yet", !fm.writes.join("").includes(ENTRY));
+    host.deliverHook(M, { hook_event_name: "SessionStart", session_id: "eng-M" });
+    check("12b: SessionStart clears dialogStuckScan immediately, synchronously", host.live.get(M).dialogStuckScan === "");
+    check("12c: the queued entry is delivered synchronously once SessionStart releases the hold (markReady's own drainPending)",
+      fm.writes.join("").includes(ENTRY));
+    try { host.stop(M, "hard"); } catch { /* ignore */ }
+  }
+
+  // ============ 13) round 3's own Minor fix: the single Esc fires for EVERY role, worker AND manager ====
+  // ============      alike — the OLD retry loop was unintentionally NOT role-gated (only dialogStuckTimer/
+  // ============      the hold itself are, via LOOM_DRIVEN_ROLES), so a non-driven role could get up to ===
+  // ============      3 Escs pre-fix; a single write is role-uniform by construction post-fix ==============
+  {
+    const WR = "sess-exactly-one-esc-worker-WR";
+    const MG = "sess-exactly-one-esc-manager-MG";
+    const fwr = spawnOne(WR, "worker");
+    const fmg = spawnOne(MG, "manager");
+    check("13: (setup) the manager role never arms dialogStuckTimer — the ALARM stays role-gated, unaffected by this fix",
+      host.live.get(MG).dialogStuckTimer === null);
+    fwr.feed(MCP_PROMPT_TEXT);
+    fmg.feed(MCP_PROMPT_TEXT);
+    const bothWrote = await waitUntil(() => countEsc(fwr) >= 1 && countEsc(fmg) >= 1, 3000);
+    check("13a: both the worker AND the manager session receive the single Esc write (not role-gated)", bothWrote);
+    check("13b: exactly one Esc for the worker role", countEsc(fwr) === 1);
+    check("13c: exactly one Esc for the manager role too — the round-3 fix (round 2's retry loop could reach 3 on a non-driven role, not main)", countEsc(fmg) === 1);
+    try { host.stop(WR, "hard"); } catch { /* ignore */ }
+    try { host.stop(MG, "hard"); } catch { /* ignore */ }
+  }
+
+  // ============ 14) migrated from round 1's own (d1): a same-id respawn DURING the deferred write's =====
+  // ============      settle delay must never let the STALE generation receive the write, or the NEW ======
+  // ============      generation be attributed one it was never fed (card 096231e8 identity) — the one ===
+  // ============      race that survives the retry loop's removal, since the single write is still =======
+  // ============      deferred by MCP_DISMISS_INITIAL_DELAY_MS ==============================================
+  {
+    const D1 = "sess-respawn-during-delay-D1";
+    const fd1a = spawnOne(D1, "worker");
+    fd1a.feed(MCP_PROMPT_TEXT); // schedules dismissMcpPrompt at MCP_DISMISS_INITIAL_DELAY_MS — not yet fired
+    spawnOne(D1, "worker", "engine-D1-resume"); // respawn the SAME sessionId immediately — a fresh Live replaces it
+    const fd1b = fakes.get(D1); // the NEW generation's own fake pty (spawnOne re-set the map entry for D1)
+    const staleWindowMs = Number(process.env.LOOM_MCP_DISMISS_INITIAL_DELAY_MS) + 200;
+    const noWriteOnStale = await assertNeverWithControl({
+      label: "14a: the STALE generation's own pty never receives the deferred Esc write after being respawned away from",
+      check: () => countEsc(fd1a) >= 1,
+      windowMs: staleWindowMs,
+      positiveControl: () => escWriteControl("14a"),
+    });
+    check("14a: the STALE generation never received the deferred Esc write", noWriteOnStale);
+    const noWriteOnNew = await assertNeverWithControl({
+      label: "14b: the NEW generation's pty receives no Esc write either (nothing fed it a dialog)",
+      check: () => countEsc(fd1b) >= 1,
+      windowMs: 300,
+      positiveControl: () => escWriteControl("14b"),
+    });
+    check("14b: the NEW generation received no Esc write either", noWriteOnNew);
+    try { host.stop(D1, "hard"); } catch { /* ignore */ }
+  }
+
+  // ============ 15) round 4 (delta Code Review 07a334ed, Minor 1): a SessionStart landing DURING the ======
+  // ============      MCP_DISMISS_INITIAL_DELAY_MS wait — i.e. BEFORE the deferred Esc write ever fires — ===
+  // ============      no longer suppresses that write. The OLD `isPastBoot` bail (round 3) would have left ==
+  // ============      this session's own dialog completely unanswered: a single stray Esc landing at the ====
+  // ============      now-past-boot main prompt is accepted as harmless so that a dialog that is ACTUALLY ===
+  // ============      still open (the ordering the hold itself already trusts, per isBlockedOnUnresolvedBoot
+  // ============      Dialog's own doc) never gets skipped. Session stays ALIVE throughout (never stopped) ==
+  // ============      so the deferred callback's identity/liveness guards can't mask the isPastBoot removal =
+  {
+    const N = "sess-sessionstart-during-delay-still-escapes-N";
+    const fn = spawnOne(N, "worker");
+    fn.feed(MCP_PROMPT_TEXT); // schedules dismissMcpPrompt at +MCP_DISMISS_INITIAL_DELAY_MS — not yet fired
+    check("15a: (setup) the deferred write has not fired yet", countEsc(fn) === 0);
+    host.deliverHook(N, { hook_event_name: "SessionStart", session_id: "eng-N" }); // lands DURING the delay
+    check("15b: (setup) SessionStart observed and the hold's own scan cleared — isPastBoot is true before the deferred write ever fires",
+      host.live.get(N).sessionStartObserved === true && host.live.get(N).dialogStuckScan === "");
+    const stillWrote = await waitUntil(() => countEsc(fn) >= 1, 3000);
+    check("15c: the single Esc STILL fires even though SessionStart already landed — the isPastBoot bail is gone", stillWrote);
+    check("15d: exactly one Esc — still no retry loop", countEsc(fn) === 1);
+    try { host.stop(N, "hard"); } catch { /* ignore */ }
+  }
 } finally {
   for (const id of [
     "sess-dialog-stuck-A", "sess-slow-healthy-B", "sess-late-sessionstart-C", "sess-manager-not-gated-D",
     "sess-plain-not-gated-E", "sess-resume-rearms-F", "sess-overwrite-resume-G", "sess-dies-before-sessionstart-H",
     "sess-first-turn-started-no-sessionstart-I", "sess-any-hook-observed-no-sessionstart-J",
-    "sess-mcp-prompt-single-chunk-K",
+    "sess-mcp-prompt-single-chunk-K", "sess-post-write-noise-still-held-L", "sess-sessionstart-after-esc-releases-M",
+    "sess-exactly-one-esc-worker-WR", "sess-exactly-one-esc-manager-MG", "sess-respawn-during-delay-D1",
+    "sess-sessionstart-during-delay-still-escapes-N",
   ]) {
     try { host.stop(id, "hard"); } catch { /* ignore */ }
   }
@@ -257,6 +436,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — claude boot-dialog-stuck detector fires once (named signature, no screen content) for an unattended spawn that never reaches SessionStart; never fires for a slow-but-healthy boot or a late SessionStart after the alarm; role-gated to LOOM_DRIVEN_ROLES; re-arms on resume; the overwrite-on-resume and onExit timer clears hold under real timing; the fire-time bail suppresses the alarm whenever firstTurnStarted or any other hook proves the engine is past boot; and (round 3) the MCP-prompt Esc-dismiss's own dialogStuckScan clear survives being fed as a single chunk in the same onData callback, and repaint residue during the 300ms pre-Esc wait does not outlive the dismissal."
+  ? "\n✅ ALL PASS — claude boot-dialog-stuck detector fires once (named signature, no screen content) for an unattended spawn that never reaches SessionStart; never fires for a slow-but-healthy boot or a late SessionStart after the alarm; role-gated to LOOM_DRIVEN_ROLES; re-arms on resume; the overwrite-on-resume and onExit timer clears hold under real timing; the fire-time bail suppresses the alarm whenever firstTurnStarted or any other hook proves the engine is past boot; and (card e29923e3 round 3 scope cut) the MCP-prompt Esc-dismiss is a single write, never a retry loop — the hold stays engaged forever past a dropped/lone Esc on a static dialog, no post-write screen output of any kind (sync frames, OSC, ticks, or even a full clean repaint) ever releases it, only a real SessionStart releases AND delivers a queued entry, the single write fires uniformly for every role (not just LOOM_DRIVEN_ROLES), a same-id respawn during the write's own settle delay never misattributes it across generations, and (round 4) a SessionStart landing DURING the deferred delay no longer suppresses the single Esc write."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

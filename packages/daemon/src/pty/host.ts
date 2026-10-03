@@ -1084,9 +1084,15 @@ export function detectBlockingDialogSignature(flatCollapsed: string): string | n
   if (/isthisaprojectyoutrust/i.test(flatCollapsed)) return "workspace-trust";
   // The per-project "N new MCP servers found — enable?" prompt — same test as the existing bootScan
   // dismiss-scan above (mcpPromptHandled), reused here rather than re-derived.
-  if (/mcpserver/i.test(flatCollapsed) && /rejectall/i.test(flatCollapsed)) return "mcp-server-enable";
+  if (isMcpServerEnableSignature(flatCollapsed)) return "mcp-server-enable";
   if (/entertoconfirm/i.test(flatCollapsed) && /esctocancel/i.test(flatCollapsed)) return "enter-esc-footer";
   return null;
+}
+
+// @decision e29923e3 — the ONE shared test for the MCP-enable signature (the detection site below, and
+// detectBlockingDialogSignature's own branch, both use this, never a re-derived copy). See record.
+export function isMcpServerEnableSignature(flatCollapsed: string): boolean {
+  return /mcpserver/i.test(flatCollapsed) && /rejectall/i.test(flatCollapsed);
 }
 
 /**
@@ -1337,6 +1343,11 @@ export const READY_FALLBACK_ABSOLUTE_CEILING_MS = Number(process.env.LOOM_READY_
  *  SessionStart never genuinely fired, and gating this alarm on `ready` would silence it exactly when a
  *  real stuck dialog needs it most. */
 export const CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS = Number(process.env.LOOM_CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS) || 150_000;
+
+/** @decision e29923e3 — round 3 (scope cut): a single Esc write, never a retry loop. This is the ONLY
+ *  delay the dismiss ever waits out — gives the just-arrived chunk a moment to settle before writing.
+ *  See record for why screen output after the write is never consulted to decide anything further. */
+export const MCP_DISMISS_INITIAL_DELAY_MS = Number(process.env.LOOM_MCP_DISMISS_INITIAL_DELAY_MS) || 300;
 
 /**
  * Card df5e37e7: bound on waitForMcpSeen — how long a deferred resume-continuation nudge (see
@@ -2957,7 +2968,10 @@ interface Live {
   // and could settle on EITHER cycle's target, observed as worker_set_mode landing on the boot default
   // ("auto") regardless of what was requested). Always resolved (never rejects) so the chain can't wedge.
   modeCycleChain: Promise<void>;
-  mcpPromptHandled: boolean;  // guard: dismiss the plugin-MCP enable-prompt with Esc at most once per session
+  // One-shot guard: recognizes the plugin-MCP enable-prompt and schedules the SINGLE Esc dismiss write
+  // (dismissMcpPrompt) at most once per session (card e29923e3 round 3: one Esc, never a retry loop —
+  // this flag only guards re-detection/re-starting for the SAME dialog).
+  mcpPromptHandled: boolean;
   bootScan: string;           // bounded rolling buffer of early boot output, scanned for that prompt
   // Card 01160ae3: a SEPARATE bounded rolling buffer (same convention as bootScan above — 8192 cap,
   // collapseBoot-normalized), but gated on !sessionStartObserved rather than !mcpPromptHandled, so it
@@ -4910,58 +4924,27 @@ export class PtyHost {
       // Card 01160ae3: feed the boot-dialog-stuck scan for the WHOLE pre-SessionStart window — gated on
       // `dialogStuckTimer` being armed (i.e. this is an unattended-role session the detector watches at
       // all), never on `mcpPromptHandled`/`sessionStartObserved` directly, so a DIFFERENT dialog appearing
-      // after the MCP-prompt scan below already fired is still visible when the timer checks it. Fed
-      // BEFORE the MCP-prompt branch below (Card 850eb55c, round 3, item 1) so that branch's own clear of
-      // this SAME buffer, when it fires on this SAME chunk `d`, is not immediately re-appended right back
-      // by this feed running afterward in the same callback invocation.
-      if (live.dialogStuckTimer) {
-        live.dialogStuckScan = (live.dialogStuckScan + d).slice(-8192);
-      }
+      // after the MCP-prompt scan below already fired is still visible when the timer checks it. The
+      // MCP-prompt branch below never clears this buffer at detection time (see its own decision-anchored
+      // comment just below), so the two blocks here never interact within one callback invocation.
+      if (live.dialogStuckTimer) live.dialogStuckScan = (live.dialogStuckScan + d).slice(-8192);
       // A per-project "N new MCP servers found — enable?" prompt (e.g. docker/sentry, inherited from
       // ~/.mcp.json up-tree) can block the unattended boot BEFORE SessionStart. The PRIMARY fix now
       // pre-decides those servers in ~/.claude.json (ensureTrusted → disabledMcpjsonServers) so the
       // prompt never appears. This Esc scan is the BELT-AND-SUSPENDERS fallback for anything not
-      // pre-decided (e.g. a plugin-provided server not in any .mcp.json): dismiss it once with Esc
-      // ("reject all"). NOTE: the single fire-and-forget Esc can intermittently drop on Windows ConPTY
-      // (card dacb8571) — that's why prevention, not this dismissal, is the real fix. Bounded rolling scan.
+      // pre-decided (e.g. a plugin-provided server not in any .mcp.json): dismiss it with a single Esc
+      // ("reject all") via `dismissMcpPrompt` — any single Esc can intermittently drop on Windows ConPTY
+      // (card dacb8571); prevention, not this dismissal, is still the real fix. Bounded rolling scan.
       if (!live.mcpPromptHandled) {
         live.bootScan = (live.bootScan + d).slice(-8192);
         const flat = collapseBoot(live.bootScan);
-        if (/MCPserver/i.test(flat) && /rejectall/i.test(flat)) {
+        if (isMcpServerEnableSignature(flat)) {
           live.mcpPromptHandled = true;
           live.bootScan = "";
-          // Card 850eb55c (round 2, item 3; round 3, item 1): `dialogStuckScan` is a SEPARATE cumulative
-          // buffer (fed unconditionally whenever `dialogStuckTimer` is armed — see its own feed site
-          // above, now ordered BEFORE this branch so this clear is not immediately undone by that feed
-          // re-appending the SAME chunk `d` within this SAME callback invocation) that
-          // `detectBlockingDialogSignature` also matches against the SAME "MCPserver"+"rejectall" text
-          // (its "mcp-server-enable" signature) — without this clear, the dialog Loom JUST dismissed below
-          // would keep reading as "still stuck" for the rest of the 8192-char rolling window, holding
-          // kickoff delivery (`isBlockedOnUnresolvedBootDialog`) against a dialog that is no longer on
-          // screen. Clear it here, the one case where Loom itself KNOWS it just resolved a recognized
-          // dialog — mirrors `bootScan`'s own clear immediately above. The other two known signatures
-          // (external-imports/workspace-trust) are pre-declined/pre-trusted BEFORE spawn (ensureTrusted)
-          // and have no in-session dismiss action of Loom's own to key a clear off, so they are
-          // deliberately NOT given an equivalent reset here — only a genuinely resolved SessionStart (or
-          // anyHookObserved) clears those, same as before.
-          live.dialogStuckScan = "";
-          // eslint-disable-next-line no-console
-          console.log(`[pty] ${opts.sessionId} dismissing plugin-MCP enable-prompt (Esc = reject all)`);
-          // Card ac20c8e7 (bb3d9005 residual ①): boot-time write timer gated on `alive` alone used to be
-          // reachable in the kill()→'exit' window (`alive` stays true through it — see Live.killed's own
-          // doc) — a kill() landing between the MCP-prompt detection and this 300ms timer would let this
-          // write reach an already-destroyed socket. `!live.killed` closes it, same as every other write
-          // gate bb3d9005 fixed.
-          setTimeout(() => {
-            if (live.alive && !live.killed) this.ptyWrite(opts.sessionId, live, ESC_KEY, "esc-mcp-dismiss");
-            // Card 850eb55c (round 3, item 1): the dialog can still repaint onto the screen for up to this
-            // whole 300ms wait before Esc actually dismisses it — any chunk the engine emits in that window
-            // (still showing "MCPserver"+"rejectall", e.g. a redraw) re-feeds `dialogStuckScan` above and
-            // would otherwise leave the hold engaged even after Loom's own dismissal has landed. Clear it
-            // again here, after the write, so repaint residue accumulated during the wait doesn't outlive
-            // the dismissal.
-            live.dialogStuckScan = "";
-          }, 300);
+          // @decision e29923e3 — never clear `dialogStuckScan` here or anywhere in `dismissMcpPrompt`;
+          // never infer dismissal from screen output at all. It clears ONLY via the `SessionStart` hook
+          // case (isPastBoot) below. See record for why, and the accepted residual if the Esc drops.
+          setTimeout(() => this.dismissMcpPrompt(opts.sessionId, live), MCP_DISMISS_INITIAL_DELAY_MS);
         }
       }
       // Resuming a large/old session shows a "resume from summary / as-is" gate BEFORE SessionStart
@@ -5190,7 +5173,8 @@ export class PtyHost {
       startupModeCycles: 0, startupCyclesDone: true, startupCycleInFlight: false, // a shell never cycles a permission mode — never flipped
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
-      dialogStuckScan: "", dialogStuckTimer: null, // never armed for a shell — see its own call site (claude path only)
+      dialogStuckScan: "",
+      dialogStuckTimer: null, // never armed for a shell — see its own call site (claude path only)
       resumeGateHandled: true, resumeGateDetected: true, resumeGateScan: "",
       isResume: false, modeLogged: true, // a shell has no claude footer/permission mode to read
       resumeModeTarget: null, // a shell never cycles a permission mode
@@ -6403,7 +6387,8 @@ export class PtyHost {
       startupModeCycles: 0, startupCyclesDone: true, startupCycleInFlight: false, // a canned entry never cycles a permission mode — never flipped
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
-      dialogStuckScan: "", dialogStuckTimer: null, // never armed for a canned entry — see its own call site (claude path only)
+      dialogStuckScan: "",
+      dialogStuckTimer: null, // never armed for a canned entry — see its own call site (claude path only)
       resumeGateHandled: true, resumeGateDetected: true, resumeGateScan: "",
       isResume: false, modeLogged: true,
       resumeModeTarget: null,
@@ -9205,6 +9190,17 @@ export class PtyHost {
     return !this.isPastBoot(live)
       && !!live.role && (LOOM_DRIVEN_ROLES as readonly string[]).includes(live.role)
       && detectBlockingDialogSignature(collapseBoot(live.dialogStuckScan)) !== null;
+  }
+
+  // @decision e29923e3 — a single Esc write, never a retry loop, never keyed on screen output or
+  // `isPastBoot`: a stray Esc at the main prompt is harmless, a skipped one on an open dialog is not.
+  // Bind to `boundLive` by identity (card 096231e8). See record for the full round-by-round history.
+  private dismissMcpPrompt(sessionId: string, boundLive: Live): void {
+    if (this.live.get(sessionId) !== boundLive) return; // respawned — never write into a new generation
+    if (!boundLive.alive || boundLive.killed) return; // pty gone
+    this.ptyWrite(sessionId, boundLive, ESC_KEY, "esc-mcp-dismiss");
+    // eslint-disable-next-line no-console
+    console.log(`[pty] ${sessionId} dismissing plugin-MCP enable-prompt (Esc = reject all)`);
   }
 
   /**

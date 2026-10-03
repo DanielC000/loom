@@ -29,6 +29,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // side of SessionStart, and proves delivery now happens directly off the cycle's own onDone — promptly,
 // strictly after the last Shift+Tab — with `host.reconcile()` never called anywhere in the scenario.
 //
+// Card e29923e3, scenario (5): the MCP-dialog variant of (3) — the SAME readiness-fallback + reconcile()
+// hold, but behind the MCP-enable dialog (dismissMcpPrompt's single deferred Esc) instead of the
+// external-imports dialog. Proves the Esc write alone never releases the hold across several reconcile()
+// ticks, and delivery proceeds exactly once SessionStart actually resolves the dialog.
+//
 // HERMETIC, claude-free — a fake pty (mirrors worker-kickoff-guarantee.mjs).
 //
 // RUN: pnpm build (from packages/daemon) then `node test/kickoff-readiness-fallback.mjs`.
@@ -60,6 +65,9 @@ process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = "5000";
 // (comfortably above READY_FALLBACK_MS=30 above) so (3)'s post-SessionStart delivery doesn't need to wait
 // out the real 30s production default.
 process.env.LOOM_FIRST_TURN_STALE_MS = "100";
+// Card e29923e3, scenario (5) only: the MCP-dialog variant needs its deferred single-Esc write to fire
+// well inside this file's own short timeouts — mirrors claude-boot-dialog-stuck.mjs's own pin.
+process.env.LOOM_MCP_DISMISS_INITIAL_DELAY_MS = "20";
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -75,6 +83,10 @@ const AUTO_FOOTER = "auto mode on (shift+tab to cycle)";
 // Card 850eb55c, scenario (3)/(4): a recognized blocking-dialog signature (external-imports) — hoisted to
 // module scope since (4) (round 2) needs the SAME text (3) already uses, in a separate block.
 const DIALOG_TEXT = "Allow external CLAUDE.md file imports?\n❯ No, disable external imports\n  Yes, allow external imports\nEnter to confirm · Esc to cancel";
+// Card e29923e3, scenario (5): the MCP-enable-prompt signature — same text claude-boot-dialog-stuck.mjs
+// uses — and the ESC key its single deferred dismiss write (dismissMcpPrompt) sends.
+const MCP_PROMPT_TEXT = "2 new MCP servers found\n❯ Enable\n  Reject all";
+const ESC_KEY = "\x1b";
 
 const fakes = [];
 // Extends the shared seam (tracked onExit callback, a real kill()) rather than a local fake — see
@@ -105,6 +117,7 @@ const host = new TestPtyHost(events);
 const writtenOf = (fake) => fake.writes.join("");
 const countIn = (fake, marker) => writtenOf(fake).split(marker).length - 1;
 const countShiftTabs = (fake) => fake.writes.filter((w) => w === SHIFT_TAB).length;
+const countEsc = (fake) => fake.writes.filter((w) => w === ESC_KEY).length;
 
 // windowMs shared by every negative check below — derived from the pinned LOOM_SUBMIT_VERIFY_TIMEOUT_MS
 // (5000ms) above: comfortably (25x) under it, so sendEnterAndVerify's give-up/reassert-paste retry can
@@ -497,12 +510,52 @@ try {
       lastShiftTabIdxH !== -1 && firstPasteIdxH !== -1 && firstPasteIdxH > lastShiftTabIdxH);
     try { host.stop(H, "hard"); } catch { /* ignore */ }
   }
+
+  // ============ (5) Card e29923e3: the MCP-dialog variant of (3) — a LOOM_DRIVEN-role session readied ====
+  // ============     via the fallback, stuck on the MCP-enable dialog (not external-imports): the single ==
+  // ============     deferred Esc still fires exactly once, the hold survives several reconcile() ticks ===
+  // ============     while the dialog stays on screen (the Esc write alone never releases it — only =======
+  // ============     SessionStart does), and delivery proceeds exactly once the instant SessionStart =======
+  // ============     actually resolves it. RED against main (850eb55c's original optimistic clear released=
+  // ============     the hold AT DETECTION, before any Esc or SessionStart, letting the kickoff through ====
+  // ============     prematurely — see docs/decisions/e29923e3-hold-boot-dialog-kickoff-until-sessionstart.
+  // ============     md's own Background). ====================================================================
+  {
+    const I = "fallback-I-mcp-dialog-stuck";
+    const KICKOFF5 = "orchestrate task via the readiness fallback — stuck behind the MCP-enable dialog";
+    host.spawn({
+      sessionId: I, cwd: tmpHome, startupPrompt: KICKOFF5, role: "worker",
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    host.markMcpSeen(I); // "worker" mounts loom-orchestration MCP — see (3)'s own comment on C
+    const fi = fakes[fakes.length - 1];
+    fi.feed(MCP_PROMPT_TEXT); // schedules dismissMcpPrompt at +MCP_DISMISS_INITIAL_DELAY_MS, holds the kickoff
+
+    await waitUntil(() => host.hasReachedReady(I), { label: "(5a) READY_FALLBACK_MS marks ready despite the MCP dialog", timeoutMs: 5000 });
+    check("(5a) ready, but nothing written yet for the kickoff", countIn(fi, PASTE_START) === 0);
+
+    await waitUntil(() => countEsc(fi) >= 1, { label: "(5b) the single deferred Esc fires", timeoutMs: 3000 });
+    check("(5b) exactly one Esc written — no retry loop", countEsc(fi) === 1);
+
+    // The hold must survive several reconcile() ticks while the dialog stays on screen — the Esc write
+    // itself never clears dialogStuckScan (card e29923e3's own round-3 "do not" above); only SessionStart does.
+    for (let k = 0; k < 5; k++) host.reconcile();
+    check("(5c) STILL nothing written after several reconcile() ticks — the Esc write alone never releases the hold", countIn(fi, PASTE_START) === 0);
+
+    host.deliverHook(I, { hook_event_name: "SessionStart", session_id: "eng-I" }); // the dialog actually resolves
+    host.reconcile();
+    await waitUntil(() => countIn(fi, PASTE_START) === 1, { label: "(5d) kickoff delivered exactly once once SessionStart resolves the dialog", timeoutMs: 3000 });
+    check("(5d) exactly ONE kickoff delivery", countIn(fi, PASTE_START) === 1);
+    check("(5d) the delivered text is the ORIGINAL kickoff", writtenOf(fi).includes(KICKOFF5));
+    try { host.stop(I, "hard"); } catch { /* ignore */ }
+  }
 } finally {
-  for (const id of ["fallback-A", "fallback-B", "fallback-C-dialog-stuck", "fallback-D-no-dialog-control", "fallback-E-manager-role-control", "fallback-F-dialog-stuck-drain", "fallback-G-dialog-stuck-mode-cycle", "fallback-H-drainpending-cycle-guard"]) { try { host.stop(id, "hard"); } catch { /* ignore */ } }
+  for (const id of ["fallback-A", "fallback-B", "fallback-C-dialog-stuck", "fallback-D-no-dialog-control", "fallback-E-manager-role-control", "fallback-F-dialog-stuck-drain", "fallback-G-dialog-stuck-mode-cycle", "fallback-H-drainpending-cycle-guard", "fallback-I-mcp-dialog-stuck"]) { try { host.stop(id, "hard"); } catch { /* ignore */ } }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a fresh spawn whose SessionStart hook is NEVER delivered still gets its kickoff delivered exactly once, via READY_FALLBACK_MS's own markReady call chaining into the same logLandedMode-gated scheduleKickoffGuarantee delivery the SessionStart-driven path uses; resume (no startupPrompt) stays a byte-identical no-op through this path too; (card 850eb55c) a LOOM_DRIVEN-role session stuck on a recognized boot dialog pre-SessionStart has BOTH delivery paths (scheduleKickoffGuarantee's direct submit, drainPending's own queued-entry path) held — never dropped — until SessionStart actually resolves the dialog, while the same role with no dialog and a non-LOOM_DRIVEN role with the same dialog both stay unchanged; (round 2) when SessionStart arrives LATE (ready already latched by the fallback) and drives a REAL boot mode-cycle, the kickoff is held through the whole cycle and delivered PROMPTLY, strictly after the cycle's last Shift+Tab, straight off the cycle's own onDone — never via host.reconcile(), which this file never once calls in that scenario; and (round 3) drainPending's OWN startupCycleInFlight guard, isolated from scheduleKickoffGuarantee's own check, also holds a queued entry through a reconcile() call fired BETWEEN the cycle's two Shift+Tabs, with busy already cleared and the dialog already resolved."
+  ? "\n✅ ALL PASS — a fresh spawn whose SessionStart hook is NEVER delivered still gets its kickoff delivered exactly once, via READY_FALLBACK_MS's own markReady call chaining into the same logLandedMode-gated scheduleKickoffGuarantee delivery the SessionStart-driven path uses; resume (no startupPrompt) stays a byte-identical no-op through this path too; (card 850eb55c) a LOOM_DRIVEN-role session stuck on a recognized boot dialog pre-SessionStart has BOTH delivery paths (scheduleKickoffGuarantee's direct submit, drainPending's own queued-entry path) held — never dropped — until SessionStart actually resolves the dialog, while the same role with no dialog and a non-LOOM_DRIVEN role with the same dialog both stay unchanged; (round 2) when SessionStart arrives LATE (ready already latched by the fallback) and drives a REAL boot mode-cycle, the kickoff is held through the whole cycle and delivered PROMPTLY, strictly after the cycle's last Shift+Tab, straight off the cycle's own onDone — never via host.reconcile(), which this file never once calls in that scenario; (round 3) drainPending's OWN startupCycleInFlight guard, isolated from scheduleKickoffGuarantee's own check, also holds a queued entry through a reconcile() call fired BETWEEN the cycle's two Shift+Tabs, with busy already cleared and the dialog already resolved; and (card e29923e3) the MCP-dialog variant of that same hold — dismissMcpPrompt's single deferred Esc fires exactly once, survives several reconcile() ticks with the dialog still on screen, and delivery proceeds exactly once SessionStart actually resolves it."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
