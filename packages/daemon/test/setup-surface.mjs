@@ -64,7 +64,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       on a Companion- or Workspace-Auditor-rigged agent (a rename-only edit is unaffected); agent_create
 //       refuses an assistant-role profileId; profile_update refuses ANY patch to an already-locked
 //       profile — including setup's own "Setup Assistant" rig (self-modification) and a role-null patch
-//       that would otherwise bypass the resolved-role check while also stripping another field.
+//       that would otherwise bypass the resolved-role check while also stripping another field. Card
+//       ced4285e (round 2): profile_update ALSO refuses flipping a profile's role to "manager" while it
+//       is already bound to an agent living in a reserved/system project (a stranded-row hazard distinct
+//       from the agent-row-touching cases above, since this route never touches the agent row at all),
+//       gated on the FLIP so an unrelated patch or a same-role patch is never refused.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/setup-surface.mjs
 import fs from "node:fs";
@@ -747,6 +751,43 @@ try {
   const taReserved = await call("template_apply", { projectId: "pHome", templateName: "Solo builder" });
   check("(m) template_apply REJECTS applying to a reserved/system project", typeof taReserved.error === "string" && /reserved\/system project/.test(taReserved.error));
   check("(m) template_apply: the rejected reserved-home apply made NO agent", db.listAgents("pHome").length === nAgentsBeforeReservedTemplate);
+
+  // Card ced4285e (round 2, Code Review 04e0e82c, MAJOR): profile_update can flip an EXISTING profile's
+  // role to "manager" while that profile is already bound to an agent in the reserved "pHome" project — a
+  // DIFFERENT route to the same stranded-row hazard than the profile_assign/agent_update cases above (it
+  // never touches the agent row at all). The original 73c16ec8 survey only checked setup's agent_update/
+  // profile_assign (already safe via setupMayTouchAgentError) and missed this one. Bound directly via
+  // db.updateAgent — setup's own profile_assign would itself refuse this bind (reserved-home agent), so
+  // this simulates a pre-existing binding, exactly like the platform.ts-surface sibling test's fixtures.
+  db.updateAgent("agentMgr", { profileId: okWrk.id });
+  const upFlipReserved = await call("profile_update", { profileId: okWrk.id, patch: { role: "manager" } });
+  check("(m) profile_update REJECTS flipping role to manager while bound to an agent in a reserved project",
+    typeof upFlipReserved.error === "string" && /manager/i.test(upFlipReserved.error) && /reserved/i.test(upFlipReserved.error) &&
+    upFlipReserved.error.includes("agentMgr") && upFlipReserved.error.includes("pHome"));
+  check("(m) profile_update: the rejected role-flip left the profile's role UNCHANGED (still worker)", db.getProfile(okWrk.id)?.role === "worker");
+  // Control: an unrelated patch to the SAME reserved-bound profile still succeeds (not a blanket refusal).
+  const upFlipReservedUnrelated = await call("profile_update", { profileId: okWrk.id, patch: { icon: "🔁" } });
+  check("(m) profile_update: an unrelated patch to the SAME reserved-bound profile still SUCCEEDS",
+    upFlipReservedUnrelated.icon === "🔁" && upFlipReservedUnrelated.role === "worker" && !upFlipReservedUnrelated.error);
+  // Control: the SAME role-flip succeeds when the profile is bound only to a NON-reserved-project agent.
+  const upFlipOrdinary = await call("profile_update", { profileId: okNul.id, patch: { role: "manager" } });
+  check("(m) profile_update: flipping role to manager SUCCEEDS for a profile with NO reserved-project binding (control)",
+    upFlipOrdinary.role === "manager" && !upFlipOrdinary.error);
+
+  // Round 2 minor fold (mirrors platform-surface's (C4)): a profile ALREADY role "manager", bound (via
+  // direct db write — no MCP guard would ever let this bind happen live, since reservedProjectManagerProfileError
+  // refuses it at assign time) to an agent in the reserved "pHome" project. Proves the setup-surface guard
+  // is ALSO gated on a FLIP, never the resolved role: a `v.value.role === "manager"` check (round 1's
+  // shape) would wrongly re-scan and refuse an UNRELATED patch here, even though no flip is happening and
+  // the "stranding" was never created through any guarded path. RED-PROVEN manually: temporarily reverted
+  // setup.ts's guard condition to `if (v.value.role === "manager")` (round 1's unconditional shape),
+  // rebuilt, and re-ran this file — this check failed (the unrelated patch was wrongly refused); every
+  // other check in this file stayed GREEN. Restored the guard, rebuilt, re-ran GREEN before committing.
+  const alreadyMgr = await call("profile_create", { profile: { name: "AlreadyMgrRig", role: "manager" } });
+  db.insertAgent({ id: "agentAlreadyMgrReserved", projectId: "pHome", name: "Already-Mgr-Bound", startupPrompt: "x", position: 2, profileId: alreadyMgr.id });
+  const upAlreadyMgrUnrelated = await call("profile_update", { profileId: alreadyMgr.id, patch: { icon: "🆗" } });
+  check("(m) profile_update: an unrelated patch to an ALREADY-manager profile bound in a reserved project SUCCEEDS (flip-gating control, mirrors platform-surface's C4)",
+    upAlreadyMgrUnrelated.icon === "🆗" && upAlreadyMgrUnrelated.role === "manager" && !upAlreadyMgrUnrelated.error);
 
   // Item 1 (code review, the setup-role mint RATCHET): profile_create({role:"setup"}) is now rejected too
   // (proved in (e) above, alongside the sibling manager/worker/null-only acceptances) — here, prove the

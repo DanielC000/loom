@@ -19,6 +19,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       route (the whole point of the opt-out — mirrors companion-provision.mjs's (6i) for clone). The
 //       ROLE check is NEVER lifted, even here: a template bound to an elevated-role profile still 400s
 //       with nothing written.
+//   (7) card ced4285e round 2: applyWorkflowTemplate's `reservedProjectManagerProfileError` pre-flight
+//       (setup/templates.ts) is ALSO skippable only by `humanAuthorized: true` — this REST route's own
+//       exemption, same as (6). Applying "Solo builder" (whose "Orchestrator" agent binds the
+//       manager-role "Orchestrator" profile) into a RESERVED project still succeeds here — the intended
+//       exemption — even though the Platform Lead's own `template_apply` MCP tool (no humanAuthorized)
+//       refuses the identical apply (see (D1)/(D2) in reserved-home-manager-agent-reassign-guard.mjs).
 // Run: 1) build (turbo builds shared first), 2) node test/setup-templates-rest.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -239,7 +245,32 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
   }
 }
 
+// ===== (7) card ced4285e round 2: humanAuthorized ALSO exempts the reserved-project manager-role guard =====
+{
+  const db = new Db(path.join(TMP, "loom-human-authorized-reserved.db"));
+  seedDefaultProfiles(db); // "Orchestrator" profile seeded here is role "manager"
+  const now = new Date().toISOString();
+  const projectId = "pHumanAuthorizedReserved";
+  db.insertProject({ id: projectId, name: "Reserved Project", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: now, archivedAt: null, reserved: true });
+
+  const app = await buildApp(db);
+  try {
+    const r = await app.inject({
+      method: "POST", url: "/api/setup/templates/apply",
+      payload: { projectId, templateName: "Solo builder" },
+    });
+    check("(7) reserved project + manager-role roster: POST /api/setup/templates/apply → 201 (humanAuthorized exempts the reserved-project guard too)", r.statusCode === 201);
+    const body = r.json();
+    check("(7) response carries all 3 created agents", Array.isArray(body.agents) && body.agents.length === 3);
+    check("(7) the manager-role 'Orchestrator' agent was actually created in the reserved project",
+      db.listAgents(projectId).find((a) => a.name === "Orchestrator")?.profileId === db.listProfiles().find((p) => p.name === "Orchestrator")?.id);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GET /api/setup/templates lists the bundled presets, POST /api/setup/templates/apply stands up a preset's roster + starter card on a real project via ordinary agent-create/task-insert rows, an unknown template or project is rejected with nothing written, no MCP router exposes these REST paths (human-only), and this route's humanAuthorized opt-out (card a06650d2) skips ONLY the field check (a vaultWrite-bound template still applies) while NEVER lifting the role check (an elevated-role-bound template still 400s with nothing written)."
+  ? "\n✅ ALL PASS — GET /api/setup/templates lists the bundled presets, POST /api/setup/templates/apply stands up a preset's roster + starter card on a real project via ordinary agent-create/task-insert rows, an unknown template or project is rejected with nothing written, no MCP router exposes these REST paths (human-only), this route's humanAuthorized opt-out (card a06650d2) skips ONLY the field check (a vaultWrite-bound template still applies) while NEVER lifting the role check (an elevated-role-bound template still 400s with nothing written), and (card ced4285e round 2) the SAME humanAuthorized opt-out also exempts the reserved-project manager-role guard — a manager-role roster still applies into a reserved project over this route."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

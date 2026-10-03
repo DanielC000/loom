@@ -3,6 +3,7 @@ import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import type { Agent, Task } from "@loom/shared";
 import type { Db } from "../db.js";
 import { agentAssignableProfileError } from "../profiles/validate.js";
+import { reservedProjectManagerProfileError } from "../agents/clone-core.js";
 
 /**
  * Guided Onboarding & Templates (onboarding C1) — the workflow-template model. A BUNDLED TS preset, the
@@ -137,6 +138,10 @@ export function templateAssignableProfileError(db: Db, template: WorkflowTemplat
  * @decision 3de74275 — every resolved profile is checked via `agentAssignableProfileError(profile,
  * { humanAuthorized: opts?.humanAuthorized })`: ROLE is unconditional on every caller, REST included
  * (manager/worker/null only); FIELD is fail-closed, skippable ONLY by the REST template-apply route.
+ *
+ * @decision ced4285e — ALSO checks every resolved profile via `reservedProjectManagerProfileError`, so
+ * a manager-role roster (e.g. "Orchestrator") can never land in a reserved project; skippable only by
+ * `humanAuthorized: true`, same opt-out as the field check above.
  */
 export function applyWorkflowTemplate(
   db: Db, template: WorkflowTemplate, projectId: string,
@@ -153,6 +158,10 @@ export function applyWorkflowTemplate(
     if (!profile) throw new Error(`applyWorkflowTemplate: unknown bundled profile "${spec.profileName}" for agent "${spec.name}"`);
     const assignErr = agentAssignableProfileError(profile, { humanAuthorized: opts?.humanAuthorized });
     if (assignErr) throw new Error(`applyWorkflowTemplate: agent "${spec.name}" — ${assignErr}`);
+    if (!opts?.humanAuthorized) {
+      const reservedErr = reservedProjectManagerProfileError(project, profile);
+      if (reservedErr) throw new Error(`applyWorkflowTemplate: agent "${spec.name}" — ${reservedErr}`);
+    }
     return { spec, profile };
   });
 

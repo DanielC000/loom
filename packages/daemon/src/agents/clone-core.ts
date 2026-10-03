@@ -1,9 +1,33 @@
 import { randomUUID } from "node:crypto";
-import type { Agent, Profile } from "@loom/shared";
+import type { Agent, Profile, Project } from "@loom/shared";
 import type { Db } from "../db.js";
 import { isPlatformProfile } from "../profiles/seed.js";
 import { agentAssignableProfileError } from "../profiles/validate.js";
 import { agentCreatePromptWarning } from "./promptLint.js";
+
+// @decision ced4285e — shared by createAgentCore AND the Platform Lead's reassignment surfaces so the
+// create-time and reassign-time reserved-project/manager-role checks cannot drift apart.
+export function reservedProjectManagerProfileError(
+  project: Pick<Project, "reserved"> | undefined,
+  profile: Pick<Profile, "role"> | null | undefined,
+): string | null {
+  if (project?.reserved && profile?.role === "manager") {
+    return "cannot bind a manager-role profile to an agent in a reserved/system project (the workspace home) — a manager session can never start there (see the session-start reserved-home guard); only a human may do this.";
+  }
+  return null;
+}
+
+// @decision ced4285e — the SECOND reachable route to the same hazard (profile_update flipping an
+// EXISTING shared profile's role to "manager" strands every agent bound to it, without touching any
+// agent row). A reserved project can never be archived (mcp/setup.ts's project_archive refuses it).
+export function reservedProjectAgentBoundToProfile(db: Db, profileId: string): { agent: Agent; project: Project } | null {
+  for (const project of db.listAllProjects()) {
+    if (!project.reserved) continue;
+    const hit = db.listAgents(project.id).find((a) => a.profileId === profileId);
+    if (hit) return { agent: hit, project };
+  }
+  return null;
+}
 
 /**
  * Shared core behind agent_create/agent_clone/agent_clone_batch (mcp/platform.ts) AND the companion
@@ -33,13 +57,11 @@ export function createAgentCore(
   }
   // card 73c16ec8: unlike the setup surface (mcp/setup.ts ~474), this core otherwise allows minting a
   // non-manager agent into a reserved/system project (the Platform Lead legitimately administers its own
-  // home's standing agents, e.g. cloning the Auditor). A MANAGER-role agent is the one case that can never
-  // be legitimate there: 37e15c26's session-start guard refuses a manager start against a reserved home
-  // outright, so an agent minted with a manager-role profile here would be a dangling row that can never
-  // successfully spawn.
-  if (project.reserved && profile?.role === "manager") {
-    return { ok: false, error: "cannot create a manager-role agent in a reserved/system project (the workspace home) — a manager session can never start there (see the session-start reserved-home guard); only a human may add one here." };
-  }
+  // home's standing agents, e.g. cloning the Auditor).
+  // @decision ced4285e — the manager-role check moved to the shared reservedProjectManagerProfileError
+  // (above) so create-time and reassign-time checks cannot drift apart.
+  const reservedErr = reservedProjectManagerProfileError(project, profile);
+  if (reservedErr) return { ok: false, error: reservedErr };
   const agent: Agent = {
     id: randomUUID(), projectId, name,
     startupPrompt: startupPrompt ?? "", position: db.listAgents(projectId).length,
