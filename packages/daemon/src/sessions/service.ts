@@ -21008,9 +21008,9 @@ export class SessionService {
   async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesHeld: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesPathRefused: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
-    // @decision dd494a9b — precompute both maps ONCE (not per-session) — that was the dominant cost
-    // (96% of a ~7-min boot stall). `mergeRequestSeqMap` is a safe snapshot (never appended during a
-    // run); `mergeDoneSeqMap` is NOT — keep it live via `onMergeDoneAppended` / Pass A2's own update below.
+    // @decision dd494a9b — precompute both maps for Pass A (per-session calls were 96% of a ~7-min boot
+    // stall). A live MCP handler outside this function can still append either kind while Pass A's own
+    // git awaits run (reconcile is un-awaited, card 460d3178) — Pass A2 rebuilds its own fresh pair.
     const mergeDoneSeqMap = this.db.buildLatestEventSeqMap("merge_done");
     const mergeRequestSeqMap = this.db.buildLatestEventSeqMap("merge_request");
     const handledWorktrees = new Set<string>();
@@ -21338,6 +21338,11 @@ export class SessionService {
     // → a permanent stale MERGE REQUEST alert. Emit the missing terminal event. Purely additive: no
     // git/fs op, so it never touches a worktree dir or branch (honors the inert-orphan constraint) and
     // is trivially idempotent — once merge_done exists, the next boot sees a terminal event and skips.
+    // @decision dd494a9b — REBUILD fresh here, never reuse Pass A's own maps above: a live MCP handler
+    // can append merge_request/merge_done during Pass A's real git awaits (reconcile runs un-awaited,
+    // card 460d3178). One extra O(M) scan restores the old per-session fresh-read semantics for A2.
+    const a2MergeDoneSeqMap = this.db.buildLatestEventSeqMap("merge_done");
+    const a2MergeRequestSeqMap = this.db.buildLatestEventSeqMap("merge_request");
     for (const s of all) {
       if (s.role !== "worker" || !s.taskId) continue;
       if (protectedSessionIds.has(s.id)) continue; // about to be resumed — leave its lifecycle intact
@@ -21360,8 +21365,8 @@ export class SessionService {
       // branch-presence check wrongly reads an unrelated OLDER landing (e.g. before a re-task) as having
       // resolved THIS row's own later merge_request, stranding its MERGE REQUEST alert forever.
       const repoScope = s.repoKey ?? null;
-      const latestDoneSeq = s.branch ? mergeDoneSeqMap.get(latestEventSeqMapKey(s.branch, repoScope)) ?? null : null;
-      const latestRequestSeq = s.branch ? mergeRequestSeqMap.get(latestEventSeqMapKey(s.branch, repoScope)) ?? null : null;
+      const latestDoneSeq = s.branch ? a2MergeDoneSeqMap.get(latestEventSeqMapKey(s.branch, repoScope)) ?? null : null;
+      const latestRequestSeq = s.branch ? a2MergeRequestSeqMap.get(latestEventSeqMapKey(s.branch, repoScope)) ?? null : null;
       const hasTerminal = evts.some((e) => e.kind === "merge_done" || e.kind === "merge_rejected")
         || (latestDoneSeq != null && (latestRequestSeq == null || latestDoneSeq > latestRequestSeq));
       if (!hasMergeRequest || hasTerminal) continue;
@@ -21373,9 +21378,9 @@ export class SessionService {
         // wrongly match from ANY repo, defeating the scoping this fix just added above.
         taskId: s.taskId, kind: "merge_done", detail: { branch: s.branch ?? null, reconciled: true, repoKey: repoScope },
       });
-      // @decision dd494a9b — keep mergeDoneSeqMap live for this in-run append too (same reason as
-      // finalizeMerge's onMergeDoneAppended): a LATER session in this SAME pass may share this branch.
-      if (s.branch) mergeDoneSeqMap.set(latestEventSeqMapKey(s.branch, repoScope), reconciledSeq);
+      // @decision dd494a9b — keep A2's OWN fresh map live too: a LATER session in THIS SAME A2 pass may
+      // share this branch (two A2-eligible rows, same branch+repoKey, neither with a merge_done yet).
+      if (s.branch) a2MergeDoneSeqMap.set(latestEventSeqMapKey(s.branch, repoScope), reconciledSeq);
       staleMergesResolved++;
     }
 

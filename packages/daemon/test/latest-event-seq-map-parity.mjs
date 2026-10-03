@@ -8,9 +8,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // repoKeys (null / "primary" / "other"), re-tasked REUSED branch names, and both event kinds, the map's
 // answer must equal `latestEventSeqForBranch`'s own answer — the oracle, unchanged by this card.
 //
-// It also proves the test has TEETH: a deliberately-naive map variant that ignores repoKey scoping
-// entirely (the exact defect class `latestEventSeqForBranch`'s own repoKey filter — @decision 9ac3a739 —
-// exists to prevent) is shown to DISAGREE with the oracle on a case the real map gets right.
+// It also runs a SANITY CHECK, not independent proof (the naive variant below is itself built from the
+// oracle's own per-call answers, so it cannot certify a real repoKey-blind implementation would fail —
+// only that collapsing repoKey scopes loses information the real map preserves): a deliberately-naive
+// map variant that ignores repoKey scoping entirely (the exact defect class `latestEventSeqForBranch`'s
+// own repoKey filter — @decision 9ac3a739 — exists to prevent) disagrees with the real map's scoped
+// answer on a case where the two scopes genuinely differ.
 // Run: 1) build daemon, 2) node test/latest-event-seq-map-parity.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -94,7 +97,7 @@ for (const kind of kindsToProbe) {
   check("re-task shape: the SECOND (later) merge_done's seq is returned, which is > the second merge_request's seq", doneSeq > requestSeq);
 }
 
-// ════════ THE TEST HAS TEETH: a deliberately-naive, repoKey-blind map variant disagrees with the oracle ════════
+// ════════ SANITY CHECK (not independent proof — built from the oracle): a naive, repoKey-blind map variant disagrees with the real map ════════
 // Mirrors the exact defect @decision 9ac3a739 fixed: ignoring repoKey and just tracking the max seq per
 // BRANCH ALONE. On BRANCH_A, the "other"-scoped merge_done (filed in the middle, seq-wise) would get
 // masked by the primary-scope's own LATER merge_done in a correct per-scope map — but a repoKey-blind
@@ -128,7 +131,7 @@ function buildNaiveRepoKeyBlindMap(kind) {
   check("NAIVE (repoKey-blind) variant: collapses to ONE answer for the whole branch", naiveAnswer !== null);
   check("REAL map: correctly distinguishes primary vs \"other\" scope (different seqs)", realPrimary !== realOther);
   check(
-    "THE TEST HAS TEETH: the naive variant's single answer DISAGREES with the real, correctly-scoped \"other\" answer (it can only match ONE scope, never both) — proving a repoKey-blind implementation fails this suite",
+    "SANITY CHECK (built from the oracle, not independent proof): the naive variant's single collapsed answer DISAGREES with the real, correctly-scoped \"other\" answer (it can only match ONE scope, never both) — demonstrating the scoping distinction this map must preserve",
     naiveAnswer !== realOther,
   );
 }
@@ -137,6 +140,6 @@ db.close();
 fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — buildLatestEventSeqMap is in exact parity with latestEventSeqForBranch across mixed repoKeys (null/\"primary\"/\"other\"), a re-tasked reused branch, and both event kinds; a deliberately repoKey-blind naive variant is shown to disagree with the correctly-scoped answer, proving this suite would have caught the exact defect class @decision 9ac3a739 fixed."
+  ? "\n✅ ALL PASS — buildLatestEventSeqMap is in exact parity with latestEventSeqForBranch across mixed repoKeys (null/\"primary\"/\"other\"), a re-tasked reused branch, and both event kinds; a sanity check (built from the oracle, not independent proof of a real implementation) shows a repoKey-blind variant disagrees with the correctly-scoped answer, demonstrating the scoping distinction @decision 9ac3a739 fixed."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

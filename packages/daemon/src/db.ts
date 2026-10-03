@@ -9431,9 +9431,11 @@ function detailRepoKey(detailJson: string | null): string | null {
 /**
  * The ONE key format {@link Db.buildLatestEventSeqMap} writes and every reader (reconcileOrchestrationOnBoot's
  * Pass A/A2) must read with — a NUL separator so a branch name can never collide with a repoKey value.
+ * `null` (the primary-repo scope) gets its OWN leading sentinel (`\u0001`, distinct from the `\u0002`
+ * every real repoKey string gets) so it can never collide with a literal empty-string repoKey.
  */
 export function latestEventSeqMapKey(branch: string, repoKey: string | null): string {
-  return `${branch}\u0000${repoKey ?? ""}`;
+  return repoKey === null ? `\u0001${branch}\u0000` : `\u0002${branch}\u0000${repoKey}`;
 }
 // Map a schedule-fire event row (LEFT-JOINed with its schedule/agent/project — see listScheduleHistory)
 // to the enriched, UI-ready ScheduleHistoryEntry. The join columns are NULL when the schedule (or its

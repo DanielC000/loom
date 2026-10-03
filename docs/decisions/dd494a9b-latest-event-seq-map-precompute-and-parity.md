@@ -37,24 +37,45 @@ disagree (proving the test has teeth).
 
 ## In-run staleness
 
-`merge_request` is never appended during a boot-reconcile run (only a worker's own live merge-request
-flow files it — the only writer is `sessions/service.ts`'s worker_merge handler, unreachable from
-`reconcileOrchestrationOnBoot`) — so the `merge_request` map is a safe one-time snapshot for the whole
-run. `merge_done` is NOT: `finalizeMerge` (used by Pass A) and Pass A2's own stale-alert resolver both
-append `merge_done` WHILE reconcile is running, and a later-processed session on the SAME branch must see
-an earlier-processed session's fresh append (the exact "finalizedElsewhere" check this map replaces).
+Two DIFFERENT staleness concerns, with two different fixes — do not conflate them.
+
+**Within `reconcileOrchestrationOnBoot`'s own call graph**, `merge_request` is never appended (the only
+writer is `sessions/service.ts`'s `reviewWorkerMerge` — the worker_merge review step, unreachable from
+Pass A/A2 or anything they call; verified exhaustively by reading every method Pass A calls, transitively,
+down to `spawnWorker`/`retireWorkerSession`/`soloFinalizeTipGuard` — none append it). `merge_done` IS
+appended within this call graph: `finalizeMerge` (used by Pass A) and Pass A2's own stale-alert resolver
+both append it WHILE reconcile is running, and a later-processed session on the SAME branch must see an
+earlier-processed session's fresh append (the exact "finalizedElsewhere" check this map replaces).
 `finalizeMerge` gained an optional `onMergeDoneAppended?: (branch, repoKey, seq) => void` callback, invoked
-immediately after its own `merge_done` append commits; Pass A wires it to update the live `mergeDoneSeqMap`
-in place. Pass A2's own direct `merge_done` append does the same update inline, right after `appendEvent`
-returns its assigned seq (`appendEvent` now returns `number`, not `void`). Every OTHER `finalizeMerge`
-caller (`confirmWorkerMerge`, `finishAlreadyMerged`) simply omits the callback — byte-identical behavior,
-since it's optional. Verified by `test/latest-event-seq-map-in-run-staleness.mjs`: two session rows share
-one worktree/branch, neither has a pre-existing `merge_done`; the first-processed row's real finalize
-appends a live `merge_done`, and the second-processed row (pre-seeded only with its own `merge_request`)
-must see that live append and take the cleanup-only path — never a second, duplicate finalize. The test
-also captures a map snapshot taken before reconcile runs and shows it does NOT contain the first row's
-(not-yet-appended) `merge_done` — proof that a naive one-shot-snapshot design would have missed it and
-produced the duplicate-finalize bug this fix exists to avoid.
+immediately after its own `merge_done` append commits; Pass A wires it to update its OWN live
+`mergeDoneSeqMap` in place. `appendEvent` now returns `number` (was `void`) so this callback — and Pass
+A2's own inline update — can learn the seq without a re-read. Every OTHER `finalizeMerge` caller
+(`confirmWorkerMerge`, `finishAlreadyMerged`) simply omits the callback — byte-identical behavior, since
+it's optional.
+
+**Across the WHOLE daemon**, this guarantee does NOT hold: `reconcileOrchestrationOnBoot` runs
+un-awaited after `app.listen()` (card `460d3178`), so a LIVE MCP handler (an ordinary worker's own
+`worker_merge` review, a solo `confirmWorkerMerge`) can append `merge_request` or `merge_done` for ANY
+branch — including one Pass A has not yet reached — while Pass A's own real git awaits are in flight.
+Pass A's live-callback approach does not protect Pass A2 from this, because Pass A2 starts only AFTER
+Pass A's entire (potentially long, truly concurrent) loop finishes — by then, Pass A's maps (built once
+at the very top, before Pass A's own git awaits even began) can be stale relative to concurrent live
+appends. Pass A2 therefore REBUILDS both maps fresh, synchronously, at its own starting line — one extra
+`O(M)` scan per kind — restoring the exact fresh-per-lookup semantics the old per-session
+`latestEventSeqForBranch` calls had, for A2 specifically. Pass A's own maps are deliberately NOT
+rebuilt — Pass A keeps the live-callback approach (cheaper, and sufficient for what Pass A itself needs:
+seeing ITS OWN in-run appends, not racing live external handlers mid-loop, which is a separate,
+pre-existing exposure this card does not change).
+
+Verified by `test/latest-event-seq-map-in-run-staleness.mjs`: two session rows share one worktree/branch,
+neither has a pre-existing `merge_done`; the first-processed row's real finalize appends a live
+`merge_done`, and the second-processed row (pre-seeded only with its own `merge_request`) must see that
+live append and take the cleanup-only path — never a second, duplicate finalize. The test also captures a
+map snapshot taken before reconcile runs and shows it does NOT contain the first row's (not-yet-appended)
+`merge_done` — proof that a naive one-shot-snapshot design would have missed it and produced the
+duplicate-finalize bug this fix exists to avoid. A SEPARATE test covers Pass A2's OWN in-run staleness
+(two A2-eligible rows sharing one branch+repoKey, neither with a pre-existing terminal event) — see that
+test's own header for why it must go RED with Pass A2's inline `.set` removed.
 
 ## Do not
 
@@ -65,6 +86,11 @@ produced the duplicate-finalize bug this fix exists to avoid.
 - Do not treat the `merge_done` map as a safe one-time snapshot — it must be kept live via
   `onMergeDoneAppended` (finalizeMerge) and the inline update after Pass A2's own append, or a
   same-pass sibling re-finalize regresses silently.
+- Do not let Pass A2 reuse Pass A's own maps — Pass A2 must rebuild both fresh at its own start, because
+  a live MCP handler outside this function can append either kind during Pass A's real git awaits
+  (reconcile runs un-awaited, card `460d3178`); Pass A's maps, built before those awaits, can be stale by
+  the time Pass A2 runs. Do not read "never appended" anywhere in this record as holding against live
+  handlers — it only describes `reconcileOrchestrationOnBoot`'s OWN call graph.
 - Do not add yield points (`await`) inside Pass A/A2's loops as part of this fix — that was explicitly
   deferred by the card's own manager direction (a new race surface between reconcile and live HTTP/MCP
   handlers); propose it separately with its own race analysis if a future profile still shows a
