@@ -35,7 +35,7 @@ import { stripEscapeAndControlChars } from "../security/control-chars.js";
  * `profiles/codex-compat.ts`. One string for the spawn-time report below AND `SessionService`'s default-harness guard (card 961da6c6).
  */
 export const CODEX_CODESCAPE_REASON = `codescape is enabled for this project but codex has no per-tool allow/disallow mechanism to pair with its write-tool restriction — never mounted for this harness, use harness "claude" for codescape access`;
-import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine, withCodexRoleDoctrine } from "./codex-doctrine.js";
+import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine, withCodexRoleDoctrine, removeStaleCodexDoctrineArtifact } from "./codex-doctrine.js";
 import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail, MCP_TOKEN_ENV_VAR } from "./codex-host.js";
 import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn, resolveTranscriptFile as resolveCodexRolloutFile } from "./codex-transcript.js";
 import { restoreArchivedCodexRollout } from "./codex-rollout-archive.js";
@@ -4731,6 +4731,27 @@ export class PtyHost {
   private findAnyLive(sessionId: string): Live | CodexLive | undefined {
     return this.live.get(sessionId) ?? this.liveCodex.get(sessionId);
   }
+  /** Is any live `CodexLive` entry's cwd the same directory as `cwd`? The guard
+   *  `removeStaleCodexDoctrineArtifact` (codex-doctrine.ts) calls right before it would unlink a stale
+   *  cross-harness doctrine artifact — a human/claude session must never yank it out from under a still-
+   *  running codex worker sharing this worktree (or a canonical root). Normalizes resolved/realpath +
+   *  win32-only case-folding, the SAME convention `git/worktrees.ts#normForCompare` already uses for
+   *  worktree path comparisons (never a new scheme). Read live off `this.liveCodex` on every call — never
+   *  cached — so the re-check this guard performs right before its unlink reflects a codex session that
+   *  may have started up in the meantime. */
+  private hasLiveCodexSessionAtCwd(cwd: string): boolean {
+    const norm = (p: string): string => {
+      let r: string;
+      try { r = fs.realpathSync(p); } catch { r = path.resolve(p); }
+      r = r.replace(/[\\/]+$/, "");
+      return process.platform === "win32" ? r.toLowerCase() : r;
+    };
+    const target = norm(cwd);
+    for (const other of this.liveCodex.values()) {
+      if (other.alive && norm(other.cwd) === target) return true;
+    }
+    return false;
+  }
   /** Card cd0c7fee: correlates a PreToolUse hook's `agent_id`/`agent_type` to the MCP request it
    *  precedes. Pure/dependency-free (see its own file doc) — no opts needed, so this is unconditional. */
   private readonly toolAttribution = new ToolAttributionTracker();
@@ -4872,6 +4893,15 @@ export class PtyHost {
       throw new CodexRoleSpawnRefusedError(opts.role);
     }
     if (opts.harness === "codex") { this.spawnCodexProcess(opts); return; }
+    // Card 9bf0db97 round 3: best-effort, fire-and-forget cleanup of a stale cross-harness doctrine
+    // artifact a prior codex worker left behind in this (possibly reused) worktree — never awaited, never
+    // gates the spawn below. See removeStaleCodexDoctrineArtifact's own doc.
+    // @decision 9bf0db97 — never delete without the live-codex re-check right before the unlink.
+    void removeStaleCodexDoctrineArtifact(
+      opts.cwd,
+      (c) => this.hasLiveCodexSessionAtCwd(c),
+      { sessionId: opts.sessionId, projectId: opts.projectId },
+    );
     // Code review (2026-08-05, card c469d54e): a readiness-fallback timer's callback re-looks-up its Live
     // by sessionId at fire time (`this.live.get(sessionId)`) rather than closing over the Live object
     // itself — so a timer left over from a PREVIOUS spawn of this SAME sessionId (e.g. a resume/recycle
@@ -5580,7 +5610,7 @@ export class PtyHost {
     // process starts — codex reads its project-instructions file at boot, so this must land on disk ahead
     // of createCodexPty, not raced in afterward. Best-effort + role-gated (worker only); see
     // injectCodexDoctrine's own doc.
-    injectCodexDoctrine(opts.cwd, opts.role ?? null);
+    injectCodexDoctrine(opts.cwd, opts.role ?? null, { sessionId: opts.sessionId, projectId: opts.projectId });
     // md5'd BEFORE the pty spawns — see this method's own doc on the md5-before/diff-after/disclose
     // obligation. Captured even though the trust dialog may never actually need answering (a directory
     // already trusted from an earlier run) — diffConfigAfterSpawn is a no-op (`changed:false`) in that

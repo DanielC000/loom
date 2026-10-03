@@ -544,22 +544,38 @@ export function withCodexRoleDoctrine(prompt: string, role: string | null | unde
   return [pointer, note, adapted].filter((p): p is string => p !== null).join("\n\n");
 }
 
-/** Hide the injected `AGENTS.md` from `git status` via the shared `.git/info/exclude` (local only; never
- *  edits a tracked `.gitignore`) — mirrors `skills/inject.ts#hideFromGit`'s discipline for `.claude/`.
- *  Resolves the common dir via {@link resolveGitDirsSync} (git/repo-lock.ts) — a prior local copy of this
- *  resolution duplicated skills/inject.ts's own (and shared its missing-commondir bug); card 25389c3c
- *  consolidated both onto this neutral shared helper instead of either file importing the other. */
-function hideCodexDoctrineFromGit(cwd: string): void {
-  const gitDir = resolveGitDirsSync(cwd)?.commonDir ?? null;
-  if (!gitDir) return;
-  const infoDir = path.join(gitDir, "info");
+/** Append `entry` to `commonDir`'s shared `.git/info/exclude` — the ORIGINAL, repo-wide behavior. Used
+ *  only for the NON-worktree case (`privateDir === commonDir`: a plain repo, or the submodule-shaped
+ *  canonical repo `codex-doctrine-injection.mjs`'s fixture covers) — there is nothing to leak across
+ *  there, since there is only one worktree. A genuinely LINKED worktree gets no exclude at all; see
+ *  {@link hideCodexDoctrineFromGit}'s own doc for why. */
+function appendToSharedExclude(commonDir: string, entry: string): void {
+  const infoDir = path.join(commonDir, "info");
   try { fs.mkdirSync(infoDir, { recursive: true }); } catch { /* ignore */ }
   const excludePath = path.join(infoDir, "exclude");
   let cur = ""; try { cur = fs.readFileSync(excludePath, "utf8"); } catch { /* none */ }
-  const entry = `/${CODEX_DOCTRINE_FILE}`;
   if (cur.split(/\r?\n/).includes(entry)) return;
   const prefix = cur === "" || cur.endsWith("\n") ? "" : "\n";
   try { fs.appendFileSync(excludePath, `${prefix}# loom-managed exclusions (injected per session; do not commit)\n${entry}\n`); } catch { /* ignore */ }
+}
+
+/**
+ * Hide the injected `AGENTS.md` from `git status` (local only; never edits a tracked `.gitignore`) —
+ * mirrors `skills/inject.ts#hideFromGit`'s discipline for `.claude/`. Resolves via
+ * {@link resolveGitDirsSync} (git/repo-lock.ts) — a prior local copy of this resolution duplicated
+ * skills/inject.ts's own (and shared its missing-commondir bug); card 25389c3c consolidated both onto
+ * this neutral shared helper instead of either file importing the other.
+ *
+ * @decision 9bf0db97 — never give a LINKED worktree a per-worktree `core.excludesFile`: it breaks
+ * submodule/bare-canonical `git status` and silently replaces the worker's own global excludes (an
+ * auto-commit exfiltration risk). Rely on `isCodexDoctrinePath` filters at every consumer instead.
+ */
+function hideCodexDoctrineFromGit(cwd: string): void {
+  const dirs = resolveGitDirsSync(cwd);
+  if (!dirs) return;
+  const { privateDir, commonDir } = dirs;
+  if (privateDir !== commonDir) return; // linked worktree: no safe exclude location — isCodexDoctrinePath filters cover it instead
+  appendToSharedExclude(commonDir, `/${CODEX_DOCTRINE_FILE}`);
 }
 
 /**
@@ -575,13 +591,25 @@ function hideCodexDoctrineFromGit(cwd: string): void {
  * touched, mirroring `injectSkills`'s "never clobber a repo's own pre-existing" rule. Best-effort: never
  * throws (a failed write is logged, not fatal to the spawn — mirrors the git-exclude helper above).
  */
-export function injectCodexDoctrine(cwd: string, role: string | null | undefined): void {
+export function injectCodexDoctrine(
+  cwd: string,
+  role: string | null | undefined,
+  context?: { sessionId?: string; projectId?: string },
+): void {
   if (role !== "worker") return;
   const target = codexDoctrineFile(cwd);
   const block = codexDoctrineBlock();
   let existing: string | null = null;
   try { existing = fs.readFileSync(target, "utf8"); } catch { /* no file yet — normal first spawn */ }
-  if (existing !== null && !existing.startsWith(CODEX_DOCTRINE_BEGIN)) return; // the repo's own real AGENTS.md
+  if (existing !== null && !existing.startsWith(CODEX_DOCTRINE_BEGIN)) {
+    // Card 9bf0db97: this used to return SILENTLY — the codex worker then loses the condensed worker
+    // doctrine (targeted-test default / no-speculative-gate / escalate-up rules) with nothing anywhere
+    // disclosing it, because the repo's own real AGENTS.md always wins (never clobbered — same rule as
+    // injectSkills's "never clobber a repo's own pre-existing" for claude). Non-content-bearing: only
+    // the session/project id and the path, never the repo's own file text.
+    console.log(`[codex-doctrine] skipped: session=${context?.sessionId ?? "unknown"} project=${context?.projectId ?? "unknown"} — ${target} is repo-owned, not Loom-managed; worker doctrine was NOT injected and relies on the kickoff only`);
+    return;
+  }
   if (existing === block) { hideCodexDoctrineFromGit(cwd); return; } // already current; still ensure it's excluded
   const tmp = `${target}.loom-tmp`;
   try {
@@ -593,4 +621,92 @@ export function injectCodexDoctrine(cwd: string, role: string | null | undefined
     return;
   }
   hideCodexDoctrineFromGit(cwd);
+}
+
+/** Bounded timeout for the `git ls-files` tracked-status check {@link removeStaleCodexDoctrineArtifact}
+ *  runs — mirrors the `execFile` timeout already used by {@link prewarmCodexVersionAsync} in this file. */
+const CODEX_DOCTRINE_LS_FILES_TIMEOUT_MS = 5_000;
+
+/** Resolve whether `AGENTS.md` under `cwd` is TRACKED by git, via a bounded async `git ls-files` (never
+ *  blocking — this runs off the pty spawn hot path, called fire-and-forget; see
+ *  {@link removeStaleCodexDoctrineArtifact}'s own doc). Resolves `true` (tracked) only on a confirmed
+ *  non-empty `ls-files` match; resolves `false` on a confirmed empty match (genuinely untracked); REJECTS
+ *  on any spawn/timeout/non-zero-exit error so the caller can fail CLOSED (unknown ⇒ never delete) rather
+ *  than misreading an error as "untracked" — the same "do not remove on unknown" posture this repo's own
+ *  `readWorktreeUncommittedState`/decision `6796c9ea` already takes for uncommitted-state reads. */
+function isAgentsMdTracked(cwd: string): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      ["-C", cwd, "ls-files", "--", CODEX_DOCTRINE_FILE],
+      { timeout: CODEX_DOCTRINE_LS_FILES_TIMEOUT_MS, windowsHide: true },
+      (err, stdout) => {
+        if (err) { reject(err); return; }
+        resolve(stdout.trim().length > 0);
+      },
+    );
+  });
+}
+
+/** The outcome {@link removeStaleCodexDoctrineArtifact} resolves to — exported so a direct test can
+ *  assert on it without scraping logs. */
+export type CodexDoctrineRemovalOutcome = "removed" | "skip-tracked" | "skip-foreign" | "skip-live-codex" | "skip-error";
+
+/**
+ * Removes a prior codex worker's injected {@link CODEX_DOCTRINE_FILE} from `cwd` when a NON-codex session
+ * reuses that same worktree/cwd — called fire-and-forget from the one non-codex branch of
+ * `PtyHost.spawn()`. Only ever deletes a file that starts with {@link CODEX_DOCTRINE_BEGIN} AND is
+ * confirmed untracked AND has no other live codex session sharing `cwd` (via the caller-supplied
+ * `hasLiveCodexSessionAtCwd`, re-checked immediately before the unlink). Fails closed and never throws —
+ * see `isAgentsMdTracked`'s own doc for the git-check contract.
+ *
+ * @decision 9bf0db97 — never delete without the live-codex re-check immediately before the unlink (not
+ * only at call entry), and never delete a tracked or marker-less file — both are load-bearing, not
+ * redundant.
+ */
+export async function removeStaleCodexDoctrineArtifact(
+  cwd: string,
+  hasLiveCodexSessionAtCwd: (cwd: string) => boolean,
+  context?: { sessionId?: string; projectId?: string },
+): Promise<CodexDoctrineRemovalOutcome> {
+  const target = codexDoctrineFile(cwd);
+  const tag = `session=${context?.sessionId ?? "unknown"} project=${context?.projectId ?? "unknown"}`;
+  let content: string;
+  try {
+    content = await fs.promises.readFile(target, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return "skip-foreign"; // nothing there — the common case
+    console.log(`[codex-doctrine] stale-artifact check failed to read ${target}: ${(e as Error)?.message ?? String(e)} (${tag})`);
+    return "skip-error";
+  }
+  if (!content.startsWith(CODEX_DOCTRINE_BEGIN)) return "skip-foreign"; // the project's own real AGENTS.md — never touched
+
+  let tracked: boolean;
+  try {
+    tracked = await isAgentsMdTracked(cwd);
+  } catch (e) {
+    console.log(`[codex-doctrine] stale-artifact check could not confirm git-tracked status of ${target}: ${(e as Error)?.message ?? String(e)} (${tag}) — leaving it in place`);
+    return "skip-error";
+  }
+  if (tracked) return "skip-tracked"; // somehow committed — a removal is out of this fix's scope entirely
+
+  // Re-check right before the destructive step (not only above) — narrows the window against a codex
+  // session starting up on this same cwd concurrently with everything above.
+  let liveCodexOwner: boolean;
+  try {
+    liveCodexOwner = hasLiveCodexSessionAtCwd(cwd);
+  } catch (e) {
+    console.log(`[codex-doctrine] stale-artifact check's live-session guard threw for ${target}: ${(e as Error)?.message ?? String(e)} (${tag}) — leaving it in place`);
+    return "skip-error";
+  }
+  if (liveCodexOwner) return "skip-live-codex";
+
+  try {
+    await fs.promises.unlink(target);
+  } catch (e) {
+    console.log(`[codex-doctrine] failed to remove stale cross-harness artifact ${target}: ${(e as Error)?.message ?? String(e)} (${tag})`);
+    return "skip-error";
+  }
+  console.log(`[codex-doctrine] removed stale cross-harness artifact ${target} (${tag}) — left behind by a prior codex worker in this reused worktree, not relevant to the current non-codex session`);
+  return "removed";
 }
