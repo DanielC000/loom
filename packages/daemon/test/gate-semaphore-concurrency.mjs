@@ -26,7 +26,7 @@ import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, deferred } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -1069,6 +1069,47 @@ const worktrees = [];
   } finally {
     console.log = originalLog;
   }
+}
+
+// ── Cap RAISE must wake queued waiters BEFORE the raising call's own fast-path admission (card
+//    0bdc89c0 — the gap in 424ed9a8's transition log above: it logged the cap change and stored the new
+//    value, but never called `grantEligible()`, so a queued HIGH-priority merge stayed parked while the
+//    very call that raised the cap admitted its OWN entry through `acquire()`'s synchronous fast path
+//    (which only ever checks `this.active < cap`, never the queue) — inverting card 24642c3d's priority
+//    guarantee at exactly the one moment a cap WIDENS. RED on pre-fix code: the fresh LOW-priority
+//    caller (W2) observed admitted while the already-queued HIGH-priority merge (M) stayed queued.
+{
+  const sem = new GateSemaphore();
+  const startedViaSnapshot = (sessionId) => sem.snapshot().entries.some((e) => e.sessionId === sessionId && e.phase === "running");
+
+  const dA = deferred();
+  const pA = sem.runExclusive(1, { gateType: "worker", projectId: "p", sessionId: "capraise-A" }, async () => { await dA.promise; return "a-done"; }, "low");
+  check("(capraise) precondition: A admitted into the only cap-1 slot", startedViaSnapshot("capraise-A") && sem.snapshot().active === 1);
+
+  const dM = deferred();
+  const pM = sem.runExclusive(1, { gateType: "merge", projectId: "p", sessionId: "capraise-M", taskId: "t", branch: "loom/capraise" }, async () => { await dM.promise; return "m-done"; }, "high");
+  check("(capraise) precondition: M (high) queued behind the saturated cap, not admitted", !startedViaSnapshot("capraise-M") && sem.snapshot().queued === 1);
+
+  // THE RACE: a FRESH low-priority caller arrives on the very `runExclusive` call that raises cap 1 -> 2.
+  const dW2 = deferred();
+  const pW2 = sem.runExclusive(2, { gateType: "worker", projectId: "p", sessionId: "capraise-W2" }, async () => { await dW2.promise; return "w2-done"; }, "low");
+
+  // Both `runExclusive` calls admit synchronously inside themselves (`admit()` flips registry phase to
+  // "running" before `fn` is ever invoked) — no await stands between creating pW2 above and reading the
+  // outcome here; this reads the real decision, not a guess about how long it takes to arrive.
+  check("(capraise) the cap raise admits the already-queued HIGH-priority merge, not the fresh LOW caller",
+    startedViaSnapshot("capraise-M") && !startedViaSnapshot("capraise-W2"));
+  check("(capraise) exactly 2 slots in use (A + M); W2 is queued, never fast-pathed ahead of M",
+    sem.snapshot().active === 2 && sem.snapshot().queued === 1);
+
+  dA.resolve();
+  await pA;
+  check("(capraise) once A releases, W2 (the only remaining waiter) is finally admitted", startedViaSnapshot("capraise-W2"));
+  dM.resolve();
+  await pM;
+  dW2.resolve();
+  await pW2;
+  check("(capraise) registry empty after all three settle (no leak)", sem.snapshot().entries.length === 0 && sem.snapshot().active === 0);
 }
 
 // ── Pure unit check: priority-aware queue ordering (card 24642c3d — a low-priority worker run_gate

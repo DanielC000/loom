@@ -926,10 +926,22 @@ export class GateSemaphore {
     // can differ: a write with no gate call in between never shows up here, and that's correct — nothing
     // ever ADOPTED it). Skipped on the very first call (`lastKnownCap` still undefined) so boot's initial
     // cap is a plain fact, not a transition from nothing.
+    const capRaised = this.lastKnownCap !== undefined && cap > this.lastKnownCap;
     if (this.lastKnownCap !== undefined && this.lastKnownCap !== cap) {
       console.log(`[gate] maxConcurrentGates ${this.lastKnownCap} -> ${cap}`);
     }
     this.lastKnownCap = cap;
+    // Card 0bdc89c0: a cap RAISE must grant already-queued eligible waiters, in priority order, before
+    // THIS call's own entry ever reaches `acquire()`'s fast path below — `acquire()` only ever checks
+    // `this.active < cap`, never the queue, so without this a fresh caller landing on the very call that
+    // widens the cap could self-admit ahead of a HIGH-priority waiter (a merge) that had been queued
+    // since before the raise, inverting card 24642c3d's priority guarantee. `grantEligible()` is
+    // synchronous (`admit()` bumps `this.active` immediately; only a granted waiter's own promise
+    // resolution is deferred to a microtask), so it always completes, and `this.active` already reflects
+    // every newly-granted waiter, before `acquire()` below ever reads it for this entry. A cap LOWER (or
+    // unchanged) never reaches this — `grantNext()`'s own cap check makes it a no-op there anyway, but
+    // scoping the call to a genuine raise avoids a wasted waiter scan on every ordinary gate run.
+    if (capRaised) this.grantEligible();
     const entry: RegistryEntry = {
       id: `gate-${++this.seq}`, descriptor: { ...descriptor }, priority, enqueuedAt: Date.now(), startedAt: null, attemptStartedAt: null,
       controller: new AbortController(), lastOutputAt: null, extended: false, maxConcurrent: 0,
