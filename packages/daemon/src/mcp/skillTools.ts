@@ -175,6 +175,18 @@ export function skillEditData(
   if (count > 1 && !replaceAll) {
     return { error: `oldString is not unique in "${name}"'s SKILL.md — ${count} matches; add surrounding context to make it unique, or pass replaceAll:true to replace every occurrence` };
   }
-  const newContent = replaceAll ? current.content.split(oldString).join(newString) : current.content.replace(oldString, newString);
+  // Splice by index (never String.replace with a plain-string `newString`) — `.replace(oldString,
+  // newString)` interprets `$$`/`$&`/`$'`/`` $` ``/`$1` etc. in a STRING replacement even though the
+  // search side is a literal string, so agent-authored newString text containing a `$` pattern would
+  // silently corrupt the write. `.split(oldString).join(newString)` is already immune (join never
+  // interprets replacement patterns); the single-occurrence path below mirrors resolveStartupPromptEdit
+  // (agents/validate.ts) by slicing around the exact match index instead.
+  let newContent: string;
+  if (replaceAll) {
+    newContent = current.content.split(oldString).join(newString);
+  } else {
+    const idx = current.content.indexOf(oldString);
+    newContent = current.content.slice(0, idx) + newString + current.content.slice(idx + oldString.length);
+  }
   return skillWriteData({ name, content: newContent, confirm }, opts);
 }

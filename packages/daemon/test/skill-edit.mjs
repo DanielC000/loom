@@ -18,6 +18,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       content (cross-checked by diffing a skill_edit result against an equivalent full-content
 //       skill_write on a twin fixture), and the skill_edit source calls skillWriteData() for its
 //       actual write rather than duplicating any write logic.
+//   (g) DOLLAR-PATTERN SAFETY (card 7b1cd823) — a newString containing $$/$&/$`/$'/$1 lands LITERALLY,
+//       both on the single-match path (splice-by-index) and under replaceAll (split/join); the old
+//       single-match code used a plain-string String.replace(oldString, newString), which interprets
+//       those patterns in the replacement text even though the search side is a literal string.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + SessionService against a FAKE pty,
 // the REAL PlatformMcpRouter over an in-process MCP InMemoryTransport (mirrors setup-surface.mjs /
@@ -158,6 +162,42 @@ try {
   check("(f) skill_edit and skill_write produce BYTE-IDENTICAL store output for the same final content",
     fs.readFileSync(storeSkillMd("twin-via-edit"), "utf8") === fs.readFileSync(storeSkillMd("twin-via-write"), "utf8"));
   check("(f) both twins equal the expected final content", fs.readFileSync(storeSkillMd("twin-via-edit"), "utf8") === TWIN_FINAL);
+
+  // ============ (g) DOLLAR-PATTERN SAFETY — newString is LITERAL, never a String.replace special
+  // pattern ($$/$&/$`/$'/$1) ============
+  // card 7b1cd823: the old code's single-match branch was `current.content.replace(oldString,
+  // newString)` — a plain-STRING `.replace` still interprets `$$`, `$&`, `` $` ``, `$'`, `$1` etc. in a
+  // STRING replacement even though the search side (oldString) is a literal string, so an agent-authored
+  // newString containing a `$` pattern would silently corrupt the write. Each case below is a dollar
+  // pattern that `.replace()` treats specially but a literal splice must not.
+  const DOLLAR_SRC = "---\nname: dollar-skill\ndescription: dollar-pattern safety\n---\n\n# dollar-skill\n\nANCHOR here.\n";
+  const DOLLAR_CASES = [
+    { label: "$$", newString: "echo $$ done" },           // "$$" -> literal "$" if misinterpreted
+    { label: "$&", newString: "echo $& done" },            // "$&" -> the whole match if misinterpreted
+    { label: "$`", newString: "echo $` done" },             // "$`" -> text before the match if misinterpreted
+    { label: "$'", newString: "echo $' done" },             // "$'" -> text after the match if misinterpreted
+    { label: "$1", newString: "echo $1 done" },             // "$1" -> empty/undefined capture if misinterpreted (no groups)
+  ];
+  for (const { label, newString: dollarNew } of DOLLAR_CASES) {
+    const skillName = `dollar-skill-${label.replace(/[^a-z0-9]/gi, "") || "tick"}`;
+    writeStoreFile(skillName, DOLLAR_SRC);
+    const res = await call("skill_edit", { name: skillName, oldString: "ANCHOR here.", newString: dollarNew, confirm: true });
+    check(`(g) skill_edit ${label}: a confirmed edit with a "${label}" pattern in newString succeeds`, res.ok === true && !res.error);
+    const expected = DOLLAR_SRC.slice(0, DOLLAR_SRC.indexOf("ANCHOR here.")) + dollarNew + DOLLAR_SRC.slice(DOLLAR_SRC.indexOf("ANCHOR here.") + "ANCHOR here.".length);
+    const actual = fs.readFileSync(storeSkillMd(skillName), "utf8");
+    check(`(g) skill_edit ${label}: newString landed LITERALLY (not interpreted as a replace-pattern)`, actual === expected);
+    check(`(g) skill_edit ${label}: newString's own literal "${label}" text is still present verbatim`, actual.includes(dollarNew));
+  }
+
+  // Same dollar-pattern safety under replaceAll:true (split/join is already immune — this guards against
+  // a future regression that routes replaceAll through String.replace too).
+  const DOLLAR_MULTI_SRC = "---\nname: dollar-multi\ndescription: dollar-pattern safety (replaceAll)\n---\n\n# dollar-multi\n\nTAG one.\nTAG two.\n";
+  const DOLLAR_MULTI_NEW = "SET $$ $& $1 done";
+  writeStoreFile("dollar-multi", DOLLAR_MULTI_SRC);
+  const multiRes = await call("skill_edit", { name: "dollar-multi", oldString: "TAG", newString: DOLLAR_MULTI_NEW, replaceAll: true, confirm: true });
+  check("(g) skill_edit replaceAll + dollar-pattern: a confirmed edit succeeds", multiRes.ok === true && !multiRes.error);
+  check("(g) skill_edit replaceAll + dollar-pattern: matches literal split/join, not String.replace",
+    fs.readFileSync(storeSkillMd("dollar-multi"), "utf8") === DOLLAR_MULTI_SRC.split("TAG").join(DOLLAR_MULTI_NEW));
 
   await client.close();
 
