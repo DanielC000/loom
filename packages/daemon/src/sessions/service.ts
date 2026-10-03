@@ -733,6 +733,14 @@ type ConfirmMergeResult = {
   /** @decision 99a1cf6f — `gateBaseInvalidated` is a real, resolved verdict about canonical main, never
    *  an ordinary rejection against the branch; `NEVER_CACHED_OUTCOMES` must never serve it from cache. */
   gateBaseInvalidated?: boolean;
+  /** @decision d69d4858 — the canonical checkout was off the expected mainline branch; mirrors
+   *  `mergeBatchTracked`'s own `branchDiverted`/`unverified`, same `NEVER_CACHED_OUTCOMES` strings. */
+  branchDiverted?: boolean;
+  observedBranch?: string | null;
+  unverified?: boolean;
+  /** Set only on a POST-squash `branchDiverted` — the sha of the commit that landed but is unreachable
+   *  from the real mainline branch, so a human can recover it (`git branch rescue/<id>-<sha> <sha>`). */
+  divertedSha?: string;
   /** @decision fb525c31 — set ONLY via `squashRefusedResult` (the ONE constructor): a refusal caused by the state of the CANONICAL CHECKOUT (staged dirt, dirty/untracked overlap on a path the branch touches — at admission or at squash time) or by the squash itself failing after a passing gate (`conflict`/`merge_failed`). Not a verdict about the branch, so classified `"squash-refused"` and never cached (`NEVER_CACHED_OUTCOMES`): a re-call after the human cleans the checkout must be a real re-attempt. Deliberately NOT set for STAGE_EMPTY_RETRY/orphaned_zero_ahead (those ARE about the branch and stay cached). */
   squashRefused?: true;
   /** Card 6f13746c: an UNGATED (gate-off / gate-interval) landing was refused in-lock because a gate became owed after its decision — nothing squashed,
@@ -2334,6 +2342,12 @@ export class SessionService {
    *  to the ff. `undefined` in every existing test constructor ⇒ `runBatchedMerge`'s own default (real
    *  `canonicalGit`), byte-identical to before this seam existed. */
   private readonly batchFfGitFactory?: BatchGitDeps["gitFactory"];
+  /** TEST SEAM (card d69d4858), SAME shape as {@link batchFfGitFactory}: git factory for the SOLO
+   *  `mergeBranch` call's whole git surface, so a hermetic test can drive a REAL `confirmWorkerMerge`
+   *  through a FAKE pre- or post-squash branch-read failure (the `unverified` outcome) by proxying every
+   *  other call through to the real `canonicalGit` and intercepting only the one it targets. `undefined`
+   *  in every existing test constructor ⇒ `mergeBranch`'s own default, byte-identical to before this seam. */
+  private readonly soloMergeGitFactory?: BoundedGitDeps["gitFactory"];
   /** Public read of {@link spawnOpRetainMs} in whole minutes — lets `worker_spawn`'s own pending-note/
    *  description text (mcp/orchestration.ts) state the REAL configured window instead of a hardcoded
    *  copy that could drift from {@link SPAWN_OP_RETAIN_MS} on a future change to either. Rounds to the
@@ -2628,6 +2642,8 @@ export class SessionService {
       /** TEST SEAM (card b801bad0, fix round 3): git factory for `runBatchedMerge`'s WHOLE git surface
        *  (assembly AND the fast-forward), not the fast-forward alone — see the field's own doc. */
       batchFfGitFactory?: BatchGitDeps["gitFactory"];
+      /** TEST SEAM (card d69d4858): git factory for the SOLO `mergeBranch` call's whole git surface — see the field's own doc. */
+      soloMergeGitFactory?: BoundedGitDeps["gitFactory"];
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
@@ -2643,6 +2659,7 @@ export class SessionService {
     this.finalizeWorkerDeathPolls = opts?.finalizeWorkerDeathPolls ?? 50;
     this.spawnOpRetainMs = opts?.spawnOpRetainMs ?? SPAWN_OP_RETAIN_MS;
     this.batchFfGitFactory = opts?.batchFfGitFactory;
+    this.soloMergeGitFactory = opts?.soloMergeGitFactory;
     this.heldProbeGitFactory = opts?.heldProbeGitFactory;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
@@ -14436,6 +14453,10 @@ export class SessionService {
    */
   private async shouldSuppressMergeReject(
     workerSessionId: string, taskId: string | null, branch: string, repoPath: string, worktreePath: string, reason: string,
+    // @decision d69d4858 — the same stored-watermark branch confirmWorkerMerge resolves once, already
+    // fully qualified (`refs/heads/<branch>`) to avoid a same-named file/dir/tag ambiguity in `git log`.
+    // `undefined` (no watermark yet) falls back to "HEAD", byte-identical to before this card.
+    expectedMainlineRef?: string,
   ): Promise<{ suppress: boolean; sha: string | null }> {
     if (taskId) {
       const task = this.db.getTask(taskId);
@@ -14444,7 +14465,7 @@ export class SessionService {
         if (terminalKey && task.columnKey === terminalKey) return { suppress: true, sha: null };
       }
     }
-    if (await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs })) return { suppress: true, sha: null };
+    if (await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs })) return { suppress: true, sha: null };
     const sha = await getWorktreeLatestNonMergeSha(worktreePath, { timeoutMs: this.gitOpMs });
     try {
       const already = this.db.listEventsForWorker(workerSessionId)
@@ -14702,6 +14723,14 @@ export class SessionService {
     }
     const gate = targetRepo.gateCommand;
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
+    // @decision d69d4858 — the stored watermark's OWN `branch` (2a6a292a), resolved ONCE, threaded
+    // through every already-landed lookup and the squash. `undefined` (no watermark yet) ⇒ unchanged.
+    const expectedMainlineBranch = parseMainlineWatermark(this.db.getMeta(mainlineWatermarkKey(project.id, worker.repoKey ?? "primary")))?.branch;
+    // Code Review round 2 (card dd36012a): a BARE branch name handed to `git log <base>` is ambiguous
+    // against a same-named top-level file/dir (fails closed to null, i.e. "not landed") or a same-named
+    // tag (silently scans the wrong history) — fully qualify it ONCE here; `expectedMainlineBranch` above
+    // stays the short name for the pin comparison and human-facing messages.
+    const expectedMainlineRef = expectedMainlineBranch ? `refs/heads/${expectedMainlineBranch}` : undefined;
     // Card e8df2659: the HUMAN-only per-project `orchestration.mergeGate:"off"` switch. Routed through the
     // inert-diff-skip machinery below (same repo-guard-only admission, `gateRan:false`, `skipped:true`) with
     // `skipReason:"gate-disabled"`; ONLY the gate command is skipped — the union-merge/conflict refusal, the
@@ -14720,7 +14749,7 @@ export class SessionService {
       return !!task && !!terminalKey && task.columnKey === terminalKey;
     })();
     if (!fs.existsSync(worktreePath) || taskAlreadyTerminal) {
-      const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null });
+      const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, expectedMainlineRef });
       if (finished) return finished;
     }
 
@@ -14756,7 +14785,7 @@ export class SessionService {
     // events — never its own about-to-be-appended one (which would otherwise self-suppress the very first
     // notification).
     const rejectNotify = async (reason: string, msg: string): Promise<{ suppressed: boolean; sha: string | null }> => {
-      const { suppress: suppressed, sha } = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, repoPath, worktreePath, reason);
+      const { suppress: suppressed, sha } = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, repoPath, worktreePath, reason, expectedMainlineRef);
       if (!suppressed) {
         // LINEAGE-RESOLVED (card 05c36bf4, CR Major 1): this is confirmWorkerMergeTracked's own
         // onSettledAfterPending's SUPPRESSING push (outcome.value.notified:true skips its generic echo —
@@ -14808,7 +14837,7 @@ export class SessionService {
     };
     {
       const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null);
-      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs }))) return refuseReviewedTipMoved(rt, "confirm-start");
+      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs }))) return refuseReviewedTipMoved(rt, "confirm-start");
     }
 
     // BACKSTOP (BEFORE the gate/merge): refuse if the worker's commits are STRANDED on a self-created
@@ -14893,7 +14922,7 @@ export class SessionService {
       // detected here and could still see an over-refusal in that narrow combination — but no incorrect
       // commit can ever result either way, since `mergeBranchLocked` never reaches subject construction
       // on ANY noop path; the residual cost is at most an unnecessary refusal, not a missed guard.
-      const priorLanding = await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
+      const priorLanding = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs });
       const taskForTitleGuard = priorLanding ? null : this.db.getTask(taskId);
       const titleGuard = taskForTitleGuard ? checkTitleHtmlEntities(taskForTitleGuard.title, false) : null;
       if (titleGuard) {
@@ -15279,7 +15308,7 @@ export class SessionService {
       // `findLandedSquashCommit`'s re-task guard (below, via `mergeBranch`'s own noop classification) exists
       // to detect — misclassifying a legitimate ALREADY_MERGED re-confirm as STAGE_EMPTY_RETRY otherwise.
       // Card 13fc5227: a HELD branch (owedBase set) is never "already landed" as a whole — its late range is still owed, so it must not take the already-landed shortcut.
-      const preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
+      const preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs });
       if (!preLanded) {
         const union = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs }, owedBase);
         if (!union.ok) {
@@ -15329,7 +15358,7 @@ export class SessionService {
       if (preLanded) {
         const landedStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         if (landedStamp.head !== null && !landedStamp.dirty) {
-          const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, gateSkipped: "already-landed" });
+          const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, gateSkipped: "already-landed", expectedMainlineRef });
           if (finished) return finished;
         }
       }
@@ -16758,10 +16787,10 @@ export class SessionService {
     const squashTip = expectedTipForLanding(landingPin) ?? (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined;
     {
       const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null, squashTip ?? null);
-      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs }))) return refuseReviewedTipMoved(rt, "pre-squash");
+      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs }))) return refuseReviewedTipMoved(rt, "pre-squash");
     }
     const mainlineCheckedTip = await this.checkMainlineMove({ projectId: project.id, repoKey: worker.repoKey ?? "primary", repoPath, managerSessionId, workerSessionId, taskId }); // card 4fa36502: fail-open tripwire, before the squash trusts main's tip
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip);
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef);
     if (mainlineCheckedTip && merge.ok && !merge.noop && merge.sha) await this.advanceMainlineWatermark(project.id, worker.repoKey ?? "primary", repoPath, mainlineCheckedTip); // card 4fa36502: a successful Loom landing is the new "explained" tip — but ONLY when this landing's check completed, so an unverified move stays catchable
     // Card 6f13746c: record the landing HERE — at the squash, still INSIDE the repo guard (`endSquash` / `releaseInertRepoGuard` run in the
     // `finally` below) — so the counter's order equals main's order: a later pass resets only what precedes it on main, and an ungated landing
@@ -16806,6 +16835,30 @@ export class SessionService {
         const { suppressed, sha } = await rejectNotify("gate_base_invalidated", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: "gate_base_invalidated", sha, ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, gateBaseInvalidated: true };
+      }
+      // @decision d69d4858 — canonical diverted off the expected mainline branch: a fact about the
+      // checkout, never the branch, never cached. `merge.reason` carries the full actionable text.
+      if (merge.branchDiverted || merge.unverified) {
+        const why = merge.reason ?? "the canonical checkout diverted off the expected mainline branch";
+        // Code Review round 2 (card dd36012a): word by whether a sha actually landed — a POST-squash
+        // divert/unverified means a real commit object exists (just unconfirmed/unreachable), so "canonical
+        // repo and worktree are untouched" is false there; only a PRE-squash refusal is genuinely untouched.
+        // Round 3 (delta review b39e8972): keyed on `branchDiverted`/`unverified` themselves, never on
+        // `divertedSha` alone — a POST-squash `unverified` is NOT a confirmed divert, so it must never
+        // borrow the branch-diverted "Canonical main was NOT advanced" phrasing (that previously produced
+        // a self-contradiction against `why`'s own "could not be confirmed" wording on that exact path).
+        const detailText = merge.branchDiverted && merge.divertedSha
+          ? `${why} Canonical main was NOT advanced — a commit landed (${merge.divertedSha}) but is not confirmed reachable from mainline; worktree retained.`
+          : merge.unverified && merge.divertedSha
+          ? `${why} A commit landed (${merge.divertedSha}); whether it is on mainline is UNCONFIRMED — check \`git log ${expectedMainlineBranch}\` before recovering. Worktree retained.`
+          : `${why} Canonical repo and worktree are untouched; nothing was squashed; worktree retained.`;
+        const failReason = merge.branchDiverted ? "branch_diverted" : "branch_divert_unverified";
+        const { suppressed, sha } = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", {
+          reason: failReason, sha, expectedMainlineBranch, observedBranch: merge.observedBranch ?? null,
+          ...(merge.divertedSha ? { divertedSha: merge.divertedSha } : {}), ...(suppressed ? { suppressed: true } : {}),
+        });
+        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, branchDiverted: merge.branchDiverted, unverified: merge.unverified, observedBranch: merge.observedBranch ?? null, divertedSha: merge.divertedSha };
       }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       // Card 4b7ff996 CR follow-up: derive "is this the canonical-checkout-is-dirty failure class" from
@@ -17183,8 +17236,11 @@ export class SessionService {
   private async finishSoloAlreadyLanded(a: {
     managerSessionId: string; workerSessionId: string; taskId: string | null; worktreePath: string; branch: string; repoPath: string; projectId: string; opId: string;
     forceRemoveWorktree?: boolean; opStartedAt?: string; repoKey: string | null; gateSkipped?: "already-landed";
+    // @decision d69d4858 — same stored-watermark branch confirmWorkerMerge resolves once, already fully
+    // qualified (`refs/heads/<branch>`). `undefined` (no watermark yet) falls back to "HEAD", unchanged.
+    expectedMainlineRef?: string;
   }): Promise<ConfirmMergeResult | null> {
-    const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, "HEAD", { timeoutMs: this.gitOpMs }));
+    const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, a.expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs }));
     const alreadyLanded = looked.result;
     if (!alreadyLanded) return null;
     const guard = this.soloFinalizeTipGuard({ opId: a.opId, managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, branch: a.branch, landedTip: looked.landedTip, branchGone: looked.branchGone, landedSha: alreadyLanded, repoKey: a.repoKey });
@@ -19146,7 +19202,14 @@ export class SessionService {
           const project = worker ? this.db.getProject(worker.projectId) : undefined;
           if (worker?.branch && project) {
             const repo = resolveRepoByKey(project, worker.repoKey);
-            const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, "HEAD", { timeoutMs: this.gitOpMs }).catch(() => null));
+            // Code Review round 2 (card dd36012a, MAJOR): this path FINALIZES on a hit (worktree removed,
+            // branch deleted, task merged) — scanning bare "HEAD" would trust whatever the canonical
+            // checkout happens to be sitting on after a post-squash divert, landing the exact silent-loss
+            // bug this card exists to close. Scan the stored watermark's branch instead, fully qualified
+            // to avoid a same-named file/dir/tag ambiguity; `undefined` (no watermark yet) ⇒ "HEAD", unchanged.
+            const crExpectedBranch = parseMainlineWatermark(this.db.getMeta(mainlineWatermarkKey(project.id, worker.repoKey ?? "primary")))?.branch;
+            const crExpectedRef = crExpectedBranch ? `refs/heads/${crExpectedBranch}` : undefined;
+            const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, crExpectedRef ?? "HEAD", { timeoutMs: this.gitOpMs }).catch(() => null));
             const landedSha = crLooked.result;
             if (landedSha) {
               const crGuard = this.soloFinalizeTipGuard({ opId, managerSessionId, workerSessionId, taskId, branch: worker.branch, landedTip: crLooked.landedTip, branchGone: crLooked.branchGone, landedSha, repoKey: worker.repoKey ?? null });
@@ -19346,7 +19409,7 @@ export class SessionService {
         //
         // Card 6325bc74 — a `NotYourWorkerError` throw classifies as "not-your-worker", not "unknown": it
         // is a fact about the CALLING MANAGER, a dimension `NEVER_CACHED_OUTCOMES` excludes from caching.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

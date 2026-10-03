@@ -16,6 +16,7 @@ import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doct
 import { isCodexDoctrinePath } from "../pty/codex-doctrine.js";
 import { checkTitleHtmlEntities, CONVENTIONAL_TYPES } from "../tasks/title-guard.js";
 import { mergeCommitBlocksLinearization, MAX_MERGE_COMMITS_CHECKED } from "./merge-linearization.js";
+import { readHeadShaAndBranch } from "./mainline-watch.js";
 import {
   emitCompareSoundnessOk,
   transpileIgnoringCommentsAndWhitespace,
@@ -6282,8 +6283,8 @@ export async function verifyReviewedTipChain(
 
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
-  gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string }> {
+  gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string, expectedMainlineBranch?: string, expectedMainlineRef?: string,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -6297,7 +6298,7 @@ export async function mergeBranch(
   // @decision 87a3c87e — never drop this pause/resume bracket, and never move resume out of `finally`.
   const pauseToken = pauseVaultAutoCommit(repoPath);
   try {
-    return await withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip));
+    return await withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip, expectedMainlineBranch, expectedMainlineRef));
   } catch (e) {
     if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message };
     throw e;
@@ -6311,8 +6312,8 @@ export async function mergeBranch(
 // unattributed window entry (repo/branch only), never a functional difference in what this function does.
 async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
-  gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string }> {
+  gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string, expectedMainlineBranch?: string, expectedMainlineRef?: string,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string }> {
   // QUARANTINE CHECK moved to the TRUE convergence point, `withCanonicalIndexLock` (git/repo-lock.ts) —
   // this function only ever runs INSIDE that lock (see `mergeBranch` above), so a check re-derived here
   // would be unreachable dead code: a quarantined repo now never gets this far.
@@ -6364,6 +6365,25 @@ async function mergeBranchLocked(
       return {
         ok: false, gateBaseInvalidated: true,
         reason: "canonical main advanced since this merge's gate-validated tree was fixed (a benign race between concurrent merges/commits on this repo, not a problem with this branch) — canonical repo and worktree are untouched; re-confirm to re-gate against the current tree",
+      };
+    }
+  }
+  // @decision d69d4858 — pin the CHECKED-OUT BRANCH too, not just the sha above: a same-commit divert
+  // passes the sha-only check trivially. Gated entirely on expectedMainlineBranch; unset ⇒ unchanged.
+  if (expectedMainlineBranch !== undefined) {
+    const pre = await readHeadShaAndBranch(git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, mainline-branch pre-check)");
+    if (!pre) {
+      // Fail CLOSED: a read error/timeout is NOT proof of anything either way, so this refuses exactly
+      // like a confirmed divert rather than silently proceeding on an unverified checkout.
+      return {
+        ok: false, unverified: true,
+        reason: `failed to verify the canonical checkout's branch before honoring this merge (expected mainline branch "${expectedMainlineBranch}") — canonical repo and worktree are untouched; re-confirm once resolved`,
+      };
+    }
+    if (pre.branch !== expectedMainlineBranch) {
+      return {
+        ok: false, branchDiverted: true, observedBranch: pre.branch,
+        reason: `canonical repo is checked out on "${pre.branch ?? "(detached)"}", not the expected mainline branch "${expectedMainlineBranch}" — something diverted the checkout (a human REST GitWriter checkout/branch create, the Platform Lead's own git_checkout/git_create_branch, or a stray manual checkout) since this project's mainline baseline was established. Check out "${expectedMainlineBranch}" again in the canonical repo and re-confirm; if "${pre.branch ?? "(detached)"}" is actually a deliberate mainline rename, ask the owner to reset this project's mainline baseline first (POST /api/projects/:id/mainline-watermark/reset, loopback, human-only). Canonical repo and worktree are untouched; nothing was squashed. This refusal is never cached.`,
       };
     }
   }
@@ -6466,6 +6486,34 @@ async function mergeBranchLocked(
       return `reset --hard (${context}) failed — canonical repo may have residue: ${(e as Error).message}`;
     }
   }
+
+  // @decision d69d4858 — re-verify the landed branch too: a commit may already exist by this point, so
+  // this can only stop a false ok:true, never undo the landing. Gated entirely on expectedMainlineBranch.
+  const verifyLandedOnMainline = async (
+    sha: string,
+  ): Promise<{ ok: true } | { ok: false; unverified?: boolean; branchDiverted?: boolean; observedBranch?: string | null; divertedSha?: string; reason: string }> => {
+    if (expectedMainlineBranch === undefined) return { ok: true };
+    const post = await readHeadShaAndBranch(git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, post-commit mainline-branch verify)");
+    if (!post) {
+      // Code Review round 2 (card dd36012a): `sha` DID land (the commit object exists) — carried as
+      // `divertedSha` too (same field the confirmed-divert branch below uses) so a caller's wording/event
+      // can correctly say "a commit landed, unconfirmed where" rather than falsely implying nothing landed.
+      return {
+        ok: false, unverified: true, divertedSha: sha,
+        // Round 3 (delta review b39e8972): dropped "most likely landed correctly" — that confident
+        // claim is exactly what made the caller's old divertedSha-keyed wording self-contradictory
+        // against this reason. Whether it's on mainline is UNCONFIRMED, not assumed either way.
+        reason: `squash commit landed (${sha}) but canonical HEAD (and checked-out branch) could not be re-read to verify it landed on the expected mainline branch "${expectedMainlineBranch}"`,
+      };
+    }
+    if (post.branch !== expectedMainlineBranch) {
+      return {
+        ok: false, branchDiverted: true, observedBranch: post.branch, divertedSha: sha,
+        reason: `squash commit ${sha} landed on "${post.branch ?? "(detached)"}", not the expected mainline branch "${expectedMainlineBranch}" — the canonical checkout was diverted during this merge. The commit exists but is NOT reachable from mainline; recover it with \`git branch rescue/<id>-${sha.slice(0, 8)} ${sha}\` from the canonical repo, check out "${expectedMainlineBranch}" again, then cherry-pick it onto the real mainline branch (or ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset if "${post.branch ?? "(detached)"}" is actually a deliberate rename). This refusal is never cached.`,
+      };
+    }
+    return { ok: true };
+  };
 
   // Danger-window tracking (board card 5a7692a4): from HERE — right before `git merge --squash` (NOT
   // literally the attempt's first mutating git call — see merge-danger-window.ts's own doc on
@@ -6582,7 +6630,10 @@ async function mergeBranchLocked(
       // branch's commits are "already in main" iff a prior squash carrying its trailer is reachable from HEAD
       // AND that commit's content is verified to actually contain the branch's own changes (see
       // findLandedSquashCommit's content-reachability check — trailer presence alone is not proof).
-      const landed = await findLandedSquashCommit(repoPath, branch, "HEAD", deps);
+      // @decision d69d4858 — scan the MAINLINE ref (expectedMainlineBranch), not bare HEAD, when pinned:
+      // the pre-check above has already refused by this point on a real divert, so this is defense in
+      // depth, not load-bearing on its own — unset (no watermark yet) falls back to "HEAD", unchanged.
+      const landed = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", deps);
       // `sha` rides along on the ALREADY_MERGED case (card 1eebc46a) — `landed` IS the commit's sha,
       // already resolved by the lookup just above; surfacing it costs no extra git call, just returning
       // data this function already computed, so the caller (finalizeMerge) can persist ship-state without
@@ -6690,6 +6741,8 @@ async function mergeBranchLocked(
             // HEAD moved despite the reported failure — the commit landed (and its real git child is now
             // CONFIRMED dead, so nothing can land AFTER this point), verified as OUR commit specifically.
             // Recover it truthfully rather than reporting a false failure.
+            const verified = await verifyLandedOnMainline(headAfterFailure);
+            if (!verified.ok) return { ...verified, landedTip: resolvedBranchHead };
             return { ok: true, sha: headAfterFailure, subject, landedTip: resolvedBranchHead };
           }
           return {
@@ -6712,6 +6765,8 @@ async function mergeBranchLocked(
     // be what HEAD actually points at.
     try {
       const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
+      const verified = await verifyLandedOnMainline(sha);
+      if (!verified.ok) return { ...verified, landedTip: resolvedBranchHead };
       return { ok: true, sha, subject, landedTip: resolvedBranchHead };
     } catch (e) {
       return { ok: false, reason: `squash landed but failed to read the result: ${(e as Error).message}` };

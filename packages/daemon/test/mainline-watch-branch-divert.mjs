@@ -17,11 +17,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        guard round 2 added there (see D5) is a no-op on this path since the live branch already agrees with W.
 //   (D4) BOOT: the identical branch-mismatch alert, through `checkMainlineMovesOnBoot` (source:"boot") — same
 //        watermark-unchanged guarantee, filed once per (from, to), no nudge (no live manager at boot).
-//   (D5) ROUND 2, SOLO, RED-FIRST: a divert that PREDATES the confirm (not during it) — the real bug this card's
-//        round 2 fixed. There is no branch-pin refusal on the solo path, so the squash lands directly onto the
-//        stray branch; `checkMainlineMove` used to still return a tip here, letting `advanceMainlineWatermark`
-//        re-stamp W to the stray branch one step later. See `batch-merge-watermark-branch-pin.mjs`'s (P1) for
-//        the same repro on the batch path.
+//   (D5) ROUND 2, SOLO: a divert that PREDATES the confirm (not during it). UPDATED once card d69d4858 landed
+//        its own solo branch-pin refusal: the confirm now REFUSES (branchDiverted) instead of landing onto the
+//        stray branch — this file's own concern (does checkMainlineMove's tripwire still fire + leave the
+//        watermark untouched) is unaffected either way, since checkMainlineMove runs before d69d4858's own
+//        check and never depends on whether the squash itself proceeds. See `batch-merge-watermark-branch-pin.mjs`'s
+//        (P1) for the still-unfixed batch-side equivalent (card ba663984).
 //   (D6) MARKER SHARING: an undelivered sha-level alert marker (different evidence, coincidentally the same
 //        (from, to) as a later divert — a same-commit checkout never moves the tip) is never clobbered.
 //   (D7) THE NUDGE TEXT for a divert names the expected/observed branch and a checkout/reset-route remedy, never
@@ -164,11 +165,15 @@ try {
   // concern, proven there — D5 is about the solo advance-helper guard, a different thing entirely).
   db.deleteMeta(MW.mainlineBootAlertKey(P.projId, "primary"));
 
-  // ── (D5) SOLO, RED-FIRST: a divert that PREDATES a worker's confirm (no divert during the confirm
-  //        itself) — card 2a6a292a round 2's own repro. There is no branch-pin refusal on the solo path
-  //        at all, so the squash lands directly onto the stray branch; the bug was that
-  //        `checkMainlineMove` observed the SAME mismatch but still returned a tip on the landing path,
-  //        letting `advanceMainlineWatermark` re-stamp W to the stray branch one step later ────────────
+  // ── (D5) SOLO: a divert that PREDATES a worker's confirm (no divert during the confirm itself) —
+  //        card 2a6a292a round 2's own repro. UPDATED once card d69d4858 round 2 landed: the solo path
+  //        now ALSO has its own, SEPARATE branch-pin refusal (mergeBranchLocked's own pre-squash check),
+  //        so the squash never even runs here — this scenario's own checks (below) that rely on
+  //        `rd5.merged === false` / the watermark staying untouched pass for THAT reason, not because of
+  //        `checkMainlineMove`'s own null-on-branch-mismatch guard this scenario originally existed to
+  //        prove (round 3, delta review b39e8972 item 2 — proven by reverting ONLY that guard's
+  //        `return null` to `return head.tip`: every check above stayed green). (D5b) below calls
+  //        `checkMainlineMove` directly, in isolation from d69d4858's own refusal, to actually discriminate it.
   const wBeforeD5 = watermark();
   const strayBranch3 = `mwbd-stray-solo-${sfx}`;
   const preD5Sha = canonHead();
@@ -179,12 +184,26 @@ try {
   const w7 = await addWorker(d5Sessions, "d5a");
   const rd5 = await confirmSolo(d5Sessions, w7);
   check("(D5) setup control: canonical really diverted before the confirm, same commit as the watermark", canonBranch() === strayBranch3 && preD5Sha === wBeforeD5.sha);
-  check("(D5) the SOLO landing proceeds (no branch-pin refusal exists on this path) and lands onto the stray branch", rd5.merged === true);
-  check("(D5) mainline's own ref was NOT advanced — the content landed on the stray branch instead", git(P.repo, "rev-parse", MAINREF) === preD5Sha);
-  check("(D5) THE FIX: the watermark's branch is still MAIN despite a real SOLO landing on the stray branch", watermark()?.branch === MAIN);
-  check("(D5) THE FIX: the watermark's sha is unchanged too (a divert is never \"safe to land\" for W)", watermark()?.sha === wBeforeD5.sha);
+  check("(D5) the solo path's OWN branch-pin refusal (card d69d4858) fires: the confirm refuses instead of landing", rd5.merged === false && rd5.branchDiverted === true && rd5.observedBranch === strayBranch3);
+  check("(D5) nothing lands anywhere: mainline's own ref untouched", git(P.repo, "rev-parse", MAINREF) === preD5Sha);
+  check("(D5) nothing lands anywhere: the stray branch is untouched too (refused before the squash)", git(P.repo, "rev-parse", `refs/heads/${strayBranch3}`) === preD5Sha);
+  check("(D5) the watermark's branch stays MAIN — but note nothing landed at all here, so this alone doesn't prove checkMainlineMove's own guard (see D5b)", watermark()?.branch === MAIN);
+  check("(D5) the watermark's sha is unchanged too", watermark()?.sha === wBeforeD5.sha);
   const evD5New = mwEvents().slice(countBeforeD5);
   check("(D5) a NEW branch-diverted event fired for this move", evD5New.length === 1 && evD5New[0].detail.evidence.join() === "branch-diverted" && evD5New[0].detail.expectedBranch === MAIN && evD5New[0].detail.observedBranch === strayBranch3);
+
+  // ── (D5b) THE ACTUAL DISCRIMINATOR (round 3, delta review b39e8972 item 2): call `checkMainlineMove`
+  //        directly, in isolation from d69d4858's own unrelated branch-pin refusal above — canonical is
+  //        STILL diverted onto the same stray branch at the same sha, so this re-exercises the exact
+  //        mismatch 2a6a292a's round 2 guard exists to catch. RED-FIRST: revert ONLY that guard's
+  //        `return null` (the branch-mismatch arm) to `return head.tip` and this goes red while every
+  //        (D5) check above stays green — proving THIS is the check that actually pins the guard.
+  const wBeforeD5b = watermark();
+  const tipD5b = await d5Sessions.checkMainlineMove({ projectId: P.projId, repoKey: "primary", repoPath: P.repo, managerSessionId: P.mgrId, workerSessionId: w7.workerId, taskId: w7.taskId });
+  check("(D5b) checkMainlineMove itself returns null on a branch mismatch (2a6a292a's own guard, not d69d4858's)", tipD5b === null);
+  // Round 3 Code Review (reviewer 7497f7cf): a SANITY check, not a discriminator — the branch-mismatch arm
+  // never calls `store()` either way, so this can't fail under the C6 revert above (only `tipD5b` can).
+  check("(D5b) sanity: the watermark is still untouched by this direct call", watermark()?.branch === wBeforeD5b.branch && watermark()?.sha === wBeforeD5b.sha);
   git(P.repo, "checkout", "-q", MAIN);
   git(P.repo, "branch", "-q", "-D", strayBranch3);
 
