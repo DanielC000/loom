@@ -473,20 +473,24 @@ function makeRepo(repo) {
   await pSelfCheck.catch(() => {});
 }
 
-// ── The gate-superseded nudge's `reason` text must not assert a merge HAPPENED when the confirm that
-//    triggered the supersede is then REFUSED. Sibling of the B2-1 block above, but SAME-project this
-//    time: B2-1's mgrA is in a DIFFERENT project, so supersedeQueuedSelfCheck's own projectId check
-//    refuses it before anything is cancelled. Here mgrA is a PEER manager in the SAME project as
-//    workerB's real owner (mgrB) — that project-level (not ownership-level) scope is DELIBERATE (mirrors
-//    gate_cancel's own scope; see supersedeQueuedSelfCheck's doc) — so this confirm DOES supersede
-//    workerB's queued self-check, even though confirmWorkerMerge itself goes on to refuse the confirm
-//    ("not your worker", checked deeper in the call chain, well after the supersede already fired). The
-//    self-check's own settled `reason` — the exact text also threaded into the worker's
-//    `[loom:gate-superseded]` nudge and into `gate_status`'s cancelled payload — must therefore read
-//    truthfully for this exact case: it must NOT claim a merge happened or was decided, only that a
-//    manager in this project called worker_merge_confirm for this worker. RED-first: this fails against
-//    the pre-fix text ("the manager decided to merge — this self-check's result would no longer be
-//    used") and passes against the corrected text.
+// ── The gate-superseded nudge's `reason` text must not assert a merge HAPPENED. Sibling of the B2-1
+//    block above — but since a66ed81f ("check ownership before attaching to an in-flight spawn or merge
+//    op", card 656e326f, this card's own discoveredFrom) hoisted the ownership check (now lineage-based,
+//    `sameManagerLineage`) in `confirmWorkerMergeTracked` to run BEFORE `supersedeQueuedSelfCheck` ever
+//    fires, a same-project PEER manager — not just a cross-project one, per B2-1 — can no longer reach
+//    the supersede at all: a refused "not your worker" caller cancels NOTHING, same-project or not. This
+//    block now proves BOTH halves: (a) the same-project peer's refused confirm leaves workerB's queued
+//    self-check alone (closing the narrower gap B2-1 only covered for a DIFFERENT project — the two
+//    blocks are no longer asymmetric); (b) the WORDING coverage itself — the self-check's settled
+//    `reason` (also threaded into the worker's `[loom:gate-superseded]` nudge and `gate_status`'s
+//    cancelled payload) must never claim a merge happened or was decided, only that worker_merge_confirm
+//    was called — driven through the ONE path that still reaches supersedeQueuedSelfCheck for real:
+//    workerB's actual owner (mgrB) calling its own confirm. (Grepped every other test asserting
+//    "superseded"/`cancelKind` or calling `confirmWorkerMergeTracked` with a non-owner for the same
+//    assumption — none found; see this card's own worker_report.) RED-first on (a): this failed by
+//    hanging forever at the old (b)-shaped `await pSelfCheck` below, because the pre-fix same-project
+//    peer call never superseded anything once ownership was checked first — see this block's own `try`/
+//    `finally` for why that can no longer wedge the file even if this regresses again.
 {
   const sfx = `wording-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-gc-wording-${sfx}`);
@@ -540,30 +544,50 @@ function makeRepo(repo) {
   await waitUntil(() => sessions.gateQueueForManager(projId).queued.length === 1);
   check("(wording) workerB's own self-check is queued (setup sanity)", sessions.gateQueueForManager(projId).queued.length === 1);
 
-  // mgrA is a PEER manager (same project) but does NOT own workerB — confirmWorkerMergeTracked must
-  // refuse ("not your worker"), same as B2-1's own assertion shape — but here, UNLIKE B2-1, the queued
-  // self-check DOES get superseded as a side effect, because supersedeQueuedSelfCheck's project-level
-  // scope matches (both mgrA and workerB are in projId). That's the existing, deliberate scope — this
-  // block is about the WORDING of what the worker is then told, not about whether the supersede itself
-  // should fire (it should, and must keep firing).
-  const mergeAttempt = await sessions.confirmWorkerMergeTracked(mgrA, workerB);
-  check("(wording) the same-project peer manager's merge attempt is genuinely refused (not your worker)",
-    mergeAttempt.settled === true && mergeAttempt.ok === false && /not your worker/i.test(String(mergeAttempt.error?.message ?? mergeAttempt.error)));
+  // `finally` so a thrown/failed assertion path (or a future regression reopening the old hang) can
+  // never again leave the holder's gate occupied forever — see this block's own header comment.
+  try {
+    // (a) mgrA is a PEER manager (same project) but does NOT own workerB — confirmWorkerMergeTracked
+    // refuses it ("not your worker") via the ownership pre-check, hoisted ahead of ANY side effect. This
+    // refusal settles quickly (it's a synchronous-shaped refusal, never a hang), so a plain `await` here
+    // is safe.
+    const peerAttempt = await sessions.confirmWorkerMergeTracked(mgrA, workerB);
+    check("(wording) the same-project peer manager's merge attempt is genuinely refused (not your worker)",
+      peerAttempt.settled === true && peerAttempt.ok === false && /not your worker/i.test(String(peerAttempt.error?.message ?? peerAttempt.error)));
+    check("(wording) workerB's queued self-check is STILL queued — the refused peer confirm cancelled NOTHING",
+      sessions.gateQueueForManager(projId).queued.length === 1);
 
-  const selfCheckSettled = await pSelfCheck;
-  check("(wording) workerB's queued self-check WAS superseded despite the refused confirm (deliberate project-level scope, unchanged)",
-    selfCheckSettled.ok === true && selfCheckSettled.value?.cancelled === true && selfCheckSettled.value?.cancelKind === "superseded-by-merge");
-  const reasonText = String(selfCheckSettled.value?.reason ?? "");
-  check("(wording) the reason text is non-empty (setup sanity — everything downstream reads this string)", reasonText.length > 0);
-  // THE ACTUAL BUG: the pre-fix text asserted "the manager decided to merge" unconditionally — false on
-  // THIS path, where the confirm that triggered the supersede was refused, not decided.
-  check("(wording) the reason text does NOT assert a merge happened or was decided — this confirm was REFUSED",
-    !/decided to merge/i.test(reasonText) && !/\bmerged?\b/i.test(reasonText));
-  check("(wording) the reason text still names the real, unconditional trigger — the worker_merge_confirm call itself, true regardless of that call's own outcome",
-    /worker_merge_confirm/i.test(reasonText) && /regardless/i.test(reasonText));
+    // (b) Drive the WORDING coverage through the one path that still reaches supersedeQueuedSelfCheck for
+    // real: workerB's ACTUAL owner (mgrB) calling its own confirm. The ownership pre-check passes
+    // trivially for a worker's real owner, so execution still reaches the supersede exactly as before
+    // this card. Fired without an immediate `await` — its own merge gate queues behind workerHolder, and
+    // we don't need that to settle before checking the self-check's own outcome below.
+    const pOwnerConfirm = sessions.confirmWorkerMergeTracked(mgrB, workerB);
+    const selfCheckSettled = await pSelfCheck;
+    check("(wording) workerB's queued self-check WAS superseded by its real owner's confirm",
+      selfCheckSettled.ok === true && selfCheckSettled.value?.cancelled === true && selfCheckSettled.value?.cancelKind === "superseded-by-merge");
+    const reasonText = String(selfCheckSettled.value?.reason ?? "");
+    check("(wording) the reason text is non-empty (setup sanity — everything downstream reads this string)", reasonText.length > 0);
+    // THE ACTUAL BUG this block guards: the pre-fix text asserted "the manager decided to merge"
+    // unconditionally — false whenever the triggering confirm doesn't itself end in a real merge.
+    check("(wording) the reason text does NOT assert a merge happened or was decided — it only states that worker_merge_confirm was called",
+      !/decided to merge/i.test(reasonText) && !/\bmerged?\b/i.test(reasonText));
+    check("(wording) the reason text still names the real, unconditional trigger — the worker_merge_confirm call itself, true regardless of that call's own outcome",
+      /worker_merge_confirm/i.test(reasonText) && /regardless/i.test(reasonText));
 
-  releaseHolder("go");
-  await pHolderRun.catch(() => {});
+    // Tidy up the owner's own now-redundant merge op without needing a real end-to-end git merge: cancel
+    // it once it reaches the queue (same shape as the B2-2 block below) rather than releasing the holder
+    // and letting it run to completion — this block is about the self-check's wording, not the merge's
+    // own outcome.
+    const ownerMergeEntry = await waitUntil(() => sessions.gateQueueForManager(projId).queued.find((e) => e.gateType === "merge"));
+    if (ownerMergeEntry) {
+      await sessions.cancelGateOp(mgrB, ownerMergeEntry.opId, { scope: { kind: "project" } });
+    }
+    await pOwnerConfirm.catch(() => {});
+  } finally {
+    releaseHolder("go");
+    await pHolderRun.catch(() => {});
+  }
 }
 
 // ── Card 8f58c354 B2-2 origin, INVERTED by card 361520a0 Half Two: gate_cancel's QUEUED branch used to
