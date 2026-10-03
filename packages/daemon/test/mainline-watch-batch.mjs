@@ -9,6 +9,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //         solo first-parent rule would not have).
 //   (B3)  a human commit between batches is silent.
 //   (B4)  card 2a6a292a round 3: guard 1b exercised ALONE on advanceMainlineWatermarkForBatch — refuses a branch-mismatched W even with a fully valid (checkedTip, isAncestor) pair.
+//   (B5)  card 77b8319b: advanceMainlineWatermarkForBatch refuses to overwrite a present-but-unreadable W even with a fully valid (checkedTip, isAncestor) pair — the raw row is byte-identical afterward.
 // Run: 1) build daemon (pnpm build), 2) LOOM_CODEX_BIN=<nonexistent> node test/mainline-watch-batch.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -129,6 +130,26 @@ try {
     d1.db.setMeta(key, JSON.stringify({ branch: MAIN, sha: baseShaB4 }));
     await d1.sessions.advanceMainlineWatermarkForBatch(P.projId, "primary", P.repo, baseShaB4, baseShaB4, batchHeadShaB4);
     check("(B4) control: with branch agreement restored, the identical call DOES advance W", watermark(d1)?.branch === MAIN && watermark(d1)?.sha === batchHeadShaB4);
+  }
+
+  // ── (B5) card 77b8319b: advanceMainlineWatermarkForBatch must not overwrite a present-but-unreadable row
+  //        either, even with a fully valid (checkedTip, isAncestor) pair — mirroring (B4)'s own shape for
+  //        the unreadable case instead of a branch mismatch. ──────────────────────────────────────────────
+  {
+    const key = MW.mainlineWatermarkKey(P.projId, "primary");
+    const baseShaB5 = canonHead();
+    const mm = await addWorker(d1.db, "mm"), nn = await addWorker(d1.db, "nn");
+    const rb5 = await batch(d1, [mm, nn]);
+    check("(B5) setup control: a real batch landed on top of baseShaB5", rb5.ok === true && canonHead() !== baseShaB5);
+    const batchHeadShaB5 = canonHead();
+    const rawBeforeB5 = "not json at all";
+    d1.db.setMeta(key, rawBeforeB5);
+    await d1.sessions.advanceMainlineWatermarkForBatch(P.projId, "primary", P.repo, baseShaB5, baseShaB5, batchHeadShaB5);
+    check("(B5) THE GUARD: a present-but-unreadable row is left BYTE-IDENTICAL despite a fully valid (checkedTip, isAncestor) pair", d1.db.getMeta(key) === rawBeforeB5);
+    // control: the SAME call, with a valid watermark restored, DOES advance — the guard is unreadable-specific, not a blanket refusal.
+    d1.db.setMeta(key, JSON.stringify({ branch: MAIN, sha: baseShaB5 }));
+    await d1.sessions.advanceMainlineWatermarkForBatch(P.projId, "primary", P.repo, baseShaB5, baseShaB5, batchHeadShaB5);
+    check("(B5) control: with a valid watermark restored, the identical call DOES advance", watermark(d1)?.branch === MAIN && watermark(d1)?.sha === batchHeadShaB5);
   }
 
 } finally {

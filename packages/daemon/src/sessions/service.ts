@@ -29,7 +29,7 @@ import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateR
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit, isNotAGitRepositoryError } from "../git/bounded.js";
-import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, parseMainlineWatermark, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
+import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
@@ -743,6 +743,10 @@ type ConfirmMergeResult = {
   branchDiverted?: boolean;
   observedBranch?: string | null;
   unverified?: boolean;
+  /** @decision 77b8319b — set alongside `branchDiverted:true` ONLY on the early watermark-corrupt/unreadable
+   *  refusal (mirrors `MergeBatchResult.watermarkUnreadable`): the checkout may be fine, it's the STORED
+   *  RECORD that's untrustworthy, so a caller must not claim "restore the checkout" for this reason. */
+  watermarkUnreadable?: boolean;
   /** Set only on a POST-squash `branchDiverted` — the sha of the commit that landed but is unreachable
    *  from the real mainline branch, so a human can recover it (`git branch rescue/<id>-<sha> <sha>`). */
   divertedSha?: string;
@@ -14741,7 +14745,25 @@ export class SessionService {
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
     // @decision d69d4858 — the stored watermark's OWN `branch` (2a6a292a), resolved ONCE, threaded
     // through every already-landed lookup and the squash. `undefined` (no watermark yet) ⇒ unchanged.
-    const expectedMainlineBranch = parseMainlineWatermark(this.db.getMeta(mainlineWatermarkKey(project.id, worker.repoKey ?? "primary")))?.branch;
+    // @decision 77b8319b — fail CLOSED on a present-but-unreadable row (corrupt JSON/shape, or a `getMeta`
+    // throw): refuse this confirm outright, mirroring the batch pin's own early refusal (`ba663984`),
+    // rather than falling back to a live read — only a genuinely ABSENT row (true first sight) falls back.
+    const watermarkKey = mainlineWatermarkKey(project.id, worker.repoKey ?? "primary");
+    let watermarkRaw: string | undefined;
+    let watermarkReadFailed = false;
+    try {
+      watermarkRaw = this.db.getMeta(watermarkKey);
+    } catch {
+      watermarkReadFailed = true;
+    }
+    const watermarkRead = watermarkReadFailed ? { state: "unreadable" as const } : readMainlineWatermarkStrict(watermarkRaw);
+    if (watermarkReadFailed || watermarkRead.state === "unreadable") {
+      const liveHead = await readMainlineHead(repoPath, this.mainlineGitMs()).catch(() => null);
+      const observedBranch = liveHead?.branch ?? null;
+      const reason = `this project's stored mainline watermark record is ${watermarkReadFailed ? "unreadable (a database read failed)" : "corrupt (it does not parse as a valid {branch, sha} record)"} — refusing to pin this solo merge's squash rather than silently falling back to a live read, which would re-open the pre-existing-checkout-divert gap this pin exists to close. Canonical repo is currently checked out on "${observedBranch ?? "(detached/unreadable)"}". Ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only), which re-initializes the watermark from the current checkout, then retry.`;
+      return { merged: false, reason, notified: false, opId: thisOpId, branchDiverted: true, watermarkUnreadable: true };
+    }
+    const expectedMainlineBranch = watermarkRead.state === "ok" ? watermarkRead.watermark.branch : undefined;
     // Code Review round 2 (card dd36012a): a BARE branch name handed to `git log <base>` is ambiguous
     // against a same-named top-level file/dir (fails closed to null, i.e. "not landed") or a same-named
     // tag (silently scans the wrong history) — fully qualify it ONCE here; `expectedMainlineBranch` above
@@ -17804,8 +17826,10 @@ export class SessionService {
         } catch {
           watermarkReadFailed = true;
         }
-        const watermark = watermarkReadFailed ? null : parseMainlineWatermark(watermarkRaw);
-        if (watermarkReadFailed || (watermarkRaw !== undefined && !watermark)) {
+        // @decision 77b8319b — the SAME strict reader the solo pin and checkMainlineMove use, so "absent"
+        // vs "present-but-unparseable" is classified identically on every path.
+        const watermarkRead = watermarkReadFailed ? { state: "unreadable" as const } : readMainlineWatermarkStrict(watermarkRaw);
+        if (watermarkReadFailed || watermarkRead.state === "unreadable") {
           const liveHead = await readMainlineHead(finalRepoPath, this.mainlineGitMs()).catch(() => null);
           const observedBranch = liveHead?.branch ?? null;
           const reason = `this project's stored mainline watermark record is ${watermarkReadFailed ? "unreadable (a database read failed)" : "corrupt (it does not parse as a valid {branch, sha} record)"} — refusing to pin this batch's fast-forward rather than silently falling back to a live read, which would re-open the pre-existing-checkout-divert gap this pin exists to close. Canonical repo is currently checked out on "${observedBranch ?? "(detached/unreadable)"}". Ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only), which re-initializes the watermark from the current checkout, then retry.`;
@@ -17825,7 +17849,7 @@ export class SessionService {
         // @decision ba663984 — the branch half of the pin: the watermark resolved above (`undefined` only
         // on a genuinely absent row, handled above) beats this live read. `baseMainSha` (the sha-only
         // forfeit check) stays live-read-based, unchanged — only the branch half of the pin changes.
-        const expectedBaseBranch = watermark?.branch ?? baseMainHead?.branch;
+        const expectedBaseBranch = (watermarkRead.state === "ok" ? watermarkRead.watermark.branch : undefined) ?? baseMainHead?.branch;
         if (expectedBaseBranch === undefined) {
           // eslint-disable-next-line no-console
           console.warn(`[merge-batch] no mainline branch available to pin for ${finalRepoPath} (repoKey ${batchRepoKey}) — canonical HEAD is detached/unreadable; this batch's fast-forward runs WITHOUT a branch-divert check (the sha-only forfeit check still applies)`);
@@ -18767,7 +18791,10 @@ export class SessionService {
       const rawW = this.db.getMeta(key);
       const head = await this.boundedByDeadline(this.mainlineHeadReader(a.repoPath, ms), deadlineAt, 0, "head read");
       if (!head) return null;
-      const w = parseMainlineWatermark(rawW);
+      // @decision 77b8319b — strict read: a PRESENT-but-unreadable row is never collapsed into "absent"
+      // the way a bare `parseMainlineWatermark(rawW)` would, which is what let `store()` below silently
+      // heal a corrupt row onto whatever branch happens to be checked out.
+      const watermarkRead = readMainlineWatermarkStrict(rawW);
       // Compare-and-set: a concurrent writer (a landing's own advance) that changed the key since we read it wins — an unguarded boot check must never regress a newer watermark.
       const alertKey = mainlineBootAlertKey(a.projectId, a.repoKey);
       // @decision 4fa36502 — ONE predicate for every marker delete (`dropBootAlert`): a marker goes only once DELIVERED, or when this check's baseline IS the marker's own `from` (a true re-detection / undo). An undelivered one is an alert no manager has read; W moving must never drop it.
@@ -18776,7 +18803,15 @@ export class SessionService {
       const boot = a.source === "boot";
       // @decision 4fa36502 — TRUE first sight only: no watermark has EVER been stamped for this (project, repoKey).
       // There is nothing yet to compare the live checkout against, so initialise silently.
-      if (!w) { store(); return head.tip; }
+      if (watermarkRead.state === "absent") { store(); return head.tip; }
+      // @decision 77b8319b — a present-but-unreadable row is never healed either: skip, fail-open, leaving
+      // W (and the corrupt row) exactly as-is so the next solo/batch pin read still sees — and refuses on
+      // — the same corrupt record, instead of finding it silently "fixed" onto whatever is checked out.
+      if (watermarkRead.state === "unreadable") {
+        console.warn(`[mainline-watch] stored watermark for ${a.projectId}:${a.repoKey} is present but unreadable (does not parse as a valid {branch, sha} record) — leaving it untouched rather than silently re-stamping it`);
+        return null;
+      }
+      const w = watermarkRead.watermark;
       if (w.branch !== head.branch) {
         // @decision 2a6a292a — a branch change under an EXISTING watermark is never trusted by itself:
         // alert, leave W untouched (dedupe via `sameMove` below), and never return a tip — a divert is
@@ -18919,8 +18954,11 @@ export class SessionService {
       // @decision 2a6a292a round 2 — a second, independent guard against the SAME bug `checkMainlineMove` already
       // refuses a tip for: never change W's BRANCH away from an existing trusted baseline, even here.
       const key = mainlineWatermarkKey(projectId, repoKey);
-      const w = parseMainlineWatermark(this.db.getMeta(key));
-      if (w && w.branch !== head.branch) return;
+      const watermarkRead = readMainlineWatermarkStrict(this.db.getMeta(key));
+      // @decision 77b8319b — an unreadable row must never be overwritten either: skip, leaving the corrupt
+      // record visible to the next pin-read refusal, instead of silently healing it via this advance.
+      if (watermarkRead.state === "unreadable") return;
+      if (watermarkRead.state === "ok" && watermarkRead.watermark.branch !== head.branch) return;
       this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip }));
     } catch (err) {
       console.warn(`[mainline-watch] watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
@@ -18943,8 +18981,10 @@ export class SessionService {
       // existing trusted baseline, even on a verified fast-forward (a batch can "land" onto a stray
       // branch when the whole batch, not just the gate, ran while canonical was already diverted).
       const key = mainlineWatermarkKey(projectId, repoKey);
-      const w = parseMainlineWatermark(this.db.getMeta(key));
-      if (w && w.branch !== head.branch) return;
+      const watermarkRead = readMainlineWatermarkStrict(this.db.getMeta(key));
+      // @decision 77b8319b — same as the solo twin: an unreadable row is never overwritten either.
+      if (watermarkRead.state === "unreadable") return;
+      if (watermarkRead.state === "ok" && watermarkRead.watermark.branch !== head.branch) return;
       this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: batchHeadSha }));
     } catch (err) {
       console.warn(`[mainline-watch] batch watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
@@ -19250,18 +19290,30 @@ export class SessionService {
             // checkout happens to be sitting on after a post-squash divert, landing the exact silent-loss
             // bug this card exists to close. Scan the stored watermark's branch instead, fully qualified
             // to avoid a same-named file/dir/tag ambiguity; `undefined` (no watermark yet) ⇒ "HEAD", unchanged.
-            const crExpectedBranch = parseMainlineWatermark(this.db.getMeta(mainlineWatermarkKey(project.id, worker.repoKey ?? "primary")))?.branch;
-            const crExpectedRef = crExpectedBranch ? `refs/heads/${crExpectedBranch}` : undefined;
-            const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, crExpectedRef ?? "HEAD", { timeoutMs: this.gitOpMs }).catch(() => null));
-            const landedSha = crLooked.result;
-            if (landedSha) {
-              const crGuard = this.soloFinalizeTipGuard({ opId, managerSessionId, workerSessionId, taskId, branch: worker.branch, landedTip: crLooked.landedTip, branchGone: crLooked.branchGone, landedSha, repoKey: worker.repoKey ?? null });
-              return this.finishAlreadyMerged({
-                managerSessionId, workerSessionId, taskId, worktreePath: worker.worktreePath ?? worker.cwd,
-                branch: worker.branch, repoPath: repo.path, projectId: project.id, opId, forceRemoveWorktree,
-                opStartedAt, mergedSha: landedSha, repoKey: worker.repoKey ?? null,
-                ...(crGuard.expectedBranchTip ? { expectedBranchTip: crGuard.expectedBranchTip } : {}), onBranchRetained: crGuard.onBranchRetained, retainedNote: crGuard.warning,
-              });
+            let crWatermarkRaw: string | undefined;
+            let crWatermarkReadFailed = false;
+            try {
+              crWatermarkRaw = this.db.getMeta(mainlineWatermarkKey(project.id, worker.repoKey ?? "primary"));
+            } catch {
+              crWatermarkReadFailed = true;
+            }
+            const crWatermarkRead = crWatermarkReadFailed ? { state: "unreadable" as const } : readMainlineWatermarkStrict(crWatermarkRaw);
+            // @decision 77b8319b — an unreadable row must never fall back to scanning bare "HEAD" either:
+            // skip the already-landed finalize outright and let the original error propagate instead.
+            if (crWatermarkRead.state !== "unreadable") {
+              const crExpectedBranch = crWatermarkRead.state === "ok" ? crWatermarkRead.watermark.branch : undefined;
+              const crExpectedRef = crExpectedBranch ? `refs/heads/${crExpectedBranch}` : undefined;
+              const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, crExpectedRef ?? "HEAD", { timeoutMs: this.gitOpMs }).catch(() => null));
+              const landedSha = crLooked.result;
+              if (landedSha) {
+                const crGuard = this.soloFinalizeTipGuard({ opId, managerSessionId, workerSessionId, taskId, branch: worker.branch, landedTip: crLooked.landedTip, branchGone: crLooked.branchGone, landedSha, repoKey: worker.repoKey ?? null });
+                return this.finishAlreadyMerged({
+                  managerSessionId, workerSessionId, taskId, worktreePath: worker.worktreePath ?? worker.cwd,
+                  branch: worker.branch, repoPath: repo.path, projectId: project.id, opId, forceRemoveWorktree,
+                  opStartedAt, mergedSha: landedSha, repoKey: worker.repoKey ?? null,
+                  ...(crGuard.expectedBranchTip ? { expectedBranchTip: crGuard.expectedBranchTip } : {}), onBranchRetained: crGuard.onBranchRetained, retainedNote: crGuard.warning,
+                });
+              }
             }
           }
           throw err;

@@ -31,6 +31,19 @@ export function parseMainlineWatermark(raw: string | undefined): MainlineWaterma
   } catch { return null; }
 }
 
+/** @decision 77b8319b — never collapse a present-but-unreadable row into "absent": a caller that falls
+ * back to a live read on "no watermark" must refuse instead on "unreadable", never silently heal it. */
+export type MainlineWatermarkReadState =
+  | { state: "absent" }
+  | { state: "ok"; watermark: MainlineWatermark }
+  | { state: "unreadable" };
+
+export function readMainlineWatermarkStrict(raw: string | undefined): MainlineWatermarkReadState {
+  if (raw === undefined) return { state: "absent" };
+  const w = parseMainlineWatermark(raw);
+  return w ? { state: "ok", watermark: w } : { state: "unreadable" };
+}
+
 /** Reflog messages git itself writes for a porcelain move (commit / merge / pull / reset / rebase / fetch …). A raw `git update-ref` without `-m` writes an EMPTY message. Spoofable by `-m` — a hint, not proof. */
 const PORCELAIN_REFLOG = /^(commit(?: \((?:amend|merge|initial|cherry-pick|revert)\))?:|merge\b|pull\b|reset:|rebase\b|fetch\b|cherry-pick\b|revert\b|am\b|update by push\b|checkout:|branch:)/;
 export const isRawReflogMessage = (msg: string): boolean => !PORCELAIN_REFLOG.test(msg.trim());

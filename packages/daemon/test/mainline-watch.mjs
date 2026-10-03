@@ -20,9 +20,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (S7) a raw write onto a commit that is NOT a loom/* tip fires the reflog evidence only.
 //   (S7b) TOCTOU: the watermark advances only when the landing sits directly on the tip that was checked.
 //   (S7d) card 2a6a292a round 3: guard 1b exercised ALONE — advanceMainlineWatermark refuses a branch-mismatched W even with a valid checkedTip, independent of checkMainlineMove.
+//   (S7e) card 77b8319b: advanceMainlineWatermark refuses to overwrite a present-but-unreadable W even with a valid checkedTip (the raw row is byte-identical afterward).
 //   (S8) FAIL-OPEN: a failing reader ⇒ the merge lands exactly as today, NO event, the watermark is NOT advanced past the unverified move — so
 //        the very next landing (reader restored) still catches it.
 //   (S9) BOUNDED: a >cap first-parent range ⇒ ONE low-severity "unverifiable" event (no nudge) and the watermark advances (no unbounded scan).
+//   (S10) card 77b8319b: a watermark row that is PRESENT but fails to parse (corrupt/wrong-shaped) must never be
+//        collapsed into "absent" and silently healed (`store()`d) onto whatever branch happens to be checked out —
+//        `checkMainlineMove` returns null, fail-open, and leaves the corrupt row byte-identical.
 //
 // NOT COVERED HERE: merge_batch and boot (mainline-watch-batch*.mjs / mainline-watch-boot.mjs); a worker that forges the message AND deletes its branch (S5); a `git -C <canon> commit`
 // (byte-identical to a human commit); a bare canonical repo (no reflog).
@@ -327,6 +331,24 @@ try {
     check("(S7d) control: with branch agreement restored, the identical call DOES advance W", watermark()?.branch === MAIN && watermark()?.sha === headTipS7d);
   }
 
+  // ── (S7e) card 77b8319b: advanceMainlineWatermark must not overwrite a present-but-unreadable row
+  //         either, even with a VALID checkedTip (the first-parent check alone would otherwise pass and
+  //         heal it) — tested directly, mirroring (S7d)'s own shape for the unreadable case instead of a
+  //         branch mismatch. ──────────────────────────────────────────────────────────────────────────────
+  {
+    const key = MW.mainlineWatermarkKey(P.projId, "primary");
+    const headTipS7e = canonHead();
+    const parentOfHeadS7e = git(P.repo, "rev-parse", "HEAD~1");
+    const rawBeforeS7e = "not json at all";
+    db.setMeta(key, rawBeforeS7e);
+    await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, parentOfHeadS7e); // a VALID checkedTip
+    check("(S7e) THE GUARD: a present-but-unreadable row is left BYTE-IDENTICAL despite a valid checkedTip", db.getMeta(key) === rawBeforeS7e);
+    // control: the SAME checkedTip, with a valid watermark restored, DOES advance — the guard is unreadable-specific, not a blanket refusal.
+    db.setMeta(key, JSON.stringify({ branch: MAIN, sha: parentOfHeadS7e }));
+    await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, parentOfHeadS7e);
+    check("(S7e) control: with a valid watermark restored, the identical call DOES advance", watermark()?.branch === MAIN && watermark()?.sha === headTipS7e);
+  }
+
   // ── (S8) FAIL-OPEN ─────────────────────────────────────────────────────────
   const o = await addWorker("o"), p = await addWorker("p"), q = await addWorker("q");
   const oc = git(o.worktreePath, "commit-tree", "-p", canonHead(), "-m", "sneaky2", `${canonHead()}^{tree}`);
@@ -364,6 +386,25 @@ try {
   check("(S9) …no nudge for the low-severity case", nudges.length === nudgesPre);
   check("(S9) …and the watermark advanced (no unbounded rescan next time)", watermark()?.sha === canonHead());
   void r;
+
+  // ── (S10) card 77b8319b: a present-but-unreadable (corrupt) watermark row must never be healed ──
+  {
+    const key10 = MW.mainlineWatermarkKey(P.projId, "primary");
+    const rawBefore10 = "not json at all";
+    const validBefore10 = watermark();
+    const eventsBefore10 = db.listEventsSince(0, 100000).filter((e) => e.kind === "mainline_moved_outside_loom" && e.detail?.projectId === P.projId).length;
+    db.setMeta(key10, rawBefore10);
+    const warnS10 = console.warn; const warnedS10 = []; console.warn = (...args) => { warnedS10.push(args.join(" ")); };
+    let tipS10;
+    try { tipS10 = await sessions.checkMainlineMove({ projectId: P.projId, repoKey: "primary", repoPath: P.repo, managerSessionId: P.mgrId, workerSessionId: null, taskId: null }); }
+    finally { console.warn = warnS10; }
+    check("(S10) checkMainlineMove returns null on a present-but-unreadable row (never healed into a fresh tip)", tipS10 === null);
+    check("(S10) THE FIX: the corrupt row is left BYTE-IDENTICAL — never silently re-stamped", db.getMeta(key10) === rawBefore10);
+    check("(S10) no mainline_moved_outside_loom event was filed for this (a data-integrity skip, not a detected move)", db.listEventsSince(0, 100000).filter((e) => e.kind === "mainline_moved_outside_loom" && e.detail?.projectId === P.projId).length === eventsBefore10);
+    check("(S10) a fail-open warning was logged, not swallowed silently", warnedS10.some((w2) => /unreadable/.test(w2)));
+    // restore a valid watermark so the file ends in the same clean state S9 left it in
+    db.setMeta(key10, JSON.stringify(validBefore10));
+  }
 
   // ── negative control: nothing ever alerted for a landing that only had explained moves ──
   check("(control) every alert above was one of the deliberate bypass landings (d,h,l,n,q high; s low) — no stray event on a, b, e, f, j, p", [a, b, e, f, j, p].every((w) => evFor(w).length === 0));

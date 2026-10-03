@@ -38,6 +38,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       forced throw (a `getPid` that throws) with canonical diverted onto a stray-only trailer commit must
 //       NOT finalize.
 //
+// Card 77b8319b extends this file: `parseMainlineWatermark` collapses a genuinely ABSENT watermark row and
+// one that is PRESENT but fails to parse (corrupt/wrong-shaped) to the identical `null` — so a corrupt row
+// used to be silently treated as "no watermark yet" and fallen back to a live read, reopening the exact
+// stray-branch landing gap (A)-(H) above close for an ordinary divert.
+//   (I) a watermark row that EXISTS but fails to parse (non-JSON), canonical genuinely on mainline: the pin
+//       read refuses OUTRIGHT (`branchDiverted:true, watermarkUnreadable:true`) rather than falling back to
+//       the live read; `gate_status(opId)` settles `passed:false` with the same reason.
+//   (J) the pin read's OWN `db.getMeta` call THROWS: refused the same fail-closed way as (I), never treated
+//       as "no watermark".
+//   (K) `confirmWorkerMergeTracked`'s catch path (479f449f) must not fall back to scanning bare `HEAD`
+//       either when ITS OWN watermark read is unreadable — simulated as the row becoming corrupt BETWEEN
+//       the pin-read (which sees it good, so (I)/(J)'s own early refusal doesn't short-circuit first) and
+//       the catch path's later, independent read — with a trailer commit sitting right on mainline's
+//       CURRENT HEAD (the shape that WOULD look "already landed" via the old bare-`HEAD` fallback).
+//
 // OUT OF SCOPE (carded separately, eb58b8bd): the periodic orphan sweep and findLandedSquashCommitViaMap
 // also scan "HEAD" — not touched here.
 //
@@ -428,7 +443,121 @@ const rejectedEvents = (db, workerId, reason) => db.listEventsForWorker(workerId
   try { db.close(); } catch { /* already closed */ }
 }
 
+// ── (I) card 77b8319b: a watermark row that EXISTS but fails to parse (non-JSON), canonical genuinely on
+//        mainline — the pin read refuses OUTRIGHT rather than falling back to the live read ─────────────────
+{
+  const I = mk("i");
+  const MAIN = makeRepo(I);
+  const db = new Db();
+  const sessions = seedProject(db, I);
+  const KEY = MW.mainlineWatermarkKey(I.projId, "primary");
+  db.setMeta(KEY, "this is not json at all");
+
+  const w = await addWorker(db, I, "i");
+  const preSha = git(I.repo, "rev-parse", "HEAD");
+  check("(I) precondition: canonical is genuinely on MAIN (no divert in effect)", git(I.repo, "symbolic-ref", "--short", "HEAD") === MAIN);
+  const result = await sessions.confirmWorkerMergeTracked(I.mgrId, w.workerId);
+  const confirm = result.settled && result.ok ? result.value : { __unsettled: result };
+  check("(I) an unparseable watermark row REFUSES outright — never falls back to the live read", confirm.merged === false && confirm.branchDiverted === true && confirm.watermarkUnreadable === true);
+  check("(I) mainline's own ref was NOT advanced", git(I.repo, "rev-parse", MAIN) === preSha);
+  check("(I) the worktree is retained (not finalized)", fs.existsSync(w.worktreePath));
+  check("(I) REFUSAL TEXT names the record as corrupt", confirm.reason?.includes("corrupt"));
+  check("(I) REFUSAL TEXT names the observed (live) branch", confirm.reason?.includes(`"${MAIN}"`));
+  check("(I) REFUSAL TEXT names the human-only mainline-watermark reset route as the remedy", confirm.reason?.includes("POST /api/projects/:id/mainline-watermark/reset"));
+  check("(I) the unparseable row itself is left untouched (never silently repaired)", db.getMeta(KEY) === "this is not json at all");
+  const stI = confirm.opId ? sessions.gateStatus(confirm.opId) : undefined;
+  check("(I) gate_status resolves this refusal as settled, never a bare row", stI?.state === "settled" && stI?.passed === false);
+  check("(I) gate_status carries the same reason", stI?.reason === confirm.reason);
+  try { db.close(); } catch { /* already closed */ }
+}
+
+// ── (J) card 77b8319b: the pin read's OWN `db.getMeta` call THROWS — refused the same fail-closed way ───────
+{
+  const J = mk("j");
+  const MAIN = makeRepo(J);
+  const db = new Db();
+  const sessions = seedProject(db, J);
+  const KEY = MW.mainlineWatermarkKey(J.projId, "primary");
+  const realGetMeta = db.getMeta.bind(db);
+  db.getMeta = (k) => { if (k === KEY) throw new Error("simulated db read failure"); return realGetMeta(k); };
+
+  const w = await addWorker(db, J, "j");
+  const preSha = git(J.repo, "rev-parse", "HEAD");
+  try {
+    const result = await sessions.confirmWorkerMergeTracked(J.mgrId, w.workerId);
+    const confirm = result.settled && result.ok ? result.value : { __unsettled: result };
+    check("(J) a watermark read that THROWS REFUSES outright — never treated as \"no watermark\"", confirm.merged === false && confirm.branchDiverted === true && confirm.watermarkUnreadable === true);
+    check("(J) mainline's own ref was NOT advanced", git(J.repo, "rev-parse", MAIN) === preSha);
+    check("(J) the worktree is retained (not finalized)", fs.existsSync(w.worktreePath));
+    check("(J) REFUSAL TEXT names the record as unreadable", confirm.reason?.includes("unreadable"));
+    check("(J) REFUSAL TEXT names the human-only mainline-watermark reset route as the remedy", confirm.reason?.includes("POST /api/projects/:id/mainline-watermark/reset"));
+    const stJ = confirm.opId ? sessions.gateStatus(confirm.opId) : undefined;
+    check("(J) gate_status resolves this refusal as settled, never a bare row", stJ?.state === "settled" && stJ?.passed === false);
+    check("(J) gate_status carries the same reason", stJ?.reason === confirm.reason);
+  } finally {
+    db.getMeta = realGetMeta;
+  }
+  try { db.close(); } catch { /* already closed */ }
+}
+
+// ── (K) card 77b8319b (manager-added): confirmWorkerMergeTracked's catch path (479f449f) must not fall
+//        back to scanning bare HEAD either when ITS OWN watermark read is unreadable. Simulated as the row
+//        becoming corrupt BETWEEN the pin-read (sees it good, so (I)/(J)'s own early refusal does not
+//        short-circuit first and the confirm proceeds into the throwing pty call) and the catch path's own,
+//        later, independent read — with a trailer commit sitting right on mainline's CURRENT HEAD (no
+//        divert at all): exactly the shape the OLD bare-"HEAD" fallback would have wrongly finalized. ───────
+{
+  const K = mk("k");
+  const MAIN = makeRepo(K);
+  const db = new Db();
+  const throwingPtyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {}, getPid() { throw new Error("[TEST] simulated pty failure"); } };
+  db.insertProject({ id: K.projId, name: "SMWP", repoPath: K.repo, vaultPath: K.repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: K.agentId, projectId: K.projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: K.mgrId, projectId: K.projId, agentId: K.agentId, engineSessionId: null, title: null, cwd: K.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  const sessions = new SessionService(db, throwingPtyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000, runGate: async () => PASS, reapWorktreeProcesses: noReap });
+  const KEY = MW.mainlineWatermarkKey(K.projId, "primary");
+  const realGetMeta = db.getMeta.bind(db);
+  db.setMeta(KEY, JSON.stringify({ branch: MAIN, sha: git(K.repo, "rev-parse", "HEAD") }));
+
+  const w = await addWorker(db, K, "k");
+  // A trailer commit for this worker's branch lands directly on the CURRENT mainline HEAD — no divert at
+  // all; the shape that WOULD look "already landed" if scanned via a bare "HEAD" fallback.
+  git(K.repo, "merge", "-q", "--squash", w.branch);
+  git(K.repo, "commit", "-q", "-m", `feat(x): change (landed-looking)\n\nLoom-Worker-Branch: ${w.branch}`);
+  const landedLookingSha = git(K.repo, "rev-parse", "HEAD");
+  check("(K) precondition: a trailer commit for this worker now sits on the CURRENT mainline HEAD", git(K.repo, "log", MAIN, `--grep=Loom-Worker-Branch: ${w.branch}`, "--format=%H") === landedLookingSha);
+
+  // Flip the row to corrupt AFTER the first read of THIS key — confirmWorkerMerge's own early pin-read (call
+  // #1) still sees it good and proceeds; every later read of this key (the catch path's own, call #2+) sees
+  // it corrupt, simulating the row becoming unreadable mid-confirm.
+  let pinReadsSeen = 0;
+  db.getMeta = (k) => {
+    if (k !== KEY) return realGetMeta(k);
+    pinReadsSeen++;
+    return pinReadsSeen === 1 ? realGetMeta(k) : "this is not json at all";
+  };
+  try {
+    const result = await sessions.confirmWorkerMergeTracked(K.mgrId, w.workerId);
+    const settledOk = result?.settled === true && result?.ok === true;
+    // Code Review f578bbfb Minor: >= 2 (not >= 1) actually proves the catch path's OWN read ran — >=1 is
+    // satisfied by the pin-read alone and would pass even if the catch path never read the key at all.
+    check("(K) setup control: the pin-read's own early refusal did NOT short-circuit, AND the catch path's own read ran (>=2 reads of this key)", pinReadsSeen >= 2);
+    check("(K) the catch path did NOT finalize as merged, even though a trailer commit sits right on HEAD", !(settledOk && result.value?.merged === true));
+    // Code Review f578bbfb Minor: skipping the already-landed finalize is only half the proof — the ORIGINAL
+    // error (the simulated pty failure that triggered the catch path in the first place) must propagate,
+    // never be swallowed, so the generic merge-failed/merge-unknown echo still reports a real diagnostic.
+    check("(K) the ORIGINAL error propagates (settled, not ok) rather than being swallowed", result?.settled === true && result?.ok === false);
+    check("(K) the propagated error is the simulated pty failure, not a different/substituted one", result?.ok === false && result.error instanceof Error && /\[TEST\] simulated pty failure/.test(result.error.message));
+    check("(K) the worktree was NOT removed", fs.existsSync(w.worktreePath));
+    check("(K) the task was NOT moved to a terminal column", db.getTask(w.taskId)?.columnKey === "in_progress");
+    check("(K) mainline's own ref is untouched beyond the precondition commit", git(K.repo, "rev-parse", MAIN) === landedLookingSha);
+  } finally {
+    db.getMeta = realGetMeta;
+  }
+  try { db.close(); } catch { /* already closed */ }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the solo squash-merge path pins the checked-out mainline branch from the stored watermark, re-verified BEFORE (D) and AFTER (E, F) the squash with fully-qualified refs (G) throughout, fails closed on a read failure either side, leaves a no-watermark project unchanged (B), scans the mainline ref rather than bare HEAD in both the suppress decision (D) and the tracked catch path (H), and never finalizes a diverted confirm that threw."
+  ? "\n✅ ALL PASS — the solo squash-merge path pins the checked-out mainline branch from the stored watermark, re-verified BEFORE (D) and AFTER (E, F) the squash with fully-qualified refs (G) throughout, fails closed on a read failure either side, leaves a no-watermark project unchanged (B), scans the mainline ref rather than bare HEAD in both the suppress decision (D) and the tracked catch path (H), never finalizes a diverted confirm that threw, and (card 77b8319b) refuses outright — rather than healing — on a present-but-unreadable watermark row on both the pin read (I, J) and the tracked catch path (K)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
