@@ -1,4 +1,4 @@
-import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
+import { requireHermeticEnv } from "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // IdleWatcher test (Asleep-at-the-Wheel idle-manager watchdog, Task 3). NO claude — the watcher takes
 // an injected pty-slice, so the tick tests use a RECORDING STUB and drive tick() directly. Hermetic
 // like context-watcher.mjs: each env gets its OWN temp .db, imports dist/* + @loom/shared, no daemon.
@@ -11,10 +11,24 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { Db } from "../dist/db.js";
-import { IdleWatcher } from "../dist/orchestration/idle-watcher.js";
-import { OrchestrationControl } from "../dist/orchestration/control.js";
-import { validateProjectConfigOverride, validateAgentProjectConfigOverride } from "../dist/mcp/platform.js";
+import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+
+// Card 86c9bdbd: idle-watcher.ts now reads the daemon-global usage-limit signal (orchestration/
+// usage-awareness.ts), which resolves its state-file path off LOOM_HOME at MODULE LOAD — so LOOM_HOME
+// must be an isolated temp dir BEFORE dist is ever imported, or this file would silently read the real
+// `~/.loom/tmp/claude-usage.json`. Dynamic imports (after useOwnLoomHome) replace the previous static
+// ones for exactly this reason. Code Review f6ef98d2: every (24*) test below now drives the DEDICATED
+// `isUsageLimited` seam (mirrors Scheduler/PollService/WakeService/EventTriggerService's own seam) via
+// makeEnv's `isUsageLimited` override, so this file never calls recordClaudeRateLimit/clearClaudeRateLimit
+// and never touches the real on-disk awareness record — EXCEPT the one deliberate end-to-end test of the
+// DEFAULT wiring further down, which is why useOwnLoomHome + requireHermeticEnv() still guard this file.
+useOwnLoomHome("idle-watcher-");
+requireHermeticEnv(); // card 86c9bdbd: refuse to run if LOOM_HOME isn't isolated — see the (24e) end-to-end test
+const { Db } = await import("../dist/db.js");
+const { IdleWatcher } = await import("../dist/orchestration/idle-watcher.js");
+const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { validateProjectConfigOverride, validateAgentProjectConfigOverride } = await import("../dist/mcp/platform.js");
+const { recordClaudeRateLimit, clearClaudeRateLimit } = await import("../dist/orchestration/usage-awareness.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -22,7 +36,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const NOW = new Date("2026-06-03T12:00:00.000Z");
 const minutesAgo = (m) => new Date(NOW.getTime() - m * 60_000).toISOString();
 
-function makeEnv({ recycleRatio = 0.8, projectConfig = {}, isWorkerStranded = () => true } = {}) {
+function makeEnv({ recycleRatio = 0.8, projectConfig = {}, isWorkerStranded = () => true, isUsageLimited = undefined } = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-idle-w-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `ip-${Math.random().toString(36).slice(2, 8)}`;
@@ -46,7 +60,11 @@ function makeEnv({ recycleRatio = 0.8, projectConfig = {}, isWorkerStranded = ()
   // manager-loop message. Defaults to `true` (every live idle worker counts as stranded) so pre-existing
   // tests that don't care about this narrowing are unaffected; per-test overrides exercise the narrowing
   // itself (see (5d)/(5e) below) — the REAL predicate is exercised end-to-end in idle-worker-watcher.mjs.
-  const watcher = new IdleWatcher({ db, pty, control, recycleRatio, notifyIdleWorker, isWorkerStranded });
+  // isUsageLimited: card 86c9bdbd's injectable seam — omitted (undefined) ⇒ IdleWatcher falls back to the
+  // real isLikelyNearClaudeUsageLimit, which reads this env's isolated LOOM_HOME (see useOwnLoomHome at
+  // the top of this file), never the real one. Most tests omit it (same as every pre-existing test before
+  // this seam existed); the (24*) usage-limit tests pass an explicit stub instead.
+  const watcher = new IdleWatcher({ db, pty, control, recycleRatio, notifyIdleWorker, isWorkerStranded, isUsageLimited });
   return { dbFile, db, projId, agentId, alive, enqueued, control, watcher, idleWorkerNudges };
 }
 
@@ -869,6 +887,46 @@ const DROPPED_BOARD = {
   cleanup(e);
 }
 
+// Card 86c9bdbd — THE REPRO: genuine activity that happened BEFORE the manager's idle_report('waiting')
+// call must NOT retroactively defeat the snooze that call just set, even though that activity landed
+// strictly after the PREVIOUS nudge (the stale-anchor bug: producedActivitySince used to compare only
+// against last_idle_nudge_at, which idle_report never advances).
+{
+  const e = makeEnv();
+  // Mirrors the real incident's shape: nudged 60m ago; the manager did genuine work (a merge) 50m ago,
+  // THEN called idle_report('waiting', minutes:1440) 45m ago (its own lastActivity) — simulated here at
+  // the db layer exactly as SessionService.recordIdleReport's 'waiting' branch does it: resetIdleNudgeState
+  // + setIdleNudgePolicy('snoozed', <future>) + stampIdleDispositionAt(<the call's own instant>).
+  seedManager(e, "mgr-stale-anchor", { idleMin: 45 });
+  e.db.recordIdleNudge("mgr-stale-anchor", minutesAgo(60)); // the PREVIOUS nudge: unanswered 1, last_idle_nudge_at = -60m
+  e.db.appendEvent({ id: randomUUID(), ts: minutesAgo(50), managerSessionId: "mgr-stale-anchor", kind: "merge_done", detail: {} }); // genuine activity, BEFORE idle_report
+  e.db.resetIdleNudgeState("mgr-stale-anchor");
+  e.db.setIdleNudgePolicy("mgr-stale-anchor", "snoozed", minutesAgo(-1395)); // ~1440m from the -45m call
+  e.db.stampIdleDispositionAt("mgr-stale-anchor", minutesAgo(45)); // the idle_report call's own instant
+  e.watcher.tick(NOW);
+  const s = e.db.getIdleNudgeState("mgr-stale-anchor");
+  check("(12c) pre-disposition activity does NOT defeat a snooze set AFTER it (stays 'snoozed')", s?.policy === "snoozed");
+  check("(12c) pre-disposition activity does NOT defeat a snooze set AFTER it (silent, no nudge)", e.enqueued.length === 0);
+  cleanup(e);
+}
+
+// Sanity/negative control for (12c): activity that happens AFTER the idle_report call must still be able
+// to reset the policy — the fix rebases the anchor, it does not disable reset-on-activity altogether.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-fresh-anchor", { idleMin: 45 });
+  e.db.recordIdleNudge("mgr-fresh-anchor", minutesAgo(60));
+  e.db.resetIdleNudgeState("mgr-fresh-anchor");
+  e.db.setIdleNudgePolicy("mgr-fresh-anchor", "snoozed", minutesAgo(-1395));
+  e.db.stampIdleDispositionAt("mgr-fresh-anchor", minutesAgo(45)); // idle_report call at -45m
+  e.db.appendEvent({ id: randomUUID(), ts: minutesAgo(40), managerSessionId: "mgr-fresh-anchor", kind: "merge_done", detail: {} }); // AFTER idle_report
+  e.watcher.tick(NOW);
+  const s = e.db.getIdleNudgeState("mgr-fresh-anchor");
+  check("(12d) genuinely POST-disposition activity still resets to 'watching' (fix rebases, doesn't disable, the check)", s?.policy === "watching");
+  check("(12d) idle long enough since that reset (45m since lastActivity) → re-nudged this tick", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-fresh-anchor");
+  cleanup(e);
+}
+
 // ============================ (13) only managers; not live ============================
 {
   const e = makeEnv();
@@ -1530,7 +1588,87 @@ const otherCausesAreZero = (cc, expectedKey) => CAUSE_KEYS.filter((k) => k !== e
   cleanup(e);
 }
 
+// ============================ (24) SILENT — likely near a Claude usage limit (card 86c9bdbd) ============================
+// tick() now reads the SAME daemon-global signal worker_spawn's own refusal reads
+// (isLikelyNearClaudeUsageLimit + resolveConfig's platform.rateLimit.recencyWindowMs) — no second notion
+// of "usage-limited", via the injectable `isUsageLimited` seam (mirrors Scheduler/PollService/
+// WakeService/EventTriggerService's own seam). Code Review f6ef98d2: (24a)-(24d) drive that seam
+// directly with a plain stub — NONE of them touch the real on-disk awareness record. Only the dedicated
+// (24e) end-to-end test below exercises the real default wiring.
+{
+  const e = makeEnv({ isUsageLimited: () => true });
+  seedManager(e, "mgr-usage-limited");
+  seedTodo(e, 5);
+  e.watcher.tick(NOW);
+  check("(24a) usage-limited: NO nudge fires", e.enqueued.length === 0);
+  const s = e.db.getIdleNudgeState("mgr-usage-limited");
+  check("(24a) usage-limited: last_idle_nudge_at / unanswered untouched (nothing was actually sent)", s?.lastIdleNudgeAt === null && s?.unanswered === 0);
+  cleanup(e);
+}
+// Negative control for (24a): an otherwise-IDENTICAL manager, with the seam explicitly returning false,
+// still gets nudged — proves the new skip is gated on the signal's actual value, not a blanket suppression.
+{
+  const e = makeEnv({ isUsageLimited: () => false });
+  seedManager(e, "mgr-not-usage-limited");
+  seedTodo(e, 5);
+  e.watcher.tick(NOW);
+  check("(24b) NOT usage-limited (negative control): the otherwise-identical manager IS nudged",
+    e.enqueued.length === 1 && e.enqueued[0].id === "mgr-not-usage-limited");
+  cleanup(e);
+}
+// The usage-limit skip ALSO suppresses the escalate-at-cap branch (same "global off-switch" shape as the
+// human-paused skip — see (7b) above, and this card's decision record): a human already knows their own
+// usage is capped, so escalating "slept through every nudge" on top of that is pure noise.
+{
+  const e = makeEnv({ isUsageLimited: () => true });
+  seedManager(e, "mgr-usage-limited-capped");
+  e.db.recordIdleNudge("mgr-usage-limited-capped", minutesAgo(120));
+  e.db.recordIdleNudge("mgr-usage-limited-capped", minutesAgo(60)); // at cap (2)
+  e.watcher.tick(NOW);
+  check("(24c) capped + usage-limited → NOT escalated (no idle_escalated event)",
+    e.db.listEvents("mgr-usage-limited-capped").filter((ev) => ev.kind === "idle_escalated").length === 0);
+  check("(24c) capped + usage-limited → policy unchanged ('watching')", e.db.getIdleNudgeState("mgr-usage-limited-capped")?.policy === "watching");
+  cleanup(e);
+}
+// The seam is also given the resolved recencyWindowMs as its 2nd arg (never a second, independently-
+// derived number) — proven by an injected stub that ASSERTS its own args rather than merely returning a
+// constant, so a future refactor that stops threading the real resolved value through would be CAUGHT here.
+{
+  let sawArgs = null;
+  const e = makeEnv({
+    projectConfig: {},
+    isUsageLimited: (now, recencyWindowMs) => { sawArgs = { now, recencyWindowMs }; return false; },
+  });
+  seedManager(e, "mgr-seam-args");
+  seedTodo(e, 1);
+  e.watcher.tick(NOW);
+  const expectedRecencyWindowMs = 6 * 60 * 60_000; // the platform default (platform.rateLimit.recencyWindowMs) — no project override here
+  check("(24d) the seam is called with THIS tick's own `now`", sawArgs?.now?.getTime() === NOW.getTime());
+  check("(24d) the seam is called with the resolved recencyWindowMs (not a second, hand-derived number)",
+    sawArgs?.recencyWindowMs === expectedRecencyWindowMs);
+  cleanup(e);
+}
+// (24e) END-TO-END: with NO isUsageLimited override, tick() falls back to the REAL isLikelyNearClaudeUsageLimit
+// — the one case in this file that genuinely touches the on-disk awareness record, so it's the one place
+// recordClaudeRateLimit/clearClaudeRateLimit are used at all. requireHermeticEnv() at the top of this file
+// (right after useOwnLoomHome) is what makes this safe: a bare run with LOOM_HOME pointing at the real
+// ~/.loom aborts before this ever reaches clearClaudeRateLimit(), instead of deleting a live record.
+{
+  clearClaudeRateLimit(); // defensive: this file's isolated LOOM_HOME should already be clean
+  const e = makeEnv(); // isUsageLimited omitted ⇒ the REAL default
+  seedManager(e, "mgr-default-wiring");
+  seedTodo(e, 5);
+  recordClaudeRateLimit(Math.floor(NOW.getTime() / 1000) + 3600); // a KNOWN future reset — deterministic regardless of the real wall-clock
+  e.watcher.tick(NOW);
+  check("(24e) default wiring: the REAL isLikelyNearClaudeUsageLimit suppresses the nudge", e.enqueued.length === 0);
+  clearClaudeRateLimit();
+  e.watcher.tick(new Date(NOW.getTime() + 60_000));
+  check("(24e) default wiring: once cleared, the SAME manager is nudged normally", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-default-wiring");
+  cleanup(e);
+  clearClaudeRateLimit(); // leave no trace for anything else in this process
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged; a PLATFORM (Lead) session (card 98b3725c) gets the SAME full-trigger/silent/escalate coverage a manager does, alongside a manager in the same project/tick without interference; a platform-role session now gets its OWN idle-nudge copy (no orchestration-loop/pick-up-next/N-actionable framing) and discounts parked-lane (decision-gated/owner-flow) cards from its actionable count, while the manager's copy and parked-lane counting stay byte-identical (card f98f3e43); and a session's OWN open (pending) owner question_ask — regardless of taskId — suppresses ITS idle nudge ONLY when there's no other actionable work (card cb56cf80, narrowed to SESSION-scoped + no-other-actionable-work by card 8e87f3b5), resuming normally once answered, when there's no pending own-Request, when other actionable work exists despite the pending Request, or for a fresh non-recycle successor that never filed the Request itself — without being fooled by an unrelated agent/session's pending Request."
+  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged; a PLATFORM (Lead) session (card 98b3725c) gets the SAME full-trigger/silent/escalate coverage a manager does, alongside a manager in the same project/tick without interference; a platform-role session now gets its OWN idle-nudge copy (no orchestration-loop/pick-up-next/N-actionable framing) and discounts parked-lane (decision-gated/owner-flow) cards from its actionable count, while the manager's copy and parked-lane counting stay byte-identical (card f98f3e43); and a session's OWN open (pending) owner question_ask — regardless of taskId — suppresses ITS idle nudge ONLY when there's no other actionable work (card cb56cf80, narrowed to SESSION-scoped + no-other-actionable-work by card 8e87f3b5), resuming normally once answered, when there's no pending own-Request, when other actionable work exists despite the pending Request, or for a fresh non-recycle successor that never filed the Request itself — without being fooled by an unrelated agent/session's pending Request; the reset-on-activity check now anchors on the LATER of last_idle_nudge_at and idle_disposition_at (card 86c9bdbd), so genuine orchestration activity that predates a manager's own idle_report('waiting') call can no longer defeat the snooze that call just set, while activity genuinely AFTER that call still resets it as before; and while the account is likely near a Claude usage limit (the SAME signal worker_spawn's refusal reads), the idle nudge — and the escalate-at-cap branch — are silently suppressed instead of firing into an already-exhausted allowance."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

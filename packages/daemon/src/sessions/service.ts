@@ -10984,6 +10984,10 @@ export class SessionService {
    * promptly to run the review→gate→merge it now has waiting — wiring the report into the SAME idle/wake
    * machinery the manager parked itself with. No-op for an already-`watching` (or missing) manager, so a
    * non-parked manager's byte-stream is unchanged. Pure DB + never throws (must not disturb the report).
+   *
+   * @decision 86c9bdbd — never skip this re-arm for a worker report, even mid-snooze: a report is
+   * genuine new work delivered as a turn, not activity that predates the park, so it must always wake a
+   * parked manager; gate any resulting NUDGE on the usage-limit signal in idle-watcher.ts instead.
    */
   private wakeParkedManagerOnReport(managerSessionId: string): void {
     try {
@@ -13473,11 +13477,18 @@ export class SessionService {
       snoozeUntil = new Date(Date.now() + snoozeMinutes * 60_000).toISOString();
       this.db.resetIdleNudgeState(sessionId); // zero the unanswered counter first (P1 setIdleNudgePolicy doesn't)
       this.db.setIdleNudgePolicy(sessionId, "snoozed", snoozeUntil);
+      // Card 86c9bdbd: stamp idle_disposition_at to THIS call's own instant — NOT last_idle_nudge_at
+      // (that one paces re-nudge cadence and means "a nudge was actually sent"; stamping it here would
+      // overload that meaning). This anchors the reset-on-activity check so an orchestration event the
+      // manager produced BEFORE this call (e.g. a merge it did while winding down) can never retroactively
+      // defeat the snooze it is about to set — see idle-watcher.ts's reset-on-activity check.
+      this.db.stampIdleDispositionAt(sessionId, new Date().toISOString());
       policy = "snoozed";
     } else {
       // done
       this.db.resetIdleNudgeState(sessionId); // zero the unanswered counter first
       this.db.setIdleNudgePolicy(sessionId, "suppressed");
+      this.db.stampIdleDispositionAt(sessionId, new Date().toISOString()); // same anchoring rationale as 'waiting' above
       policy = "suppressed";
     }
 

@@ -488,6 +488,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   idle_nudge_snooze_until TEXT,                        -- ISO ts | NULL (silent until this passes)
   last_idle_nudge_at TEXT,                             -- ISO ts | NULL (last nudge fired)
   idle_nudge_unanswered INTEGER NOT NULL DEFAULT 0,    -- consecutive unanswered nudges
+  -- The manager's own most recent idle_report('waiting'|'done') call, DISTINCT from last_idle_nudge_at
+  -- (which paces re-nudge cadence and is read as "a nudge was actually sent"). The reset-on-activity
+  -- check anchors on max(last_idle_nudge_at, idle_disposition_at) so an orchestration event the manager
+  -- produced BEFORE this disposition call can never retroactively invalidate it (card 86c9bdbd).
+  idle_disposition_at TEXT,                            -- ISO ts | NULL (last idle_report waiting/done call)
   -- ContextWatcher per-manager recycle-nudge state (parity with the idle-watchdog columns above): persist
   -- the last context-nudge time + unanswered count so the re-nudge cadence + escalate-after-cap survive a
   -- daemon restart. No snooze column (unlike idle): a context nudge is answered by RECYCLING, not snoozing.
@@ -1766,6 +1771,10 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   idle_nudge_snooze_until: "TEXT",
   last_idle_nudge_at: "TEXT",
   idle_nudge_unanswered: "INTEGER NOT NULL DEFAULT 0",
+  // Card 86c9bdbd — the manager's own last idle_report('waiting'|'done') call; see the CREATE TABLE
+  // comment above. Nullable, no DEFAULT needed: NULL on every legacy row = "never recorded", which the
+  // reset-on-activity anchor already treats as absent (falls back to last_idle_nudge_at alone).
+  idle_disposition_at: "TEXT",
   // ContextWatcher recycle-nudge state (parity with the idle columns above). NOT NULL + constant DEFAULT
   // is legal on ALTER TABLE ADD COLUMN, so legacy rows backfill to 'watching' / 0.
   context_nudge_policy: "TEXT NOT NULL DEFAULT 'watching'",
@@ -2219,6 +2228,8 @@ export interface IdleNudgeState {
   snoozeUntil: string | null;
   lastIdleNudgeAt: string | null;
   unanswered: number;
+  /** The manager's own last idle_report('waiting'|'done') call — see idle_disposition_at's own doc. */
+  idleDispositionAt: string | null;
 }
 
 /** ContextWatcher recycle-nudge policy (twin of IdleNudgePolicy; no snooze state — see below). */
@@ -6087,7 +6098,7 @@ export class Db {
   /** Read the per-session idle-watchdog state; undefined when the session row is missing. */
   getIdleNudgeState(id: string): IdleNudgeState | undefined {
     const r = this.db.prepare(
-      "SELECT idle_nudge_policy, idle_nudge_snooze_until, last_idle_nudge_at, idle_nudge_unanswered FROM sessions WHERE id = ?",
+      "SELECT idle_nudge_policy, idle_nudge_snooze_until, last_idle_nudge_at, idle_nudge_unanswered, idle_disposition_at FROM sessions WHERE id = ?",
     ).get(id) as Row | undefined;
     if (!r) return undefined;
     return {
@@ -6095,6 +6106,7 @@ export class Db {
       snoozeUntil: (r.idle_nudge_snooze_until as string) ?? null,
       lastIdleNudgeAt: (r.last_idle_nudge_at as string) ?? null,
       unanswered: (r.idle_nudge_unanswered as number) ?? 0,
+      idleDispositionAt: (r.idle_disposition_at as string) ?? null,
     };
   }
   /**
@@ -6110,6 +6122,17 @@ export class Db {
   recordIdleNudge(id: string, atIso: string): void {
     this.db.prepare("UPDATE sessions SET last_idle_nudge_at = ?, idle_nudge_unanswered = idle_nudge_unanswered + 1 WHERE id = ?")
       .run(atIso, id);
+    this.notifySessionChanged(id);
+  }
+  /**
+   * Stamp idle_disposition_at: the manager's own most recent idle_report('waiting'|'done') call. Never
+   * touches last_idle_nudge_at/idle_nudge_unanswered — those pace re-nudge cadence and are read as "a
+   * nudge was actually sent" (idle-watcher.ts's idleForMin math), a DIFFERENT fact than "the manager told
+   * me its disposition." Kept as its own accessor rather than folded into recordIdleNudge for that reason
+   * (card 86c9bdbd).
+   */
+  stampIdleDispositionAt(id: string, atIso: string): void {
+    this.db.prepare("UPDATE sessions SET idle_disposition_at = ? WHERE id = ?").run(atIso, id);
     this.notifySessionChanged(id);
   }
   /**

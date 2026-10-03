@@ -6,6 +6,7 @@ import type { OrchestrationControl } from "./control.js";
 import type { QueueSource, TurnRoute, QueuedMessageKind } from "../pty/host.js";
 import { computeBoardDelta, formatBoardDeltaDigest } from "./board-read.js";
 import { requestAnsweredTriggerNotice } from "./deferred-trigger-notice.js";
+import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
 export interface IdlePty {
@@ -61,6 +62,14 @@ export interface IdleWatcherDeps {
   isWorkerStranded: (workerSessionId: string) => boolean;
   /** Tick cadence; defaults to 60s. Injectable so a test drives tick() directly. */
   intervalMs?: number;
+  /**
+   * Card 86c9bdbd: "are we near the Claude usage limit?" — defaults to the global awareness record
+   * (mirrors Scheduler/PollService/WakeService/EventTriggerService's own `isUsageLimited` seam —
+   * scheduler.ts, poll.ts, wake.ts, event-triggers.ts — same shape, same default). Injectable so a test
+   * can drive the limit-skip deterministically without ever touching the real on-disk awareness file.
+   * The optional 2nd arg is the resolved recency window (ms); a test stub may ignore it.
+   */
+  isUsageLimited?: (now: Date, recencyWindowMs?: number) => boolean;
 }
 
 /**
@@ -194,6 +203,17 @@ export class IdleWatcher {
     const nowMs = now.getTime();
     const nowIso = now.toISOString();
 
+    // Card 86c9bdbd: the SAME daemon-global signal worker_spawn's own refusal reads
+    // (isLikelyNearClaudeUsageLimit + the SAME resolveConfig recencyWindowMs — see
+    // sessions/service.ts's worker_spawn usage-limit check) — no second notion of "usage-limited".
+    // Computed ONCE per tick (not per manager): the signal is a single daemon-global file, not
+    // per-project, so re-deriving it per manager would be wasted work for the same answer.
+    // `this.deps.isUsageLimited` is the SAME injectable seam Scheduler/PollService/WakeService/
+    // EventTriggerService already use (see IdleWatcherDeps' own doc) — defaults to the real awareness
+    // record, so production behavior is unchanged; a test can drive it deterministically instead.
+    const usageRecencyWindowMs = resolveConfig(undefined, db.getPlatformConfig()).platform.rateLimit.recencyWindowMs;
+    const usageLimited = (this.deps.isUsageLimited ?? isLikelyNearClaudeUsageLimit)(now, usageRecencyWindowMs);
+
     // Platform (Lead) sessions get the SAME coverage as managers (card 98b3725c) — merged from a
     // SEPARATE query rather than widening listLiveManagers, which ContextWatcher also reads (recycle-
     // by-context) and must not silently start covering Lead sessions too. Reusing the manager loop
@@ -224,7 +244,17 @@ export class IdleWatcher {
       // DOES fire in production, that's a real bug signal worth naming, not silencing.
       let state = db.getIdleNudgeState(m.id);
       if (!state) { this.logSkipIfChanged(m.id, "no-idle-state"); continue; }
-      if (state.lastIdleNudgeAt && this.producedActivitySince(m.id, state.lastIdleNudgeAt)) {
+      // Card 86c9bdbd: anchor on the LATER of lastIdleNudgeAt (when a nudge was last actually sent) and
+      // idleDispositionAt (when the manager last told us 'waiting'/'done' via idle_report) — never
+      // lastIdleNudgeAt alone. lastIdleNudgeAt is frozen at the PREVIOUS nudge and is never advanced by
+      // idle_report (it means something different elsewhere in this file — see idleForMin below — so it
+      // must not be overloaded), so genuine activity the manager produced BEFORE its own idle_report call
+      // (e.g. a merge it finished while winding down) used to look identical to activity produced AFTER —
+      // both land "after lastIdleNudgeAt" — and wiped a snooze the manager had JUST deliberately set,
+      // fully aware of that earlier activity. Comparing against the later of the two anchors means only
+      // activity that happens after the manager's own most recent disposition call can still re-arm it.
+      const resetAnchor = this.laterIso(state.lastIdleNudgeAt, state.idleDispositionAt);
+      if (resetAnchor && this.producedActivitySince(m.id, resetAnchor)) {
         db.resetIdleNudgeState(m.id);
         state = db.getIdleNudgeState(m.id);
         if (!state) { this.logSkipIfChanged(m.id, "no-idle-state"); continue; }
@@ -252,6 +282,14 @@ export class IdleWatcher {
       // (it must pass the SAME predicate a nudge does: unpaused, no live worker, not recycle-pending,
       // idle≥window-since-last-nudge, alive — so a human/recycle-owned manager is never escalated).
       if (control.isPaused(m.id)) { this.logSkipIfChanged(m.id, "human-paused"); continue; }
+
+      // Card 86c9bdbd, DoD-2: while the account is likely near a Claude usage limit, worker_spawn would
+      // refuse anyway — nudging "pick up the next task NOW" just burns another manager turn on an
+      // already-exhausted allowance and invites exactly that refused retry. Skip silently, mirroring the
+      // human-paused skip above (same "global off-switch" shape, including suppressing the escalate-on-
+      // unanswered-cap branch below — a human already knows their own usage is capped). logSkipIfChanged
+      // rate-limits this to ONE log line per manager per transition INTO this reason, not one per tick.
+      if (usageLimited) { this.logSkipIfChanged(m.id, "usage-limited"); continue; }
 
       // OWN pending owner Request (card cb56cf80, narrowed by card 8e87f3b5): a manager/Lead correctly
       // parked on an OPEN owner-facing question_ask IT ITSELF filed is not idle — it's blocked on the
@@ -844,6 +882,13 @@ export class IdleWatcher {
       if (e.ts > sinceIso && ORCH_ACTIVITY_KINDS.has(e.kind)) return true;
     }
     return false;
+  }
+
+  /** The later of two nullable ISO timestamps (string comparison is safe for ISO-8601 UTC); null iff both are. */
+  private laterIso(a: string | null, b: string | null): string | null {
+    if (!a) return b;
+    if (!b) return a;
+    return a > b ? a : b;
   }
 
   start(): void {

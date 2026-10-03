@@ -29,11 +29,6 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Db } from "../dist/db.js";
-import { OrchestrationMcpRouter } from "../dist/mcp/orchestration.js";
-import { buildServer } from "../dist/gateway/server.js";
-import { IdleWatcher } from "../dist/orchestration/idle-watcher.js";
-import { OrchestrationControl } from "../dist/orchestration/control.js";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
@@ -42,6 +37,16 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-q-fresh-spawn-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+
+// Card 86c9bdbd: this assignment was previously a no-op for any LOOM_HOME-derived MODULE CONSTANT (e.g.
+// paths.ts's own LOOM_HOME/DB_PATH, and now orchestration/usage-awareness.ts's STATE_PATH) — it ran AFTER
+// the static dist imports below had already loaded and frozen those constants off the ambient (real)
+// LOOM_HOME. Converted to dynamic imports so this assignment actually lands first.
+const { Db } = await import("../dist/db.js");
+const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { buildServer } = await import("../dist/gateway/server.js");
+const { IdleWatcher } = await import("../dist/orchestration/idle-watcher.js");
+const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 
 const dbFile = path.join(tmpHome, "qfs.db");
 const db = new Db(dbFile);

@@ -97,6 +97,12 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
     check("(S) waiting(15) → snoozeUntil ≈ now + 15m (explicit wins over project default)",
       ms >= before + 15 * 60_000 && ms <= after + 15 * 60_000);
     check("(S) waiting(15) → return snoozeUntil matches the column", r.snoozeUntil === s.snoozeUntil);
+    // Card 86c9bdbd: idle_disposition_at is stamped to THIS call's own instant, NOT last_idle_nudge_at
+    // (freshManager pre-seeds 2 recorded nudges at `now`, strictly BEFORE this call — so a distinct,
+    // later idleDispositionAt here proves the two are tracked separately, not aliased).
+    check("(S) waiting(15) → idle_disposition_at stamped to now (distinct from the pre-seeded last_idle_nudge_at)",
+      s.idleDispositionAt != null && Date.parse(s.idleDispositionAt) >= before && Date.parse(s.idleDispositionAt) <= after &&
+      s.idleDispositionAt !== now);
   }
 
   // waiting WITHOUT minutes → falls back to the project's idleDefaultSnoozeMinutes (90), not 15/30.
@@ -116,11 +122,23 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
   // done → policy 'suppressed', snooze cleared, unanswered 0.
   {
     const id = freshManager();
+    const before = Date.now();
     svc.recordIdleReport(id, "done");
+    const after = Date.now();
     const s = db.getIdleNudgeState(id);
     check("(S) done → policy 'suppressed'", s.policy === "suppressed");
     check("(S) done → snoozeUntil null", s.snoozeUntil === null);
     check("(S) done → unanswered 0", s.unanswered === 0);
+    check("(S) done → idle_disposition_at ALSO stamped (not just 'waiting')",
+      s.idleDispositionAt != null && Date.parse(s.idleDispositionAt) >= before && Date.parse(s.idleDispositionAt) <= after);
+  }
+
+  // working → idle_disposition_at is left UNTOUCHED (policy is already 'watching'; nothing to anchor).
+  {
+    const id = freshManager();
+    svc.recordIdleReport(id, "working");
+    const s = db.getIdleNudgeState(id);
+    check("(S) working → idle_disposition_at stays null (only 'waiting'/'done' stamp it)", s.idleDispositionAt === null);
   }
 
   // The detail/state is audited to the orchestration timeline (so Task 4 can surface the 'why').
@@ -370,7 +388,61 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
   rmDb(file);
 }
 
+// ==================== (W) a worker report during a snooze still WAKES the manager (card 86c9bdbd) ====================
+// Pins the intended NON-change: wakeParkedManagerOnReport (sessions/service.ts) must keep unconditionally
+// re-arming a snoozed/suppressed manager when a worker reports, REGARDLESS of idle_disposition_at — a
+// worker report is genuine new work delivered as a turn, not activity that predates the park, so it is
+// deliberately NOT subject to the stale-anchor fix this card made to the reset-on-activity check in
+// idle-watcher.ts (see that file's test suite for the anchor fix itself).
+{
+  const file = tmpDbFile("wake");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  db.insertProject({ id: "wp", name: "WP", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "wt", projectId: "wp", name: "t", startupPrompt: "x", position: 0 });
+  db.insertTask({ id: "wtask", projectId: "wp", title: "W-TASK", body: "", columnKey: "in_progress", position: 0, createdAt: now, updatedAt: now });
+  db.insertSession({
+    id: "wmgr", projectId: "wp", agentId: "wt", engineSessionId: null, title: null, cwd: "/x",
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "manager",
+  });
+  db.insertSession({
+    id: "wwkr", projectId: "wp", agentId: "wt", engineSessionId: null, title: null, cwd: "/x",
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "worker", parentSessionId: "wmgr", taskId: "wtask",
+  });
+
+  // Park the manager exactly as a real idle_report('waiting', minutes:1440) call would: 'snoozed', a
+  // snooze_until far in the future, AND idle_disposition_at stamped — the fix this card made must not,
+  // by itself, prevent a worker report from waking it.
+  const future = new Date(Date.now() + 1440 * 60_000).toISOString();
+  db.setIdleNudgePolicy("wmgr", "snoozed", future);
+  db.stampIdleDispositionAt("wmgr", now);
+  const before = db.getIdleNudgeState("wmgr");
+  check("(W) setup: manager starts 'snoozed' with a future snoozeUntil + a stamped idle_disposition_at",
+    before.policy === "snoozed" && before.snoozeUntil === future && before.idleDispositionAt === now);
+
+  // Minimal stub pty — workerReport's pty calls are all guarded (`typeof this.pty.X === "function"`)
+  // except enqueueStdin/isAlive, which every real dispatch path needs (mirrors idle-watcher.mjs's stub).
+  const enqueued = [];
+  const pty = {
+    isAlive: () => true,
+    enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; },
+  };
+  const svc = new SessionService(db, pty, new OrchestrationControl());
+  const r = await svc.workerReport("wwkr", { status: "progress", summary: "self-check green, still working" });
+  check("(W) the report delivered", r.deliveryStatus === "delivered-live");
+
+  const after = db.getIdleNudgeState("wmgr");
+  check("(W) a worker report WAKES the snoozed manager regardless of idle_disposition_at (policy → 'watching')",
+    after.policy === "watching");
+  check("(W) the snooze is cleared on wake", after.snoozeUntil === null);
+
+  db.close();
+  rmDb(file);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — recordIdleReport maps each state to the correct P1 policy/snooze (explicit minutes vs idleDefaultSnoozeMinutes fallback) and always zeroes the unanswered counter, for BOTH manager and platform roles; an explicit minutes above the 1440 (24h) ceiling is clamped (and NOT for an ordinary value), 0/negative/NaN/Infinity fall back to the project default instead of a past or invalid snoozeUntil, and the default no-minutes path is unchanged; idle_report is registered on the manager surface (not the worker surface) AND on the Lead's PlatformMcpRouter, and works end-to-end there."
+  ? "\n✅ ALL PASS — recordIdleReport maps each state to the correct P1 policy/snooze (explicit minutes vs idleDefaultSnoozeMinutes fallback) and always zeroes the unanswered counter, for BOTH manager and platform roles; an explicit minutes above the 1440 (24h) ceiling is clamped (and NOT for an ordinary value), 0/negative/NaN/Infinity fall back to the project default instead of a past or invalid snoozeUntil, and the default no-minutes path is unchanged; idle_report is registered on the manager surface (not the worker surface) AND on the Lead's PlatformMcpRouter, and works end-to-end there; a worker report still wakes a snoozed manager regardless of idle_disposition_at (card 86c9bdbd's intended non-change)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

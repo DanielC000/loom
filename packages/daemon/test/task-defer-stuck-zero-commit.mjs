@@ -42,10 +42,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { useOwnLoomHome } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
+// Card 86c9bdbd: idle-watcher.ts now reads the daemon-global usage-limit signal (orchestration/
+// usage-awareness.ts), which resolves its state-file path off LOOM_HOME at MODULE LOAD — must be an
+// isolated temp dir BEFORE dist is ever imported, or this file would silently read the real
+// `~/.loom/tmp/claude-usage.json`.
+useOwnLoomHome("task-defer-stuck-");
 const { Db } = await import("../dist/db.js");
 const { getProjectTask, listProjectTasks, createProjectTask, updateProjectTask } = await import("../dist/mcp/tasks.js");
 const { taskKey } = await import("../dist/git/worktrees.js");

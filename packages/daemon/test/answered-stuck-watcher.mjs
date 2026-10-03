@@ -21,9 +21,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Db } from "../dist/db.js";
-import { IdleWatcher } from "../dist/orchestration/idle-watcher.js";
-import { OrchestrationControl } from "../dist/orchestration/control.js";
+import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+
+// Card 86c9bdbd: idle-watcher.ts's tick() (called here, which internally also drives
+// tickAnsweredStuckQuestions) now reads the daemon-global usage-limit signal (orchestration/
+// usage-awareness.ts), which resolves its state-file path off LOOM_HOME at MODULE LOAD — must be an
+// isolated temp dir BEFORE dist is ever imported, or this file would silently read the real
+// `~/.loom/tmp/claude-usage.json`. Dynamic imports (after useOwnLoomHome) replace the previous static
+// ones for exactly this reason.
+useOwnLoomHome("answered-stuck-watcher-");
+const { Db } = await import("../dist/db.js");
+const { IdleWatcher } = await import("../dist/orchestration/idle-watcher.js");
+const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
