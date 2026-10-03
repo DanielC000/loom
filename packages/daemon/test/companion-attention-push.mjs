@@ -475,6 +475,11 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
     classify("claude_boot_dialog_stuck", { parentNudged: false, role: "manager" }) === "escalation");
   check("classify: claude_boot_dialog_stuck(no parentNudged field) → null (defensive default, never a false positive)",
     classify("claude_boot_dialog_stuck", { role: "worker" }) === null);
+  // Card b1da256d: the RESOLVE half of the pair above is NEVER an owner alert — it clears an
+  // already-filed one, it is never itself a fresh one. web/attention.ts derives its own "cleared" state
+  // from this same event independently; this module must never ALSO push it as a new alert.
+  check("classify: claude_boot_dialog_resolved → null (a resolve clears an alert, never a fresh one)",
+    classify("claude_boot_dialog_resolved", {}) === null);
   check("classify: an unrelated kind → null", classify("spawn_worker", {}) === null);
   const line = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "context_escalated", detail: {} }, "context-overflow", "Proj Z");
   check("alertLine: terse, names the project + an m: id slice", line.includes("Proj Z") && line.includes("m:mgr-1234"));

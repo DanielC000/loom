@@ -8,7 +8,7 @@ import { CODEX_RESTRICTED_TOOLS_REASON, TRANSCRIPT_ROOT_DENY_ROLES, codexPermiss
 import { spawn, type IPty } from "node-pty";
 import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
-import { resolveProfileCapabilities, usesOrchestrationMcp } from "@loom/shared";
+import { resolveProfileCapabilities, usesOrchestrationMcp, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
@@ -2986,6 +2986,9 @@ interface Live {
   // rare path where SessionStart itself was missed (the READY_FALLBACK case). Checked alongside
   // sessionStartObserved/firstTurnStarted at the boot-dialog-stuck timer's fire site so a healthy session
   // that merely missed its SessionStart hook is never wrongly flagged as stuck on a dialog.
+  // Card b1da256d: the false→true FLIP of this field (not merely its value) is ALSO what fires
+  // onClaudeBootDialogResolved, exactly once per Live incarnation — see deliverHook's own doc at that call
+  // site for why.
   anyHookObserved: boolean;
   resumeGateHandled: boolean; // TERMINAL: true once Enter has actually been sent for the resume-from-summary
                               // gate (confirmed-or-given-up) — see resolveResumeGate. Also gates whether
@@ -3540,6 +3543,14 @@ export interface PtyHostEvents {
    *  not a signature matched — `signatureName` null means nothing recognized was in the scan buffer, not
    *  that the session is fine. Never carries screen content — signature NAME only. */
   onClaudeBootDialogStuck?(sessionId: string, info: { timeoutMs: number; signatureName: string | null; role: SessionRole | null }): void;
+  /** Card b1da256d — the RESOLVE half of the pair above: fired from `deliverHook` the first time
+   *  `Live.anyHookObserved` flips false→true for THIS Live incarnation (see that flip site's own doc) —
+   *  never scoped to the `SessionStart` hook alone, so a non-SessionStart first hook under the
+   *  READY_FALLBACK path resolves too. Fires on EVERY spawn/resume/fork/recycle's first hook, whether or
+   *  not this session was ever stuck; the handler itself (SessionService.handleClaudeBootDialogResolved)
+   *  is the one that decides whether there's anything to pair against, so it must stay cheap and never
+   *  throw back into deliverHook. */
+  onClaudeBootDialogResolved?(sessionId: string): void;
   /** @decision b987f086 — onCodexUnsupportedCapability: two independent reasons (a stdio-only MCP server;
    *  codescapeEnabled for codex), named distinctly in info.items[].reason, never blended — and never relied
    *  on alone, since profiles/validate.ts's save-time rejection can't catch a profile that predates it. */
@@ -3634,13 +3645,9 @@ export const TASK_TRACKING_TOOLS: readonly string[] = ["TaskCreate", "TaskGet", 
  */
 export const HARNESS_SCHEDULING_TOOLS: readonly string[] = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger"];
 
-/** @decision 8dd1dd1c — human-prompt disallow gate ONLY; see {@link BOOT_DIALOG_DETECTOR_ROLES} for the
- *  stuck-dialog detector's own, deliberately separate, role set. */
-export const LOOM_DRIVEN_ROLES: readonly SessionRole[] = ["worker", "setup", "auditor", "workspace-auditor", "run", "assistant"];
-
-/** @decision e2a3c613 — the boot-dialog-stuck detector's own role set, kept separate from
- *  {@link LOOM_DRIVEN_ROLES} so manager/platform coverage here never leaks into disallowedToolsForRole. */
-export const BOOT_DIALOG_DETECTOR_ROLES: readonly SessionRole[] = [...LOOM_DRIVEN_ROLES, "manager", "platform"];
+// Card b1da256d: LOOM_DRIVEN_ROLES/BOOT_DIALOG_DETECTOR_ROLES now live in @loom/shared (so
+// packages/web can read them too) — re-exported here for every existing importer of this module.
+export { LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES };
 
 /** @decision 8dd1dd1c — human-prompt disallow: Loom-driven roles only (see {@link LOOM_DRIVEN_ROLES}),
  *  never manager/platform. Task-tracking (card 33f9f181) and harness-scheduling
@@ -6903,7 +6910,19 @@ export class PtyHost {
     if (live.kind !== "claude") return; // shells/canned entries have no hook relay; the busy/readiness machine is Claude-only
     // Card 01160ae3: ANY hook delivery proves the engine is past the pre-SessionStart boot window, even
     // when SessionStart itself was missed — see anyHookObserved's own doc comment on Live.
+    // @decision b1da256d — never move this fire site into `case "SessionStart":` — capture the
+    // anyHookObserved false→true flip here instead, or a non-SessionStart first hook can never resolve.
+    const firstHookThisIncarnation = !live.anyHookObserved;
     live.anyHookObserved = true;
+    if (firstHookThisIncarnation) {
+      try {
+        this.events.onClaudeBootDialogResolved?.(sessionId);
+      } catch (err) {
+        // Mirrors onClaudeBootDialogStuck's own guard — never let this become a second failure mode.
+        // eslint-disable-next-line no-console
+        console.error(`[claude-boot-dialog-stuck] ${sessionId} onClaudeBootDialogResolved handler threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+      }
+    }
     // eslint-disable-next-line no-console
     console.log(`[hook] ${sessionId} ${hook.hook_event_name ?? "?"} session_id=${hook.session_id ?? "-"}`);
     switch (hook.hook_event_name) {

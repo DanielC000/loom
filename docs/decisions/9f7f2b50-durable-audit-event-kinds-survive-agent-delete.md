@@ -19,7 +19,7 @@ trace"). It is **session-scoped bookkeeping** iff its only real readers are live
 it strictly during the episode (nudge/dedupe/backoff state, poll/schedule/wake mechanics) — once the
 session/agent is gone, nothing of record is lost by its disappearing.
 
-## The classification (61 of 122 `OrchestrationEventKind` members as of card f44cc187 — the "48 of 102" figure this heading previously carried was ALREADY stale before that card touched it; re-measured directly against the live `DURABLE_AUDIT_EVENT_KINDS`/`ORCHESTRATION_EVENT_KIND_MEMBERSHIP` sets rather than incrementing the old number)
+## The classification (62 of 124 `OrchestrationEventKind` members as of card b1da256d — re-measured directly against the live `DURABLE_AUDIT_EVENT_KINDS`/`ORCHESTRATION_EVENT_KIND_MEMBERSHIP` sets rather than incrementing the prior heading's number, which was itself already stale by one `OrchestrationEventKind` member before this card touched it)
 
 Derived by reading every kind's own doc comment in `packages/shared/src/types.ts` plus the four existing
 kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVITY_KINDS`,
@@ -56,6 +56,9 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
   `codex_submit_unconfirmed`, `codex_boot_stuck`,
   `claude_boot_dialog_stuck` (card `01160ae3` — claude's analog of `codex_boot_stuck`: the only durable
   trace that an unattended spawn hung on a blocking CLI dialog before SessionStart ever fired),
+  `claude_boot_dialog_resolved` (card `b1da256d` — the RESOLVE half of the pair above; survives for the
+  same reason its `claude_boot_dialog_stuck` counterpart does — a cascaded agent/session delete must not
+  silently un-pair the two and leave an orphaned stuck row that now reads as never-resolved),
   `codex_unsupported_capability`,
   `harness_default_skipped` (card `961da6c6`: the only durable trace that a safety-scoped agent was kept on
   claude instead of the fleet's codex default), `companion_zero_reply_detected`.

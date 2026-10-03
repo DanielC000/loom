@@ -48,6 +48,35 @@
 //      `dismissMcpPrompt` — a SessionStart landing DURING the deferred delay (before the Esc write ever
 //      fires) no longer suppresses it; the single Esc still fires exactly once, session kept alive
 //      throughout so the identity/liveness guards can't mask the removal.
+//   16-19. Card b1da256d: `onClaudeBootDialogResolved` — the RESOLVE half of this detector, fired from
+//      `deliverHook` the first time `Live.anyHookObserved` flips false→true for a given Live incarnation
+//      (see that call site's own doc). (16) an on-time SessionStart of a fresh spawn fires exactly once; a
+//      second hook on the same incarnation never refires it. (17) a LATE SessionStart arriving after the
+//      stuck alarm already fired still fires exactly once (round 3's own case). (18) round 2 (item 1): a
+//      re-spawn (resume) of the SAME session id AFTER incarnation 1 has already fired its OWN resolved
+//      event: the respawn itself (fresh Live, no hook yet) fires no ADDITIONAL event; the first hook on
+//      the NEW incarnation fires a SECOND, independent resolved event (count 1 → 2) — per-incarnation,
+//      never globally suppressed by the OLD incarnation's prior fire. (19) THE ROUND-4 GAP
+//      ITSELF: a non-SessionStart first hook (e.g. PreToolUse) arriving after the alarm, with SessionStart
+//      NEVER observed at all, still fires exactly once — a SessionStart-only design (round 3's own, cut at
+//      e2a3c613 round 4 because it missed exactly this case) can never fire here.
+//
+// RED-BEFORE-GREEN for (18)/scenario 18 (round 2, item 1): round 1's own version of scenario 18 never
+// delivered any hook on incarnation 1 before respawning, so a once-per-sessionId Set (fire the resolve at
+// most once EVER for a session id, instead of once per Live incarnation) would have passed it too — that
+// Set would never have been populated before the respawn. Confirmed by hand: with `deliverHook`'s
+// `firstHookThisIncarnation` check temporarily replaced by a module-level `Set<string>` keyed on
+// sessionId alone (fire only if the id had never fired before, regardless of incarnation), 18c fails
+// (count stuck at 1, not 2) while every other scenario in this file — including 16/17/19, which never
+// respawn — still passes; reverting to the real per-incarnation `anyHookObserved` flip restores the full
+// green. See the card's own done-report for the exact before/after run.
+//
+// RED-BEFORE-GREEN for (19)/scenario 19 (this project's own standing verification posture): with the fix
+// reverted to fire `onClaudeBootDialogResolved` ONLY inside `deliverHook`'s `case "SessionStart":` block
+// (round 3's own cut design) instead of on the top-of-function `anyHookObserved` flip, scenario 19a fails
+// (zero resolved events, not one) while every other scenario in this file still passes — confirmed by hand
+// against that reverted build before restoring the real (flip-keyed) fix; see the card's own done-report
+// for the exact before/after run.
 //
 // RUN: pnpm build (repo root) then `node test/claude-boot-dialog-stuck.mjs` from packages/daemon.
 import fs from "node:fs";
@@ -158,9 +187,15 @@ const countEsc = (fake) => fake.writes.filter((w) => w === ESC_KEY).length;
 // never releases the hold post round 3; only a real SessionStart does.
 const CLEAN_DISMISS_TEXT = "Welcome back! How can I help you today?\nAsk Claude to write, fix, or explain code, run commands, or manage files in this project, and it will dive right in.\n> ";
 const stuckEvents = [];
+const resolvedEvents = [];
 const events = {
   onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {},
   onClaudeBootDialogStuck(sessionId, info) { stuckEvents.push({ sessionId, info }); },
+  // Card b1da256d: fires on the FIRST hook of every Live incarnation, unconditionally — the host layer
+  // has no notion of "was this session ever stuck"; that's SessionService.handleClaudeBootDialogResolved's
+  // own job (covered separately in claude-boot-dialog-stuck-no-self-nudge.mjs). These scenarios only pin
+  // the HOST wiring: which hook, in which order, fires this callback exactly once per incarnation.
+  onClaudeBootDialogResolved(sessionId) { resolvedEvents.push({ sessionId }); },
 };
 const host = new TestPtyHost(events);
 
@@ -451,6 +486,75 @@ try {
     check("15d: exactly one Esc — still no retry loop", countEsc(fn) === 1);
     try { host.stop(N, "hard"); } catch { /* ignore */ }
   }
+
+  // ============ 16) Card b1da256d: onClaudeBootDialogResolved — on-time SessionStart of a fresh spawn ====
+  // ============      fires exactly once; a SECOND hook on the SAME incarnation never refires it ===========
+  {
+    const O = "sess-resolved-ontime-O";
+    spawnOne(O, "worker");
+    check("16: (setup) no resolved event yet for a fresh spawn with no hook delivered", resolvedEvents.filter((e) => e.sessionId === O).length === 0);
+    host.deliverHook(O, { hook_event_name: "SessionStart", session_id: "eng-O" });
+    check("16a: an on-time SessionStart on a fresh spawn fires exactly one resolved event", resolvedEvents.filter((e) => e.sessionId === O).length === 1);
+    host.deliverHook(O, { hook_event_name: "PreToolUse", session_id: "eng-O", tool_name: "mcp__loom-tasks__tasks_get" });
+    check("16b: a SECOND hook on the same incarnation does not refire the resolved event", resolvedEvents.filter((e) => e.sessionId === O).length === 1);
+    try { host.stop(O, "hard"); } catch { /* ignore */ }
+  }
+
+  // ============ 17) Card b1da256d: a LATE SessionStart arriving AFTER the stuck alarm already fired =======
+  // ============      fires exactly one resolved event (this is round 3's own case, still covered) =========
+  {
+    const P = "sess-resolved-late-sessionstart-P";
+    spawnOne(P, "worker");
+    const stuckFiredP = await waitUntil(() => stuckEvents.some((e) => e.sessionId === P), 3000);
+    check("17: (setup) the stuck alarm fired for P before any hook arrived", stuckFiredP);
+    check("17: (setup) no resolved event yet", resolvedEvents.filter((e) => e.sessionId === P).length === 0);
+    host.deliverHook(P, { hook_event_name: "SessionStart", session_id: "eng-P" });
+    check("17a: a LATE SessionStart after the alarm fires exactly one resolved event", resolvedEvents.filter((e) => e.sessionId === P).length === 1);
+    try { host.stop(P, "hard"); } catch { /* ignore */ }
+  }
+
+  // ============ 18) Card b1da256d round 2 (item 1): a re-spawn (resume) of the SAME session id, AFTER ====
+  // ============      incarnation 1 has ALREADY fired its OWN resolved event — the respawn itself fires ===
+  // ============      nothing (fresh Live, no hook yet), but the FIRST hook on the NEW incarnation fires ===
+  // ============      a SECOND, independent resolved event (count 1 → 2): per-incarnation, never globally
+  // ============      suppressed-forever by the OLD incarnation's prior fire. Round 1's own version of =====
+  // ============      this scenario never delivered ANY hook on incarnation 1 — so a once-per-sessionId ===
+  // ============      Set (fire at most once EVER for a given session id, instead of once per Live ========
+  // ============      incarnation) would have passed it too, since that Set would never have been =========
+  // ============      populated in the first place. This version is the one that can actually tell the ====
+  // ============      two designs apart — see this file's own RED-BEFORE-GREEN note above the import ======
+  // ============      block for the proof against a temporary once-per-sessionId Set. ========================
+  {
+    const Q = "sess-resolved-respawn-Q";
+    spawnOne(Q, "worker");
+    const stuckFiredQ = await waitUntil(() => stuckEvents.some((e) => e.sessionId === Q), 3000);
+    check("18: (setup) the stuck alarm fired for Q", stuckFiredQ);
+    host.deliverHook(Q, { hook_event_name: "SessionStart", session_id: "eng-Q-1" });
+    check("18a: incarnation 1's own first hook fires exactly one resolved event", resolvedEvents.filter((e) => e.sessionId === Q).length === 1);
+    spawnOne(Q, "worker", "eng-Q-resume"); // resume: fresh Live, anyHookObserved reset to false
+    check("18b: the respawn itself (fresh Live, no hook yet) fires no ADDITIONAL resolved event (still exactly one)", resolvedEvents.filter((e) => e.sessionId === Q).length === 1);
+    host.deliverHook(Q, { hook_event_name: "SessionStart", session_id: "eng-Q-2" });
+    check("18c: the first hook on the NEW incarnation fires a SECOND, independent resolved event (count 1 → 2) — a once-per-sessionId Set would have failed this", resolvedEvents.filter((e) => e.sessionId === Q).length === 2);
+    try { host.stop(Q, "hard"); } catch { /* ignore */ }
+  }
+
+  // ============ 19) Card b1da256d — THE ROUND-4 GAP ITSELF: a non-SessionStart first hook (e.g. ===========
+  // ============      PreToolUse) arriving after the alarm, with SessionStart NEVER arriving at all, ========
+  // ============      still fires exactly one resolved event. A SessionStart-only design (round 3's own, =====
+  // ============      cut at e2a3c613 round 4) can NEVER fire here — see this file's own RED-BEFORE-GREEN ===
+  // ============      note above the import block for how that was proven directly against this scenario. ==
+  {
+    const R = "sess-resolved-non-sessionstart-first-R";
+    spawnOne(R, "worker");
+    const stuckFiredR = await waitUntil(() => stuckEvents.some((e) => e.sessionId === R), 3000);
+    check("19: (setup) the stuck alarm fired for R, SessionStart never observed", stuckFiredR && host.live.get(R).sessionStartObserved === false);
+    host.deliverHook(R, { hook_event_name: "PreToolUse", session_id: "eng-R", tool_name: "mcp__loom-tasks__tasks_get" }); // NOT SessionStart
+    check("19a: a non-SessionStart first hook after the alarm fires exactly one resolved event — the round-4 gap a SessionStart-only design could never close",
+      resolvedEvents.filter((e) => e.sessionId === R).length === 1);
+    host.deliverHook(R, { hook_event_name: "SessionStart", session_id: "eng-R" }); // a later SessionStart must not refire
+    check("19b: a later SessionStart on the same incarnation does not refire", resolvedEvents.filter((e) => e.sessionId === R).length === 1);
+    try { host.stop(R, "hard"); } catch { /* ignore */ }
+  }
 } finally {
   for (const id of [
     "sess-dialog-stuck-A", "sess-slow-healthy-B", "sess-late-sessionstart-C", "sess-manager-gated-D",
@@ -460,6 +564,8 @@ try {
     "sess-post-write-noise-still-held-L", "sess-sessionstart-after-esc-releases-M",
     "sess-exactly-one-esc-worker-WR", "sess-exactly-one-esc-plain-MG", "sess-respawn-during-delay-D1",
     "sess-sessionstart-during-delay-still-escapes-N",
+    "sess-resolved-ontime-O", "sess-resolved-late-sessionstart-P", "sess-resolved-respawn-Q",
+    "sess-resolved-non-sessionstart-first-R",
   ]) {
     try { host.stop(id, "hard"); } catch { /* ignore */ }
   }
@@ -467,6 +573,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — claude boot-dialog-stuck detector fires once (named signature, no screen content) for an unattended spawn that never reaches SessionStart; never fires for a slow-but-healthy boot or a late SessionStart after the alarm; role-gated to LOOM_DRIVEN_ROLES; re-arms on resume; the overwrite-on-resume and onExit timer clears hold under real timing; the fire-time bail suppresses the alarm whenever firstTurnStarted or any other hook proves the engine is past boot; and (card e29923e3 round 3 scope cut) the MCP-prompt Esc-dismiss is a single write, never a retry loop — the hold stays engaged forever past a dropped/lone Esc on a static dialog, no post-write screen output of any kind (sync frames, OSC, ticks, or even a full clean repaint) ever releases it, only a real SessionStart releases AND delivers a queued entry, the single write fires uniformly for every role (not just LOOM_DRIVEN_ROLES), a same-id respawn during the write's own settle delay never misattributes it across generations, and (round 4) a SessionStart landing DURING the deferred delay no longer suppresses the single Esc write."
+  ? "\n✅ ALL PASS — claude boot-dialog-stuck detector fires once (named signature, no screen content) for an unattended spawn that never reaches SessionStart; never fires for a slow-but-healthy boot or a late SessionStart after the alarm; role-gated to LOOM_DRIVEN_ROLES; re-arms on resume; the overwrite-on-resume and onExit timer clears hold under real timing; the fire-time bail suppresses the alarm whenever firstTurnStarted or any other hook proves the engine is past boot; and (card e29923e3 round 3 scope cut) the MCP-prompt Esc-dismiss is a single write, never a retry loop — the hold stays engaged forever past a dropped/lone Esc on a static dialog, no post-write screen output of any kind (sync frames, OSC, ticks, or even a full clean repaint) ever releases it, only a real SessionStart releases AND delivers a queued entry, the single write fires uniformly for every role (not just LOOM_DRIVEN_ROLES), a same-id respawn during the write's own settle delay never misattributes it across generations, and (round 4) a SessionStart landing DURING the deferred delay no longer suppresses the single Esc write; (card b1da256d) and onClaudeBootDialogResolved fires exactly once per Live incarnation on the first hook of any kind — an on-time or late SessionStart, a re-spawn's own fresh first hook, and (the round-4 gap itself) a non-SessionStart first hook with SessionStart never observed at all — never twice for the same incarnation."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

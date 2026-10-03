@@ -199,6 +199,11 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // resolve this, a human must. See docs/decisions/e2a3c613-*.md for the full reasoning.
     case "claude_boot_dialog_stuck":
       return detail?.parentNudged === false ? "escalation" : null;
+    // Card b1da256d: the RESOLVE half of the pair above — a resolve clears an already-filed alert, it is
+    // never itself a fresh owner-facing one. Falls to `default` (null) structurally either way; named
+    // explicitly so a reader doesn't have to re-derive that from the switch's fallthrough.
+    case "claude_boot_dialog_resolved":
+      return null;
     default:
       return null;
   }

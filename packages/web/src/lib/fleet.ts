@@ -128,3 +128,39 @@ function archivedRecency(sessions: readonly SessionListItem[]): number {
   for (const s of sessions) max = Math.max(max, +new Date(s.lastActivity));
   return max;
 }
+
+// ── BOOT STUCK pairing (card b1da256d round 2, item 3b) ─────────────────────────────────────────────────
+// Extracted out of lib/attention.ts's useAttention so it's unit-testable without React/react-query: given
+// a boot-dialog-stuck candidate's event stream (claude_boot_dialog_stuck/claude_boot_dialog_resolved,
+// unsorted) and a liveness predicate, returns the sessions that should STILL surface a BOOT STUCK alert —
+// latest-event-wins per session, a resolved pairing clears it, an owner-unreachable stuck episode
+// (`detail.parentNudged===false` — see handleClaudeBootDialogStuck, sessions/service.ts) is required, and
+// a stuck session that's no longer live is dropped (nobody can act on it anymore).
+export interface BootStuckAlert { event: OrchestrationEvent; sessionId: string }
+
+export function activeBootStuckAlerts(
+  events: readonly OrchestrationEvent[],
+  isLiveSessionId: (sessionId: string) => boolean,
+): BootStuckAlert[] {
+  // @decision b1da256d — this sort relies on a stuck/resolved pair always sharing one managerSessionId
+  // (service.ts copies it from the paired stuck row, never re-derives it live) so both always arrive
+  // from the SAME per-session server query, already `ts, rowid`-ordered — don't add a client ordinal.
+  const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+  const latest = new Map<string, OrchestrationEvent>();
+  for (const e of sorted) {
+    if (e.kind === "claude_boot_dialog_stuck") {
+      if ((e.detail as { parentNudged?: boolean } | undefined)?.parentNudged !== false) continue;
+    } else if (e.kind !== "claude_boot_dialog_resolved") {
+      continue;
+    }
+    latest.set(e.workerSessionId ?? e.managerSessionId, e);
+  }
+  const out: BootStuckAlert[] = [];
+  for (const e of latest.values()) {
+    if (e.kind !== "claude_boot_dialog_stuck") continue; // a claude_boot_dialog_resolved is the latest → cleared.
+    const sessionId = e.workerSessionId ?? e.managerSessionId;
+    if (!isLiveSessionId(sessionId)) continue; // nobody can act on a no-longer-live session's alarm
+    out.push({ event: e, sessionId });
+  }
+  return out;
+}

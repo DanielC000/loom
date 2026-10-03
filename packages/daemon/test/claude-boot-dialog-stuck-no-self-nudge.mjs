@@ -44,6 +44,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //       are now TWO leadBoardTaskId-carrying events (ep1 -> T1 terminal, ep2 -> T2 open) — the buggy
 //       .find() would return ep1 (oldest), see T1 terminal, and wrongly file a THIRD task even though T2
 //       is open and should be reused; .findLast() returns ep2 (latest), sees T2 open, correctly reuses it.
+//   (I)-(L) Card b1da256d: `handleClaudeBootDialogResolved` — the RESOLVE half of the pair above. (I) a
+//       no-op with no prior unpaired stuck event. (J) pairs against an existing unpaired stuck event (set
+//       up via the REAL handleClaudeBootDialogStuck, never a hand-crafted row), filed under the SAME
+//       managerSessionId convention. (K) idempotent — a second call once already resolved appends nothing
+//       more. (J2) round 2 (item 2): a worker stuck under M1 then RELINKED to M2 before it resolves —
+//       the resolved row carries M1's managerSessionId/taskId (copied from the paired stuck row), never
+//       M2 (the worker's live parent at resolve time). (L) end-to-end through the REAL PtyHost: an on-time
+//       first hook on a never-stuck session fires the host callback exactly once, and the service reached
+//       through that real callback correctly no-ops (see claude-boot-dialog-stuck.mjs for the HOST-WIRING
+//       coverage of the resolve's own fire site — on/late SessionStart, a respawn's fresh incarnation, and
+//       the round-4 non-SessionStart-first-hook gap — which this service-level file deliberately does not
+//       duplicate). (M) round 2 (item 3a): the ONE host+service POSITIVE end-to-end case — a REAL fired
+//       dialogStuckTimer reaching the REAL handleClaudeBootDialogStuck, paired with a REAL non-SessionStart
+//       first hook reaching the REAL handleClaudeBootDialogResolved, both through real PtyHost callbacks.
 //
 // RED-BEFORE-GREEN (this project's own standing verification posture): run against the PRE-FIX
 // sessions/service.ts (`git show b3f908fd:packages/daemon/src/sessions/service.ts`, the round-1 tip) —
@@ -51,17 +65,35 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 // nudge to the stuck session too). (A) and (C) already pass unchanged (event recording and the no-parent
 // branch were never the defect). (E) is NEW in round 2 and has no pre-fix baseline of its own to compare
 // against — see the separate real-PtyHost block at the end of this file for round 2's own red-before-green
-// proof (isLiveAndPreBoot's `live.alive` check, run against a reverted copy that drops it).
+// proof (isLiveAndPreBoot's `live.alive` check, run against a reverted copy that drops it). (I)-(L) are new
+// code with no pre-fix baseline of their own; see claude-boot-dialog-stuck.mjs's own header for the
+// RED-BEFORE-GREEN proof covering the resolve's fire site (scenario 19, the round-4 gap).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
+  try {
+    return await sharedWaitUntil(pred, { timeoutMs, intervalMs, label: "claude-boot-dialog-stuck-no-self-nudge" });
+  } catch (err) {
+    if (err?.exhaustedOnThrow !== false) throw err;
+    return false;
+  }
+};
 
 const tmpHome = path.join(os.tmpdir(), `loom-cbdsns-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Round 2 (item 3a): shrunk so the (M) end-to-end block below can let the REAL dialogStuckTimer fire
+// rather than hand-crafting the stuck event. Must be set BEFORE pty/host.js is first dynamically
+// imported anywhere in this file (the constant is read at module-load time, same as
+// claude-boot-dialog-stuck.mjs's own top-of-file setting) — it is imported for the first time in the
+// (F)-(H) block below, so this must land here, ahead of every import in this file. Harmless for (F)-(L)
+// above: none of them wait on this timer actually firing.
+process.env.LOOM_CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS = "250";
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -361,6 +393,83 @@ try {
   }
   delete process.env.LOOM_DEV;
 
+  // ===================== Card b1da256d: handleClaudeBootDialogResolved — the RESOLVE half of the pair ====
+  // =====================     above. (I) no-op when there's no prior unpaired stuck event. (J) pairs =======
+  // =====================     against an existing unpaired stuck event (set up via the REAL ================
+  // =====================     handleClaudeBootDialogStuck, never a hand-crafted row), filed under the SAME ==
+  // =====================     managerSessionId convention (parentSessionId ?? sessionId). (K) idempotent — =
+  // =====================     a second call once the latest event is already resolved appends nothing more.
+  {
+    const ptyI = new PtyStub();
+    const sessionsI = new SessionService(db, ptyI, new OrchestrationControl());
+    const noHistory = `cbdsns-resolved-noop-${sfx}`;
+    mkSession({ id: noHistory, role: "worker" });
+
+    sessionsI.handleClaudeBootDialogResolved(noHistory);
+    check("(I) no-op: calling handleClaudeBootDialogResolved with no prior stuck history appends nothing",
+      db.listEventsForWorker(noHistory).filter((e) => e.kind === "claude_boot_dialog_resolved").length === 0);
+  }
+
+  {
+    const ptyJ = new PtyStub();
+    const sessionsJ = new SessionService(db, ptyJ, new OrchestrationControl());
+    const mgrJ = `cbdsns-resolved-pair-mgr-${sfx}`, wkrJ = `cbdsns-resolved-pair-wkr-${sfx}`;
+    mkSession({ id: mgrJ, role: "manager" });
+    mkSession({ id: wkrJ, role: "worker", parentSessionId: mgrJ });
+    ptyJ.setLive(mgrJ); ptyJ.setLive(wkrJ);
+    ptyJ.setPastBoot(mgrJ);
+
+    sessionsJ.handleClaudeBootDialogStuck(wkrJ, { timeoutMs: 150_000, signatureName: "workspace-trust", role: "worker" });
+    check("(J) (setup) exactly one unpaired stuck event exists",
+      db.listEventsForWorker(wkrJ).filter((e) => e.kind === "claude_boot_dialog_stuck").length === 1
+      && db.listEventsForWorker(wkrJ).filter((e) => e.kind === "claude_boot_dialog_resolved").length === 0);
+
+    sessionsJ.handleClaudeBootDialogResolved(wkrJ);
+    const resolvedEventsJ = db.listEventsForWorker(wkrJ).filter((e) => e.kind === "claude_boot_dialog_resolved");
+    check("(J) pairs against the unpaired stuck event: exactly one resolved event appended", resolvedEventsJ.length === 1);
+    check("(J) the resolved event is filed under the SAME managerSessionId convention (parentSessionId) as the stuck event", resolvedEventsJ[0]?.managerSessionId === mgrJ);
+    check("(J) the resolved event's workerSessionId names the affected session", resolvedEventsJ[0]?.workerSessionId === wkrJ);
+
+    sessionsJ.handleClaudeBootDialogResolved(wkrJ);
+    check("(K) idempotent: a second call once already resolved appends no second resolved event",
+      db.listEventsForWorker(wkrJ).filter((e) => e.kind === "claude_boot_dialog_resolved").length === 1);
+  }
+
+  // ===================== (J2) Card b1da256d round 2 (item 2): a worker stuck under M1 is RELINKED to M2 ===
+  // =====================      before it ever resolves — the resolved row must carry M1 (the paired stuck ===
+  // =====================      row's own managerSessionId/taskId), never M2 (the worker's CURRENT ============
+  // =====================      parentSessionId at resolve time) — proving handleClaudeBootDialogResolved =====
+  // =====================      copies from the stuck row it pairs with instead of re-deriving from the ======
+  // =====================      session's live parent (db.reparentLiveWorkers/relinkWorkerToManager can =======
+  // =====================      reparent between the two episodes). ============================================
+  {
+    const ptyJ2 = new PtyStub();
+    const sessionsJ2 = new SessionService(db, ptyJ2, new OrchestrationControl());
+    const m1 = `cbdsns-j2-m1-${sfx}`, m2 = `cbdsns-j2-m2-${sfx}`, wkrJ2 = `cbdsns-j2-wkr-${sfx}`;
+    const taskJ2 = `cbdsns-j2-task-${sfx}`;
+    mkSession({ id: m1, role: "manager" });
+    mkSession({ id: m2, role: "manager" });
+    mkSession({ id: wkrJ2, role: "worker", parentSessionId: m1, taskId: taskJ2 });
+    ptyJ2.setLive(m1); ptyJ2.setLive(m2); ptyJ2.setLive(wkrJ2);
+    ptyJ2.setPastBoot(m1); ptyJ2.setPastBoot(m2);
+
+    sessionsJ2.handleClaudeBootDialogStuck(wkrJ2, { timeoutMs: 150_000, signatureName: "workspace-trust", role: "worker" });
+    const stuckJ2 = db.listEventsForWorker(wkrJ2).filter((e) => e.kind === "claude_boot_dialog_stuck");
+    check("(J2) (setup) the stuck event is filed under M1", stuckJ2[stuckJ2.length - 1]?.managerSessionId === m1);
+
+    // Relink the worker onto M2 (mirrors a real recycle-settle reparent) BEFORE it ever resolves.
+    db.relinkWorkerToManager(wkrJ2, m2);
+    check("(J2) (setup) the worker's CURRENT parentSessionId is now M2", db.getSession(wkrJ2)?.parentSessionId === m2);
+
+    sessionsJ2.handleClaudeBootDialogResolved(wkrJ2);
+    const resolvedJ2 = db.listEventsForWorker(wkrJ2).filter((e) => e.kind === "claude_boot_dialog_resolved");
+    check("(J2) exactly one resolved event appended", resolvedJ2.length === 1);
+    check("(J2) the resolved row carries M1 (the paired stuck row's own managerSessionId) — never M2, the CURRENT parent at resolve time",
+      resolvedJ2[0]?.managerSessionId === m1);
+    check("(J2) the resolved row carries the paired stuck row's own taskId, not re-derived from the current session row",
+      resolvedJ2[0]?.taskId === taskJ2);
+  }
+
   db.close();
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -399,7 +508,111 @@ try {
   }
 }
 
+// ===================== (L) Card b1da256d — end-to-end through the REAL PtyHost (lead's own ruling: =========
+// =====================     "an on-time first hook on a session with NO stuck history files nothing — the ===
+// =====================     service no-op — end to end through the host spy"). Service-only tests can't ====
+// =====================     reproduce the Live-state wiring this proves: the real host's deliverHook must ===
+// =====================     actually fire onClaudeBootDialogResolved on the first hook, AND the service =====
+// =====================     reached through that real callback must correctly no-op for a never-stuck session.
+// =====================     Own FRESH Db (the main `db` above is already closed by this point) — mirrors ====
+// =====================     the F-H block's own independence from the main try/finally. ======================
+{
+  const { PtyHost } = await import("../dist/pty/host.js");
+  const { createSeamHost } = await import("./_seam-host-fixture.mjs");
+  // The main try/finally above already fs.rmSync'd tmpHome on its way out — recreate it (Db needs
+  // LOOM_HOME to exist; PtyHost's LOGS_DIR, resolved from LOOM_HOME at module-load time, needs it too).
+  fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
+  const dbL = new Db();
+  const projL = `cbdsns-l-proj-${sfx}`, agentL = `cbdsns-l-ag-${sfx}`;
+  dbL.insertProject({ id: projL, name: projL, repoPath: os.tmpdir(), vaultPath: os.tmpdir(), config: {}, createdAt: now, archivedAt: null });
+  dbL.insertAgent({ id: agentL, projectId: projL, name: "t", startupPrompt: "", position: 0 });
+  const ptyStub = new PtyStub();
+  const sessions = new SessionService(dbL, ptyStub, new OrchestrationControl());
+  let resolvedCalls = 0;
+  const events = {
+    onEngineSessionId() {}, onContextStats() {}, onRateLimited() {}, onExit() {}, onBusy() {},
+    onClaudeBootDialogResolved: (id) => { resolvedCalls++; sessions.handleClaudeBootDialogResolved(id); },
+  };
+  const host = new (createSeamHost(PtyHost))(events);
+  const id = `cbdsns-resolved-e2e-ontime-${sfx}`;
+  dbL.insertSession({
+    id, projectId: projL, agentId: agentL, engineSessionId: `eng-${id}`, title: null, cwd: os.tmpdir(),
+    processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "worker", parentSessionId: null, taskId: null, worktreePath: null, branch: null,
+  });
+  try {
+    host.spawn({
+      sessionId: id, cwd: tmpHome, role: "worker",
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    host.deliverHook(id, { hook_event_name: "SessionStart", session_id: `eng-${id}` });
+    check("(L) the real host's onClaudeBootDialogResolved callback fires exactly once for an on-time first hook", resolvedCalls === 1);
+    check("(L) the service correctly no-ops end-to-end — no claude_boot_dialog_resolved event for a session with no stuck history",
+      dbL.listEventsForWorker(id).filter((e) => e.kind === "claude_boot_dialog_resolved").length === 0);
+  } finally {
+    try { host.stop(id, "hard"); } catch { /* ignore */ }
+    dbL.close();
+  }
+}
+
+// ===================== (M) Card b1da256d round 2 (item 3a): ONE host+service POSITIVE end-to-end case — =
+// =====================     the REAL dialogStuckTimer fires (no dialog text fed, no SessionStart ever ======
+// =====================     delivered) and reaches the REAL handleClaudeBootDialogStuck via the real host ==
+// =====================     callback; a non-SessionStart first hook (PreToolUse) then flips ==================
+// =====================     anyHookObserved and fires the REAL handleClaudeBootDialogResolved, appending ===
+// =====================     the resolved row — the full pair end-to-end through REAL host wiring on BOTH ===
+// =====================     sides (the (L) block above only end-to-ends the no-op/never-stuck half).
+// =====================     LOOM_CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS is shrunk at the TOP of this file =====
+// =====================     (before pty/host.js's own first import, where the constant is read) so the =====
+// =====================     real timer fires in milliseconds instead of the real 150s default. =============
+{
+  const { PtyHost } = await import("../dist/pty/host.js");
+  const { createSeamHost } = await import("./_seam-host-fixture.mjs");
+  fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
+  const dbM = new Db();
+  const projM = `cbdsns-m-proj-${sfx}`, agentM = `cbdsns-m-ag-${sfx}`;
+  dbM.insertProject({ id: projM, name: projM, repoPath: os.tmpdir(), vaultPath: os.tmpdir(), config: {}, createdAt: now, archivedAt: null });
+  dbM.insertAgent({ id: agentM, projectId: projM, name: "t", startupPrompt: "", position: 0 });
+  const ptyStubM = new PtyStub();
+  const sessionsM = new SessionService(dbM, ptyStubM, new OrchestrationControl());
+  let stuckCalls = 0, resolvedCallsM = 0;
+  const events = {
+    onEngineSessionId() {}, onContextStats() {}, onRateLimited() {}, onExit() {}, onBusy() {},
+    onClaudeBootDialogStuck: (id, info) => { stuckCalls++; sessionsM.handleClaudeBootDialogStuck(id, info); },
+    onClaudeBootDialogResolved: (id) => { resolvedCallsM++; sessionsM.handleClaudeBootDialogResolved(id); },
+  };
+  const host = new (createSeamHost(PtyHost))(events);
+  const idM = `cbdsns-resolved-e2e-real-pair-${sfx}`;
+  dbM.insertSession({
+    id: idM, projectId: projM, agentId: agentM, engineSessionId: `eng-${idM}`, title: null, cwd: os.tmpdir(),
+    processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "worker", parentSessionId: null, taskId: null, worktreePath: null, branch: null,
+  });
+  try {
+    host.spawn({
+      sessionId: idM, cwd: tmpHome, role: "worker",
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    // No dialog text fed, no SessionStart delivered — this is the exact hang the detector exists to catch.
+    const stuckFired = await waitUntil(() => stuckCalls === 1, 3000);
+    check("(M) (setup) the REAL dialogStuckTimer fired and reached the real handleClaudeBootDialogStuck via the real host callback", stuckFired);
+    check("(M) the stuck event was durably recorded",
+      dbM.listEventsForWorker(idM).filter((e) => e.kind === "claude_boot_dialog_stuck").length === 1);
+
+    host.deliverHook(idM, { hook_event_name: "PreToolUse", session_id: `eng-${idM}`, tool_name: "mcp__loom-tasks__tasks_get" }); // NOT SessionStart
+    check("(M) a non-SessionStart first hook after the real alarm fires the REAL onClaudeBootDialogResolved callback exactly once", resolvedCallsM === 1);
+    const resolvedM = dbM.listEventsForWorker(idM).filter((e) => e.kind === "claude_boot_dialog_resolved");
+    check("(M) the real end-to-end flow appends exactly one resolved row", resolvedM.length === 1);
+    check("(M) the resolved row names the affected session", resolvedM[0]?.workerSessionId === idM);
+  } finally {
+    try { host.stop(idM, "hard"); } catch { /* ignore */ }
+    dbM.close();
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — handleClaudeBootDialogStuck always records the durable event (role + parentNudged included), notifies the parent manager only when it is LIVE and itself past boot, and never writes anything to the stuck session itself (the self-nudge that could confirm a live dialog is gone); a parent that is live but still pre-SessionStart, and the no-parent branch, are both event-only; an ABSENT parent (round 2 item 5) correctly goes through the ordinary durable enqueue instead of being silently withheld; and the real PtyHost.isLiveAndPreBoot correctly reads an unknown id and a dead-but-mapped id the same way (both false), never conflating either with a genuinely live, still-booting session."
+  ? "\n✅ ALL PASS — handleClaudeBootDialogStuck always records the durable event (role + parentNudged included), notifies the parent manager only when it is LIVE and itself past boot, and never writes anything to the stuck session itself (the self-nudge that could confirm a live dialog is gone); a parent that is live but still pre-SessionStart, and the no-parent branch, are both event-only; an ABSENT parent (round 2 item 5) correctly goes through the ordinary durable enqueue instead of being silently withheld; the real PtyHost.isLiveAndPreBoot correctly reads an unknown id and a dead-but-mapped id the same way (both false), never conflating either with a genuinely live, still-booting session; and (card b1da256d) handleClaudeBootDialogResolved no-ops with no prior stuck history, pairs against (and is idempotent against re-pairing) an existing unpaired stuck event, carries the PAIRED STUCK ROW's own managerSessionId/taskId even across an intervening relink to a new manager (round 2 item 2), correctly no-ops end-to-end through the REAL PtyHost for an on-time first hook on a never-stuck session, and (round 2 item 3a) correctly pairs a REAL fired dialogStuckTimer with a REAL non-SessionStart-first-hook resolve, end-to-end through real host wiring on both sides."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

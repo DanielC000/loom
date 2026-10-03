@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
+  activeBootStuckAlerts,
 } from "../src/lib/fleet.ts";
 
 let pass = 0;
@@ -139,6 +140,67 @@ check("isActiveWaitingSnooze is true only for an unexpired idle_report('waiting'
   assert.equal(isActiveWaitingSnooze(workingState, now), false, "a non-waiting state never excludes");
   assert.equal(isActiveWaitingSnooze(idleEscalated, now), false, "only idle_report (not idle_escalated) carries a snooze");
   assert.equal(isActiveWaitingSnooze(undefined, now), false, "no event at all → not snoozed");
+});
+
+// ── BOOT STUCK pairing (card b1da256d round 2, item 3b) — extracted out of lib/attention.ts ────────────
+
+let evSeq = 0;
+const bootEv = (o = {}) => ({
+  id: `ev-${++evSeq}`,
+  ts: o.ts ?? new Date(evSeq).toISOString(), // monotonically increasing by default
+  kind: o.kind ?? "claude_boot_dialog_stuck",
+  workerSessionId: o.workerSessionId ?? "sess-stuck-1",
+  managerSessionId: o.managerSessionId ?? "sess-stuck-1",
+  taskId: o.taskId ?? null,
+  detail: o.detail ?? { parentNudged: false },
+});
+const alwaysLive = () => true;
+const alwaysDead = () => false;
+
+check("activeBootStuckAlerts: a lone stuck event (nobody else addressed) on a LIVE session surfaces an alert", () => {
+  const stuck = bootEv({ workerSessionId: "sess-a", managerSessionId: "sess-a" });
+  const alerts = activeBootStuckAlerts([stuck], alwaysLive);
+  assert.equal(alerts.length, 1, "stuck only ⇒ item");
+  assert.equal(alerts[0].sessionId, "sess-a");
+  assert.equal(alerts[0].event.id, stuck.id);
+});
+
+check("activeBootStuckAlerts: a stuck event followed by its resolved counterpart clears the alert", () => {
+  const sid = "sess-b";
+  const stuck = bootEv({ workerSessionId: sid, managerSessionId: sid, ts: "2026-01-01T00:00:00.000Z" });
+  const resolved = bootEv({ workerSessionId: sid, managerSessionId: sid, kind: "claude_boot_dialog_resolved", detail: {}, ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeBootStuckAlerts([stuck, resolved], alwaysLive);
+  assert.equal(alerts.length, 0, "stuck then resolved ⇒ none");
+});
+
+check("activeBootStuckAlerts: a resolved event followed by a NEW stuck episode re-surfaces the alert", () => {
+  const sid = "sess-c";
+  const resolved = bootEv({ workerSessionId: sid, managerSessionId: sid, kind: "claude_boot_dialog_resolved", detail: {}, ts: "2026-01-01T00:00:00.000Z" });
+  const stuck = bootEv({ workerSessionId: sid, managerSessionId: sid, ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeBootStuckAlerts([resolved, stuck], alwaysLive);
+  assert.equal(alerts.length, 1, "resolved then stuck ⇒ item — latest wins, in EITHER order in the input array");
+  assert.equal(alerts[0].sessionId, sid);
+});
+
+check("activeBootStuckAlerts: a stuck session that's no longer live is dropped — nobody can act on it anymore", () => {
+  const stuck = bootEv({ workerSessionId: "sess-d", managerSessionId: "sess-d" });
+  const alerts = activeBootStuckAlerts([stuck], alwaysDead);
+  assert.equal(alerts.length, 0, "a non-live session ⇒ none");
+});
+
+check("activeBootStuckAlerts: a stuck event where someone else WAS addressed (parentNudged:true) never surfaces", () => {
+  const stuck = bootEv({ workerSessionId: "sess-e", managerSessionId: "sess-e", detail: { parentNudged: true } });
+  const alerts = activeBootStuckAlerts([stuck], alwaysLive);
+  assert.equal(alerts.length, 0, "parentNudged:true ⇒ none");
+});
+
+check("activeBootStuckAlerts: unsorted input is sorted internally — order of the array passed in doesn't matter", () => {
+  const sid = "sess-f";
+  const stuck = bootEv({ workerSessionId: sid, managerSessionId: sid, ts: "2026-01-01T00:00:00.000Z" });
+  const resolved = bootEv({ workerSessionId: sid, managerSessionId: sid, kind: "claude_boot_dialog_resolved", detail: {}, ts: "2026-01-01T00:00:01.000Z" });
+  // Pass resolved BEFORE stuck in array order — the function must sort by `ts`, not trust array order.
+  const alerts = activeBootStuckAlerts([resolved, stuck], alwaysLive);
+  assert.equal(alerts.length, 0, "still clears — sorted by ts internally, not by array position");
 });
 
 console.log(`\n${pass} passed`);

@@ -9684,6 +9684,34 @@ export class SessionService {
   }
 
   /**
+   * The RESOLVE half of `claude_boot_dialog_stuck`/`claude_boot_dialog_resolved`. Fired from
+   * `pty/host.ts`'s `deliverHook` on the first hook of every Live incarnation, whether or not this
+   * session was ever stuck. Derives the pairing decision from durable event history alone (never
+   * in-memory `Live` state), via `listEventsForWorkerKinds` (kind-filtered — cheap even for a session
+   * with a long, unrelated event history). Wrapped so a DB fault here can never escape into
+   * `deliverHook`'s caller.
+   *
+   * @decision b1da256d — copy `managerSessionId`/`taskId` from the paired stuck row (`latest`), never
+   * re-derive them from the session's current `parentSessionId`/`taskId` — a reparent/relink between
+   * the two episodes would split one logical pair across two different managers.
+   */
+  handleClaudeBootDialogResolved(sessionId: string): void {
+    try {
+      const trail = this.db.listEventsForWorkerKinds(sessionId, ["claude_boot_dialog_stuck", "claude_boot_dialog_resolved"]);
+      const latest = trail[trail.length - 1];
+      if (!latest || latest.kind !== "claude_boot_dialog_stuck") return; // no-op: nothing unpaired to resolve
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: latest.managerSessionId,
+        workerSessionId: sessionId, taskId: latest.taskId,
+        kind: "claude_boot_dialog_resolved", detail: {},
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[claude-boot-dialog-stuck] ${sessionId} handleClaudeBootDialogResolved threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+
+  /**
    * @decision b987f086 — fired ONCE per spawn (fresh/resume/fork/recycle each re-evaluate and may fire
    * again); this is a spawn-time report, never a retry ladder like `onCodexSubmitUnconfirmed`'s.
    */

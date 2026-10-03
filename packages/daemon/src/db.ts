@@ -1643,7 +1643,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   "manager_exited_with_live_workers", "fleet_resume_failed", "manager_crash_resume_failed",
   "parked_manager_workers_unresumed", "fleet_resume_entry_failed", "setup_resume_superseded", "rate_limit_bailed", "usage_latch_cleared", "session_message_gave_up",
   "paste_length_loss", "paste_tripwire_give_up", "prompt_mismatch_unresolved", "repeated_tool_call",
-  "codex_submit_unconfirmed", "codex_boot_stuck", "claude_boot_dialog_stuck", "codex_unsupported_capability", "harness_default_skipped", "harness_role_forced_claude", "codex_isolation_gap_disclosed", "companion_zero_reply_detected",
+  "codex_submit_unconfirmed", "codex_boot_stuck", "claude_boot_dialog_stuck", "claude_boot_dialog_resolved", "codex_unsupported_capability", "harness_default_skipped", "harness_role_forced_claude", "codex_isolation_gap_disclosed", "companion_zero_reply_detected",
   // Owner-interaction records (ruled durable — lead gen 345, low volume, provenance IS the value)
   "question_asked", "question_amended", "request_escalated", "task_held_cleared",
 ]);
@@ -6925,6 +6925,19 @@ export class Db {
   listEventsForWorker(workerSessionId: string): OrchestrationEvent[] {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE worker_session_id = ? ORDER BY ts, rowid")
       .all(workerSessionId) as Row[]).map(toOrchestrationEvent);
+  }
+  /**
+   * Card b1da256d — `listEventsForWorker`'s kind-bounded sibling: same worker scope and `ts, rowid`
+   * ordering/tiebreak, but filtered to `kinds` server-side so a caller that only cares about a small,
+   * known pairing (e.g. `claude_boot_dialog_stuck`/`claude_boot_dialog_resolved`) never pays for reading
+   * this session's ENTIRE event history just to find the last of two kinds in it.
+   */
+  listEventsForWorkerKinds(workerSessionId: string, kinds: readonly OrchestrationEventKind[]): OrchestrationEvent[] {
+    if (kinds.length === 0) return [];
+    const placeholders = kinds.map(() => "?").join(",");
+    return (this.db.prepare(
+      `SELECT * FROM orchestration_events WHERE worker_session_id = ? AND kind IN (${placeholders}) ORDER BY ts, rowid`,
+    ).all(workerSessionId, ...kinds) as Row[]).map(toOrchestrationEvent);
   }
   /**
    * Card 42daa283 — every event of one kind whose `detail.branch` is `branch`, chronological. The branch-keyed lookup behind the

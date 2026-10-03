@@ -418,6 +418,10 @@ async function main(): Promise<void> {
     // recipient shape as handleCodexBootStuck rather than inventing a new one. See
     // PtyHostEvents.onClaudeBootDialogStuck's own doc / SessionService.handleClaudeBootDialogStuck's own doc.
     onClaudeBootDialogStuck: (sessionId, info) => sessions.handleClaudeBootDialogStuck(sessionId, info),
+    // Card b1da256d: the RESOLVE half — fired on the first hook of every Live incarnation (see
+    // PtyHostEvents.onClaudeBootDialogResolved's own doc). `sessions` decides whether there's an unpaired
+    // claude_boot_dialog_stuck to pair against; see SessionService.handleClaudeBootDialogResolved's own doc.
+    onClaudeBootDialogResolved: (sessionId) => sessions.handleClaudeBootDialogResolved(sessionId),
     // Card b987f086: a codex spawn declared a capability (a stdio MCP server, or codescape) this harness
     // structurally cannot mount — `sessions` (forward reference, same pattern as onCodexBootStuck above)
     // decides how to record the durable event + fail loud to the recipient AND the sender/manager. See

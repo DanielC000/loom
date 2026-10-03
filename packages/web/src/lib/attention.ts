@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
+import { BOOT_DIALOG_DETECTOR_ROLES } from "@loom/shared";
 import { api } from "./api";
-import { hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
+import { activeBootStuckAlerts, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -151,6 +152,28 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   // permanent attention items. Only a live manager's pending reviews / idle states are actionable.
   const managers = all.filter((s) => s.role === "manager" && s.processState === "live");
 
+  // Card b1da256d (ported from e2a3c613's round 2-3 draft, cut at round 4): a boot-dialog-stuck session
+  // with NO live parent to notify (a manager, the platform Lead, or a parentless worker/setup/run/
+  // assistant) files its own `claude_boot_dialog_stuck` event under ITS OWN id (handleClaudeBootDialogStuck's
+  // `managerSessionId: s?.parentSessionId ?? sessionId`) — never fetched by the `managers` query above
+  // (role !== "manager", or role === "manager" but this is deliberately a SEPARATE query set so widening
+  // it can't also start surfacing Lead idle/context events, a different card's scope). "no parentSessionId"
+  // is the exact structural condition the daemon itself uses to decide nobody else was addressed. Round 2
+  // (item 4): also restrict to `BOOT_DIALOG_DETECTOR_ROLES` (imported from `@loom/shared`, never copied by
+  // hand — the daemon's own `pty/host.ts` re-exports the same constant) — a role outside that set (e.g.
+  // "operator") can never arm the detector at all, so fanning out a per-session event query for one is
+  // pure waste. `queryKey` deliberately matches the one above so a session that's in both sets (a live
+  // manager) shares one cached fetch, not two.
+  const bootStuckCandidates = all.filter((s) =>
+    s.processState === "live" && !s.parentSessionId && !!s.role && BOOT_DIALOG_DETECTOR_ROLES.includes(s.role));
+  const bootStuckEventQueries = useQueries({
+    queries: bootStuckCandidates.map((m) => ({
+      queryKey: ["orchEvents", m.id],
+      queryFn: () => api.orchestrationEvents(m.id),
+      refetchInterval: 4000,
+    })),
+  });
+
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
       queryKey: ["orchEvents", m.id],
@@ -158,7 +181,15 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
       refetchInterval: 4000,
     })),
   });
+  // Round 2 (Code Review e5290bc2 MAJOR): do NOT merge bootStuckEventQueries into allEvents — that made
+  // every bootStuckCandidate's event stream (the Platform Lead, setup, assistant, top-level runs) feed
+  // latestIdle/latestContext/latestQuiet/latestMerge below, so a parentless session's idle_report/
+  // context_escalated/board_quiet_cause/merge_request events wrongly surfaced as MANAGER ASLEEP / CONTEXT
+  // OVERFLOW / QUIET BOARD / MERGE REQUEST items — and a live manager (in BOTH sets) had its events
+  // double-counted. `allEvents` stays scoped to `managers` alone; `bootStuckEventQueries` feeds ONLY
+  // `activeBootStuckAlerts` below, from its own separate flattened list.
   const allEvents = eventQueries.flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? []);
+  const bootStuckEvents = bootStuckEventQueries.flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? []);
 
   const sortedEvents = [...allEvents].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
 
@@ -170,6 +201,12 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
       latestMerge.set(e.taskId || e.workerSessionId || e.id, e);
     }
   }
+
+  // Card b1da256d round 2 (item 3b): the pairing/sort/liveness-drop logic itself now lives in the pure,
+  // unit-tested `activeBootStuckAlerts` (lib/fleet.ts) — see that function's own doc for the
+  // parentNudged filter, the workerSessionId keying rationale, and the latest-wins/non-live-drop rules.
+  const activeBootStuck = activeBootStuckAlerts(bootStuckEvents, (sessionId) =>
+    all.find((s) => s.id === sessionId)?.processState === "live");
 
   // Asleep-at-the-Wheel watchdog (Task 4): surface the manager's LATEST idle disposition. An
   // `idle_escalated` (slept through every nudge) or an `idle_report` with state done is
@@ -263,6 +300,13 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
         text: `${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)} ` : ""}${e.taskId ? `task ${e.taskId.slice(0, 8)} ` : ""}— awaiting review`,
       });
     }
+  }
+  for (const { event: e, sessionId: sid } of activeBootStuck) {
+    const detail = (e.detail ?? {}) as { signatureName?: string | null; role?: string | null; timeoutMs?: number };
+    items.push({
+      key: `bs-${e.id}`, tone: "red", kind: "BOOT STUCK", sessionId: sid,
+      text: `${detail.role ?? "session"} ${sid.slice(0, 8)} never reached SessionStart — possible blocking CLI dialog (${detail.signatureName ?? "none recognized"})`,
+    });
   }
   for (const e of latestIdle.values()) {
     const detail = (e.detail ?? {}) as { state?: string; detail?: string; unanswered?: number };

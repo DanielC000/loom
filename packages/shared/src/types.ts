@@ -507,6 +507,16 @@ export function usesOrchestrationMcp(role: SessionRole | null): boolean {
   return role === "manager" || role === "worker" || role === "assistant";
 }
 
+// Card b1da256d: moved here from `pty/host.ts` (which re-exports both for its own existing
+// importers) so `packages/web` — daemon-unreachable — can read this role list too.
+/** @decision 8dd1dd1c — human-prompt disallow gate ONLY; see {@link BOOT_DIALOG_DETECTOR_ROLES} for the
+ *  stuck-dialog detector's own, deliberately separate, role set. */
+export const LOOM_DRIVEN_ROLES: readonly SessionRole[] = ["worker", "setup", "auditor", "workspace-auditor", "run", "assistant"];
+
+/** @decision e2a3c613 — the boot-dialog-stuck detector's own role set, kept separate from
+ *  {@link LOOM_DRIVEN_ROLES} so manager/platform coverage here never leaks into disallowedToolsForRole. */
+export const BOOT_DIALOG_DETECTOR_ROLES: readonly SessionRole[] = [...LOOM_DRIVEN_ROLES, "manager", "platform"];
+
 // --- Agent Runs (R2): the AgentRun primitive ------------------------------------------------------
 /**
  * An AgentRun's lifecycle status (Agent Runs R2). queued/starting/running are in-flight; the rest are
@@ -1573,6 +1583,19 @@ export type OrchestrationEventKind =
   // @decision 01160ae3 — never a nudge to the AFFECTED session itself (see that record): it would be
   // typed into the live dialog and its Enter would confirm the dialog's highlighted option.
   | "claude_boot_dialog_stuck"
+  // Card b1da256d — the RESOLVE half of the pair above: `claude_boot_dialog_stuck` paired against a LATER
+  // `claude_boot_dialog_resolved` for the same session, latest-wins, exactly like `merge_request`/
+  // `merge_done`. Filed by `SessionService.handleClaudeBootDialogResolved`, fired from `pty/host.ts`'s
+  // `deliverHook` the first time `Live.anyHookObserved` flips false→true for a given Live incarnation
+  // (covers an on-time/late SessionStart AND a non-SessionStart first hook under READY_FALLBACK alike —
+  // see that handler's own doc for why this is NOT scoped to the `SessionStart` case). A no-op (nothing
+  // appended) when the latest event for this session isn't an unpaired `claude_boot_dialog_stuck`.
+  // workerSessionId = the affected session itself, managerSessionId = `s?.parentSessionId ?? sessionId`
+  // (same fallback as the stuck event); `detail` is always `{}` — nothing more to say than "resolved".
+  // Never classified into the owner-attention surfaces (companion/attention-push.ts's `classify()` returns
+  // null for it — a resolve clears an alert, it is never itself a fresh one) and never added to
+  // `EVENT_TRIGGER_EVENT_KINDS`, for the identical reason.
+  | "claude_boot_dialog_resolved"
   // Card b987f086 — a codex spawn declared ≥1 capability the harness structurally cannot mount: either an
   // MCP server this session resolved is not `{type:"http"}` (codex has no stdio-MCP-server concept — see
   // pty/codex-host.ts's `unsupportedCodexMcpServers`), or the project's `codescape.enabled` is true (codex
@@ -1801,7 +1824,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, fleet_resume_entry_failed: true, setup_resume_superseded: true,
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
   discovery_block_injection: true,
-  codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
+  codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
   codex_auto_commit: true,
   credential_revoked: true,
   credential_undeliverable: true,
