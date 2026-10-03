@@ -1516,12 +1516,15 @@ async function main(): Promise<void> {
   // rest a continuation nudge, and honors a parked session's usage hold. Best-effort + runs once.
   if (restartIntent) {
     clearRestartIntent();
-    const { resumed, skippedParked, failed, retiredSkipped } = sessions.resumeFleetOnBoot(restartIntent);
+    const { resumed, skippedParked, failed, retiredSkipped, setupResumeSuperseded } = sessions.resumeFleetOnBoot(restartIntent);
     console.log(
       `[boot] self-host restart: resumed ${resumed.length} session(s) across the fleet` +
       (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +
       (failed.length ? `, ${failed.length} unresumable (skipped)` : "") +
       (retiredSkipped.length ? `, ${retiredSkipped.length} skipped as a retired recycle successor (see the reconcile line above)` : "") +
+      // Card 39b58667: EXPECTED housekeeping (a stale duplicate setup row collapsing), never a failure —
+      // logged separately from `failed` above on purpose.
+      (setupResumeSuperseded.length ? `, ${setupResumeSuperseded.length} stale duplicate setup session(s) superseded (see setup_resume_superseded)` : "") +
       ` (requester ${restartIntent.managerSessionId.slice(0, 8)})`,
     );
   } else if (crashOrphanedWorkers.length > 0 || crashOrphanedManagers.length > 0) {

@@ -1,4 +1,4 @@
-import { MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
+import { MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 
 /**
  * The shared tail appended to EVERY auto-resume nudge — both the daemon-restart fleet resume
@@ -111,7 +111,7 @@ export function buildBlockedResumeNudgeBody(prefix: string, extra = ""): string 
 export const RESUME_FAILURE_REASON_MAX_CHARS = 200;
 
 /**
- * Fail-closed ALLOWLIST of `resume()`'s own 7 static throw messages (sessions/service.ts) — the only
+ * Fail-closed ALLOWLIST of `resume()`'s own 8 static throw messages (sessions/service.ts) — the only
  * reason strings `normalizeResumeOneResult` ever passes through verbatim. Anything else (whatever
  * `resume()` re-throws from its `pty.spawn()` call, e.g. an OS error naming a host path or a session
  * uuid) is replaced with a generic, identity-free fallback. Deliberately an ALLOWLIST, not a
@@ -132,6 +132,10 @@ export const RESUME_KNOWN_SAFE_REASONS: ReadonlySet<string> = new Set([
   // entry it was silently rewritten to RESUME_UNKNOWN_REASON_FALLBACK, masking a barred-project resume
   // as a generic fault in fleet_resume_failed/manager_crash_resume_failed and the Lead's nudge.
   MANAGER_SESSION_BARRED_ERROR,
+  // @decision 39b58667 — a setup session's own resume() throws this verbatim (identity-free), same
+  // reasoning as MANAGER_SESSION_BARRED_ERROR above (the properly-intercepted setup-singleton collapse
+  // itself never reaches this allowlist — resumeFleetOnBoot's own interception consumes it first).
+  SETUP_SESSION_RESUME_BARRED_ERROR,
 ]);
 
 /** The sanitized stand-in for any resume-failure reason NOT on {@link RESUME_KNOWN_SAFE_REASONS}. */

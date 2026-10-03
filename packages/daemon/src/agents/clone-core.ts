@@ -19,6 +19,12 @@ export function managerSessionBarredFrom(project: Pick<Project, "reserved" | "re
 export const MANAGER_SESSION_BARRED_ERROR =
   "refusing to start a manager session: a manager session can never start in this project (it is a reserved/system project, or its repoPath is the workspace home or an ancestor of it)";
 
+// @decision 39b58667 — resume()'s setup-singleton refusal, hosted here (not service.ts) so
+// resume-nudge.ts's RESUME_KNOWN_SAFE_REASONS can list it with no circular import — same reason
+// MANAGER_SESSION_BARRED_ERROR lives here; service.ts re-exports it unchanged for its own importers.
+export const SETUP_SESSION_RESUME_BARRED_ERROR =
+  "refusing to resume: a live setup session already exists for this agent (the Setup operator is a singleton — never two LIVE setup sessions)";
+
 // @decision ced4285e — shared by createAgentCore AND the Platform Lead's reassignment surfaces so the
 // create-time and reassign-time reserved-project/manager-role checks cannot drift apart.
 // @decision d25e4ea7 — keys on the unified `managerSessionBarredFrom`, not `project.reserved` alone, so

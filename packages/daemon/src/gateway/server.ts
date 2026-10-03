@@ -23,7 +23,7 @@ import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
-import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR } from "../sessions/service.js";
+import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
@@ -5633,7 +5633,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     } catch (e) {
       // Card 15806f81: mirrors the /fork route's own honest-4xx mapping below — MANAGER_SESSION_BARRED_ERROR
       // was falling through to a generic 500 here (resume() has thrown it since 6ed0f922).
-      if (e instanceof Error && e.message === MANAGER_SESSION_BARRED_ERROR) return reply.code(409).send({ error: e.message });
+      // Card 39b58667: same honest-4xx treatment for resume()'s own setup-singleton refusal.
+      if (e instanceof Error && (e.message === MANAGER_SESSION_BARRED_ERROR || e.message === SETUP_SESSION_RESUME_BARRED_ERROR)) {
+        return reply.code(409).send({ error: e.message });
+      }
       throw e;
     }
   });

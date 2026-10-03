@@ -1652,6 +1652,18 @@ export type OrchestrationEventKind =
   // case classify() above deliberately does NOT alert on — unlike attention-push, an event trigger has no
   // equivalent `resumeFailed` filter.
   | "fleet_resume_entry_failed"
+  // Card 39b58667 — `resumeFleetOnBoot` found a role-"setup" entry whose resume() call refused with
+  // SETUP_SESSION_RESUME_BARRED_ERROR: a historical duplicate "live" setup row (both DB-flagged live
+  // from before this restart) collapsing onto its already-(re-)resumed sibling. EXPECTED housekeeping,
+  // never a `fleet_resume_failed`/`fleet_resume_entry_failed` entry — the Setup operator is a singleton
+  // (decision ad131671), so exactly one of the two surviving is the correct, intended outcome, not a
+  // crash. Filed under the SUPERSEDED (losing) session's own id (managerSessionId = workerSessionId =
+  // sessionId — a setup session has no parent). `detail` carries { agentId, projectId, supersededBy:
+  // string | null } — the WINNING sibling's id, re-derived at file time (null only if it can no longer be
+  // found, defensive). Which of two stale-live rows wins is ORDER-DEPENDENT (resumeFleetOnBoot's entries
+  // loop is unspecified order) — acceptable, since both rows are the same agent's operator and either
+  // surviving is equally correct.
+  | "setup_resume_superseded"
   // Canonical main advanced between a batch worktree being cut and its post-gate fast-forward, so the
   // batch's single gate never validated main's real current tree — abandoned, every candidate falls
   // back to its own individual gate. Filed under the confirming MANAGER; `detail` carries
@@ -1786,7 +1798,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   companion_home_cleared: true, companion_reminder_rerouted: true, companion_unbound_route_refused: true,
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
-  manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, fleet_resume_entry_failed: true,
+  manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, fleet_resume_entry_failed: true, setup_resume_superseded: true,
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,

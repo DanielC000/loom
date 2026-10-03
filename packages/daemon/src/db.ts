@@ -1641,7 +1641,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   // Incident / forensic record
   "session_died", "session_recovery_abandoned", "worker_report_undelivered", "worker_exited_without_report",
   "manager_exited_with_live_workers", "fleet_resume_failed", "manager_crash_resume_failed",
-  "parked_manager_workers_unresumed", "fleet_resume_entry_failed", "rate_limit_bailed", "usage_latch_cleared", "session_message_gave_up",
+  "parked_manager_workers_unresumed", "fleet_resume_entry_failed", "setup_resume_superseded", "rate_limit_bailed", "usage_latch_cleared", "session_message_gave_up",
   "paste_length_loss", "paste_tripwire_give_up", "prompt_mismatch_unresolved", "repeated_tool_call",
   "codex_submit_unconfirmed", "codex_boot_stuck", "claude_boot_dialog_stuck", "codex_unsupported_capability", "harness_default_skipped", "harness_role_forced_claude", "codex_isolation_gap_disclosed", "companion_zero_reply_detected",
   // Owner-interaction records (ruled durable — lead gen 345, low volume, provenance IS the value)

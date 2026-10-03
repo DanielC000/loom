@@ -23,7 +23,7 @@ import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProce
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
-import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
+import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
@@ -2209,6 +2209,10 @@ export class CodexForkUnsupportedError extends Error {
 export const SETUP_SESSION_FORK_BARRED_ERROR =
   "refusing to fork: a live setup session already exists for this agent (the Setup operator is a singleton — never two LIVE setup sessions)";
 
+// @decision 39b58667 — hosted in clone-core.ts (circular-import reasons); re-exported here unchanged
+// for this module's existing importers (gateway/server.ts, the test suite).
+export { SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
+
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
   /**
@@ -3565,10 +3569,17 @@ export class SessionService {
     return { ...session, processState: "live" };
   }
 
-  // @decision ad131671 — the ONE lookup for "is a live setup session already attached to this agent";
-  // startSetup's reuse and forkSession's refusal both call this, never re-derive it inline.
+  // @decision ad131671 — the ONE lookup for DB-flagged-live setup sessions for an agent; startSetup,
+  // forkSession, and resume() all route through this (via liveSetupSession below, or directly — see
+  // card 39b58667's record) instead of re-deriving `db.liveSessions(...).filter(role==="setup")`.
+  private liveSetupSessions(agentId: string): Session[] {
+    return this.db.liveSessions(agentId).filter((s) => s.role === "setup");
+  }
+
+  // Thin, UNCHANGED-behavior wrapper over liveSetupSessions — startSetup's reuse and forkSession's
+  // refusal both call this exactly as before (first/most-recently-active DB-flagged-live match).
   private liveSetupSession(agentId: string): Session | undefined {
-    return this.db.liveSessions(agentId).find((s) => s.role === "setup");
+    return this.liveSetupSessions(agentId)[0];
   }
 
   // HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"setup"}) — no agent/MCP path mints one
@@ -3814,6 +3825,14 @@ export class SessionService {
         },
       });
       throw new Error(MANAGER_SESSION_BARRED_ERROR);
+    }
+    // @decision 39b58667 — never key this on the raw DB "live" flag (it can disagree with real pty
+    // liveness: a phantom-live row, or a sibling flipped live moments earlier in the same boot loop) and
+    // never add an allowSuperseded bypass — check this session's SIBLING via verified `pty.isAlive`.
+    if (session.role === "setup") {
+      const verifiedLiveSibling = this.liveSetupSessions(session.agentId)
+        .find((s) => s.id !== session.id && this.pty.isAlive(s.id));
+      if (verifiedLiveSibling) throw new Error(SETUP_SESSION_RESUME_BARRED_ERROR);
     }
     const config = resolveConfig(project.config);
     // @decision e98877b1 — on agent-row-missing resume, still apply the role-keyed pin via
@@ -5609,7 +5628,7 @@ export class SessionService {
     // signature; a hermetic test injects a fixed result so it can assert the withheld-vs-emitted "code is
     // live" wording deterministically, without a real git checkout + rebuilt dist.
     opts: { resumeOne?: (id: string) => ResumeOneResult; now?: Date; deployStaleness?: DeployStalenessResult } = {},
-  ): { resumed: string[]; skippedParked: string[]; failed: string[]; retiredSkipped: string[] } {
+  ): { resumed: string[]; skippedParked: string[]; failed: string[]; retiredSkipped: string[]; setupResumeSuperseded: string[] } {
     const now = opts.now ?? new Date();
     const deployStaleness = opts.deployStaleness ?? currentDeployStaleness();
     // Card ee05750e: the reason a resume attempt failed now survives past the bare boolean this used to
@@ -5630,6 +5649,10 @@ export class SessionService {
     const resumed: string[] = [];
     const skippedParked: string[] = [];
     const failed: string[] = [];
+    // @decision 39b58667 — a setup-singleton collapse (resume() throwing SETUP_SESSION_RESUME_BARRED_ERROR
+    // for a stale duplicate setup row) is EXPECTED boot housekeeping, not a crash — kept OUT of `failed`
+    // (which feeds the unconditional fleet_resume_failed "worker-crashed" owner page) and tracked here instead.
+    const setupResumeSuperseded: string[] = [];
     // Card 5a9a963b: identity for each fleet-wide resume failure, captured alongside `failed` itself so
     // the Platform Lead (the one recipient with cross-project reach — `list_all_sessions` — to actually
     // investigate one) can be told WHICH session, not just a count. Read from the captured
@@ -5871,7 +5894,28 @@ export class SessionService {
       let resumeOk = false;
       try {
         const parked = isParked(e.sessionId);
-        const attempt = normalizeResumeOneResult(resumeOne(e.sessionId));
+        const rawAttempt = resumeOne(e.sessionId);
+        // @decision 39b58667 — check the RAW reason (before normalizeResumeOneResult sanitizes it away)
+        // and never push this into `failed` — a setup-singleton collapse must never feed fleet_resume_failed.
+        if (e.role === "setup" && typeof rawAttempt === "object" && rawAttempt && rawAttempt.ok === false
+          && rawAttempt.reason === SETUP_SESSION_RESUME_BARRED_ERROR) {
+          setupResumeSuperseded.push(e.sessionId);
+          const agentId = this.db.getSession(e.sessionId)?.agentId ?? null;
+          const winnerId = agentId
+            ? this.liveSetupSessions(agentId).find((s) => s.id !== e.sessionId && this.pty.isAlive(s.id))?.id ?? null
+            : null;
+          try {
+            this.db.appendEvent({
+              id: randomUUID(), ts: now.toISOString(), managerSessionId: e.sessionId, workerSessionId: e.sessionId,
+              taskId: null, kind: "setup_resume_superseded",
+              detail: { agentId, projectId: this.db.getSession(e.sessionId)?.projectId ?? null, supersededBy: winnerId },
+            });
+          } catch (appendErr) {
+            console.warn(`[restart] appendEvent(setup_resume_superseded) failed for ${e.sessionId.slice(0, 8)}: ${(appendErr as Error)?.message ?? appendErr}`);
+          }
+          continue;
+        }
+        const attempt = normalizeResumeOneResult(rawAttempt);
         if (!attempt.ok) { failed.push(e.sessionId); failedDetail.push(captureFailureDetail(e, attempt.reason)); continue; }
         resumed.push(e.sessionId);
         resumeOk = true;
@@ -6242,7 +6286,7 @@ export class SessionService {
     // call already ran (idempotent via `aggregateFiled`) or nothing in the fleet failed.
     fileFleetResumeFailedAggregate();
 
-    return { resumed, skippedParked, failed, retiredSkipped };
+    return { resumed, skippedParked, failed, retiredSkipped, setupResumeSuperseded };
   }
 
   /**

@@ -25,16 +25,44 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     requester shape) — the OLD code set `reqNudgeSent = true` only AFTER the call returned, so a throw
 //     mid-call left it `false` and the catch block sent a SECOND, contradictory fallback nudge on top of
 //     the one already persisted. RED under the pre-round-2 ordering (flag set after, not before, the call).
+// Card 39b58667 adds:
+// (H) a setup-singleton boot collapse (two "setup" rows for one agent, both DB-flagged live before the
+//     restart) is EXPECTED housekeeping, never a `failed`/fleet_resume_failed crash signal — the loser
+//     lands in `setupResumeSuperseded` and files one informational setup_resume_superseded event naming
+//     both ids. (H-neg-1)/(H-neg-2) control that the interception is scoped to the EXACT reason string
+//     AND role "setup" — a genuinely-unresumable setup row, or that same reason text on a non-setup
+//     entry, must still count as a real failure.
+// (H-real) drives REAL resume() (no resumeOne stub) through a real PtyHost/SeamHost, proving the
+//     interception also catches the reason text as resume()'s own thrown Error.message actually arrives,
+//     wrapped by resumeFleetOnBoot's default resumeOne — not just the shape a test hand-constructs.
+// Round 2 (Code Review 8f29fece, Minor 1): (H-neg-2) used to seed its reason-bearing entry as the
+//     restart REQUESTER — which the per-entry loop skips entirely (`if (e.sessionId === reqId)
+//     continue;`), so it never reached the interception in the first place and stayed green even with
+//     the `e.role === "setup"` gate removed. Fixed: a separate, non-requester WORKER entry under the
+//     requester now carries the reason text instead.
 // Run: 1) build daemon, 2) node test/restart-fleet-entry-crash-guard.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execSync } from "node:child_process";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rfecg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+// (H-real) below drives REAL resume() (no resumeOne stub) through a real PtyHost/SeamHost — it needs a
+// sandboxed HOME/USERPROFILE so engineTranscriptExists resolves against a fixture transcript rather than
+// the real user's ~/.claude/projects. Must be set BEFORE any dist import below: claude-transcript.ts's
+// CLAUDE_PROJECTS_ROOT is a module-load-time const (os.homedir() captured once at import).
+const rfecgSandboxHome = path.join(process.env.LOOM_HOME, "home");
+fs.mkdirSync(rfecgSandboxHome, { recursive: true });
+process.env.USERPROFILE = rfecgSandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = rfecgSandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
-const { SessionService } = await import("../dist/sessions/service.js");
+const { SessionService, SETUP_SESSION_RESUME_BARRED_ERROR } = await import("../dist/sessions/service.js");
+const { PtyHost } = await import("../dist/pty/host.js");
+const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
+const { commitAll } = await import("./_git-commit.mjs");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { RESUME_UNKNOWN_REASON_FALLBACK } = await import("../dist/orchestration/resume-nudge.js");
 const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
@@ -420,6 +448,203 @@ try {
   check("(G) exactly ONE message reaches the queue — no contradictory fallback double-send (Minor-2b fix)", msgsG.length === 1);
   check("(G) that one message is the real 'code is live' nudge, not the fallback 'unexpected error' text",
     msgsG.length === 1 && /now LIVE/.test(msgsG[0]) && !/unexpected error/i.test(msgsG[0]));
+
+  // ============================ (H) CARD 39b58667: A SETUP-SINGLETON BOOT COLLAPSE IS HOUSEKEEPING, NEVER A CRASH ============================
+  // Two "setup" rows for ONE agent were BOTH DB-flagged live before this restart (a historical duplicate —
+  // exactly what resume()'s new singleton refusal now prevents going forward). resumeOne for the LOSER
+  // (sB) returns {ok:false, reason: SETUP_SESSION_RESUME_BARRED_ERROR} — the shape resume() itself now
+  // throws. This must NOT land in `failed`/fire the unconditional fleet_resume_failed "worker-crashed"
+  // aggregate; it must land in `setupResumeSuperseded`, file ONE informational setup_resume_superseded
+  // event naming both ids, and get NO continuation nudge. `isAlive` tracks a configurable alive-id set
+  // (unlike PtyStub's hardcoded `false`) so the WINNER (sA) resolves as genuinely alive for the
+  // `supersededBy` re-derivation inside the interception — mirrors a real post-resume pty.
+  class AliveTrackingPtyStub {
+    constructor(aliveIds) { this.q = new Map(); this.aliveIds = aliveIds ?? new Set(); }
+    isAlive(id) { return this.aliveIds.has(id); }
+    enqueueStdin(id, text) { const a = this.q.get(id) ?? []; a.push(text); this.q.set(id, a); return { delivered: false, position: a.length }; }
+    getPending(id) { return [...(this.q.get(id) ?? [])]; }
+    isComposerDirty() { return false; }
+    waitForMcpSeen() { return Promise.resolve(true); }
+  }
+  const projH = `rfecg-H-${sfx}`;
+  mkProject(projH); mkAgent(`${projH}-ag`, projH);
+  const mgrH = `rfecg-mgrH-${sfx}`;
+  const sA = `rfecg-sA-${sfx}`, sB = `rfecg-sB-${sfx}`;
+  mkSession({ id: mgrH, projId: projH, agentId: `${projH}-ag`, role: "manager" });
+  mkSession({ id: sA, projId: projH, agentId: `${projH}-ag`, role: "setup" });
+  mkSession({ id: sB, projId: projH, agentId: `${projH}-ag`, role: "setup" });
+  const intentH = {
+    reason: "deploy", managerSessionId: mgrH, requestedAt: now,
+    resume: [
+      { sessionId: mgrH, role: "manager", parentSessionId: null },
+      { sessionId: sA, role: "setup", parentSessionId: null },
+      { sessionId: sB, role: "setup", parentSessionId: null },
+    ],
+  };
+  const resumeOneH = (sid) => (sid === sB ? { ok: false, reason: SETUP_SESSION_RESUME_BARRED_ERROR } : { ok: true });
+  const ptyH = new AliveTrackingPtyStub(new Set([sA]));
+  const sessionsH = new SessionService(db, ptyH, new OrchestrationControl());
+  let threwH = null;
+  let resultH;
+  try {
+    resultH = sessionsH.resumeFleetOnBoot(intentH, { resumeOne: resumeOneH, deployStaleness: CLEAN_STALENESS });
+  } catch (e) {
+    threwH = e;
+  }
+  await flush();
+  check("(H) resumeFleetOnBoot never throws on a setup-singleton collapse", threwH === null);
+  check("(H) sA (the winner) IS in resumed", !!resultH && resultH.resumed.includes(sA));
+  check("(H) sB (the loser) is NOT in resumed", !!resultH && !resultH.resumed.includes(sB));
+  check("(H) sB is in setupResumeSuperseded, exactly once", !!resultH && resultH.setupResumeSuperseded.filter((id) => id === sB).length === 1);
+  check("(H) sB is NEVER in `failed` — the whole point of the fix", !!resultH && !resultH.failed.includes(sB));
+  check("(H) NO fleet_resume_failed aggregate fires — nothing genuinely failed in this restart",
+    db.listEvents(mgrH).filter((ev) => ev.kind === "fleet_resume_failed").length === 0);
+  check("(H) NO fleet_resume_entry_failed event fires for sB either (not misclassified as an ordinary per-entry crash)",
+    db.listEvents(sB).filter((ev) => ev.kind === "fleet_resume_entry_failed").length === 0);
+  const supersededEvents = db.listEvents(sB).filter((ev) => ev.kind === "setup_resume_superseded");
+  check("(H) exactly ONE setup_resume_superseded event, filed under the LOSER's own id", supersededEvents.length === 1);
+  check("(H) detail names the correct agentId + the WINNER as supersededBy",
+    supersededEvents[0]?.detail?.agentId === `${projH}-ag` && supersededEvents[0]?.detail?.supersededBy === sA);
+  check("(H) sB gets ZERO messages — no continuation nudge for a row that was never actually resumed",
+    ptyH.getPending(sB).length === 0);
+  const mgrHq = ptyH.getPending(mgrH);
+  check("(H) the requester still gets its normal 'code is live, whole fleet resumed' nudge — the collapse never poisons the fleetOk text",
+    mgrHq.length === 1 && /now LIVE/.test(mgrHq[0]) && /resumed too/i.test(mgrHq[0]) && !/failed to resume/i.test(mgrHq[0]));
+
+  // --- (H-neg-1) CONTROL: a genuine OTHER setup resume failure still counts as a real failure ---
+  // Proves the interception matches on the EXACT reason string, not "role === setup never fails".
+  const projH2 = `rfecg-H2-${sfx}`;
+  mkProject(projH2); mkAgent(`${projH2}-ag`, projH2);
+  const mgrH2 = `rfecg-mgrH2-${sfx}`;
+  const sC = `rfecg-sC-${sfx}`;
+  mkSession({ id: mgrH2, projId: projH2, agentId: `${projH2}-ag`, role: "manager" });
+  mkSession({ id: sC, projId: projH2, agentId: `${projH2}-ag`, role: "setup" });
+  const intentH2 = {
+    reason: "deploy", managerSessionId: mgrH2, requestedAt: now,
+    resume: [
+      { sessionId: mgrH2, role: "manager", parentSessionId: null },
+      { sessionId: sC, role: "setup", parentSessionId: null },
+    ],
+  };
+  const resumeOneH2 = (sid) => (sid === sC ? { ok: false, reason: "session has no engine id to resume" } : { ok: true });
+  const ptyH2 = new AliveTrackingPtyStub();
+  const sessionsH2 = new SessionService(db, ptyH2, new OrchestrationControl());
+  const resultH2 = sessionsH2.resumeFleetOnBoot(intentH2, { resumeOne: resumeOneH2, deployStaleness: CLEAN_STALENESS });
+  check("(H-neg-1) CONTROL: a genuinely-unresumable setup row DOES land in `failed`", resultH2.failed.includes(sC));
+  check("(H-neg-1) CONTROL: it is NOT swallowed into setupResumeSuperseded", !resultH2.setupResumeSuperseded.includes(sC));
+  check("(H-neg-1) CONTROL: the fleet_resume_failed aggregate DOES fire this time",
+    db.listEvents(mgrH2).filter((ev) => ev.kind === "fleet_resume_failed").length === 1);
+
+  // --- (H-neg-2) CONTROL: the exact SETUP_SESSION_RESUME_BARRED_ERROR text on a NON-setup entry is NOT intercepted ---
+  // Proves the interception also gates on e.role === "setup", not merely the reason string. Round 2
+  // (Code Review 8f29fece, Minor 1): the entry carrying this text must be NEITHER the restart requester
+  // NOR role "setup" — a requester entry is skipped by the per-entry loop entirely (`if (e.sessionId ===
+  // reqId) continue;`, service.ts ~5890) and takes the SEPARATE final-block path instead, which has no
+  // setup interception of its own to disable; removing `e.role === "setup"` from the per-entry guard
+  // therefore left THIS test green even though the role gate was gone. A non-requester, non-setup WORKER
+  // entry is what actually reaches the per-entry interception's condition.
+  const projH3 = `rfecg-H3-${sfx}`;
+  mkProject(projH3); mkAgent(`${projH3}-ag`, projH3);
+  const mgrH3 = `rfecg-mgrH3-${sfx}`;
+  const wH3 = `rfecg-wH3-${sfx}`;
+  mkSession({ id: mgrH3, projId: projH3, agentId: `${projH3}-ag`, role: "manager" });
+  mkSession({ id: wH3, projId: projH3, agentId: `${projH3}-ag`, role: "worker", parentSessionId: mgrH3, taskId: `${wH3}-task` });
+  const intentH3 = {
+    reason: "deploy", managerSessionId: mgrH3, requestedAt: now,
+    resume: [
+      { sessionId: mgrH3, role: "manager", parentSessionId: null },
+      { sessionId: wH3, role: "worker", parentSessionId: mgrH3 },
+    ],
+  };
+  const resumeOneH3 = (sid) => (sid === wH3 ? { ok: false, reason: SETUP_SESSION_RESUME_BARRED_ERROR } : { ok: true });
+  const ptyH3 = new AliveTrackingPtyStub();
+  const sessionsH3 = new SessionService(db, ptyH3, new OrchestrationControl());
+  const resultH3 = sessionsH3.resumeFleetOnBoot(intentH3, { resumeOne: resumeOneH3, deployStaleness: CLEAN_STALENESS });
+  check("(H-neg-2) CONTROL: a non-setup, non-requester entry carrying this exact reason text still lands in `failed`", resultH3.failed.includes(wH3));
+  check("(H-neg-2) CONTROL: it is NOT swallowed into setupResumeSuperseded", !resultH3.setupResumeSuperseded.includes(wH3));
+
+  // ============================ (H-real) THE SAME COLLAPSE, DRIVEN THROUGH REAL resume() ============================
+  // Round 2 (Code Review 8f29fece, Nit): every (H)/(H-neg) scenario above injects a hand-shaped
+  // `resumeOne` stub — none of them prove the interception's `rawAttempt.reason ===
+  // SETUP_SESSION_RESUME_BARRED_ERROR` comparison matches the ACTUAL text resume() throws, wrapped by
+  // resumeFleetOnBoot's own DEFAULT resumeOne (`(id) => { try { this.resume(id); return {ok:true}; }
+  // catch (e) { return {ok:false, reason: e.message}; } }`, service.ts ~5636). This variant omits
+  // `resumeOne` entirely, driving the REAL SessionService.resume() through a real PtyHost/SeamHost (only
+  // the OS process is faked; isAlive/spawn/setProcessState are all genuine) against a real temp git repo
+  // + stub engine transcript, so a future change that re-wraps/re-throws the error differently (losing
+  // byte-identity with the exported constant) would be caught here.
+  const repoHReal = path.join(process.env.LOOM_HOME, "repo-hreal");
+  fs.mkdirSync(repoHReal, { recursive: true });
+  fs.writeFileSync(path.join(repoHReal, "README.md"), "# (H-real) fixture repo\n");
+  execSync(`git init -q`, { cwd: repoHReal });
+  commitAll(repoHReal, "init", "-c user.email=rfecg@loom -c user.name=rfecg");
+  const writeHRealTranscript = (eng) => {
+    const dir = path.join(rfecgSandboxHome, ".claude", "projects", encodeProjectDir(repoHReal));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${eng}.jsonl`), `{"type":"user","message":{"content":"hi"}}\n`);
+  };
+  const projHReal = `rfecg-Hreal-${sfx}`;
+  mkProject(projHReal);
+  // Direct insertAgent (not the shared mkAgent helper) with an explicit profileId:null — this scenario
+  // is the one case in this file that drives a REAL resolveAgentSpawn/pty.spawn, mirroring the proven
+  // shape setup-session-resume-barred.mjs uses for the same reason.
+  db.insertAgent({ id: `${projHReal}-ag`, projectId: projHReal, name: "t", startupPrompt: "SETUP", position: 0, profileId: null });
+  const mgrHReal = `rfecg-mgrHreal-${sfx}`;
+  const sAr = `rfecg-sAr-${sfx}`, sBr = `rfecg-sBr-${sfx}`;
+  // A REAL resume() needs a REAL (cwd, engineSessionId, transcript) triple for every session here — the
+  // shared `mkSession` helper (used by every stubbed-resumeOne scenario above) seeds `cwd: os.tmpdir()`
+  // with no transcript file, which is fine when `resumeOne` is stubbed but would make the REQUESTER's
+  // own real resume() throw "transcript missing" here. Seed all three (manager + both setup rows) the
+  // same way instead.
+  const seedHRealSession = (id, role) => {
+    writeHRealTranscript(`eng-${id}`);
+    db.insertSession({
+      id, projectId: projHReal, agentId: `${projHReal}-ag`, engineSessionId: `eng-${id}`,
+      title: null, cwd: repoHReal, processState: "live", resumability: "unknown",
+      busy: false, createdAt: now, lastActivity: now, lastError: null, role, parentSessionId: null,
+    });
+  };
+  seedHRealSession(mgrHReal, "manager");
+  seedHRealSession(sAr, "setup");
+  seedHRealSession(sBr, "setup");
+  const intentHReal = {
+    reason: "deploy", managerSessionId: mgrHReal, requestedAt: now,
+    resume: [
+      { sessionId: mgrHReal, role: "manager", parentSessionId: null },
+      { sessionId: sAr, role: "setup", parentSessionId: null },
+      { sessionId: sBr, role: "setup", parentSessionId: null },
+    ],
+  };
+  const eventsHReal = {
+    onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
+    onBusy(id, busy) { db.setBusy(id, busy); },
+    onContextStats() {}, onRateLimited() {},
+    onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); },
+  };
+  const hostHReal = new (createSeamHost(PtyHost))(eventsHReal);
+  const sessionsHReal = new SessionService(db, hostHReal, new OrchestrationControl());
+  let threwHReal = null;
+  let resultHReal;
+  try {
+    // NO resumeOne override — exercises the REAL default, wrapping real resume() throws.
+    resultHReal = sessionsHReal.resumeFleetOnBoot(intentHReal, { deployStaleness: CLEAN_STALENESS });
+  } catch (e) {
+    threwHReal = e;
+  }
+  await flush();
+  check("(H-real) resumeFleetOnBoot never throws on a REAL setup-singleton collapse", threwHReal === null);
+  check("(H-real) exactly one of sAr/sBr resumed, the other superseded (order-dependent, both acceptable)",
+    !!resultHReal &&
+    ((resultHReal.resumed.includes(sAr) && resultHReal.setupResumeSuperseded.includes(sBr) && !resultHReal.resumed.includes(sBr)) ||
+     (resultHReal.resumed.includes(sBr) && resultHReal.setupResumeSuperseded.includes(sAr) && !resultHReal.resumed.includes(sAr))));
+  check("(H-real) neither row is ever in `failed`", !!resultHReal && !resultHReal.failed.includes(sAr) && !resultHReal.failed.includes(sBr));
+  check("(H-real) NO fleet_resume_failed aggregate fires", db.listEvents(mgrHReal).filter((ev) => ev.kind === "fleet_resume_failed").length === 0);
+  const loserHReal = resultHReal?.setupResumeSuperseded?.[0];
+  const winnerHReal = loserHReal === sAr ? sBr : sAr;
+  check("(H-real) the winner is genuinely pty-alive (a real spawn happened, not a stubbed return)", !!loserHReal && hostHReal.isAlive(winnerHReal));
+  const supersededEventsHReal = loserHReal ? db.listEvents(loserHReal).filter((ev) => ev.kind === "setup_resume_superseded") : [];
+  check("(H-real) exactly ONE setup_resume_superseded event, filed under the loser's own id", supersededEventsHReal.length === 1);
+  check("(H-real) detail names the real winner as supersededBy", supersededEventsHReal[0]?.detail?.supersededBy === winnerHReal);
 
 } finally {
   try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
