@@ -223,8 +223,10 @@ interface LandResult {
  * `git merge-tree --write-tree <A> <B>` exits 1 on a conflict WITHOUT throwing through simple-git (the
  * same non-zero-exit-reads-as-success gotcha this file's other checks already work around): the
  * resulting tree oid is the first line regardless of exit status, with conflict info following it on a
- * real conflict — so anything but exactly one oid line means a conflict, never a clean merge. Mirrors
- * `verifyReviewedTipChain`'s identical reading of this same command (`worktrees.ts`). Needs git >= 2.38
+ * real conflict — so anything but exactly one oid line means a conflict, never a clean merge. Same output
+ * parsing as `verifyReviewedTipChain`'s own reading of this same command (`worktrees.ts`) — that function
+ * additionally pins `--attr-source=<prev>`, which this call does not (it reads the landed tree's own
+ * `.gitattributes`, as the cherry-picks that produced it did). Needs git >= 2.38
  * (introduced `--write-tree`; the owner's host is 2.47, CI is `ubuntu-latest` — both well above the
  * floor); an older git's "unknown option" error is a real git error here, already fails closed below.
  */
@@ -682,7 +684,10 @@ async function landBranchCommitsIndividually(
     }
     if (divergence.conflict) {
       await rollback();
-      return fail({ ok: false, reason: `${branch}: a 3-way merge of the batch against its reviewed tip ${branchTip.slice(0, 7)} conflicts — rebase onto main` });
+      return fail({
+        ok: false, conflict: true,
+        reason: `${branch}: a 3-way merge of the batch against its reviewed tip ${branchTip.slice(0, 7)} conflicts — resolve against main or an earlier branch already landed in this batch`,
+      });
     }
     if (divergence.paths.length > 0) {
       await rollback();

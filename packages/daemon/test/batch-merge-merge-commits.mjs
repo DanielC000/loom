@@ -32,13 +32,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (9) card f01c219d ROUND 2 — a sibling candidate landed EARLIER in the same batch touches the same file
 //       in a DIFFERENT hunk than a later candidate (which also carries its own forward merge): BOTH land,
 //       combining both hunks. RED under round 1, which treated this as the accepted "sibling overlap" false
-//       positive and dropped the later candidate.
+//       positive and dropped the later candidate. Landing order is pinned via GIT_AUTHOR_DATE/
+//       GIT_COMMITTER_DATE (not a sleep) and asserted explicitly, not just inferred from the result (card 9aa3f0e3).
+//   (10) card 9aa3f0e3 — a real 3-way merge-tree CONFLICT (the `landedTreeDivergesFromExpected` check) must
+//       flag the dropped candidate `conflict:true`, exactly like the cherry-pick conflict path already does.
+//       Faked via a gitFactory that intercepts ONLY the `merge-tree --write-tree` call's output (every other
+//       git call, including the cherry-pick itself, runs for real and succeeds cleanly) — isolating the
+//       specific branch this card's fix touches without needing a natural (and much harder to construct)
+//       case where a real cherry-pick succeeds but the wider 3-way merge-tree comparison disagrees.
 //
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/batch-merge-merge-commits.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { useOwnLoomHome } from "./_tmp-fixture.mjs";
@@ -48,6 +55,8 @@ requireHermeticEnv();
 
 const { createWorktree, mergeMainIntoWorktree } = await import("../dist/git/worktrees.js");
 const { assembleBatchBranches } = await import("../dist/git/batch-merge.js");
+const { boundedSimpleGit } = await import("../dist/git/bounded.js");
+const { nonInteractiveEnv } = await import("../dist/git/writer.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -79,6 +88,15 @@ async function cutWithFile(repo, label, file, content) {
 const write = (wt, f, c) => fs.writeFileSync(path.join(wt, f), c);
 const advanceMain = (repo, f, c, msg) => { write(repo, f, c); commitAll(repo, msg, GIT_ID); };
 const treeOf = (cwd, ref) => git(cwd, `rev-parse ${ref}:`);
+// Pins both the author and committer date (card 9aa3f0e3) so a test asserting landing order by earliest-
+// author-date is deterministic — no reliance on a real wall-clock sleep between two commits.
+function commitAllAt(cwd, message, identity, isoDate) {
+  const idArgs = identity ? identity.split(" ").filter(Boolean) : [];
+  execFileSync("git", ["add", "."], { cwd });
+  execFileSync("git", [...idArgs, "commit", "-q", "-m", message], {
+    cwd, env: { ...process.env, GIT_AUTHOR_DATE: isoDate, GIT_COMMITTER_DATE: isoDate },
+  });
+}
 
 // ── (1) TRAP: the REAL union-forward commit on the worker's own branch ──
 {
@@ -291,11 +309,13 @@ const treeOf = (cwd, ref) => git(cwd, `rev-parse ${ref}:`);
   commitAll(repo, "chore(test): seed hot2.txt", GIT_ID);
   const sibling = await cut(repo, "sibling-earlier");
   write(sibling.worktreePath, "hot2.txt", "A\nb\nc\nd\ne\n");
-  commitAll(sibling.worktreePath, "feat(test): sibling edits line1", GIT_ID);
-  await new Promise((resolve) => setTimeout(resolve, 1100)); // distinct, later author date for the branch below (landing order is earliest-author-date-first)
+  // Pinned author/committer dates (not a sleep — card 9aa3f0e3): the sibling's date is earlier than the
+  // branch's below, so landing order (earliest-author-date-first) is deterministic regardless of how
+  // fast this test runs, and case (9) asserts that order explicitly rather than only landing membership.
+  commitAllAt(sibling.worktreePath, "feat(test): sibling edits line1", GIT_ID, "2024-01-01T00:00:00Z");
   const branch = await cut(repo, "sibling-later");
   write(branch.worktreePath, "hot2.txt", "a\nb\nc\nd\nE\n");
-  commitAll(branch.worktreePath, "feat(test): branch edits line5", GIT_ID);
+  commitAllAt(branch.worktreePath, "feat(test): branch edits line5", GIT_ID, "2024-01-01T00:00:10Z");
   advanceMain(repo, "main-advance3.txt", "adv3\n", "chore(test): main advances (unrelated)");
   const fwd = await mergeMainIntoWorktree(repo, branch.worktreePath);
   check("(9) precondition: the later branch's forward merge is clean", fwd.ok === true && fwd.merged === true);
@@ -303,8 +323,50 @@ const treeOf = (cwd, ref) => git(cwd, `rev-parse ${ref}:`);
   const r = await assembleBatchBranches(repo, batchWt, [branch, sibling]);
   check("(9) both candidates LAND (neither dropped)",
     r.dropped.length === 0 && r.landed.some((l) => l.branch === sibling.branch) && r.landed.some((l) => l.branch === branch.branch));
+  check("(9) the earlier-authored sibling lands FIRST, despite being passed second to assembleBatchBranches",
+    r.landed[0]?.branch === sibling.branch && r.landed[1]?.branch === branch.branch);
   check("(9) the landed file carries BOTH hunks — the sibling's line1 AND the branch's line5",
     fs.readFileSync(path.join(batchWt, "hot2.txt"), "utf8").replace(/\r/g, "") === "A\nb\nc\nd\nE\n");
+}
+
+// ── (10) card 9aa3f0e3 — a real 3-way merge-tree CONFLICT must flag the dropped candidate conflict:true,
+//     exactly like the cherry-pick conflict path already does. The cherry-pick itself lands cleanly (no
+//     real conflict); only the merge-tree content-check's OUTPUT is faked, via the same gitFactory
+//     fault-injection seam batch-merge-rollback-abort.mjs already uses — delegating every other git call
+//     (cherry-pick, commit, rollback's reset --hard, everything) to the REAL git. ──
+{
+  const repo = makeRepo("conflictflag");
+  write(repo, "cf.txt", "base\n");
+  commitAll(repo, "chore(test): seed cf.txt", GIT_ID);
+  const w = await cut(repo, "conflictflag");
+  write(w.worktreePath, "own.txt", "own work\n");
+  commitAll(w.worktreePath, "feat(test): own work", GIT_ID);
+  const branchTip = git(w.worktreePath, "rev-parse HEAD");
+  const { worktreePath: batchWt } = await createWorktree(repo, projId, `bmmc-batch-conflictflag-${sfx}`);
+  const batchHeadBefore = git(batchWt, "rev-parse HEAD");
+
+  function fakeMergeTreeConflictGitFactory(repoPath, blockTimeoutMs) {
+    const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
+    return {
+      raw: async (args) => {
+        if (Array.isArray(args) && args[0] === "merge-tree" && args[1] === "--write-tree" &&
+            args[2] === batchHeadBefore && args[3] === branchTip) {
+          // More than one output line — the exact non-single-oid shape landedTreeDivergesFromExpected
+          // treats as a conflict (it never inspects the content, only the line count/oid-pattern).
+          return "CONFLICT (content): Merge conflict in own.txt\n100644 deadbeef1234 1\town.txt\n";
+        }
+        return real.raw(args);
+      },
+    };
+  }
+
+  const r = await assembleBatchBranches(repo, batchWt, [w], { gitFactory: fakeMergeTreeConflictGitFactory });
+  check("(10) precondition: the candidate is dropped by the (faked) content-check, not a real cherry-pick conflict",
+    r.dropped.length === 1 && !/cherry-picking/.test(r.dropped[0].reason));
+  check("(10) the candidate is DROPPED, not landed", r.landed.length === 0 && r.dropped[0]?.branch === w.branch);
+  check("(10) the dropped candidate is flagged conflict:true", r.dropped[0].conflict === true);
+  check("(10) the reason covers BOTH a conflict with main and an earlier sibling already landed in the batch",
+    /resolve against main or an earlier branch already landed in this batch/.test(r.dropped[0].reason));
 }
 
 console.log(failures === 0 ? "\n✅ ALL PASS" : `\n❌ ${failures} check(s) FAILED`);
