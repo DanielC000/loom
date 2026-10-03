@@ -507,6 +507,21 @@ export function usesOrchestrationMcp(role: SessionRole | null): boolean {
   return role === "manager" || role === "worker" || role === "assistant";
 }
 
+/**
+ * The ONE role that does NOT mount the loom-tasks (project board) MCP server — an Agent Runs R2 `run`
+ * session gets ONLY its restricted loom-run surface (submit_result); every other role (including a
+ * plain/null session) layers on top of loom-tasks. Shared here so `pty/host.ts`'s `buildMcpServers`
+ * (what gets MOUNTED for a spawn) and `mcp/server.ts`'s `TaskMcpRouter.resolveProject` (what the HTTP
+ * route SERVES) can never independently drift — see card c2ccc4b0: before this, only the mount side
+ * excluded `run`, and the served surface had no role check of its own at all.
+ *
+ * @decision c2ccc4b0 — NOT the only copy of this check: `pty/host.ts`'s `buildMcpServers` early-returns
+ *  for `!mountsTaskMcp(role)`, and `mcp/server.ts`'s `resolveProject` 404s the same way. Update both.
+ */
+export function mountsTaskMcp(role: SessionRole | null): boolean {
+  return role !== "run";
+}
+
 // Card b1da256d: moved here from `pty/host.ts` (which re-exports both for its own existing
 // importers) so `packages/web` — daemon-unreachable — can read this role list too.
 /** @decision 8dd1dd1c — human-prompt disallow gate ONLY; see {@link BOOT_DIALOG_DETECTOR_ROLES} for the

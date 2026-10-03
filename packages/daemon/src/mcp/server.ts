@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { TASK_STRUCTURE_SHAPE, TASK_STRUCTURE_DOC, TASK_CREATE_STRUCTURE_SHAPE, TASK_CREATE_STRUCTURE_DOC } from "../tasks/relations.js";
-import { resolveConfig } from "@loom/shared";
+import { resolveConfig, mountsTaskMcp } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { WakeService } from "../orchestration/wake.js";
 import {
@@ -130,8 +130,12 @@ export class TaskMcpRouter {
   // swappable-backend seam) — production never passes a 3rd arg, so every real spawn is unaffected.
   constructor(private db: Db, private wakes: WakeService, private fetchOverride?: typeof fetch) {}
 
+  // @decision c2ccc4b0 — gate via the SHARED `mountsTaskMcp` predicate, never a hand-rolled
+  // `role === "run"` check, or this served-side gate can drift from buildMcpServers' mount-side one.
   resolveProject(sessionId: string): string | null {
-    return this.db.getSession(sessionId)?.projectId ?? null;
+    const session = this.db.getSession(sessionId);
+    if (!session || !mountsTaskMcp(session.role ?? null)) return null;
+    return session.projectId;
   }
 
   private buildServer(projectId: string, sessionId: string, attributions?: Map<string, ToolAttributionResult>): McpServer {

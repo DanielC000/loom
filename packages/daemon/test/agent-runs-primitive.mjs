@@ -10,7 +10,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   3. teardown: a terminal run + transcript retention + snapshot-dir GC on session exit.
 //   4. restart-mid-run → the run is marked FAILED (no resume), the session is exited (no zombie), and
 //      orphaned snapshots are swept; a live run is excluded from the restart resume set.
-//   5. the run MCP (submit_result) is reachable ONLY for a kind==="run" session.
+//   5. the run MCP (submit_result) is reachable ONLY for a kind==="run" session, AND (card c2ccc4b0) a
+//      run session is refused by the loom-tasks router too — `mountsTaskMcp` (@loom/shared) is the ONE
+//      shared predicate both buildMcpServers' mount side and TaskMcpRouter.resolveProject's served side
+//      call, so the two can't independently drift.
 //   + existing spawns stay byte-identical (buildMcpServers for non-run roles is unchanged).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/agent-runs-primitive.mjs
@@ -19,6 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
+import { mountsTaskMcp, SESSION_ROLES } from "@loom/shared";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -34,6 +38,7 @@ const { PtyHost, buildMcpServers } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { RunMcpRouter } = await import("../dist/mcp/run.js");
+const { TaskMcpRouter } = await import("../dist/mcp/server.js");
 const { composeRunStartupPrompt } = await import("../dist/runs/prompt.js");
 const { runSnapshotDir } = await import("../dist/runs/snapshot.js");
 const { archivedTranscriptPath } = await import("../dist/sessions/transcript.js");
@@ -210,6 +215,19 @@ try {
   check("5 RunMcpRouter.resolveRole is NON-null for a run session", runRouter.resolveRole(s3.id) !== null);
   check("5 RunMcpRouter.resolveRole is null for a non-run (plain) session", runRouter.resolveRole(plain.id) === null);
   check("5 RunMcpRouter.resolveRole is null for an unknown session", runRouter.resolveRole("does-not-exist") === null);
+
+  // Card c2ccc4b0: the loom-tasks router's OWN gate — a run session must be refused THERE too, not just
+  // on loom-run. `wakes` stubbed {} is safe: resolveProject never touches it (stub-safety, same posture
+  // as companion-loop.mjs/my-context-gate.mjs's bare-{} db/sessions stubs).
+  const taskRouter = new TaskMcpRouter(db, {});
+  check("5 TaskMcpRouter.resolveProject is null for a run session (refused, card c2ccc4b0)", taskRouter.resolveProject(s3.id) === null);
+  check("5 TaskMcpRouter.resolveProject still resolves for a non-run (plain) session", taskRouter.resolveProject(plain.id) === PROJECT_ID);
+  check("5 TaskMcpRouter.resolveProject is null for an unknown session", taskRouter.resolveProject("does-not-exist") === null);
+  // Behavioral: the shared predicate itself, over every real SessionRole + plain (null) — only "run" is false.
+  for (const role of SESSION_ROLES) {
+    check(`5 mountsTaskMcp("${role}") === ${role !== "run"}`, mountsTaskMcp(role) === (role !== "run"));
+  }
+  check("5 mountsTaskMcp(null) === true (plain session keeps loom-tasks)", mountsTaskMcp(null) === true);
 
   // ===================== 6. CAPSTONE FIXES — stringified-result tolerance (BUG 1) + hard run-timeout (BUG 2) =====================
   // These reproduce what the real-claude capstone surfaced (the hermetic R2 tests missed them: they pass

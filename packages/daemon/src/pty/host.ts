@@ -8,7 +8,7 @@ import { CODEX_RESTRICTED_TOOLS_REASON, TRANSCRIPT_ROOT_DENY_ROLES, codexPermiss
 import { spawn, type IPty } from "node-pty";
 import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
-import { resolveProfileCapabilities, usesOrchestrationMcp, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES } from "@loom/shared";
+import { resolveProfileCapabilities, usesOrchestrationMcp, mountsTaskMcp, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
@@ -1898,7 +1898,9 @@ export function buildMcpServers(o: {
   // Agent Runs R2: a `run` session gets ONLY the restricted run surface — NOT even loom-tasks. This is
   // the one path that does not mount loom-tasks (every other role layers ON TOP of it). The early return
   // keeps every non-run spawn byte-identical to today (a run is the only role that reaches this branch).
-  if (o.role === "run") {
+  // @decision c2ccc4b0 — `!mountsTaskMcp(...)` (not a hand-rolled `role === "run"`), so this mount-side
+  // check and TaskMcpRouter.resolveProject's served-side check can never independently drift.
+  if (!mountsTaskMcp(o.role ?? null)) {
     return { [LOOM_RUN_SERVER_ID]: { type: "http", url: `http://127.0.0.1:${o.port}/mcp-run/${o.sessionId}`, ...authHeaders } };
   }
   // manager/worker AND the Companion (assistant) mount loom-orchestration — but a role-gated surface:
