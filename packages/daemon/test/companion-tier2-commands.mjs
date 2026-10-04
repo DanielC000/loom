@@ -58,7 +58,7 @@ requireHermeticEnv();
 const { Db } = await import("../dist/db.js");
 const { InAppChannel, IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
 const { CompanionController } = await import("../dist/companion/controller.js");
-const { commandHandler, registeredCommandNames, COMMAND_MENU } = await import("../dist/companion/commands.js");
+const { commandHandler, registeredCommandNames, registeredDmOnlyCommandNames, COMMAND_MENU, GROUP_COMMAND_MENU } = await import("../dist/companion/commands.js");
 const { ChatGateway } = await import("../dist/companion/chat-gateway.js");
 const { createDbCompanionAuth } = await import("../dist/companion/auth.js");
 const { inMemoryVoicePrefs } = await import("../dist/companion/voice-prefs.js");
@@ -354,7 +354,9 @@ try {
   // ============ 9f — '/help' and the Telegram COMMAND_MENU flag EVERY DM-only command (card 5307c09f
   //                   round 2 Minor 3): a group member sees the restriction before even trying it ============
   {
-    const dmOnlyNames = ["new", "reset", "lock", "export", "refresh"];
+    const dmOnlyNames = registeredDmOnlyCommandNames();
+    check("dmOnly set: exactly new/reset/lock/export/refresh (sanity on the flag, not a hand-maintained list)",
+      new Set(dmOnlyNames).size === 5 && ["new", "reset", "lock", "export", "refresh"].every((n) => dmOnlyNames.includes(n)));
     const helpAck = commandHandler("help")(undefined, {}, {}).ack;
     for (const name of dmOnlyNames) {
       const entry = COMMAND_MENU.find((c) => c.command === name);
@@ -363,6 +365,39 @@ try {
       // so this can't pass merely because /help and COMMAND_MENU derive from the same (possibly-wrong)
       // source; it would fail if /help's rendering ever dropped the "(DM only)" suffix on its own.
       check(`/help: '/${name}' line is marked (DM only)`, new RegExp(`^/${name} .*\\(DM only\\)$`, "m").test(helpAck));
+    }
+  }
+
+  // ============ 9f' — GROUP_COMMAND_MENU (card d100843f) omits exactly the dmOnly set and nothing else;
+  //                    the dmOnly FLAG itself matches each handler's REAL group-route refusal, so the
+  //                    advertised menu and the actual refusal behavior can't drift apart (same bug class
+  //                    5307c09f fixed for the single global menu — this is its two-scoped-menu successor) ===
+  {
+    const dmOnlyNames = registeredDmOnlyCommandNames();
+    const allNames = registeredCommandNames();
+    const groupMenuNames = GROUP_COMMAND_MENU.map((c) => c.command);
+    check("GROUP_COMMAND_MENU: omits every dmOnly command", dmOnlyNames.every((n) => !groupMenuNames.includes(n)));
+    check("GROUP_COMMAND_MENU: includes every non-dmOnly command", allNames.filter((n) => !dmOnlyNames.includes(n)).every((n) => groupMenuNames.includes(n)));
+    check("GROUP_COMMAND_MENU: size === total minus dmOnly (no extra omissions, no extra inclusions)", groupMenuNames.length === allNames.length - dmOnlyNames.length);
+
+    // The parity check itself: for every command except "/voice" (a documented, deliberate exception —
+    // its group restriction is CONDITIONAL on args, not a blanket refusal, so it never carries `dmOnly`),
+    // drive the REAL handler on a group route and confirm whether it produces the shared group-route
+    // refusal — then assert THAT boolean matches the dmOnly flag. Deps are spies that throw if ever
+    // reached, so a false "refuses" never passes merely because a deps call happened to also throw.
+    const GROUP_REFUSAL_RE = /only works in a private chat with me — it isn't available in group chats\./;
+    const groupRoute = { sessionId: "s", channel: "in-app", chatId: "g", senderId: "member-1" };
+    const unreachableDeps = {
+      resetConversation: async () => { throw new Error("resetConversation must not be reached on a group refusal"); },
+      exportConversation: () => { throw new Error("exportConversation must not be reached on a group refusal"); },
+      refreshPersona: () => { throw new Error("refreshPersona must not be reached on a group refusal"); },
+      closeTrustWindow: () => { throw new Error("closeTrustWindow must not be reached on a group refusal"); },
+    };
+    for (const name of allNames.filter((n) => n !== "voice")) {
+      const result = await commandHandler(name)(undefined, groupRoute, inMemoryVoicePrefs(), unreachableDeps);
+      const refuses = GROUP_REFUSAL_RE.test(result.ack);
+      check(`dmOnly parity: '/${name}' handler's real group-route refusal (${refuses}) matches its dmOnly flag (${dmOnlyNames.includes(name)})`,
+        refuses === dmOnlyNames.includes(name));
     }
   }
 

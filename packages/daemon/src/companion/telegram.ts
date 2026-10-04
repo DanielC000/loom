@@ -21,7 +21,7 @@ import { randomUUID } from "node:crypto";
 import { Bot, InputFile } from "grammy";
 import type { ChannelAdapter, InboundAttachment, InboundHandler, InboundMessage } from "./types.js";
 import { cappedBackoff, runWithReconnect } from "./resilience.js";
-import { COMMAND_MENU } from "./commands.js";
+import { GROUP_COMMAND_MENU, PRIVATE_COMMAND_MENU } from "./commands.js";
 import { LOOM_HOME } from "../paths.js";
 import { guardedFetch } from "../connections/boundedFetch.js";
 
@@ -52,9 +52,16 @@ export interface TelegramBotLike {
      *  `signal` (card dc5df70e) lets the adapter's `send` abort a hung request once `tryAck`'s own timeout
      *  fires, so a dead socket doesn't linger after the caller stops waiting on it. */
     sendMessage(chatId: string | number, text: string, other?: undefined, signal?: AbortSignal): Promise<unknown>;
-    /** Register the native "/" command menu (Companion Voice epic, VOICE-P1). Optional on the seam so an
-     *  existing test fake bot (no `setMyCommands`) stays valid — the call site guards with `?.`. */
-    setMyCommands?(commands: { command: string; description: string }[]): Promise<unknown>;
+    /** Register the native "/" command menu (Companion Voice epic, VOICE-P1). `other.scope` (card
+     *  d100843f) mirrors grammY's own real `setMyCommands(commands, other?)` signature — the call site
+     *  below registers the FULL menu against `all_private_chats` and a DM-only-command-free menu against
+     *  `all_group_chats` as two separate calls, rather than one undifferentiated global menu. Optional on
+     *  the seam so an existing test fake bot (no `setMyCommands`) stays valid — the call site guards with
+     *  `?.`. */
+    setMyCommands?(
+      commands: { command: string; description: string }[],
+      other?: { scope: { type: "all_private_chats" | "all_group_chats" } },
+    ): Promise<unknown>;
     /** Resolve a Telegram `file_id` to its download path (Companion Voice epic, VOICE-P2). Optional on the
      *  seam so an existing test fake bot (no voice-download tests) stays valid. */
     getFile?(fileId: string): Promise<{ file_path?: string }>;
@@ -198,12 +205,18 @@ export function createTelegramAdapter(
     name: TELEGRAM_CHANNEL,
     maxMessageLength: TELEGRAM_MAX_MESSAGE_LENGTH,
     start() {
-      // Register the native "/" command menu (Companion Voice epic, VOICE-P1) — best-effort, fire-and-forget:
-      // a failure (network / bad token) is logged, never thrown, and never blocks/delays the poll loop below.
-      // `?.` guards a test fake bot that doesn't implement setMyCommands (companion-telegram.mjs).
-      void bot.api.setMyCommands?.(COMMAND_MENU).catch((err) => {
+      // Register the native "/" command menu (Companion Voice epic, VOICE-P1; split into two scoped menus,
+      // card d100843f) — best-effort, fire-and-forget: a failure (network / bad token) is logged, never
+      // thrown, and never blocks/delays the poll loop below. `?.` guards a test fake bot that doesn't
+      // implement setMyCommands (companion-telegram.mjs). TWO separate calls, one per Telegram scope, so a
+      // group chat's native menu never advertises a DM-only command its handler would just refuse.
+      void bot.api.setMyCommands?.(PRIVATE_COMMAND_MENU, { scope: { type: "all_private_chats" } }).catch((err) => {
         // eslint-disable-next-line no-console
-        console.error(`[companion] telegram setMyCommands failed: ${describeError(err)}`);
+        console.error(`[companion] telegram setMyCommands (private) failed: ${describeError(err)}`);
+      });
+      void bot.api.setMyCommands?.(GROUP_COMMAND_MENU, { scope: { type: "all_group_chats" } }).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error(`[companion] telegram setMyCommands (group) failed: ${describeError(err)}`);
       });
       // Fire-and-forget the RESILIENT poll loop: runWithReconnect re-runs bot.start() after a backoff on
       // any drop, until stop() flips `stopped`. A startup failure (bad token / network) is logged, never

@@ -144,8 +144,27 @@ function normalizeLangCode(code: string): string {
 
 interface CommandDef {
   handler: CommandHandler;
-  /** The Telegram `setMyCommands` menu description for this command. */
+  /** The Telegram `setMyCommands` menu description for this command, WITHOUT any "(DM only)" suffix —
+   *  that annotation is derived from `dmOnly` (see `describeCommand`) so the label can never say something
+   *  the flag disagrees with. */
   description: string;
+  /** True for a command whose own handler refuses outside a DM (`route.senderId !== null`, the
+   *  GROUP_ROUTE_REFUSAL_SUFFIX idiom above) — the single source of truth for (1) the "(DM only)" suffix
+   *  `describeCommand` appends, and (2) which commands `GROUP_COMMAND_MENU` omits from the group-chat
+   *  Telegram "/" menu. Card 5307c09f introduced the refusal; this flag is what keeps the advertised menu
+   *  from drifting away from what the handler actually refuses — see `registeredDmOnlyCommandNames`,
+   *  which a test asserts against the real per-handler refusal behavior so the two can never diverge.
+   *  Omitted (falsy) for a command with no such blanket refusal — including "/voice", whose group
+   *  restriction is conditional (only "on"/"auto" refuse; "off" is allowed) rather than a full DM-only
+   *  gate, so it deliberately does NOT carry this flag. */
+  dmOnly?: boolean;
+}
+
+/** Append the "(DM only)" annotation to a command's description iff `dmOnly` is set — the ONE place this
+ *  label is produced, so `COMMAND_MENU`, `GROUP_COMMAND_MENU`'s omission, and "/help"'s listing can never
+ *  show a different answer for the same command. */
+function describeCommand(def: CommandDef): string {
+  return def.dmOnly ? `${def.description} (DM only)` : def.description;
 }
 
 /** `/new` — start a fresh conversation (forgets prior context + clears the chat history). `/reset` is a
@@ -208,11 +227,13 @@ const COMMANDS: Record<string, CommandDef> = {
     },
   },
   new: {
-    description: "Start a fresh conversation — forgets everything said so far (DM only)",
+    description: "Start a fresh conversation — forgets everything said so far",
+    dmOnly: true,
     handler: startFreshConversation,
   },
   reset: {
-    description: "Alias of /new — start a fresh conversation (DM only)",
+    description: "Alias of /new — start a fresh conversation",
+    dmOnly: true,
     handler: startFreshConversation,
   },
   status: {
@@ -234,7 +255,8 @@ const COMMANDS: Record<string, CommandDef> = {
     },
   },
   lock: {
-    description: "Revoke my standing confirmation — the next sensitive action needs your OK again (DM only)",
+    description: "Revoke my standing confirmation — the next sensitive action needs your OK again",
+    dmOnly: true,
     // Companion Trust Window (Framework Card 0): the owner's explicit "step down" — closes every warm
     // window this session holds, across every route/sender, so a subsequent Tier-A act (decision_resolve/
     // board_create/board_update) falls back to a fresh propose/confirm round-trip. Never destructive to
@@ -257,7 +279,8 @@ const COMMANDS: Record<string, CommandDef> = {
     },
   },
   refresh: {
-    description: "Reload my instructions and memory — keeps our conversation (DM only)",
+    description: "Reload my instructions and memory — keeps our conversation",
+    dmOnly: true,
     // Live, NON-destructive upgrade: recomposes+re-enqueues the persona/memory prompt with no "/clear" and
     // no history reset, so an agent-definition edit (persona brief, given name, memory) lands mid-
     // conversation. Cannot pick up an MCP-server/tool-allowlist change — those are fixed at process spawn.
@@ -275,7 +298,8 @@ const COMMANDS: Record<string, CommandDef> = {
     },
   },
   export: {
-    description: "Export the current conversation as an in-chat markdown dump (DM only)",
+    description: "Export the current conversation as an in-chat markdown dump",
+    dmOnly: true,
     // Replies IN-CHAT to the SAME authenticated route only — never writes to disk, never sends via a
     // separate document/file mechanism, never leaves this route. `deps.exportConversation` reads exactly
     // the CURRENT (open) conversation (respects a prior "/new" boundary), so this can never leak an
@@ -315,7 +339,7 @@ const COMMANDS: Record<string, CommandDef> = {
     // registered above automatically appears here — the in-app web chat has no native command menu
     // (Telegram gets one via setMyCommands), so this is the only way to discover commands there.
     handler() {
-      const lines = Object.entries(COMMANDS).map(([command, def]) => `/${command} – ${def.description}`);
+      const lines = Object.entries(COMMANDS).map(([command, def]) => `/${command} – ${describeCommand(def)}`);
       return { ack: `Available commands:\n${lines.join("\n")}` };
     },
   },
@@ -327,14 +351,36 @@ export function commandHandler(name: string): CommandHandler | undefined {
   return COMMANDS[name]?.handler;
 }
 
-/** The commands this router recognizes — the Telegram `setMyCommands` menu (`telegram.ts`), DERIVED from
- *  {@link COMMANDS} so the native "/" UI and the actual handler map can never drift apart. */
+/** The FULL command set — every recognized command, DERIVED from {@link COMMANDS} so the native "/" UI
+ *  and the actual handler map can never drift apart. Used as "/help"'s own source and as the Telegram
+ *  `all_private_chats` scope menu (`telegram.ts` registers it as {@link PRIVATE_COMMAND_MENU}, the SAME
+ *  array — a private chat is where every command, DM-only or not, actually works). */
 export const COMMAND_MENU: { command: string; description: string }[] = Object.entries(COMMANDS).map(
-  ([command, def]) => ({ command, description: def.description }),
+  ([command, def]) => ({ command, description: describeCommand(def) }),
 );
+
+/** Alias of {@link COMMAND_MENU} — the Telegram `all_private_chats` scope menu. A separate exported name
+ *  (rather than reusing COMMAND_MENU directly at the call site) so `telegram.ts`'s two `setMyCommands`
+ *  calls read as two deliberately-scoped registrations, not one menu plus one subset. */
+export const PRIVATE_COMMAND_MENU = COMMAND_MENU;
+
+/** The Telegram `all_group_chats` scope menu: {@link COMMAND_MENU} with every `dmOnly` command omitted —
+ *  DERIVED from the SAME `dmOnly` flag on {@link COMMANDS} that each handler's own group-route refusal
+ *  reads (never a second hand-maintained list), so the native "/" menu a group sees can't advertise a
+ *  command that handler would just refuse. */
+export const GROUP_COMMAND_MENU: { command: string; description: string }[] = Object.entries(COMMANDS)
+  .filter(([, def]) => !def.dmOnly)
+  .map(([command, def]) => ({ command, description: describeCommand(def) }));
 
 /** Every recognized command name (test seam — belt-and-suspenders: asserts the handler key-set equals
  *  the {@link COMMAND_MENU} command-set, on top of the by-construction guarantee above). */
 export function registeredCommandNames(): string[] {
   return Object.keys(COMMANDS);
+}
+
+/** Every command name flagged `dmOnly` (test seam) — the menu-side half of the card-5307c09f parity check:
+ *  a test asserts this set equals the names whose handler ACTUALLY refuses on a group route, so the flag
+ *  and the real refusal behavior can never drift apart. */
+export function registeredDmOnlyCommandNames(): string[] {
+  return Object.entries(COMMANDS).filter(([, def]) => def.dmOnly).map(([command]) => command);
 }

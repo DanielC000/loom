@@ -51,7 +51,7 @@ const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { ChatGateway } = await import("../dist/companion/chat-gateway.js");
 const { inMemoryVoicePrefs, createDbCompanionVoicePrefs, DEFAULT_VOICE_PREF } = await import("../dist/companion/voice-prefs.js");
-const { parseCommand, commandHandler, COMMAND_MENU, registeredCommandNames } = await import("../dist/companion/commands.js");
+const { parseCommand, commandHandler, COMMAND_MENU, GROUP_COMMAND_MENU, PRIVATE_COMMAND_MENU, registeredCommandNames } = await import("../dist/companion/commands.js");
 const { createTelegramAdapter } = await import("../dist/companion/telegram.js");
 
 function fakeAdapter(name, sent) {
@@ -339,7 +339,7 @@ try {
       const commandCalls = [];
       let messageHandler = null, errorHandler = null, running = false;
       const api = { async sendMessage(chatId, text) { sends.push({ chatId, text }); } };
-      if (withCommands) api.setMyCommands = async (commands) => { commandCalls.push(commands); };
+      if (withCommands) api.setMyCommands = async (commands, other) => { commandCalls.push({ commands, other }); };
       return {
         sends, commandCalls,
         bot: {
@@ -353,13 +353,28 @@ try {
       };
     }
     {
+      // Card d100843f: start() registers TWO scoped menus (never one undifferentiated global call) — a
+      // full "all_private_chats" menu and a DM-only-command-free "all_group_chats" menu — so a group
+      // chat's native "/" menu never advertises a command its handler would just refuse.
       const fake = makeFakeBot();
       const adapter = createTelegramAdapter("tok", () => {}, { bot: fake.bot, sleep: async () => {} });
       adapter.start();
       await tick();
-      check("telegram start(): registers the '/' command menu", fake.commandCalls.length === 1);
-      check("telegram start(): menu includes /lang and /voice", fake.commandCalls[0]?.some((c) => c.command === "lang") && fake.commandCalls[0]?.some((c) => c.command === "voice"));
-      check("telegram start(): the registered menu IS the shared COMMAND_MENU (menu/handlers never drift)", JSON.stringify(fake.commandCalls[0]) === JSON.stringify(COMMAND_MENU));
+      // NEGATIVE CONTROL (card d100843f DoD): a single undifferentiated call — the behavior before this
+      // fix — would fail BOTH of the next two checks: length !== 2 is the only thing this line proves
+      // RED on the pre-fix shape; the two checks below prove WHICH two calls are expected.
+      check("telegram start(): registers exactly TWO scoped command menus (not one global call)", fake.commandCalls.length === 2);
+      const privateCall = fake.commandCalls.find((c) => c.other?.scope?.type === "all_private_chats");
+      const groupCall = fake.commandCalls.find((c) => c.other?.scope?.type === "all_group_chats");
+      check("telegram start(): one call scoped to all_private_chats", !!privateCall);
+      check("telegram start(): one call scoped to all_group_chats", !!groupCall);
+      check("telegram start(): the private-scope menu includes /lang and /voice", privateCall?.commands?.some((c) => c.command === "lang") && privateCall?.commands?.some((c) => c.command === "voice"));
+      check("telegram start(): the private-scope menu IS the shared PRIVATE_COMMAND_MENU (menu/handlers never drift)", JSON.stringify(privateCall?.commands) === JSON.stringify(PRIVATE_COMMAND_MENU));
+      check("telegram start(): the group-scope menu IS the shared GROUP_COMMAND_MENU (menu/handlers never drift)", JSON.stringify(groupCall?.commands) === JSON.stringify(GROUP_COMMAND_MENU));
+      // Exact command set, not just a subset: the group menu must OMIT every DM-only command.
+      const groupMenuNames = (groupCall?.commands ?? []).map((c) => c.command);
+      check("telegram start(): the group-scope menu omits /new, /reset, /lock, /refresh, /export", ["new", "reset", "lock", "refresh", "export"].every((n) => !groupMenuNames.includes(n)));
+      check("telegram start(): the group-scope menu still includes /lang, /voice, /status, /whoami, /start, /help", ["lang", "voice", "status", "whoami", "start", "help"].every((n) => groupMenuNames.includes(n)));
       await adapter.stop();
     }
     {
