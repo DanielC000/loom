@@ -245,7 +245,7 @@ export function resetMarker(id: string, ts?: string): ChatMessage {
  *  1008 reason the shared classifier does not recognise. Equally terminal, but the credential is FINE
  *  and no banner applies — so it must not borrow `revoked`'s "token revoked" copy, which would send the
  *  user to re-paste a token that was never the problem. Every other state is transient. */
-export type ChatConnState = "connecting" | "connected" | "reconnecting" | "revoked" | "refused";
+export type ChatConnState = "connecting" | "connected" | "reconnecting" | "revoked" | "refused" | "token-refused";
 
 // ── Chat HISTORY seed (bug 0f01f234 — the "reload loses the whole conversation" fix; UNIFIED
 // CROSS-CHANNEL CHAT, card 7d63e200 — every channel, not just in-app) ──────────────────────────────────

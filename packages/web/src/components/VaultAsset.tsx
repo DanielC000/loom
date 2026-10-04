@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { api } from "../lib/api";
 import { isRemoteOrigin } from "../lib/gatewayCredential";
+import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
 import { DOWNLOAD_BLOB_TYPE, assetFileName, vaultAssetMode, viewSource } from "../lib/vaultAsset";
 import { color, font, radius } from "../theme";
 
@@ -45,6 +46,12 @@ type AssetState =
  */
 export function useVaultAsset(projectId: string, path: string, purpose: "view" = "view"): AssetState {
   const mode = vaultAssetMode(isRemoteOrigin());
+  // Card a6d7bf36: a remote fetch that 401'd while the gateway token was dead left this hook in `error`
+  // for the life of the component — the banner's paste no longer reloads the page, so nothing re-ran it.
+  // This is a react-query-free resource, so `invalidateQueries` does not reach it either; the re-attach
+  // nonce is what does. Bumped only on the CLEARING edge, so a loopback render is unaffected and a
+  // locked page is not thrashed while it stays locked.
+  const reattachNonce = useCredentialReattachNonce();
   const direct = mode === "direct" ? api.vaultRawUrl(projectId, path) : null;
   const [state, setState] = useState<AssetState>(
     direct ? { status: "ready", url: direct } : { status: "loading", url: null },
@@ -88,7 +95,7 @@ export function useVaultAsset(projectId: string, path: string, purpose: "view" =
       live = false;
       if (owned.current) { URL.revokeObjectURL(owned.current); owned.current = null; }
     };
-  }, [mode, projectId, path]);
+  }, [mode, projectId, path, reattachNonce]);
 
   return state;
 }

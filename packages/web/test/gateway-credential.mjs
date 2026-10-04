@@ -429,4 +429,49 @@ check("noteRemoteSocketRefusal: only a never-opened socket on a remote origin ho
   assert.equal(L.credentialLock(), null, "and it never sets the loopback lock");
 });
 
+// ── probeHeldGatewayToken (card a6d7bf36) ──────────────────────────────────────────────────
+// The question a refused WebSocket upgrade cannot answer. On a remote origin with a DEAD token in
+// storage the upgrade 401s, so no socket opens and the browser reports a bare 1006 with no reason —
+// noteRemoteSocketRefusal above returns false for exactly that case (a token IS held). So "the token is
+// dead" and "the daemon is restarting" are indistinguishable AT THE CLOSE, and this asks over HTTP.
+const HELD = "held-gw-token";
+
+await acheck("probeHeldGatewayToken: a REFUSED held token is `invalid` AND raises the gateway lock", async () => {
+  mem.set("loom.gatewayToken", HELD);
+  const seen = [];
+  assert.equal(await G.probeHeldGatewayToken(async (t) => { seen.push(t); return "invalid"; }, true), "invalid");
+  assert.deepEqual(seen, [HELD], "it must probe the token this browser HOLDS, not a candidate");
+  assert.equal(G.gatewayLock(), true, "the banner's paste field is the re-entry surface");
+  // ...but it must NOT claim WHICH of revoked/paused/rotated/deleted happened: a 401 to a probe does
+  // not say, and the banner's revoked copy names a specific change. That is the fabricated observation
+  // the three-state split exists to prevent.
+  assert.equal(G.gatewayTokenRevoked(), null, "a probe's 401 must never assert a named token-status change");
+  assert.equal(L.credentialLock(), null, "and never the LOOPBACK lock");
+});
+
+await acheck("probeHeldGatewayToken: `valid` and `unknown` both pass through and raise NOTHING", async () => {
+  // This is the half that makes it usable as a retry STOP at all. verifyGatewayTokenAgainstDaemon read
+  // as a boolean reports a dropped request as a refusal, so a page would lock itself every time the
+  // daemon merely restarted — the exact case the unbounded retry ladder exists to heal.
+  for (const outcome of ["valid", "unknown"]) {
+    reset();
+    mem.set("loom.gatewayToken", HELD);
+    assert.equal(await G.probeHeldGatewayToken(async () => outcome, true), outcome);
+    assert.equal(G.gatewayLock(), false, outcome + " must not lock the page");
+    assert.equal(G.gatewayTokenRevoked(), null);
+  }
+});
+
+await acheck("probeHeldGatewayToken: `none` when there is nothing to ask about — and it never calls the probe", async () => {
+  let calls = 0;
+  const count = async () => { calls += 1; return "invalid"; };
+  // No token held: a refused handshake is already covered by noteRemoteSocketRefusal, which locks.
+  assert.equal(await G.probeHeldGatewayToken(count, true, null), "none");
+  // A loopback origin never reads a gateway token at all, so it has none to disprove.
+  mem.set("loom.gatewayToken", HELD);
+  assert.equal(await G.probeHeldGatewayToken(count, false), "none");
+  assert.equal(calls, 0, "`none` must cost no request — this runs on every socket close");
+  assert.equal(G.gatewayLock(), false, "and `none` is not an outcome ABOUT a token, so never a refusal");
+});
+
 console.log(`\n${pass} checks passed`);

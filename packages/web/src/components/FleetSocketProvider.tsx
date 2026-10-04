@@ -4,7 +4,8 @@ import type { ServerFleetMessage, SessionListItem } from "@loom/shared";
 import { api, orchStatusQuery } from "../lib/api";
 import { applyFleetDelta } from "../lib/fleetSocket";
 import { socketAuth } from "../lib/gatewayCredential";
-import { createReconnectBackoff, createRetryLoop, handleSocketClose } from "../lib/socketReconnect";
+import { createReconnectBackoff, createRefusalEpisode, createRetryLoop, handleSocketClose } from "../lib/socketReconnect";
+import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
 
 /**
  * C4 of the WS delta-push umbrella (1efde4ba) — the payoff card. Owns ONE app-wide `/ws/fleet` socket
@@ -58,6 +59,12 @@ function log(...args: unknown[]) {
 
 export function FleetSocketProvider() {
   const qc = useQueryClient();
+  // Card a6d7bf36 — the RE-ATTACH signal, in this effect's deps so an unlock tears the whole lifecycle
+  // down and rebuilds it: a fresh socket, fresh seed loops, a fresh backoff. That is what revives this
+  // feed after a TERMINAL close (card f8d2684d made the reconnect permanent-stop, so before this a
+  // pasted token left the page on its 10s polling fallback until the user reloaded), and what makes the
+  // bounded ladder below safe to add.
+  const reattachNonce = useCredentialReattachNonce();
 
   useEffect(() => {
     let disposed = false;
@@ -71,6 +78,12 @@ export function FleetSocketProvider() {
     const seedRetry = createRetryLoop();
     const statusSeedRetry = createRetryLoop();
     const stopSeedRetries = () => { seedRetry.stop(); statusSeedRetry.stop(); };
+    // Card a6d7bf36 — the ONE held-credential probe this run of failures is allowed. A remote page whose
+    // gateway token has died never gets a 1008 here either (the upgrade 401s, so there is no socket to
+    // close and the browser reports a bare 1006), so this socket's own reconnect would otherwise retry a
+    // guaranteed 401 forever at the 10s cap, spending the trusted proxy's shared failed-auth budget.
+    const refusalEpisode = createRefusalEpisode();
+    let retriesStopped = false;
     // While a seed fetch is in flight, inbound deltas are buffered (in wire order) instead of patching the
     // cache directly, then replayed onto the seed once it lands — see the seed() comment below.
     let seeding = false;
@@ -189,6 +202,7 @@ export function FleetSocketProvider() {
       socket.onopen = () => {
         if (disposed) return;
         backoff.reset();
+        refusalEpisode.reset(); // this run of failures is over; a later one gets its own probe
         stopFallbackPoll();
         log("connected");
         seed();
@@ -235,10 +249,30 @@ export function FleetSocketProvider() {
           log(`disconnected by policy (${what}) — not reconnecting, seed retries stopped; see the gateway banner`);
           startFallbackPoll();
         };
+        /**
+         * Card a6d7bf36 — the held credential came back REFUSED from the episode probe, so this socket's
+         * handshake will 401 identically forever. Same disposition as a 1008 terminal close, reached by a
+         * different route: stop reconnecting and stop the seed loops, but KEEP the fallback poll (its own
+         * 401 is what holds the gateway banner up — the trade card 04314fbc already settled above).
+         *
+         * Safe to stop only because the probe raised the gateway lock, whose CLEARING bumps the re-attach
+         * nonce in this provider's deps and rebuilds the whole lifecycle.
+         */
+        const stopForRefusal = () => {
+          if (disposed || retriesStopped) return;
+          retriesStopped = true;
+          clearTimeout(reconnectTimer);
+          reconnectTimer = undefined;
+          stopSeedRetries();
+          log("the gateway token this browser holds was refused — not reconnecting; see the gateway banner");
+          startFallbackPoll();
+        };
         handleSocketClose(e, {
           retry: () => {
+            if (retriesStopped) { startFallbackPoll(); return; }
             log("disconnected — falling back to polling and reconnecting");
             startFallbackPoll();
+            refusalEpisode.check(stopForRefusal);
             reconnectTimer = setTimeout(connect, backoff.next());
           },
           tokenDead: (change) => terminal(`gateway token ${change}`),
@@ -269,7 +303,7 @@ export function FleetSocketProvider() {
         socket.close();
       }
     };
-  }, [qc]);
+  }, [qc, reattachNonce]);
 
   return null;
 }

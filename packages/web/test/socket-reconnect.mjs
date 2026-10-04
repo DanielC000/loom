@@ -306,4 +306,187 @@ check("two retry loops are INDEPENDENT — stopping one must not stop the other"
   assert.equal(t.armed.size, 1, "only a's timer was cleared");
 });
 
+// The episode checks below are ASYNC. The sync `check` above would call fn(), ignore the promise
+// and count the case green before any assertion inside it ran, so they get their own awaited
+// harness — the same split gateway-credential.mjs makes for its own async cases.
+const acheck = async (name, fn) => {
+  mem.clear(); G.resetGatewayLockForTest();
+  await fn(); pass++; console.log(`ok   ${name}`);
+};
+
+// ── createRefusalEpisode (card a6d7bf36): the bound on a guaranteed-401 reconnect ladder ──────────
+// A remote page holding a DEAD gateway token never sees the 1008 contract above: the upgrade 401s, so no
+// socket ever opens and the browser reports a bare 1006. classifySocketClose therefore says retry (and
+// must), which is how the pane came to retry a request that can only ever 401, forever, at the 10s cap.
+// The episode is the one HTTP question allowed per run of failures, and only a real refusal stops it.
+//
+// The probe is injected here, so these assert the EPISODE's algebra, not the probe's — the probe's own
+// three outcomes are covered in gateway-credential.mjs against the real module.
+const episode = (outcomes, maxUnknown) => {
+  const asked = [];
+  const queue = [...outcomes];
+  const e = S.createRefusalEpisode(async () => {
+    const next = queue.length > 1 ? queue.shift() : queue[0];
+    asked.push(next);
+    return next;
+  }, maxUnknown);
+  return { e, asked };
+};
+
+await acheck("an `invalid` probe runs onDead ONCE and settles the episode", async () => {
+  const { e, asked } = episode(["invalid"]);
+  let dead = 0;
+  e.check(() => { dead += 1; });
+  // The probe is async, so the close handler has already returned and scheduled its next attempt by the
+  // time this resolves. That ordering is the point: the ladder keeps running until an answer arrives.
+  assert.equal(dead, 0, "the stop must not be synchronous with the close");
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(dead, 1);
+  assert.equal(e.settled(), true);
+  e.check(() => { dead += 1; });
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(dead, 1, "a settled episode asks nothing and fires nothing again");
+  assert.deepEqual(asked, ["invalid"], "exactly ONE probe per episode");
+});
+
+await acheck("`valid` and `none` settle the episode WITHOUT stopping the ladder", async () => {
+  for (const outcome of ["valid", "none"]) {
+    const { e, asked } = episode([outcome]);
+    let dead = 0;
+    e.check(() => { dead += 1; });
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(dead, 0, outcome + " is not a refusal, so the retry ladder must keep running");
+    assert.equal(e.settled(), true, outcome + " answers the question, so stop asking");
+    e.check(() => { dead += 1; });
+    await Promise.resolve(); await Promise.resolve();
+    assert.deepEqual(asked, [outcome], "and it never asks twice");
+  }
+});
+
+await acheck("`unknown` learned NOTHING, so it may re-ask — but a bounded number of times", async () => {
+  // The asymmetry is deliberate. An unknown is a dropped request or an intermediary's answer, so asking
+  // again is legitimate; an unbounded re-ask is the loop this mechanism exists to bound, and each ask
+  // spends the same shared failed-auth budget. Past the cap the episode gives up on LEARNING and the
+  // socket keeps its pre-existing unbounded retry — never a lock on an unobserved refusal.
+  const { e, asked } = episode(["unknown"], 3);
+  let dead = 0;
+  for (let i = 0; i < 10; i += 1) {
+    e.check(() => { dead += 1; });
+    await Promise.resolve(); await Promise.resolve();
+  }
+  assert.equal(dead, 0, "an unknown must NEVER stop the ladder: that would lock a page on a restarting daemon");
+  assert.equal(asked.length, 3, "re-asks are capped, not unlimited (saw " + asked.length + ")");
+  assert.equal(e.settled(), true);
+});
+
+await acheck("the PRODUCTION default re-ask cap is finite — the constant is what reaches a real pane", async () => {
+  // The case above injects its own cap, so it proves the mechanism and NOT that production is
+  // bounded. A default of Infinity would pass it identically. This is the one that would not.
+  assert.ok(Number.isInteger(S.REFUSAL_EPISODE_MAX_UNKNOWN) && S.REFUSAL_EPISODE_MAX_UNKNOWN > 0
+    && S.REFUSAL_EPISODE_MAX_UNKNOWN <= 10, `the cap must be a small positive integer, saw ${S.REFUSAL_EPISODE_MAX_UNKNOWN}`);
+  let asked = 0;
+  const e = S.createRefusalEpisode(async () => { asked += 1; return "unknown"; });
+  for (let i = 0; i < S.REFUSAL_EPISODE_MAX_UNKNOWN + 5; i += 1) {
+    e.check(() => { throw new Error("an unknown must never stop the ladder"); });
+    await Promise.resolve(); await Promise.resolve();
+  }
+  assert.equal(asked, S.REFUSAL_EPISODE_MAX_UNKNOWN, "the default cap must actually bind");
+});
+
+await acheck("an `unknown` that later turns `invalid` still stops the ladder, inside the cap", async () => {
+  const { e, asked } = episode(["unknown", "invalid"], 3);
+  let dead = 0;
+  e.check(() => { dead += 1; });
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(dead, 0);
+  e.check(() => { dead += 1; });
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(dead, 1);
+  assert.deepEqual(asked, ["unknown", "invalid"]);
+});
+
+await acheck("reset() re-opens the episode — a socket that OPENED ends the run of failures", async () => {
+  const { e, asked } = episode(["valid"]);
+  e.check(() => {});
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(e.settled(), true);
+  e.reset();
+  assert.equal(e.settled(), false);
+  e.check(() => {});
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(asked.length, 2, "the next run of failures gets its own probe");
+});
+
+await acheck("at most ONE probe is in flight, however many closes land while it is pending", async () => {
+  let asked = 0;
+  let release;
+  const e = S.createRefusalEpisode(() => new Promise((r) => { asked += 1; release = r; }));
+  for (let i = 0; i < 5; i += 1) e.check(() => {});
+  assert.equal(asked, 1, "five closes during one pending probe must not fire five requests");
+  release("valid");
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(e.settled(), true);
+});
+
+await acheck("a probe IN FLIGHT when reset() lands cannot touch the NEW episode", async () => {
+  // `reset()` ends one run of failures; it cannot cancel an HTTP request already out. The real ordering
+  // is unremarkable: a socket OPENS (so `reset()` runs), and the probe issued by the run of failures
+  // BEFORE it answers only afterwards, describing credential state that is no longer current. Without a
+  // generation fence that late `"invalid"` stops a ladder whose socket just demonstrably worked —
+  // reproduced on the first pass of card a6d7bf36.
+  let release;
+  let asked = 0;
+  const e = S.createRefusalEpisode(() => new Promise((r) => { asked += 1; release = r; }));
+  let dead = 0;
+  e.check(() => { dead += 1; });
+  assert.equal(asked, 1);
+  e.reset();          // a socket opened
+  release("invalid"); // ...and only now does the superseded probe answer
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(dead, 0, "a superseded probe must never stop the new episode's ladder");
+  assert.equal(e.settled(), false, "nor settle it — a new run of failures keeps its own question");
+
+  // ...and the new episode is genuinely usable afterwards: its OWN probe is the one that counts.
+  e.check(() => { dead += 1; });
+  assert.equal(asked, 2, "reset() must leave the episode able to ask again");
+  release("invalid");
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(dead, 1);
+  assert.equal(e.settled(), true);
+});
+
+await acheck("a superseded `unknown` does not spend the NEW episode's re-ask budget", async () => {
+  // The quieter half of the same fence. An `"unknown"` is not a stop, so a missing fence does not show
+  // up as a dead pane here — it silently charges the stale answer to the new episode's cap, which then
+  // gives up on learning early and leaves a genuinely dead credential un-probed.
+  const releases = [];
+  let asked = 0;
+  const e = S.createRefusalEpisode(() => new Promise((r) => { asked += 1; releases.push(r); }), 2);
+  e.check(() => {}); // episode 1's probe, deliberately left in flight
+  e.reset();
+  releases[0]("unknown");
+  await Promise.resolve(); await Promise.resolve();
+  // Episode 2 must now get its FULL cap of re-asks.
+  for (let i = 0; i < 2; i += 1) {
+    e.check(() => { throw new Error("an unknown must never stop the ladder"); });
+    releases[releases.length - 1]("unknown");
+    await Promise.resolve(); await Promise.resolve();
+  }
+  assert.equal(asked, 3, "one superseded probe plus the new episode's own two (a charged stale answer reads 2)");
+  assert.equal(e.settled(), true, "and the cap binds on the new episode's own asks");
+});
+
+await acheck("a probe that THROWS settles rather than becoming a second unbounded loop", async () => {
+  let asked = 0;
+  const e = S.createRefusalEpisode(async () => { asked += 1; throw new Error("unexpected"); });
+  let dead = 0;
+  for (let i = 0; i < 5; i += 1) {
+    e.check(() => { dead += 1; });
+    await Promise.resolve(); await Promise.resolve();
+  }
+  assert.equal(asked, 1);
+  assert.equal(dead, 0, "a thrown probe observed nothing, so it must not stop the ladder either");
+  assert.equal(e.settled(), true);
+});
+
 console.log(`\n${pass} check(s) passed`);

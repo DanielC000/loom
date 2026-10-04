@@ -343,6 +343,46 @@ export function noteRemoteSocketRefusal(everOpened: boolean, remote: boolean = i
 }
 
 /**
+ * What a probe of the token this browser ALREADY HOLDS came to. `"none"` is not an outcome ABOUT a token
+ * (a loopback origin, or nothing held), so it must never read as a refusal.
+ */
+export type HeldGatewayTokenProbe = "none" | "valid" | "invalid" | "unknown";
+
+/**
+ * Probe the HELD gateway token against the daemon, to settle the one question a refused WebSocket upgrade
+ * cannot answer by itself. On a remote origin with a dead token still in storage the upgrade 401s, so no
+ * socket ever opens and the browser reports **1006** with an empty reason — there was no socket for the
+ * daemon to close with its 1008 contract. `noteRemoteSocketRefusal` above returns `false` for precisely
+ * this case (a token IS held, so a refused handshake is not evidence of a missing one), which leaves
+ * "this token is dead" and "the daemon is restarting" indistinguishable at the close. They are not
+ * indistinguishable over HTTP, so ask there instead of guessing.
+ *
+ * Three-state through the SHARED classifier, for the reason that algebra exists at all: only `"invalid"`
+ * is the daemon's own refusal. `verifyGatewayTokenAgainstDaemon` read as a boolean is too coarse to drive
+ * a retry STOP off — it reports a dropped request as a refusal, so a page would lock itself every time
+ * the daemon merely restarted, which is the exact case the unbounded retry loop exists to heal.
+ *
+ * On `"invalid"` it raises the plain gateway LOCK — whose banner copy already says, accurately, that the
+ * daemon refused the token this browser holds — and deliberately NOT `noteGatewayTokenRevoked`: that
+ * state names WHICH of revoked/paused/rotated/deleted happened, and a 401 to a probe does not say which.
+ * Picking one would fabricate the observation the three-state split protects.
+ *
+ * @decision a6d7bf36 — never stop a retry ladder on anything but `"invalid"`, and never claim a named
+ * token-status change for a probe's 401.
+ */
+export async function probeHeldGatewayToken(
+  verify: (token: string) => Promise<CredentialVerifyOutcome> = verifyGatewayTokenAgainstDaemon,
+  remote: boolean = isRemoteOrigin(),
+  gatewayToken: string | null = getGatewayToken(),
+): Promise<HeldGatewayTokenProbe> {
+  if (!remote || gatewayToken === null) return "none";
+  const outcome = await verify(gatewayToken);
+  if (outcome !== "invalid") return outcome;
+  noteGatewayLock();
+  return "invalid";
+}
+
+/**
  * Prove a candidate gateway token against the daemon BEFORE storing it: `GET /api/version` is a Tier-1 read that a
  * remote-class request must authenticate, so a 2xx ⇔ the token verified (unlike loopback, where reads are ungated and
  * prove nothing). It changes nothing.

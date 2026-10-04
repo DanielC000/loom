@@ -11,7 +11,8 @@ import { channelBadgeLabel } from "../lib/companion";
 import { api, getLoopbackToken } from "../lib/api";
 import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCredential";
-import { createReconnectBackoff, handleSocketClose } from "../lib/socketReconnect";
+import { createReconnectBackoff, createRefusalEpisode, handleSocketClose } from "../lib/socketReconnect";
+import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
 import { Button, Dot, SectionLabel, StatusPill } from "./ui";
 import { color, font, radius } from "../theme";
 
@@ -136,11 +137,26 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
   const prevLenRef = useRef(0);
   const nextId = () => String(++idRef.current);
 
+  // Card a6d7bf36 — the RE-ATTACH signal (lib/useCredentialReattach): bumped whenever either credential
+  // lock CLEARS, and in the socket effect's deps below so a paste rebuilds this panel's socket in place.
+  // This panel was the third socket client and had none: after a terminal 1008 it sat in "revoked" for
+  // good, and only a full page reload could revive it — which is also what makes bounding its ladder
+  // (`stopForRefusal` below) safe rather than a permanently dead pane.
+  //
+  // The effect it keys is the one that ALSO seeds the durable history, so a rebuild re-fetches the
+  // transcript rather than re-attaching to an empty panel: the once-at-mount seed below is this effect's
+  // own body, not a separate mount-only effect.
+  const reattachNonce = useCredentialReattachNonce();
+
   // ── WebSocket lifecycle: connect, ingest chat frames, auto-reconnect with backoff. ─────────────
   useEffect(() => {
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     const backoff = createReconnectBackoff();
+    // Card a6d7bf36 — the ONE held-credential probe this run of never-opened failures is allowed, and the
+    // flag that ends the ladder once it comes back refused. Shared policy in lib/socketReconnect.
+    const refusalEpisode = createRefusalEpisode();
+    let retriesStopped = false;
     // Card 093981dd: scoped to the whole effect, NOT to one `connect()` — once any attempt has opened,
     // a later close is an ordinary disconnect, never a missing credential. Without this, the reconnect
     // loop below would keep saying "reconnecting" forever against a guard 401 with nothing explaining why.
@@ -162,6 +178,26 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
     prevLenRef.current = 0;
     clearReplyTimer();
 
+    /**
+     * Card a6d7bf36 — the held credential was REFUSED (the episode probe's only stopping outcome), so
+     * every further handshake would 401 identically, forever, at the 10s cap. End the ladder: a rejected
+     * WS upgrade spends the trusted proxy's ONE shared failed-auth bucket, so a few mounted panes 429
+     * unrelated remote callers.
+     *
+     * Its own state, NOT `revoked`: that pill says "token revoked", which is one of the four named
+     * changes only a daemon-authored close reason can establish. A probe's 401 does not say which.
+     *
+     * Safe to stop ONLY because the probe raised the gateway lock on its way here — which puts the
+     * banner's paste field on screen, and whose CLEARING bumps `reattachNonce` and rebuilds this effect.
+     */
+    const stopForRefusal = () => {
+      if (disposed || retriesStopped) return;
+      retriesStopped = true;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+      setConn("token-refused");
+    };
+
     const connect = () => {
       if (disposed) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -181,6 +217,7 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
         if (disposed) return;
         everOpened = true;
         backoff.reset(); // start the ladder over once a connection actually establishes
+        refusalEpisode.reset(); // this run of failures is over; a later one gets its own probe
         setConn("connected");
       };
       ws.onmessage = (e) => {
@@ -268,10 +305,22 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
           tokenDead: () => setConn("revoked"), // the page banner owns re-entry
           refused: () => setConn("refused"),   // this pane only; the credential is fine
           retry: () => {
+            // A socket already in flight when the probe answered still closes here; it must not re-arm
+            // the ladder `stopForRefusal` just ended (card a6d7bf36).
+            if (retriesStopped) return;
             // A handshake that never opened on a token-less browser is the credential lock, not a flaky link.
             // Still reconnect: if the user pastes a credential into the banner, the next attempt carries it.
             if (noteRemoteSocketRefusal(everOpened)) { /* the gateway banner owns it */ }
             else if (isCredentialSocketFailure(everOpened, getLoopbackToken())) noteCredentialLock("socket");
+            else if (!everOpened) {
+              // Never opened, but we DO hold a credential. Two indistinguishable causes at the close: a
+              // daemon that is down or restarting, or a credential the daemon has since rejected — the
+              // upgrade 401s, so no socket opens and the browser reports a bare 1006 with no reason. Keep
+              // retrying so the restart case heals itself, and ask over HTTP, ONCE per episode, which case
+              // this is (card a6d7bf36). Only a real refusal ends the ladder; `unknown` and `valid` leave
+              // it running.
+              refusalEpisode.check(stopForRefusal);
+            }
             setConn("reconnecting");
             reconnectTimer = setTimeout(connect, backoff.next());
           },
@@ -283,6 +332,11 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
     // Load-then-connect (bug 0f01f234): seed the durable history BEFORE opening the WS, so there is no
     // window where a live frame and a historical row could both land. `disposed` guards against a fast
     // sessionId swap (or unmount) landing a stale fetch's result on the NEW session's transcript.
+    //
+    // Card a6d7bf36: this is also the RE-SEED on a credential re-attach. The effect is keyed on
+    // `reattachNonce`, so a paste re-runs this seed with the new credential — without it, a rebuild would
+    // re-attach the socket to a panel whose transcript had been cleared above and never re-fetched (and
+    // on a remote origin this very fetch is what 401'd while the token was dead).
     (async () => {
       try {
         const body = await api.companionMessages(sessionId);
@@ -317,7 +371,7 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
         else { ws.onopen = null; ws.close(); }
       }
     };
-  }, [sessionId]);
+  }, [sessionId, reattachNonce]);
 
   // ── Autoscroll + unread bookkeeping on a new message ──────────────────────────────────────────
   // Stick to the bottom while the reader is there; once they've scrolled up to read back, DON'T yank them
@@ -554,6 +608,11 @@ function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
     conn === "connected" ? { tone: "phosphor" as const, label: "connected", glow: true } :
     conn === "connecting" ? { tone: "amber" as const, label: "connecting", glow: false } :
     conn === "revoked" ? { tone: "red" as const, label: "token revoked", glow: false } :
+    // Card a6d7bf36: the held credential came back REFUSED from an HTTP probe, not from a close reason —
+    // so it is a credential claim (red, banner-bound) but deliberately NOT a NAMED one: a 401 to a probe
+    // never says which of revoked/paused/rotated/deleted happened, and `revoked`'s own label would assert
+    // the one observation the three-state probe exists to avoid fabricating.
+    conn === "token-refused" ? { tone: "red" as const, label: "token refused", glow: false } :
     // Card 04314fbc: terminal, but NOT a credential claim — amber (the same "attention, not alarm" tone
     // `connecting` uses) and wording that says this pane was refused, with no token to go re-paste.
     conn === "refused" ? { tone: "amber" as const, label: "refused", glow: false } :

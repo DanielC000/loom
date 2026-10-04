@@ -24,7 +24,10 @@ import {
   WS_CLOSE_POLICY_VIOLATION,
   type GatewayTokenCloseChange,
 } from "@loom/shared";
-import { noteGatewayTokenRevoked, type GatewayTokenChange } from "./gatewayCredential";
+import {
+  noteGatewayTokenRevoked, probeHeldGatewayToken,
+  type GatewayTokenChange, type HeldGatewayTokenProbe,
+} from "./gatewayCredential";
 
 /** Backoff bounds for every socket in the app: first retry after 1s, doubling, capped at 10s. */
 export const SOCKET_RECONNECT_MIN_MS = 1000;
@@ -182,5 +185,85 @@ export function createRetryLoop(deps: {
     stop: () => { dead = true; disarm(); },
     stopped: () => dead,
     pendingDelay: () => armedDelay,
+  };
+}
+
+/**
+ * How many times ONE refusal episode may re-ask after an `"unknown"` probe. An `unknown` means nothing
+ * was learned (the request never landed, or an intermediary answered), so asking again is legitimate —
+ * but an unbounded re-ask is itself the loop this whole mechanism exists to bound, and each ask spends
+ * the daemon's shared failed-auth budget too. Past the cap the episode gives up on LEARNING and the
+ * socket keeps its pre-existing unbounded retry: noisy and self-healing beats locking a live page on a
+ * refusal nobody ever observed.
+ */
+export const REFUSAL_EPISODE_MAX_UNKNOWN = 3;
+
+/**
+ * One run of never-opened socket failures — a refusal EPISODE — and the single held-credential probe it
+ * is allowed. `check` is called from the close handler on every attempt; at most one probe is ever in
+ * flight, and the episode settles as soon as it has an answer worth keeping.
+ */
+export interface RefusalEpisode {
+  /** Ask once for this episode. `onDead` runs iff the daemon REFUSED the credential this browser holds. */
+  check: (onDead: () => void) => void;
+  /** A socket opened: the episode is over, so the next run of failures gets its own probe. */
+  reset: () => void;
+  /** True once this episode will ask no more (answered, or out of `unknown` re-asks). Diagnostic/test. */
+  settled: () => boolean;
+}
+
+/**
+ * The bound on a guaranteed-401 reconnect ladder, shared by every socket client that has one.
+ *
+ * A remote page holding a DEAD gateway token retries an upgrade that can only ever 401, at the 10s cap,
+ * for as long as the tab is open — and a rejected WS upgrade spends the trusted proxy's ONE shared
+ * `PROXY_FAILED_AUTH_PER_MIN` bucket, so a few mounted panes 429 unrelated remote callers. The close
+ * event cannot tell that apart from a restarting daemon (see `probeHeldGatewayToken`), so the episode
+ * asks over HTTP, once, and only a real refusal stops the ladder.
+ *
+ * `probe` is injectable for the unit test only; production callers pass nothing.
+ *
+ * @decision a6d7bf36 — the stop must be paired with a re-attach path that does not require a page
+ * reload (`lib/useCredentialReattach`): capping this loop without one turns "noisy but self-healing"
+ * into "silently dead until the user reloads", which is strictly worse than the loop it removes.
+ */
+export function createRefusalEpisode(
+  probe: () => Promise<HeldGatewayTokenProbe> = probeHeldGatewayToken,
+  maxUnknown: number = REFUSAL_EPISODE_MAX_UNKNOWN,
+): RefusalEpisode {
+  let inFlight = false;
+  let settled = false;
+  let unknowns = 0;
+  // The EPISODE's identity. `reset()` ends one run of failures and starts another, but it cannot cancel
+  // a probe already in flight — so each `check` captures the generation it asked under and a result from
+  // a superseded one is dropped on arrival. Without this fence a probe issued before a successful open
+  // lands on the NEW episode: an `invalid` from the dead credential stops a ladder that just worked, and
+  // an `unknown`/`valid` silently spends the new episode's one question or settles it unasked.
+  let generation = 0;
+  return {
+    check: (onDead) => {
+      if (inFlight || settled) return;
+      inFlight = true;
+      const asked = generation;
+      void probe().then(
+        (outcome) => {
+          if (asked !== generation) return; // superseded by a reset() while this was in flight
+          inFlight = false;
+          if (outcome === "invalid") { settled = true; onDead(); return; }
+          // "unknown" learned nothing, so the episode may ask again — a bounded number of times.
+          if (outcome === "unknown") { unknowns += 1; if (unknowns >= maxUnknown) settled = true; return; }
+          settled = true; // "valid" / "none": the credential is not what is wrong, so stop asking
+        },
+        () => {
+          if (asked !== generation) return;
+          // The probe swallows its own failures, so a rejection here is unexpected — settle rather than
+          // let an unexpectedly-throwing probe become a second unbounded loop.
+          inFlight = false;
+          settled = true;
+        },
+      );
+    },
+    reset: () => { generation += 1; inFlight = false; settled = false; unknowns = 0; },
+    settled: () => settled,
   };
 }

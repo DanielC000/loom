@@ -64,10 +64,19 @@ export function GatewayTokenBanner() {
     if (outcome === "unverified") { setError("Didn't get an answer about that token — nothing was saved. Try again."); return; }
     if (outcome === "unstorable") { setError("This browser refused to store it (private mode?)."); return; }
     setValue(""); // don't leave the secret sitting in component state
-    clearGatewayLock();
     void qc.invalidateQueries(); // let anything that failed while locked settle
-    // The live panes hold sockets opened without a token; a reload is the simplest correct way to reconnect them.
-    window.location.reload();
+    // This used to end in `window.location.reload()`. Clearing the lock IS the reconnect now: every
+    // socket client watches the clearing edge (lib/useCredentialReattach) and rebuilds its socket in
+    // place. What that keeps — and what it does NOT, which is less than the first version of this
+    // comment claimed — is enumerated in the record.
+    //
+    // @decision a6d7bf36 — do not reload here again: it would mask whether the re-attach path works at
+    // all, since the page comes back either way, and it is the only recovery a pane whose ladder stopped
+    // has left.
+    //
+    // LAST, and after the token is already in storage (storeVerifiedGatewayToken put it there): this
+    // notifies synchronously, so every re-attach it triggers must find the new credential.
+    clearGatewayLock();
   };
 
   // Re-check a candidate whose first check never reached the daemon (the helper stores + reloads on a

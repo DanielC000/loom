@@ -43,10 +43,20 @@ test.describe("a browser behind a trusted reverse proxy", () => {
     await expect(page.getByText("The daemon refused that token")).toBeVisible();
     expect(await page.evaluate(() => localStorage.getItem("loom.gatewayToken"))).toBeNull();
 
-    // The real one: verified, stored on THIS origin, the page reloads and the banner is gone.
+    // The real one: verified, stored on THIS origin, and the banner is gone.
+    //
+    // Card a6d7bf36 changed HOW it goes: this used to wait for a `load` event, because a successful paste
+    // ended in `window.location.reload()`. It no longer does — clearing the gateway lock re-attaches every
+    // live socket in place (lib/useCredentialReattach), which is what let the bounded retry ladder stop
+    // safely. So a `load` here is now exactly what must NOT arrive, and this asserts that rather than
+    // merely not waiting for it: the sentinel is set AFTER load, so a reload would wipe it.
+    // (The `?gwtoken=` capture path below still reloads, deliberately — see its own note.)
+    await page.evaluate(() => { (window as unknown as { __noReload: number }).__noReload = Date.now(); });
     await page.getByLabel("Gateway token").fill(rig.token);
-    await Promise.all([page.waitForEvent("load"), page.getByRole("button", { name: "Use token" }).click()]);
+    await page.getByRole("button", { name: "Use token" }).click();
     await expect(gatewayBanner(page)).toHaveCount(0);
+    expect(await page.evaluate(() => (window as unknown as { __noReload?: number }).__noReload ?? null),
+      "a successful paste must re-attach in place, never reload the page").not.toBeNull();
     expect(await page.evaluate(() => localStorage.getItem("loom.gatewayToken"))).toBe(rig.token);
     expect(await page.evaluate(() => localStorage.getItem("loom.loopbackToken")), "the LOOPBACK credential key is never touched").toBeNull();
 

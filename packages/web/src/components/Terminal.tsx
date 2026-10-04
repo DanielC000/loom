@@ -1,11 +1,12 @@
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
 import { getLoopbackToken } from "../lib/api";
 import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
-import { createReconnectBackoff, handleSocketClose, type SocketCloseVerdict } from "../lib/socketReconnect";
-import { credentialLock, isCredentialSocketFailure, noteCredentialLock, subscribeCredentialLock } from "../lib/loopbackCredential";
+import { createReconnectBackoff, createRefusalEpisode, handleSocketClose, type SocketCloseVerdict } from "../lib/socketReconnect";
+import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
+import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCredential";
 import { useIsCompanionSession } from "../lib/companionGuard";
 import { Dot } from "./ui";
 import { color, font, space } from "../theme";
@@ -79,17 +80,13 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
   const applyFontSizeRef = useRef<(() => void) | null>(null);
 
   // Card 093981dd: a pane that died on the credential guard must RE-ATTACH once the user unlocks, or it
-  // sits blank forever pointing at a banner that is no longer on screen. Watch the lock and bump a nonce
-  // on the locked -> unlocked transition only; the nonce is in the attach effect's deps, so the socket is
-  // rebuilt exactly once per unlock and never on the lock-being-SET edge (which would tear down a pane
-  // mid-failure for no benefit).
-  const lock = useSyncExternalStore(subscribeCredentialLock, credentialLock, () => null);
-  const prevLock = useRef(lock);
-  const [reattachNonce, setReattachNonce] = useState(0);
-  useEffect(() => {
-    if (prevLock.current !== null && lock === null) setReattachNonce((n) => n + 1);
-    prevLock.current = lock;
-  }, [lock]);
+  // sits blank forever pointing at a banner that is no longer on screen. The nonce is in the attach
+  // effect's deps, so the socket is rebuilt exactly once per unlock.
+  //
+  // Card a6d7bf36 moved it into the shared `lib/useCredentialReattach` and widened it to BOTH locks: the
+  // version here watched only the LOOPBACK one, so a remote pane killed by a dead gateway token had no
+  // re-attach path at all. It is also what makes the bounded ladder below safe — see `stopForRefusal`.
+  const reattachNonce = useCredentialReattachNonce();
 
   useEffect(() => {
     if (!ref.current) return;
@@ -227,6 +224,10 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     const backoff = createReconnectBackoff();
+    // Card a6d7bf36 — the ONE held-credential probe this run of never-opened failures is allowed, and the
+    // flag that ends the ladder once it comes back refused. Shared policy in lib/socketReconnect.
+    const refusalEpisode = createRefusalEpisode();
+    let retriesStopped = false;
     let disposed = false;
     // STICKY across attempts, deliberately: both credential classifiers below read it as "has this pane
     // ever had a working socket", and one successful attach permanently rules a missing credential out.
@@ -257,11 +258,33 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       if (everOpened) term.reset();
       everOpened = true;
       noticeWritten = false;
+      refusalEpisode.reset(); // this run of failures is over; a later one gets its own probe
       if (resizable) fitAndReport();
     };
 
     const scheduleReconnect = () => {
+      if (retriesStopped) return;
       reconnectTimer = setTimeout(connect, backoff.next());
+    };
+
+    /**
+     * Card a6d7bf36 — the held credential was REFUSED (the episode probe's only stopping outcome), so
+     * every further attempt would 401 identically, forever, at the 10s cap. End the ladder: a rejected
+     * WS upgrade spends the trusted proxy's ONE shared failed-auth bucket, so a few mounted panes 429
+     * unrelated remote callers.
+     *
+     * Safe to stop ONLY because the probe raised the gateway lock on its way here — which puts the
+     * banner's paste field on screen, and whose CLEARING bumps this pane's re-attach nonce and rebuilds
+     * this whole effect. Without that path this would be a silently dead pane, not a quiet one.
+     */
+    const stopForRefusal = () => {
+      if (disposed || retriesStopped) return;
+      retriesStopped = true;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+      setReconnecting(false);
+      term.write("\r\n\x1b[31m[this access token was refused — this terminal is disconnected]\x1b[0m\r\n"
+        + "\x1b[2m[paste a current token in the banner at the top of the page]\x1b[0m\r\n");
     };
 
     // Card 093981dd: a rejected upgrade used to render as a permanently blank pane — this file carried no
@@ -298,6 +321,8 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
 
     /** The pre-1008 close policy, unchanged: the everOpened/credential inference and its own backoff. */
     const handleRetryableClose = () => {
+      // A socket already in flight when the probe answered still closes here; it must not re-arm.
+      if (retriesStopped) { setReconnecting(false); return; }
       setReconnecting(true);
       if (everOpened) {
         if (!noticeWritten) { term.write("\r\n\x1b[2m[connection lost — reconnecting]\x1b[0m\r\n"); noticeWritten = true; }
@@ -314,9 +339,14 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
         term.write("\r\n\x1b[31m[no local access credential — live terminals are disabled]\x1b[0m\r\n"
           + "\x1b[2m[see the banner at the top of the page]\x1b[0m\r\n");
       } else {
-        // Never opened, but we DO hold a credential — a daemon that is down or restarting, which a page
-        // loaded mid-restart hits. Keep retrying so the pane heals itself rather than needing a reload.
+        // Never opened, but we DO hold a credential. Two indistinguishable causes: a daemon that is down
+        // or restarting (which a page loaded mid-restart hits), or a credential the daemon has since
+        // rejected — the upgrade 401s, so no socket ever opens and the browser reports a bare 1006 with
+        // no reason to read. Keep retrying so the restart case heals itself rather than needing a reload,
+        // and ask over HTTP, ONCE per episode, which case this actually is (card a6d7bf36). Only a real
+        // refusal ends the ladder; `unknown` and `valid` both leave it running.
         if (!noticeWritten) { term.write("\r\n\x1b[31m[could not connect to this session — retrying]\x1b[0m\r\n"); noticeWritten = true; }
+        refusalEpisode.check(stopForRefusal);
         scheduleReconnect();
       }
     };

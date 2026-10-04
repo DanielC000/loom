@@ -18,9 +18,9 @@
 //    (checks 5-7 below).
 // Run: node packages/web/test/socket-close-wiring.mjs
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 const read = (rel) => {
@@ -35,11 +35,31 @@ const read = (rel) => {
   return stripped;
 };
 
-const CLIENTS = {
-  "components/Terminal.tsx": read("components/Terminal.tsx"),
-  "components/CompanionChat.tsx": read("components/CompanionChat.tsx"),
-  "components/FleetSocketProvider.tsx": read("components/FleetSocketProvider.tsx"),
-};
+// DISCOVERED, never hand-written. A socket client is a file that CALLS `socketAuth` — the one helper that
+// builds a WebSocket's credential, so nothing in this app can open an authenticated socket without it.
+//
+// Card a6d7bf36 round 2: this used to be a literal array of three paths, and that is exactly how
+// CompanionChat came to be left out of checks (8)-(10) — it was simply not in the list, so its missing
+// re-attach nonce and unbounded ladder read as green. A list a client can be absent from cannot detect an
+// absent client; a derived one fails the moment a new socket client (or one quietly dropped) does not
+// carry the wiring.
+const walk = (dir) => readdirSync(dir, { withFileTypes: true })
+  .flatMap((entry) => (entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)]));
+const CLIENTS = {};
+for (const abs of walk(root).filter((p) => /\.tsx?$/.test(p))) {
+  const rel = relative(root, abs).split("\\").join("/");
+  const src = read(rel);
+  if (!/\bsocketAuth\s*\(/.test(src)) continue;
+  if (/\bexport function socketAuth\s*\(/.test(src)) continue; // the DEFINITION, not a caller
+  CLIENTS[rel] = src;
+}
+// The discovery is itself an instrument, so pin what it found. Without this a broken walk/regex yields an
+// EMPTY map and every per-client check below passes vacuously — the classic zero-population green.
+const EXPECTED_CLIENTS = ["components/CompanionChat.tsx", "components/FleetSocketProvider.tsx", "components/Terminal.tsx"];
+assert.deepEqual(Object.keys(CLIENTS).sort(), EXPECTED_CLIENTS,
+  `the socketAuth-caller scan found ${JSON.stringify(Object.keys(CLIENTS).sort())}. A NEW socket client here is `
+  + "not a test bug: add it to EXPECTED_CLIENTS and make it satisfy every check below (that is the point of "
+  + "deriving the list). A MISSING one means the walk or the regex broke.");
 const fleet = CLIENTS["components/FleetSocketProvider.tsx"];
 const companion = CLIENTS["components/CompanionChat.tsx"];
 
@@ -152,6 +172,77 @@ check("(7) unmount stops the loops too, and the disconnected fallback poll delib
   // gateway banner up, and at 10s it is ~6 requests/min per feed rather than the seeds' ~120/min.
   assert.ok(/const terminal = [\s\S]{0,400}?startFallbackPoll\(\)/.test(fleet),
     "a terminal close must still start the fallback poll");
+});
+
+// ── card a6d7bf36: the bounded ladder and the re-attach that makes it safe ────────────────────
+// Same division of labour as above: `socket-reconnect.mjs` proves the EPISODE's algebra and
+// `gateway-credential.mjs` proves the probe's three outcomes, both against the real modules. What
+// neither can see is whether the socket clients that own a reconnect ladder actually consult it,
+// and — the load-bearing half — whether they also watch the re-attach nonce. A client that bounds its
+// ladder without watching the nonce converts a noisy self-healing pane into a silently dead one.
+//
+// EVERY discovered client, not a sub-list: all three reconnect, so all three must bound and re-attach.
+const LADDER_CLIENTS = Object.keys(CLIENTS);
+
+/**
+ * The deps of the effect that CONSTRUCTS the WebSocket — the only effect whose re-keying actually
+ * rebuilds the socket. Scoped this tightly (card a6d7bf36 round 2) because a file-wide search for
+ * `reattachNonce` in SOME deps array passes for a nonce parked on an unrelated effect, which would be
+ * inert for re-attach while reading green.
+ */
+const attachEffectDeps = (src, name) => {
+  const effects = src.split(/\buseEffect\(/).slice(1).filter((body) => /new WebSocket\(/.test(body));
+  assert.equal(effects.length, 1, `${name}: expected exactly ONE socket-constructing effect, saw ${effects.length}`);
+  const deps = /\}, \[([^\]]*)\]\)/.exec(effects[0]);
+  assert.ok(deps, `${name}: could not read the socket-constructing effect's dependency list`);
+  return deps[1];
+};
+
+check("(8) every client with a reconnect ladder bounds it through the shared episode", () => {
+  for (const name of LADDER_CLIENTS) {
+    const src = CLIENTS[name];
+    assert.ok(/createRefusalEpisode\s*\(/.test(src), `${name}: must build a refusal episode`);
+    assert.ok(/refusalEpisode\.check\(/.test(src), `${name}: must ASK it from the close path`);
+    assert.ok(/refusalEpisode\.reset\(\)/.test(src),
+      `${name}: a socket that OPENED must end the episode, or one probe covers the whole tab`);
+  }
+});
+
+check("(9) ...and PAIRS that bound with the re-attach nonce — the half that makes stopping safe", () => {
+  for (const name of LADDER_CLIENTS) {
+    const src = CLIENTS[name];
+    assert.ok(/useCredentialReattachNonce\(\)/.test(src), `${name}: must read the re-attach nonce`);
+    assert.ok(/from "\.\.\/lib\/useCredentialReattach"/.test(src), `${name}: from the shared hook`);
+    // A nonce nothing depends on is inert. It has to be in the deps of the effect that BUILDS the
+    // socket — not merely somewhere in the file — or clearing a lock changes nothing.
+    assert.match(attachEffectDeps(src, name), /\breattachNonce\b/,
+      `${name}: reattachNonce must be in the socket-constructing effect's deps`);
+  }
+});
+
+check("(10) no client re-arms after the ladder stopped, and the nonce watches BOTH locks", () => {
+  for (const name of LADDER_CLIENTS) {
+    const src = CLIENTS[name];
+    assert.ok(/retriesStopped/.test(src), `${name}: must hold a stopped flag`);
+    // A socket already in flight when the probe answered still closes afterwards. Without this guard
+    // that close re-arms the very ladder the probe just stopped.
+    assert.ok(/if \(retriesStopped\)/.test(src), `${name}: the close path must bail once stopped`);
+  }
+  // The hook itself: a nonce on only ONE of the two locks is the gap card a6d7bf36 closes — Terminal's
+  // own nonce watched the loopback lock and nothing in the app watched the gateway one.
+  const hook = read("lib/useCredentialReattach.ts");
+  assert.ok(/subscribeCredentialLock/.test(hook), "the hook must watch the LOOPBACK lock");
+  assert.ok(/subscribeGatewayLock/.test(hook), "the hook must watch the GATEWAY lock");
+});
+
+check("(11) the gateway banner recovers by re-attaching, not by reloading the page", () => {
+  // The reload was the old recovery: it rebuilt every socket by discarding every pane's scrollback and
+  // the whole query cache. Clearing the lock is that reconnect now — and a reload here would also mask
+  // whether the nonce path works at all, since the page comes back either way.
+  const banner = read("components/GatewayTokenBanner.tsx");
+  assert.ok(/clearGatewayLock\(\)/.test(banner), "the successful-paste path must clear the lock");
+  assert.ok(!/location\.reload\(\)/.test(banner),
+    "the banner must not reload the page to reconnect its sockets");
 });
 
 if (failures.length) {
