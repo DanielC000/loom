@@ -38,6 +38,14 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { requireHermeticEnv } from "./_guard.mjs";
+import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+
+// HERMETICITY (card 500fe2df): SCENARIO 2 below calls the real enterMergeQuarantine() directly — a real
+// durable latch write under LOOM_HOME. Isolate BEFORE the dist imports below, same as every other
+// hermetic test in this suite.
+useOwnLoomHome("loom-bwrlr-home-");
+requireHermeticEnv();
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };

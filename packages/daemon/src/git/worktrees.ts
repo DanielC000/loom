@@ -3818,6 +3818,18 @@ export const STATIC_GUARD_REPO_PATHS = [
   // triggering — a real session spawn — has no compiled-output signature the transpile-identity check
   // could ever see), so it could otherwise take the reduced path and never trip a single check.
   "packages/daemon/test/first-run-suppress-guard.mjs",
+  // Card 500fe2df: a corpus-wide scan of packages/daemon/test/*.mjs asserting every test that raises a
+  // REAL `enterMergeQuarantine(` (directly, or indirectly via a `mergeBranch(...)` call carrying its own
+  // `timeoutMs`, which can raise one internally on an unconfirmed kill) sets a temp LOOM_HOME before the
+  // dist import, or `requireHermeticEnv()`s before the call — same chokepoint
+  // `createworktree-loom-home-guard.mjs` already polices for `WORKTREES_DIR`, but for
+  // `MERGE_QUARANTINE_DIR` instead. Without this entry, a real boot found 13+ stale latch files re-armed
+  // from temp test repos (`loom-mhdwq-*`, among others) — six test files were leaking this way, none of
+  // which touch `createWorktree(` at all, so the existing guard above never saw them. Belongs here on the
+  // same ground as its corpus-wide-scan siblings: a NEW test file reintroducing this shape is a
+  // source-TEXT property the reduced/emit-compare path cannot reason about (a .mjs test file has no
+  // compile step), so it could otherwise take the reduced path and never trip a single check.
+  "packages/daemon/test/merge-quarantine-loom-home-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run

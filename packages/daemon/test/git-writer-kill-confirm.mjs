@@ -17,10 +17,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { GitWriter } from "../dist/git/writer.js";
-import { activeMergeQuarantineFor, enterMergeQuarantine, clearMergeQuarantine } from "../dist/git/merge-quarantine.js";
-import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit, useOwnLoomHome } from "./_tmp-fixture.mjs";
 import { pollUntil } from "./_timing-guard.mjs";
+
+// HERMETICITY (card 500fe2df): sections [1]-[5] below drive real unconfirmed-kill/quarantine paths — a
+// real enterMergeQuarantine() raise persists a durable latch under LOOM_HOME. The two dist imports below
+// were previously STATIC, which would evaluate before any runtime hermetic setup could run at all
+// (static imports are hoisted ahead of every other top-level statement); converted to dynamic
+// `await import(...)` so useOwnLoomHome()/requireHermeticEnv() below actually run first, same as every
+// other hermetic test in this suite.
+useOwnLoomHome("loom-gw-killconfirm-home-");
+requireHermeticEnv();
+
+const { GitWriter } = await import("../dist/git/writer.js");
+const { activeMergeQuarantineFor, enterMergeQuarantine, clearMergeQuarantine } = await import("../dist/git/merge-quarantine.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };

@@ -14,10 +14,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { VaultVersioner, commitVault } from "../dist/vault/versioner.js";
-import { enterMergeQuarantine, clearMergeQuarantine } from "../dist/git/merge-quarantine.js";
-import { boundedSimpleGit } from "../dist/git/bounded.js";
-import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit, useOwnLoomHome } from "./_tmp-fixture.mjs";
+
+// HERMETICITY (card 500fe2df): this file calls the real enterMergeQuarantine() many times over (real
+// durable latch writes under LOOM_HOME) — the three dist imports below were previously STATIC, which
+// would evaluate before any runtime hermetic setup could run at all (static imports are hoisted ahead of
+// every other top-level statement); converted to dynamic `await import(...)` so useOwnLoomHome()/
+// requireHermeticEnv() below actually run first, same as every other hermetic test in this suite.
+useOwnLoomHome("loom-vault-quarantine-home-");
+requireHermeticEnv();
+
+const { VaultVersioner, commitVault } = await import("../dist/vault/versioner.js");
+const { enterMergeQuarantine, clearMergeQuarantine } = await import("../dist/git/merge-quarantine.js");
+const { boundedSimpleGit } = await import("../dist/git/bounded.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };

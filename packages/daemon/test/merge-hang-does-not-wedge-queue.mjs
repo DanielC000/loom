@@ -52,6 +52,17 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { requireHermeticEnv } from "./_guard.mjs";
+import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+
+// HERMETICITY (card 500fe2df): this file calls the REAL mergeBranch() with a short timeoutMs on repos
+// whose kill may go unconfirmed (see header above) — an unconfirmed kill raises a REAL
+// enterMergeQuarantine(), which persists a durable latch file under LOOM_HOME. Running this file bare
+// (no harness) with LOOM_HOME unset used to write that latch straight into the real ~/.loom — exactly the
+// `loom-mhdwq-*-repo-*` / `loom/hang-a` latches found at a real boot (card 500fe2df). Isolate BEFORE the
+// dist import below, same as every other hermetic test in this suite.
+useOwnLoomHome("loom-mhdwq-");
+requireHermeticEnv();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distUrl = pathToFileURL(path.join(__dirname, "..", "dist", "git", "worktrees.js")).href;

@@ -74,7 +74,14 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertNeverWithControl, pollUntil } from "./_timing-guard.mjs";
-import { mkdtempManaged } from "./_tmp-fixture.mjs";
+import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, useOwnLoomHome } from "./_tmp-fixture.mjs";
+
+// HERMETICITY (card 500fe2df): scenarios 3-5 below drive REAL unconfirmed-kill/quarantine paths through
+// the real mergeBranch() — a genuine enterMergeQuarantine() raise persists a durable latch under
+// LOOM_HOME. Isolate BEFORE the dist import below, same as every other hermetic test in this suite.
+useOwnLoomHome("loom-mckc-");
+requireHermeticEnv();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");

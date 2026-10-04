@@ -25,7 +25,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit, useOwnLoomHome } from "./_tmp-fixture.mjs";
+
+// HERMETICITY (card 500fe2df): SCENARIO 2 below calls the real enterMergeQuarantine() directly — a real
+// durable latch write under LOOM_HOME. Isolate BEFORE the dist import below, same as every other hermetic
+// test in this suite.
+useOwnLoomHome("loom-mvac-home-");
+requireHermeticEnv();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
