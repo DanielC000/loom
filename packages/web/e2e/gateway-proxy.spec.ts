@@ -6,101 +6,17 @@
 // (reads included) then carries it — including the /ws/fleet upgrade, whose token rides the subprotocol, never the URL.
 // A plain loopback page on the SAME daemon is untouched.
 //
-// HARNESS: this spec boots its OWN daemon (the shared `loomDaemon` fixture has no proxy listener and proxy mode needs a
-// gateway token at boot), seeded through ./fixtures/gateway-proxy-seed.mjs. An in-test Node reverse proxy fronts the
-// daemon's 127.0.0.1-only proxy listener, and Chromium is told `box.tail1.ts.net` resolves to 127.0.0.1, so the page's
-// origin is a genuine non-loopback hostname. NOT covered: a real Tailscale node (Host/Origin/ws behaviour of Serve
-// itself is unverified) — the daemon half is packages/daemon/test/remote-trusted-proxy-real.mjs.
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import http from "node:http";
-import net from "node:net";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+// HARNESS: ./fixtures/gateway-proxy-rig.ts (extracted by card f8d2684d, which needed the same rig) — this spec boots its
+// OWN isolated daemon, an in-test Node reverse proxy in front of it, and a Chromium told `box.tail1.ts.net` resolves to
+// 127.0.0.1, so the page's origin is a genuine non-loopback hostname. NOT covered: a real Tailscale node (Host/Origin/ws
+// behaviour of Serve itself is unverified) — the daemon half is packages/daemon/test/remote-trusted-proxy-real.mjs.
 import { expect, test, type Page } from "@playwright/test";
-import { assertNoRealClaudeSpawn } from "./fixtures/daemon";
+import { GATEWAY_PROXY_LAUNCH_OPTIONS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
-const DAEMON_INDEX = path.join(REPO_ROOT, "packages", "daemon", "dist", "index.js");
-const WEB_DIST = path.join(REPO_ROOT, "packages", "web", "dist");
-const SEED_SCRIPT = path.join(__dirname, "fixtures", "gateway-proxy-seed.mjs");
-const PROXY_HOST = "box.tail1.ts.net";
+test.use({ launchOptions: GATEWAY_PROXY_LAUNCH_OPTIONS });
 
-test.use({ launchOptions: { args: [`--host-resolver-rules=MAP ${PROXY_HOST} 127.0.0.1`] } });
-
-interface Rig { origin: string; token: string; loopbackURL: string; stop: () => Promise<void> }
-
-async function startRig(): Promise<Rig> {
-  const scratch = mkdtempSync(path.join(tmpdir(), "loom-e2e-gwproxy-"));
-  const home = path.join(scratch, "home");
-  mkdirSync(home, { recursive: true });
-  // 1. The FRONT proxy first: its port is part of the trusted origin, which the daemon must know at boot.
-  let target = 0;
-  const forward = (headers: http.IncomingHttpHeaders): http.IncomingHttpHeaders => ({ ...headers, "x-forwarded-proto": "http" }); // Host preserved, like Serve
-  const front = http.createServer((cReq, cRes) => {
-    const up = http.request({ host: "127.0.0.1", port: target, method: cReq.method, path: cReq.url, headers: forward(cReq.headers), agent: false }, (uRes) => { cRes.writeHead(uRes.statusCode ?? 502, uRes.headers); uRes.pipe(cRes); });
-    up.on("error", () => { cRes.writeHead(502); cRes.end(); });
-    cReq.pipe(up);
-  });
-  front.on("upgrade", (cReq, cSock, head) => {
-    const headers = forward(cReq.headers);
-    const up = net.connect(target, "127.0.0.1", () => {
-      up.write(`${cReq.method} ${cReq.url} HTTP/1.1\r\n${Object.entries(headers).map(([k, v]) => `${k}: ${String(v)}`).join("\r\n")}\r\n\r\n`);
-      if (head.length) up.write(head);
-      up.pipe(cSock); cSock.pipe(up);
-    });
-    up.on("error", () => cSock.destroy());
-    cSock.on("error", () => up.destroy());
-  });
-  await new Promise<void>((resolve) => front.listen(0, "127.0.0.1", resolve));
-  const frontPort = (front.address() as net.AddressInfo).port;
-  const origin = `http://${PROXY_HOST}:${frontPort}`;
-
-  // 2. Seed the home (first-run marker + remoteAccess config + a gateway token), then boot the daemon against it.
-  const token = execFileSync(process.execPath, [SEED_SCRIPT], {
-    env: { ...process.env, LOOM_HOME: home, LOOM_TEST: "1", LOOM_E2E_REMOTE_ACCESS: JSON.stringify({ enabled: true, bindHost: "127.0.0.1", proxyPort: 0, trustedProxyOrigins: [origin] }) },
-    encoding: "utf8",
-  }).trim();
-  let log = "";
-  const child: ChildProcess = spawn(process.execPath, [DAEMON_INDEX], {
-    env: { ...process.env, LOOM_HOME: home, LOOM_PORT: "0", LOOM_WEB_DIST: WEB_DIST, LOOM_DEV: "0", LOOM_SCHEDULER_ENABLED: "0", LOOM_PYTHON_NO_PROVISION: "1", LOOM_SUPPRESS_USAGE_POLLER: "1", LOOM_TEST: "1" },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  child.stdout?.on("data", (c: Buffer) => { log += c.toString(); });
-  child.stderr?.on("data", (c: Buffer) => { log += c.toString(); });
-  const stop = async (): Promise<void> => {
-    const exited = new Promise<void>((resolve) => { if (child.exitCode !== null) resolve(); else child.once("exit", () => resolve()); });
-    try { child.kill(); } catch { /* already gone */ }
-    await Promise.race([exited, new Promise<void>((r) => setTimeout(r, 8000))]);
-    await new Promise<void>((resolve) => { front.closeAllConnections?.(); front.close(() => resolve()); });
-    try { rmSync(scratch, { recursive: true, force: true }); } catch { /* best-effort */ }
-  };
-  try {
-    // Wait for BOTH listeners' log lines (the proxy listener's is logged after the loopback one).
-    const deadline = Date.now() + 30_000;
-    let proxyPort: number | null = null;
-    let loopbackURL: string | null = null;
-    while (Date.now() < deadline && (proxyPort === null || loopbackURL === null)) {
-      loopbackURL = /listening on (http:\/\/\S+)/.exec(log)?.[1] ?? null;
-      const m = /trusted-proxy listener: http:\/\/127\.0\.0\.1:(\d+)/.exec(log);
-      proxyPort = m?.[1] ? Number(m[1]) : null;
-      if (child.exitCode !== null) throw new Error(`daemon exited early (${child.exitCode}):\n${log}`);
-      if (proxyPort === null || loopbackURL === null) await new Promise((r) => setTimeout(r, 100));
-    }
-    if (proxyPort === null || loopbackURL === null) throw new Error(`the daemon never opened its trusted-proxy listener. Log:\n${log}`);
-    target = proxyPort;
-    assertNoRealClaudeSpawn(log, "post-boot");
-    return { origin, token, loopbackURL, stop };
-  } catch (err) {
-    await stop();
-    throw err;
-  }
-}
-
-let rig: Rig;
-test.beforeAll(async () => { rig = await startRig(); });
+let rig: GatewayProxyRig;
+test.beforeAll(async () => { rig = await startGatewayProxyRig(); });
 test.afterAll(async () => { await rig?.stop(); });
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => { try { localStorage.setItem("loom.setupWelcomeDismissed", "1"); } catch { /* storage blocked */ } });

@@ -11,6 +11,7 @@ import { channelBadgeLabel } from "../lib/companion";
 import { api, getLoopbackToken } from "../lib/api";
 import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCredential";
+import { createReconnectBackoff, onSocketClose } from "../lib/socketReconnect";
 import { Button, Dot, SectionLabel, StatusPill } from "./ui";
 import { color, font, radius } from "../theme";
 
@@ -72,8 +73,6 @@ function blobToBase64(blob: Blob): Promise<string> {
  * the companion channel); rendered as the top-of-chat alert banner.
  */
 
-const RECONNECT_MIN_MS = 1000;
-const RECONNECT_MAX_MS = 10000;
 // If a sent message draws no reply within this window, stop the "typing" affordance and surface a gentle
 // "no reply yet" hint — the companion may be offline / not yet provisioned (never a fake "delivered").
 const REPLY_TIMEOUT_MS = 25000;
@@ -141,7 +140,7 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
   useEffect(() => {
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    let backoff = RECONNECT_MIN_MS;
+    const backoff = createReconnectBackoff();
     // Card 093981dd: scoped to the whole effect, NOT to one `connect()` — once any attempt has opened,
     // a later close is an ordinary disconnect, never a missing credential. Without this, the reconnect
     // loop below would keep saying "reconnecting" forever against a guard 401 with nothing explaining why.
@@ -181,7 +180,7 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
       ws.onopen = () => {
         if (disposed) return;
         everOpened = true;
-        backoff = RECONNECT_MIN_MS; // reset the backoff once a connection actually establishes
+        backoff.reset(); // start the ladder over once a connection actually establishes
         setConn("connected");
       };
       ws.onmessage = (e) => {
@@ -255,16 +254,19 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
         }
         // any other frame (control/garbage) is ignored — never rendered
       };
-      ws.onclose = () => {
+      ws.onclose = (e) => {
         if (disposed) return;
         wsRef.current = null;
+        // Card f8d2684d: a 1008 close is TERMINAL — classified FIRST (shared policy, lib/socketReconnect)
+        // so a revoked token lands in its own dead-end state instead of an endless "reconnecting" pill.
+        // `revoked` also disables Send (canSend gates on "connected"); the page banner owns re-entry.
+        if (!onSocketClose(e).retry) { setConn("revoked"); return; }
         // A handshake that never opened on a token-less browser is the credential lock, not a flaky link.
         // Still reconnect: if the user pastes a credential into the banner, the next attempt carries it.
         if (noteRemoteSocketRefusal(everOpened)) { /* the gateway banner owns it */ }
         else if (isCredentialSocketFailure(everOpened, getLoopbackToken())) noteCredentialLock("socket");
         setConn("reconnecting");
-        reconnectTimer = setTimeout(connect, backoff);
-        backoff = Math.min(backoff * 2, RECONNECT_MAX_MS); // exponential backoff, capped
+        reconnectTimer = setTimeout(connect, backoff.next());
       };
       // onerror is followed by onclose; let onclose own the reconnect so we don't double-schedule.
     };
@@ -542,6 +544,7 @@ function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
   const pill =
     conn === "connected" ? { tone: "phosphor" as const, label: "connected", glow: true } :
     conn === "connecting" ? { tone: "amber" as const, label: "connecting", glow: false } :
+    conn === "revoked" ? { tone: "red" as const, label: "token revoked", glow: false } :
     { tone: "red" as const, label: "reconnecting", glow: false };
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>

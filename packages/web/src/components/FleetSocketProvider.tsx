@@ -4,6 +4,7 @@ import type { ServerFleetMessage, SessionListItem } from "@loom/shared";
 import { api, orchStatusQuery } from "../lib/api";
 import { applyFleetDelta } from "../lib/fleetSocket";
 import { socketAuth } from "../lib/gatewayCredential";
+import { createReconnectBackoff, onSocketClose, SOCKET_RECONNECT_MIN_MS } from "../lib/socketReconnect";
 
 /**
  * C4 of the WS delta-push umbrella (1efde4ba) — the payoff card. Owns ONE app-wide `/ws/fleet` socket
@@ -29,8 +30,6 @@ import { socketAuth } from "../lib/gatewayCredential";
  * Renders nothing — it's a side-effect-only sibling, not a context provider (no consumer reads anything
  * off it directly; they all just `useQuery(["allSessions"])` as before and this keeps that cache warm).
  */
-const RECONNECT_MIN_MS = 1000;
-const RECONNECT_MAX_MS = 10000;
 const FALLBACK_POLL_MS = 10000;
 
 /**
@@ -67,7 +66,7 @@ export function FleetSocketProvider() {
     let seedRetryTimer: ReturnType<typeof setTimeout> | undefined;
     let statusSeedRetryTimer: ReturnType<typeof setTimeout> | undefined;
     let fallbackPollTimer: ReturnType<typeof setInterval> | undefined;
-    let backoff = RECONNECT_MIN_MS;
+    const backoff = createReconnectBackoff();
     // While a seed fetch is in flight, inbound deltas are buffered (in wire order) instead of patching the
     // cache directly, then replayed onto the seed once it lands — see the seed() comment below.
     let seeding = false;
@@ -129,7 +128,7 @@ export function FleetSocketProvider() {
         .catch((err) => {
           if (disposed) return;
           log("seed fetch failed, retrying", err);
-          seedRetryTimer = setTimeout(seed, RECONNECT_MIN_MS);
+          seedRetryTimer = setTimeout(seed, SOCKET_RECONNECT_MIN_MS);
         });
     };
 
@@ -169,7 +168,7 @@ export function FleetSocketProvider() {
           if (disposed) return;
           log("status seed fetch failed, retrying", err);
           // Retry forces a real read: a failed seed means nothing trustworthy landed in the shared entry.
-          statusSeedRetryTimer = setTimeout(() => seedStatus(true), RECONNECT_MIN_MS);
+          statusSeedRetryTimer = setTimeout(() => seedStatus(true), SOCKET_RECONNECT_MIN_MS);
         });
     };
 
@@ -183,7 +182,7 @@ export function FleetSocketProvider() {
 
       socket.onopen = () => {
         if (disposed) return;
-        backoff = RECONNECT_MIN_MS;
+        backoff.reset();
         stopFallbackPoll();
         log("connected");
         seed();
@@ -207,17 +206,24 @@ export function FleetSocketProvider() {
         if (seeding) { buffered.push(msg); return; }
         qc.setQueryData<SessionListItem[]>(["allSessions"], (prev) => applyFleetDelta(prev ?? [], msg));
       };
-      socket.onclose = () => {
+      socket.onclose = (e) => {
         if (disposed) return;
         ws = null;
         seeding = false;
         buffered = [];
         statusSeeding = false;
         statusDeltaDuringSeed = null;
+        // Card f8d2684d: a 1008 close is TERMINAL — classified FIRST (shared policy, lib/socketReconnect).
+        // Only the RECONNECT stops: the fallback poll still runs, both because that is this provider's
+        // existing disconnected behaviour and because its own 401 is what keeps the gateway banner raised.
+        if (!onSocketClose(e).retry) {
+          log("disconnected by policy (close 1008) — not reconnecting; see the gateway banner");
+          startFallbackPoll();
+          return;
+        }
         log("disconnected — falling back to polling and reconnecting");
         startFallbackPoll();
-        reconnectTimer = setTimeout(connect, backoff);
-        backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
+        reconnectTimer = setTimeout(connect, backoff.next());
       };
       // onerror is followed by onclose; let onclose own the fallback/reconnect so we don't double-schedule.
     };

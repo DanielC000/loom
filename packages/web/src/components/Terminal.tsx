@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
 import { getLoopbackToken } from "../lib/api";
 import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
+import { createReconnectBackoff, onSocketClose } from "../lib/socketReconnect";
 import { credentialLock, isCredentialSocketFailure, noteCredentialLock, subscribeCredentialLock } from "../lib/loopbackCredential";
 import { useIsCompanionSession } from "../lib/companionGuard";
 import { Dot } from "./ui";
@@ -40,14 +41,12 @@ import "./Terminal.css";
  * then behaves exactly like `readOnly`, plus a note saying so. Nothing about that is enforcement — the
  * daemon drops a remote peer's stdin either way; this is purely so the viewer stops typing into the void.
  *
- * The socket RECONNECTS on close with capped exponential backoff (card 019d2e7a), the same discipline
- * FleetSocketProvider/CompanionChat already use — see `connect()` below. The xterm instance is built
- * ONCE per mount and outlives every attempt: only the socket is rebuilt, so a reconnect costs no
- * remount, no scrollback teardown, and no font re-derivation.
+ * The socket RECONNECTS on close with capped exponential backoff (card 019d2e7a) from the shared
+ * `lib/socketReconnect` ladder every socket in the app now uses (which also decides when a close is
+ * TERMINAL and must not be retried at all) — see `connect()` below. The xterm instance is built ONCE per
+ * mount and outlives every attempt: only the socket is rebuilt, so a reconnect costs no remount, no
+ * scrollback teardown, and no font re-derivation.
  */
-/** Reconnect backoff bounds — same ladder as FleetSocketProvider (1s, doubling, capped at 10s). */
-const RECONNECT_MIN_MS = 1000;
-const RECONNECT_MAX_MS = 10000;
 export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyProp = false, heightBudget }: { sessionId: string; resizable?: boolean; readOnly?: boolean; heightBudget?: number }) {
   // COMPANION GUARD (card 5c87f4b6) — the structural half of the "a companion is driven ONLY through its
   // chat surface" invariant, placed HERE because this is the real transport chokepoint: `disableStdin`
@@ -227,7 +226,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     // a reconnect swaps the transport underneath them without touching the xterm they also close over.
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    let backoff = RECONNECT_MIN_MS;
+    const backoff = createReconnectBackoff();
     let disposed = false;
     // STICKY across attempts, deliberately: both credential classifiers below read it as "has this pane
     // ever had a working socket", and one successful attach permanently rules a missing credential out.
@@ -254,7 +253,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
 
     const handleOpen = () => {
       if (disposed) return;
-      backoff = RECONNECT_MIN_MS;
+      backoff.reset();
       setReconnecting(false);
       // A RE-attach replays the daemon's bounded ring from the top (PtyHost.subscribe), so without this
       // the replay would stack underneath whatever the dead socket left on screen — the same screen
@@ -268,8 +267,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     };
 
     const scheduleReconnect = () => {
-      reconnectTimer = setTimeout(connect, backoff);
-      backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
+      reconnectTimer = setTimeout(connect, backoff.next());
     };
 
     // Card 093981dd: a rejected upgrade used to render as a permanently blank pane — this file carried no
@@ -280,9 +278,25 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     // Card 019d2e7a: a close is now RETRIED rather than being the pane's terminal state — except for the
     // two credential verdicts, which are not transient and whose own recovery path is the unlock nonce
     // above. Retrying those would spin a pointless 401 loop behind an unread banner.
-    const handleClose = () => {
+    //
+    // Card f8d2684d: a 1008 close is TERMINAL and is classified FIRST — before the everOpened branch
+    // below, which would otherwise read a revoked token as an ordinary mid-session disconnect and retry
+    // it forever behind "[connection lost — reconnecting]". The shared policy lives in
+    // lib/socketReconnect (one copy for all three sockets); this pane only paints the verdict.
+    const handleClose = (e: CloseEvent) => {
       if (disposed) return;
       socket = null;
+      const verdict = onSocketClose(e);
+      if (!verdict.retry) {
+        setReconnecting(false);
+        // The page-wide gateway banner owns re-entry for a dead token (onSocketClose raised it); a bare
+        // policy refusal has no banner and no fix, so the daemon's own reason is the whole message.
+        term.write(verdict.kind === "gateway-token"
+          ? `\r\n\x1b[31m[access token ${verdict.change} — this terminal is disconnected]\x1b[0m\r\n`
+            + "\x1b[2m[sign in again with the banner at the top of the page]\x1b[0m\r\n"
+          : `\r\n\x1b[31m[this terminal was refused: ${verdict.reason || "policy violation"}]\x1b[0m\r\n`);
+        return;
+      }
       setReconnecting(true);
       if (everOpened) {
         if (!noticeWritten) { term.write("\r\n\x1b[2m[connection lost — reconnecting]\x1b[0m\r\n"); noticeWritten = true; }

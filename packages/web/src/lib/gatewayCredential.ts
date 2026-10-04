@@ -122,6 +122,7 @@ export function noteGatewayLock(): void {
 }
 export function clearGatewayLock(): void {
   dismissGatewayLinkRejected();
+  clearGatewayTokenRevoked();
   if (!locked) return;
   locked = false;
   for (const fn of listeners) fn(false);
@@ -147,7 +148,36 @@ export function subscribeGatewayLinkRejected(fn: (rejected: boolean) => void): (
   linkListeners.add(fn);
   return () => { linkListeners.delete(fn); };
 }
-export function resetGatewayLockForTest(): void { locked = false; listeners.clear(); linkRejected = false; linkListeners.clear(); }
+/**
+ * The gateway-token status change that just killed this browser's live sockets, as the daemon named it in
+ * its 1008 close reason (`gateway/token-sockets.ts`). Card f8d2684d: a REVOKED (or paused/rotated/deleted)
+ * token is a different failure from "this address needs a token" — the browser holds one and it used to
+ * work — so the banner needs to say which happened, and `lib/socketReconnect.ts` resolves it from the
+ * close reason rather than guessing. Distinct state from `locked`, but it SETS the lock too: every later
+ * request with the dead token 401s anyway, and the banner's paste field is already the re-entry action.
+ */
+export type GatewayTokenChange = "revoked" | "paused" | "rotated" | "deleted";
+let tokenRevoked: GatewayTokenChange | null = null;
+const revokedListeners = new Set<(change: GatewayTokenChange | null) => void>();
+export function gatewayTokenRevoked(): GatewayTokenChange | null { return tokenRevoked; }
+export function noteGatewayTokenRevoked(change: GatewayTokenChange): void {
+  if (tokenRevoked !== change) {
+    tokenRevoked = change;
+    for (const fn of revokedListeners) fn(change);
+  }
+  noteGatewayLock(); // the banner (and its paste field) is the re-entry surface
+}
+/** Cleared only by a successful re-entry — `clearGatewayLock` calls this, so no caller has to remember to. */
+export function clearGatewayTokenRevoked(): void {
+  if (tokenRevoked === null) return;
+  tokenRevoked = null;
+  for (const fn of revokedListeners) fn(null);
+}
+export function subscribeGatewayTokenRevoked(fn: (change: GatewayTokenChange | null) => void): () => void {
+  revokedListeners.add(fn);
+  return () => { revokedListeners.delete(fn); };
+}
+export function resetGatewayLockForTest(): void { locked = false; listeners.clear(); linkRejected = false; linkListeners.clear(); tokenRevoked = null; revokedListeners.clear(); }
 
 /**
  * A WebSocket upgrade that never opened, on a REMOTE origin holding no gateway token: note the gateway lock and

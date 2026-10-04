@@ -3,8 +3,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Button, Dot, Input } from "./ui";
 import { color, font, radius } from "../theme";
 import {
-  clearGatewayLock, dismissGatewayLinkRejected, gatewayLinkRejected, gatewayLock, getGatewayToken, setGatewayToken, subscribeGatewayLinkRejected,
-  subscribeGatewayLock, verifyGatewayTokenAgainstDaemon,
+  clearGatewayLock, dismissGatewayLinkRejected, gatewayLinkRejected, gatewayLock, gatewayTokenRevoked, getGatewayToken, setGatewayToken,
+  subscribeGatewayLinkRejected, subscribeGatewayLock, subscribeGatewayTokenRevoked, verifyGatewayTokenAgainstDaemon,
 } from "../lib/gatewayCredential";
 
 /**
@@ -14,10 +14,17 @@ import {
  * wrong one here and its `loom open` advice is unrunnable on this device.
  *
  * @decision 093981dd — keep this banner separate from the loopback one; never print or embed a token in its copy.
+ *
+ * Card f8d2684d adds a THIRD headline: the token this browser holds was revoked, paused, rotated or deleted
+ * WHILE the page was open (the daemon closed its live sockets with 1008, and `lib/socketReconnect` raised the
+ * lock). It reuses this banner rather than minting a second one, because the paste field here already IS the
+ * "sign in again" action — but it must not read as "this address needs a gateway token": the user had a
+ * working one, so the copy names what changed instead of implying they never supplied one.
  */
 export function GatewayTokenBanner() {
   const lockedNow = useSyncExternalStore(subscribeGatewayLock, gatewayLock, () => false);
   const linkRejected = useSyncExternalStore(subscribeGatewayLinkRejected, gatewayLinkRejected, () => false);
+  const revoked = useSyncExternalStore(subscribeGatewayTokenRevoked, gatewayTokenRevoked, () => null);
   const locked = lockedNow || linkRejected;
   const qc = useQueryClient();
   const [value, setValue] = useState("");
@@ -52,13 +59,17 @@ export function GatewayTokenBanner() {
       <Dot tone="red" glow style={{ marginTop: 4, flex: "0 0 auto" }} />
       <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}>
         <span style={{ color: color.text }}>
-          <strong style={{ color: color.red, fontWeight: 600 }}>{lockedNow ? "This address needs a gateway token." : "A link's gateway token was refused."}</strong>{" "}
-          {!lockedNow
+          <strong style={{ color: color.red, fontWeight: 600 }}>
+            {revoked ? `This access token was ${revoked}.` : lockedNow ? "This address needs a gateway token." : "A link's gateway token was refused."}
+          </strong>{" "}
+          {revoked
+            ? `Loom closed this browser's live connections because the gateway token it holds was ${revoked} on the daemon. Paste a current token to sign in again.`
+            : !lockedNow
             ? "The token in the ?gwtoken= link you opened was not accepted, so it was NOT saved; the token this browser already holds is unchanged."
             : holdsToken
             ? "The daemon refused the token this browser holds (revoked, paused or mistyped)."
             : "You reached Loom through a reverse proxy, so every request must present a gateway token."}{" "}
-          {lockedNow ? "Nothing loads until it does. " : ""}This address serves reads, answering requests and steering sessions only.
+          {lockedNow && !revoked ? "Nothing loads until it does. " : ""}This address serves reads, answering requests and steering sessions only.
         </span>
         <span style={{ color: color.textDim }}>
           On the machine running the daemon, mint one over loopback (see <code style={{ color: color.cyan, background: color.panel2,

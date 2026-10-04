@@ -237,7 +237,10 @@ export function resetMarker(id: string, ts?: string): ChatMessage {
 // The panel's connection lifecycle — drives the status pill + whether Send is enabled. `reconnecting`
 // is the transient gap between a drop and the next open (auto-reconnect), distinct from a never-yet-open
 // `connecting` so the pill copy can differ ("connecting" vs "reconnecting").
-export type ChatConnState = "connecting" | "connected" | "reconnecting";
+/** `revoked` (card f8d2684d) is TERMINAL — the daemon closed this socket with 1008 because the browser's
+ *  gateway token was revoked/paused/rotated/deleted, so the chat stops retrying and stops offering Send;
+ *  the page-wide gateway banner is where the user re-enters a token. Every other state is transient. */
+export type ChatConnState = "connecting" | "connected" | "reconnecting" | "revoked";
 
 // ── Chat HISTORY seed (bug 0f01f234 — the "reload loses the whole conversation" fix; UNIFIED
 // CROSS-CHANNEL CHAT, card 7d63e200 — every channel, not just in-app) ──────────────────────────────────
