@@ -258,12 +258,15 @@ export function injectSkills(cwd: string, sessionId: string, subset?: string[] |
   //
   // @decision 509176c8 — round 2's `isTrustedBundledContent` check was CUT (round 3): it withheld
   // legitimate bundled skills (a pre-provenance customization, or a pristine copy ahead of reseed).
-  // The bundled-name collision it can't catch is tracked separately on card 9a3dea30.
+  //
+  // @decision 9a3dea30 — round 2: `isBundledSkill(n)` flips true the instant an asset merges, before the
+  // next boot's rename-aside fix ever runs, so a still-"agent"-stamped collision must stay excluded even
+  // once isBundledSkill is true. Provenance-only — never content-equality (see the decision record).
   const isLockedRole = role != null && LOCKED_PROFILE_ROLES.has(role);
   const want = subset && subset.length
     ? storeNames.filter((n) => subset.includes(n))
     : isLockedRole
-      ? storeNames.filter((n) => isBundledSkill(n) || skillProvenance(n) === "human")
+      ? storeNames.filter((n) => (isBundledSkill(n) && skillProvenance(n) !== "agent") || skillProvenance(n) === "human")
       : storeNames;
   // FORCE-INCLUDE the role's operating-doctrine skill regardless of the subset (a profile whose subset
   // omits "worker"/"orchestrate"/… must still ship its role doctrine). Only when present in the store and

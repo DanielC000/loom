@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SKILLS_DIR } from "../paths.js";
-import { seedBaseSnapshots, seedFileBaseSnapshots, autoFastForwardPristineSkills, retireOrphanedBundledSkillDirs } from "./store.js";
+import { seedBaseSnapshots, seedFileBaseSnapshots, autoFastForwardPristineSkills, retireOrphanedBundledSkillDirs, renameAsideAgentCollision } from "./store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // dist/skills -> dist -> daemon root -> assets/skills. Overridable via LOOM_ASSET_SKILLS (mirrors
@@ -41,6 +41,16 @@ export function seedGlobalSkills(): string[] {
     if (!e.isDirectory()) continue;
     const src = path.join(ASSET_SKILLS, e.name);
     const dest = path.join(SKILLS_DIR, e.name);
+    // @decision 9a3dea30 — before the seed-if-absent check below, rename aside any AGENT-stamped user
+    // skill already sitting under this bundled name, so the fresh bundled seed lands on a clean slate.
+    const renameResult = renameAsideAgentCollision(e.name);
+    if (renameResult && !renameResult.stampCleared) {
+      // Round 2: the content move succeeded but the old name's crash-safety step-3 stamp clear failed —
+      // skip fresh-seeding `e.name` THIS boot so that dangling "agent" stamp can never later mis-fire
+      // against a genuinely bundled copy (see renameAsideAgentCollision's own doc). Retried next boot.
+      console.log(`[skills] skipping this boot's seed of '${e.name}' — its old provenance stamp failed to clear (see the log line above); will retry next boot`);
+      continue;
+    }
     if (fs.existsSync(path.join(dest, "SKILL.md"))) {
       // Genuine skill (incl. UI edits) — never overwrite, but backfill any NEW asset file/dir the store
       // doesn't have yet. Best-effort: a backfill hiccup must never break boot seeding of other skills.

@@ -529,6 +529,124 @@ export function retireOrphanedBundledSkillDirs(): string[] {
   return retired;
 }
 
+/** Suffix used by {@link renameAsideAgentCollision} to mint a non-colliding user-skill name — see that
+ *  function's own doc for why the gate is bare `skillProvenance(name) === "agent"`, never content. */
+const AGENT_RENAME_SUFFIX = "-agent-renamed";
+
+/** Pick a free, valid, non-bundled name derived from `base` for {@link renameAsideAgentCollision} to
+ *  rename a colliding agent-written skill dir INTO. Tries `<base>-agent-renamed` first, then numeric
+ *  variants (`-agent-renamed-2`, `-3`, …) up to a bound, truncating `base` as needed to respect NAME_RE's
+ *  64-char cap. "Free" means: not already a directory in SKILLS_DIR, and not itself a current bundled
+ *  name (never mint a candidate that collides with ANOTHER shipped skill). Returns null only if every
+ *  bounded attempt is taken — effectively unreachable in practice; the caller fails closed and logs.
+ */
+function pickRenameAsideName(base: string): string | null {
+  const bundled = bundledNames();
+  const isFree = (candidate: string): boolean =>
+    isValidSkillName(candidate) && !fs.existsSync(path.join(SKILLS_DIR, candidate)) && !bundled.has(candidate);
+  for (let n = 1; n <= 999; n++) {
+    const suffix = n === 1 ? AGENT_RENAME_SUFFIX : `${AGENT_RENAME_SUFFIX}-${n}`;
+    const maxBaseLen = 64 - suffix.length;
+    if (maxBaseLen <= 0) return null; // pathological base/suffix length — never reachable with today's names
+    const truncatedBase = base.length > maxBaseLen ? base.slice(0, maxBaseLen) : base;
+    const candidate = `${truncatedBase}${suffix}`;
+    if (isFree(candidate)) return candidate;
+  }
+  return null;
+}
+
+/** Rewrite a SKILL.md's frontmatter `name:` field to `newName`, leaving the rest of the file (including
+ *  any `# <heading>` in the body) untouched. A renamed-aside skill whose SKILL.md still declares the OLD
+ *  name hands an unlocked session two skills both claiming that name — a harness collision; see the
+ *  decision record on {@link renameAsideAgentCollision} below. Content with no frontmatter `name:` line
+ *  is returned unchanged. */
+export function renameFrontmatterName(content: string, newName: string): string {
+  const fm = content.match(/^(---\r?\n)([\s\S]*?)(\r?\n---)/);
+  if (!fm || fm[1] === undefined || fm[2] === undefined || fm[3] === undefined) return content;
+  const [whole, open, body, close] = fm as [string, string, string, string];
+  if (!/^name:\s*.*$/m.test(body)) return content;
+  const newBody = body.replace(/^name:\s*.*$/m, `name: ${newName}`);
+  return open + newBody + close + content.slice(whole.length);
+}
+
+export interface RenameAsideCollisionResult {
+  /** The fresh, non-colliding user-skill name the agent content was moved to; null when this call only
+   *  finished a dangling stamp cleanup left by a prior interrupted run (nothing moved THIS call). */
+  newName: string | null;
+  /** False when the crash-safety step-3 stamp clear on the OLD name failed. The caller (seedGlobalSkills)
+   *  must then skip fresh-seeding `name` THIS boot — see the decision record on
+   *  {@link renameAsideAgentCollision} below for why. */
+  stampCleared: boolean;
+}
+
+/**
+ * @decision 9a3dea30 — the gate is bare `skillProvenance(name) === "agent"`, never content-equality or
+ * `customized`; never add a boot migration to back-stamp legacy unstamped collisions.
+ *
+ * Before seeding a BUNDLED name whose store dir already holds an AGENT-written user skill (card
+ * 509176c8's collision gap), rename the colliding dir ASIDE to a fresh, non-colliding user-skill name —
+ * content intact, its own frontmatter `name:` rewritten to match — so the normal fresh-bundled-seed path
+ * below gets a clean slate under the original name. Called from seedGlobalSkills() for every bundled
+ * asset name, every boot; a no-op (`null`) after one cheap `skillProvenance` read for anything not
+ * stamped "agent". Crash-safety ordering (stamp new name first, then a single atomic `fs.renameSync`,
+ * then clear the old stamp) and the legacy-unstamped residual are covered in full in the decision record
+ * — read it there, not here.
+ *
+ * @decision 9a3dea30 — round 2: a failed final stamp-clear (step 3) must make the caller skip fresh-
+ * seeding `name` this boot (`stampCleared:false`), never ignore it — see the decision record for the
+ * re-collision this prevents. Retried on a later boot via the crash-recovery branch below.
+ */
+export function renameAsideAgentCollision(name: string): RenameAsideCollisionResult | null {
+  if (skillProvenance(name) !== "agent") return null;
+  const dest = path.join(SKILLS_DIR, name);
+  if (!fs.existsSync(path.join(dest, "SKILL.md"))) {
+    // Crash-recovery: either a prior interrupted rename already moved the content away and only the
+    // stamp-clear step never landed, or this name's stamp is otherwise stale with no dir to protect.
+    // Either way there is nothing left to rename — finish the stamp cleanup now so a later boot (once
+    // this bundled name is freshly seeded under `name`) never re-fires on the dangling "agent" stamp and
+    // mistakes legitimate bundled content for the old agent content.
+    const cleared = clearSkillProvenance(name);
+    if (!cleared) console.log(`[skills] '${name}' has a dangling 'agent' provenance stamp with no directory to protect, and clearing it failed — a later boot will retry`);
+    return { newName: null, stampCleared: cleared };
+  }
+  const newName = pickRenameAsideName(name);
+  if (!newName) {
+    console.log(`[skills] could not find a free name to rename aside the agent-written '${name}' ahead of a colliding bundled seed — leaving it in place; the collision persists for this skill until resolved by hand`);
+    return null;
+  }
+  const map = readProvenanceMap();
+  map[newName] = "agent";
+  if (!writeProvenanceMap(map)) {
+    console.log(`[skills] failed to stamp '${newName}' before renaming aside '${name}' — aborting this rename; '${name}' is untouched and a later boot will retry`);
+    return null;
+  }
+  try {
+    fs.renameSync(dest, path.join(SKILLS_DIR, newName));
+  } catch (e) {
+    console.log(`[skills] failed to rename aside '${name}' -> '${newName}': ${(e as Error).message} — '${name}' is untouched; its stamp still reads agent, so a later boot retries`);
+    return null;
+  }
+  // Rewrite the moved skill's own declared frontmatter name so it no longer claims the bundled name it
+  // was just renamed away from — best-effort; a failure here never undoes the move or the stamp clear
+  // below (content safety + collision-avoidance already succeeded; a stale declared name is the lesser,
+  // separately-logged residual).
+  try {
+    const newMdPath = skillMd(newName);
+    const raw = fs.readFileSync(newMdPath, "utf8");
+    const rewritten = renameFrontmatterName(raw, newName);
+    if (rewritten !== raw) atomicWriteFile(newMdPath, rewritten);
+  } catch (e) {
+    console.log(`[skills] renamed aside '${name}' -> '${newName}' but failed to rewrite its frontmatter name: ${(e as Error).message} — it may still declare '${name}'`);
+  }
+  const cleared = clearSkillProvenance(name);
+  if (cleared) {
+    console.log(`[skills] renamed aside agent-written user skill '${name}' -> '${newName}' before seeding a newly-bundled skill of that name — content preserved intact as an ordinary user skill (see Skills UI)`);
+  } else {
+    console.log(`[skills] renamed aside agent-written user skill '${name}' -> '${newName}' but failed to clear '${name}'s old provenance stamp — skipping this boot's fresh seed of '${name}' so the dangling stamp can't later mis-fire against it; a later boot retries the clear`);
+  }
+  return { newName, stampCleared: cleared };
+}
+
 // --- 3-way adopt-update merge ----------------------------------------------------------------------
 export interface SkillConflictHunk { mine: string; base: string; shipped: string; }
 export interface SkillMergeResult { clean: boolean; merged: string; conflicts?: SkillConflictHunk[]; }
@@ -805,6 +923,7 @@ export function adoptSkillUpdate(name: string, resolvedContent: string): { name:
   if (!v) return null;
   if (!writeSkill(name, resolvedContent)) return null;
   writeBase(name, v.shipped); // base = shipped: the update is now adopted (clears updateAvailable)
+  clearSkillProvenance(name); // best-effort — this lands bundled content under `name` (decision record 9a3dea30)
   try { advancePristineExtraFiles(name); } catch { /* best-effort — SKILL.md adopt already succeeded */ }
   return readSkill(name);
 }
@@ -896,6 +1015,16 @@ function writeProvenanceMap(map: Record<string, SkillProvenance>): boolean {
   catch (e) { console.log(`[skills] failed to write provenance map ${SKILL_PROVENANCE_FILE}: ${(e as Error).message}`); return false; }
 }
 
+/** Clear any provenance stamp on `name`, best-effort; true iff none remains (absent counts as success).
+ *  @decision 9a3dea30 — every write path that lands genuinely-bundled content under `name` must call
+ *  this, or a stale "agent" stamp wrongly withholds it from a locked role. See the decision record. */
+export function clearSkillProvenance(name: string): boolean {
+  const map = readProvenanceMap();
+  if (!Object.hasOwn(map, name)) return true; // nothing stamped — already clear, no write needed
+  delete map[name];
+  return writeProvenanceMap(map);
+}
+
 /** Create or overwrite a skill's SKILL.md. Returns false on an invalid name — or, for an "agent" write,
  *  when the provenance downgrade below fails. `provenance`, when passed, stamps WHO authored this write
  *  ("agent" for the loom-setup/loom-platform MCP surfaces, "human" for the Skills UI/REST routes — see
@@ -965,6 +1094,7 @@ export function resetSkillToBundled(name: string): boolean {
   const dest = path.join(SKILLS_DIR, name);
   fs.rmSync(dest, { recursive: true, force: true });
   fs.cpSync(src, dest, { recursive: true });
+  clearSkillProvenance(name); // best-effort — this lands bundled content under `name` (decision record 9a3dea30)
   // mine = base = shipped: a full discard also re-syncs the base snapshot, clearing any update-available.
   const shipped = readFileOrNull(assetMd(name));
   if (shipped != null) writeBase(name, shipped);

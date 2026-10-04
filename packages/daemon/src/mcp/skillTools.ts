@@ -6,6 +6,7 @@ import {
   isValidSkillName,
   isBundledSkill,
   publishSkillToBundled,
+  clearSkillProvenance,
 } from "../skills/store.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
@@ -108,6 +109,7 @@ export function skillWriteData(
     // afterwards (diverged:false) — the asset→reset end-state the Lead's workflow targets.
     if (!writeSkill(name, content)) return { error: "invalid skill name" };
     if (!publishSkillToBundled(name)) return { error: `failed to publish "${name}" to its bundled asset` };
+    clearSkillProvenance(name); // best-effort — this lands bundled content under `name` (decision record 9a3dea30)
     return { ok: true, name, bundled: true, target: "asset", skill: listSkills().find((s) => s.name === name) ?? null };
   }
   // USER skill (both surfaces): write the user store only. ALWAYS an agent-authored write (card
