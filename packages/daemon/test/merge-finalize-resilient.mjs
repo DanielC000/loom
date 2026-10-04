@@ -31,6 +31,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //                     worker_merge_confirm/worker_list), never reaching the merging manager at all. Now
 //                     it's ALSO on the return value, worded distinctly ("WEDGED") from the busy-dir case
 //                     above, and says what to do.
+//   (4) CLAIMED path (card f487a493) — a NEW spawn claims C's exact worktree path WHILE finalizeMerge's
+//                     own (non-staleKnowledge) removal is in flight; removeWorktree's abortIfClaimed
+//                     fires on attempt 1, nothing is touched, the merge still finalizes, and (unlike the
+//                     busy/wedged cases) worker_merge_confirm's return carries NO worktree-GC warning at
+//                     all — correct, safe respawn behaviour, never a cleanup failure to report.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-finalize-resilient.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -44,7 +49,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree, removeWorktree, killableRemoveDir } = await import("../dist/git/worktrees.js");
+const { createWorktree, removeWorktree, killableRemoveDir, normForCompare } = await import("../dist/git/worktrees.js");
 const { WORKTREES_DIR } = await import("../dist/paths.js");
 
 let failures = 0;
@@ -128,11 +133,17 @@ const X = { projId: `mfr-x-proj-${sfx}`, agentId: `mfr-x-top-${sfx}`, taskId: `m
 // W: task 035fb673 — genuinely WEDGED (killed:true, not just a clean reject) worktree removal, to prove
 // worker_merge_confirm's return now SURFACES the wedge (not just a console.warn nobody polling it sees).
 const W = { projId: `mfr-w-proj-${sfx}`, agentId: `mfr-w-top-${sfx}`, taskId: `mfr-w-task-${sfx}`, mgrId: `mfr-w-mgr-${sfx}`, workerId: `mfr-w-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mfr-wedge-${sfx}`), file: "wedge.txt", tag: "w" };
+// C: card f487a493 — a real, still-registered worktree (NOT detached like X/W) that a NEW spawn claims
+// (via claimedWorktreePaths) WHILE this confirm's own finalizeMerge removal is in flight. finalizeMerge
+// never sets `staleKnowledge`, so it never pre-checks claimedWorktreePaths the way a stale-knowledge
+// caller does — the abort is reachable here on gcWorktreeDir's removeWorktree attempt 1.
+const C = { projId: `mfr-c-proj-${sfx}`, agentId: `mfr-c-top-${sfx}`, taskId: `mfr-c-task-${sfx}`, mgrId: `mfr-c-mgr-${sfx}`, workerId: `mfr-c-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mfr-claimed-${sfx}`), file: "claimed.txt" };
 
 try {
   await setupWorker(H);
   await setupBusyWorker(X);
   await setupBusyWorker(W);
+  await setupWorker(C);
 
   // --- (1) HAPPY path: removal works normally. ---
   const headHBefore = git(H.repo, "rev-parse HEAD"); // canonical HEAD before the squash merge
@@ -229,9 +240,42 @@ try {
     /WEDGED/.test(confirmW.warning) && confirmW.warning !== confirmX.warning);
   check("(wedged) the warning says what the manager should DO",
     /no action needed|needsHuman|background sweep/i.test(confirmW.warning));
+
+  // --- (4) CLAIMED path (card f487a493): a NEW spawn claims this EXACT worktree path while finalizeMerge's
+  // own (non-staleKnowledge) removal is in flight. Injected directly into `claimedWorktreePaths` — the
+  // same seam `reclaimWedgedWorktreePathForSpawn` itself populates — to simulate that race deterministically.
+  // removeWorktree's `abortIfClaimed` check runs BEFORE any `removeDir` call, so this fires on attempt 1:
+  // nothing is touched, the merge still finalizes, and the manager-facing `warning` carries NOTHING about
+  // it (a respawn claiming the path is correct, safe behaviour — never a cleanup failure to report).
+  sessions.claimedWorktreePaths.add(normForCompare(C.worktreePath));
+  let confirmC;
+  const warningsC = [];
+  console.warn = (...a) => { warningsC.push(a.join(" ")); };
+  try {
+    confirmC = await sessions.confirmWorkerMerge(C.mgrId, C.workerId);
+  } finally {
+    console.warn = realWarn;
+    sessions.claimedWorktreePaths.delete(normForCompare(C.worktreePath)); // this test's own injected claim, not the daemon's
+  }
+  check("(claimed) confirmWorkerMerge STILL returns merged:true despite the claim-abort", confirmC.merged === true);
+  check("(claimed) file landed on canonical repo (merge committed)", fs.existsSync(path.join(C.repo, C.file)));
+  check("(claimed) the worktree was NEVER TOUCHED — still fully present with its real .git linkage",
+    fs.existsSync(C.worktreePath) && fs.existsSync(path.join(C.worktreePath, ".git")));
+  check("(claimed) branch NOT deleted — still checked out in the untouched worktree",
+    git(C.repo, `branch --list ${C.branch}`) !== "");
+  check("(claimed) task STILL moved to done", db.getTask(C.taskId).columnKey === "done");
+  check("(claimed) merge_done event STILL recorded (exactly 1)", mergeDoneCount(C.mgrId) === 1);
+  check("(claimed) the distinct, non-alarming 'claimed' log fired, naming the path",
+    warningsC.some((w) => w.includes(C.worktreePath) && /claimed this path/i.test(w)));
+  check("(claimed) the OLD contradictory 'could not remove dir ... left on disk' log did NOT fire for this event",
+    !warningsC.some((w) => w.includes(C.worktreePath) && /left on disk for a later GC/i.test(w)));
+  // NEGATIVE CONTROL mirroring the happy-path one above (task 035fb673's own shape): the manager-facing
+  // `warning` carries NO worktree-GC wording for the claimed outcome either — excluded by design.
+  check("(claimed) worker_merge_confirm's RETURN carries NO worktree-GC warning text (non-alarming by design)",
+    !confirmC.warning || !/WEDGED|left on disk|needsHuman|worktree.*not removed|worker_reap/i.test(confirmC.warning));
 } finally {
   db.close();
-  for (const p of [H, X, W]) {
+  for (const p of [H, X, W, C]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { if (p.busyDir) fs.rmSync(p.busyDir, { recursive: true, force: true }); } catch { /* ignore */ }
     fs.rmSync(p.repo, { recursive: true, force: true });
@@ -240,6 +284,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — finalizeMerge finishes the merge bookkeeping (branch deleted, task done, merge_done) and reports merged:true EVEN WHEN worktree removal fails; the busy dir is left for boot-reconcile Pass B. A wedged/left-on-disk removal is now ALSO surfaced on worker_merge_confirm's own return value (not just console.warn), worded distinctly per outcome and naming what the manager should do; a clean removal carries no such warning at all."
+  ? "\n✅ ALL PASS — finalizeMerge finishes the merge bookkeeping (branch deleted, task done, merge_done) and reports merged:true EVEN WHEN worktree removal fails; the busy dir is left for boot-reconcile Pass B. A wedged/left-on-disk removal is now ALSO surfaced on worker_merge_confirm's own return value (not just console.warn), worded distinctly per outcome and naming what the manager should do; a clean removal carries no such warning at all. A removal aborted because a new spawn claimed the exact path (reachable on finalizeMerge's own non-staleKnowledge call) leaves the worktree/branch untouched, still finalizes the merge, and surfaces no worktree-GC warning at all — correct, safe behaviour, not a failure."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -429,27 +429,40 @@ try {
   // (l4) card a5d9c458 ROUND 3 — removeWorktree's OWN belt-and-braces `deps.abortIfClaimed` check,
   //      consulted before EVERY retry attempt (not just once up front). The PRIMARY defense against a
   //      respawn reclaiming this exact path mid-removal is SessionService's `removingWorktreePaths`
-  //      mutual-exclusion mark (proven against the real sweep in worktree-wedge-retry.mjs) — this proves
-  //      the belt-and-braces half removeWorktree itself owns, independent of that caller-side mark: a
-  //      clean reject on attempt 1 must not be followed by a further attempt once the path is claimed.
+  //      mutual-exclusion mark (proven against the real sweep in createworktree-wedge-reclaim.mjs section
+  //      (H)) — this proves the belt-and-braces half removeWorktree itself owns, independent of that
+  //      caller-side mark: a clean reject on attempt 1 must not be followed by a further attempt once the
+  //      path is claimed. Round 4 (card f487a493) adds the distinct `aborted` field this outcome now
+  //      reports — see worktrees.ts's own doc comment for why it's no longer folded into plain `!removed`.
   {
     const claimedPath = path.join(WORKTREES_DIR, "wt-fixture-proj", "claimed-mid-retry");
     fs.mkdirSync(claimedPath, { recursive: true });
     let removeDirCalls = 0;
     let claimedNow = false;
-    const result = await removeWorktree(repo, claimedPath, {
-      removeDir: async () => {
-        removeDirCalls++;
-        // Simulate a respawn's claim landing during THIS attempt's own async window — exactly the shape
-        // the retry loop's clean-reject delay otherwise leaves open.
-        claimedNow = true;
-        return { removed: false, killed: false }; // a clean reject — would normally trigger the retry delay
-      },
-      abortIfClaimed: () => claimedNow,
-    });
+    const warningsL4 = [];
+    const realWarnL4 = console.warn;
+    console.warn = (...a) => { warningsL4.push(a.join(" ")); };
+    let result;
+    try {
+      result = await removeWorktree(repo, claimedPath, {
+        removeDir: async () => {
+          removeDirCalls++;
+          // Simulate a respawn's claim landing during THIS attempt's own async window — exactly the shape
+          // the retry loop's clean-reject delay otherwise leaves open.
+          claimedNow = true;
+          return { removed: false, killed: false }; // a clean reject — would normally trigger the retry delay
+        },
+        abortIfClaimed: () => claimedNow,
+      });
+    } finally {
+      console.warn = realWarnL4;
+    }
     check("(l4) removeDir was called exactly ONCE — the abort predicate stopped any further retry", removeDirCalls === 1);
-    check("(l4) removeWorktree reports NOT removed, and NOT wedged (aborted, not a genuine hang)", result.removed === false && result.wedged === false);
+    check("(l4) removeWorktree reports NOT removed, NOT wedged, and ABORTED (card f487a493's distinct field)",
+      result.removed === false && result.wedged === false && result.aborted === true);
     check("(l4) the claimed-mid-retry dir is left on disk, untouched", fs.existsSync(claimedPath));
+    check("(l4) the generic 'could not remove dir ... left on disk' warn did NOT fire for an aborted removal",
+      !warningsL4.some((w) => /could not remove dir/.test(w)));
     fs.rmSync(claimedPath, { recursive: true, force: true });
   }
 
@@ -469,7 +482,7 @@ try {
       abortIfClaimed: () => false,
     });
     check("(l4 negative control) abortIfClaimed:false never aborts — the retry proceeds and succeeds normally",
-      resultNeg.removed === true && resultNeg.wedged === false && removeDirCallsNeg === 2);
+      resultNeg.removed === true && resultNeg.wedged === false && resultNeg.aborted === false && removeDirCallsNeg === 2);
   }
 
   // (m) findLandedSquashCommit — the deterministic trailer detector that REPLACES isBranchMerged under

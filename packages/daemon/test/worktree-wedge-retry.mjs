@@ -255,7 +255,7 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const S = { repo: path.join(os.tmpdir(), `loom-wwr-superseded-${sfx}`) };
   initRepo(S.repo);
   S.worktreePath = leftoverDir("superseded", sfx);
-  // @decision a5d9c458 (round 3 nit) — seed the OLD entry with an EXPLICITLY older firstWedgedAt via a
+  // @decision a5d9c458 — seed the OLD entry with an EXPLICITLY older firstWedgedAt via a
   // direct app_meta write, bypassing recordWorktreeWedgeAttempt's own `now` stamp. Both this entry and
   // the LATER re-record below (seeded via the ordinary API, which stamps real `now`) would otherwise
   // both carry a millisecond-resolution ISO timestamp — same-millisecond collision is a real, if rare,

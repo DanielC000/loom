@@ -1428,7 +1428,7 @@ const IN_FLIGHT_SPAWN_CLAIMANT = "in-flight-spawn-claim";
 /** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
  *  alongside `outcome: "nested-repo-blocked"` — see that outcome's doc on gcWorktreeDir. */
 type GcOutcomeResult = {
-  outcome: "removed" | "wedged" | "left-on-disk" | "needs-human-skip" | "nested-repo-blocked" | "dirty-retained" | "path-refused" | "quarantined" | "reclaimed-by-live-session" | "wedge-entry-superseded";
+  outcome: "removed" | "wedged" | "left-on-disk" | "needs-human-skip" | "nested-repo-blocked" | "dirty-retained" | "path-refused" | "quarantined" | "reclaimed-by-live-session" | "wedge-entry-superseded" | "claimed";
   nestedRepoPaths?: string[];
   scanTruncated?: boolean;
   /** Only with `outcome: "dirty-retained"` (card 6796c9ea): the uncommitted paths, or `unverified:true` when the status read failed (fail closed). */
@@ -21619,13 +21619,23 @@ export class SessionService {
     const normPath = normForCompare(worktreePath);
     this.removingWorktreePaths.add(normPath);
     try {
-      const { removed, wedged } = await removeWorktree(repoPath, worktreePath, {
+      const { removed, wedged, aborted } = await removeWorktree(repoPath, worktreePath, {
         timeoutMs: this.gitOpMs,
         removeDir: this.removeDirOverride,
         // Belt and braces: removeWorktree's OWN retry loop re-checks this before every attempt, in case a
         // claim somehow lands despite the REMOVING mark above.
         abortIfClaimed: () => this.claimedWorktreePaths.has(normPath),
       });
+      if (aborted) {
+        // card f487a493: a NEW spawn claimed this path while removal was in flight — correct, safe
+        // behaviour (the exact race finalizeMerge's own, non-staleKnowledge call can hit on attempt 1,
+        // since it never checks claimedWorktreePaths before this call the way the staleKnowledge guard
+        // does). Non-alarming by design: never logged as a failed removal, never counted as wedged/
+        // left-on-disk.
+        // eslint-disable-next-line no-console
+        console.warn(`[worktree] ${worktreePath} not removed — a new spawn claimed this path for reuse while removal was in flight (expected, safe). Nothing further was touched.`);
+        return { outcome: "claimed" };
+      }
       if (removed) {
         this.db.clearWedgedWorktree(worktreePath);
         // Purge any leftover gate-timeout breaker streak for this branch (see opts.branch's doc) — the
@@ -21703,6 +21713,9 @@ export class SessionService {
    * is self-released before throwing — refuse the spawn rather than silently letting `createWorktree`
    * reuse/recut a dir whose state is now unknown); or if a removal is currently IN FLIGHT against this
    * exact path (see {@link removingWorktreePaths}) — retry shortly rather than racing it.
+   *
+   * @decision a5d9c458 — `release()` is PATH-KEYED, not ref-counted (ROUND 4); see the decision record
+   * for the second-claimant risk and why it's safe today.
    */
   private reclaimWedgedWorktreePathForSpawn(
     projectId: string, taskId: string, repoKey?: string | null,
@@ -21842,14 +21855,16 @@ export class SessionService {
         // eslint-disable-next-line no-console
         console.warn(`${logPrefix} worktree ${args.worktreePath} RETAINED (nested-repo-blocked) — ` +
           `merge already landed, only the worktree cleanup is deferred.`);
-      } else if (result.outcome !== "removed" && result.outcome !== "dirty-retained" && result.outcome !== "reclaimed-by-live-session" && result.outcome !== "wedge-entry-superseded") {
+      } else if (result.outcome !== "removed" && result.outcome !== "dirty-retained" && result.outcome !== "reclaimed-by-live-session" && result.outcome !== "wedge-entry-superseded" && result.outcome !== "claimed") {
         // Task 035fb673: this used to be console.warn-only (the daemon log), invisible to the merging
         // manager. `worktreeGcOutcome` carries it out to the caller so it can be folded into the
         // `worker_merge_confirm` return's `warning` field — a surface the manager already reads.
         // "reclaimed-by-live-session"/"wedge-entry-superseded" are excluded above because both are
         // UNREACHABLE here (card a5d9c458): this call never sets `staleKnowledge`, which is the only
         // thing gcWorktreeDir ever checks to produce either outcome — see its own decision record for
-        // why finalizeMerge never sets it.
+        // why finalizeMerge never sets it. "claimed" (card f487a493) IS reachable here — a new spawn
+        // claiming this exact path mid-removal is correct, safe behaviour, not a failed cleanup, so it
+        // gets no manager-facing warning at all (gcWorktreeDir already logged it, non-alarmingly).
         worktreeGcOutcome = result.outcome;
         // eslint-disable-next-line no-console
         console.warn(`${logPrefix} worktree ${args.worktreePath} not removed (${result.outcome}); ` +

@@ -226,8 +226,10 @@ wraps the entire `removeWorktree` call and the outcome handling after it. While 
 it — a respawn racing in during ANY of `removeWorktree`'s internal awaits now finds the mark and backs
 off, instead of a check that might or might not still be looking. `removeWorktree` itself also gained a
 belt-and-braces `deps.abortIfClaimed` predicate, re-consulted before EVERY retry attempt (not just once):
-if `removingWorktreePaths`'s mutual exclusion is ever bypassed by a future caller, a claim appearing
-mid-retry still halts the loop rather than touching the directory again.
+if a future CLAIM-side path ever adds to `claimedWorktreePaths` without first checking
+`removingWorktreePaths` (bypassing the mutual exclusion above), a claim appearing mid-retry still halts
+the loop rather than touching the directory again. This is scoped narrowly — see the "Do not" section's
+own correction on what `abortIfClaimed` does and does not cover.
 
 Two secondary fixes landed alongside the mutex: (1) `reclaimWedgedWorktreePathForSpawn` now returns
 `{ worktreePath, release }` instead of a bare path string — the UNIT that mints a claim also owns
@@ -237,7 +239,10 @@ correctly" risk a bare-string contract leaves open. (2) the `(entry-superseded)`
 (`worktree-wedge-retry.mjs`) now seeds its OLD wedge entry's `firstWedgedAt` via a direct `setMeta` write
 to an explicitly past timestamp, rather than via `recordWorktreeWedgeAttempt`'s own `now` stamp — the
 test's whole point is that the supersede check discriminates on `firstWedgedAt` changing, and two
-`Date.now()` calls landing in the SAME millisecond would have made that assertion vacuously pass.
+`Date.now()` calls landing in the SAME millisecond would NOT have made that assertion pass vacuously —
+with equal timestamps the supersede check sees no change, removal proceeds, and `removeDir` is actually
+invoked, so the test's own `removeDirCallsForS === 0` assertion would FAIL. It is a false RED (a flaky
+test failure from timing coincidence), not a silently-vacuous pass.
 
 ### Do not
 
@@ -254,7 +259,13 @@ test's whole point is that the supersede check discriminates on `firstWedgedAt` 
 - Do not treat `removeWorktree`'s `abortIfClaimed` as the primary defense — it is deliberately
   "belt-and-braces" (its own doc comment says so); the primary defense is the caller-side mutual
   exclusion. Do not remove `abortIfClaimed` on the theory that the mutex alone is sufficient — it is the
-  only thing that would still catch a future bypass of that mutex.
+  only thing that would still catch a future bypass of that mutex. Scope that claim precisely: it covers
+  only a future CLAIM-side bypass — some later `claimedWorktreePaths`-granting path (a future
+  `reclaimWedgedWorktreePathForSpawn`, or its replacement) that forgets to check `removingWorktreePaths`
+  first, the way the current one does. It gives NO protection against a wholly new caller that invokes
+  `removeWorktree` directly without going through `gcWorktreeDir`'s mark/claim machinery at all — such a
+  caller would never populate `claimedWorktreePaths` in the first place, so `abortIfClaimed` (which only
+  ever reads that Set) has nothing to catch; it would need its own equivalent guard.
 - Do not go back to a bare worktree-path string return from `reclaimWedgedWorktreePathForSpawn` — the
   returned `release()` is what lets the UNIT own the claim's lifecycle instead of every caller hand-rolling
   its own `claimedWorktreePaths.delete(normForCompare(path))`.
@@ -268,3 +279,99 @@ re-check) — fixed on card `a5d9c458` round 3 (delta Code Review `133a89bc`), c
 `packages/daemon/test/createworktree-wedge-reclaim.mjs` section (H),
 `packages/daemon/test/worker-spawn-worktree-path-claim.mjs`, and
 `packages/daemon/test/worktrees.mjs` section (l4).
+
+## ROUND 4 (card `f487a493`, delta CR `c37f17a2` of round 3) — an abort is a distinct, non-alarming outcome, not a failed removal
+
+### Narrative
+
+Round 3's `abortIfClaimed` (above) stopped the retry loop correctly, but `removeWorktree` reported it
+exactly like an ordinary clean-reject-then-give-up: `{removed: false, wedged: false}`, indistinguishable
+from a genuine `left-on-disk` failure. Two logs could fire for the SAME event and contradict each
+other — "aborting removal ... mid-retry ... Nothing further was touched" immediately followed by "could
+not remove dir ... left on disk for a later GC" — and the "mid-retry" wording was itself wrong whenever
+the abort fired on attempt 1 (reachable via `finalizeMerge`'s own call, which never sets
+`staleKnowledge` and so never pre-checks `claimedWorktreePaths` the way the stale-knowledge callers do —
+a concurrent `reclaimWedgedWorktreePathForSpawn` call can populate `claimedWorktreePaths` for this path
+in the window before `gcWorktreeDir` marks it `removingWorktreePaths`, so `abortIfClaimed` can trip on
+the very first `removeDir` attempt). Downstream, `gcWorktreeDir` folded this into plain `"left-on-disk"`,
+and `worker_merge_confirm` surfaced it to the manager as an ordinary failed cleanup — worded as if
+something needed fixing, when a respawn claiming the path is correct, safe behaviour.
+
+The fix: `removeWorktree` now returns a third, distinct `aborted: boolean` field. The generic "could not
+remove dir" warn is skipped entirely when `aborted` is true (no more contradictory double-log), and the
+abort's own log drops "mid-retry" in favor of wording CONDITIONAL on the attempt number — "Nothing was
+touched" on attempt 1 (no `removeDir` call has run yet), "Nothing further was touched" on a later one
+(prior attempts already called `removeDir`, even though each rejected cleanly). `gcWorktreeDir` checks
+`aborted` before `wedged`/`left-on-disk` and returns a new, distinct outcome, `"claimed"`, with its own
+non-alarming log line. `finalizeWorktreeAndBranch` excludes `"claimed"` from the outcomes it folds into
+`worktreeGcOutcome` (the field `worker_merge_confirm`'s `warning` text is built from) — the same
+treatment `"removed"` itself gets, since nothing here is actually wrong.
+
+### Do not
+
+- Do not report an `abortIfClaimed` stop the same way as a genuine removal failure — it is a correct,
+  expected outcome (a respawn claimed the path), never a "left on disk" or "wedged" failure to retry.
+- Do not word the abort log as "mid-retry" — it fires identically on attempt 1 (reachable via
+  `finalizeMerge`'s non-`staleKnowledge` call) and on a later retry; the wording must not imply it is
+  retry-specific. Do not make the "nothing was touched" half attempt-INDEPENDENT either: on attempt 1 no
+  `removeDir` call has run yet, so "Nothing was touched" is literally true; by attempt > 1 one or more
+  PRIOR attempts already called `removeDir` (even though each rejected cleanly), so it must read "Nothing
+  FURTHER was touched" — the two cases are not interchangeable wording.
+- Do not let both the abort log and the generic "could not remove dir" warn fire for the same event —
+  they describe the SAME outcome and previously contradicted each other.
+- Do not surface `"claimed"` to a manager via `worktreeGcWarning`/`worktreeGcOutcome` — it is a
+  non-alarming, expected outcome, not a cleanup failure needing attention.
+
+### Source
+
+`packages/daemon/src/git/worktrees.ts` (`removeWorktree`'s `aborted` field and its log text) and
+`packages/daemon/src/sessions/service.ts` (`gcWorktreeDir`'s `"claimed"` outcome,
+`finalizeWorktreeAndBranch`'s exclusion) — fixed on card `f487a493`.
+
+## `reclaimWedgedWorktreePathForSpawn`'s `release()` is path-keyed, not ref-counted (card `f487a493`)
+
+### Narrative
+
+`release()` (`service.ts` ~:21722) is `this.claimedWorktreePaths.delete(normPath)` — unconditional and
+keyed purely on the normalized PATH, never on which caller's claim it is. If two claimants ever held a
+claim on the exact same `normPath` at once, EITHER one's `release()` would drop BOTH — there is no
+ref-count, so the second claimant's "hold" would silently vanish the instant the first one lets go, even
+though the second is still relying on it.
+
+That's safe today only because the two real claimants can never legitimately target the same path at
+once — verified, not assumed:
+
+- `spawnWorker` (~:8020) calls `reclaimWedgedWorktreePathForSpawn(project.id, taskId ?? claimKey, ...)`.
+  A real `taskId` can't have two concurrent claimants: `inFlightSpawnTaskIds`'s atomic check-and-set
+  (`sha:93a496a0`) refuses a second concurrent spawn for the same `taskId` BEFORE this call ever runs. A
+  taskless spawn mints a FRESH `randomUUID()` `claimKey` per call (`2514e6e1`) — two taskless spawns never
+  share one.
+- The batch merge (~:18729) calls `reclaimWedgedWorktreePathForSpawn(finalProjectId, \`batch-${opId}\`)`.
+  `opId` is minted via `randomUUID()` exactly once per NEW op under its `PendingOpRegistry.attach` key
+  (`pending-ops.ts`'s `attach()`, the `fresh.opId = randomUUID()` mint) — a caller attaching to an
+  ALREADY-in-flight op for the same key reuses that SAME opId rather than minting a second one, so there
+  is still only ONE live batch claim per key at any time; two DIFFERENT keys get DIFFERENT, freshly-minted
+  opIds.
+- The two claim-key shapes can never collide with EACH OTHER either: a real `taskId`/taskless `claimKey`
+  is a bare UUID string, while a batch's key is always `batch-`-prefixed — different shapes, never equal.
+
+`resolveWorktreePath` is a pure, deterministic function of `(projectId, taskId, repoKey)` (see this
+record's own "Do not" on that above), so two claim keys that can never collide produce two worktree paths
+that can never collide either — modulo the same baseline UUID-collision-is-negligible assumption every
+other claim/identity structure in this codebase already relies on (session ids, task ids).
+
+### Do not
+
+- Do not add a future claimant of `claimedWorktreePaths` keyed on anything OTHER than a provably-unique,
+  per-task/per-op identifier (verified the way the two existing claimants are verified above, not
+  assumed) — `release()`'s path-keyed Set has no ref-count, so a genuine second claimant on the same path
+  would have its hold silently dropped by the first claimant's own release.
+- Do not "fix" this by ref-counting `claimedWorktreePaths` preemptively — today's two claimants are
+  provably disjoint, so there is nothing to fix yet; ref-count it only if a future claimant actually
+  breaks that disjointness, and say so here when it does.
+
+### Source
+
+`packages/daemon/src/sessions/service.ts` (`reclaimWedgedWorktreePathForSpawn`'s `release()`, the
+`spawnWorker` and batch-merge call sites) and `packages/daemon/src/orchestration/pending-ops.ts`
+(`PendingOpRegistry.attach`'s `opId` mint) — reviewed on card `f487a493`.

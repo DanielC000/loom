@@ -1411,25 +1411,34 @@ export async function removeWorktree(
   repoPath: string,
   worktreePath: string,
   deps: BoundedGitDeps = {},
-): Promise<{ removed: boolean; wedged: boolean }> {
+): Promise<{ removed: boolean; wedged: boolean; aborted: boolean }> {
   const refusal = worktreeRemovalRefusal(worktreePath, [repoPath]);
   if (refusal) {
     // eslint-disable-next-line no-console
     console.warn(`[worktree] REFUSED to remove ${worktreePath} — ${refusal}. Nothing was touched.`);
-    return { removed: false, wedged: false };
+    return { removed: false, wedged: false, aborted: false };
   }
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
   let removed = true;
   let wedged = false;
+  // Distinct from `wedged`/plain `!removed`: the loop was stopped by `deps.abortIfClaimed`, never by a
+  // failed/killed `removeDir` call. The directory itself was never touched on THIS call — a respawn
+  // claimed the path (correct, safe behaviour), not a removal failure.
+  let aborted = false;
   for (let attempt = 1; attempt <= REMOVE_DIR_CLEAN_RETRY_ATTEMPTS; attempt++) {
     // @decision a5d9c458 — re-consulted on EVERY iteration (never just once before the loop): a claim
     // can land during a PRIOR iteration's own removeDir await or retry delay, so only a fresh check right
     // here catches it before the NEXT attempt actually touches the directory.
     if (deps.abortIfClaimed?.()) {
+      // This fires on attempt 1 just as readily as on a later retry (the caller's claim can land before
+      // this call's own first removeDir ever runs) — so the wording is CONDITIONAL on which: "Nothing
+      // was touched" is only true on attempt 1 (no removeDir call has run yet); by attempt > 1 one or
+      // more PRIOR attempts already called removeDir (even though each rejected cleanly), so it's
+      // "nothing FURTHER was touched" — this abort itself touches nothing more, but something already did.
       // eslint-disable-next-line no-console
-      console.warn(`[worktree] aborting removal of ${worktreePath} mid-retry — the path is now claimed. Nothing further was touched.`);
-      removed = false; wedged = false; break;
+      console.warn(`[worktree] aborting removal of ${worktreePath} — the path is now claimed (attempt ${attempt}/${REMOVE_DIR_CLEAN_RETRY_ATTEMPTS}). ${attempt === 1 ? "Nothing was touched." : "Nothing further was touched."}`);
+      removed = false; wedged = false; aborted = true; break;
     }
     // Only skip a RETRY (attempt > 1) if the dir vanished between attempts (e.g. removed some other way) —
     // the first attempt always calls removeDir unconditionally, mirroring the pre-existing force-remove
@@ -1442,7 +1451,11 @@ export async function removeWorktree(
     if (result.killed) { wedged = true; break; } // genuinely wedged — hand to the caller's slow-retry policy, NEVER loop a hang HERE
     if (attempt < REMOVE_DIR_CLEAN_RETRY_ATTEMPTS) await delay(REMOVE_DIR_CLEAN_RETRY_DELAY_MS); // clean reject → short bounded retry
   }
-  if (!removed) {
+  if (!removed && !aborted) {
+    // An abort is reported above, distinctly and non-alarmingly — skip this generic "could not remove"
+    // warn for it entirely, so the two logs never contradict each other (the old behaviour logged BOTH
+    // "aborting... nothing further was touched" AND "could not remove dir ... left on disk for a later
+    // GC" for the exact same event).
     // eslint-disable-next-line no-console
     console.warn(`[worktree] could not remove dir ${worktreePath} (${wedged ? "genuinely wedged — caller retries it slowly" : "left on disk for a later GC"})`);
   }
@@ -1463,7 +1476,7 @@ export async function removeWorktree(
     // A hung/failed prune must NOT throw past removeWorktree (which would re-introduce the boot hang
     // via finalizeMerge / Pass B). A stale admin record is harmless — createWorktree prunes on reuse.
   }
-  return { removed, wedged };
+  return { removed, wedged, aborted };
 }
 
 /** Cap on filesystem entries visited by {@link measureDirSize} — mirrors {@link
