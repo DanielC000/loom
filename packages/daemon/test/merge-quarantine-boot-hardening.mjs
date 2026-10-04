@@ -421,10 +421,20 @@ try {
     fs.writeFileSync(path.join(finalPath, "blocker.txt"), "x");
     const tokenA = enterMergeQuarantine(repo, "branch-a", "reason a");
     enterMergeQuarantine(repo, "branch-b", "reason a"); // appends tokenB to the SAME entry (round 7, M1)
-    const tmpPath = fs.readdirSync(MERGE_QUARANTINE_DIR).map((f) => path.join(MERGE_QUARANTINE_DIR, f)).find((p) => p.startsWith(`${finalPath}.tmp-`));
     const tokenB = activeMergeQuarantineFor(repo)?.tokens?.find((t) => t !== tokenA);
-    check("(PCWF) precondition: only a tmp exists (finalPath is still just the directory blocker), holding BOTH tokens",
-      !!tmpPath && fs.statSync(finalPath).isDirectory() && activeMergeQuarantineFor(repo)?.tokens?.length === 2);
+    // The fresh-entry write (tokenA alone) AND the append's own rewrite (tokenA+tokenB) BOTH fail their
+    // rename (the directory blocker above), so TWO tmps now sit on disk for this hash — `readdirSync`
+    // gives no ordering guarantee across random-hex tmp names, so picking just "the first" one (as this
+    // test used to) is a coin flip on which survives the parking below (card 92c645cc round 2, item 1:
+    // measured ~1/3 flaky). Identify every tmp for this hash, and pick the one whose OWN content actually
+    // carries BOTH tokens for the checks that need to track that specific file.
+    const allTmps = fs.readdirSync(MERGE_QUARANTINE_DIR)
+      .map((f) => path.join(MERGE_QUARANTINE_DIR, f))
+      .filter((p) => p.startsWith(`${finalPath}.tmp-`));
+    const readTokens = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")).tokens; } catch { return undefined; } };
+    const tmpPath = allTmps.find((p) => readTokens(p)?.includes(tokenA) && readTokens(p)?.includes(tokenB));
+    check("(PCWF) precondition: two tmps exist (finalPath is still just the directory blocker), one holding BOTH tokens",
+      allTmps.length === 2 && !!tmpPath && fs.statSync(finalPath).isDirectory() && activeMergeQuarantineFor(repo)?.tokens?.length === 2);
 
     // Patch fs.openSync to fail ONLY this repo's own tmp writes (EMFILE-shaped) — simulates the
     // partial-clear's OWN rewrite failing for an unrelated reason, never the rename blocker above.
@@ -434,20 +444,21 @@ try {
       return realOpenSync(p, ...rest);
     };
     try { clearMergeQuarantineByToken(repo, tokenA); } finally { fs.openSync = realOpenSync; }
-    check("(PCWF) THE REGRESSION: the sweep must NOT delete the pre-existing tmp when the rewrite fails", fs.existsSync(tmpPath));
+    check("(PCWF) THE REGRESSION: the sweep must NOT delete the pre-existing tmps when the rewrite fails", allTmps.every((p) => fs.existsSync(p)));
 
     // Genuinely clear the in-memory entry THIS process's own calls above already set — otherwise the
     // "fresh boot" checks below could pass VACUOUSLY off that stale entry alone (same trap as SCENARIO
-    // TORN-WRITE's own (a)/(c) cases). Park the tmp first if it's still there, so the clear's own sweep
-    // can't touch it; if the bug already deleted it, there's nothing to park.
-    if (fs.existsSync(tmpPath)) {
-      const parked = path.join(os.tmpdir(), `loom-mqbh-parked-pcwf-${path.basename(tmpPath)}`);
-      fs.renameSync(tmpPath, parked);
-      clearMergeQuarantine(repo);
-      fs.renameSync(parked, tmpPath);
-    } else {
-      clearMergeQuarantine(repo);
-    }
+    // TORN-WRITE's own (a)/(c) cases). Park EVERY surviving tmp for this hash first, so the clear's own
+    // sweep can't touch any of them — `clearMergeQuarantine` sweeps the WHOLE hash prefix unconditionally,
+    // so parking only the one-token-B tmp would still let it delete the other tmp out from under this test.
+    const survivingTmps = allTmps.filter((p) => fs.existsSync(p));
+    const parkedPairs = survivingTmps.map((p) => {
+      const parked = path.join(os.tmpdir(), `loom-mqbh-parked-pcwf-${path.basename(p)}`);
+      fs.renameSync(p, parked);
+      return [p, parked];
+    });
+    clearMergeQuarantine(repo);
+    for (const [original, parked] of parkedPairs) fs.renameSync(parked, original);
     check("(PCWF) precondition: in-memory is genuinely clean before the fresh boot", !activeMergeQuarantineFor(repo));
 
     fs.rmSync(finalPath, { recursive: true, force: true }); // blocker/env issue resolved
