@@ -32,6 +32,54 @@ export type TerminalInput =
   | { type: "repaint" }                 // force Ctrl-L repaint (tearing mitigation)
   | { type: "resize"; cols: number; rows: number }; // SHELL terminals only — fit the pty to the pane
 
+// ── WebSocket CLOSE contract (shared by every Tier-1 WS route: /ws/term, /ws/fleet, /ws/companion) ──
+//
+// @decision 04314fbc — never restate a close reason as a literal at a send site or as a pattern in the
+// browser; build with `gatewayTokenCloseReason` and read back with `parseGatewayTokenCloseReason`, so a
+// one-word edit cannot silently downgrade a revoked-credential close to an unrecognised one.
+
+/**
+ * WebSocket close code 1008 ("policy violation") — the ONLY code the daemon sends to end a socket for a
+ * reason the client must NOT retry. Every other code (1000/1001/1006/1011/…) is an ordinary disconnect.
+ */
+export const WS_CLOSE_POLICY_VIOLATION = 1008;
+
+/**
+ * The gateway-token status changes that kill every socket the token had open (card 3c205fb5). All four
+ * mean the same thing to a browser — the credential it holds is dead — and differ only in the wording the
+ * banner shows, so they are ONE list rather than four call-site literals.
+ */
+export const GATEWAY_TOKEN_CLOSE_CHANGES = ["revoked", "paused", "rotated", "deleted"] as const;
+export type GatewayTokenCloseChange = (typeof GATEWAY_TOKEN_CLOSE_CHANGES)[number];
+
+/** The exact close reason `GatewayTokenSocketRegistry.closeAll` sends for a token status change. */
+export function gatewayTokenCloseReason(change: GatewayTokenCloseChange): string {
+  return `gateway token ${change}`;
+}
+
+const GATEWAY_TOKEN_CLOSE_REASONS = new Map<string, GatewayTokenCloseChange>(
+  GATEWAY_TOKEN_CLOSE_CHANGES.map((change) => [gatewayTokenCloseReason(change), change]),
+);
+
+/**
+ * Read a close reason back into the change that produced it, or `null` when it is not one of the four.
+ *
+ * EXACT match, deliberately: the second 1008 producer below is a per-socket policy refusal where the
+ * credential is fine, and a FUTURE third producer we have never seen must fall that way too. Matching
+ * loosely (a prefix, a case-insensitive scan) would claim a dead credential on a reason this contract
+ * does not actually define — a false app-wide alarm, the one error worth engineering against here.
+ */
+export function parseGatewayTokenCloseReason(reason: string | null | undefined): GatewayTokenCloseChange | null {
+  return GATEWAY_TOKEN_CLOSE_REASONS.get(reason ?? "") ?? null;
+}
+
+/**
+ * The OTHER 1008 producer (decision 710a34fa): a remote peer asking for a HOST SHELL terminal. Terminal
+ * for that one socket, but the credential is healthy and no banner applies — which is exactly why the
+ * reason, not the code, is what separates the two classes.
+ */
+export const SHELL_LOOPBACK_ONLY_CLOSE_REASON = "host shell terminals are loopback-only";
+
 /**
  * A plain interactive SHELL terminal (pwsh/cmd/bash) the HUMAN spawned in a project's repo cwd from
  * the Terminals page — NOT a Claude session (no agent, engine id, role, busy, or resumability). Lives
