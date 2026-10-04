@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
-import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES, ALL_ORCHESTRATION_EVENT_KINDS } from "@loom/shared";
+import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES, ALL_ORCHESTRATION_EVENT_KINDS, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason, SHELL_LOOPBACK_ONLY_CLOSE_REASON } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { GatewayTokenSocketRegistry } from "./token-sockets.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
@@ -5182,7 +5182,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // opened, not just future requests — close them in the same request as the status write. Activating
     // (or an unrelated name-only edit) closes nothing: there is nothing stale to cut off.
     if (patch.status === "paused" || patch.status === "revoked") {
-      gatewayTokenSockets.closeAll(tokenId, 1008, `gateway token ${patch.status}`);
+      gatewayTokenSockets.closeAll(tokenId, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason(patch.status));
     }
     return deps.db.getGatewayToken(tokenId);
   });
@@ -5193,7 +5193,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!rotated) return reply.code(404).send({ error: "gateway token not found" });
     // Card 3c205fb5: the OLD secret is dead the instant rotation happens (Db.rotateGatewayToken's own
     // doc) — a socket opened under it must go too, not just a future request presenting it.
-    gatewayTokenSockets.closeAll(tokenId, 1008, "gateway token rotated");
+    gatewayTokenSockets.closeAll(tokenId, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason("rotated"));
     return reply.send(rotated); // { token, plaintext }
   });
   // Hard-delete a token (permanent). A soft revoke is POST /api/gateway-tokens/:id {status:'revoked'}.
@@ -5202,7 +5202,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!deps.db.getGatewayToken(tokenId)) return reply.code(404).send({ error: "gateway token not found" });
     deps.db.deleteGatewayToken(tokenId);
     // Card 3c205fb5: the row (and every authority it granted) is gone — close whatever it still had open.
-    gatewayTokenSockets.closeAll(tokenId, 1008, "gateway token deleted");
+    gatewayTokenSockets.closeAll(tokenId, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason("deleted"));
     return { ok: true };
   });
 
@@ -6336,7 +6336,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // a shell pty. An empty/undeterminable peer address counts as non-loopback (fail closed).
     const remotePeer = classOf(req).kind === "remote";
     if (remotePeer && deps.pty.listShells().some((t) => t.id === sessionId)) {
-      socket.close(1008, "host shell terminals are loopback-only");
+      socket.close(WS_CLOSE_POLICY_VIOLATION, SHELL_LOOPBACK_ONLY_CLOSE_REASON);
       return;
     }
     // Card 5c14fa6b — tell a remote viewer its pane is inert BEFORE anything else, so the pane can
