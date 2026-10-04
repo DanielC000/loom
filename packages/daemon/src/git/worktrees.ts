@@ -3805,6 +3805,19 @@ export const STATIC_GUARD_REPO_PATHS = [
   // emit-compare path cannot reason about, so it could otherwise take the reduced path and never trip a
   // single check.
   "packages/daemon/test/fixed-tmpdir-literal-guard.mjs",
+  // Card 2365cc22: a corpus-wide scan of packages/daemon/test/*.mjs asserting every real
+  // `spawn(process.execPath, [...])` of the real `dist/index.js` daemon also sets
+  // `LOOM_SUPPRESS_FIRST_RUN_LAUNCH` in that same spawn's env — without it, a fresh LOOM_HOME with zero
+  // ordinary projects (true for every one of these tests at boot, before it seeds its own first project)
+  // unconditionally fires the real Setup Assistant first-run auto-launch (setup/first-run.ts), spawning a
+  // genuine claude.exe. MEASURED LIVE against board-consistency.mjs before this fix: a real claude.exe
+  // (role "setup") spawned and lived ~29s during an ordinary run, invisible to that test's own
+  // assertions. Belongs here on the same ground as its corpus-wide-scan siblings above: a NEW test file
+  // that spawns the real daemon without this flag is a source-TEXT property the reduced/emit-compare path
+  // cannot reason about (a .mjs test file has no compile step, and the daemon-side behavior it risks
+  // triggering — a real session spawn — has no compiled-output signature the transpile-identity check
+  // could ever see), so it could otherwise take the reduced path and never trip a single check.
+  "packages/daemon/test/first-run-suppress-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run

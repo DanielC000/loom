@@ -19,7 +19,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { waitForOwnDaemon, captureStderrTail } from "./_daemon-ready.mjs";
 import { commitAll } from "./_git-commit.mjs";
 import { mintTestMcpToken, mcpAuthRequestInit } from "./_mcp-auth.mjs";
 
@@ -38,22 +38,21 @@ const now = new Date().toISOString();
 // Card 280b1e44: the loom-platform MCP router is now ALSO gated on isLoomDev() (mcp/platform.ts's
 // resolveRole) — this test's whole purpose is proving the platform surface's shape, so it must boot with
 // LOOM_DEV=1 regardless of the ambient gate-runner env, mirroring how a real self-hosting daemon opts in.
+// Card 2365cc22: LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1 — a fresh LOOM_HOME with zero ordinary projects (true
+// here until this test seeds one, below) is exactly the condition that fires the real Setup Assistant
+// first-run auto-launch (setup/first-run.ts) — a REAL claude spawn this test never intends. Measured
+// live firing in a sibling of this file before this fix (card 2365cc22 checkpoint).
 const daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
-  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0", LOOM_DEV: "1" },
-  stdio: "ignore",
+  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0", LOOM_DEV: "1", LOOM_SUPPRESS_FIRST_RUN_LAUNCH: "1" },
+  stdio: ["ignore", "ignore", "pipe"], // stderr captured (not "ignore") so an early EADDRINUSE-style exit is diagnosable
 });
-async function waitReady(timeoutMs = 20000) {
-  try {
-    return await sharedWaitUntil(async () => {
-      try { const r = await fetch(`${BASE}/api/projects`); return r.ok; } catch { return false; }
-    }, { timeoutMs, intervalMs: 200, label: "platform-scope: daemon ready" });
-  } catch (err) {
-    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
-    if (err?.exhaustedOnThrow !== false) throw err;
-    return false;
-  }
+const getStderrTail = captureStderrTail(daemon);
+try {
+  await waitForOwnDaemon({ child: daemon, base: BASE, loomHome: LOOM, getStderrTail, label: "platform-scope: daemon ready" });
+} catch (err) {
+  console.error(`daemon did not become ready: ${err.message}`);
+  process.exit(2);
 }
-if (!(await waitReady())) { console.error("daemon did not become ready"); process.exit(2); }
 // gateway's loopback write guard (card 4ff9a073) is active for any REAL spawned daemon — the secret is
 // minted before app.listen(), so it's already there once waitReady() observes a response.
 const loopbackToken = readLoopbackToken(LOOM);

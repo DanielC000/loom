@@ -40,8 +40,11 @@ const hadKey = (() => { try { return trustKey in (JSON.parse(fs.readFileSync(rea
 
 let daemon = null;
 try {
+  // Card 2365cc22: LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1 — a fresh LOOM_HOME with zero ordinary projects
+  // (true here until this test seeds one, below) is exactly the condition that fires the real Setup
+  // Assistant first-run auto-launch (setup/first-run.ts) — a REAL claude spawn this test never intends.
   daemon = spawn(process.execPath, [path.resolve("packages/daemon/dist/index.js")],
-    { env: { ...process.env, LOOM_HOME: home, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0" }, stdio: "ignore" });
+    { env: { ...process.env, LOOM_HOME: home, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0", LOOM_SUPPRESS_FIRST_RUN_LAUNCH: "1" }, stdio: "ignore" });
 
   // wait for listen
   let up = false;

@@ -1423,7 +1423,14 @@ async function runOne(name, lane) {
     // (mirroring this script's own appendGateTimingRow/GATE_TIMING_NDJSON pattern) needs the REAL home,
     // not the isolated one, to produce anything durable — see memory
     // `instrument-inside-test-reads-isolated-loom-home` for the bug this closes.
-    env: { ...process.env, LOOM_HOME: home, LOOM_REAL_HOME: LOOM_HOME, LOOM_PORT: String(port), LOOM_TEST: "1" },
+    // Card 2365cc22: LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1 — central backstop. Any test file that spawns a
+    // REAL dist/index.js daemon with `...process.env` in its own env object (every one of them does)
+    // inherits this, so the real Setup Assistant first-run auto-launch (setup/first-run.ts) can never
+    // fire a real claude spawn under the gate even for a future test that forgets its own explicit
+    // per-file flag. Each of those files ALSO sets it explicitly (defense-in-depth for `node test/X.mjs`
+    // run directly, outside this harness, which never sees this env block at all) — see
+    // first-run-suppress-guard.mjs, which enforces the explicit per-file side of this.
+    env: { ...process.env, LOOM_HOME: home, LOOM_REAL_HOME: LOOM_HOME, LOOM_PORT: String(port), LOOM_TEST: "1", LOOM_SUPPRESS_FIRST_RUN_LAUNCH: "1" },
   });
   const endTs = Date.now();
 

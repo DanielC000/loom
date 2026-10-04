@@ -23,7 +23,7 @@ import { nextFireAt } from "../dist/orchestration/cron.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { waitForOwnDaemon, captureStderrTail } from "./_daemon-ready.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
@@ -651,24 +651,23 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
 // --- PART 2: REST round-trip via the daemon's endpoints ---
 // --- boot the isolated daemon (dist/index.js) — deferred until here so PART 1 stays daemon-free ---
 fs.mkdirSync(LOOM, { recursive: true });
+// Card 2365cc22: LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1 — a fresh LOOM_HOME with zero ordinary projects (true
+// here until this test seeds one, below) is exactly the condition that fires the real Setup Assistant
+// first-run auto-launch (setup/first-run.ts) — a REAL claude spawn this test never intends. Measured
+// live firing in a sibling of this file before this fix (card 2365cc22 checkpoint).
 const daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
-  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0" },
-  stdio: "ignore",
+  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0", LOOM_SUPPRESS_FIRST_RUN_LAUNCH: "1" },
+  stdio: ["ignore", "ignore", "pipe"], // stderr captured (not "ignore") so an early EADDRINUSE-style exit is diagnosable
 });
-async function waitReady(timeoutMs = 20000) {
-  try {
-    return await sharedWaitUntil(async () => {
-      try { const r = await fetch(`${BASE}/api/projects`); return r.ok; } catch { return false; }
-    }, { timeoutMs, intervalMs: 200, label: "scheduler: daemon ready" });
-  } catch (err) {
-    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
-    if (err?.exhaustedOnThrow !== false) throw err;
-    return false;
-  }
+const getStderrTail = captureStderrTail(daemon);
+try {
+  await waitForOwnDaemon({ child: daemon, base: BASE, loomHome: LOOM, getStderrTail, label: "scheduler: daemon ready" });
+} catch (err) {
+  console.error(`daemon did not become ready: ${err.message}`);
+  process.exit(2);
 }
-if (!(await waitReady())) { console.error("daemon did not become ready"); process.exit(2); }
 // gateway's loopback write guard (card 4ff9a073) is active for any REAL spawned daemon — the secret is
-// minted before app.listen(), so it's already there once waitReady() observes a response.
+// minted before app.listen(), so it's already there once waitForOwnDaemon() confirms readiness.
 loopbackToken = readLoopbackToken(LOOM);
 
 const rid = `rest-${Date.now()}`;

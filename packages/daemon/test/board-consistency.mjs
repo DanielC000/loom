@@ -22,7 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { waitForOwnDaemon, captureStderrTail } from "./_daemon-ready.mjs";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { commitAll } from "./_git-commit.mjs";
@@ -68,28 +68,25 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- boot the isolated daemon (dist/index.js) ---
+// Card 2365cc22: LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1 — a fresh LOOM_HOME with zero ordinary projects (true
+// here until this test seeds one, below) is exactly the condition that fires the real Setup Assistant
+// first-run auto-launch (setup/first-run.ts) — a REAL claude spawn this test never intends. Measured
+// LIVE on this exact file before this fix (card 2365cc22 checkpoint): a real claude.exe (role "setup",
+// agent "Platform") spawned and lived ~29s during an ordinary run, invisible to the test's own checks.
 const daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
-  env: { ...process.env, LOOM_HOME, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0" },
-  stdio: "ignore",
+  env: { ...process.env, LOOM_HOME, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0", LOOM_SUPPRESS_FIRST_RUN_LAUNCH: "1" },
+  stdio: ["ignore", "ignore", "pipe"], // stderr captured (not "ignore") so an early EADDRINUSE-style exit is diagnosable
 });
-// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/200ms-interval budget;
-// the predicate keeps swallowing a not-up-yet fetch failure internally (unchanged), only a genuine
-// non-timeout error from the shared helper itself would propagate.
-async function waitReady(timeoutMs = 20000) {
-  try {
-    return await sharedWaitUntil(async () => {
-      try { const r = await fetch(`${BASE}/api/projects`); return r.ok; } catch { return false; }
-    }, { timeoutMs, intervalMs: 200, label: "board-consistency: daemon ready" });
-  } catch (err) {
-    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
-    if (err?.exhaustedOnThrow !== false) throw err;
-    return false;
-  }
-}
+const getStderrTail = captureStderrTail(daemon);
 
 let session = null;
 try {
-  if (!(await waitReady())) { console.error("daemon did not become ready"); process.exit(2); }
+  try {
+    await waitForOwnDaemon({ child: daemon, base: BASE, loomHome: LOOM_HOME, getStderrTail, label: "board-consistency: daemon ready" });
+  } catch (err) {
+    console.error(`daemon did not become ready: ${err.message}`);
+    process.exit(2);
+  }
   loopbackToken = readLoopbackToken(LOOM_HOME);
 
   // vaultPath omitted (card daee3532): aliasing it onto repoPath is refused at create time by
