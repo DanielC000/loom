@@ -21,6 +21,7 @@ import { createRotatingLog } from "./lib/rotating-log.mjs";
 import { createLineTimestamper } from "./lib/line-timestamp.mjs";
 import { loadDotEnvFile, fillEnvDefaults } from "./lib/env-file.mjs";
 import { installEpipeTolerantStdio } from "./lib/epipe-tolerant-stdio.mjs";
+import { acquireStartGuard } from "../bin/lib/start-guard.mjs";
 
 // Card 175a7eb2: a supervisor whose hosting console has died is alive but doomed — it passes a
 // liveness check (the process exists) and then can crash on its own next console.log/error (e.g. the
@@ -105,6 +106,18 @@ async function waitForReady(port, timeoutMs) {
 const wantsDetach = process.argv.includes("--detach");
 const isDetachedChild = process.env.LOOM_SUPERVISOR_DETACHED_CHILD === "1";
 if (wantsDetach && !isDetachedChild) {
+  // Guard FIRST (card 4e026f35) — before the "already answering" port probe below, and held through the
+  // ENTIRE build + readiness wait further down (this launch's own build can take MINUTES, so a second
+  // `--detach` racing this one would also see "nothing listening yet" on the bare port probe alone). See
+  // bin/lib/start-guard.mjs for why this uses an OS-released primitive rather than a file lock.
+  const guard = await acquireStartGuard({ loomHome: LOOM_HOME, port: PORT });
+  if (!guard.acquired) {
+    console.log(`[supervisor] a start for this LOOM_HOME/port is already in progress — not starting a second one.`);
+    process.exit(0);
+  }
+  // Card 4e026f35 round 3 item 4: see bin/loom.mjs's identical check for why a degraded (fail-open) guard
+  // is worth a line rather than a silently swallowed diagnostic.
+  if (guard.degraded) console.error(`[supervisor] start-guard degraded (${guard.code}) — proceeding without mutual exclusion for this launch.`);
   // Double-start guard (Code Review finding #5): a second `--detach` while one is already up would
   // overwrite the pid file with the NEW supervisor's pid, orphaning the first (its own daemon child then
   // dies on EADDRINUSE, leaving supervisor #1 live with no record — unstoppable through
@@ -112,6 +125,7 @@ if (wantsDetach && !isDetachedChild) {
   // a foreground `pnpm daemon:stable` on the same port must also be refused).
   if (await httpVersionOk(PORT, 1500)) {
     console.log(`[supervisor] a daemon is already answering at http://127.0.0.1:${PORT} — not starting a second one.`);
+    guard.release();
     process.exit(0);
   }
   fs.mkdirSync(path.join(LOOM_HOME, "logs"), { recursive: true }); // also creates LOOM_HOME (an ancestor)
@@ -149,6 +163,7 @@ if (wantsDetach && !isDetachedChild) {
   } catch (err) {
     console.error(`[supervisor] failed to write the PID file (${err.message}) — killing the just-spawned detached child so it can't become an untracked orphan.`);
     try { process.kill(child.pid, "SIGKILL"); } catch { /* best-effort */ }
+    guard.release();
     process.exit(1);
   }
   console.log(`[supervisor] started detached — PID ${child.pid}`);
@@ -165,6 +180,7 @@ if (wantsDetach && !isDetachedChild) {
   const ready = await waitForReady(PORT, 240_000);
   if (ready) console.log(`[supervisor] ready — http://127.0.0.1:${PORT}`);
   else console.error(`[supervisor] not answering on http://127.0.0.1:${PORT} yet after 240s — it may still be building; check ${SUPERVISOR_LOG_PATH} and ${path.join(LOOM_HOME, "logs", "daemon-output.log")}.`);
+  guard.release();
   process.exit(0);
 }
 

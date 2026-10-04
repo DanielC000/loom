@@ -26,6 +26,7 @@ import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { CHANNELS, isValidChannel, installSpecFor, readChannel, writeChannel } from "./update-config.mjs";
 import { commandLineOf, matchesRecordedEntry } from "./lib/cmdline-identity.mjs";
+import { acquireStartGuard } from "./lib/start-guard.mjs";
 
 // UV_THREADPOOL_SIZE (task dea6728e, defense-in-depth): the default libuv pool is only 4 threads, so a
 // small handful of wedged fs ops could starve fs/dns/crypto process-wide. `startDetached`/`loom service`
@@ -462,45 +463,62 @@ async function startForeground({ port, open }) {
 
 // --- start --detach: background the daemon, write a PID file, return -------------------------------
 async function startDetached({ port, open }) {
-  const daemonEntry = resolveDaemonEntry();
-  const url = urlFor(port);
-
-  // Already up on this port? Don't spawn a second daemon that would just fail to bind.
-  if (await fetchVersion(port)) {
-    console.log(`loom: a daemon is already running at ${url}.`);
+  // Guard FIRST (card 4e026f35) — before resolveDaemonEntry, before the port probe, before anything else
+  // — and held through the full readiness wait below, released in `finally` regardless of outcome. See
+  // bin/lib/start-guard.mjs for why this uses an OS-released primitive rather than a file lock.
+  const guard = await acquireStartGuard({ loomHome: loomHome(), port });
+  if (!guard.acquired) {
+    console.log(`loom: a start for this LOOM_HOME/port is already in progress.`);
     return 0;
   }
-
-  // Detached child IS the daemon process (node dist/index.js) — its pid is the one we later stop. Its
-  // logs go to a file under LOOM_HOME/logs so a backgrounded boot stays debuggable; fall back to ignore.
-  const env = { ...process.env, LOOM_PORT: String(port) };
-  let stdio = "ignore";
-  let logPath = null;
+  // Card 4e026f35 round 3 item 4: `degraded:true` means the OS-released primitive itself failed open on
+  // an unexpected (non-EADDRINUSE) error — this launch still proceeds (see acquireStartGuard's own doc
+  // for why that's correct), but silently proceeding with NO mutual exclusion at all is worth a line, not
+  // a swallowed diagnostic.
+  if (guard.degraded) console.error(`loom: start-guard degraded (${guard.code}) — proceeding without mutual exclusion for this launch.`);
   try {
-    const logsDir = path.join(loomHome(), "logs");
-    fs.mkdirSync(logsDir, { recursive: true });
-    logPath = path.join(logsDir, "daemon-detached.log");
-    const fd = fs.openSync(logPath, "a");
-    stdio = ["ignore", fd, fd];
-  } catch { /* keep stdio = "ignore" */ }
+    const daemonEntry = resolveDaemonEntry();
+    const url = urlFor(port);
 
-  const child = spawn(process.execPath, [daemonEntry], { cwd: pkgRoot, env, detached: true, windowsHide: true, stdio });
-  child.unref();
-  // `entry: daemonEntry` (card 279c0208 review) — the exact absolute path this child was spawned with
-  // (see `resolveDaemonEntry`), so it is GUARANTEED to appear verbatim in this pid's own live command
-  // line later — see `isOurDaemon`.
-  writePidFile({ pid: child.pid, port, url, entry: daemonEntry, version: readVersion(), startedAt: new Date().toISOString() });
-  console.log(`Starting Loom v${readVersion()} in the background …`);
+    // Already up on this port? Don't spawn a second daemon that would just fail to bind.
+    if (await fetchVersion(port)) {
+      console.log(`loom: a daemon is already running at ${url}.`);
+      return 0;
+    }
 
-  const ready = await waitForReady(port, 30000);
-  if (ready) {
-    console.log(`\n  Loom is running at ${urlHint(url)}  (detached, PID ${child.pid})\n  Stop it with 'loom stop'.\n`);
-    if (open) openBrowser(url);
-    return 0;
-  }
-  console.error(`loom: the daemon did not answer on ${url} within 30s (PID ${child.pid}).
+    // Detached child IS the daemon process (node dist/index.js) — its pid is the one we later stop. Its
+    // logs go to a file under LOOM_HOME/logs so a backgrounded boot stays debuggable; fall back to ignore.
+    const env = { ...process.env, LOOM_PORT: String(port) };
+    let stdio = "ignore";
+    let logPath = null;
+    try {
+      const logsDir = path.join(loomHome(), "logs");
+      fs.mkdirSync(logsDir, { recursive: true });
+      logPath = path.join(logsDir, "daemon-detached.log");
+      const fd = fs.openSync(logPath, "a");
+      stdio = ["ignore", fd, fd];
+    } catch { /* keep stdio = "ignore" */ }
+
+    const child = spawn(process.execPath, [daemonEntry], { cwd: pkgRoot, env, detached: true, windowsHide: true, stdio });
+    child.unref();
+    // `entry: daemonEntry` (card 279c0208 review) — the exact absolute path this child was spawned with
+    // (see `resolveDaemonEntry`), so it is GUARANTEED to appear verbatim in this pid's own live command
+    // line later — see `isOurDaemon`.
+    writePidFile({ pid: child.pid, port, url, entry: daemonEntry, version: readVersion(), startedAt: new Date().toISOString() });
+    console.log(`Starting Loom v${readVersion()} in the background …`);
+
+    const ready = await waitForReady(port, 30000);
+    if (ready) {
+      console.log(`\n  Loom is running at ${urlHint(url)}  (detached, PID ${child.pid})\n  Stop it with 'loom stop'.\n`);
+      if (open) openBrowser(url);
+      return 0;
+    }
+    console.error(`loom: the daemon did not answer on ${url} within 30s (PID ${child.pid}).
 It may still be starting — check 'loom status'${logPath ? ` or the log at ${logPath}` : ""}.`);
-  return 1;
+    return 1;
+  } finally {
+    guard.release();
+  }
 }
 
 // --- stop: graceful, with a cross-platform fallback ladder -----------------------------------------
