@@ -14,6 +14,7 @@
 import {
   classifyCredentialProbe, pendingCandidateStore, type CredentialVerifyOutcome,
 } from "./credentialVerify";
+import { isWellFormedLoopbackToken } from "./loopbackCredential";
 
 import type { GatewayTokenCloseChange } from "@loom/shared";
 
@@ -170,14 +171,17 @@ export function isGatewayTokenRequired(status: number, body: unknown): boolean {
 
 /** RFC 7230 §3.2.6 `token` chars — a WebSocket subprotocol list element must be composed ENTIRELY of
  *  these, or the browser's own `new WebSocket(url, protocols)` throws SYNCHRONOUSLY, before any network
- *  attempt is even made. A stored secret can fail this (hand-edited, mangled by a copy/paste, captured
- *  from a malformed link) — `socketAuth` below treats a non-token-safe value as ABSENT rather than let
- *  that throw kill the socket outright: with no protocols offered, the daemon 401s as it always did for a
- *  missing credential, and the existing banner/paste recovery runs instead of the pane simply dying with
- *  no retry (card e4459829 round 2). */
+ *  attempt is even made. A stored GATEWAY token can fail this (hand-edited, mangled by a copy/paste,
+ *  captured from a malformed link) — `socketAuth` below treats a non-token-safe value as ABSENT rather
+ *  than let that throw kill the socket outright: with no protocols offered, the daemon 401s as it always
+ *  did for a missing credential, and the existing banner/paste recovery runs instead of the pane simply
+ *  dying with no retry (card e4459829 round 2). The LOOPBACK secret's own shape check is the SAME rule,
+ *  but lives as `isWellFormedLoopbackToken` in `loopbackCredential.ts` and is reused below rather than
+ *  reimplemented (card 0045a8cb) — that module already owns every other loopback-secret invariant. */
 const SUBPROTOCOL_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
-/** `token` if it's safe to embed whole in a `Sec-WebSocket-Protocol` list entry, else `null`. */
+/** `token` if it's safe to embed whole in a `Sec-WebSocket-Protocol` list entry, else `null`. GATEWAY
+ *  token only — the loopback branch of `socketAuth` reuses `isWellFormedLoopbackToken` instead. */
 function asSubprotocolSafe(token: string | null): string | null {
   return token !== null && SUBPROTOCOL_TOKEN_RE.test(token) ? token : null;
 }
@@ -198,7 +202,7 @@ export function socketAuth(kind: "term" | "companion" | "fleet", loopbackToken: 
     return token ? { query: "", protocols: ["loom.v1", `loom.bearer.${token}`] } : { query: "" };
   }
   if (kind === "fleet") return { query: "" };
-  const token = asSubprotocolSafe(loopbackToken);
+  const token = loopbackToken !== null && isWellFormedLoopbackToken(loopbackToken) ? loopbackToken : null;
   return token ? { query: "", protocols: ["loom.v1", `loom.bearer.${token}`] } : { query: "" };
 }
 

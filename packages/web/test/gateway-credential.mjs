@@ -387,6 +387,22 @@ check("socketAuth: a non-token-safe stored secret is treated as ABSENT — never
   assert.deepEqual(G.socketAuth("term", "loopback-secret", true, safe), { query: "", protocols: ["loom.v1", `loom.bearer.${safe}`] });
 });
 
+// Card 0045a8cb: socketAuth's loopback branch must REUSE loopbackCredential.ts's shape predicate, not a
+// second hand-written rule — so its verdict must track whatever `isWellFormedLoopbackToken` says, for a
+// wider spread of candidates than the fixed bad/safe lists above happen to cover.
+check("socketAuth: the loopback branch's verdict always agrees with isWellFormedLoopbackToken — same predicate, not a parallel copy", () => {
+  const candidates = ["deadbeef", "abc.DEF-123_~!#$%&'*+^`|", "s e/c", "a,b", 'with"quote', "héllo", "", "x", "!@#"];
+  let agreements = 0;
+  for (const c of candidates) {
+    const wellFormed = L.isWellFormedLoopbackToken(c);
+    const result = G.socketAuth("term", c, false, "gw");
+    const sawProtocols = "protocols" in result;
+    assert.equal(sawProtocols, wellFormed, `candidate=${JSON.stringify(c)}`);
+    if (wellFormed) agreements++;
+  }
+  assert.ok(agreements >= 2, "the positive side of the comparison must actually fire at least once");
+});
+
 check("the gateway lock: its own state + subscription, independent of the loopback lock", () => {
   const seen = [];
   const unsub = G.subscribeGatewayLock((v) => seen.push(v));

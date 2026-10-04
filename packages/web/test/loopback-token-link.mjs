@@ -21,6 +21,7 @@
 // write the secret at all now), and packages/web/e2e/loopback-token-link.spec.ts proves the wiring against
 // a real daemon.
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import { register } from "node:module";
 
@@ -109,6 +110,48 @@ await acheck("storeVerifiedLoopbackToken: an empty/whitespace candidate is refus
   assert.equal(await L.storeVerifiedLoopbackToken("   \n ", verify), "refused");
   assert.deepEqual(verify.seen, [], "nothing to prove — never ask the daemon");
   assert.equal(L.getLoopbackToken(), null);
+});
+
+// ── card 0045a8cb: the shared shape predicate, and the chokepoint that refuses on it early ────────────
+check("isWellFormedLoopbackToken: every RFC 7230 tchar class passes; the daemon's own hex secret passes", () => {
+  assert.equal(L.isWellFormedLoopbackToken("abc.DEF-123_~!#$%&'*+^`|"), true);
+  assert.equal(L.isWellFormedLoopbackToken("deadbeef00112233"), true, "the real secret is always hex");
+});
+
+// The REAL shape, not just a hex-looking fixture: gateway/loopback-secret.ts's getOrCreateLoopbackSecret
+// mints `randomBytes(32).toString("hex")` — exactly 64 lowercase hex chars — reproduced here verbatim so
+// this predicate is proven against what the daemon ACTUALLY mints, never a guess at its shape. If this
+// predicate ever regressed to reject a genuine secret, a real user's browser would be locked out of
+// writes and live terminals with no way to self-recover (a fresh `loom open` mints a new file but a
+// stuck-rejecting predicate would reject that one too) — this is the test that must never go red.
+check("isWellFormedLoopbackToken: the REAL daemon secret shape (randomBytes(32).toString('hex'), 64 lowercase hex chars) passes", () => {
+  for (let i = 0; i < 20; i++) {
+    const real = randomBytes(32).toString("hex");
+    assert.equal(real.length, 64, "sanity: this is really 64 chars, matching the daemon's own secret length");
+    assert.match(real, /^[0-9a-f]{64}$/, "sanity: this is really lowercase hex, matching the daemon's own alphabet");
+    assert.equal(L.isWellFormedLoopbackToken(real), true, real);
+  }
+});
+
+check("isWellFormedLoopbackToken: a char a WebSocket subprotocol element can't carry fails — even though it would verify fine over an HTTP Bearer header", () => {
+  for (const bad of ["s e/c", "a,b", 'with"quote', "héllo", ""]) {
+    assert.equal(L.isWellFormedLoopbackToken(bad), false, JSON.stringify(bad));
+  }
+});
+
+await acheck("storeVerifiedLoopbackToken: a malformed (non-subprotocol-safe) candidate is refused WITHOUT a round trip", async () => {
+  const verify = spyVerify("valid"); // would VERIFY if consulted — proving the refusal happens before that
+  for (const bad of ["s e/c", "a,b", 'with"quote', "héllo"]) {
+    assert.equal(await L.storeVerifiedLoopbackToken(bad, verify), "refused", bad);
+  }
+  assert.deepEqual(verify.seen, [], "a candidate socketAuth could never use is never worth asking the daemon about");
+  assert.equal(L.getLoopbackToken(), null);
+});
+
+await acheck("storeVerifiedLoopbackToken: a malformed candidate never evicts a working held secret", async () => {
+  seedHeldSecret("owner-working-secret");
+  assert.equal(await L.storeVerifiedLoopbackToken("s e/c", spyVerify("valid")), "refused");
+  assert.equal(L.getLoopbackToken(), "owner-working-secret");
 });
 
 await acheck("storeVerifiedLoopbackToken: a VERIFIED candidate is stored trimmed", async () => {

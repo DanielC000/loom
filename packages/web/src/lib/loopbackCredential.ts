@@ -227,11 +227,36 @@ export async function verifyLoopbackToken(token: string): Promise<CredentialVeri
 }
 
 /**
+ * RFC 7230 §3.2.6 `token` chars — a WebSocket subprotocol list element must be composed ENTIRELY of
+ * these, or the browser's own `new WebSocket(url, protocols)` throws SYNCHRONOUSLY. The real secret
+ * (`getOrCreateLoopbackSecret`, daemon-side) is always hex, so a malformed candidate is not a live bug —
+ * but `verifyLoopbackToken` above proves a candidate over an HTTP `Authorization` header, which accepts
+ * characters a subprotocol can't carry, so a non-token-safe candidate could verify and be stored, then
+ * get silently treated as absent by `socketAuth`'s own shape check, leaving `isCredentialSocketFailure`
+ * (keyed on `token === null`) to misread the result.
+ *
+ * @decision 0045a8cb — the ONE place this shape rule is written: `storeVerifiedLoopbackToken` refuses a
+ * malformed candidate before the round-trip, and `socketAuth` (`gatewayCredential.ts`) reuses this same
+ * predicate for the loopback branch instead of a second hand-written rule.
+ */
+const LOOPBACK_TOKEN_CHARS_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/** True when `token` is composed entirely of RFC 7230 `token` chars — safe to embed whole in a
+ *  `Sec-WebSocket-Protocol` list entry, and what the real (hex) secret always is. */
+export function isWellFormedLoopbackToken(token: string): boolean {
+  return LOOPBACK_TOKEN_CHARS_RE.test(token);
+}
+
+/**
  * The ONE way this browser's loopback secret is ever written: prove the candidate with `verifyLoopbackToken`
  * (injectable for tests, never re-implemented by a caller), and only then write it. `"refused"` = empty, or
  * the daemon itself rejected it; `"unverified"` = the check never got an answer, so NOTHING is known about
  * it; `"unstorable"` = it verified but localStorage refused it (private mode). In all three failure cases
  * nothing is written, so whatever secret this browser already held is still there.
+ *
+ * A candidate that is not `isWellFormedLoopbackToken` is refused WITHOUT a round trip — it could still
+ * verify over the HTTP probe below, but it would never actually work for a WebSocket upgrade (see that
+ * predicate's own doc), so there is nothing to gain by asking the daemon about it first.
  *
  * @decision a1ec70a6 — every path that obtains a candidate secret (the banner's paste field, `loom open`'s
  * `?token=` link) goes through HERE, and `"unverified"` is never reported to the user as a refusal.
@@ -242,6 +267,7 @@ export async function storeVerifiedLoopbackToken(
 ): Promise<"stored" | "refused" | "unverified" | "unstorable"> {
   const candidate = token.trim();
   if (!candidate) return "refused";
+  if (!isWellFormedLoopbackToken(candidate)) return "refused";
   const outcome = await verify(candidate);
   if (outcome === "invalid") return "refused";
   if (outcome === "unknown") return "unverified";
