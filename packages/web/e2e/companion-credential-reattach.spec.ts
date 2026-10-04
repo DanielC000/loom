@@ -28,8 +28,22 @@
 // in the first place — what matters is that `clearGatewayLock()` runs and the panel reacts to it, which
 // is the same edge a proxied page's paste produces. The remote/proxied half of this card (a dead token,
 // a bounded ladder, the fleet feed) is covered for real in `gateway-dead-token-bound.spec.ts`.
+//
+// @decision 02f0e8a6 — this spec's seeded `companion_config` row outlives its session and shares one bot
+// token; left behind it made a LATER spec's config save refuse. Do not drop the afterEach cleanup.
 import { randomUUID } from "node:crypto";
 import { expect, test } from "./fixtures/daemon";
+
+const seededConfigSessionIds: string[] = [];
+
+test.afterEach(async ({ page, loomDaemon }) => {
+  for (const sessionId of seededConfigSessionIds.splice(0)) {
+    const res = await page.request.delete(`${loomDaemon.baseURL}/api/companion/config/${sessionId}`, {
+      headers: { authorization: `Bearer ${loomDaemon.loopbackSecret}` },
+    });
+    expect(res.ok()).toBe(true);
+  }
+});
 
 /** Records every `/ws/companion` socket the page constructs — the COUNT is what separates a genuine
  *  re-attach from a pill that merely re-rendered. Records only; never substitutes the socket, so the chat
@@ -64,6 +78,7 @@ test("re-entering a credential re-attaches the companion chat in place — and r
   // companion" tie-break can land on one of theirs.
   const name = `Reattach-${randomUUID().slice(0, 8)}`;
   const companion = await loomDaemon.seedCompanion({ name });
+  seededConfigSessionIds.push(companion.sessionId);
   // One OPEN (current) conversation carrying a distinctive line, so (4) has something to come back to.
   // A single array = one conversation, and the last one is always the live/current one.
   const seeded = `durable turn ${name}`;

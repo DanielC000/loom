@@ -22,7 +22,23 @@
 // ⭐ CONTROL: each assertion's sibling runs the OTHER reason through the SAME instrument on the SAME socket,
 // so neither state can pass by accident — "refused, not revoked" would read identically if the instrument
 // simply never fired, and "revoked" would read identically if every 1008 still collapsed to it.
+//
+// @decision 02f0e8a6 — this spec's two seeded `companion_config` rows outlive their sessions and share one
+// bot token; left behind they made a LATER spec's config save refuse. Do not drop the afterEach cleanup.
 import { expect, test } from "./fixtures/daemon";
+
+const seededConfigSessionIds: string[] = [];
+
+test.afterEach(async ({ page, loomDaemon }) => {
+  for (const sessionId of seededConfigSessionIds.splice(0)) {
+    const res = await page.request.delete(`${loomDaemon.baseURL}/api/companion/config/${sessionId}`, {
+      headers: { authorization: `Bearer ${loomDaemon.loopbackSecret}` },
+    });
+    // Asserted, not fire-and-forget: this DELETE 401s without the bearer header, and a silently no-opping
+    // cleanup only ever hurts a LATER spec — so it has to fail loudly in its own.
+    expect(res.ok()).toBe(true);
+  }
+});
 
 /** Records the last `/ws/companion` socket the page constructs, so a test can hand its `onclose` a close
  *  event of its choosing. Records only — never substitutes the socket, so the chat still connects for real
@@ -65,7 +81,7 @@ async function close1008(page: import("@playwright/test").Page, reason: string) 
 }
 
 test("an UNRECOGNISED 1008 reason reads as refused, never as a revoked token", async ({ page, loomDaemon }) => {
-  await loomDaemon.seedCompanion();
+  seededConfigSessionIds.push((await loomDaemon.seedCompanion()).sessionId);
   const chat = await openConnectedChat(page, loomDaemon.baseURL);
 
   // The host-shell refusal's own reason — a real daemon string, and deliberately NOT one of the four
@@ -91,7 +107,7 @@ test("an UNRECOGNISED 1008 reason reads as refused, never as a revoked token", a
 test("CONTROL: a gateway-token 1008 on the SAME socket still reads as a revoked token", async ({ page, loomDaemon }) => {
   // Without this, the test above passes identically for a build that renders "refused" for EVERY 1008 —
   // i.e. for the same collapse, merely relabelled. Same instrument, same socket, only the reason differs.
-  await loomDaemon.seedCompanion();
+  seededConfigSessionIds.push((await loomDaemon.seedCompanion()).sessionId);
   const chat = await openConnectedChat(page, loomDaemon.baseURL);
 
   await close1008(page, "gateway token revoked");

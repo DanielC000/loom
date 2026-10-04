@@ -19,14 +19,39 @@
 // (gateway/server.ts's seed handler defaults the omitted field to `null`), so it reproduces the exact
 // "inheriting the default, nothing stored" starting state the bug needs.
 //
-// CROSS-SPEC CLEANUP: same load-bearing discipline as companion-zero-reply-alert.spec.ts — the shared e2e
-// daemon never drops a `companion_config` row on session-archive alone, and a leftover row is another
-// candidate in the Companion page's own "focus the most active companion" tie-break. This spec deletes
-// its own config row.
+// @decision 02f0e8a6 — the unique bot token, the asserted save response and the unconditional focus check
+// are three independent layers; collapsing any of them re-opens a different hole. Also: this spec deletes
+// its own config rows, so it never becomes the leftover that poisons a later sibling.
 import { randomUUID } from "node:crypto";
-import { expect, test } from "./fixtures/daemon";
+import { expect, test, type LoomDaemon } from "./fixtures/daemon";
 
 const seededConfigSessionIds: string[] = [];
+
+/** Seed a companion that CANNOT collide with a sibling's leftover row: a unique name (so the picker can
+ *  target it) AND a unique bot token (so the enabled-token-collision guard can never refuse its saves —
+ *  see layer 1 in the header). Registers it for this file's own afterEach cleanup. */
+async function seedIsolatedCompanion(loomDaemon: LoomDaemon) {
+  const suffix = randomUUID().slice(0, 8);
+  const name = `Ada-${suffix}`;
+  const companion = await loomDaemon.seedCompanion({ name, botToken: `123456:e2e-heartbeat-${suffix}` });
+  seededConfigSessionIds.push(companion.sessionId);
+  return { name, companion };
+}
+
+/** Focus THIS spec's own companion, then pin that focus by name. The picker only renders with 2+
+ *  companions, so the CLICK is necessarily conditional — the identity assertion after it is NOT (layer 3).
+ *  Waiting for the chat to settle first is load-bearing: the page's own "focus the most active companion"
+ *  effect runs once the companion list resolves and overrides a selection made ahead of it. */
+async function focusOwnCompanion(page: import("@playwright/test").Page, name: string) {
+  const chat = page.locator("#companion-panel-chat");
+  await expect(chat.getByText("connected", { exact: true })).toBeVisible();
+  const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+  if (await pickerBtn.count()) {
+    await pickerBtn.click();
+    await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
+  }
+  await expect(chat.getByText(name, { exact: true })).toBeVisible();
+}
 
 test.afterEach(async ({ page, loomDaemon }) => {
   for (const sessionId of seededConfigSessionIds.splice(0)) {
@@ -38,19 +63,11 @@ test.afterEach(async ({ page, loomDaemon }) => {
 });
 
 test("Manage tab: an unrelated save never pins the default heartbeat prompt as a stored override", async ({ page, loomDaemon }) => {
-  const name = `Ada-${randomUUID().slice(0, 8)}`;
-  const companion = await loomDaemon.seedCompanion({ name });
-  seededConfigSessionIds.push(companion.sessionId);
+  const { name, companion } = await seedIsolatedCompanion(loomDaemon);
 
   await page.goto(`${loomDaemon.baseURL}/companion`);
-
-  // Focus OUR companion (the picker renders with >1 companion on the shared worker daemon).
   await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
-  const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
-  if (await pickerBtn.count()) {
-    await pickerBtn.click();
-    await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
-  }
+  await focusOwnCompanion(page, name);
   await page.getByRole("tab", { name: "Manage" }).click();
 
   // Sanity: the server-side contract itself, BEFORE any UI interaction — a row seeded with no override
@@ -74,7 +91,14 @@ test("Manage tab: an unrelated save never pins the default heartbeat prompt as a
   // Touch only an UNRELATED field (the heartbeat cadence) — never the prompt textarea — then Save.
   const cadence = configSection.getByRole("spinbutton");
   await cadence.fill("45");
+  // Layer 2 (see header): capture the save's OWN response, so a server-side REFUSAL fails here naming the
+  // daemon's reason — rather than surfacing only as the form staying open, which says nothing about why.
+  const savePut = page.waitForResponse(
+    (r) => r.request().method() === "PUT" && new URL(r.url()).pathname === `/api/companion/config/${companion.sessionId}`,
+  );
   await configSection.getByRole("button", { name: "Save" }).click();
+  const saveRes = await savePut;
+  expect(saveRes.status(), `the save must be accepted — the daemon refused it: ${await saveRes.text()}`).toBe(200);
   await expect(configSection.getByRole("button", { name: "Save" })).toHaveCount(0); // editing closed on success
 
   // The cadence change landed (proves the save actually round-tripped)... SCOPED to our config section —
@@ -112,18 +136,12 @@ test("Manage tab: an unrelated save never pins the default heartbeat prompt as a
 // IS the built-in constant and no Callout — then the same textarea under the env-pinned read. A
 // one-polarity check would pass on a component that ignored the server value entirely.
 test("Manage tab: the heartbeat-prompt placeholder follows the server's resolved default, env-pinned included", async ({ page, loomDaemon }) => {
-  const name = `Ada-${randomUUID().slice(0, 8)}`;
-  const companion = await loomDaemon.seedCompanion({ name });
-  seededConfigSessionIds.push(companion.sessionId);
+  const { name, companion } = await seedIsolatedCompanion(loomDaemon);
 
   const ENV_PROMPT = `Env-pinned check-in ${randomUUID().slice(0, 8)}: only ping me about the deploy.`;
   const openEditor = async () => {
     await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
-    const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
-    if (await pickerBtn.count()) {
-      await pickerBtn.click();
-      await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
-    }
+    await focusOwnCompanion(page, name);
     await page.getByRole("tab", { name: "Manage" }).click();
     const section = page.locator("section").filter({ hasText: "Run configuration" });
     await section.getByRole("button", { name: "Edit" }).click();
