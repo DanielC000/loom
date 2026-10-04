@@ -148,7 +148,7 @@ try {
     h.makeResumableWorker(wkr, mgr);
 
     // Deliberately retire it (stopWorker: hard kill fires the fake pty's onExit synchronously).
-    h.sessions.stopWorker(mgr, wkr, "hard");
+    await h.sessions.stopWorker(mgr, wkr, "hard");
     check("(1 pre) the worker is retired", h.db.isWorkerRetirementActive(wkr) === true);
 
     // Make getProject() throw "project not found" for THIS project id — reached AFTER the retirement
@@ -182,7 +182,7 @@ try {
     const mgr = "p1b-mgr", wkr = "p1b-wkr";
     h.insertManager(mgr);
     h.makeResumableWorker(wkr, mgr);
-    h.sessions.stopWorker(mgr, wkr, "hard");
+    await h.sessions.stopWorker(mgr, wkr, "hard");
     check("(1b pre) the worker is retired", h.db.isWorkerRetirementActive(wkr) === true);
 
     failSpawnFor = wkr; // createPty() throws synchronously for this session on its next spawn
@@ -214,7 +214,7 @@ try {
     h.insertManager(mgr);
     h.makeResumableWorker(wkr, mgr);
 
-    h.sessions.stopWorker(mgr, wkr, "hard");
+    await h.sessions.stopWorker(mgr, wkr, "hard");
     check("(2 pre) retired", h.db.isWorkerRetirementActive(wkr) === true);
 
     const resumed = h.sessions.resume(wkr, { allowSuperseded: true });
@@ -230,7 +230,7 @@ try {
       && !h.db.listEvents(wkr).some((e) => e.kind === "wake_dropped" && e.detail?.wakeId === postLiftWake));
 
     // Now retire it AGAIN (a fresh deliberate stop, same as any routine respawn-on-same-worktree cycle).
-    const res2 = h.sessions.stopWorker(mgr, wkr, "hard");
+    const res2 = await h.sessions.stopWorker(mgr, wkr, "hard");
     check("(2) a second stopWorker succeeds on the revived worker", res2.stopped === true);
     check("(2) a SECOND worker_retired event is filed", h.db.listEventsForWorker(wkr).filter((e) => e.kind === "worker_retired").length === 2);
     check("(2) THE RE-ARM: isWorkerRetirementActive reads ACTIVE again (seq-ordered past the earlier lift)", h.db.isWorkerRetirementActive(wkr) === true);
