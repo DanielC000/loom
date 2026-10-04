@@ -69,6 +69,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       is already bound to an agent living in a reserved/system project (a stranded-row hazard distinct
 //       from the agent-row-touching cases above, since this route never touches the agent row at all),
 //       gated on the FLIP so an unrelated patch or a same-role patch is never refused.
+//   (o) card 05153988 round 2: profile_update ALSO refuses a role CHANGE outright when the STORED profile
+//       carries a human-set AGENT_FORBIDDEN_PROFILE_KEYS-class capability (e.g. a QA-Tester-shaped
+//       worker rig's browserTesting) — SETUP_ALLOWED_PROFILE_ROLES restricts WHICH roles are reachable
+//       (manager/worker/null) but does not stop a worker→manager flip from carrying that capability onto
+//       the new role; an unrelated patch on the same profile, and a capability-free role change, both
+//       still succeed (the gate is about carried capability, not role changes in general).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/setup-surface.mjs
 import fs from "node:fs";
@@ -347,6 +353,28 @@ try {
     !upUnrelated.error && upUnrelated.icon === "🎨");
   check("(n) profile_update: that unrelated patch left the existing browserTesting grant UNCHANGED",
     db.getProfile(okWrk.id)?.browserTesting === true);
+
+  // ============ (o) card 05153988 round 2: a setup-surface role CHANGE must not carry a human-set
+  // capability onto the new role either. SETUP_ALLOWED_PROFILE_ROLES only restricts WHICH roles are
+  // reachable (manager/worker/null) — it does NOT stop a worker→manager flip from silently carrying a
+  // human-set browserTesting grant (QA-Tester-shaped) onto the new role. okWrk already carries
+  // browserTesting (set at (n) above, simulating a prior HUMAN REST/UI grant).
+  const upRoleChangeCarriesBrowser = await call("profile_update", { profileId: okWrk.id, patch: { role: "manager" } });
+  check("(o) profile_update REFUSES a worker→manager role change on a profile carrying human-set browserTesting (card 05153988 round 2)",
+    typeof upRoleChangeCarriesBrowser.error === "string" && /browserTesting/i.test(upRoleChangeCarriesBrowser.error) && /Profiles UI/i.test(upRoleChangeCarriesBrowser.error));
+  check("(o) profile_update: the refused role-change left okWrk's role UNCHANGED (still worker)", db.getProfile(okWrk.id)?.role === "worker");
+  // An unrelated patch on the SAME capability-carrying profile (no role change) still succeeds.
+  const upCarryUnrelated = await call("profile_update", { profileId: okWrk.id, patch: { description: "still a worker rig" } });
+  check("(o) profile_update: an unrelated patch on the SAME browserTesting-carrying profile still succeeds",
+    !upCarryUnrelated.error && upCarryUnrelated.description === "still a worker rig" && upCarryUnrelated.role === "worker");
+  check("(o) profile_update: that unrelated patch left the existing browserTesting grant UNCHANGED", db.getProfile(okWrk.id)?.browserTesting === true);
+  // Control: a CAPABILITY-FREE worker→manager role change still succeeds — the gate is about carried
+  // capability, not about role changes in general (a dedicated, freshly-minted clean worker rig, never
+  // touched by the (n) browserTesting fixture above).
+  const cleanWrkForFlip = await call("profile_create", { profile: { name: "CleanWrkRig", role: "worker" } });
+  const upCleanFlip = await call("profile_update", { profileId: cleanWrkForFlip.id, patch: { role: "manager" } });
+  check("(o) profile_update: a capability-free worker→manager role change still succeeds (control)",
+    !upCleanFlip.error && upCleanFlip.role === "manager");
 
   // reads.
   const projs = await call("list_all_projects", {});
@@ -780,14 +808,18 @@ try {
   // profile_assign (already safe via setupMayTouchAgentError) and missed this one. Bound directly via
   // db.updateAgent — setup's own profile_assign would itself refuse this bind (reserved-home agent), so
   // this simulates a pre-existing binding, exactly like the platform.ts-surface sibling test's fixtures.
-  db.updateAgent("agentMgr", { profileId: okWrk.id });
-  const upFlipReserved = await call("profile_update", { profileId: okWrk.id, patch: { role: "manager" } });
+  // A DEDICATED capability-free profile (not okWrk, which carries browserTesting since (n)/(o) above) —
+  // card 05153988 round 2's carryover check would otherwise fire FIRST and mask this reserved-project
+  // check entirely, so this fixture must stay clean to keep the two hazards independently provable.
+  const okWrkReserved = await call("profile_create", { profile: { name: "WrkRigReserved", role: "worker" } });
+  db.updateAgent("agentMgr", { profileId: okWrkReserved.id });
+  const upFlipReserved = await call("profile_update", { profileId: okWrkReserved.id, patch: { role: "manager" } });
   check("(m) profile_update REJECTS flipping role to manager while bound to an agent in a reserved project",
     typeof upFlipReserved.error === "string" && /manager/i.test(upFlipReserved.error) && /reserved/i.test(upFlipReserved.error) &&
     upFlipReserved.error.includes("agentMgr") && upFlipReserved.error.includes("pHome"));
-  check("(m) profile_update: the rejected role-flip left the profile's role UNCHANGED (still worker)", db.getProfile(okWrk.id)?.role === "worker");
+  check("(m) profile_update: the rejected role-flip left the profile's role UNCHANGED (still worker)", db.getProfile(okWrkReserved.id)?.role === "worker");
   // Control: an unrelated patch to the SAME reserved-bound profile still succeeds (not a blanket refusal).
-  const upFlipReservedUnrelated = await call("profile_update", { profileId: okWrk.id, patch: { icon: "🔁" } });
+  const upFlipReservedUnrelated = await call("profile_update", { profileId: okWrkReserved.id, patch: { icon: "🔁" } });
   check("(m) profile_update: an unrelated patch to the SAME reserved-bound profile still SUCCEEDS",
     upFlipReservedUnrelated.icon === "🔁" && upFlipReservedUnrelated.role === "worker" && !upFlipReservedUnrelated.error);
   // Control: the SAME role-flip succeeds when the profile is bound only to a NON-reserved-project agent.

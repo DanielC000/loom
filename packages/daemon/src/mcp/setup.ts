@@ -10,7 +10,7 @@ import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { expandTilde } from "../paths.js";
-import { validateProfile, agentProfileKeyError, agentAssignableProfileError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { reservedProjectAgentBoundToProfile } from "../agents/clone-core.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
@@ -721,7 +721,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker or null ONLY — a patch that yields any other role (elevated platform/auditor/workspace-auditor, or operator/assistant/setup) is rejected (human-only). LEAST-PRIVILEGE: REJECTED outright, before the patch is even validated, when the profile's CURRENT (pre-patch) role is anything but manager/worker/null — this includes the Setup Assistant's own rig, so this surface can never self-modify, and closes a patch that clears `role` to null in the SAME call that also strips another field (e.g. a Companion's restrictedTools), which would otherwise pass the resolved-role check below. Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker or null ONLY — a patch that yields any other role (elevated platform/auditor/workspace-auditor, or operator/assistant/setup) is rejected (human-only). LEAST-PRIVILEGE: REJECTED outright, before the patch is even validated, when the profile's CURRENT (pre-patch) role is anything but manager/worker/null — this includes the Setup Assistant's own rig, so this surface can never self-modify, and closes a patch that clears `role` to null in the SAME call that also strips another field (e.g. a Companion's restrictedTools), which would otherwise pass the resolved-role check below. A `role` CHANGE is ALSO REJECTED outright if the stored profile carries any human-set AGENT_FORBIDDEN_PROFILE_KEYS-class capability (card 05153988) — e.g. flipping a QA-Tester-shaped worker rig's human-set browserTesting to \"manager\" is the exact escalation this guards; the error names the offending keys (\"ask the human to change the role in the Profiles UI\"). Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: strictShape({ profileId: z.string(), patch: z.object({}).passthrough() }),
       },
       async ({ profileId, patch }) => {
@@ -750,6 +750,10 @@ export class SetupMcpRouter {
         // regardless of caller.)
         const v = validateProfile({ ...base, ...patchNoId }, { previousRole: existing.role, patch: patchNoId });
         if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });
+        // @decision 05153988 — refuse a role CHANGE outright when the STORED profile carries a
+        // human-set capability (checked against `existing`, pre-patch — see the decision record).
+        const carryoverErr = roleChangeCapabilityCarryoverError(existing.role, v.value.role, existing);
+        if (carryoverErr) return ok({ error: carryoverErr });
         // Guard the RESOLVED role (after the merge) — a patch must not be able to elevate a rig to
         // platform/auditor via the ungated setup surface, even if the base profile already held it.
         const roleErr = setupRoleError(v.value.role);

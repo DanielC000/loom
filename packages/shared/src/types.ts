@@ -213,10 +213,12 @@ export interface Profile {
    * browserTesting/documentConversion it confers no capability, it withdraws one. Default OFF (absent/false)
    * and fully additive — a rig without it spawns byte-identically to today (the disallow list is exactly the
    * role's human-prompt tools). Least-privilege by construction: the tool set is fixed, never agent- or
-   * free-form-configurable; the human WIDENS deliberately by turning the flag OFF. HUMAN-set only (Profiles
-   * UI / REST), like role/browserTesting: NEVER exposed as an agent MCP setter beyond the profile surface
-   * (same capability-gating posture as browserTesting/gateCommand). The counterweight to a companion driven
-   * by untrusted inbound chat (a prompt-injection vector).
+   * free-form-configurable; the human WIDENS deliberately by turning the flag OFF. The counterweight to
+   * a companion driven by untrusted inbound chat (a prompt-injection vector).
+   *
+   * @decision 8c27ae8e — agent-writable BY DESIGN, unlike browserTesting: it only RESTRICTS a rig's
+   * tool surface rather than granting a new one, so it stays settable via the Setup Assistant's/Platform
+   * Lead's own profile-writing MCP tools (NOT in `AGENT_FORBIDDEN_PROFILE_KEYS`, profiles/validate.ts).
    */
   restrictedTools?: boolean;
   /**
@@ -227,9 +229,12 @@ export interface Profile {
    * injected); it is a pure LIFECYCLE flag the worker_report path keys off: a no-commit worker that
    * reports done with 0 commits ahead of base is AUTO-RETIRED (its concurrency slot freed without a
    * manual worker_stop — a read-only worker has no merge step to free it), and the "forgot to commit"
-   * guard is SUPPRESSED for it. HUMAN-set only (Profiles UI / REST), like role/browserTesting — it gates
-   * orchestration behavior, never an agent MCP write surface. A NORMAL (noCommit-false) 0-commit worker
-   * still gets the warning and is NEVER auto-retired (the forgot-to-commit safety net stays intact).
+   * guard is SUPPRESSED for it. A NORMAL (noCommit-false) 0-commit worker still gets the warning and is
+   * NEVER auto-retired (the forgot-to-commit safety net stays intact).
+   *
+   * @decision 8c27ae8e — agent-writable BY DESIGN, unlike browserTesting: it only declares a
+   * lifecycle contract rather than granting a capability, so it stays settable via the Setup Assistant's/
+   * Platform Lead's own profile-writing MCP tools (NOT in `AGENT_FORBIDDEN_PROFILE_KEYS`).
    */
   noCommit?: boolean;
   /**

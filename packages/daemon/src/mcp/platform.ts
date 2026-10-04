@@ -29,7 +29,7 @@ import { nextFireAt } from "../orchestration/cron.js";
 import { recordBoardReadForProjects } from "../orchestration/board-read.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { splitGateSteps } from "../orchestration/gate-runner.js";
-import { validateProfile, agentProfileKeyError, agentAssignableProfileError, HARNESS_ID_SCHEMA } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, HARNESS_ID_SCHEMA } from "../profiles/validate.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { createAgentCore, cloneAgentCore, cloneSourceFieldError, reservedProjectManagerProfileError, reservedProjectAgentBoundToProfile } from "../agents/clone-core.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
@@ -1954,7 +1954,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. A `role` CHANGE is REJECTED outright if the stored profile carries any of those human-set capabilities (card 05153988) — carrying e.g. browserTesting onto a role nobody reviewed it for (changing a QA-Tester-shaped rig to \"assistant\") is the exact escalation this guards; the error names the offending keys (\"ask the human to change the role in the Profiles UI\"). Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: strictShape({ profileId: z.string(), patch: z.object({}).passthrough() }),
       },
       async ({ profileId, patch }) => {
@@ -1973,6 +1973,10 @@ export class PlatformMcpRouter {
         // forced to restate it).
         const v = validateProfile({ ...base, ...patchNoId }, { previousRole: existing.role, patch: patchNoId });
         if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });
+        // @decision 05153988 — refuse a role CHANGE outright when the STORED profile carries a
+        // human-set capability (checked against `existing`, pre-patch — see the decision record).
+        const carryoverErr = roleChangeCapabilityCarryoverError(existing.role, v.value.role, existing);
+        if (carryoverErr) return ok({ error: carryoverErr });
         // @decision ced4285e — the profile-role-change route; gated on a FLIP into "manager" so an
         // unrelated patch to an already-manager profile is never refused.
         if (existing.role !== "manager" && v.value.role === "manager") {

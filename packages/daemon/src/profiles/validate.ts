@@ -202,6 +202,41 @@ export function agentProfileKeyError(raw: unknown): string | null {
 }
 
 /**
+ * Per-key "is this human-set capability actually carried" predicate for the carry-over check below. An
+ * EXHAUSTIVE Record keyed off `AGENT_FORBIDDEN_PROFILE_KEYS` (card 05153988 round 2) — not a hand-rolled
+ * if-chain re-listing the keys — so a key added to that array without a matching entry here fails to
+ * compile, rather than silently never being checked by `roleChangeCapabilityCarryoverError`.
+ */
+const AGENT_FORBIDDEN_PROFILE_KEY_CARRIED: Record<
+  (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number],
+  (existing: Pick<Profile, (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number]>) => boolean
+> = {
+  connections: (existing) => !!existing.connections && existing.connections.length > 0,
+  capabilities: (existing) => !!existing.capabilities && existing.capabilities.length > 0,
+  vaultWrite: (existing) => !!existing.vaultWrite,
+  harness: (existing) => existing.harness != null && existing.harness !== "claude",
+  browserTesting: (existing) => !!existing.browserTesting,
+  documentConversion: (existing) => !!existing.documentConversion,
+  allowDelta: (existing) => existing.allowDelta.length > 0,
+};
+
+/**
+ * @decision 05153988 — refuses an AGENT `profile_update` role CHANGE when the stored profile carries a
+ * human-set capability; deliberately includes `browserTesting`, unlike the assign-time checks below.
+ */
+export function roleChangeCapabilityCarryoverError(
+  previousRole: string | null | undefined,
+  newRole: string | null | undefined,
+  existing: Pick<Profile, (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number]>,
+): string | null {
+  if ((previousRole ?? null) === (newRole ?? null)) return null; // not a role change
+  const carried = AGENT_FORBIDDEN_PROFILE_KEYS.filter((key) => AGENT_FORBIDDEN_PROFILE_KEY_CARRIED[key](existing));
+  if (carried.length === 0) return null;
+  const reasons = carried.map((k) => `${k} (${AGENT_FORBIDDEN_PROFILE_KEY_REASONS[k]})`).join(", ");
+  return `cannot change role: this profile carries human-set ${reasons} — ask the human to change the role in the Profiles UI`;
+}
+
+/**
  * @decision 3de74275 — do not skip this at an assignment call site believing `agentProfileKeyError` at
  * mint time already covers it: a human-minted profile can independently carry `connections`/
  * `capabilities`/`vaultWrite`, and BINDING an existing such profile was never checked anywhere.

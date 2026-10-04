@@ -303,6 +303,20 @@ try {
   check("profile_update: that unrelated patch left profQA's existing browserTesting grant UNCHANGED",
     db.getProfile("profQA")?.browserTesting === true);
 
+  // card 05153988: a role CHANGE must be REFUSED outright when the STORED profile carries a human-set
+  // AGENT_FORBIDDEN_PROFILE_KEYS-class capability — carrying browserTesting onto a role nobody reviewed
+  // it for (e.g. patching this QA-Tester-shaped rig to "assistant") is the exact escalation closed here.
+  const puRoleChangeCarriesBrowser = await call("profile_update", { profileId: "profQA", patch: { role: "assistant", restrictedTools: true } });
+  check("profile_update: REFUSES a role change on a profile carrying human-set browserTesting (card 05153988)",
+    typeof puRoleChangeCarriesBrowser.error === "string" && /browserTesting/i.test(puRoleChangeCarriesBrowser.error) && /Profiles UI/i.test(puRoleChangeCarriesBrowser.error));
+  check("profile_update: the refused role-change left profQA's role UNCHANGED (still worker)",
+    db.getProfile("profQA")?.role === "worker");
+  // A role change on a CAPABILITY-FREE profile (pc, "Reviewer" — no browserTesting/connections/etc. set)
+  // still succeeds — this gate is about carried capability, not about role changes in general.
+  const puRoleChangeClean = await call("profile_update", { profileId: pc.id, patch: { role: "manager" } });
+  check("profile_update: a role change on a capability-free profile still succeeds (card 05153988)",
+    !puRoleChangeClean.error && puRoleChangeClean.role === "manager");
+
   const pa = await call("profile_assign", { agentId: "agentWork", profileId: "profQA" });
   check("profile_assign: assigns an existing profile", pa.profileId === "profQA" && !pa.error);
   check("profile_assign: persists to the agent row", db.getAgent("agentWork")?.profileId === "profQA");
