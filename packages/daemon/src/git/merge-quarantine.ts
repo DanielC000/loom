@@ -264,16 +264,24 @@ function deleteSourceLatchIfSuperseded(sourceFile: string, writtenEntry: MergeQu
   try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, sourceFile)); } catch { /* best-effort */ }
 }
 
-/** The stable hash-prefixed glob for KEY's OWN tmp residue — `<hash>.json.tmp-<pid>`, any pid. Best-effort;
- *  a missing/unreadable directory is not an error. Never throws. */
-function deleteMergeQuarantineTmpResidueForKey(key: string): void {
-  const prefix = `${quarantineHashForKey(key)}.json.tmp-`;
+/** The stable hash-prefixed glob for a bare latch HASH's own tmp residue — `<hash>.json.tmp-<pid>`, any
+ *  pid. Best-effort; a missing/unreadable directory is not an error. Never throws. Factored out of
+ *  {@link deleteMergeQuarantineTmpResidueForKey} so {@link clearMergeQuarantineLatchFile} (card c0be9bf9),
+ *  which only ever holds a bare hash — never a repoPath/key it could trust — can sweep tmp residue too. */
+function deleteMergeQuarantineTmpResidueForHash(hash: string): void {
+  const prefix = `${hash}.json.tmp-`;
   let files: string[];
   try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return; }
   for (const f of files) {
     if (!f.startsWith(prefix)) continue;
     try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, f)); } catch { /* best-effort */ }
   }
+}
+
+/** The stable hash-prefixed glob for KEY's OWN tmp residue — `<hash>.json.tmp-<pid>`, any pid. Best-effort;
+ *  a missing/unreadable directory is not an error. Never throws. */
+function deleteMergeQuarantineTmpResidueForKey(key: string): void {
+  deleteMergeQuarantineTmpResidueForHash(quarantineHashForKey(key));
 }
 
 /** The stable hash-prefixed glob for `repoPath`'s OWN tmp residue — `<hash>.json.tmp-<pid>`, any pid.
@@ -426,21 +434,15 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
 }
 
 /**
- * UNCONDITIONAL clear for `repoPath` — empties the WHOLE outstanding-token set at once (round 7, M1).
- * Called from exactly two places: (1) the human-only loopback REST route
- * (`POST /internal/merge-quarantine/clear`, gateway/server.ts), and (2) internally, once
- * {@link clearMergeQuarantineByToken} empties the token set itself. A RESTORED quarantine (re-entered at
- * boot) can ONLY ever be cleared this way, since the original in-process promise chain(s) that could
- * auto-clear it are gone once the process(es) that held them have exited. Idempotent; a clear on an
- * already-clear repo is a silent no-op.
+ * KEY-ADDRESSED core — empties the WHOLE outstanding-token set at once (round 7, M1) for the entry
+ * currently armed at `key`: lifts every map slot it's armed under, deletes each one's physical latch,
+ * sweeps a PENDING entry matching `key`, and deletes any now-unreferenced `orphanLatchFiles` (round 7 M2).
+ * {@link clearMergeQuarantine} wraps this with a freshly-recomputed key from a repoPath.
  *
- * Round 7 (M2): also deletes any {@link MergeQuarantineEntry.orphanLatchFiles} this entry referenced,
- * PROVIDED no OTHER still-active entry references the same orphan filename — closing the trap where an
- * unmatched corrupt latch quarantined every registered repo and NOTHING ever deleted the orphan file
- * itself, so every later boot re-quarantined everything again even after a human cleared each repo by hand.
+ * @decision c0be9bf9 — a caller that already matched a SPECIFIC key some other way (never derived it
+ * fresh from a repoPath) must call this directly, not `clearMergeQuarantine` — see the decision record.
  */
-export function clearMergeQuarantine(repoPath: string): void {
-  const key = canonicalRepoLockKey(repoPath);
+export function clearMergeQuarantineByKey(key: string): void {
   const entry = activeQuarantines.get(key);
   // Lift EVERY key this entry is armed under (its own tracked set), never reference equality — a union or
   // an orphan merge REBUILDS the entry object, so a map slot holding an OLDER build of the "same" logical
@@ -471,6 +473,18 @@ export function clearMergeQuarantine(repoPath: string): void {
       console.log(`[merge-quarantine] deleted orphan latch ${orphanFile} — no remaining quarantine entry references it.`);
     } catch { /* already gone, or never existed under that exact name — either way, nothing left to do */ }
   }
+}
+
+/**
+ * UNCONDITIONAL clear for `repoPath` — thin wrapper over {@link clearMergeQuarantineByKey}, addressed by a
+ * FRESHLY-recomputed `canonicalRepoLockKey(repoPath)`. Called from exactly two places: (1) the human-only
+ * loopback REST route (`POST /internal/merge-quarantine/clear`, gateway/server.ts), and (2) internally,
+ * once {@link clearMergeQuarantineByToken} empties the token set itself. A RESTORED quarantine (re-entered
+ * at boot) can ONLY ever be cleared this way, since the original in-process promise chain(s) that could
+ * auto-clear it are gone once the process(es) that held them have exited.
+ */
+export function clearMergeQuarantine(repoPath: string): void {
+  clearMergeQuarantineByKey(canonicalRepoLockKey(repoPath));
 }
 
 export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry | undefined {
@@ -517,6 +531,123 @@ export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry
  *  `activeQuarantines.values()` (once per key) and must be reported once, not twice. */
 export function listActiveMergeQuarantines(): MergeQuarantineEntry[] {
   return [...new Set(activeQuarantines.values()), ...pendingUnresolvedQuarantines.map((p) => p.entry)];
+}
+
+/** The bare 24-hex-character latch FILE id (never a repoPath) `repoPath`'s own canonical key currently
+ *  hashes to. TEST/DIAGNOSTIC HELPER ONLY (round 3, card c0be9bf9) — no production call site hands this to
+ *  a human; `GET /internal/merge-quarantine/list` hands out {@link quarantineLatchFileIdsFor}'s own id
+ *  list instead. Kept for a caller (today, only tests) that already holds a bare repoPath and wants the
+ *  exact id a FRESH recompute would produce for it, without duplicating this module's hashing by hand.
+ *
+ *  ⚠️ Do not reach for this in new production code — for an entry armed under more than one key (a
+ *  dual-armed `resolvedKey`-vs-current-key entry, decision 54054c01) it can name a DIFFERENT file than the
+ *  one that is actually durable on disk, or miss one entirely. */
+export function quarantineLatchIdFor(repoPath: string): string {
+  return quarantineHashFor(repoPath);
+}
+
+/** The on-disk latch file id(s) for `entry` — one per key it is armed under
+ *  ({@link MergeQuarantineEntry.armedKeys}), or, for a PENDING (boot-unverifiable) entry with no
+ *  `armedKeys` of its own, the id baked into its own recorded `sourceFile` name. Exported so a
+ *  human-facing listing route can hand out id(s) usable with {@link clearMergeQuarantineLatchFile}.
+ *
+ * @decision c0be9bf9 — NOT every id in the returned array is guaranteed to have its own physical file;
+ * ids[0] is the one guarantee (sorted real-file-first) — see the decision record for why and for
+ * quarantineLatchIdFor's own, narrower single-guess limitation.
+ */
+export function quarantineLatchFileIdsFor(entry: MergeQuarantineEntry): string[] {
+  if (entry.armedKeys?.length) {
+    const ids = [...new Set(entry.armedKeys.map(quarantineHashForKey))];
+    return ids.sort((a, b) => {
+      const aExists = fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${a}.json`));
+      const bExists = fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${b}.json`));
+      return aExists === bExists ? 0 : aExists ? -1 : 1;
+    });
+  }
+  const pending = pendingUnresolvedQuarantines.find((p) => p.entry === entry);
+  if (pending) return [pending.sourceFile.slice(0, -".json".length)];
+  return [quarantineHashFor(entry.repoPath)];
+}
+
+/** Thin, symmetric wrapper shared by BOTH the project-resolved `/internal/merge-quarantine/clear` route
+ *  and its no-project-resolution twin `/internal/merge-quarantine/clear-by-path` (card c0be9bf9) — factored
+ *  out so the two routes cannot drift in what a clear actually DOES; each route's own job ends at
+ *  resolving its own address (projectId/repoKey, or a raw repoPath) down to a `repoPath` and calling this. */
+export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantined: boolean } {
+  const wasQuarantined = !!activeMergeQuarantineFor(repoPath);
+  clearMergeQuarantine(repoPath);
+  return { wasQuarantined };
+}
+
+const QUARANTINE_LATCH_ID_PATTERN = /^[0-9a-f]{24}$/;
+
+/**
+ * Clear a quarantine latch by its bare FILE id (card c0be9bf9). `id` must be EXACTLY the 24-hex-character
+ * form {@link quarantineLatchIdFor}/{@link quarantineLatchFileIdsFor} produce — validated BEFORE any
+ * filesystem access, so a malformed id can never reach a path join.
+ *
+ * @decision c0be9bf9 — resolve `id` to the matched entry's own Map KEY and delegate to
+ * clearMergeQuarantineByKey — never to its `repoPath` via clearMergeQuarantineReporting/
+ * clearMergeQuarantine (round 1, superseded in round 3 — see the decision record for why that drifts).
+ *
+ * Falls back to a raw `<id>.json` (+ tmp residue) unlink ONLY when no entry anywhere matches `id` — a
+ * genuinely corrupt/unparsable latch with no repoPath to delegate to.
+ */
+export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean } | { ok: false; reason: string } {
+  if (!QUARANTINE_LATCH_ID_PATTERN.test(id)) {
+    return { ok: false, reason: `invalid latch id '${id}' — expected a 24-hex-character id (see GET /internal/merge-quarantine/list)` };
+  }
+  const resolvedDir = path.resolve(MERGE_QUARANTINE_DIR);
+  const finalPath = path.resolve(resolvedDir, `${id}.json`);
+  if (path.dirname(finalPath) !== resolvedDir || path.basename(finalPath) !== `${id}.json`) {
+    return { ok: false, reason: "resolved path escaped the quarantine directory — refusing" };
+  }
+  for (const key of activeQuarantines.keys()) {
+    if (quarantineHashForKey(key) !== id) continue;
+    clearMergeQuarantineByKey(key);
+    return { ok: true, wasQuarantined: true };
+  }
+  for (const pending of pendingUnresolvedQuarantines) {
+    if (pending.sourceFile !== `${id}.json`) continue;
+    // A pending entry isn't armed into activeQuarantines under any key — drop ONLY this exact pending
+    // entry and its own sourceFile directly, never a recomputed-key delegation (which could drift onto an
+    // unrelated repo's entry the same way the active-entry path used to — round 3).
+    pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => p !== pending);
+    try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, pending.sourceFile)); } catch { /* best-effort */ }
+    return { ok: true, wasQuarantined: true };
+  }
+  // No in-memory entry anywhere matches this id — a truly corrupt/unparsable latch (or its own tmp
+  // residue) with no repoPath to delegate to. Raw delete of exactly this file (belt-and-braces over the
+  // regex + resolved-path check above, which already rule out any path separator or `..`).
+  try { fs.unlinkSync(finalPath); } catch { /* ENOENT — already cleared, or never had a parseable entry */ }
+  deleteMergeQuarantineTmpResidueForHash(id);
+  return { ok: true, wasQuarantined: false };
+}
+
+/**
+ * Split `entries` (the shape {@link listActiveMergeQuarantines} / {@link reenterMergeQuarantinesAtBoot}
+ * return) by whether each one's repo is a member of `registeredRepoPaths` — i.e. whether any currently-
+ * configured project (including an archived one — see the caller's own doc for why that matters) still
+ * names this exact repo. Shared by the boot-time summary (card c0be9bf9, collapsing a wall of per-latch
+ * warnings for repos that were never registered, or no longer are, into one line) AND the read-only list
+ * route's own `registered` flag — the two must use the IDENTICAL criterion, or a human reading the list
+ * sees a different answer than what the boot log just told them.
+ *
+ * Registration is checked by CANONICAL KEY, never a raw string match — a registered repoPath and a
+ * quarantine entry's own `repoPath` can be different spellings of the same physical repo (case, trailing
+ * slash), and `canonicalRepoLockKey` is the one place this module already trusts for that comparison.
+ */
+export function partitionQuarantinesByRegistration(
+  entries: MergeQuarantineEntry[],
+  registeredRepoPaths: string[],
+): { registered: MergeQuarantineEntry[]; orphaned: MergeQuarantineEntry[] } {
+  const registeredKeys = new Set(registeredRepoPaths.map(canonicalRepoLockKey));
+  const registered: MergeQuarantineEntry[] = [];
+  const orphaned: MergeQuarantineEntry[] = [];
+  for (const entry of entries) {
+    (registeredKeys.has(canonicalRepoLockKey(entry.repoPath)) ? registered : orphaned).push(entry);
+  }
+  return { registered, orphaned };
 }
 
 /**

@@ -67,7 +67,10 @@ import { getWorkerDiffCached, resolveWorkerBranchInfo } from "../git/worktrees.j
 import { checkRepoRebind, checkLiveWorktreeSessions, checkTaskRepoKeyRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
-import { activeMergeQuarantineFor, clearMergeQuarantine } from "../git/merge-quarantine.js";
+import {
+  clearMergeQuarantineReporting, clearMergeQuarantineLatchFile, listActiveMergeQuarantines,
+  partitionQuarantinesByRegistration, quarantineLatchFileIdsFor,
+} from "../git/merge-quarantine.js";
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
 import { validateRepoRegistry, resolveRepoKeyOrError, diffRepoRegistry, composeRepoRegistryChangeNote, type RepoRegistryDiff } from "../projects/repos.js";
@@ -772,8 +775,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // @decision 93249b52 — /internal/merge-quarantine/clear (round 4) joins the same bearer-guarded
       // set: re-exposing a quarantined repo to further canonical-mutating writes is a comparable blast
       // radius, not an ordinary /api/* write.
+      // Card c0be9bf9: /internal/merge-quarantine/clear-by-path (the no-project-resolution twin) joins
+      // the SAME set and the SAME tier — it performs the identical clear, just addressed by repoPath/id
+      // instead of projectId/repoKey, so it carries the identical blast radius.
       const isGuardedInternalWrite = req.method === "POST" &&
-        (routePattern === "/internal/shutdown" || routePattern === "/internal/update" || routePattern === "/internal/merge-quarantine/clear");
+        (routePattern === "/internal/shutdown" || routePattern === "/internal/update" ||
+          routePattern === "/internal/merge-quarantine/clear" || routePattern === "/internal/merge-quarantine/clear-by-path");
       if (!isGuardedApiWrite && !isTermSocket && !isCompanionSocket && !isGuardedInternalWrite) return;
       // This check is what scopes the hook to loopback, not a defensive no-op: a non-loopback caller
       // reaching here either already passed/failed the trust-tier wall above, or has no non-loopback bind
@@ -3189,6 +3196,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // the one remaining path). No MCP tool exposes this — same trust-boundary posture as the git/vault
   // writers and gateCommand (CLAUDE.md). `repoKey` (optional, `null`/absent = primary) is resolved
   // server-side via the project's own registry, never a raw client-supplied path.
+  // Card c0be9bf9: the actual clear (`activeMergeQuarantineFor` + `clearMergeQuarantine`) now runs through
+  // the shared `clearMergeQuarantineReporting` helper — this route's own job is ONLY resolving
+  // projectId/repoKey to a repoPath; `/clear-by-path` below is the no-resolution twin, and both must stay
+  // behaviorally identical past that point, so neither inlines the clear itself.
   app.post("/internal/merge-quarantine/clear", async (req, reply) => {
     if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
     const body = (req.body ?? {}) as { projectId?: string; repoKey?: string | null };
@@ -3202,9 +3213,75 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!(e instanceof UnknownRepoKeyError)) throw e;
       return reply.code(400).send({ error: `unknown repoKey: ${e.repoKey}` });
     }
-    const wasQuarantined = !!activeMergeQuarantineFor(repo.path);
-    clearMergeQuarantine(repo.path);
+    const { wasQuarantined } = clearMergeQuarantineReporting(repo.path);
     return { ok: true, wasQuarantined, repoPath: repo.path };
+  });
+
+  // --- Merge-quarantine HUMAN clear, no project resolution (card c0be9bf9) — reaches a latch whose repo
+  // was never a registered Loom project (or no longer is), which `/clear` above structurally cannot:
+  // that route resolves projectId+repoKey through the DB first, so an orphaned latch (its repoPath isn't
+  // bound to ANY project) has nothing for it to resolve. SAME trust tier as `/clear` (loopback +
+  // isGuardedInternalWrite above) and the SAME underlying clear (`clearMergeQuarantineReporting`) — this
+  // route is strictly a wider address space (repoPath/id instead of projectId/repoKey), never a weaker
+  // check; deliberately allowed to also clear a CURRENTLY-REGISTERED repo's quarantine (same bearer+
+  // loopback tier already gates both routes, so there is no privilege gap in offering a second address
+  // for the same action). Exactly one of `repoPath`/`id` must be given.
+  // - `repoPath`: the exact string recorded on the latch (see GET /internal/merge-quarantine/list) —
+  //   delegates straight to `clearMergeQuarantineReporting`, identical to `/clear`'s own last step.
+  // - `id`: the latch's bare 24-hex-character file id (also from the list route) — for a latch with no
+  //   trustworthy `repoPath` at all (a genuinely corrupt/unparsable one). Never auto-deletes anything
+  //   this route wasn't explicitly told to.
+  app.post("/internal/merge-quarantine/clear-by-path", async (req, reply) => {
+    if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
+    const body = (req.body ?? {}) as { repoPath?: string; id?: string };
+    const hasRepoPath = typeof body.repoPath === "string" && body.repoPath.length > 0;
+    const hasId = typeof body.id === "string" && body.id.length > 0;
+    if (hasRepoPath === hasId) {
+      return reply.code(400).send({ error: "provide exactly one of repoPath or id" });
+    }
+    if (hasRepoPath) {
+      const { wasQuarantined } = clearMergeQuarantineReporting(body.repoPath as string);
+      return { ok: true, wasQuarantined, repoPath: body.repoPath };
+    }
+    const result = clearMergeQuarantineLatchFile(body.id as string);
+    if (!result.ok) return reply.code(400).send({ error: result.reason });
+    return { ok: true, wasQuarantined: result.wasQuarantined, id: body.id };
+  });
+
+  // --- Merge-quarantine read-only list (card c0be9bf9) — loopback-only, deliberately NOT covered by the
+  // isGuardedInternalWrite bearer guard (decision 214caa53: GET reads are settled policy as ungated —
+  // filesystem access already grants the same read surface, and these paths are already readable on disk
+  // under LOOM_HOME). Gives a human the id(s)/repoPath of every active (or boot-pending-unresolvable)
+  // quarantine, and whether it's still bound to a currently-registered project, BEFORE they call
+  // `/clear-by-path`. `ids` is quarantineLatchFileIdsFor(e)'s own id list; `id` is kept as `ids[0]` for a
+  // caller that only ever expects one. A genuinely corrupt/unparsable latch matching NO in-memory entry is
+  // NOT listed here — its id is the stem of its own filename, visible via `ls`/`dir`, and still accepted
+  // by `/clear-by-path`'s `{id}` form.
+  //
+  // @decision c0be9bf9 — not every id in `ids` is guaranteed to name a file that currently exists on disk;
+  // only `ids[0]`/`id` is (see quarantineLatchFileIdsFor's own doc and the decision record).
+  app.get("/internal/merge-quarantine/list", async (req, reply) => {
+    if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
+    const registeredRepoPaths = deps.db.listAllRegisteredRepoPaths();
+    const entries = listActiveMergeQuarantines();
+    const { registered } = partitionQuarantinesByRegistration(entries, registeredRepoPaths);
+    const registeredSet = new Set(registered);
+    const items = entries.map((e) => {
+      const ids = quarantineLatchFileIdsFor(e);
+      return {
+        id: ids[0],
+        ids,
+        repoPath: e.repoPath,
+        branch: e.branch,
+        reason: e.reason,
+        opId: e.opId ?? null,
+        enteredAt: e.enteredAt,
+        orphanLatchFiles: e.orphanLatchFiles ?? [],
+        placeholder: e.placeholder === true,
+        registered: registeredSet.has(e),
+      };
+    });
+    return { ok: true, items };
   });
 
   // @decision 32fd6f4c — /internal/test/seed: direct deps.db/file writes for e2e-only data (usage

@@ -71,7 +71,7 @@ import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
 import { readAndClearMergeDangerLatches, describeMergeDangerLatchAtBoot } from "./git/merge-danger-latch.js";
-import { reenterMergeQuarantinesAtBoot } from "./git/merge-quarantine.js";
+import { reenterMergeQuarantinesAtBoot, partitionQuarantinesByRegistration } from "./git/merge-quarantine.js";
 import { runGracefulTeardown, computeFlushVaultsStepBudgetMs, reportAndConsumeHardShutdownWatchdogRecord } from "./graceful-teardown.js";
 
 async function main(): Promise<void> {
@@ -1030,9 +1030,20 @@ async function main(): Promise<void> {
   // quarantine was re-armed to refuse them. Deliberately its own, distinct boot message — never routed
   // through describeMergeDangerLatchAtBoot below, which must never say "no action needed" for a quarantine
   // (that function only ever describes the UNRELATED crash-recovery latch).
-  for (const q of reenterMergeQuarantinesAtBoot([...canonicalRepoPaths])) {
+
+  // Card c0be9bf9: partition by REGISTRATION (never by filesystem existence — a temporarily unmounted
+  // drive must stay loud, see partitionQuarantinesByRegistration's own doc) so a leaked-test / deleted-repo
+  // orphan latch collapses into ONE summary line instead of its own per-entry warning; a latch for a repo
+  // that's still a registered project (live, reserved, OR archived — db.listAllRegisteredRepoPaths())
+  // keeps the full, unchanged, per-entry warning below.
+  const { registered: registeredQuarantines, orphaned: orphanedQuarantines } =
+    partitionQuarantinesByRegistration(reenterMergeQuarantinesAtBoot([...canonicalRepoPaths]), db.listAllRegisteredRepoPaths());
+  for (const q of registeredQuarantines) {
     const opText = q.opId ? `, op ${q.opId}` : "";
     console.warn(`[boot] canonical repo ${q.repoPath} is QUARANTINED (branch '${q.branch}'${opText}, entered ${q.enteredAt}): ${q.reason} — re-armed after this restart; merges/batches/worktree-creates against it will refuse until a human clears it: POST /internal/merge-quarantine/clear`);
+  }
+  if (orphanedQuarantines.length > 0) {
+    console.warn(`[boot] ${orphanedQuarantines.length} merge-quarantine latch(es) found for repo(s) that are not (or no longer) a registered Loom project — harmless (no merge can ever target them) but will keep re-arming on every boot until cleared: GET /internal/merge-quarantine/list to see them, POST /internal/merge-quarantine/clear-by-path to clear each by repoPath or id.`);
   }
   const app = await buildServer({
     db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, operatorMcp, runMcp, control, usageStatus,

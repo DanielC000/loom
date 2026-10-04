@@ -294,6 +294,27 @@ try {
   check("(N) POST /internal/hook with NO auth header still succeeds (deliberately excluded from the guard)",
     hookNoAuth.statusCode === 200);
 
+  // ===================== (Q) card c0be9bf9: POST /internal/merge-quarantine/clear-by-path =====================
+  // Same tier as (L)/(M) above — joins isGuardedInternalWrite verbatim, so the shape of proof is identical:
+  // 401 with no credential, 401 with a wrong one, reaches the real handler with the correct one. Route
+  // BEHAVIOR (repoPath/id addressing, exactly-one-of validation, etc.) is covered in
+  // test/merge-quarantine-clear-by-path.mjs — this file's own job is only the auth mechanics.
+  const clearByPath = (bearer, payload) => appWithSecret.inject({ method: "POST", url: "/internal/merge-quarantine/clear-by-path", headers: authH(bearer), payload });
+  const cbpNoAuth = await clearByPath(undefined, { repoPath: TMP });
+  check("(Q) POST /internal/merge-quarantine/clear-by-path with NO auth header → 401", cbpNoAuth.statusCode === 401);
+  const cbpWrongAuth = await clearByPath("not-the-real-secret", { repoPath: TMP });
+  check("(Q) POST /internal/merge-quarantine/clear-by-path with a WRONG bearer value → 401", cbpWrongAuth.statusCode === 401);
+  const cbpRightAuth = await clearByPath(SECRET, { repoPath: TMP });
+  check("(Q) POSITIVE CONTROL: POST /internal/merge-quarantine/clear-by-path with the CORRECT secret reaches the real handler (200, not 401)",
+    cbpRightAuth.statusCode === 200);
+
+  // ===================== (R) card c0be9bf9: GET /internal/merge-quarantine/list stays UNGATED by the bearer secret =====================
+  // Deliberate (decision 214caa53: GET reads are settled policy as ungated) — same negative-scope shape as
+  // (N)'s proof for /internal/hook: even with loopbackSecret wired, a GET here needs no Authorization header.
+  const listNoAuth = await appWithSecret.inject({ method: "GET", url: "/internal/merge-quarantine/list", headers: H });
+  check("(R) GET /internal/merge-quarantine/list with NO auth header still succeeds (deliberately ungated, decision 214caa53)",
+    listNoAuth.statusCode === 200);
+
   // ===================== (P) GAP 1 fail-closed: an UNDETERMINABLE peer address (card 214caa53) =====================
   // Pre-fix, `req.socket?.remoteAddress ?? ""` on an empty address fell through `!LOOPBACK.has("")` (true)
   // straight to `return` — the hook silently no-op'd and the request proceeded with NO credential check
@@ -380,6 +401,12 @@ try {
     check("(G) the guard matches /internal/shutdown by pattern", /["']\/internal\/shutdown["']/.test(codeSlice));
     check("(G) the guard matches /internal/update by pattern", /["']\/internal\/update["']/.test(codeSlice));
     check("(G) the guard does NOT match /internal/hook by pattern", !/["']\/internal\/hook["']/.test(codeSlice));
+    // (G) card c0be9bf9: the guard's route-matching also names /internal/merge-quarantine/clear-by-path
+    // (the no-project-resolution twin, same tier) — corroborates the behavioral (Q) proof above structurally.
+    check("(G) the guard matches /internal/merge-quarantine/clear-by-path by pattern", /["']\/internal\/merge-quarantine\/clear-by-path["']/.test(codeSlice));
+    // And GET /internal/merge-quarantine/list must NOT be named by the guard at all — it's deliberately
+    // ungated (decision 214caa53), corroborating (R)'s behavioral proof structurally.
+    check("(G) the guard does NOT match /internal/merge-quarantine/list by pattern", !/["']\/internal\/merge-quarantine\/list["']/.test(codeSlice));
     // (G) card 214caa53: GAP 1's empty-address check — both PRESENCE and ORDERING. This check's whole job
     // is an ordering claim (the empty-address reject must run BEFORE the LOOPBACK-set membership check,
     // not be folded into or come after it — see server.ts's own comment for why), so verify the ordering

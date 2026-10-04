@@ -3216,6 +3216,24 @@ export class Db {
     return this.db.prepare("SELECT * FROM projects WHERE archived_at IS NOT NULL AND reserved = 0 ORDER BY archived_at DESC")
       .all().map(toProject);
   }
+  /**
+   * Every canonical repo path this daemon has EVER registered to a project — primary `repoPath` AND every
+   * additional `repos[]` entry, across live, reserved, AND archived projects (card c0be9bf9). Deliberately
+   * MORE inclusive than `index.ts`'s own `canonicalRepoPaths` (which excludes archived — that one answers
+   * "what can a merge land on RIGHT NOW", a narrower question): a merge-quarantine latch for an archived
+   * project's repo is still a REAL, once-legitimate quarantine, not noise, even though Loom will never
+   * merge into it again — collapsing it into the "nobody owns this" orphan bucket would bury a latch a
+   * human might still want to know about. Vault-only projects contribute nothing (no `repoPath`). Deduped.
+   */
+  listAllRegisteredRepoPaths(): string[] {
+    const paths = new Set<string>();
+    for (const project of [...this.listAllProjects(), ...this.listArchivedProjects()]) {
+      for (const repoPath of [project.repoPath, ...project.repos.map((r) => r.path)]) {
+        if (repoPath) paths.add(repoPath);
+      }
+    }
+    return [...paths];
+  }
   /** True iff ANY reserved/system project exists (name-agnostic). Prefer the NAME-SCOPED checks below as
    * the per-home idempotency gate now that more than one reserved home can coexist (see below). */
   hasReservedProject(): boolean {
