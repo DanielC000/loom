@@ -2060,17 +2060,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const plannedTelegramBinding = botToken && allowedChatId && homeChannel === channel && homeChatId === allowedChatId
         ? { scope: "dm" as const, flaggedNonPrivate: isLikelyGroupTelegramChatId(channel, allowedChatId) }
         : undefined;
-      // No real sessionId exists yet to pass as requestingSessionId (the session is minted below) — the
-      // in-app guard just above is what covers the in-app vector for this pre-spawn call; every other
-      // channel's ownership check is a no-op against a plannedTelegramBinding anyway (it carries no
-      // sessionId to compare).
+      // No real sessionId exists yet to pass as requestingSessionId (the session is minted below) —
+      // passing `undefined` makes companionRouteBlockReason skip its entire ownership check outright (see
+      // that function's own doc), not merely "a no-op against this plannedTelegramBinding" — so this holds
+      // regardless of what fields a future binding shape might carry. The in-app guard just above is the
+      // one that actually matters pre-spawn: an in-app home is refused outright before this call even runs.
       const blockReason = companionRouteBlockReason({ channel: homeChannel, chatId: homeChatId }, plannedTelegramBinding, undefined);
       if (blockReason === "route-flagged-non-private") {
         return reply.code(400).send({ error: `home (channel=${homeChannel}, chatId=${homeChatId}) would be flagged non-private — delivery to it is refused; give it its own, confirmed-private route` });
       }
       if (blockReason === "route-unbound") {
-        // card 94754bbe: same numeric-only guard as GUARD 6 above — a home target gets the same pre-spawn check.
-        return reply.code(400).send({ error: `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(homeChatId)}) — Telegram private chat ids are always numbers` });
+        if (isNonNumericTelegramChatId(homeChannel, homeChatId) || isLikelyGroupTelegramChatId(homeChannel, homeChatId)) {
+          // card 94754bbe: same numeric-only guard as GUARD 6 above — a home target gets the same pre-spawn check.
+          return reply.code(400).send({ error: `home chatId must be a numeric Telegram chat id (got ${JSON.stringify(homeChatId)}) — Telegram private chat ids are always numbers` });
+        }
+        // card 7e4db63f: a numerically-shaped home that just doesn't match the one route this provision call
+        // will actually write (the always-written in-app route, bound automatically to the new session's own
+        // id below, or the Telegram dm route this call writes when botToken+allowedChatId are given) is a
+        // DIFFERENT problem than a bad chatId shape — don't reuse the numeric-shape message for it.
+        return reply.code(400).send({ error: `home (channel=${homeChannel}, chatId=${homeChatId}) must be the chat this provision binds (allowedChatId) or in-app — no other route exists yet for this call to bind a home to` });
       }
       home = { channel: homeChannel, chatId: homeChatId };
     }

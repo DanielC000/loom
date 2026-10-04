@@ -138,6 +138,22 @@ function warnStaleStoredHomes(db: CompanionConfigStore): void {
       );
       continue;
     }
+    if (reason === "route-flagged-non-private") {
+      // card 7e4db63f: a binding flagged non-private at runtime IS live (shape-fine, has a row) — branch on
+      // the ACTUAL reason here too, same as the foreign-session case above, instead of falling through to
+      // the badShape ternary below, which would wrongly say "no live binding... pair or bind first" for a
+      // binding that is in fact live and just flagged.
+      // eslint-disable-next-line no-console
+      console.error(
+        `[companion] SETUP: session ${row.sessionId.slice(0, 8)}'s STORED home target (channel=` +
+          `${home.channel}) is flagged non-private — proactive delivery (heartbeat/reminder/attention-push) ` +
+          `to it is refused at the outbound chokepoint (card 1b0df437) and will stay refused until it's ` +
+          `fixed. If this is genuinely a shared chat, re-bind it with scope "group"; otherwise remove and ` +
+          `re-add this channel (this also clears any home/reminder pinned to it), or update the home via ` +
+          `PUT /api/companion/home.`,
+      );
+      continue;
+    }
     const badShape = isNonNumericTelegramChatId(home.channel, home.chatId) || isLikelyGroupTelegramChatId(home.channel, home.chatId);
     // card 1b0df437 item 3: disclosure-safe — never the chatId itself (identifying), only the channel and
     // which of the two distinct problems applies (bad shape vs. a shape that's fine but unbound).
