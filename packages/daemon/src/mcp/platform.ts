@@ -2565,19 +2565,21 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_update",
       {
-        description: "Structural edit of any project by id — name, vaultPath, and/or repoPath (omitted fields left as-is). Config changes go through project_configure. REJECTS a NAME CHANGE on a reserved/system project (the Loom Platform home) — the platform/setup seed lookup finds that home by name, so renaming it here would mint a duplicate reserved home on the next boot; rename it via the Projects UI/REST instead. vaultPath/repoPath/config edits to a reserved project remain allowed. repoPath REBINDS the project to a different repo: it MUST exist and be a git repository (rejected otherwise, exactly like project_create), and the rebind is REFUSED while the project has any live session occupying a worktree (those would be stranded — the offending sessions are named). This elevated/human-only surface is the ONLY place repoPath is editable. referenceRepos and repos (the writable multi-repo registry) are NOT settable even here — both are REST/UI-only (human), same exfil-adjacent trust class as repoPath/gateCommand. 404 if the project is unknown. Returns the updated project PLUS `staleStartupPrompts`: any agent in this project whose startupPrompt still references a name/repoPath/vaultPath value THIS call just changed away from (a rename lint, WARN-only — it never edits the prompt; fix stale content via agent_update). The returned config's sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
+        description: "Structural edit of any project by id — name, vaultPath, and/or repoPath (omitted fields left as-is). Config changes go through project_configure. REJECTS a NAME CHANGE on a reserved/system project (the Loom Platform home) — the platform/setup SEED lookup itself now survives a rename (card a47dd144's stable id marker), but ~11 OTHER runtime lookups across sessions/service.ts, gateway/server.ts, and this router still resolve these homes by NAME ONLY (card 5dff8d08, not yet fixed), so a rename here would silently break those until that follow-up lands; rename it via the Projects UI/REST instead. vaultPath/repoPath/config edits to a reserved project remain allowed. repoPath REBINDS the project to a different repo: it MUST exist and be a git repository (rejected otherwise, exactly like project_create), and the rebind is REFUSED while the project has any live session occupying a worktree (those would be stranded — the offending sessions are named). This elevated/human-only surface is the ONLY place repoPath is editable. referenceRepos and repos (the writable multi-repo registry) are NOT settable even here — both are REST/UI-only (human), same exfil-adjacent trust class as repoPath/gateCommand. 404 if the project is unknown. Returns the updated project PLUS `staleStartupPrompts`: any agent in this project whose startupPrompt still references a name/repoPath/vaultPath value THIS call just changed away from (a rename lint, WARN-only — it never edits the prompt; fix stale content via agent_update). The returned config's sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
         inputSchema: strictShape({ projectId: z.string(), name: z.string().optional(), vaultPath: z.string().optional(), repoPath: z.string().optional() }),
       },
       async ({ projectId, name, vaultPath, repoPath }) => {
         const project = db.getProject(projectId);
         if (!project) return ok({ error: "project not found" });
-        // Card 7aa0cc30: a reserved/system home (the Loom Platform project) is found by NAME at boot
-        // (hasReservedProjectNamed) — renaming it here would silently mint a duplicate reserved home on
-        // the next seed pass. Refuse ONLY an actual name CHANGE (name !== current); a same-name no-op
-        // call, and any vaultPath/repoPath/config edit, stay allowed — this surface is elevated/dev-only
-        // and legitimately edits its own home's other fields.
+        // Card 7aa0cc30, reason updated by card a47dd144 round 2: the seed lookup itself is no longer
+        // name-only (resolveSetupHome/resolvePlatformHome's stable id marker survives a rename), but ~11
+        // OTHER runtime lookups (sessions/service.ts, gateway/server.ts, this router) still resolve these
+        // homes by NAME ONLY — card 5dff8d08, not yet fixed — so a rename here would silently break those
+        // until that follow-up lands. Refuse ONLY an actual name CHANGE (name !== current); a same-name
+        // no-op call, and any vaultPath/repoPath/config edit, stay allowed — this surface is
+        // elevated/dev-only and legitimately edits its own home's other fields.
         if (name !== undefined && project.reserved && name !== project.name) {
-          return ok({ error: "cannot rename a reserved/system project (the Loom Platform home) — rename would mint a duplicate reserved home on next boot; rename it via the Projects UI/REST." });
+          return ok({ error: "cannot rename a reserved/system project (the Loom Platform home) — other runtime lookups still resolve it by name (card 5dff8d08); rename it via the Projects UI/REST." });
         }
         // repoPath REBIND (elevated/human-only): fronted by the SHARED guard (isGitRepo + live-worktree
         // refusal), identical to the human REST PATCH path. Non-repo or a live worktree → reject, no write.

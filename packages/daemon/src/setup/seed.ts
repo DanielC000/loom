@@ -4,6 +4,15 @@ import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { LOOM_HOME } from "../paths.js";
 import type { Db } from "../db.js";
 import { isOperatorEnabled } from "../mcp/operator.js";
+import {
+  resolveReservedHomeByMarker,
+  SETUP_HOME_PROJECT_ID_KEY,
+  PLATFORM_HOME_PROJECT_ID_KEY,
+  SETUP_PROJECT_NAME,
+  LEGACY_SETUP_PROJECT_NAME,
+  PLATFORM_PROJECT_NAME,
+} from "../projects/reserved-home-markers.js";
+export { SETUP_PROJECT_NAME };
 
 /**
  * Setup Assistant — the reserved, UNGATED "Platform" home + its single Setup Assistant agent.
@@ -14,10 +23,15 @@ import { isOperatorEnabled } from "../mcp/operator.js";
  * CORE path — there is NO isLoomDev gate. The single agent runs the bundled "Setup Assistant" profile
  * (role "setup", seeded ungated by seedDefaultProfiles) and the ungated /setup-assistant doctrine skill.
  *
- * Like seedPlatformHome / seedDefaultProfiles this is SEED-IF-ABSENT (idempotent), keyed NAME-SCOPED to
- * this home's own name so it coexists with the platform home without either suppressing the other's seed
- * (see db.hasReservedProjectNamed). It runs every boot and no-ops once the home exists, so a user's later
- * edits (renamed agent, edited prompt, archived home) are never clobbered.
+ * Like seedPlatformHome / seedDefaultProfiles this is SEED-IF-ABSENT (idempotent). The idempotency gate
+ * is a STABLE app_meta id marker (card a47dd144, resolveSetupHome below), not the home's `name` — a
+ * rename is deliberately allowed on a reserved project (PATCH /api/projects/:id), and a name-only gate
+ * would see no match after one and mint a second, empty home on the next boot. An install that pre-dates
+ * the marker (or whose marker fails validation) falls back to the SAME archive-agnostic name-scoped
+ * match as before (db.getReservedProjectByNameIncludingArchived(SETUP_PROJECT_NAME)) and backfills the
+ * marker the moment it's found, so coexistence with the platform home (each keyed to its own
+ * marker/name) is unchanged. It runs every boot and no-ops once the home exists, so a user's later edits
+ * (renamed agent, edited prompt, renamed home, archived home) are never clobbered.
  *
  * E1-4 SCOPE ONLY: this seeds the project + agent + its default prompt. It does NOT spawn the assistant
  * (startSetup is a separate human-REST / first-run-boot path — E1, later card) and adds no spawn path of
@@ -25,22 +39,25 @@ import { isOperatorEnabled } from "../mcp/operator.js";
  */
 
 /**
- * The reserved setup home's display name (also the name-scoped idempotency anchor). Renamed
- * "Getting Started" → "Platform": the home is now exposed in the project picker (GET /api/setup/home), and
- * "Platform" reads better there than "Getting Started". DISTINCT from the dev-only platform home's
- * PLATFORM_PROJECT_NAME ("Loom Platform"), so the name-scoped reserved-home lookups never collide. Existing
- * installs are migrated in place by the boot-time seedSetupProjectRename below.
+ * The reserved setup home's display name (also the name-scoped idempotency anchor), re-exported above
+ * from `projects/reserved-home-markers.ts` (card a47dd144 round 2 — moved there, alongside
+ * PLATFORM_PROJECT_NAME and LEGACY_SETUP_PROJECT_NAME, so `resolveReservedHomeByMarker`'s collision
+ * check can recognise the OTHER home's name without the two seed files importing one another; every
+ * existing importer of `SETUP_PROJECT_NAME` from this file is unaffected). Renamed "Getting Started" →
+ * "Platform": the home is now exposed in the project picker (GET /api/setup/home), and "Platform" reads
+ * better there than "Getting Started". DISTINCT from the dev-only platform home's PLATFORM_PROJECT_NAME
+ * ("Loom Platform"), so the name-scoped reserved-home lookups never collide. Existing installs are
+ * migrated in place by the boot-time seedSetupProjectRename below.
  */
-export const SETUP_PROJECT_NAME = "Platform";
 
 /**
- * The pre-rename reserved setup-home name. Existing installs seeded the home under this literal before the
- * "Getting Started" → "Platform" rename; the boot-time guarded rename (seedSetupProjectRename) backfills
- * them to SETUP_PROJECT_NAME. Kept as a named constant — typed `string` so the migration's revert guard
- * (`SETUP_PROJECT_NAME === LEGACY_SETUP_PROJECT_NAME`) type-checks — so the migration matches the EXACT old
- * literal (never a user-renamed home).
+ * The pre-rename reserved setup-home name, re-exported here (see SETUP_PROJECT_NAME above) for the
+ * `SETUP_PROJECT_NAME === LEGACY_SETUP_PROJECT_NAME` type-check below. Existing installs seeded the home
+ * under this literal before the "Getting Started" → "Platform" rename; the boot-time guarded rename
+ * (seedSetupProjectRename) backfills them to SETUP_PROJECT_NAME — matching the EXACT old literal, never
+ * a user-renamed home.
  */
-const LEGACY_SETUP_PROJECT_NAME: string = "Getting Started";
+export { LEGACY_SETUP_PROJECT_NAME };
 
 /**
  * The Setup home has NO real git repo — it is an onboarding scope, not a codebase. Both repoPath and
@@ -118,15 +135,35 @@ const SETUP_CHECKLIST: { title: string; body: string }[] = [
 ];
 
 /**
+ * Resolve the reserved setup home by its stable app_meta id marker (card a47dd144), falling back to a
+ * NAME match (current, then the pre-rebrand legacy literal) for an install that pre-dates the marker —
+ * or whose marker fails validation (gone, not reserved, or colliding with the platform home's own
+ * marker id OR name — round 2) — and backfilling the marker the instant a name match is found. See
+ * reserved-home-markers.ts's resolveReservedHomeByMarker for the shared validation logic.
+ */
+function resolveSetupHome(db: Db): Project | undefined {
+  return resolveReservedHomeByMarker(
+    db,
+    SETUP_HOME_PROJECT_ID_KEY,
+    PLATFORM_HOME_PROJECT_ID_KEY,
+    [SETUP_PROJECT_NAME, LEGACY_SETUP_PROJECT_NAME],
+    [PLATFORM_PROJECT_NAME],
+  );
+}
+
+/**
  * Seed the reserved "Platform" home and its Setup Assistant agent IF ABSENT. UNGATED — runs for
  * every loomctl user regardless of LOOM_DEV (the deliberate difference from seedPlatformHome). Idempotent:
- * once the named reserved home exists this no-ops (preserving any user edits). The agent is bound to the
- * bundled "Setup Assistant" profile, looked up by name from the already-seeded profiles (seedDefaultProfiles
- * runs first at boot); if that profile is somehow missing the agent is still seeded with profileId null
- * (resolveProfile's plain backstop) so the seed never throws. Returns a short summary ([] when it no-ops).
+ * once the home exists (by its stable marker, or an archive-agnostic name match — so an ARCHIVED legacy
+ * home still counts as already-seeded, never grounds to mint a second, live one beside it) this no-ops
+ * (preserving any user edits).
+ * The agent is bound to the bundled "Setup Assistant" profile, looked up by name from the already-seeded
+ * profiles (seedDefaultProfiles runs first at boot); if that profile is somehow missing the agent is
+ * still seeded with profileId null (resolveProfile's plain backstop) so the seed never throws. Returns a
+ * short summary ([] when it no-ops).
  */
 export function seedSetupHome(db: Db): string[] {
-  if (db.hasReservedProjectNamed(SETUP_PROJECT_NAME)) return []; // already seeded — never clobber user edits
+  if (resolveSetupHome(db)) return []; // already seeded — never clobber user edits
 
   const now = new Date().toISOString();
   const project: Project = {
@@ -145,6 +182,7 @@ export function seedSetupHome(db: Db): string[] {
     vaultOnly: true, // reserved home: repoPath and vaultPath both bind the same folder, no separate repo
   };
   db.insertProject(project);
+  db.setMeta(SETUP_HOME_PROJECT_ID_KEY, project.id); // stamp the stable marker now — survives any later rename
 
   const profile = db.listProfiles().find((p) => p.name === SETUP_PROFILE_NAME);
   const agent: Agent = {
@@ -211,18 +249,20 @@ export function seedSetupProjectRename(db: Db): string | null {
  *
  * @decision sha:aecc6551
  *
- *   - the reserved "Platform" setup home ONLY (resolved by name, never a
- *     name-agnostic reserved lookup — gotcha #1; first named at this exact site) — see record;
+ *   - the reserved "Platform" setup home ONLY (resolved via resolveSetupHome's stable marker, falling
+ *     back to a name match — never a name-agnostic reserved lookup — gotcha #1, amended by card
+ *     a47dd144; first named at this exact site) — see record;
  *   - matched by the EXACT old literal — a user-renamed agent (any other name) is left alone;
  *   - AND it must run the setup-role profile (the operator's rig) — a stray same-named agent isn't renamed.
  *
- * Idempotent by NAME-MATCH, no marker needed: after the rename the old literal is gone, so a re-run finds
- * nothing and no-ops (returns null). Also no-ops on a fresh install (seed already created "Platform") and if
- * the rebrand were ever reverted (new === old). Returns the new name when it renamed, else null.
+ * Idempotent by AGENT-NAME-MATCH within the resolved home: after the rename the old literal is gone, so a
+ * re-run finds nothing and no-ops (returns null). Also no-ops on a fresh install (seed already created
+ * "Platform") and if the rebrand were ever reverted (new === old). Returns the new name when it renamed,
+ * else null.
  */
 export function seedSetupAgentRename(db: Db): string | null {
   if (SETUP_AGENT_NAME === LEGACY_SETUP_AGENT_NAME) return null; // rebrand reverted — nothing to migrate
-  const home = db.getReservedProjectByName(SETUP_PROJECT_NAME);
+  const home = resolveSetupHome(db);
   if (!home) return null; // no setup home yet — nothing to backfill
   const legacy = db.listAgents(home.id).find((a) => a.name === LEGACY_SETUP_AGENT_NAME);
   if (!legacy) return null; // already renamed, user-renamed, or fresh install seeded the new name
@@ -262,9 +302,9 @@ Your audit + suggestion tools and the "Review my workspace" trigger are live —
  * B4 backfill — seed the bundled Workspace Auditor agent into the SAME reserved "Platform" setup home as
  * the operator (one home, two agents), SEED-IF-ABSENT BY AGENT-NAME. Run at boot AFTER seedSetupHome.
  *
- * @decision sha:aecc6551 — scoped to the reserved home by NAME, never a name-agnostic reserved lookup
- * (gotcha #1, more than one reserved project can exist); seeded by its own separate boot-time
- * name-presence check, never folded into seedSetupHome (gotcha #2, which no-ops once the home exists).
+ * @decision sha:aecc6551 — scoped to the reserved home via resolveSetupHome (marker, falling back to
+ * name), never a name-agnostic reserved lookup (gotcha #1, amended by card a47dd144); seeded by its own
+ * separate boot-time name-presence check, never folded into seedSetupHome (gotcha #2).
  *
  * Idempotent + non-clobbering: if an agent named SETUP_AUDITOR_AGENT_NAME already lives in the home this
  * no-ops (returns null), so reboots never duplicate it and a user's edits to that agent (prompt, profile)
@@ -274,7 +314,7 @@ Your audit + suggestion tools and the "Review my workspace" trigger are live —
  * backstop if absent so the seed never throws). Returns the seeded name, or null when it no-ops.
  */
 export function seedSetupAuditorAgent(db: Db): string | null {
-  const home = db.getReservedProjectByName(SETUP_PROJECT_NAME);
+  const home = resolveSetupHome(db);
   if (!home) return null; // no setup home yet — seedSetupHome (run first) creates it; nothing to attach to
   const agents = db.listAgents(home.id);
   if (agents.some((a) => a.name === SETUP_AUDITOR_AGENT_NAME)) return null; // already present — idempotent
@@ -316,15 +356,15 @@ Act only on the explicit task the human gives you this session. Confirm before a
  * but PERSISTS across a later flag-off; deliberately NO first-run auto-launch — session creation
  * stays human-REST-only via startOperator. See record for the full narrative.
  *
- * Scoped to the reserved home resolved by NAME (gotcha #1, see
- * docs/decisions/aecc6551-reserved-home-agent-seeder-pattern.md), never a name-agnostic reserved lookup.
- * Bound to the bundled "Elevated Operator" profile (looked up by name; profileId null backstop if absent
- * so the seed never throws). Returns the seeded name, or null when it no-ops (home missing, flag off, or
- * already present).
+ * Scoped to the reserved home resolved via resolveSetupHome (gotcha #1, see
+ * docs/decisions/aecc6551-reserved-home-agent-seeder-pattern.md — amended by card a47dd144), never a
+ * name-agnostic reserved lookup. Bound to the bundled "Elevated Operator" profile (looked up by name;
+ * profileId null backstop if absent so the seed never throws). Returns the seeded name, or null when it
+ * no-ops (home missing, flag off, or already present).
  */
 export function seedOperatorAgent(db: Db): string | null {
   if (!isOperatorEnabled(db)) return null; // flag off — never seed the agent row at all
-  const home = db.getReservedProjectByName(SETUP_PROJECT_NAME);
+  const home = resolveSetupHome(db);
   if (!home) return null; // no setup home yet — seedSetupHome (run first) creates it; nothing to attach to
   const agents = db.listAgents(home.id);
   if (agents.some((a) => a.name === OPERATOR_AGENT_NAME)) return null; // already present — idempotent
@@ -371,9 +411,9 @@ Your replies may be read aloud as a voice message, so write in short, natural sp
  * (one home, three standing agents), SEED-IF-ABSENT BY AGENT-NAME — the EXACT mirror of seedSetupAuditorAgent
  * (B4). Run at boot AFTER seedSetupHome.
  *
- * @decision sha:aecc6551 — scoped to the reserved home by NAME, never a name-agnostic reserved lookup
- * (gotcha #1, more than one reserved project can exist); seeded by its own separate boot-time
- * name-presence check, never folded into seedSetupHome (gotcha #2, which no-ops once the home exists).
+ * @decision sha:aecc6551 — scoped to the reserved home via resolveSetupHome (marker, falling back to
+ * name), never a name-agnostic reserved lookup (gotcha #1, amended by card a47dd144); seeded by its own
+ * separate boot-time name-presence check, never folded into seedSetupHome (gotcha #2).
  *
  * TEMPLATE ONLY — this seeds the rig (the assistant-role Companion profile + a Companion agent bound to it)
  * so a "New companion" provision has an author-free default spawn target. It creates NO session and writes
@@ -387,7 +427,7 @@ Your replies may be read aloud as a voice message, so write in short, natural sp
  * seeded name, or null when it no-ops.
  */
 export function seedCompanionAgent(db: Db): string | null {
-  const home = db.getReservedProjectByName(SETUP_PROJECT_NAME);
+  const home = resolveSetupHome(db);
   if (!home) return null; // no setup home yet — seedSetupHome (run first) creates it; nothing to attach to
   const agents = db.listAgents(home.id);
   if (agents.some((a) => a.name === COMPANION_AGENT_NAME)) return null; // already present — idempotent

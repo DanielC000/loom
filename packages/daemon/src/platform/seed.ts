@@ -2,6 +2,15 @@ import { randomUUID } from "node:crypto";
 import type { Agent, Project } from "@loom/shared";
 import { LOOM_HOME, isLoomDev } from "../paths.js";
 import type { Db } from "../db.js";
+import {
+  resolveReservedHomeByMarker,
+  PLATFORM_HOME_PROJECT_ID_KEY,
+  SETUP_HOME_PROJECT_ID_KEY,
+  PLATFORM_PROJECT_NAME,
+  SETUP_PROJECT_NAME,
+  LEGACY_SETUP_PROJECT_NAME,
+} from "../projects/reserved-home-markers.js";
+export { PLATFORM_PROJECT_NAME };
 
 /**
  * Platform Manager P1 — the reserved "Loom Platform" home + its two seeded agents.
@@ -31,8 +40,13 @@ import type { Db } from "../db.js";
  * updates an existing install. Prefer prompts that describe only what exists today.
  */
 
-/** The reserved platform project's display name (also the idempotency-by-presence anchor). */
-export const PLATFORM_PROJECT_NAME = "Loom Platform";
+/**
+ * The reserved platform project's display name (also the idempotency-by-presence anchor),
+ * re-exported above from `projects/reserved-home-markers.ts` (card a47dd144 round 2 — moved there,
+ * alongside SETUP_PROJECT_NAME/LEGACY_SETUP_PROJECT_NAME, so `resolveReservedHomeByMarker`'s collision
+ * check can recognise the OTHER home's name without the two seed files importing one another; every
+ * existing importer of `PLATFORM_PROJECT_NAME` from this file is unaffected).
+ */
 
 /**
  * The Platform has NO real git repo — it is an admin scope, not a codebase. We bind both repoPath and
@@ -104,6 +118,23 @@ export const PLATFORM_PROMPT_REFRESH: Readonly<Record<string, { prior: string; c
 };
 
 /**
+ * Resolve the reserved platform home by its stable app_meta id marker (card a47dd144), falling back to
+ * a NAME match for an install that pre-dates the marker — or whose marker fails validation (gone, not
+ * reserved, or colliding with the setup home's own marker id OR name — round 2) — and backfilling the
+ * marker the instant a name match is found. See reserved-home-markers.ts's resolveReservedHomeByMarker
+ * for the shared validation logic.
+ */
+function resolvePlatformHome(db: Db): Project | undefined {
+  return resolveReservedHomeByMarker(
+    db,
+    PLATFORM_HOME_PROJECT_ID_KEY,
+    SETUP_HOME_PROJECT_ID_KEY,
+    [PLATFORM_PROJECT_NAME],
+    [SETUP_PROJECT_NAME, LEGACY_SETUP_PROJECT_NAME],
+  );
+}
+
+/**
  * ONE-TIME boot migration (marker-guarded one-shot, mirrors backfillColumnRoles): refresh the reserved
  * platform agents' stored startupPrompt to the phase-NOTE-stripped text — but ONLY where the stored value is
  * byte-identical to the prior seeded text (UNEDITED). A user-edited prompt is left untouched. Because the
@@ -117,7 +148,7 @@ export const PLATFORM_PROMPT_REFRESH: Readonly<Record<string, { prior: string; c
  */
 export function migratePlatformPrompts(db: Db): { migrated: number } {
   if (db.getMeta(PLATFORM_PROMPT_MIGRATION_KEY)) return { migrated: 0 }; // guard 1: already run
-  const home = db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+  const home = resolvePlatformHome(db);
   if (!home) return { migrated: 0 }; // guard 2: no platform home (non-dev / pre-seed) — don't stamp; retry next boot
   let migrated = 0;
   for (const agent of db.listAgents(home.id)) {
@@ -132,11 +163,12 @@ export function migratePlatformPrompts(db: Db): { migrated: number } {
 }
 
 /**
- * Seed the reserved "Loom Platform" project and its two agents IF ABSENT. Idempotent: once a reserved
- * project exists this no-ops (preserving any user edits). Assigns each agent its bundled platform
- * profile, looked up by name from the already-seeded profiles (seedDefaultProfiles runs first at boot);
- * if a profile is somehow missing the agent is still seeded with profileId null (resolveProfile's plain
- * backstop) so the seed never throws. Returns a short summary of what was seeded ([] when it no-ops).
+ * Seed the reserved "Loom Platform" project and its two agents IF ABSENT. Idempotent: once the home
+ * exists (by its stable marker, or a name match) this no-ops (preserving any user edits). Assigns each
+ * agent its bundled platform profile, looked up by name from the already-seeded profiles
+ * (seedDefaultProfiles runs first at boot); if a profile is somehow missing the agent is still seeded
+ * with profileId null (resolveProfile's plain backstop) so the seed never throws. Returns a short
+ * summary of what was seeded ([] when it no-ops).
  *
  * DEV-ONLY: the whole Platform layer is gated behind LOOM_DEV (see paths.ts › isLoomDev). Without the
  * flag — the default for every `loomctl` user — this no-ops entirely (the reserved project + its agents
@@ -145,10 +177,12 @@ export function migratePlatformPrompts(db: Db): { migrated: number } {
  */
 export function seedPlatformHome(db: Db): string[] {
   if (!isLoomDev()) return []; // dev-only Platform layer — never seeds for regular loomctl users
-  // NAME-SCOPED idempotency: gate on THIS home's name, not "any reserved project" — the ungated
-  // "Getting Started" setup home (seedSetupHome) is also a reserved project, so a name-agnostic check
-  // would let either home silently suppress the other's seed. Behavior unchanged when this is the only home.
-  if (db.hasReservedProjectNamed(PLATFORM_PROJECT_NAME)) return []; // already seeded — never clobber user edits
+  // STABLE-MARKER idempotency (card a47dd144, resolvePlatformHome): gate on THIS home's own marker,
+  // falling back to its name — never "any reserved project" — the ungated "Platform" setup home
+  // (seedSetupHome) is also reserved, so a name-agnostic check would let either home silently suppress
+  // the other's seed, and a NAME-ONLY gate would miss a renamed home and mint a second one. Behavior
+  // unchanged when this is the only home.
+  if (resolvePlatformHome(db)) return []; // already seeded — never clobber user edits
 
   const now = new Date().toISOString();
   const project: Project = {
@@ -167,6 +201,7 @@ export function seedPlatformHome(db: Db): string[] {
     vaultOnly: true, // reserved home: repoPath and vaultPath both bind the same folder, no separate repo
   };
   db.insertProject(project);
+  db.setMeta(PLATFORM_HOME_PROJECT_ID_KEY, project.id); // stamp the stable marker now — survives any later rename
 
   const profilesByName = new Map(db.listProfiles().map((p) => [p.name, p]));
   const seeded: string[] = [`project:${project.name}`];

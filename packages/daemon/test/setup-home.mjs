@@ -12,6 +12,22 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       is UNCHANGED (regression: still the "Loom Platform" project + its TWO agents).
 //   (3) THE BUG THE FIX PREVENTS: the OLD name-agnostic hasReservedProject() is true after EITHER seed, so
 //       it would have silently skipped the second home. The name-scoped gate lets the other home still seed.
+//   (7)-(11) card a47dd144: both homes now resolve by a STABLE app_meta id marker, not their `name` — a
+//       human CAN rename a reserved project's name (only repoPath rebind/archive/delete are refused), so
+//       the OLD name-only gate would mint a duplicate home after a rename. Proves the marker survives a
+//       rename for both homes, backfills correctly for a pre-marker existing install, and self-heals from
+//       a stale/mis-stamped/colliding marker (never skips creation or attaches to the wrong project).
+//   (12) card a47dd144 ROUND 2, fix #1: the id-collision check alone misses a marker mis-stamped to the
+//       OTHER home's row when that OTHER home's OWN marker was never stamped (nothing to collide
+//       against by id) — resolveReservedHomeByMarker now ALSO rejects a marked row named for the other
+//       home. RED on a22d42ce: a mis-stamped setup marker pointing at "Loom Platform" (no platform
+//       marker yet) used to be trusted as the setup home, silently attaching the Workspace Auditor to
+//       "Loom Platform" instead of minting the real setup home.
+//   (13) card a47dd144 ROUND 2, fix #2: the name-match fallback now uses the ARCHIVE-AGNOSTIC
+//       getReservedProjectByNameIncludingArchived, matching the pre-marker hasReservedProjectNamed gate
+//       it replaces. RED on a22d42ce: a pre-marker install whose reserved home was archived was
+//       invisible to the LIVE-only getReservedProjectByName fallback, so the seeder minted a second,
+//       live home beside the archived one instead of treating it as already-seeded.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/setup-home.mjs
 import fs from "node:fs";
@@ -37,6 +53,7 @@ const { Db } = await import("../dist/db.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const { seedPlatformHome, PLATFORM_PROJECT_NAME } = await import("../dist/platform/seed.js");
 const { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, SETUP_PROJECT_NAME, SETUP_AGENT_NAME, SETUP_AUDITOR_AGENT_NAME } = await import("../dist/setup/seed.js");
+const { SETUP_HOME_PROJECT_ID_KEY, PLATFORM_HOME_PROJECT_ID_KEY } = await import("../dist/projects/reserved-home-markers.js");
 const now = new Date().toISOString();
 const { isLoomDev } = await import("../dist/paths.js");
 
@@ -346,11 +363,222 @@ try {
   check("(6f) the renamed home is the SAME row (id stable) and still holds its operator agent",
     dbN.getReservedProjectByName(SETUP_PROJECT_NAME)?.id === preHomeId && dbN.listAgents(preHomeId).some((a) => a.name === SETUP_AGENT_NAME));
   dbN.close();
+
+  // ===================== (7) card a47dd144 — STABLE MARKER survives a human rename (setup) ============
+  // THE BUG THIS CARD FIXES: a human CAN rename a reserved project's `name` via PATCH /api/projects/:id
+  // (only repoPath rebind/archive/delete are refused for `p.reserved`). The OLD idempotency gate
+  // (db.hasReservedProjectNamed(SETUP_PROJECT_NAME)) would then be FALSE on the next boot and mint a
+  // SECOND, empty "Platform" home. RED on pre-fix code: seedSetupHome used to re-create here.
+  const dbO = new Db(path.join(tmpHome, "marker-rename.db"));
+  seedDefaultProfiles(dbO);
+  seedSetupHome(dbO);
+  const homeO = dbO.getReservedProjectByName(SETUP_PROJECT_NAME);
+  check("(7) the stable marker is stamped to the home's id at creation", dbO.getMeta(SETUP_HOME_PROJECT_ID_KEY) === homeO.id);
+  dbO.updateProject(homeO.id, { name: "My Renamed Platform" }); // simulates the human REST rename
+  check("(7) the OLD name-scoped signal is now false after the rename (why the old gate would double-seed)",
+    dbO.hasReservedProjectNamed(SETUP_PROJECT_NAME) === false);
+  const reseedO = seedSetupHome(dbO);
+  check("(7) re-seedSetupHome after a rename does NOT mint a duplicate (returns [])", reseedO.length === 0);
+  check("(7) still exactly ONE reserved project after the rename + re-seed", dbO.listAllProjects().filter((p) => p.reserved).length === 1);
+  check("(7) a same-file lookup (seedSetupAuditorAgent) also resolves the RENAMED home, not a phantom one",
+    seedSetupAuditorAgent(dbO) === SETUP_AUDITOR_AGENT_NAME && dbO.listAgents(homeO.id).some((a) => a.name === SETUP_AUDITOR_AGENT_NAME));
+  check("(7) still exactly ONE reserved project after attaching the auditor", dbO.listAllProjects().filter((p) => p.reserved).length === 1);
+  dbO.close();
+
+  // ===================== (8) card a47dd144 — BACKFILL for a pre-marker existing install (setup) =======
+  // Simulates upgrading from a version before this fix: the home exists (seeded the OLD way, so no
+  // marker was ever stamped). seedSetupHome must still no-op (name match) AND backfill the marker, so a
+  // LATER rename (post-upgrade) doesn't reopen the double-seed hole.
+  const dbP = new Db(path.join(tmpHome, "marker-backfill.db"));
+  seedDefaultProfiles(dbP);
+  const preMarkerHomeId = "pre-marker-home";
+  dbP.insertProject({ id: preMarkerHomeId, name: SETUP_PROJECT_NAME, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  check("(8) a pre-marker install genuinely has no marker yet", dbP.getMeta(SETUP_HOME_PROJECT_ID_KEY) === undefined);
+  const seedP1 = seedSetupHome(dbP);
+  check("(8) seedSetupHome no-ops on the pre-marker home (name match) AND backfills the marker",
+    seedP1.length === 0 && dbP.getMeta(SETUP_HOME_PROJECT_ID_KEY) === preMarkerHomeId);
+  dbP.updateProject(preMarkerHomeId, { name: "Something Else Entirely" }); // the post-upgrade human rename
+  const seedP2 = seedSetupHome(dbP);
+  check("(8) a LATER rename after the backfill still does not cause a double-seed (marker survives it)",
+    seedP2.length === 0 && dbP.listAllProjects().filter((p) => p.reserved).length === 1);
+  dbP.close();
+
+  // ===================== (9) card a47dd144 — STABLE MARKER survives a human rename (platform) =========
+  // The exact mirror of (7) for the dev-only platform home. LOOM_DEV is already "1" from phase (2) on.
+  const dbQ = new Db(path.join(tmpHome, "marker-rename-platform.db"));
+  seedDefaultProfiles(dbQ);
+  seedPlatformHome(dbQ);
+  const platQ = dbQ.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+  check("(9) the platform marker is stamped to the home's id at creation", dbQ.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === platQ.id);
+  dbQ.updateProject(platQ.id, { name: "Renamed Platform Home" });
+  check("(9) the OLD name-scoped signal is now false after the rename", dbQ.hasReservedProjectNamed(PLATFORM_PROJECT_NAME) === false);
+  const reseedQ = seedPlatformHome(dbQ);
+  check("(9) re-seedPlatformHome after a rename does NOT mint a duplicate (RED on pre-fix code)", reseedQ.length === 0);
+  check("(9) still exactly ONE reserved project after the rename + re-seed", dbQ.listAllProjects().filter((p) => p.reserved).length === 1);
+  dbQ.close();
+
+  // ===================== (10) card a47dd144 — BACKFILL for a pre-marker existing install (platform) ====
+  const dbR = new Db(path.join(tmpHome, "marker-backfill-platform.db"));
+  seedDefaultProfiles(dbR);
+  const preMarkerPlatId = "pre-marker-platform";
+  dbR.insertProject({ id: preMarkerPlatId, name: PLATFORM_PROJECT_NAME, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  check("(10) a pre-marker platform install genuinely has no marker yet", dbR.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === undefined);
+  const seedR1 = seedPlatformHome(dbR);
+  check("(10) seedPlatformHome no-ops on the pre-marker home AND backfills the marker",
+    seedR1.length === 0 && dbR.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === preMarkerPlatId);
+  dbR.updateProject(preMarkerPlatId, { name: "Something Else" });
+  const seedR2 = seedPlatformHome(dbR);
+  check("(10) a LATER rename after the backfill still does not cause a double-seed (platform)",
+    seedR2.length === 0 && dbR.listAllProjects().filter((p) => p.reserved).length === 1);
+  dbR.close();
+
+  // ===================== (11) card a47dd144 review condition — MARKER VALIDATION ========================
+  // A stale/mis-stamped/colliding marker must never make a seeder skip creation or attach agents to the
+  // wrong project. No OLD-code equivalent exists (the old gate never read any marker at all) — this is
+  // new coverage for the new validation branch in resolveReservedHomeByMarker, not a RED-on-old-code case.
+  const dbS = new Db(path.join(tmpHome, "marker-validate.db"));
+  seedDefaultProfiles(dbS);
+  seedSetupHome(dbS);
+  seedPlatformHome(dbS);
+  const setupS = dbS.getReservedProjectByName(SETUP_PROJECT_NAME);
+  const platS = dbS.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+
+  // (11a) COLLISION: mis-stamp setup's marker with the PLATFORM home's id.
+  dbS.setMeta(SETUP_HOME_PROJECT_ID_KEY, platS.id);
+  check("(11a) setup still resolves ITS OWN home despite a marker collision with the platform home's id",
+    seedSetupHome(dbS).length === 0 && dbS.listAllProjects().filter((p) => p.reserved).length === 2);
+  check("(11a) the collision self-heals: setup's marker is re-stamped back to the setup home's own id",
+    dbS.getMeta(SETUP_HOME_PROJECT_ID_KEY) === setupS.id);
+  check("(11a) a same-file lookup (seedSetupAuditorAgent) also resolves the CORRECT (setup) home despite the collision",
+    seedSetupAuditorAgent(dbS) === SETUP_AUDITOR_AGENT_NAME && dbS.listAgents(setupS.id).some((a) => a.name === SETUP_AUDITOR_AGENT_NAME));
+
+  // (11b) NONEXISTENT: setup's marker points at a project id that doesn't exist at all.
+  dbS.setMeta(SETUP_HOME_PROJECT_ID_KEY, "does-not-exist");
+  check("(11b) a marker pointing at a nonexistent project id falls back to the name match (no double-seed)",
+    seedSetupHome(dbS).length === 0 && dbS.getMeta(SETUP_HOME_PROJECT_ID_KEY) === setupS.id);
+
+  // (11c) NOT RESERVED: setup's marker points at an ORDINARY (non-reserved) project.
+  dbS.insertProject({ id: "ordinary-collide", name: "RealWork3", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  dbS.setMeta(SETUP_HOME_PROJECT_ID_KEY, "ordinary-collide");
+  check("(11c) a marker pointing at a NON-reserved project is rejected and falls back to the name match",
+    seedSetupHome(dbS).length === 0 && dbS.getMeta(SETUP_HOME_PROJECT_ID_KEY) === setupS.id);
+  dbS.close();
+
+  // (11d-f) the EXACT mirror of (11a-c), the other direction (platform's marker validated against setup's).
+  const dbT = new Db(path.join(tmpHome, "marker-validate-platform.db"));
+  seedDefaultProfiles(dbT);
+  seedSetupHome(dbT);
+  seedPlatformHome(dbT);
+  const setupT = dbT.getReservedProjectByName(SETUP_PROJECT_NAME);
+  const platT = dbT.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+
+  dbT.setMeta(PLATFORM_HOME_PROJECT_ID_KEY, setupT.id);
+  check("(11d) platform still resolves ITS OWN home despite a marker collision with the setup home's id",
+    seedPlatformHome(dbT).length === 0 && dbT.listAllProjects().filter((p) => p.reserved).length === 2);
+  check("(11d) the collision self-heals: platform's marker is re-stamped back to the platform home's own id",
+    dbT.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === platT.id);
+
+  dbT.setMeta(PLATFORM_HOME_PROJECT_ID_KEY, "does-not-exist");
+  check("(11e) a marker pointing at a nonexistent project id falls back to the name match (platform)",
+    seedPlatformHome(dbT).length === 0 && dbT.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === platT.id);
+
+  dbT.insertProject({ id: "ordinary-collide-2", name: "RealWork4", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  dbT.setMeta(PLATFORM_HOME_PROJECT_ID_KEY, "ordinary-collide-2");
+  check("(11f) a marker pointing at a NON-reserved project is rejected and falls back to the name match (platform)",
+    seedPlatformHome(dbT).length === 0 && dbT.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === platT.id);
+  dbT.close();
+
+  // ===================== (12) card a47dd144 ROUND 2 fix #1 — NAME collision when the OTHER marker is
+  // UNSET ====================================================================================
+  // The id-collision check (`markedId !== otherId`) alone is blind here: when the OTHER home's marker was
+  // NEVER stamped, otherId is undefined, and any real id string !== undefined — so a marker mis-stamped to
+  // the OTHER home's row used to pass validation and be trusted. RED on a22d42ce.
+
+  // (12a) setup's marker mis-stamped to the (pre-marker, unmarked) "Loom Platform" row.
+  const dbU = new Db(path.join(tmpHome, "marker-name-collision.db"));
+  seedDefaultProfiles(dbU);
+  const preMarkerPlatId2 = "pre-marker-platform-2";
+  dbU.insertProject({ id: preMarkerPlatId2, name: PLATFORM_PROJECT_NAME, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  check("(12a) the 'Loom Platform' home exists with NO platform marker stamped yet", dbU.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === undefined);
+  dbU.setMeta(SETUP_HOME_PROJECT_ID_KEY, preMarkerPlatId2); // mis-stamp: setup's marker points at the platform home
+  const seededU = seedSetupHome(dbU);
+  check("(12a) seedSetupHome does NOT trust a setup marker pointing at the platform home (mints the real setup home instead of no-opping)",
+    seededU.length > 0);
+  check("(12a) exactly TWO reserved homes now (the platform home + the freshly seeded real setup home)",
+    dbU.listAllProjects().filter((p) => p.reserved).length === 2);
+  const seededAudU = seedSetupAuditorAgent(dbU);
+  check("(12a) seedSetupAuditorAgent attaches the auditor to the REAL setup home", seededAudU === SETUP_AUDITOR_AGENT_NAME);
+  check("(12a) the 'Loom Platform' home gets NO Workspace Auditor (or any) agent attached — not mistaken for the setup home",
+    dbU.listAgents(preMarkerPlatId2).length === 0);
+  const realSetupHomeU = dbU.getReservedProjectByName(SETUP_PROJECT_NAME);
+  check("(12a) the Workspace Auditor landed on the real 'Platform' setup home",
+    !!realSetupHomeU && dbU.listAgents(realSetupHomeU.id).some((a) => a.name === SETUP_AUDITOR_AGENT_NAME));
+  check("(12a) the setup marker self-heals to the real setup home's id, not the mis-stamped platform id",
+    !!realSetupHomeU && dbU.getMeta(SETUP_HOME_PROJECT_ID_KEY) === realSetupHomeU.id);
+  dbU.close();
+
+  // (12b) the exact mirror: platform's marker mis-stamped to the (pre-marker, unmarked) "Platform" setup row.
+  const dbV = new Db(path.join(tmpHome, "marker-name-collision-platform.db"));
+  seedDefaultProfiles(dbV);
+  const preMarkerSetupId2 = "pre-marker-setup-2";
+  dbV.insertProject({ id: preMarkerSetupId2, name: SETUP_PROJECT_NAME, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  check("(12b) the 'Platform' setup home exists with NO setup marker stamped yet", dbV.getMeta(SETUP_HOME_PROJECT_ID_KEY) === undefined);
+  dbV.setMeta(PLATFORM_HOME_PROJECT_ID_KEY, preMarkerSetupId2); // mis-stamp: platform's marker points at the setup home
+  const seededPlatV = seedPlatformHome(dbV);
+  check("(12b) seedPlatformHome does NOT trust a platform marker pointing at the setup home (mints the real platform home instead of no-opping)",
+    seededPlatV.length > 0);
+  check("(12b) the setup home gets NO Platform Lead/Auditor agents attached — not mistaken for the platform home",
+    dbV.listAgents(preMarkerSetupId2).length === 0);
+  const realPlatHomeV = dbV.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+  check("(12b) the platform marker self-heals to the real platform home's id, not the mis-stamped setup id",
+    !!realPlatHomeV && dbV.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === realPlatHomeV.id);
+  dbV.close();
+
+  // ===================== (13) card a47dd144 ROUND 2 fix #2 — an ARCHIVED home must still count as
+  // already-seeded ==========================================================================
+  // The name-match fallback used the LIVE-only getReservedProjectByName, regressing the archive-agnostic
+  // never-clobber behavior the old hasReservedProjectNamed gate had. RED on a22d42ce.
+
+  // (13a) setup: a pre-marker reserved home that is ARCHIVED.
+  const dbW = new Db(path.join(tmpHome, "marker-archived-fallback.db"));
+  seedDefaultProfiles(dbW);
+  const archivedHomeId = "archived-setup-home";
+  dbW.insertProject({ id: archivedHomeId, name: SETUP_PROJECT_NAME, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: now, reserved: true });
+  check("(13a) the pre-marker reserved home exists but is ARCHIVED, and carries no marker yet",
+    dbW.getProject(archivedHomeId)?.archivedAt === now && dbW.getMeta(SETUP_HOME_PROJECT_ID_KEY) === undefined);
+  check("(13a) the archive-agnostic hasReservedProjectNamed still sees it (the gate the OLD pre-marker code used)",
+    dbW.hasReservedProjectNamed(SETUP_PROJECT_NAME) === true);
+  check("(13a) the LIVE-only getReservedProjectByName does NOT see it (why the fallback needed to change)",
+    dbW.getReservedProjectByName(SETUP_PROJECT_NAME) === undefined);
+  check("(13a) the new archive-agnostic getReservedProjectByNameIncludingArchived DOES see it",
+    dbW.getReservedProjectByNameIncludingArchived?.(SETUP_PROJECT_NAME)?.id === archivedHomeId);
+  const seededW = seedSetupHome(dbW);
+  check("(13a) seedSetupHome treats the archived home as already-seeded and does NOT mint a second, live one (returns [])",
+    seededW.length === 0);
+  check("(13a) still exactly ONE reserved home (the archived one) — no duplicate minted (listAllProjects() excludes archived rows, so this uses listAllProjectsIncludingArchived instead)",
+    dbW.listAllProjectsIncludingArchived().filter((p) => p.reserved).length === 1);
+  check("(13a) the marker backfills to the archived home's id", dbW.getMeta(SETUP_HOME_PROJECT_ID_KEY) === archivedHomeId);
+  dbW.close();
+
+  // (13b) the exact mirror for the platform home.
+  const dbX = new Db(path.join(tmpHome, "marker-archived-fallback-platform.db"));
+  seedDefaultProfiles(dbX);
+  const archivedPlatId = "archived-platform-home";
+  dbX.insertProject({ id: archivedPlatId, name: PLATFORM_PROJECT_NAME, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: now, reserved: true });
+  check("(13b) the pre-marker platform home exists but is ARCHIVED, and carries no marker yet",
+    dbX.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === undefined);
+  const seededPlatX = seedPlatformHome(dbX);
+  check("(13b) seedPlatformHome treats the archived home as already-seeded and does NOT mint a second, live one (returns [])",
+    seededPlatX.length === 0);
+  check("(13b) still exactly ONE reserved home (platform, archived) — no duplicate minted (listAllProjectsIncludingArchived, same reason as 13a)",
+    dbX.listAllProjectsIncludingArchived().filter((p) => p.reserved).length === 1);
+  check("(13b) the marker backfills to the archived platform home's id", dbX.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === archivedPlatId);
+  dbX.close();
 } finally {
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the ungated 'Platform' setup home + 'Platform' operator agent seed for every user (no LOOM_DEV gate), idempotently across reboots, COEXIST with the dev-only 'Loom Platform' home (name-scoped gate; platform seeding unchanged at 2 agents); the A2 guarded rename backfills a pre-rebrand 'Setup Assistant' operator → 'Platform' while leaving user-renamed + non-reserved-home agents untouched; the B4 seedSetupAuditorAgent backfill seeds a 2nd 'Workspace Auditor' agent into the SAME home (fresh + existing installs), idempotently, never clobbering a user edit and scoped to the reserved home by name; and the 'Getting Started' → 'Platform' home rename migration backfills an existing install's reserved home IN PLACE (idempotent, collision-refusing, reserved-scoped, no-op on fresh/user-renamed/absent homes), with the boot order (rename THEN seed) never minting a duplicate home."
+  ? "\n✅ ALL PASS — the ungated 'Platform' setup home + 'Platform' operator agent seed for every user (no LOOM_DEV gate), idempotently across reboots, COEXIST with the dev-only 'Loom Platform' home (gate unchanged at 2 agents); the A2 guarded rename backfills a pre-rebrand 'Setup Assistant' operator → 'Platform' while leaving user-renamed + non-reserved-home agents untouched; the B4 seedSetupAuditorAgent backfill seeds a 2nd 'Workspace Auditor' agent into the SAME home (fresh + existing installs), idempotently, never clobbering a user edit; the 'Getting Started' → 'Platform' home rename migration backfills an existing install's reserved home IN PLACE (idempotent, collision-refusing, reserved-scoped, no-op on fresh/user-renamed/absent homes), with the boot order (rename THEN seed) never minting a duplicate home; (card a47dd144) both reserved homes now resolve by a STABLE app_meta id marker, not their `name` — surviving a human rename of either home without minting a duplicate, backfilling the marker for a pre-marker existing install, and self-healing from a stale/mis-stamped/colliding marker; and (card a47dd144 round 2) the collision check also rejects a marker mis-stamped to the OTHER home's row even when that other home's OWN marker was never stamped (name-collision, not just id-collision), and the name-match fallback is archive-agnostic, so an ARCHIVED legacy home still counts as already-seeded rather than growing a second, live duplicate beside it."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

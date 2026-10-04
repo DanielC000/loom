@@ -3228,7 +3228,8 @@ export class Db {
    * /api/platform/home + /api/setup/home discovery routes, platformEscalate, auditFileFinding) resolve by
    * THIS, keyed to the home's own name. EXCLUDES archived (archived_at IS NULL) — mirroring the
    * listAllProjects()-based lookups it replaces, so an (impossible-in-prod) archived reserved home is
-   * never returned/targeted. For the seed idempotency gate use hasReservedProjectNamed (archive-agnostic).
+   * never returned/targeted. For the seed idempotency gate use hasReservedProjectNamed (archive-agnostic),
+   * or getReservedProjectByNameIncludingArchived when the archived ROW itself is needed.
    */
   getReservedProjectByName(name: string): Project | undefined {
     const r = this.db.prepare("SELECT * FROM projects WHERE reserved = 1 AND name = ? AND archived_at IS NULL").get(name) as Row | undefined;
@@ -3237,6 +3238,22 @@ export class Db {
   /** True iff a reserved/system project with this exact name exists — the per-home idempotency gate. */
   hasReservedProjectNamed(name: string): boolean {
     return !!this.db.prepare("SELECT 1 FROM projects WHERE reserved = 1 AND name = ? LIMIT 1").get(name);
+  }
+  /**
+   * The archive-agnostic twin of {@link getReservedProjectByName} (card a47dd144 round 2): returns the
+   * reserved project with this exact name REGARDLESS of archive state, matching
+   * `hasReservedProjectNamed`'s own archive-agnostic contract rather than the live-only one. Needed by
+   * `resolveReservedHomeByMarker`'s name-match fallback — using the live-only getter there regressed the
+   * old (pre-marker) never-clobber behavior: an archived legacy home would be invisible to the fallback,
+   * so a seeder would mint a brand-new live home beside it instead of treating the archived one as
+   * already-seeded. Prefers a live row over an archived one if (impossible-in-prod) both exist under the
+   * same name.
+   */
+  getReservedProjectByNameIncludingArchived(name: string): Project | undefined {
+    const r = this.db.prepare(
+      "SELECT * FROM projects WHERE reserved = 1 AND name = ? ORDER BY (archived_at IS NULL) DESC, created_at DESC LIMIT 1",
+    ).get(name) as Row | undefined;
+    return r ? toProject(r) : undefined;
   }
   getProject(id: string): Project | undefined {
     const r = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Row | undefined;
