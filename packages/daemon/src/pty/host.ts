@@ -11919,14 +11919,17 @@ export class PtyHost {
   }
 
   stop(sessionId: string, mode: StopMode, opts?: { shell?: boolean }): boolean | void {
+    // @decision 710a34fa — a host shell is torn down ONLY via DELETE /api/terminals/:id ({shell:true});
+    // every other caller (incl. POST /api/sessions/:id/stop) is refused (false), never killed. Checked
+    // BEFORE dispatching to either harness — a CodexLive entry is never kind "shell", so {shell:true} refuses it too, same as a claude one.
     const liveCodexEntry = this.liveCodex.get(sessionId);
-    if (liveCodexEntry) { this.stopCodex(sessionId, liveCodexEntry, mode); return; }
+    if (liveCodexEntry) {
+      if (opts?.shell === true) return false;
+      this.stopCodex(sessionId, liveCodexEntry, mode);
+      return;
+    }
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
-    // @decision 710a34fa — a host shell is torn down ONLY by its own loopback route (DELETE /api/terminals/:id,
-    // which passes {shell:true}); every session-facing caller (incl. the Tier-1 POST /api/sessions/:id/stop)
-    // gets a refusal (false), never a kill.
-    // `{shell:true}` is a claim the entry really IS a shell: DELETE /api/terminals/<agent-session-id> must not hard-kill an agent.
     if ((live.kind === "shell") !== (opts?.shell === true)) return false;
     // A Stop intent must NOT be defeated by a queued inbound turn re-arming busy. Mark the session
     // STOPPING (drainPending/enqueueStdin then refuse to submit a new turn) and CLEAR the held queue,
