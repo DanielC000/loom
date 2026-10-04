@@ -1234,7 +1234,9 @@ export function bundledSkillAssetsDir(): string {
  * UI edit becomes committable (the human commits — this never commits). RESTRICTED to names that
  * already exist as a bundled asset; it won't mint a new asset dir for a user-created skill.
  * Returns false if the skill has no bundled asset or no store SKILL.md.
- * HUMAN-only (REST) — like the vault/git writers, NO agent MCP tool exposes this.
+ * Reached via human REST (`POST /api/skills/:name/publish`) AND, same exception as the git/vault writers,
+ * the dev Platform Lead's elevated `skill_write` MCP tool (mcp/skillTools.ts's `allowBundledAsset:true`
+ * branch, mounted on loom-platform only) — no OTHER agent MCP tool exposes this.
  */
 export function publishSkillToBundled(name: string): boolean {
   if (!isValidSkillName(name)) return false;

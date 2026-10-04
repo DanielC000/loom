@@ -23,13 +23,14 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * ║ The workspace Auditor ingests UNTRUSTED transcript content (a prompt-injection surface: "ignore your ║
  * ║ instructions and push to …"). This router is gated to role==="workspace-auditor" ONLY and exposes    ║
  * ║ NOTHING but cross-project READS (the SAME shared list_sessions/transcript_read the dev Auditor uses —║
- * ║ mcp/transcript-read.ts — plus the agent-prompt / skill-text READS it critiques against, plus the     ║
- * ║ OWN-PROJECT-CONFINED source reads below) + a small, fully-confined set of INERT, DEDUPE/SERVER-       ║
+ * ║ mcp/transcript-read.ts — plus the agent-prompt / skill-text READS it critiques against, plus the      ║
+ * ║ PER-CALL, PROJECT-SCOPED source reads below) + a small, fully-confined set of INERT, DEDUPE/SERVER-   ║
  * ║ RESOLVED daemon-local writes + ONE confined outward nudge — and is fail-closed by construction (a     ║
  * ║ tool not registered here cannot be reached):                                                          ║
- * ║   0. repo_read_file / repo_grep / repo_glob → READ-ONLY reads over ONE project's source tree, scoped  ║
- * ║      PER CALL by a caller-supplied `projectId` resolved SERVER-SIDE to that project's OWN `repoPath`   ║
- * ║      (never another project's root — reuses `registerScopedRepoReadTools`, mcp/repo-read.ts, the SAME  ║
+ * ║   0. repo_read_file / repo_grep / repo_glob → READ-ONLY reads over ONE project's source tree PER CALL,║
+ * ║      scoped by a caller-supplied `projectId` — ANY project registered on this daemon, resolved         ║
+ * ║      SERVER-SIDE to that project's OWN `repoPath` (the read can never escape that resolved root to an  ║
+ * ║      arbitrary host path — reuses `registerScopedRepoReadTools`, mcp/repo-read.ts, the SAME            ║
  * ║      confinement gate + bound constants as the dev Auditor's fixed-root repo_* tools). An unknown      ║
  * ║      projectId or a project with no readable repo root is a clean {error}, never a crash or an         ║
  * ║      arbitrary-host-file read. Pure reads: no write, no exec/shell, no git mutation.                   ║

@@ -16,25 +16,29 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  *   - `registerRepoReadTools` — the DEV Platform Auditor's fixed-root surface over the Loom SOURCE tree
  *     (`paths.ts > loomRepoRoot`), so the Auditor — otherwise transcript-only and STRUCTURALLY BLIND to
  *     silent code gaps — can run a code-structure gap-hunt (see the 7 lenses in the platform-audit skill).
- *   - `registerScopedRepoReadTools` — the END-USER Workspace Auditor's PER-CALL, `projectId`-scoped surface
- *     over the CALLER'S OWN project repo (root resolved by the caller-supplied `resolveRoot`, e.g. from
- *     `db.getProject(projectId).repoPath`), for the same structural gap-hunt over the user's own source.
+ *   - `registerScopedRepoReadTools` — the END-USER Workspace Auditor's PER-CALL, `projectId`-scoped surface:
+ *     each call names ANY project registered on this daemon (root resolved by the caller-supplied
+ *     `resolveRoot`, e.g. from `db.getProject(projectId).repoPath`) — cross-project by design, matching this
+ *     Auditor's cross-project transcript reads, never restricted to one fixed project across calls. What's
+ *     actually confined is WITHIN a single call: that call's resolved root, never an escape off of it.
  *
  * == STAYS INSIDE THE TRUST BOUNDARY ==================================================================
  * These are PURE READS, hard-confined to their resolved root and hard-bounded, with NO host-process spawn:
  *   - Every path is CONFINED to the resolved root — a relative path that escapes it (via `..`, an absolute
  *     path, or a symlink pointing outside) is REFUSED, so `repo_read_file` / `repo_grep` / `repo_glob`
- *     themselves can never resolve to an arbitrary host file (e.g. `~/.ssh/id_rsa`, the prod DB, another
- *     project's source). This confinement belongs to these three tools, not to the calling SESSION as a
- *     whole — an auditor session's own native Bash/Read/Write is unconfined and sits outside this module
- *     entirely; it is simply never the sanctioned path for the read job these tools exist to do.
+ *     themselves can never resolve to an arbitrary host file (e.g. `~/.ssh/id_rsa`, the prod DB) outside
+ *     whichever root was resolved for that call. This confinement belongs to these three tools, not to the
+ *     calling SESSION as a whole — an auditor session's own native Bash/Read/Write is unconfined and sits
+ *     outside this module entirely; it is simply never the sanctioned path for the read job these tools
+ *     exist to do.
  *   - grep/glob are pure in-process `fs` reads + a translated RegExp — NEVER `git grep` / `rg` / any child
  *     process. There is no shell, no exec, nothing outward.
  *   - Hard bounds cap every read (file bytes, returned lines, match count, files walked) so a huge or
  *     hostile tree can't blow the tool-result budget or wedge the daemon.
  * NO WRITE lives here — this module only ADDS reads. `registerRepoReadTools` is registered ONLY on the dev
  * AuditMcpRouter; `registerScopedRepoReadTools` is registered ONLY on the end-user WorkspaceAuditMcpRouter,
- * confined to the CALLING project's own repo root — never another project's root — the dev<->user split.
+ * each call confined to that call's own resolved `projectId` root — never an escape off of it — the
+ * dev<->user split.
  * ====================================================================================================
  */
 
@@ -340,8 +344,9 @@ export function registerRepoReadTools(server: McpServer): void {
 export type ScopedRootResolution = { root: string } | { error: string };
 
 /**
- * Resolve the tools' root PER CALL from the caller-supplied `projectId` (own-project confinement — the
- * caller can never name another project's root). `resolveRoot` typically wraps `db.getProject(projectId)`.
+ * Resolve the tools' root PER CALL from the caller-supplied `projectId` — the caller may name ANY project
+ * registered on this daemon (cross-project by design); what's confined is the resulting READ, which can
+ * never escape that resolved root. `resolveRoot` typically wraps `db.getProject(projectId)`.
  */
 export type ScopedRootResolver = (projectId: string) => ScopedRootResolution;
 
@@ -357,10 +362,11 @@ export function registerScopedRepoReadTools(server: McpServer, resolveRoot: Scop
     "repo_read_file",
     {
       description:
-        "Read ONE text file from YOUR OWN project's source tree (read-only, code-awareness for the " +
-        "structural gap-hunt). `projectId` names the project (from list_sessions); `path` is RELATIVE to " +
-        "that project's repo root — an absolute path or a `..` escape is refused (you can only read inside " +
-        "the named project's own repo root, never another project's root or an arbitrary host file). " +
+        "Read ONE text file from a project's source tree — `projectId` names ANY project registered on this " +
+        "daemon (from list_sessions), read-only, code-awareness for the structural gap-hunt. `path` is " +
+        "RELATIVE to that project's repo root — an absolute path or a `..` escape is refused (you can only " +
+        "read inside the NAMED project's own repo root for THIS call, never escape it to an arbitrary host " +
+        "file). " +
         "Returns {path, totalLines, offset, lines, nextOffset}: `lines` is a 0-based window (`offset`, up to " +
         `${MAX_READ_LINES} lines), and \`nextOffset\` is the next index to page from (null when the file is ` +
         "exhausted). Binary or oversized (>512 KiB) files are refused with {error}, as is an unknown " +
@@ -385,9 +391,9 @@ export function registerScopedRepoReadTools(server: McpServer, resolveRoot: Scop
     "repo_grep",
     {
       description:
-        "Search YOUR OWN project's source tree for a JS RegExp `pattern`, returning matching lines as " +
+        "Search a project's source tree for a JS RegExp `pattern`, returning matching lines as " +
         "{file, line, text} (read-only; in-process — NEVER shells out to git grep / rg). `projectId` names " +
-        "the project (from list_sessions). Narrow with an optional `glob` (e.g. \"src/**/*.ts\") matched " +
+        "ANY project registered on this daemon (from list_sessions). Narrow with an optional `glob` (e.g. \"src/**/*.ts\") matched " +
         "against the project-relative path; `ignoreCase` for a case-insensitive search. Skips " +
         "node_modules/.git/dist and binary/oversized files. Capped at " +
         `${MAX_GREP_MATCHES} matches (\`capped:true\` when it hit the cap — tighten the pattern/glob). ` +
@@ -417,8 +423,8 @@ export function registerScopedRepoReadTools(server: McpServer, resolveRoot: Scop
     "repo_glob",
     {
       description:
-        "List files in YOUR OWN project's source tree whose project-relative POSIX path matches a " +
-        "`pattern` (read-only). `projectId` names the project (from list_sessions). Supports `**` " +
+        "List files in a project's source tree whose project-relative POSIX path matches a " +
+        "`pattern` (read-only). `projectId` names ANY project registered on this daemon (from list_sessions). Supports `**` " +
         "(cross-directory), `*`, `?` — e.g. \"src/mcp/*.ts\" or \"**/*.test.mjs\". Skips " +
         "node_modules/.git/dist. Discovery order is not guaranteed; capped at " +
         `${MAX_GLOB_RESULTS} paths (\`capped:true\` when it hit the cap). Returns {matches, capped} of ` +

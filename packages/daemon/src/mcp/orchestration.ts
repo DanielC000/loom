@@ -1140,8 +1140,10 @@ const toDesiredColumn = (c: KanbanColumn): DesiredColumn => {
  * Orchestration MCP server (phase-2 §A2/§A3) — a ROLE-BASED surface, keyed by the URL-path
  * session id and resolved SERVER-SIDE (the agent never names "which session"):
  *   - manager → the full coordination surface (list/status/transcript/spawn/stop/message);
- *   - worker  → worker_report + the read-only my_context ONLY (so a worker CANNOT spawn/list/stop —
- *               the depth-1 tree holds at the tool surface, not just the role gate);
+ *   - worker  → worker_report, my_context, its own run_gate/gate_cancel/gate_status/gate_queue self-check
+ *               surface, and the read-only directive_status — but NEVER spawn/list/stop (so a worker
+ *               cannot spawn/list/stop a sibling — the depth-1 tree holds at the tool surface, not just
+ *               the role gate);
  *   - plain/unknown → 404 (no surface).
  * Stateless: a fresh McpServer+transport per request (the URL-path session id supplies the role
  * binding). No cached transport, so a dropped stream can't wedge the surface mid-session.
@@ -6011,7 +6013,9 @@ export class OrchestrationMcpRouter {
           "name; optional `role` assigns it a lifecycle role (intake/defaultLanding/workReady/active/review/" +
           "parked/terminal/mergeLanding) — at most one column may hold a given role (except a NEW column " +
           "can't claim defaultLanding/terminal since exactly one column must already hold each of those; " +
-          "reassign via board_column_rename on the existing holder first if you want to move one). The new " +
+          "board_column_rename has no `role` param and always preserves a column's existing role, so moving " +
+          "defaultLanding/terminal off its current holder is HUMAN-only, via the board UI column editor — " +
+          "no agent MCP tool can do it). The new " +
           "column is appended after the existing ones. Delegates to the SAME atomic writer the human column " +
           "editor uses — every existing card is untouched. Returns {ok:true, columns, warnings} or " +
           "{ok:false, error} on a hard reject (e.g. a duplicate key).",
@@ -6063,8 +6067,9 @@ export class OrchestrationMcpRouter {
           "Delete a board column in YOUR project. `key` must name an EXISTING column. Every card still on " +
           "it is re-keyed to the board's defaultLanding column (never orphaned) — the SAME safe re-key the " +
           "human column editor performs. Deleting a column that holds a REQUIRED role (defaultLanding or " +
-          "terminal) is HARD-REJECTED unless another column already carries that role (reassign it first via " +
-          "board_column_rename, or on the column you're keeping, before deleting this one). A board must " +
+          "terminal) is HARD-REJECTED unless another column already carries that role — no agent MCP tool " +
+          "can move that role onto another column (board_column_rename has no `role` param and always " +
+          "preserves it), so reassigning it first means the HUMAN board UI column editor. A board must " +
           "always keep at least one column. Returns {ok:true, columns, warnings} or {ok:false, error}.",
         inputSchema: strictShape({ key: z.string() }),
       },

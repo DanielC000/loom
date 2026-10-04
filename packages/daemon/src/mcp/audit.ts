@@ -79,9 +79,11 @@ export class AuditMcpRouter {
 
     // --- least-privilege, READ-ONLY repo tools (repo_read_file / repo_grep / repo_glob) over the Loom SOURCE
     // tree — code-awareness for the 7-lens gap-hunt (a transcript-only auditor is blind to silent code gaps).
-    // DEV-AUDITOR ONLY: deliberately NOT in the shared transcript-read helper, so the end-user Workspace
-    // Auditor never gains source-read tools (it audits the user's workspace, not Loom's dev — the dev↔user
-    // split). PURE READS, confined to the repo root, no host-process spawn — see repo-read.ts's header. ---
+    // THIS FIXED-ROOT FORM IS DEV-AUDITOR ONLY: deliberately NOT in the shared transcript-read helper, so
+    // the end-user Workspace Auditor never gains THIS (Loom-dev-repo, unscoped) variant — it audits the
+    // user's workspace, not Loom's dev (the dev↔user split). The Workspace Auditor instead gets its OWN
+    // per-project-scoped equivalent via registerScopedRepoReadTools (mcp/user-audit.ts) — it is NOT source-
+    // read-blind. PURE READS, confined to the repo root, no host-process spawn — see repo-read.ts's header. ---
     registerRepoReadTools(server);
 
     // --- cross-project READ: the Requests inbox itself (card 59489267) — so the Auditor can intake
@@ -156,7 +158,9 @@ export class AuditMcpRouter {
       {
         description:
           "File a structured audit finding as a DURABLE task on the reserved Loom Platform board (the human " +
-          "triage inbox). This is the Auditor's ONLY write — there is no git/vault/config/spawn/message here. " +
+          "triage inbox). This is the ONLY write on THIS router — there is no git/vault/config/spawn/message " +
+          "here (loom-tasks, mounted alongside for every session, still carries its own board writes like " +
+          "tasks_create/tasks_update/memory_forget — this tool is just the one write THIS surface adds). " +
           "The target board is FIXED server-side (you cannot pick a project). Give a sharp title; put the evidence " +
           "/ repro, the implicated skill/prompt/feature, and a concrete suggested improvement in detail; set a " +
           "severity. DEDUPED server-side by title: filing a finding whose title already sits on the Platform " +
