@@ -285,6 +285,17 @@ try {
   // outrank and clear a race-discard marker (card 2400d0bc) set EARLY in the fresh Live. Own isolated
   // project/session (like the regression block above) via a REAL PtyHost (SeamHost), so the real
   // requeue/attribution machinery runs end to end, not a scripted double.
+  //
+  // Card b5ab3aa4 (enqueueStdin FIFO fix) restructured how the race is staged, without changing WHAT is
+  // asserted: it used to stage the race by relying on a later-arriving, unrelated message jumping ahead
+  // of the still-queued carried entry (an artifact of the very bug b5ab3aa4 fixed), so the carried entry
+  // stayed queued BEHIND the race's own turn. That ordering is no longer reachable (correctly — FIFO now
+  // drains the OLDEST eligible entry first, always). Fixed by swapping which message is enqueued FIRST:
+  // the race-setup (non-owner) message is now queued ahead of the carried owner-attested entry, so FIFO
+  // itself (not a bypassed queue) delivers the race-setup turn first, THEN the carried entry — preserving
+  // the exact regression shape (the carried entry's REAL cross-Live `ownerTextSeq` — produced by the real
+  // `upgradeCompanionCapabilities`/`requeueQueuedMessage` path, not hand-crafted) attests AFTER the marker
+  // is set, and must not clear it.
   {
     const xDb = new Db();
     const xProjId = randomUUID();
@@ -327,38 +338,52 @@ try {
 
     const xSvc = new SessionService(xDb, xHost, new OrchestrationControl());
     const xUpgradePromise = xSvc.upgradeCompanionCapabilities(xSessionId);
-    // The carried entry: queued (held) while the OLD pty is "stopping" (same deterministic timing as the
-    // AVAILABILITY-GAP block above) — enqueueStdin mints its ownerTextSeq from the OLD Live's counter,
-    // now past the bump above, so this is a real, nonzero predecessor rank.
+    // Card b5ab3aa4: enqueue the race-SETUP (non-owner) message FIRST, so it is the genuinely OLDER entry
+    // — FIFO (not a bypassed queue) is what delivers it ahead of the carried entry below. Both are queued
+    // (held) while the OLD pty is "stopping" (same deterministic timing as the AVAILABILITY-GAP block
+    // above); `flushPending`/the requeue loop preserve this relative order across the resume boundary.
+    const raceSetupBody = "[loom:worker-report] done";
+    xHost.enqueueStdin(xSessionId, raceSetupBody, "system", undefined, undefined, "agent");
+    // The carried entry: queued (held) SECOND, behind raceSetupBody — enqueueStdin mints its ownerTextSeq
+    // from the OLD Live's counter, now past the bump above, so this is a real, nonzero predecessor rank.
     const carriedOwnerBody = "carried across the resume boundary";
     const carried = xHost.enqueueStdin(xSessionId, carriedOwnerBody, "human", undefined, undefined, "agent", undefined, carriedOwnerBody);
     check("cross-live setup: the carried owner-attested message is HELD while the old pty is stopping", carried.delivered === false && carried.reason === "held");
     await xUpgradePromise;
-    check("cross-live: the carried message was redelivered onto the fresh pty's pending (not yet drained — not ready yet)", xHost.getPending(xSessionId).includes(carriedOwnerBody));
+    check("cross-live: both messages were redelivered onto the fresh pty's pending, IN ORDER (not yet drained — not ready yet)",
+      xHost.getPending(xSessionId).indexOf(raceSetupBody) === 0 && xHost.getPending(xSessionId).indexOf(carriedOwnerBody) === 1);
 
-    // Flip the FRESH Live's `ready` WITHOUT letting the carried entry drain yet. A REAL resumed session
-    // only reaches `ready` through the async permission-mode-cycle dance (`cycleToMode`/`logLandedMode`,
+    // Flip the FRESH Live's `ready` WITHOUT letting anything drain yet. A REAL resumed session only
+    // reaches `ready` through the async permission-mode-cycle dance (`cycleToMode`/`logLandedMode`,
     // polling the footer) — out of scope here and orthogonal to the rank bug under test — so this reaches
     // past that machinery directly (same test-only-internals pattern pty-owner-attestation.mjs scenario
     // 13 already uses). Hold the drain across the flip (same holdDrain/releaseDrain discipline the
-    // upgrade itself uses) so the race below can be set up IN THIS Live before the carried entry is ever
-    // promoted into a turn. Releasing the hold does NOT itself trigger a drain (same as
-    // pty-owner-attestation.mjs scenario 22's own comment).
+    // upgrade itself uses) so the race below can be set up IN THIS Live before anything is promoted into
+    // a turn. Releasing the hold does NOT itself trigger a drain (same as pty-owner-attestation.mjs
+    // scenario 22's own comment).
     xHost.holdDrain(xSessionId);
     xHost.live.get(xSessionId).ready = true;
     xHost.releaseDrain(xSessionId);
-    check("cross-live: the carried entry is STILL queued, untouched, after the ready-flip", xHost.getPending(xSessionId).includes(carriedOwnerBody));
+    check("cross-live: both entries are STILL queued, untouched, after the ready-flip",
+      xHost.getPending(xSessionId).includes(raceSetupBody) && xHost.getPending(xSessionId).includes(carriedOwnerBody));
 
-    // A race IN THE FRESH LIVE: an outstanding (non-owner) turn, a raw line racing in before its
-    // confirming hook, discarded — setting the marker at the fresh Live's own FIRST rank (its counter
-    // restarted at 0 on this resume). The immediate-submit path doesn't require `pending` to be empty, so
-    // this turn submits directly while the carried entry stays queued behind it, untouched.
-    xHost.enqueueStdin(xSessionId, "[loom:worker-report] done", "system", undefined, undefined, "agent");
+    // A race IN THE FRESH LIVE: FIFO drains raceSetupBody first (the genuinely older entry) as its own
+    // turn — an outstanding (non-owner) turn, a raw line racing in before its confirming hook, discarded —
+    // setting the marker at the fresh Live's own FIRST rank (its counter restarted at 0 on this resume).
+    xHost.reconcile();
+    check("cross-live: raceSetupBody drained first (FIFO), as its own turn", xHost.isBusy(xSessionId) === true);
+    check("cross-live: the carried entry is still queued behind it, untouched", xHost.getPending(xSessionId).includes(carriedOwnerBody));
     xHost.writeStdin(xSessionId, "raced human line\r");
     xHost.deliverHook(xSessionId, { hook_event_name: "UserPromptSubmit" });
     check("cross-live: marker set in the FRESH Live", xHost.hasRaceDiscardedOwnerSubmit(xSessionId) === true);
     xHost.deliverHook(xSessionId, { hook_event_name: "Stop" }); // ends this turn -> drains the carried entry next
 
+    // THE ACTUAL REGRESSION CHECK (card 270b963c Round 2): the carried entry — produced by the REAL
+    // `upgradeCompanionCapabilities`/`requeueQueuedMessage` path, carrying `ownerTextSeq: null` (never the
+    // predecessor Live's real rank) — now drains and attests (`attributeOwnerText` runs at SUBMIT time,
+    // not at confirmation) AFTER the marker was set above. Its attestation must NOT clear the marker: a
+    // real, nonzero rank WOULD wrongly outrank and clear it here (the exact bug 270b963c Round 2 fixed).
+    xHost.reconcile();
     check("cross-live: the carried entry finally drains and re-attests", xHost.getActiveTurnOwnerText(xSessionId) === carriedOwnerBody);
     check(
       "cross-live (card 270b963c Round 2): the carried entry's cross-Live replay must NOT carry the predecessor Live's rank — the marker set in the FRESH Live must survive",

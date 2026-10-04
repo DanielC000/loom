@@ -40,7 +40,15 @@ const SETTLE_POLL = 10;
 const SETTLE_MAX_POLLS = 5;
 const CONFIRM_SETTLE_POLL = 10;
 const CONFIRM_SETTLE_MAX_POLLS = 5;
-const HOLD_MS = 10;
+// Card b5ab3aa4: generous (`HOLD_WAIT` below was defined but never actually used anywhere in this file —
+// this suite never deliberately waits past the hold or relies on its expiry). A short hold here used to be
+// harmless only because enqueueStdin's old immediate-submit branch never looked at `live.pending` at all;
+// now that it does (correctly draining an older, no-longer-held entry before a new one), a short hold can
+// expire between TEXT1's give-up and this suite's very next enqueueStdin call for TEXT2 — well within
+// Windows' coarse (~15ms) timer granularity for the busy=false poll — and coalesce the two into one
+// physical write, inflating `composerDirtyLenBelieved` (it reads `live.lastPrompt.length`, the ACTUAL
+// written text) beyond what scenario (3) asserts.
+const HOLD_MS = 5000;
 const HOLD_WAIT = HOLD_MS + 20;
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);

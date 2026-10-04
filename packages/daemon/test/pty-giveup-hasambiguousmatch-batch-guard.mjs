@@ -91,7 +91,17 @@ process.env.LOOM_SUBMIT_ENTER_DELAY_MS = "20";
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = "150";
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = "2";
 process.env.LOOM_GIVE_UP_REQUEUE_LIMIT = "1";
-process.env.LOOM_GIVE_UP_HOLD_MS = "10"; // short — scenario (3) deliberately wants a held entry to redrain
+// Card b5ab3aa4: generous, like pty-giveup-distinct-collision-provenance.mjs's own setup this scenario
+// claims to mirror — this file never waits past the hold or relies on reconcile() to redrain anything
+// (scenario (3)'s own "batch2 exhaustion" is simulated by DIRECTLY manipulating `live.pending`, precisely
+// to avoid a "timing-sensitive coalescing race", per that scenario's own comment above). A short hold here
+// used to be harmless only because enqueueStdin's old immediate-submit branch never looked at `live.pending`
+// at all; now that it does (correctly draining an older, no-longer-held entry before a new one), a short
+// hold can expire between one dispatch's give-up and the test's very next enqueueStdin call for an
+// UNRELATED dispatch — on this host, well within Windows' coarse (~15ms) timer granularity for the
+// `sharedWaitUntil` poll that detects the give-up — and coalesce the two where this suite needs them kept
+// independently ambiguous.
+process.env.LOOM_GIVE_UP_HOLD_MS = "5000";
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
