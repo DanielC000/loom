@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
@@ -143,9 +143,13 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
     queryFn: () => api.getTask(openTask!.id),
     enabled: !!openTask,
     refetchInterval: 4000,
-    // retry:false (matches Git.tsx/mergeGate.tsx/platformHome's own expected-error reads): a failure here
-    // is deterministic (404/403/401), not transient, so fail fast into TaskDrawerError below rather than
-    // leaving TaskDrawerLoading spinning through react-query's default 3-attempt backoff first.
+    // retry:false (matches Git.tsx/mergeGate.tsx/platformHome's own expected-error reads): fail FAST into
+    // TaskDrawerError / the "links unavailable" line below rather than leaving TaskDrawerLoading spinning
+    // through react-query's default 3-attempt backoff first. NOT because every failure here is permanent:
+    // 404/403/401 are (a card deleted under us, or a remote bind with no Tier-1 route for this read), but
+    // remotely a 429 or a dropped connection is transient. The `refetchInterval` above is what covers
+    // those — the poll keeps running in the error state, so a transient failure self-heals on the next
+    // tick without burning the open-drawer moment on a silent backoff the user can neither see nor skip.
     retry: false,
     // NO keepPreviousData here, unlike the board query above: this key changes when a links-block click
     // opens a DIFFERENT card, and carrying the previous card's row across that change would render the
@@ -248,7 +252,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
       {openTask && drawerTask && (
         <TaskDrawer key={drawerTask.id} task={drawerTask} column={openColumn} onClose={() => setOpenTaskId(null)}
           repos={repos} primaryRepoPath={project?.repoPath ?? ""}
-          links={taskLinks(detail)}
+          links={taskLinks(detail)} linksUnavailable={taskDetail.isError && !detail}
           columns={board.data?.columns ?? []} titleById={titleById} onOpenTask={setOpenTaskId}
           onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending}
           saveError={edit.error as TaskUpdateConflictError | null}
@@ -692,34 +696,12 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, titleBy
   );
 }
 
-// Minimal placeholder shown for the brief window between opening a DONE card (whose body the board list
-// omits) and its lazy GET /api/tasks/:id resolving — same backdrop/Esc/click-outside-closes as TaskDrawer
-// itself, so the dialog doesn't visibly jump when the real drawer takes its place.
-function TaskDrawerLoading({ onClose }: { onClose: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-  return (
-    <div onClick={onClose} role="dialog" aria-modal
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
-        alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflowY: "auto" }}>
-      <div onClick={(e) => e.stopPropagation()}
-        style={{ width: "min(820px, 92vw)", maxWidth: "100%", minHeight: "min(820px, 85vh)", maxHeight: "88vh",
-          background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
-          padding: 16, display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box" }}>
-        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>Loading task…</span>
-      </div>
-    </div>
-  );
-}
-
-// Card 3485a489: the single-task fetch backing a DONE card's drawer (needsBodyFetch above) can fail
-// outright — e.g. a remote bind with no route for it — leaving `detail` permanently null. Without this,
-// the drawer fell back to TaskDrawerLoading forever with no way out but Escape/click-outside. Same
-// backdrop/Esc/click-outside-closes shape as TaskDrawerLoading, plus a retry.
-function TaskDrawerError({ onClose, onRetry }: { onClose: () => void; onRetry: () => void }) {
+// The modal SHELL both drawer placeholders below share (card 230cb6e3 — it was duplicated verbatim in
+// each): backdrop, Esc-to-close, click-outside-to-close, and the panel geometry matched to TaskDrawer's
+// own, so the dialog never visibly jumps when the real drawer takes its place. Content is centred in a
+// column — for the single-child loading state that renders identically to the row layout it replaces,
+// and the error state's button pair stacks under its message exactly as before.
+function TaskDrawerPlaceholder({ onClose, children }: { onClose: () => void; children: ReactNode }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -734,13 +716,34 @@ function TaskDrawerError({ onClose, onRetry }: { onClose: () => void; onRetry: (
           background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
           padding: 16, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
           gap: 10, boxSizing: "border-box" }}>
-        <span style={{ color: color.red, fontFamily: font.mono, fontSize: 12 }}>couldn’t load this task</span>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={onRetry} style={{ fontFamily: font.mono, fontSize: 12 }}>retry</button>
-          <button onClick={onClose} style={{ fontFamily: font.mono, fontSize: 12 }}>close</button>
-        </div>
+        {children}
       </div>
     </div>
+  );
+}
+
+// Shown for the brief window between opening a DONE card (whose body the board list omits) and its lazy
+// GET /api/tasks/:id resolving.
+function TaskDrawerLoading({ onClose }: { onClose: () => void }) {
+  return (
+    <TaskDrawerPlaceholder onClose={onClose}>
+      <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>Loading task…</span>
+    </TaskDrawerPlaceholder>
+  );
+}
+
+// Card 3485a489: the single-task fetch backing a DONE card's drawer (needsBodyFetch above) can fail
+// outright — e.g. a remote bind with no route for it — leaving `detail` permanently null. Without this,
+// the drawer fell back to TaskDrawerLoading forever with no way out but Escape/click-outside.
+function TaskDrawerError({ onClose, onRetry }: { onClose: () => void; onRetry: () => void }) {
+  return (
+    <TaskDrawerPlaceholder onClose={onClose}>
+      <span style={{ color: color.red, fontFamily: font.mono, fontSize: 12 }}>couldn’t load this task</span>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={onRetry} style={{ fontFamily: font.mono, fontSize: 12 }}>retry</button>
+        <button onClick={onClose} style={{ fontFamily: font.mono, fontSize: 12 }}>close</button>
+      </div>
+    </TaskDrawerPlaceholder>
   );
 }
 
@@ -776,9 +779,9 @@ function shipVerificationStyle(verification: Task["mergedVerification"]): { colo
 // Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
 // then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
 // reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
-function TaskDrawer({ task, column, repos, primaryRepoPath, links, columns, titleById, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError }:
+function TaskDrawer({ task, column, repos, primaryRepoPath, links, linksUnavailable, columns, titleById, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError }:
   { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string;
-    links: TaskLinks; columns: KanbanColumn[]; titleById: Map<string, string>; onOpenTask: (id: string) => void;
+    links: TaskLinks; linksUnavailable: boolean; columns: KanbanColumn[]; titleById: Map<string, string>; onOpenTask: (id: string) => void;
     onClose: () => void; onSave: (patch: TaskEditPatch) => void; saving: boolean; saveError: TaskUpdateConflictError | null; onDismissConflict: () => void;
     onDelete: () => void; deleting: boolean; deleteError: string | null }) {
   const [title, setTitle] = useState(task.title);
@@ -982,10 +985,22 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, links, columns, titl
             editable field. Renders nothing at all when the card has no links, which is the common case, so
             an ordinary card's drawer is unchanged.
 
-            No loading placeholder on purpose: the detail read is a loopback request, and reserving space
-            for a block that MOST cards will never fill would flash an empty panel on every single drawer
-            open — worse than the block simply appearing once it lands. (A done card waits on that same
-            read anyway, via TaskDrawerLoading, so its links are already there when the drawer draws.) */}
+            No loading placeholder on purpose: reserving space for a block that MOST cards will never fill
+            would flash an empty panel on every single drawer open — worse than the block simply appearing
+            once it lands. (A done card waits on that same read anyway, via TaskDrawerLoading, so its links
+            are already there when the drawer draws.)
+
+            But a FAILED read is not an empty one. A LIVE card renders this drawer off its board row, so
+            the read failing leaves `links` empty and the block absent — indistinguishable from a card that
+            genuinely has no connections, i.e. a false zero (card 230cb6e3). Say so rather than render it;
+            the 4s poll keeps retrying underneath, so the line clears itself once the read recovers. */}
+        {linksUnavailable && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, color: color.textMuted,
+            fontFamily: font.mono, fontSize: 11 }}>
+            <Dot tone="amber" />
+            <span>links unavailable — couldn’t read this card’s connections (retrying…)</span>
+          </div>
+        )}
         {hasTaskLinks(links) && (
           <TaskLinksBlock links={links} columns={columns} titleById={titleById} onOpenTask={requestOpen} />
         )}
