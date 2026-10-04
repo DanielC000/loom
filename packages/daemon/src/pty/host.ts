@@ -2915,20 +2915,11 @@ interface Live {
   // PROVEN engine confirmation may ever consult it, never `hasAmbiguousMatch`'s guess. Bounded by count,
   // never time — never archive the count-eviction path (a memory-safety backstop, not a supersede event).
   retiredGiveUpSignatures: Map<string, Array<{ len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string } }>>;
-  // Card c00231e2: rolling in-memory record of every GIVE-UP RECOVERY fire for THIS session — ONLY ever
-  // pushed to for a manager/platform-lead session (gated at the one call site, `maybeFireGiveUpRecoveryAlarm`);
-  // a worker's entry stays permanently empty. Pruned to entries within `GIVE_UP_RECOVERY_ALARM_WINDOW_MS`
-  // of "now" on every fire BEFORE the new timestamp is pushed — if that pruning leaves the array empty
-  // (a quiet gap of at least the window with zero fires), `giveUpRecoveryAlarmed` below is reset first,
-  // which is what lets a later burst alarm again as a fresh episode. Once pruned+pushed, a count at or
-  // past `GIVE_UP_RECOVERY_ALARM_THRESHOLD` fires `PtyHostEvents.onGiveUpRecoveryAlarm` IF
-  // `giveUpRecoveryAlarmed` is still false for this episode.
+  // @decision c00231e2 — rolling fire timestamps for the owner give-up alarm; see that record for the
+  // episode/latch mechanics. Manager/platform-lead only — a worker's entry stays permanently empty.
   giveUpRecoveryFiredAt: number[];
-  // Card c00231e2: true once this EPISODE (the current unbroken run of fires inside the rolling window —
-  // see `giveUpRecoveryFiredAt`'s own doc) has already fired `onGiveUpRecoveryAlarm` once — the ONE-alarm-
-  // per-episode latch. Reset to false only by a quiet gap >= the window with zero fires, never by the
-  // alarm's own delivery outcome (an undeliverable alarm must not re-arm immediately and spam the same
-  // episode again).
+  // @decision c00231e2 — the one-alarm-per-episode latch paired with `giveUpRecoveryFiredAt` above; see
+  // that record.
   giveUpRecoveryAlarmed: boolean;
   // Card 1bd1f045: monotonic per-session sequence number for the `[pty-write]` byte/call-sequence log —
   // bumped by `ptyWrite()` on every REAL `live.pty.write()` call (see that method's doc). THE load-bearing
@@ -3562,15 +3553,9 @@ export interface PtyHostEvents {
    *  @decision 7772176d — kickoffText gives it the same cross-turn re-mint an ordinary message gets. */
   onKickoffGiveUpExhausted?(sessionId: string, msgId: string, rootMsgId: string, kickoffText: string): void;
   /**
-   * Card c00231e2: a MANAGER/platform-lead session's own GIVE-UP RECOVERY (see `Live.giveUpRecoveryFiredAt`'s
-   * own doc for the counting/episode mechanics) crossed `GIVE_UP_RECOVERY_ALARM_THRESHOLD` fires inside
-   * `GIVE_UP_RECOVERY_ALARM_WINDOW_MS` — PtyHost has no DB access (same layering boundary as
-   * `onKickoffGiveUpExhausted`/`onCodexSubmitUnconfirmed` above), so the implementer (sessions/service.ts,
-   * via index.ts) decides how to record this durably for the human (`detail:{count,windowMs}` — counts
-   * and a duration only, never message text). `count`/`windowMs` are the resolved values AT THE MOMENT
-   * this fired (not necessarily today's constants, in case an env override changes mid-run). OPTIONAL,
-   * same rationale as its siblings: every existing `PtyHostEvents` test double is unaffected until it
-   * opts in. Never fired for a worker — gated at the one call site on `live.role`.
+   * @decision c00231e2 — never fired for a worker; `count`/`windowMs` are resolved values, never message
+   * text. PtyHost has no DB access (same layering boundary as its siblings above), so the implementer
+   * (sessions/service.ts, via index.ts) decides how to record this durably for the human.
    */
   onGiveUpRecoveryAlarm?(sessionId: string, info: { count: number; windowMs: number }): void;
   /**
@@ -10101,11 +10086,7 @@ export class PtyHost {
   }
 
   /**
-   * Card c00231e2: the manager/platform-lead-only GIVE-UP RECOVERY owner-alarm — see
-   * `Live.giveUpRecoveryFiredAt`'s own doc for the rolling-window/episode mechanics and
-   * `PtyHostEvents.onGiveUpRecoveryAlarm`'s own doc for why PtyHost hands this off rather than persisting
-   * it itself. Workers are excluded here, at the source, so their entries never even start accumulating —
-   * their owning manager already sees `composerDirtyLen` for this.
+   * @decision c00231e2 — never count a worker's give-ups; gated here, at the source.
    */
   private maybeFireGiveUpRecoveryAlarm(sessionId: string, live: Live): void {
     if (live.role !== "manager" && live.role !== "platform") return;
