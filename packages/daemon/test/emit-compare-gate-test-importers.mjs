@@ -44,6 +44,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (K) SPAWN EDGE — `--only=<stem>` LITERAL (round 4) — the harness-selector shape 2 of the 5 real
 //       spawner tests use instead (`spawn(execPath, [SCRIPT, "--only=<stem>"])`), WITH a negative control
 //       proving an unrelated `--only=` value does not fold in.
+//   (L) UTF-8 CHUNK-SPLIT DECODE (card db669d74) — a multi-byte character split across two separate
+//       stdout "data" events decodes correctly via collectUtf8Stdout, with a negative control proving the
+//       pre-fix naive per-chunk decode genuinely corrupts it.
+//   (M) WINDOWS ARGV-LENGTH OVERFLOW → STDIN (card db669d74) — a diff touching enough test files that the
+//       roots payload alone exceeds the Windows ~32767-char command-line limit still finds them all,
+//       because roots now rides the child's stdin, never a JSON argv element.
 // Run: 1) build daemon (pnpm build), 2) node test/emit-compare-gate-test-importers.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -476,6 +482,75 @@ try {
     check("(K) NEGATIVE CONTROL: spawnerK2.mjs's unrelated `--only=otherK` does NOT fold in", !directK.changedTestFiles.includes("packages/daemon/test/spawnerK2.mjs"));
     check("(K) exactly two files folded in (no unrelated over-widening)", directK.changedTestFiles.length === 2);
   }
+
+  // ── (L) UTF-8 CHUNK-SPLIT DECODE (card db669d74, a 72769424 delta-review finding) — collectUtf8Stdout
+  //        must not corrupt a multi-byte character whose bytes straddle two separate stdout "data" events.
+  //        A deterministic fixture (Readable.from an async generator, with an await between chunks forcing
+  //        two separate pushes rather than one coalesced read) splits a 4-byte UTF-8 character (🎉,
+  //        U+1F389) exactly between byte 2 and byte 3. NEGATIVE CONTROL runs FIRST, proving the fixture
+  //        genuinely reproduces the hazard: the naive per-chunk `Buffer#toString()` decode this file's two
+  //        child-stdout collectors used BEFORE card db669d74 corrupts the character into replacement
+  //        characters when fed the identical split ─────────────────────────────────────────────────────
+  {
+    const { collectUtf8Stdout } = await import("../dist/git/worktrees.js");
+    const { Readable } = await import("node:stream");
+    const fullChar = Buffer.from("🎉", "utf8"); // 4 bytes: F0 9F 8E 89 — split 2/2 below.
+    const makeSplitStream = () => Readable.from((async function* () {
+      yield fullChar.subarray(0, 2);
+      await new Promise((r) => setImmediate(r)); // forces a SEPARATE "data" event for the second half
+      yield fullChar.subarray(2);
+    })(), { objectMode: false });
+
+    // NEGATIVE CONTROL: the pre-card-db669d74 shape (`out += d`, decoding each Buffer chunk independently,
+    // with no `setEncoding` applied).
+    let naive = "";
+    await new Promise((resolve) => {
+      const s = makeSplitStream();
+      s.on("data", (d) => { naive += d; });
+      s.on("end", resolve);
+    });
+    check("(L) NEGATIVE CONTROL: the naive per-chunk decode DOES corrupt the split character (proves this fixture reproduces the real hazard)", naive !== "🎉" && naive.includes("�"));
+
+    // THE FIX: collectUtf8Stdout, exported from worktrees.ts, shared by both child-stdout collectors.
+    const s2 = makeSplitStream();
+    const acc = collectUtf8Stdout(s2, 1_000_000);
+    await new Promise((resolve) => s2.on("end", resolve));
+    check("(L) ⭐ THE FIX: collectUtf8Stdout decodes the split character correctly — no replacement character", acc.value === "🎉");
+  }
+
+  // ── (M) WINDOWS ARGV-LENGTH OVERFLOW → STDIN (card db669d74, a 72769424 delta-review finding) — a diff
+  //        touching enough test files that `JSON.stringify(roots)` alone would exceed the Windows
+  //        ~32767-char combined command-line limit must still find them via the real scan, never silently
+  //        fail closed. REAL repro: N trivial test files, ALL changed in one commit, so
+  //        `roots.length === N` and the pre-fix argv-JSON payload comfortably overflows the limit on its
+  //        own (measured below, not assumed) ──────────────────────────────────────────────────────────────
+  {
+    const M = mk("m");
+    initRepo(M);
+    const N = 1200;
+    for (let i = 0; i < N; i++) {
+      fs.writeFileSync(path.join(M.repo, "packages", "daemon", "test", `bigm${i}.mjs`), `console.log(${i});\n`);
+    }
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: M.repo });
+    execSync(`git add -A && git ${GIT_ID} commit -q -m init`, { cwd: M.repo });
+    const baseShaM = execSync("git rev-parse HEAD", { cwd: M.repo }).toString().trim();
+    const { worktreePath: wtM, branch: branchM } = await createWorktree(M.repo, M.projId, M.taskId);
+    worktrees.push(wtM);
+    for (let i = 0; i < N; i++) {
+      fs.appendFileSync(path.join(wtM, "packages", "daemon", "test", `bigm${i}.mjs`), "// touched\n");
+    }
+    execSync(`git add -A && git ${GIT_ID} commit -q -m "fix: touch ${N} test files"`, { cwd: wtM });
+
+    const wouldBeArgvLen = JSON.stringify(Array.from({ length: N }, (_, i) => `packages/daemon/test/bigm${i}.mjs`)).length;
+    console.log(`(M) roots JSON length if passed via argv: ${wouldBeArgvLen} chars (Windows combined command-line limit is ~32767)`);
+    check("(M) the fixture's own roots payload genuinely exceeds the Windows argv limit (a real repro, not a vacuous one)", wouldBeArgvLen > 32767);
+
+    const t0M = Date.now();
+    const directM = await computeEmitCompareGate(wtM, baseShaM, branchM);
+    console.log(`(M) computeEmitCompareGate elapsed: ${Date.now() - t0M}ms over ${N} trivial fixture files`);
+    check("(M) ⭐ THE FIX: eligible:true even though roots.length is far past the pre-fix argv ceiling — the scan ran via stdin, not argv", directM.eligible === true);
+    check(`(M) changedTestFiles includes all ${N} touched files`, directM.changedTestFiles.length === N);
+  }
 } finally {
   for (const wt of worktrees) cleanupPathSync(wt);
   cleanupPathSync(process.env.LOOM_HOME);
@@ -483,5 +558,6 @@ try {
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — card 72769424 (+ rounds 3-4): a changed test file's TRANSITIVE importers (found via a real static-import-graph scan of the whole packages/daemon/test/** corpus) fold into the reduced gate's run set — directly (A), through an underscore-helper pass-through node (B) — and a NON-LITERAL dynamic import() folds its own file in as a wildcard hazard instead of forcing the full gate (C, with a negative control proving a literal import to an unrelated file does NOT fold in), while an unrelated changed file still folds in nothing extra (D), a NOT_HERMETIC importer still folds into notHermeticExcluded (E), every non-literal dynamic import is now an UNCONDITIONAL wildcard with no classifier left to fool — including the shapes (shadowing, case, cwd-relative) that fooled the round-2 classifier (F) — a DELETED test file's importer is still found (G), the scan does not fail closed on this repo's own REAL 1324-file corpus (H), the real-corpus scan runs OFF the host event loop instead of freezing it (I, round 4), and a file that SPAWNS another test file as a child process (never `import`s it) is still found — via a full basename literal (J, round 4) or a `--only=<stem>` CLI-arg literal with a negative control (K, round 4)."
+  + " A multi-byte character split across two stdout chunks decodes correctly (L, card db669d74), and a diff whose roots payload alone would overflow the Windows argv limit still finds every importer because roots now rides stdin, never argv (M, card db669d74)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -4670,27 +4670,50 @@ export async function scanTestImporterClosure(
  *  diff closed, same as every other mechanism failure this scan can hit. */
 export const TEST_IMPORTER_SCAN_TIMEOUT_MS = 120_000;
 
+/** @decision db669d74 — decodes via `setEncoding("utf8")`, never per-chunk `Buffer#toString()`, so a
+ *  multi-byte character split across two stdout chunks is never corrupted into U+FFFD.
+ *
+ *  Exported for direct unit testing against a deterministic chunk-split fixture (a real OS pipe's chunk
+ *  boundaries aren't controllable from outside), and shared by both this file's child-stdout call sites. */
+export function collectUtf8Stdout(stdout: NodeJS.ReadableStream | null | undefined, maxLen: number): { value: string } {
+  const acc = { value: "" };
+  stdout?.setEncoding("utf8");
+  stdout?.on("data", (chunk: string) => { if (acc.value.length < maxLen) acc.value += chunk; });
+  return acc;
+}
+
 /** Evaluated by the child (`node --input-type=module -e`). `url` is THIS SAME compiled module's own
  *  `import.meta.url` — never a worktree's copy; the scan LOGIC must stay the host's trusted code, only the
- *  DATA it reads (`testDirAbs`) points into the worktree under test. Prints one JSON line and force-exits
- *  so a stray handle can't keep the child alive. */
+ *  DATA it reads (`testDirAbs`, and `roots` over stdin) points into the worktree under test. Prints one
+ *  JSON line and force-exits so a stray handle can't keep the child alive.
+ *
+ *  @decision db669d74 — reads `roots` from STDIN, never a JSON argv element: a diff touching several
+ *  hundred test files can serialize past the Windows ~32767-char combined command-line limit, silently
+ *  losing the reduction (fails closed, safe) the moment `spawn` fails. Stdin has no such ceiling. */
 const TEST_IMPORTER_SCAN_PROBE_SOURCE =
-  "const [url,testDirAbs,rootsJson]=process.argv.slice(1);" +
+  "const [url,testDirAbs]=process.argv.slice(1);" +
+  "let rootsJson='';" +
+  "process.stdin.setEncoding('utf8');" +
+  "process.stdin.on('data',(c)=>{rootsJson+=c});" +
+  "process.stdin.on('end',()=>{" +
   "import(url).then(" +
   "(m)=>m.scanTestImporterClosure(testDirAbs,JSON.parse(rootsJson))" +
   ".then((r)=>{process.stdout.write(JSON.stringify(r));process.exit(0)})" +
   ".catch(()=>process.exit(4))," +
-  "()=>process.exit(2));";
+  "()=>process.exit(2));" +
+  "});";
 
 /** @decision 72769424 — same killable-child-process isolation {@link loadHarnessSetExport} already
  *  established (card fca110cf): async spawn only, never `spawnSync`. Any mechanism failure here fails
- *  closed to `"harness-config-unavailable"`, same as {@link scanTestImporterClosure}'s own internal ones. */
+ *  closed to `"harness-config-unavailable"`, same as {@link scanTestImporterClosure}'s own internal ones.
+ *
+ *  @decision db669d74 — writes `roots` to the child's stdin, never a JSON argv element — see
+ *  {@link TEST_IMPORTER_SCAN_PROBE_SOURCE}'s own anchor for why. */
 function scanTestImporterClosureInChildProcess(
   testDirAbs: string, roots: readonly string[], timeoutMs: number,
 ): Promise<TestImporterClosureScanResult> {
   return new Promise((resolve) => {
     let settled = false;
-    let out = "";
     let child: ChildProcess;
     const done = (r: TestImporterClosureScanResult) => {
       if (settled) return;
@@ -4703,19 +4726,27 @@ function scanTestImporterClosureInChildProcess(
       done({ ok: false, kind: "harness-config-unavailable", reason: "test-importer-scan child process timed out" });
     }, timeoutMs);
     try {
-      child = spawn(process.execPath, ["--input-type=module", "-e", TEST_IMPORTER_SCAN_PROBE_SOURCE, import.meta.url, testDirAbs, JSON.stringify(roots)], {
-        stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+      child = spawn(process.execPath, ["--input-type=module", "-e", TEST_IMPORTER_SCAN_PROBE_SOURCE, import.meta.url, testDirAbs], {
+        stdio: ["pipe", "pipe", "ignore"], windowsHide: true,
       });
     } catch {
       done({ ok: false, kind: "harness-config-unavailable", reason: "could not spawn test-importer-scan child process" });
       return;
     }
-    child.stdout?.on("data", (d) => { if (out.length < 1_000_000) out += d; });
+    const stdoutAcc = collectUtf8Stdout(child.stdout, 1_000_000);
+    // Best-effort: a child that fails to spawn properly or exits before reading stdin can make this write
+    // error (e.g. EPIPE) — the `"error"`/`"close"` handlers below already cover every such outcome.
+    child.stdin?.on("error", () => {});
+    try {
+      child.stdin?.end(JSON.stringify(roots));
+    } catch {
+      // Best-effort — see the stdin "error" listener's own comment just above.
+    }
     child.on("error", () => done({ ok: false, kind: "harness-config-unavailable", reason: "test-importer-scan child process errored" }));
     child.on("close", (code) => {
       if (code !== 0) { done({ ok: false, kind: "harness-config-unavailable", reason: `test-importer-scan child process exited with code ${code}` }); return; }
       try {
-        done(JSON.parse(out.trim()) as TestImporterClosureScanResult);
+        done(JSON.parse(stdoutAcc.value.trim()) as TestImporterClosureScanResult);
       } catch {
         done({ ok: false, kind: "harness-config-unavailable", reason: "could not parse test-importer-scan child process output" });
       }
@@ -5177,7 +5208,6 @@ function loadHarnessSetExport(
   return new Promise((resolve) => {
     const scriptPath = path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs");
     let settled = false;
-    let out = "";
     let child: ChildProcess;
     const done = (r: Set<string> | null) => {
       if (settled) return;
@@ -5198,12 +5228,14 @@ function loadHarnessSetExport(
       done(null);
       return;
     }
-    child.stdout?.on("data", (d) => { if (out.length < 1_000_000) out += d; });
+    // @decision db669d74 — shares {@link collectUtf8Stdout} with the test-importer scan's own child-stdout
+    // collector, for the same chunk-split-corruption reason.
+    const stdoutAcc = collectUtf8Stdout(child.stdout, 1_000_000);
     child.on("error", () => done(null));
     child.on("close", (code) => {
       if (code !== 0) { done(null); return; }
       try {
-        const line = out.trim().split(/\r?\n/).filter(Boolean).pop() ?? "";
+        const line = stdoutAcc.value.trim().split(/\r?\n/).filter(Boolean).pop() ?? "";
         const parsed = JSON.parse(line) as { ok?: boolean; values?: unknown };
         done(parsed.ok === true && Array.isArray(parsed.values) ? new Set(parsed.values as string[]) : null);
       } catch {

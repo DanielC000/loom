@@ -16847,6 +16847,17 @@ export class SessionService {
       // ever starts — only growth well past that bound (and `GATE_EXTEND_IDLE_MS`'s own auto-extend
       // threshold) without settling should read as a genuine stall, not growth past a couple of seconds.
       //
+      // SAME WINDOW, A SECOND CONTRIBUTOR (card db669d74, a 72769424 delta-review finding): when
+      // `emitCompareSkip` is true and the branch/main tip moved during the wait, the re-derivation further
+      // below calls `computeEmitCompareGate` again, which can itself run `foldInTestImporters`'s
+      // child-process scan — bounded by `TEST_IMPORTER_SCAN_TIMEOUT_MS` (git/worktrees.ts) — ON TOP of
+      // whatever the re-union above already cost, sequentially, still before `runGateSeq` is ever invoked.
+      // Not a separate stall signal: the same admission-time `idleMs` budget this note already names, with
+      // a second, independently-bounded contributor. Deliberately left in place rather than moved out of
+      // this held slot/guard — see docs/decisions/db669d74-test-importer-scan-child-stdin-and-utf8-decode.md
+      // for why moving it is unsound here (it must observe the TRUE post-wait head) and the per-repo guard
+      // must stay held through squash (`c24dd48a`) regardless.
+      //
       // @decision b798e706 — before this, a queued merge ran its full gate against the pre-queue base and
       //  self-aborted at squash time on ANY main movement during the wait, re-paying the entire gate cost.
       //  Does NOT by itself close the same-repo-sibling-squash case above (needs card c24dd48a).
