@@ -243,17 +243,28 @@ export function seedSetupHome(db: Db): string[] {
  * empty "Platform" home beside the orphaned legacy row; scoped to the reserved home under the exact
  * legacy literal, refuses if "Platform" is already taken — see record for the full narrative.
  *
- * Idempotent by NAME-MATCH, no marker needed: after the rename the old literal is gone, so a re-run finds
- * nothing and no-ops (returns null). Also no-ops on a fresh install (seed already created "Platform"), on a
- * user-renamed home (any other name), and if the rename were ever reverted (new === old). Returns the new
- * name when it renamed, else null.
+ * @decision 247d0977 — MARKER-SCOPED, not name-scoped: once `setup.homeProjectId` is stamped this is
+ * a permanent no-op regardless of the marked row's current name. See record.
+ *
+ * Idempotent: once the setup marker exists, this is DONE for good (returns null unconditionally — see
+ * the decision above). Pre-marker, it is idempotent by NAME-MATCH: after the rename the old literal is
+ * gone, so a re-run finds nothing and no-ops. Also no-ops on a fresh install (seed already created
+ * "Platform"), on a user-renamed home (any other name), and if the rename were ever reverted (new ===
+ * old). Returns the new name when it renamed, else null.
  */
 export function seedSetupProjectRename(db: Db): string | null {
   if (SETUP_PROJECT_NAME === LEGACY_SETUP_PROJECT_NAME) return null; // rename reverted — nothing to migrate
+  // Card 247d0977: once the setup home's own marker is stamped, the migration is permanently done — the
+  // marked row IS the live setup home no matter what it's currently named, and any later rename (back to
+  // the legacy literal, or anything else) is a legitimate, deliberate edit, never state to force back.
+  if (db.getMeta(SETUP_HOME_PROJECT_ID_KEY)) return null;
+  // Pre-marker migration case only (an install that predates the marker entirely) — fall back to the
+  // archive-agnostic name-scoped match this replaced.
   if (!db.hasReservedProjectNamed(LEGACY_SETUP_PROJECT_NAME)) return null; // fresh install / user-renamed / already migrated
   if (db.hasReservedProjectNamed(SETUP_PROJECT_NAME)) return null; // new name already taken — never duplicate/clobber
   const home = db.getReservedProjectByName(LEGACY_SETUP_PROJECT_NAME);
   if (!home) return null; // archived edge — getReservedProjectByName excludes archived; nothing live to rename
+  if (home.id === db.getMeta(PLATFORM_HOME_PROJECT_ID_KEY)) return null; // never rename the row marked as the platform home
   db.updateProject(home.id, { name: SETUP_PROJECT_NAME });
   return SETUP_PROJECT_NAME;
 }

@@ -31,10 +31,14 @@ touched), and it refuses outright if a reserved home already holds the new name 
 collision/already-migrated guard that stops it from ever creating a duplicate or clobbering a
 distinct, already-migrated "Platform" home.
 
-Idempotent by NAME-MATCH, no marker needed: once the rename lands, the old literal is gone, so a
-re-run finds nothing and no-ops. It also no-ops on a fresh install (seed already created
-"Platform" directly), on a user-renamed home (any other name), and if the rename were ever
-reverted (new name equals the legacy one).
+Idempotent — but no longer purely by NAME-MATCH (card `247d0977` superseded this in MECHANISM too):
+once the setup home's own `setup.homeProjectId` marker is stamped, the function no-ops
+unconditionally, whatever the marked row is currently named — see
+[[247d0977-setup-rename-migration-marker-scoped]] for why a name-only check misidentified the
+platform home after a human swapped the two homes' names, and reverted a deliberate user rename of
+the setup home back to the legacy literal on every boot. The ORIGINAL name-match (old literal gone
+⇒ no-op; also a no-op on a fresh install, a user-renamed home, or a reverted rename) still runs, but
+only in the narrower pre-marker window (an install that predates the marker entirely).
 
 ## Do not
 

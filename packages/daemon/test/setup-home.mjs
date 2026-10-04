@@ -28,6 +28,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       it replaces. RED on a22d42ce: a pre-marker install whose reserved home was archived was
 //       invisible to the LIVE-only getReservedProjectByName fallback, so the seeder minted a second,
 //       live home beside the archived one instead of treating it as already-seeded.
+//   (6g)/(6h) card 247d0977: seedSetupProjectRename is now MARKER-scoped, not name-scoped — once
+//       setup.homeProjectId is stamped it no-ops unconditionally, never inspecting either home's name.
+//       RED on 06e9682d (before this card): (6g) a human swapping the platform/setup homes' names used
+//       to get the PLATFORM home renamed to "Platform"; (6h) a human's deliberate rename of the setup
+//       home back to the legacy literal used to get reverted on every following boot.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/setup-home.mjs
 import fs from "node:fs";
@@ -364,6 +369,55 @@ try {
     dbN.getReservedProjectByName(SETUP_PROJECT_NAME)?.id === preHomeId && dbN.listAgents(preHomeId).some((a) => a.name === SETUP_AGENT_NAME));
   dbN.close();
 
+  // ===================== (6g)/(6h) card 247d0977 — the migration is MARKER-scoped, not name-scoped ===
+  // The pre-fix migration identified "the setup home" by NAME alone, with no reference to the stable
+  // setup.homeProjectId marker every other resolver in this file already trusts. That produced two
+  // human-triggered failure shapes RED on main (commit 06e9682d / before card 247d0977):
+
+  // (6g) SHAPE (a): a human swaps the two homes' names — renames the PLATFORM home to the legacy literal
+  // and renames the SETUP home away from "Platform" to something else. Pre-fix, the next boot's name
+  // match found the PLATFORM home (now literally "Getting Started") and renamed IT to "Platform",
+  // colliding with/blinding the platform resolver, even though neither marker ever moved. Fixed: once
+  // the setup marker is stamped, the migration is marker-scoped and never inspects either home's name.
+  const dbSwap = new Db(path.join(tmpHome, "home-rename-swap.db"));
+  seedDefaultProfiles(dbSwap);
+  seedPlatformHome(dbSwap); // LOOM_DEV=1 since phase (2) — stamps the platform marker
+  seedSetupHome(dbSwap); // stamps the setup marker
+  const platSwap = dbSwap.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+  const setupSwap = dbSwap.getReservedProjectByName(SETUP_PROJECT_NAME);
+  check("(6g) pre-condition: both homes seeded + marked before the human swap", !!platSwap && !!setupSwap &&
+    dbSwap.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === platSwap.id && dbSwap.getMeta(SETUP_HOME_PROJECT_ID_KEY) === setupSwap.id);
+  dbSwap.updateProject(platSwap.id, { name: LEGACY }); // human renames the PLATFORM home to the legacy literal
+  dbSwap.updateProject(setupSwap.id, { name: "My Workspace" }); // human renames the SETUP home away from "Platform"
+  const renameSwap = seedSetupProjectRename(dbSwap);
+  check("(6g) migration no-ops once the setup marker is stamped — no name is ever inspected (returns null)",
+    renameSwap === null);
+  check("(6g) the PLATFORM home's rename to the legacy literal is left ALONE — NOT renamed to 'Platform'",
+    dbSwap.getProject(platSwap.id)?.name === LEGACY);
+  check("(6g) the SETUP home's rename away from 'Platform' is also left ALONE (nothing was touched)",
+    dbSwap.getProject(setupSwap.id)?.name === "My Workspace");
+  dbSwap.close();
+
+  // (6h) SHAPE (b): a human DELIBERATELY renames the already-migrated setup home back to the legacy
+  // literal (a legitimate reserved-project edit). Pre-fix, every following boot's name match found that
+  // SAME row again and renamed it straight back to "Platform", permanently overriding the human's own
+  // edit. Fixed: the marker being stamped means the migration is already done — the row's current name
+  // is live state, never state to force back.
+  const dbRevert = new Db(path.join(tmpHome, "home-rename-revert.db"));
+  seedDefaultProfiles(dbRevert);
+  seedSetupHome(dbRevert);
+  const setupRevert = dbRevert.getReservedProjectByName(SETUP_PROJECT_NAME);
+  check("(6h) pre-condition: the setup home is seeded + marked", dbRevert.getMeta(SETUP_HOME_PROJECT_ID_KEY) === setupRevert.id);
+  dbRevert.updateProject(setupRevert.id, { name: LEGACY }); // human deliberately renames it back to "Getting Started"
+  const renameRevert1 = seedSetupProjectRename(dbRevert);
+  check("(6h) migration no-ops on the deliberate rename (returns null, does not revert it)", renameRevert1 === null);
+  check("(6h) the home STAYS named 'Getting Started' — the deliberate edit is not forced back",
+    dbRevert.getProject(setupRevert.id)?.name === LEGACY);
+  const renameRevert2 = seedSetupProjectRename(dbRevert); // a second boot — still never reverted
+  check("(6h) a second boot still leaves the deliberate rename alone (idempotent no-op)",
+    renameRevert2 === null && dbRevert.getProject(setupRevert.id)?.name === LEGACY);
+  dbRevert.close();
+
   // ===================== (7) card a47dd144 — STABLE MARKER survives a human rename (setup) ============
   // THE BUG THIS CARD FIXES: a human CAN rename a reserved project's `name` via PATCH /api/projects/:id
   // (only repoPath rebind/archive/delete are refused for `p.reserved`). The OLD idempotency gate
@@ -596,6 +650,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the ungated 'Platform' setup home + 'Platform' operator agent seed for every user (no LOOM_DEV gate), idempotently across reboots, COEXIST with the dev-only 'Loom Platform' home (gate unchanged at 2 agents); the A2 guarded rename backfills a pre-rebrand 'Setup Assistant' operator → 'Platform' while leaving user-renamed + non-reserved-home agents untouched; the B4 seedSetupAuditorAgent backfill seeds a 2nd 'Workspace Auditor' agent into the SAME home (fresh + existing installs), idempotently, never clobbering a user edit; the 'Getting Started' → 'Platform' home rename migration backfills an existing install's reserved home IN PLACE (idempotent, collision-refusing, reserved-scoped, no-op on fresh/user-renamed/absent homes), with the boot order (rename THEN seed) never minting a duplicate home; (card a47dd144) both reserved homes now resolve by a STABLE app_meta id marker, not their `name` — surviving a human rename of either home without minting a duplicate, backfilling the marker for a pre-marker existing install, and self-healing from a stale/mis-stamped/colliding marker; and (card a47dd144 round 2) the collision check also rejects a marker mis-stamped to the OTHER home's row even when that other home's OWN marker was never stamped (name-collision, not just id-collision), and the name-match fallback is archive-agnostic, so an ARCHIVED legacy home still counts as already-seeded rather than growing a second, live duplicate beside it."
+  ? "\n✅ ALL PASS — the ungated 'Platform' setup home + 'Platform' operator agent seed for every user (no LOOM_DEV gate), idempotently across reboots, COEXIST with the dev-only 'Loom Platform' home (gate unchanged at 2 agents); the A2 guarded rename backfills a pre-rebrand 'Setup Assistant' operator → 'Platform' while leaving user-renamed + non-reserved-home agents untouched; the B4 seedSetupAuditorAgent backfill seeds a 2nd 'Workspace Auditor' agent into the SAME home (fresh + existing installs), idempotently, never clobbering a user edit; the 'Getting Started' → 'Platform' home rename migration backfills an existing install's reserved home IN PLACE (idempotent, collision-refusing, reserved-scoped, no-op on fresh/user-renamed/absent homes), with the boot order (rename THEN seed) never minting a duplicate home; (card a47dd144) both reserved homes now resolve by a STABLE app_meta id marker, not their `name` — surviving a human rename of either home without minting a duplicate, backfilling the marker for a pre-marker existing install, and self-healing from a stale/mis-stamped/colliding marker; and (card a47dd144 round 2) the collision check also rejects a marker mis-stamped to the OTHER home's row even when that other home's OWN marker was never stamped (name-collision, not just id-collision), and the name-match fallback is archive-agnostic, so an ARCHIVED legacy home still counts as already-seeded rather than growing a second, live duplicate beside it; and (card 247d0977) the rename migration is now MARKER-scoped, not name-scoped — once stamped it never inspects either home's current name, so a human swapping the two homes' names no longer renames the platform home, and a deliberate rename of the setup home back to the legacy literal is no longer reverted on every boot."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
