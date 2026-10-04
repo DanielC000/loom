@@ -346,16 +346,19 @@ function nestedValue(obj: unknown, dotPath: string): unknown {
   return cur;
 }
 const isNonBlankString = (v: unknown): boolean => typeof v === "string" && v.trim() !== "";
-/** ONE check for both nested-key guards above: does this `unset` list (normalized EXACTLY like
- *  `unsetConfigPath`) hit `k` itself, a PREFIX of it (an ancestor, e.g. "orchestration" over
+/** Shared by the human-only unset/replace guard (which iterates `HUMAN_ONLY_PROJECT_CONFIG_PATHS` — a mix
+ *  of TOP-LEVEL keys like "harness" and nested ones like "orchestration.mergeGate") AND the non-clearable
+ *  gateCommand guard below — despite the "Nested" in its old name (`unsetDropsNestedKey`, renamed by card
+ *  `3ad2b286`), `k` here is just as often a top-level path. Does this `unset` list (normalized EXACTLY
+ *  like `unsetConfigPath`) hit `k` itself, a PREFIX of it (an ancestor, e.g. "orchestration" over
  *  "orchestration.mergeGate") while `k` is stored, or a path INSIDE it (a DESCENDANT, e.g.
- *  "harness.default" under "harness") while `k` is stored? Card 74f27ab5: `harness` is an OBJECT
- *  ({default, scope}), unlike the leaf-valued nested keys — unsetting just one of its sub-fields drops
- *  the human-only value exactly as effectively as unsetting "harness" itself, so the descendant case is
- *  not optional. All three checks are on PATH TEXT only (a plain string prefix like "harnessX" is a
- *  false positive risk if compared without the "." boundary, which the explicit `${nu}.`/`${k}.`
- *  separator below rules out). */
-function unsetDropsNestedKey(k: string, stored: boolean, unset: readonly string[] | undefined): boolean {
+ *  "harness.default" under "harness") while `k` is stored? Card 74f27ab5: `harness` is a TOP-LEVEL key
+ *  that is itself an OBJECT ({default, scope}), unlike the leaf-valued nested keys — unsetting just one of
+ *  its sub-fields drops the human-only value exactly as effectively as unsetting "harness" itself, so the
+ *  descendant case is not optional. All three checks are on PATH TEXT only (a plain string prefix like
+ *  "harnessX" is a false positive risk if compared without the "." boundary, which the explicit
+ *  `${nu}.`/`${k}.` separator below rules out). */
+function unsetDropsConfigPath(k: string, stored: boolean, unset: readonly string[] | undefined): boolean {
   return (unset ?? []).some((u) => {
     const nu = normalizeConfigPath(u);
     if (nu === "" || nu === k) return nu === k;
@@ -562,7 +565,7 @@ export function validateProjectConfigOverride(
   if (dottedSessionEnvError) return { ok: false, error: dottedSessionEnvError };
   if (value.obsidian?.path !== undefined) value.obsidian.path = expandTilde(value.obsidian.path);
   if (value.python?.interpreterPath !== undefined) value.python.interpreterPath = expandTilde(value.python.interpreterPath);
-  return { ok: true, value };
+  return { ok: true, value: pruneEmptyNestedObjects(value as Record<string, unknown>) as ProjectConfigOverride };
 }
 
 /**
@@ -575,12 +578,28 @@ export function validateAgentProjectConfigOverride(
 ): { ok: true; value: ProjectConfigOverride } | { ok: false; error: string } {
   const r = agentProjectConfigOverrideSchema.safeParse(raw ?? {});
   if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
-  return { ok: true, value: r.data as ProjectConfigOverride };
+  return { ok: true, value: pruneEmptyNestedObjects(r.data as Record<string, unknown>) as ProjectConfigOverride };
 }
 
 // True only for a real, plain (non-array) object — the recursion gate for the config deep-merge below.
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** @decision 3ad2b286 — never drop this call from either validator below: a nested `__proto__` payload
+ *  validates `ok:true` reduced to `{}` (family: decision c9a2f1e0), and this is the only thing keeping
+ *  that husk out of a stored merge/replace (mirrors decision 546034fa's posture on the unset path). */
+function pruneEmptyNestedObjects(obj: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (isPlainObject(v)) {
+      const pruned = pruneEmptyNestedObjects(v);
+      if (Object.keys(pruned).length > 0) out[k] = pruned;
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
 }
 
 /**
@@ -1475,7 +1494,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The default-harness key harness (which vendor CLI a worker spawns) is human-only EVEN HERE and is REJECTED, matching profile.harness; so is permission.startupModeCycles (the startup permission-mode climb tuning), both to SET and to CLEAR. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–7200000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). You may CHANGE gateCommand to another non-empty command but NOT blank it or drop it (empty/whitespace value, unset, or replace:true omitting it are REFUSED — a human can still clear it via Settings). Any non-empty value is accepted, INCLUDING one that verifies nothing (e.g. \"exit 0\"): every merge then records a PASS with NO \"unverified\" warning, so never set one unless the owner explicitly asks — only the owner's human-only orchestration.mergeGate switch (and its orchestration.mergeGateInterval) produces a labelled skip. UNSET/REPLACE: pass unset:[\"orchestration.alertWebhook\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset. A payload that both WRITES and UNSETS the same dot-path is REJECTED (not silently resolved either way) — drop one of the two. The returned config NEVER carries sessionEnv values, masked or real — instead it carries sessionEnvKeys (names + VALUE LENGTHS only, e.g. {\"FOO\":38}), so you can confirm a length without ever seeing anything value-shaped. sessionEnvKeys is NOT a settable key — feeding this response's config straight back as a later patch/replace is REJECTED (invalid config), never a silent write.",
+        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The default-harness key harness (which vendor CLI a worker spawns) is human-only EVEN HERE and is REJECTED, matching profile.harness; so is permission.startupModeCycles (the startup permission-mode climb tuning), both to SET and to CLEAR. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–7200000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). The SAME elevation also covers orchestration.deployCommand / deployCommandTimeoutMs (same trust class as gateCommand — host-exec, bounded the same way), python.interpreterPath and obsidian.path (host-launch — an arbitrary interpreter/executable the daemon spawns), and raw sessionEnv (arbitrary env vars reaching every future spawn): the agent path drops all four from their respective parent keys (or, for sessionEnv, omits it entirely), but this FULL validator does not. All four are INTENTIONALLY Lead-settable — a deliberate decision, not an oversight to close — because this whole route is LOOM_DEV-only and human-driven; see the project_configure P3 decision record (docs/decisions/3ad2b286-platform-project-configure-elevated-host-exec-keys.md) for the full rationale. Unlike gateCommand, none of these four carries a non-clearable guard: each may be freely unset, blanked, or dropped. You may CHANGE gateCommand to another non-empty command but NOT blank it or drop it (empty/whitespace value, unset, or replace:true omitting it are REFUSED — a human can still clear it via Settings). Any non-empty value is accepted, INCLUDING one that verifies nothing (e.g. \"exit 0\"): every merge then records a PASS with NO \"unverified\" warning, so never set one unless the owner explicitly asks — only the owner's human-only orchestration.mergeGate switch (and its orchestration.mergeGateInterval) produces a labelled skip. UNSET/REPLACE: pass unset:[\"orchestration.alertWebhook\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset. A payload that both WRITES and UNSETS the same dot-path is REJECTED (not silently resolved either way) — drop one of the two. The returned config NEVER carries sessionEnv values, masked or real — instead it carries sessionEnvKeys (names + VALUE LENGTHS only, e.g. {\"FOO\":38}), so you can confirm a length without ever seeing anything value-shaped. sessionEnvKeys is NOT a settable key — feeding this response's config straight back as a later patch/replace is REJECTED (invalid config), never a silent write.",
         inputSchema: strictShape({
           projectId: z.string(),
           config: z.object({}).passthrough().optional(),
@@ -1491,13 +1510,10 @@ export class PlatformMcpRouter {
         if ("error" in resolved) return ok(resolved);
         const project = resolved;
         const resolvedProjectId = project.id;
-        // P3 ELEVATION (trust boundary): the platform role is HUMAN-EQUIVALENT, so config-set on THIS
-        // platform-route tool goes through the FULL human/REST validator (validateProjectConfigOverride) —
-        // NOT validateAgentProjectConfigOverride. The full validator carries the SAME bounds the REST PATCH
-        // path applies, so gateCommand/alertWebhook are settable but still bounded; out-of-bounds/unknown
-        // keys are rejected and the stored config is left unchanged. This bypass is keyed STRICTLY to this
-        // platform route (resolveRole 404s non-platform); the manager/worker orchestration MCP keeps using
-        // validateAgentProjectConfigOverride, which still REJECTS gateCommand/alertWebhook (unchanged).
+        // @decision 3ad2b286 — the Lead's elevated project_configure is HUMAN-EQUIVALENT (full REST
+        // validator): never narrow it to reject deployCommand/python.interpreterPath/obsidian.path/raw
+        // sessionEnv — deliberately Lead-settable, same trust class as gateCommand/alertWebhook.
+
         // Card 66b1b40d EXCEPTION to the elevation above: the default-harness key stays HUMAN-only even here,
         // matching `profile.harness` (rejected on this router's profile writers too) — a Lead must not be able
         // to route every future worker onto a different vendor CLI. Checked on the RAW payload so the human
@@ -1521,7 +1537,7 @@ export class PlatformMcpRouter {
           // Normalized EXACTLY like `unsetConfigPath` does (split on ".", drop empty segments), so
           // "orchestration.mergeGate.", ".orchestration.mergeGate", "orchestration..mergeGate", "orchestration."
           // and ".orchestration" cannot slip past a raw-string compare and still delete the key.
-          if (unsetDropsNestedKey(k, stored, unset)) return ok({ error: `invalid config: ${k} may not be cleared via an agent MCP tool (unset) — it is human-only, via the REST config PATCH / Settings UI` });
+          if (unsetDropsConfigPath(k, stored, unset)) return ok({ error: `invalid config: ${k} may not be cleared via an agent MCP tool (unset) — it is human-only, via the REST config PATCH / Settings UI` });
           if (replace && stored) return ok({ error: `invalid config: replace:true would drop the stored human-only ${k} — it may not be cleared via an agent MCP tool (human-only, via the REST config PATCH / Settings UI); use a merge write instead` });
         }
         // Card fa777608: the Lead may CHANGE `orchestration.gateCommand` but never blank or drop it (same
@@ -1535,7 +1551,7 @@ export class PlatformMcpRouter {
             return ok({ error: `invalid config: ${k} may not be set to an empty/blank value via an agent MCP tool — that gives the unverified "no gateCommand" merge path; set another non-empty command (${human})` });
           }
           const stored = isNonBlankString(nestedValue(project.config, k));
-          if (stored && unsetDropsNestedKey(k, stored, unset)) {
+          if (stored && unsetDropsConfigPath(k, stored, unset)) {
             return ok({ error: `invalid config: ${k} may not be removed via an agent MCP tool (unset) — set another non-empty command instead (${human})` });
           }
           if (stored && replace && !isNonBlankString(written)) {

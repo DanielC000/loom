@@ -53,6 +53,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       sweeping the same 10 prototype-family names as (13) through the same PATCH path: each is a
 //       genuine own key of the request body and lands correctly, proving the __proto__ refusal is
 //       specific to that one name, not a side effect of the sweep rejecting the whole family.
+//   (16) card 3ad2b286: a `{"__proto__":{...}}` payload NESTED under a top-level key (e.g. `orchestration`)
+//       is a DIFFERENT shape from (15)'s `sessionEnv.__proto__` — that key's `.strict()` z.object schema
+//       (not sessionEnv's z.record) silently drops the bare `__proto__` entry during validation itself,
+//       so `validateProjectConfigOverride`/`validateAgentProjectConfigOverride` return `ok:true` with the
+//       key reduced to `{}` rather than refusing — a husk that would otherwise reach a stored merge/
+//       replace. Proves the fix (`pruneEmptyNestedObjects`) drops that now-empty key ENTIRELY from the
+//       validator's own output (not merely from some later step), on BOTH validators and across the keys
+//       reachable through each, while a POSITIVE control proves real sibling data in the same nested
+//       object is never eaten by the prune.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + the REAL Fastify gateway
 // (app.inject), every other dep STUBBED — mirrors mgmt-project-agent.mjs's minimal harness (this route
@@ -71,7 +80,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
-const { findConfigPatchUnsetCollisions, validateProjectConfigOverride } = await import("../dist/mcp/platform.js");
+const { findConfigPatchUnsetCollisions, validateProjectConfigOverride, validateAgentProjectConfigOverride, mergeConfigOverride } = await import("../dist/mcp/platform.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -394,12 +403,47 @@ try {
   const rProtoHttp = await patch("pK", { config: { sessionEnv: JSON.parse('{"__proto__":"evil"}') } });
   check("(15) HTTP-layer note: a real PATCH body carrying __proto__ is ALSO refused today (400) — by Fastify's own onProtoPoisoning default, a separate guard from this card's fix", rProtoHttp.statusCode === 400);
   check("(15) the untouched project is unaffected by the refused HTTP request", db.getProject("pK").config.orchestration?.gateCommand === "pnpm build");
+
+  // ===================== (16) card 3ad2b286: a __proto__ NESTED under a top-level key leaves no empty
+  // husk behind — see the file header for why this is a different shape from (15)'s sessionEnv.__proto__.
+  // Driven DIRECTLY against the validators (like (13)/(15) above), not through app.inject: Fastify's own
+  // onProtoPoisoning default already refuses ANY body containing a literal "__proto__" key (see (15)'s
+  // HTTP-layer note just above) — so the real, reachable attack surface for this shape is a non-HTTP
+  // caller of these same exported validators (the platform/setup MCP routers' project_configure), not
+  // this REST route. =====
+  {
+    // Built via JSON.parse (same reason as (15)'s protoSessionEnv): a literal `{__proto__: ...}` key in
+    // this source file would set the object's prototype instead of creating an own property.
+    const protoOrch = JSON.parse('{"__proto__":{"gateCommand":"evil"}}');
+    const vFull = validateProjectConfigOverride({ orchestration: protoOrch });
+    check("(16) ★ the FULL validator still returns ok:true (this shape is NOT a validation refusal, unlike (15))", vFull.ok === true);
+    check("(16) ★ the husk is PRUNED: `orchestration` is ABSENT from the validated value, not stored as {}", !Object.hasOwn(vFull.value, "orchestration"));
+
+    // Same shape through the AGENT validator (setup.ts's surface) — `memory` is a plain agent-settable
+    // nested object, exercising a DIFFERENT top-level key than orchestration to prove the prune is
+    // general, not special-cased to one schema.
+    const protoMemory = JSON.parse('{"__proto__":{"budgetTokens":999}}');
+    const vAgent = validateAgentProjectConfigOverride({ memory: protoMemory });
+    check("(16) ★ the AGENT validator also returns ok:true for this shape", vAgent.ok === true);
+    check("(16) ★ the AGENT validator's husk is PRUNED too: `memory` is ABSENT, not stored as {}", !Object.hasOwn(vAgent.value, "memory"));
+
+    // POSITIVE CONTROL: real, non-empty sibling data in the SAME nested object is never eaten by the
+    // prune — proves this is an emptiness check, not an accidental drop of the whole key.
+    const vReal = validateProjectConfigOverride({ orchestration: { gateCommand: "pnpm build" } });
+    check("(16) CONTROL: a real (non-empty) orchestration value survives validation unpruned", vReal.ok === true && vReal.value.orchestration?.gateCommand === "pnpm build");
+
+    // merge-level proof: merging the pruned (now keyless) patch onto an EXISTING, non-empty orchestration
+    // leaves the existing value completely untouched — the husk never even reaches the merge as a {}
+    // that could shadow or no-op over real stored data.
+    const merged = mergeConfigOverride({ orchestration: { gateCommand: "pnpm build", maxConcurrentManagers: 3 } }, vFull.value);
+    check("(16) ★ merging the pruned patch onto an existing orchestration leaves it fully intact", merged.orchestration?.gateCommand === "pnpm build" && merged.orchestration?.maxConcurrentManagers === 3);
+  }
 } finally {
   try { if (app) await app.close(); } catch { /* ignore */ }
   db.close();
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PATCH /api/projects/:id/config deep-merges by default (a single-key PATCH preserves every sibling key, nested objects merge field-by-field), `unset` expresses deletion the merge itself cannot, `replace:true` still opts into the old whole-object-replace behavior byte-identical, this human REST path carries NO additiveOnlyRotationGuard (can shrink/lower/re-point rotation fields — the documented Settings.tsx escape hatch), a rejected PATCH leaves the stored config unchanged, `unset` genuinely REMOVES memory/alertWebhook/rotationMarkers+heading (not stored-empty) with an untouched sibling surviving each, and unsetting EVERY leaf of a group one dot-path at a time (the real Settings.tsx shape) PRUNES the now-empty parent too — in either order, while a PARTIAL clear leaves the group's untouched sibling leaf intact; PLUS (card b5faa194) a write and an `unset` of the SAME dot-path in one payload is now REFUSED (400, named, stored config unchanged) rather than the unset silently winning, a non-colliding rename in the same map is unaffected, the sessionEnv editor's own two-pass payload lands its rotated value, and a sessionEnv unset genuinely deletes its key while an unmodeled `pty` override survives; PLUS (card e07daa96 / reviewer session 4275d929) a prototype-family name the patch never wrote is never a false-positive collision while a genuinely own key sharing that name still is, and a zero-segment unset path is never a collision — at both the primitive and the end-to-end REST layer; PLUS (card e4e854cc) a raw sessionEnv.__proto__ key is REFUSED at validation (400, stored config unchanged) instead of zod's z.record silently dropping it, with a positive control proving the same 10 prototype-family names from (13) still land as ordinary own keys through the real PATCH path."
+  ? "\n✅ ALL PASS — PATCH /api/projects/:id/config deep-merges by default (a single-key PATCH preserves every sibling key, nested objects merge field-by-field), `unset` expresses deletion the merge itself cannot, `replace:true` still opts into the old whole-object-replace behavior byte-identical, this human REST path carries NO additiveOnlyRotationGuard (can shrink/lower/re-point rotation fields — the documented Settings.tsx escape hatch), a rejected PATCH leaves the stored config unchanged, `unset` genuinely REMOVES memory/alertWebhook/rotationMarkers+heading (not stored-empty) with an untouched sibling surviving each, and unsetting EVERY leaf of a group one dot-path at a time (the real Settings.tsx shape) PRUNES the now-empty parent too — in either order, while a PARTIAL clear leaves the group's untouched sibling leaf intact; PLUS (card b5faa194) a write and an `unset` of the SAME dot-path in one payload is now REFUSED (400, named, stored config unchanged) rather than the unset silently winning, a non-colliding rename in the same map is unaffected, the sessionEnv editor's own two-pass payload lands its rotated value, and a sessionEnv unset genuinely deletes its key while an unmodeled `pty` override survives; PLUS (card e07daa96 / reviewer session 4275d929) a prototype-family name the patch never wrote is never a false-positive collision while a genuinely own key sharing that name still is, and a zero-segment unset path is never a collision — at both the primitive and the end-to-end REST layer; PLUS (card e4e854cc) a raw sessionEnv.__proto__ key is REFUSED at validation (400, stored config unchanged) instead of zod's z.record silently dropping it, with a positive control proving the same 10 prototype-family names from (13) still land as ordinary own keys through the real PATCH path; PLUS (card 3ad2b286) a __proto__ NESTED under a top-level key (e.g. orchestration/memory) is pruned entirely from BOTH validators' output rather than left as a stored {} husk, with a positive control proving real sibling data in the same nested object survives unpruned and a merge-level proof that the pruned patch leaves an existing stored orchestration fully intact."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

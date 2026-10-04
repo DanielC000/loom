@@ -67,21 +67,32 @@ async function callTool(server, name, args) {
 const lead = () => new PlatformMcpRouter(db, svc).buildServer();
 
 // ============ (1) seed a stored human-only top-level key the normal write path would never allow ============
-db.setProjectConfig("pH", { harness: { default: "codex", scope: "workers" }, docLint: false });
+const HARNESS_SEED = { harness: { default: "codex", scope: "workers" }, docLint: false };
+db.setProjectConfig("pH", HARNESS_SEED);
 const stored1 = JSON.stringify(db.getProject("pH").config);
+// Card 3ad2b286 item 2: re-seed pH to this EXACT state immediately before each ATTACK case below. On
+// pre-fix code (where the guard doesn't actually block the mutation), an earlier attack's side effect
+// would otherwise carry into a LATER attack's starting state — e.g. (2)'s unset silently clearing
+// `harness` would leave (3)/(4)/(4b) attacking an already-empty config, so each case's own RED/GREEN
+// verdict stays independently attributable to that one case's check, never inflated or masked by a
+// prior case's mutation.
+const reseedPH = () => db.setProjectConfig("pH", HARNESS_SEED);
 
 // ============ (2) unset:["harness"] must be REFUSED (RED on old code: this silently cleared it) ============
+reseedPH();
 const unsetExact = await callTool(lead(), "project_configure", { projectId: "pH", config: {}, unset: ["harness"] });
 check("(2) Lead unset of top-level harness is REFUSED", typeof unsetExact.error === "string" && /harness/.test(unsetExact.error));
 check("(2) the refused unset did not change the stored config", JSON.stringify(db.getProject("pH").config) === stored1);
 
 // ============ (3) replace:true omitting harness must be REFUSED (RED on old code) ============
+reseedPH();
 const replaceDrop = await callTool(lead(), "project_configure", { projectId: "pH", config: { docLint: true }, replace: true });
 check("(3) Lead replace:true that would drop the stored harness is REFUSED", typeof replaceDrop.error === "string" && /harness/.test(replaceDrop.error));
 check("(3) the refused replace did not change the stored config", JSON.stringify(db.getProject("pH").config) === stored1);
 
 // ============ (4) normalization: odd spellings of the same path still resolve and are REFUSED ============
 for (const shape of ["harness.", ".harness", " harness", "harness "]) {
+  reseedPH();
   const sh = await callTool(lead(), "project_configure", { projectId: "pH", config: {}, unset: [shape] });
   const refused = typeof sh.error === "string" && /harness/.test(sh.error);
   // "harness." / ".harness" normalize (split on ".", drop empty segments) to the same "harness" path and
@@ -98,9 +109,11 @@ check("(4) none of the above changed the stored config", JSON.stringify(db.getPr
 // ============      effectively as unsetting "harness" itself, so this must be refused too (manager ============
 // ============      follow-up on this same card: RED on ca2fc9c8, the commit that closed only the exact- ============
 // ============      path and ancestor-prefix cases). ============
+reseedPH();
 const descDefault = await callTool(lead(), "project_configure", { projectId: "pH", config: {}, unset: ["harness.default"] });
 check("(4b) unset of the DESCENDANT path harness.default is REFUSED", typeof descDefault.error === "string" && /harness/.test(descDefault.error));
 check("(4b) the refused harness.default unset did not change the stored config", JSON.stringify(db.getProject("pH").config) === stored1);
+reseedPH();
 const descScope = await callTool(lead(), "project_configure", { projectId: "pH", config: {}, unset: ["harness.scope"] });
 check("(4b) unset of the DESCENDANT path harness.scope is REFUSED", typeof descScope.error === "string" && /harness/.test(descScope.error));
 check("(4b) the refused harness.scope unset did not change the stored config", JSON.stringify(db.getProject("pH").config) === stored1);
@@ -108,6 +121,7 @@ check("(4b) the refused harness.scope unset did not change the stored config", J
 // caught — proves the check is path-boundary-aware, not a bare substring/startsWith test. "harnessX" isn't
 // a real config key, so this exercises the unset-of-an-unknown-key no-op path rather than any real data
 // loss; CONFIG_TOP_LEVEL_KEYS has no real key sharing "harness" as a string prefix to use instead.
+reseedPH();
 const siblingPrefix = await callTool(lead(), "project_configure", { projectId: "pH", config: {}, unset: ["harnessX"] });
 check("(4b) CONTROL: unset of the sibling-string-prefix path \"harnessX\" is NOT refused (no \".\" boundary ⇒ not a real descendant)", !(typeof siblingPrefix.error === "string" && /harness/.test(siblingPrefix.error)));
 check("(4b) the unrefused harnessX unset left the stored config untouched (unknown key ⇒ no-op)", JSON.stringify(db.getProject("pH").config) === stored1);
