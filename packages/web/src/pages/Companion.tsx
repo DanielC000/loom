@@ -1372,7 +1372,7 @@ function RestrictToolsSection({ sessionId }: { sessionId: string }) {
           </div>
         )
       )}
-      {restart.error && <span style={errStyle}>{(restart.error as Error).message}</span>}
+      {restart.error && <span style={errStyle}>{errorText(restart.error)}</span>}
     </section>
   );
 }
@@ -1567,7 +1567,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
             </span>
           </label>
 
-          {setLead.isError && <span style={errStyle}>{(setLead.error as Error).message}</span>}
+          {setLead.isError && <span style={errStyle}>{errorText(setLead.error)}</span>}
 
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <Button variant="danger" disabled={!ack || setLead.isPending} data-testid="companion-lead-mode-confirm" onClick={() => setLead.mutate(true)}>
@@ -1589,7 +1589,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
             <strong style={{ color: color.text }}>{companionName}</strong> has full act-scope across every
             project, no guardrails. Your per-project grants are shadowed below and return the moment you switch this off.
           </span>
-          {setLead.isError && <span style={errStyle}>{(setLead.error as Error).message}</span>}
+          {setLead.isError && <span style={errStyle}>{errorText(setLead.error)}</span>}
           <Button variant="danger" disabled={setLead.isPending} data-testid="companion-lead-mode-disable" onClick={() => setLead.mutate(false)}>
             {setLead.isPending ? "Turning off…" : "Turn off"}
           </Button>
@@ -1714,7 +1714,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
               )}
             </div>
           )}
-          {respawn.error && <span style={errStyle}>{(respawn.error as Error).message}</span>}
+          {respawn.error && <span style={errStyle}>{errorText(respawn.error)}</span>}
 
           {coGrantWarnings.length > 0 && (
             <div
@@ -1971,7 +1971,7 @@ function LeverCard({ sessionId, meta, grants, projects, onMutated }: {
       ) : (
         grants.length === 0 && <span style={hint}>No projects available to grant — create a project first.</span>
       )}
-      {(upsert.error || remove.error) && <span style={errStyle}>{((upsert.error ?? remove.error) as Error).message}</span>}
+      {(upsert.error || remove.error) && <span style={errStyle}>{errorText(upsert.error ?? remove.error)}</span>}
     </div>
   );
 }
@@ -2256,7 +2256,7 @@ function PairingSection({ sessionId }: { sessionId: string }) {
         </Field>
         <Button variant="primary" disabled={mint.isPending} onClick={submit}>{mint.isPending ? "Minting…" : "Mint code"}</Button>
       </div>
-      {(localErr || mint.error) && <span style={errStyle}>{localErr ?? (mint.error as Error).message}</span>}
+      {(localErr || mint.error) && <span style={errStyle}>{localErr ?? errorText(mint.error)}</span>}
       {minted && <PairingCode code={minted.code} expiresAt={minted.expiresAt} onDismiss={() => setMinted(null)} />}
     </section>
   );

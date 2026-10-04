@@ -67,28 +67,62 @@ check("errorText swaps the guard 401 for the banner pointer and passes everythin
   assert.equal(errorText(undefined), undefined);
 });
 
-// SOURCE SCAN (not a render test): a mutation error rendered via a raw `.message` bypasses errorText. Scope =
-// the mutation variable names converted by this card, in src/**/*.tsx; a NEW mutation with another name is not covered.
 const walkTsx = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
   d.isDirectory() ? walkTsx(new URL(`${d.name}/`, dir)) : d.name.endsWith(".tsx") ? [new URL(d.name, dir)] : []);
+// Strips comments first so prose describing the rule (e.g. "window.alert()") isn't read as code.
+const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 
-check("no src file renders a converted mutation's error via a raw .message", () => {
-  const root = new URL("../src/", import.meta.url);
-  const re = /\((save|clear|remove|connect|createBinding|add|del|applyPreset|spawn|create|update|retry|reclaim|validateSonar|createOAuth|resolve|adopt|mut)\.error as Error\)\??\.message/;
-  const files = walkTsx(root);
-  assert.ok(files.length > 20, "the scan must actually see the source tree");
-  const bad = files.filter((f) => re.test(fs.readFileSync(f, "latin1"))).map((f) => f.pathname);
+// SOURCE SCAN (not a render test): a mutation error rendered via a raw `.message` bypasses errorText. Keyed
+// on the mutation SHAPE (every `const X = useMutation(...)` in the file) rather than a hand-maintained name
+// list — card 06ba70a2: the prior hand list missed restart/setLead/respawn/mint entirely and couldn't see
+// the combined `((a ?? b) as Error).message` shape at all, so six real violations shipped past it.
+const mutationNamesIn = (src) => {
+  const names = new Set();
+  const re = /\b(?:const|let)\s+([A-Za-z0-9_$]+)\s*(?::[^=]*?)?=\s*useMutation\(/g;
+  let m;
+  while ((m = re.exec(src))) names.add(m[1]);
+  return names;
+};
+/**
+ * `(x.error as Error)`, optionally combining several KNOWN mutation names via `??`, then `.message`. The
+ * `??` chain gets its own inner parens in real code (`((a.error ?? b.error) as Error)`) but a lone name
+ * doesn't (`(a.error as Error)`) — so the inner paren pair is OPTIONAL, not required.
+ */
+const rawMessageRe = (names) => {
+  const alt = [...names].map((n) => n.replace(/\$/g, "\\$")).join("|");
+  const chain = `(?:${alt})\\.error(?:\\s*\\?\\?\\s*(?:${alt})\\.error)*`;
+  return new RegExp(`\\(\\s*\\(?\\s*${chain}\\s*\\)?\\s*as\\s*Error\\s*\\)\\??\\.message`);
+};
+
+check("no mutation's error is rendered via a raw .message — use errorText()", () => {
+  const bad = [];
+  let scanned = 0;
+  for (const f of walkTsx(new URL("../src/", import.meta.url))) {
+    const raw = fs.readFileSync(f, "latin1");
+    const names = mutationNamesIn(stripComments(raw));
+    if (names.size === 0) continue;
+    scanned += names.size;
+    if (rawMessageRe(names).test(raw)) bad.push(f.pathname.split("/src/")[1]);
+  }
+  assert.ok(scanned > 100, `the scan must actually see the mutations (saw ${scanned})`);
   assert.deepEqual(bad, [], "raw mutation-error .message render(s) — use errorText()");
-  assert.ok(re.test("x{(save.error as Error).message}"), "negative control: the pattern matches the bad shape");
+  // POSITIVE CONTROLS — an empty result means nothing unless the instrument can return a hit.
+  assert.ok(rawMessageRe(new Set(["save"])).test("x{(save.error as Error).message}"),
+    "positive control: the single-name shape is caught");
+  assert.ok(rawMessageRe(new Set(["upsert", "remove"])).test("x{((upsert.error ?? remove.error) as Error).message}"),
+    "positive control: the combined `??` shape is caught (the exact pattern this card missed)");
+  assert.ok(rawMessageRe(new Set(["mint"])).test("x{(mint.error as Error)?.message}"),
+    "positive control: the optional-chaining variant is caught");
+  // NEGATIVE CONTROL — a query's `.error` is NOT a mutation and must not trip this scan (errorText's own
+  // doc: "Do not use it for GET/query errors: the guard exempts reads").
+  assert.ok(!rawMessageRe(new Set(["save"])).test("x{(q.error as Error).message}"),
+    "negative control: an unrelated (query) identifier's raw .message is not flagged");
 });
 
 // ── card ad42a127: main.tsx's MutationCache is the SOLE owner of the mutation-failure alert ──────────
 // TanStack v5 runs the cache handler AND the per-mutation one for the same failure, so a second alerter
 // means two modals for one error — exactly what `alertUnlessCredentialGuard` did at 27 call sites. The
-// two scans below pin the two shapes that defect took. Both strip comments first: this file's own prose
-// (and Skills.tsx's) says "window.alert()" while describing the rule, and a scan that reads prose as code
-// fails for the wrong reason.
-const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+// two scans below pin the two shapes that defect took.
 // Two arms, because the defect had two shapes and neither pattern sees the other: ACT catches an inline
 // `alert(...)`; NAME catches a shared helper passed by reference (`onError: alertUnlessCredentialGuard`,
 // the original 27-site shape) whose definition this scan never opens.
