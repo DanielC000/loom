@@ -19558,35 +19558,25 @@ export class SessionService {
    * widened here and by 369d8824) never lands alongside a rich direct push for the same op.
    */
   /**
-   * AUTO-SUPERSEDE (card 8d585277 — the manager's own primary ask, and the live incident: three
-   * gate-green branches serialized behind a single merge lane while each worker's OWN now-moot self-check
-   * still occupied a queue slot). A manager calling `worker_merge_confirm` AS THIS WORKER'S EXACT OWNER
-   * has, by construction, ALREADY decided this worker's queued `run_gate` self-check is moot — the merge
-   * gate re-validates independently (or REUSE-A-GREEN-SELF-CHECK reuses a settled one; see
-   * `confirmWorkerMerge`'s own doc) either way. Reclaims that slot the instant the decision is made,
-   * unconditional on what THIS confirm call goes on to decide (idempotent-already-merged, stranded-work
-   * refusal, a gate rejection, or a clean merge all equally mean the self-check's OWN result is no longer
-   * relevant to anyone) — but this method is itself called ONLY when the caller IS the exact owner
-   * (`isExactWorkerOwner`, card 164f7915 round 2): a lineage-matching-but-not-exact caller merely attaching
-   * to this worker's in-flight or cached op never reaches this method at all, so the reclaim is
-   * unconditional across OUTCOMES, never across CALLERS. See 164f7915's record for why exempting that
-   * lineage-only case is a real, bounded trade-off rather than a free one.
+   * AUTO-SUPERSEDE: reclaims a worker's queued `run_gate` self-check the instant a merge decision makes it
+   * moot. Called from its ONE call site (`confirmWorkerMergeTracked`, immediately before
+   * `pendingOps.attach()`) under EITHER of two arms, both gated fresh at that site, never re-derived here:
+   * (1) the caller IS this worker's EXACT owner (`isExactWorkerOwner`); or (2) the caller is merely
+   * LINEAGE-matching but is about to ATTACH to an already-RUNNING op under this worker's merge key. A
+   * lineage-matching caller with nothing attachable (case neither) never reaches this method at all.
+   * QUEUED ONLY: an already-ADMITTED self-check is never killed here — that is the explicit manual
+   * `gate_cancel` escalation (`cancelGateOp`) instead.
    *
-   * QUEUED ONLY — DELIBERATE (manager-approved shape, Report-and-STOP checkpoint): if the self-check has
-   * already been ADMITTED (a real process is running), this does NOTHING — no process is ever killed on
-   * this automatic, no-human-judgement path; that would mean this card's easiest-to-get-wrong hazard (a
-   * freed slot over still-running work) firing on every ordinary merge, not just a deliberate escalation.
-   * The structural per-worktree exclusivity guard (`GateDescriptor.worktreePath`, `GateSemaphore`) still
-   * ensures the merge gate can't run CONCURRENTLY with an already-running self-check regardless — it just
-   * queues behind it instead, exactly as it would have without this method existing at all. Cancelling an
-   * ALREADY-RUNNING self-check is the explicit manual `gate_cancel` escalation (`cancelGateOp` below), not
-   * this automatic path.
+   * @decision 164f7915 — the two-arm condition, the exempted no-attach case, the QUEUED-only design
+   * rationale, and a known admission-race residual this does NOT catch are decision history, not contract
+   * — read that record (`supersedeQueuedSelfCheck`'s own design, Rounds 2/3) before changing either arm.
    */
   private supersedeQueuedSelfCheck(workerSessionId: string, callerProjectId: string | null): void {
-    // PROJECT SCOPE (Code Review finding B2-1 — gated by card 164f7915's `isExactWorkerOwner` check at
-    // this method's ONLY call site, round 2): every caller reaching here already owns this worker by
-    // EXACT id, not merely lineage. `callerProjectId` still fails closed on a null/unresolvable manager,
-    // purely to scope the cancel, not as a stand-in for ownership.
+    // PROJECT SCOPE (Code Review finding B2-1 — gated by card 164f7915's exact-owner-OR-attaching-to-
+    // running condition at this method's ONLY call site, Round 3): every caller reaching here is EITHER
+    // this worker's exact owner, OR lineage-matching and attaching to an already-running op under its
+    // merge key — never a lineage-only caller with nothing attachable. `callerProjectId` still fails
+    // closed on a null/unresolvable manager, purely to scope the cancel, not as a stand-in for ownership.
     if (!callerProjectId) return;
     const gateKey = `gate:${workerSessionId}`;
     const pending = this.pendingOps.peek(gateKey);
@@ -19648,6 +19638,15 @@ export class SessionService {
   private mainlineHeadReader: typeof readMainlineHead = readMainlineHead;
   /** Test seam (card 787dd2a7 round 2): the first-sight default-branch resolver; a test replaces it to simulate a TRANSIENT read failure deterministically, never a real git-level timeout. */
   private resolveMainlineBranchStateReader: typeof resolveMainlineBranchState = resolveMainlineBranchState;
+  /** Test seam (card 86c3286a), confirmWorkerMergeTracked's own identity-resolving pair, kept separate from
+   *  checkMainlineMove's `mainlineHeadReader`/`mainlineFactsReader` above so overriding one never entangles
+   *  the other method's tests. A test overrides one (or both) to pause confirmWorkerMergeTracked between its
+   *  identity-resolving reads and its (now-after-the-awaits) supersede/attach decision, deterministically
+   *  landing a mutation inside the race window this card closes — never a fixed wait. Test-only: no
+   *  production config surface reaches either field. */
+  private confirmMergeBranchTipReader: typeof resolveGitRef = resolveGitRef;
+  /** Test seam (card 86c3286a) — see confirmMergeBranchTipReader's doc immediately above. */
+  private confirmMergeMainlineHeadReader: typeof readMainlineHead = readMainlineHead;
   private mainlineGitMs(): number { return Math.min(this.gitOpMs ?? 10_000, 10_000); }
   /** Aggregate budget for ONE mainline check (card 0eb7ff27): a few per-call timeouts, never more than 30s. The check holds the repo guard, so its total work must be bounded, not just each call. */
   private mainlineDeadlineMs(): number { return Math.min(this.mainlineGitMs() * 4, 30_000); }
@@ -20075,8 +20074,8 @@ export class SessionService {
       return { settled: true, ok: false, error: new NotYourWorkerError() };
     }
     // @decision 164f7915 — ROUND 2: no exact-id refusal belongs on this attach-reachable path (that
-    // regressed 656e326f); the only ownership gate here is the lineage check above. See the
-    // `isExactWorkerOwner` guard around `supersedeQueuedSelfCheck` below instead.
+    // regressed 656e326f); the only ownership gate here is the lineage check above. See the Round-3
+    // two-arm guard (exact owner OR attaching to a running op) around `supersedeQueuedSelfCheck` below.
 
     // LINEAGE-RESOLVED KEY (card `3a2dac9c`, DoD-2 — "resolve at the read, never rewrite at the write"
     // applied to this write path too): if a predecessor's merge op is STILL RUNNING anywhere backward in
@@ -20104,11 +20103,9 @@ export class SessionService {
     // has already settled.
     const lineageOp = lineageResolvedPendingOp(this.db, "merge", (k) => this.pendingOps.peek(k), workerSessionId);
     const key = lineageOp && lineageOp.view.state === "running" ? lineageOp.key : `merge:${workerSessionId}`;
-    // @decision 164f7915 — ROUND 2: gated on EXACT ownership, never merely lineage — see this card's
-    // record for why a lineage-only caller must skip this call rather than mint-and-cancel for nothing.
-    if (this.isExactWorkerOwner(managerSessionId, this.db.getSession(workerSessionId))) {
-      this.supersedeQueuedSelfCheck(workerSessionId, this.db.getSession(managerSessionId)?.projectId ?? null);
-    }
+    // @decision 164f7915 — do not decide the supersede HERE (Round 3): the two awaits below (resolveGitRef /
+    // readMainlineHead) leave a window for `parentSessionId` to change before the real mint. The decision
+    // now lives immediately before `pendingOps.attach()`, after those awaits.
     // @decision 27ea069e — a RUNNING op whose owning manager's whole lineage is dead is evicted here so
     // this call starts a genuinely fresh confirm; a live (or still-resuming) owner's op is left alone.
     //
@@ -20147,8 +20144,8 @@ export class SessionService {
       }
     }
     const taskId = this.db.getSession(workerSessionId)?.taskId ?? null;
-    // Same derivation `supersedeQueuedSelfCheck` above already uses — the scope anchor for this op's
-    // durable tombstone row (see onOpMinted below / the pending_gate_ops schema doc).
+    // Same derivation `supersedeQueuedSelfCheck`'s own call site (below, right before attach()) uses — the
+    // scope anchor for this op's durable tombstone row (see onOpMinted below / the pending_gate_ops schema doc).
     const projectId = this.db.getSession(managerSessionId)?.projectId ?? null;
     const who = (opId: string) => `worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${opId}]`;
     // OP-START CAPTURE (card 9d521792 CR follow-up): captured HERE, synchronously right before attach(),
@@ -20227,14 +20224,28 @@ export class SessionService {
           const project = this.db.getProject(worker.projectId);
           if (project) {
             const repo = resolveRepoByKey(project, worker.repoKey);
-            const sha = (await resolveGitRef(repo.path, worker.branch, { timeoutMs: this.gitOpMs })) ?? undefined;
+            const sha = (await this.confirmMergeBranchTipReader(repo.path, worker.branch, { timeoutMs: this.gitOpMs })) ?? undefined;
             mergeGateSuffix = mergeGateIdentitySuffix(mergeGateValue);
             // @decision c06f876a — the mainline tip is part of the identity (ONE resolver, `readMainlineHead`, the same read the store side uses); any read failure ⇒ undefined ⇒ never hits ⇒ re-gate.
-            const mainTip = sha ? (await readMainlineHead(repo.path, this.mainlineGitMs()))?.tip : undefined;
+            const mainTip = sha ? (await this.confirmMergeMainlineHeadReader(repo.path, this.mainlineGitMs()))?.tip : undefined;
             verdictIdentity = sha && mainTip ? `${sha}${mainIdentitySegment(mainTip)}${mergeGateSuffix}` : undefined;
           }
         }
       } catch { /* fail-safe: undefined identity never dedupe-hits, see doc above */ }
+    }
+    // @decision 164f7915 — Round 3: decided HERE, in the SAME synchronous step as `attach()` two lines
+    // below — no `await` may ever sit between this block and that call, or the window this round closes
+    // reopens.
+    //
+    // Re-reads the worker row and `key`'s pending-op state fresh (never the earlier `worker`/`inFlight`
+    // locals captured above the two awaits), so this sees exactly what `attach()` is about to see. Fires
+    // for the exact owner (unchanged from Round 2), OR for a lineage-only caller about to ATTACH to an
+    // already-RUNNING op under `key` (new in Round 3): per card 8d585277, cancelling a QUEUED self-check is
+    // zero-risk regardless of who it's superseded in favor of, and skipping it here would reopen the
+    // serialization that card removed.
+    const attachingToRunningOp = this.pendingOps.peek(key)?.state === "running";
+    if (attachingToRunningOp || this.isExactWorkerOwner(managerSessionId, this.db.getSession(workerSessionId))) {
+      this.supersedeQueuedSelfCheck(workerSessionId, this.db.getSession(managerSessionId)?.projectId ?? null);
     }
     const result = await this.pendingOps.attach<ConfirmMergeResult>(
       key, "merge", managerSessionId, this.syncAttachBudgetMs,

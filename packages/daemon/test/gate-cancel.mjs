@@ -305,31 +305,51 @@ function makeRepo(repo) {
 
   check("(e2e single-admission) the self-check has not run the real gate yet (still queued)", gateCalls === 0);
 
-  // The manager decides to merge WHILE the self-check is STILL queued — confirmWorkerMergeTracked runs
-  // supersedeQueuedSelfCheck as its own first (synchronous, pre-any-await) statement, so simply INITIATING
-  // this call cancels the queued self-check before the merge's own union-merge/gate logic ever starts.
+  // The manager decides to merge WHILE the self-check is STILL queued. Since card 86c3286a (Round 3),
+  // confirmWorkerMergeTracked no longer decides the supersede as its own first, pre-any-await statement —
+  // it decides it fresh, in the same synchronous step as `pendingOps.attach()`, AFTER its two
+  // identity-resolving git reads (resolveGitRef/readMainlineHead) settle. So simply INITIATING this call no
+  // longer guarantees the queued self-check is cancelled before the holder's slot could otherwise be handed
+  // to it — releasing the holder too early would let the self-check win admission via a totally UNRELATED
+  // race (GateSemaphore admission latency vs. this call's own git reads), making this block VACUOUS (it
+  // would pass by the self-check running for real and being reused, never by exercising supersede at all —
+  // a real Code Review finding against this exact block). `confirmMergeMainlineHeadReader` (the second of
+  // the two awaits) is overridden here PURELY to signal "the identity reads are done, the supersede
+  // decision has now run" — never to mutate state, unlike merge-confirm-supersede-mint-window.mjs's own
+  // (1)/(2) scenarios — so the holder is only released once that decision has already happened, same
+  // discipline, different purpose.
+  let identityResolved = false;
+  const realHeadReader = sessions.confirmMergeMainlineHeadReader;
+  sessions.confirmMergeMainlineHeadReader = async (...args) => {
+    const result = await realHeadReader(...args);
+    identityResolved = true;
+    return result;
+  };
   // Deliberately NOT awaited yet: the merge's own gate call will itself queue behind the still-held
   // unrelated holder below, so awaiting here first would deadlock this test.
-  // (supersedeQueuedSelfCheck already ran synchronously the instant the call above was MADE — an async
-  // function's body runs up to its first `await` immediately, before control returns to this line.)
   const pMerge = sessions.confirmWorkerMergeTracked(mgrId, workerId);
 
+  await waitUntil(() => identityResolved === true);
   releaseUnrelated("go"); // free the slot the holder occupied, so the merge's own gate can now proceed
   await pHolderRun.catch(() => {});
+  sessions.confirmMergeMainlineHeadReader = realHeadReader;
 
   const mergeResult = await pMerge;
   const selfCheckSettled = await pSelfCheck;
 
-  check("(e2e single-admission) the merge gate actually ran the real gate", gateCalls === 1);
   check("(e2e single-admission) the merge itself succeeded", mergeResult?.ok === true && mergeResult.value?.merged === true);
   check("(e2e single-admission) the self-check settled ok (never a thrown error surfaced to the caller)", selfCheckSettled.settled === true && selfCheckSettled.ok === true);
   check("(e2e single-admission) the self-check's OWN value reports cancelled, never a real pass/fail",
     selfCheckSettled.ok && selfCheckSettled.value?.cancelled === true && selfCheckSettled.value?.passed === undefined);
   check("(e2e single-admission) the cancel is tagged superseded-by-merge",
     selfCheckSettled.ok && selfCheckSettled.value?.cancelKind === "superseded-by-merge");
-  // Single admission: the fake gate command only ever ran ONCE (the merge's own gate) — the self-check
-  // never spawned a second, redundant run.
-  check("(e2e single-admission) exactly ONE real gate invocation total (the self-check never double-ran)", gateCalls === 1);
+  // Single admission: guards against a DOUBLE-RUN (the self-check AND the merge both spawning their own
+  // real gate call) — it is NOT a supersede witness. It passes even with `supersedeQueuedSelfCheck`
+  // no-op'd, because a self-check that wins admission and settles green before the merge's own reuse check
+  // runs still collapses to one real invocation via reuse (see docs/decisions/164f7915-*.md's Round 3
+  // residual) — this check alone can't tell that apart from a genuine supersede. The two `cancelled`-shape
+  // checks immediately above are what actually discriminate whether supersede fired.
+  check("(e2e single-admission) exactly ONE real gate invocation total (never a double-run, by whichever mechanism)", gateCalls === 1);
 }
 
 // ── (2) gate_cancel refuses an op belonging to a DIFFERENT project ──────────────────────────────────────
@@ -395,12 +415,15 @@ function makeRepo(repo) {
 }
 
 // ── Code Review finding B2-1: a manager who does NOT own a worker must not be able to cancel that
-//    worker's queued self-check as a SIDE EFFECT of a refused worker_merge_confirm call. The ownership
-//    ("not your worker") check lives deep inside confirmWorkerMerge, reached only via attach()'s factory;
-//    supersedeQueuedSelfCheck fires as the FIRST statement of confirmWorkerMergeTracked, unconditionally,
-//    before that check ever runs. RED-first: this block is written to demonstrate the bug against
-//    UNFIXED code — run it before applying the projectId-scoping fix to confirm it fails, then again after
-//    to confirm it passes.
+//    worker's queued self-check as a SIDE EFFECT of a refused worker_merge_confirm call. At the time of
+//    this incident, the ownership ("not your worker") check lived deep inside confirmWorkerMerge, reached
+//    only via attach()'s factory, while supersedeQueuedSelfCheck fired as the FIRST statement of
+//    confirmWorkerMergeTracked, unconditionally, before that check ever ran. (Since card 656e326f the
+//    lineage pre-check runs first, and since card 86c3286a/164f7915 Round 3 the supersede decision itself
+//    moved past confirmWorkerMergeTracked's own identity-resolving awaits — see that record's own history;
+//    this comment describes the shape the fix below was ORIGINALLY built against, not current timing.)
+//    RED-first: this block is written to demonstrate the bug against UNFIXED code — run it before applying
+//    the projectId-scoping fix to confirm it fails, then again after to confirm it passes.
 {
   const sfx = `b2-1-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-gc-b21-${sfx}`);
@@ -1091,8 +1114,10 @@ function makeRepo(repo) {
   // shares the worker's own worktree key, sessionId:workerSessionId — see service.ts's own construction).
   // Synthesized DIRECTLY via gateSemaphore.runExclusive (same technique batch-merge-gate-history.mjs /
   // emit-compare-gate-scope.mjs already use) rather than via confirmWorkerMergeTracked: that real call
-  // would ALSO fire supersedeQueuedSelfCheck as its own first synchronous statement (see this file's block
-  // (1) above), auto-cancelling workerA's queued self-check as a SIDE EFFECT before this block ever gets
+  // would ALSO fire supersedeQueuedSelfCheck as a side effect of its own exact-owner decision (see this
+  // file's block (1) above; since card 86c3286a/164f7915 Round 3 that decision is made right before
+  // pendingOps.attach(), not as the method's first statement, but it still fires for an exact owner like
+  // workerA here), auto-cancelling workerA's queued self-check as a SIDE EFFECT before this block ever gets
   // to test its OWN cancel path against it — a real interaction with an unrelated mechanism this block
   // must not depend on. Constructing the merge op directly isolates exactly the ownership-scope question
   // this block exists to answer.

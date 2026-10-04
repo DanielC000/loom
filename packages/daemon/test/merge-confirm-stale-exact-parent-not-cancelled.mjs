@@ -185,10 +185,15 @@ check("(setup) the worker's parentSessionId is STILL the old (dead) manager", db
   await waitUntil(() => sessions.gateQueueForManager(projId).queued.length === 1);
   check("(2) the worker's own self-check is queued again (setup sanity)", sessions.gateQueueForManager(projId).queued.length === 1);
 
-  // Fire the confirm WITHOUT awaiting yet — `supersedeQueuedSelfCheck` fires synchronously as part of
-  // STARTING this call (before it ever needs an admission slot), so the self-check settles immediately,
-  // well before the holder is released. The confirm's OWN merge gate still needs the holder released to
-  // actually run (mirrors gate-cancel.mjs's "wording" block, which drives this exact ordering the same way).
+  // Fire the confirm WITHOUT awaiting yet, and deliberately WITHOUT releasing the holder below until AFTER
+  // the self-check has settled: since card 86c3286a/164f7915 Round 3, `supersedeQueuedSelfCheck`'s own
+  // decision is made right before `pendingOps.attach()` — after this call's two identity-resolving awaits —
+  // not as its first statement, so the self-check would be free to win admission into a just-freed slot if
+  // the holder released early (see gate-cancel.mjs's "(e2e single-admission)" block for that exact race).
+  // Never releasing the holder here keeps the self-check QUEUED the whole time, so it can only ever settle
+  // via supersede, never via real admission — the legitimate-owner supersede still fires correctly once this
+  // call's awaits resolve, just not necessarily before the test's own `await pSelfCheck` below returns
+  // control (mirrors gate-cancel.mjs's "wording" block, which drives this exact ordering the same way).
   const pConfirm = sessions.confirmWorkerMergeTracked(freshMgr, workerId);
 
   // THE LEGITIMATE-OWNER SUPERSEDE, still exactly as before (also closes requirement (3)).
