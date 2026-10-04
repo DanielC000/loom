@@ -126,3 +126,57 @@ Tests: `packages/daemon/test/forced-role-resume-retry-safety.mjs` (new — Windo
 fresh claude spawn, then a second `resume()` re-enters the redirect and boots, row never marked dead;
 Window 2: a row manufactured directly in the post-flip/pre-SessionStart state, then `sweepDeadSessions`
 + `resume()` are both run against it and neither marks it dead).
+
+## Amendment (card 2911bc9b): considered no-build for Window 2
+
+Card `2911bc9b` asked whether to fully close Window 2 by keeping `harness` at "codex" until claude's fresh engine id actually arrives, marking the redirect "in progress" so a crash in the window re-enters cleanly instead of landing on "no engine id to resume".
+
+Decision: no-build. The residual is real but narrow, and closing it costs more than the residual carries.
+
+### Window width (measured)
+
+`resumeForcedRoleAsFreshClaude`'s spawn is a FRESH, non-resume, unattended-role spawn — the same shape `CLAUDE_BOOT_DIALOG_STUCK_TIMEOUT_MS`'s own telemetry comment is sized from (`pty/host.ts:1374-1381`): 778 real fresh-spawn SessionStart latencies measured on the owner's fleet, median ~3.2s, p99 ~10.6s, worst observed 90.4s.
+
+So the exposed window — spawn succeeding to SessionStart actually firing — is single-digit seconds typically, under ~11s 99% of the time, and has never been observed past ~91s.
+
+### Population (decaying, not steady-state)
+
+`forcedRoleFreshStart` only fires when `session.harness === "codex"` on a row whose role is in `TRANSCRIPT_ROOT_DENY_ROLES`.
+
+`resolveAgentSpawn`'s `roleForcesClaude` (`sessions/service.ts` ~line 2853) already forces claude at spawn time for these roles going forward — a fresh session can no longer be created with this combination.
+
+`Db.setSessionHarness` is documented as the one deliberate exception to harness being write-once-at-insert (`db.ts` ~line 5925), and it is only ever called from this one redirect, after a successful spawn — so a row that redirects once is harness="claude" permanently afterward and can never re-enter this branch again.
+
+The only rows that can ever reach this branch are legacy rows pinned "codex" before card `7955458e`'s enforcement shipped, or a row created via the explicit-role-start bypass this record's own "Do not" section above names — a fixed, one-shot-per-row, shrinking population, never replenished by anything in the current codebase.
+
+### Cost when it lands
+
+Unchanged from this record's own Window 2 analysis above: the row is not marked dead, `resume()` throws the same benign "no engine id to resume" error every other pre-first-SessionStart crash already produces, and a human starts it fresh — the established, already-accepted bar for this class of race (see the codex-rollout-lazy-write residual cited above).
+
+### Verdict
+
+A crash landing in a single-digit-second window, on a population that only shrinks and is never replenished, producing the same already-accepted outcome every other such crash produces — not worth the cost of closing below.
+
+## Documented option, if a non-decaying source of codex-pinned deny-role rows ever appears
+
+If some future change makes this population ongoing rather than one-shot-and-decaying (e.g. a new way to pin harness="codex" onto a deny-role row, or a bypass that persists), the following design closes Window 2 fully, with no new DB column.
+
+Move both the harness flip (`Db.setSessionHarness`) and `recordHarnessRoleForced` out of `resumeForcedRoleAsFreshClaude`'s post-spawn block, into the `onEngineSessionId` handler (fired from `deliverHook`'s `SessionStart` case, `pty/host.ts` ~line 7148; wired generically in `index.ts` ~line 329).
+
+Gate the flip on the same condition `forcedRoleFreshStart` already computes: `session.harness === "codex" && role in TRANSCRIPT_ROOT_DENY_ROLES`. When `onEngineSessionId` fires and the gate is true, do one atomic UPDATE — harness to claude AND `engine_session_id` to the new real id — instead of the ordinary write, then fire `recordHarnessRoleForced`.
+
+No new "redirect in progress" marker is needed: the gate condition can only be true during a genuine pending redirect, because (per the population argument above) no other live code path can produce or reproduce that combination.
+
+This closes Window 2 fully: a crash (or any pty exit) between spawn and SessionStart leaves the row untouched — harness still "codex", original engine id still intact — so the next `resume()` recomputes `forcedRoleFreshStart = true` and retries the whole redirect cleanly, identical to Window 1.
+
+### If SessionStart never arrives (hook genuinely lost, not a crash)
+
+The live pty keeps running fine regardless — its actual role/permission/MCP wiring came from the `spawn()` call's own opts, not from the DB harness column — but the row stays mismatched (harness "codex", stale codex engine id) for as long as the hook is missing.
+
+Two consequences: anything keying off `(cwd, engineSessionId, harness)` for this row — transcript/context-stat lookups — won't resolve correctly while pending, a cosmetic gap, not a crash; and if this live session later exits for any reason while still pending, the redirect self-heals and retries fresh on the next resume, repeating the role-forced notice.
+
+That repeat-notice behavior is a regression in "shows a stale notice again" terms, but a win in self-healing terms: today's eager-flip design leaves that same later-crash case permanently stuck needing a human, where the deferred design keeps retrying automatically. No sub-case was found where the deferred design is strictly worse than today's.
+
+### Do not
+
+- Do not move the flip into `onEngineSessionId` without first showing a non-decaying source of codex-pinned deny-role rows actually exists — the population argument above is the entire basis for this no-build, and it only holds while the population stays one-shot-and-decaying.
