@@ -30,8 +30,11 @@
  *     round 2) — a raw fetch/undici error is never passed through as-is, since undici embeds the full
  *     request URL verbatim in some of its own errors (e.g. "Failed to parse URL from <url>" on a
  *     malformed URL), and the URL is exactly what every caller here needs kept out of an agent-facing
- *     error. The error `code` (e.g. ECONNREFUSED) is kept when present — diagnostic without ever being
- *     able to carry a caller-supplied URL.
+ *     error. The error `code` (e.g. ECONNREFUSED, ERR_INVALID_URL) is kept when present — diagnostic
+ *     without ever being able to carry a caller-supplied URL. Card 863d30c0: undici's real `fetch` never
+ *     sets `err.code` itself — it throws a generic `TypeError: fetch failed` and puts the real code on
+ *     `err.cause.code`, so the code is read from there (never from `err.cause.message`, which embeds
+ *     host:port).
  */
 
 export interface GuardedFetchOptions {
@@ -153,9 +156,17 @@ export async function guardedFetch(url: string | URL, opts: GuardedFetchOptions)
     // the full request URL verbatim in some of its own errors (e.g. "Failed to parse URL from
     // http://.../bot123:SECRET/x" on a malformed URL), and the URL is exactly what a secret-bearing
     // caller here needs to keep out of an agent-facing error. Map to a fixed, URL-free message, keeping
-    // the error `code` (e.g. ECONNREFUSED/ENOTFOUND) when present — diagnostic without ever being able
-    // to carry a caller-supplied URL.
-    const code = (err as { code?: unknown } | null)?.code;
+    // the error `code` when present — diagnostic without ever being able to carry a caller-supplied URL.
+    // Card 863d30c0: Node's real `fetch` (undici) wraps the underlying socket/DNS error as `err.cause`,
+    // NOT `err.code` — the top-level error is always a generic `TypeError: fetch failed` with
+    // `code: undefined`; the real code (ECONNREFUSED/ENOTFOUND/ERR_INVALID_URL) lives on `err.cause.code`.
+    // Check the top-level `code` first (so a non-undici `fetchImpl` — a test double, or a future engine —
+    // that DOES set it directly still works), then fall back to `err.cause?.code`. Never read
+    // `err.cause?.message` — undici's cause often embeds the host:port, which must stay out of this
+    // agent-facing error.
+    const topCode = (err as { code?: unknown } | null)?.code;
+    const causeCode = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+    const code = typeof topCode === "string" && topCode ? topCode : causeCode;
     const suffix = typeof code === "string" && code ? ` (${code})` : "";
     return { ok: false, error: `network error${suffix}`, kind: "network" };
   }

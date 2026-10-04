@@ -41,7 +41,14 @@ const close = (server) => new Promise((resolve) => { server.closeAllConnections?
 // edit to telegram.ts ever stopped threading `fetchImpl` into `guardedFetch`, this seam would silently go
 // dark and the real global `fetch` would hit the real api.telegram.org with the real bot token — a
 // dropped seam, not a passing test. Wrapping the global `fetch` to refuse any non-127.0.0.1 host turns
-// that silent real-egress failure mode into an immediate, loud one instead.
+// that silent real-egress failure mode into an immediate FAILING one — but NOT a loud one (card
+// 863d30c0): the thrown "HERMETIC TRIPWIRE: ..." message never reaches a log or assertion text. It's
+// thrown from inside `guardedFetch`'s own `fetchImpl` call, so `guardedFetch`'s catch block (by design —
+// see boundedFetch.ts's file-header guarantee 4) maps ANY thrown error to its fixed, URL-free "network
+// error" text before telegram.ts ever sees the original message. A dropped seam still fails one of the
+// cases below (e.g. 3a's "the log names the size cap" check, since the real download never happens), so
+// the tripwire's safety property — this test cannot pass with the seam dropped — still holds; it just
+// surfaces as a generic assertion failure rather than the tripwire's own diagnostic text.
 const realFetch = globalThis.fetch;
 globalThis.fetch = (url, init) => {
   const hostname = new URL(typeof url === "string" ? url : url.toString()).hostname;

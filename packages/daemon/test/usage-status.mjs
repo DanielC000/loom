@@ -78,11 +78,16 @@ const LIVE = {
   await pNoCred.pollOnce();
   check("poll: missing creds → available:false (no fetch attempted)", pNoCred.getStatus().available === false);
 
-  // network throw → available:false with a reason
-  const pNet = new UsageStatusPoller({ credentialsPath: okCred, userAgentVersion: "9.9.9", fetchImpl: async () => { throw new Error("ECONNREFUSED"); } });
+  // network throw → available:false with a reason naming the real cause code.
+  // Card 863d30c0: shaped like Node's REAL undici fetch failure (a generic top-level `TypeError: fetch
+  // failed` with the actual errno code on `err.cause.code`, never on `err.code` itself) — a bare
+  // `new Error("ECONNREFUSED")` would pass this check vacuously even pre-fix (the OLD assertion's
+  // `|fetch` alternation matched the literal word "fetch" in "usage fetch failed: ...", not the code).
+  const econnrefused = Object.assign(new Error("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), { code: "ECONNREFUSED" }) });
+  const pNet = new UsageStatusPoller({ credentialsPath: okCred, userAgentVersion: "9.9.9", fetchImpl: async () => { throw econnrefused; } });
   await pNet.pollOnce();
   const net = pNet.getStatus();
-  check("poll: network error → available:false + reason", net.available === false && /ECONNREFUSED|fetch/i.test(net.reason));
+  check("poll: network error → available:false + reason naming ECONNREFUSED (not just the word \"fetch\")", net.available === false && /ECONNREFUSED/.test(net.reason));
 
   // 401 → available:false mentioning re-login
   // The poller now routes through the shared boundedFetch helper (card 731aa517), which streams a real
