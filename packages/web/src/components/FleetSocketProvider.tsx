@@ -4,7 +4,7 @@ import type { ServerFleetMessage, SessionListItem } from "@loom/shared";
 import { api, orchStatusQuery } from "../lib/api";
 import { applyFleetDelta } from "../lib/fleetSocket";
 import { socketAuth } from "../lib/gatewayCredential";
-import { createReconnectBackoff, onSocketClose, SOCKET_RECONNECT_MIN_MS } from "../lib/socketReconnect";
+import { createReconnectBackoff, createRetryLoop, handleSocketClose } from "../lib/socketReconnect";
 
 /**
  * C4 of the WS delta-push umbrella (1efde4ba) — the payoff card. Owns ONE app-wide `/ws/fleet` socket
@@ -63,10 +63,14 @@ export function FleetSocketProvider() {
     let disposed = false;
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    let seedRetryTimer: ReturnType<typeof setTimeout> | undefined;
-    let statusSeedRetryTimer: ReturnType<typeof setTimeout> | undefined;
     let fallbackPollTimer: ReturnType<typeof setInterval> | undefined;
     const backoff = createReconnectBackoff();
+    // Each seed owns a STOPPABLE retry loop on the same capped ladder as the reconnect, not a bare 1s
+    // setTimeout: a seed that is failing because the credential just died fails identically forever, and
+    // the terminal-close branch below stops both for good — see the decision note on that branch.
+    const seedRetry = createRetryLoop();
+    const statusSeedRetry = createRetryLoop();
+    const stopSeedRetries = () => { seedRetry.stop(); statusSeedRetry.stop(); };
     // While a seed fetch is in flight, inbound deltas are buffered (in wire order) instead of patching the
     // cache directly, then replayed onto the seed once it lands — see the seed() comment below.
     let seeding = false;
@@ -122,13 +126,14 @@ export function FleetSocketProvider() {
           const replayed = buffered.reduce(applyFleetDelta, rows);
           buffered = [];
           seeding = false;
+          seedRetry.reset();
           qc.setQueryData<SessionListItem[]>(["allSessions"], replayed);
           log(`seeded ${replayed.length} session(s)`);
         })
         .catch((err) => {
-          if (disposed) return;
+          if (disposed || seedRetry.stopped()) return;
           log("seed fetch failed, retrying", err);
-          seedRetryTimer = setTimeout(seed, SOCKET_RECONNECT_MIN_MS);
+          seedRetry.schedule(seed);
         });
     };
 
@@ -157,6 +162,7 @@ export function FleetSocketProvider() {
         .then((s) => {
           if (disposed) return;
           statusSeeding = false;
+          statusSeedRetry.reset();
           // fetchQuery has already written `s` into the shared entry, so a frame that won mid-flight has
           // to be put BACK on top of it rather than merely left alone.
           const won = statusDeltaDuringSeed;
@@ -165,10 +171,10 @@ export function FleetSocketProvider() {
           log(`seeded status (${s.pausedScopes.length} paused scope(s))`);
         })
         .catch((err) => {
-          if (disposed) return;
+          if (disposed || statusSeedRetry.stopped()) return;
           log("status seed fetch failed, retrying", err);
           // Retry forces a real read: a failed seed means nothing trustworthy landed in the shared entry.
-          statusSeedRetryTimer = setTimeout(() => seedStatus(true), SOCKET_RECONNECT_MIN_MS);
+          statusSeedRetry.schedule(() => seedStatus(true));
         });
     };
 
@@ -214,16 +220,30 @@ export function FleetSocketProvider() {
         statusSeeding = false;
         statusDeltaDuringSeed = null;
         // Card f8d2684d: a 1008 close is TERMINAL — classified FIRST (shared policy, lib/socketReconnect).
-        // Only the RECONNECT stops: the fallback poll still runs, both because that is this provider's
-        // existing disconnected behaviour and because its own 401 is what keeps the gateway banner raised.
-        if (!onSocketClose(e).retry) {
-          log("disconnected by policy (close 1008) — not reconnecting; see the gateway banner");
+        //
+        // @decision 04314fbc — a terminal close must also stop the two SEED retry loops, not only the
+        // reconnect: a seed in flight when the credential died 401s, and an unstopped loop then retries
+        // that guaranteed 401 at 1 Hz forever behind an already-raised banner.
+        //
+        // What deliberately KEEPS running is the 10s fallback poll: that is this provider's existing
+        // disconnected behaviour, and its own 401 is what holds the gateway banner up. The two are not
+        // the same trade — the fallback is one bounded request per 10s per feed, where the seed loops
+        // together ran at ~120/min and drained the trusted-proxy listener's ONE shared failed-auth
+        // bucket (PROXY_FAILED_AUTH_PER_MIN), 429ing unrelated remote callers.
+        const terminal = (what: string) => {
+          stopSeedRetries();
+          log(`disconnected by policy (${what}) — not reconnecting, seed retries stopped; see the gateway banner`);
           startFallbackPoll();
-          return;
-        }
-        log("disconnected — falling back to polling and reconnecting");
-        startFallbackPoll();
-        reconnectTimer = setTimeout(connect, backoff.next());
+        };
+        handleSocketClose(e, {
+          retry: () => {
+            log("disconnected — falling back to polling and reconnecting");
+            startFallbackPoll();
+            reconnectTimer = setTimeout(connect, backoff.next());
+          },
+          tokenDead: (change) => terminal(`gateway token ${change}`),
+          refused: (reason) => terminal(reason || "close 1008"),
+        });
       };
       // onerror is followed by onclose; let onclose own the fallback/reconnect so we don't double-schedule.
     };
@@ -236,8 +256,7 @@ export function FleetSocketProvider() {
     return () => {
       disposed = true;
       clearTimeout(reconnectTimer);
-      clearTimeout(seedRetryTimer);
-      clearTimeout(statusSeedRetryTimer);
+      stopSeedRetries();
       stopFallbackPoll();
       const socket = ws;
       ws = null;

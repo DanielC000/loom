@@ -1,0 +1,44 @@
+# 04314fbc — the WS close-reason contract lives in @loom/shared, and a terminal close stops every retry loop
+
+Card `04314fbc`, discovered from `f8d2684d` (Code Review `30569f68`). Anchored at `packages/shared/src/protocol.ts`, `packages/web/src/lib/socketReconnect.ts`, `packages/web/src/components/FleetSocketProvider.tsx` and `packages/web/src/components/CompanionChat.tsx`.
+
+Read `docs/decisions/f8d2684d-web-socket-1008-stops-reconnecting.md` first — it owns the 1008 policy itself (what is terminal, why the reason and not the code separates the two producers, and where the banner lives). This record covers only what `04314fbc` changed on top of it.
+
+## Do not
+
+- **Do not write a WebSocket close reason as a literal at a send site, or as a pattern at a read site.** Build it with `gatewayTokenCloseReason` and read it back with `parseGatewayTokenCloseReason`, both in `@loom/shared`. A reason string is a cross-process contract; two private copies drift with nothing failing.
+- **Do not call `onSocketClose` from a socket client.** Call `handleSocketClose(event, {retry, tokenDead, refused})`. `onSocketClose` returns a verdict and leaves the decision with the caller, which is exactly how the two terminal kinds got collapsed into one.
+- **Do not treat an unrecognised or per-socket 1008 as a dead credential.** Only a `gateway-token` close may say the credential is dead, because only that one has a banner to re-enter it with. A `policy` close is terminal for that socket and nothing else.
+- **Do not let a retry loop outlive a terminal close.** Anything a socket re-arms on failure — not just its reconnect — must stop when the close was terminal. A loop whose failure cause is "the credential is dead" will fail identically forever.
+- **Do not re-arm a retry on a bare fixed-interval `setTimeout`.** Use `createRetryLoop`, which rides the shared capped ladder and can be stopped.
+- **Do not stop the fleet provider's disconnected fallback poll on a terminal close.** That one is deliberate: its own 401 is what holds the gateway banner up. The distinction is rate, not principle — see below.
+
+## What was wrong
+
+Three findings from the review of `f8d2684d`, all in code that card had just shipped.
+
+**(1) Unbounded seed retries survived a terminal close.** `FleetSocketProvider`'s two seed fetches (`seed`, `seedStatus`) each re-armed on failure with `setTimeout(…, SOCKET_RECONNECT_MIN_MS)` — a flat 1s, no backoff, no bound — and the 1008 branch returned without clearing either timer. So a revoke landing while a seed was in flight left two loops retrying a guaranteed 401 at ~1 Hz each, ~120 requests/min, for as long as the page stayed open. On the trusted-proxy listener those 401s drain ONE shared failed-auth bucket (`PROXY_FAILED_AUTH_PER_MIN`), so an unrelated remote caller starts getting 429s because somebody else's tab is holding a dead token.
+
+**(2) The close-reason contract existed in two unconnected copies.** The daemon held four literals (three `closeAll` calls in `gateway/server.ts` plus the `/ws/term` shell refusal); the browser held its own anchored regex in `socketReconnect.ts`. The failure mode is quiet: rename on either side and the browser still declines to retry (correct — the code is what makes it terminal), but the reason no longer parses, so the verdict silently degrades from `gateway-token` to `policy`. The user then sees the generic "this address needs a gateway token" instead of the revoke-specific copy, and nothing fails anywhere.
+
+**(3) `CompanionChat` collapsed both 1008 kinds into "token revoked".** `if (!onSocketClose(e).retry) { setConn("revoked"); return; }` — so a per-socket policy refusal, or any future 1008 reason the classifier does not recognise, rendered a "token revoked" pill and pointed the user at a banner to re-paste a credential that was never the problem. `Terminal.tsx` had the same verdict available and did branch on `kind`; the two call sites had already drifted.
+
+## The shape that shipped
+
+**`@loom/shared` (`protocol.ts`) now owns the close contract**: `WS_CLOSE_POLICY_VIOLATION`, `GATEWAY_TOKEN_CLOSE_CHANGES` + `GatewayTokenCloseChange`, `gatewayTokenCloseReason(change)`, `parseGatewayTokenCloseReason(reason)` (an EXACT inverse — a loose match would claim a dead credential on a reason the contract does not define), and `SHELL_LOOPBACK_ONLY_CLOSE_REASON`. All four daemon send sites build from it; `socketReconnect.ts` parses with it and re-exports the code so a client needs one import. Web's `GatewayTokenChange` is now an alias of `GatewayTokenCloseChange`, so there is one definition of what the four are and every existing import still resolves.
+
+**`handleSocketClose(event, actions, note?)`** is the schedule-or-stop decision. All three branches (`retry`, `tokenDead`, `refused`) are REQUIRED, so a call site cannot express finding (3) by accident. Exactly one runs per close. All three clients route through it; none calls `onSocketClose` any more.
+
+**`createRetryLoop()`** is a stoppable retry loop on the shared capped ladder: `schedule(attempt)` (replaces rather than stacks), `reset()` on success, `stop()` cancels the pending attempt and refuses every later one permanently, plus `stopped()` so a fetch that rejects AFTER the close gives up instead of re-arming. The fleet provider holds one per seed and stops both in its terminal path and in its effect cleanup.
+
+**What a terminal close does NOT stop** is the 10s disconnected fallback poll. That is `f8d2684d`'s existing decision and it stands — the poll's own 401 is what keeps the banner raised. It is not the same trade as the seed loops: the fallback is one bounded request per 10s per feed (~12/min total, on a timer that cannot compound), where the seed loops together ran at ~120/min and re-armed off their own failures.
+
+**`CompanionChat`** gained a fifth `ChatConnState`, `refused` — terminal like `revoked` (so `canSend` still gates Send off) but amber, worded "refused", with no credential claim and no banner.
+
+## Verified
+
+- `packages/web/test/socket-reconnect.mjs` (20 checks) — behavioural, against the real module: every reason the daemon's own builder produces classifies as `gateway-token` and round-trips through the parser; the parser rejects eight near-misses it must not accept; `handleSocketClose` runs exactly one named branch per close shape, for every code and every reason class; `createRetryLoop` walks 1000/2000/4000/8000/10000/10000 (a flat 1s retry would read `[1000, 1000, …]`), `stop()` clears the pending timer and 50 further `schedule()` calls arm nothing, two loops are independent, and a POSITIVE CONTROL confirms an un-stopped loop really does keep re-arming — without it, "nothing was armed" would pass for a loop that never arms anything.
+- `packages/web/test/socket-close-wiring.mjs` (8 checks) — the half no unit test can see. `packages/web` has no React test harness (no jsdom, no testing-library), so these components cannot be rendered and their `onclose` handlers cannot be invoked; this scans the real source text for the wiring instead, and says so in its own header. It carries an instrument control (check 0) that passes against pre-fix source too, and shown RED against the pre-fix clients it reports **7 of 7** behavioural checks failing, each naming its own defect, rather than aborting on the first.
+- `packages/daemon/test/ws-close-reason-contract.mjs` (46 checks) — the daemon's side of the contract, through the real `buildServer` and the real REST routes: a recording registry pins the exact `(code, reason)` each of the three token-status writers passes (the right instrument for an ARGUMENT, since `closeAll` calls `terminate()` one line after `close()`), and a real remote `injectWS` handshake reads the shell refusal's code and reason off the wire. Both polarity controls are present: a name-only edit and an activation close nothing, and a remote peer's AGENT terminal is not refused.
+- **Drift control, measured:** changing `gatewayTokenCloseReason` to emit `gateway-token ${change}` (one hyphen) turns the daemon contract test RED on all four wire-reason pins AND the web classifier test RED on its literal-string check. The two tests deliberately pin the literal text as well as deriving from the builder, which is what makes a rename inside `@loom/shared` visible instead of self-consistent.
+- `packages/web/e2e/gateway-token-revoked.spec.ts` now records each socket's `CloseEvent` (via `addEventListener`, so it never clobbers the app's own `onclose`) and asserts code `1008` + reason `gateway token revoked`. Its comment previously claimed this and only checked `readyState === CLOSED`, which is equally true of a bare `terminate()` (1006, empty reason) — a case that would keep the page from retrying while losing every revoke-specific behaviour. The CONTROL test asserts the recorder reports `4001`/`"control"` for the close it was actually given, so the 1008 assertion cannot pass on a hard-coded recorder.

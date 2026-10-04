@@ -11,7 +11,7 @@ import { channelBadgeLabel } from "../lib/companion";
 import { api, getLoopbackToken } from "../lib/api";
 import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCredential";
-import { createReconnectBackoff, onSocketClose } from "../lib/socketReconnect";
+import { createReconnectBackoff, handleSocketClose } from "../lib/socketReconnect";
 import { Button, Dot, SectionLabel, StatusPill } from "./ui";
 import { color, font, radius } from "../theme";
 
@@ -259,14 +259,23 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
         wsRef.current = null;
         // Card f8d2684d: a 1008 close is TERMINAL — classified FIRST (shared policy, lib/socketReconnect)
         // so a revoked token lands in its own dead-end state instead of an endless "reconnecting" pill.
-        // `revoked` also disables Send (canSend gates on "connected"); the page banner owns re-entry.
-        if (!onSocketClose(e).retry) { setConn("revoked"); return; }
-        // A handshake that never opened on a token-less browser is the credential lock, not a flaky link.
-        // Still reconnect: if the user pastes a credential into the banner, the next attempt carries it.
-        if (noteRemoteSocketRefusal(everOpened)) { /* the gateway banner owns it */ }
-        else if (isCredentialSocketFailure(everOpened, getLoopbackToken())) noteCredentialLock("socket");
-        setConn("reconnecting");
-        reconnectTimer = setTimeout(connect, backoff.next());
+        // Both terminal states disable Send (canSend gates on "connected").
+        //
+        // @decision 04314fbc — keep the two terminal kinds apart: only a gateway-token close may claim
+        // the credential is dead, because only that one has a banner to re-enter it with; a per-socket
+        // or unrecognised refusal goes to `refused`.
+        handleSocketClose(e, {
+          tokenDead: () => setConn("revoked"), // the page banner owns re-entry
+          refused: () => setConn("refused"),   // this pane only; the credential is fine
+          retry: () => {
+            // A handshake that never opened on a token-less browser is the credential lock, not a flaky link.
+            // Still reconnect: if the user pastes a credential into the banner, the next attempt carries it.
+            if (noteRemoteSocketRefusal(everOpened)) { /* the gateway banner owns it */ }
+            else if (isCredentialSocketFailure(everOpened, getLoopbackToken())) noteCredentialLock("socket");
+            setConn("reconnecting");
+            reconnectTimer = setTimeout(connect, backoff.next());
+          },
+        });
       };
       // onerror is followed by onclose; let onclose own the reconnect so we don't double-schedule.
     };
@@ -545,6 +554,9 @@ function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
     conn === "connected" ? { tone: "phosphor" as const, label: "connected", glow: true } :
     conn === "connecting" ? { tone: "amber" as const, label: "connecting", glow: false } :
     conn === "revoked" ? { tone: "red" as const, label: "token revoked", glow: false } :
+    // Card 04314fbc: terminal, but NOT a credential claim — amber (the same "attention, not alarm" tone
+    // `connecting` uses) and wording that says this pane was refused, with no token to go re-paste.
+    conn === "refused" ? { tone: "amber" as const, label: "refused", glow: false } :
     { tone: "red" as const, label: "reconnecting", glow: false };
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>

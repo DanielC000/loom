@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
 import { getLoopbackToken } from "../lib/api";
 import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
-import { createReconnectBackoff, onSocketClose } from "../lib/socketReconnect";
+import { createReconnectBackoff, handleSocketClose, type SocketCloseVerdict } from "../lib/socketReconnect";
 import { credentialLock, isCredentialSocketFailure, noteCredentialLock, subscribeCredentialLock } from "../lib/loopbackCredential";
 import { useIsCompanionSession } from "../lib/companionGuard";
 import { Dot } from "./ui";
@@ -286,17 +286,24 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     const handleClose = (e: CloseEvent) => {
       if (disposed) return;
       socket = null;
-      const verdict = onSocketClose(e);
-      if (!verdict.retry) {
+      // The page-wide gateway banner owns re-entry for a dead token (the shared unit raised it); a bare
+      // policy refusal has no banner and no fix, so the daemon's own reason is the whole message.
+      const paintTerminal = (verdict: Extract<SocketCloseVerdict, { retry: false }>) => {
         setReconnecting(false);
-        // The page-wide gateway banner owns re-entry for a dead token (onSocketClose raised it); a bare
-        // policy refusal has no banner and no fix, so the daemon's own reason is the whole message.
         term.write(verdict.kind === "gateway-token"
           ? `\r\n\x1b[31m[access token ${verdict.change} — this terminal is disconnected]\x1b[0m\r\n`
             + "\x1b[2m[sign in again with the banner at the top of the page]\x1b[0m\r\n"
           : `\r\n\x1b[31m[this terminal was refused: ${verdict.reason || "policy violation"}]\x1b[0m\r\n`);
-        return;
-      }
+      };
+      handleSocketClose(e, {
+        tokenDead: (change) => paintTerminal({ retry: false, kind: "gateway-token", change }),
+        refused: (reason) => paintTerminal({ retry: false, kind: "policy", reason }),
+        retry: () => handleRetryableClose(),
+      });
+    };
+
+    /** The pre-1008 close policy, unchanged: the everOpened/credential inference and its own backoff. */
+    const handleRetryableClose = () => {
       setReconnecting(true);
       if (everOpened) {
         if (!noticeWritten) { term.write("\r\n\x1b[2m[connection lost — reconnecting]\x1b[0m\r\n"); noticeWritten = true; }

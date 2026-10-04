@@ -23,6 +23,9 @@ globalThis.window = {
 
 const S = await import("../src/lib/socketReconnect.ts");
 const G = await import("../src/lib/gatewayCredential.ts");
+// The close-reason CONTRACT itself (card 04314fbc): imported from @loom/shared so the assertions below
+// derive the daemon's own reason strings rather than restating them a third time.
+const P = await import("@loom/shared");
 
 let pass = 0;
 const check = (name, fn) => { mem.clear(); G.resetGatewayLockForTest(); fn(); pass++; console.log(`ok   ${name}`); };
@@ -146,6 +149,161 @@ check("two backoffs are INDEPENDENT — one socket's retries never advance anoth
 
 check("WS_CLOSE_POLICY_VIOLATION is the real 1008 constant, not a renamed local", () => {
   assert.equal(S.WS_CLOSE_POLICY_VIOLATION, 1008);
+});
+
+// ── The close CONTRACT is @loom/shared's, not this module's (card 04314fbc) ──────────────────────────
+// The checks above pin the literal wire strings, which is what catches a rename on EITHER side. These
+// pin the other half: that the browser reads its reasons from the same builder the daemon writes them
+// with, so the two copies cannot drift apart silently in the first place.
+check("every reason the daemon's own builder produces classifies as a dead credential", () => {
+  assert.deepEqual([...P.GATEWAY_TOKEN_CLOSE_CHANGES], ["revoked", "paused", "rotated", "deleted"]);
+  for (const change of P.GATEWAY_TOKEN_CLOSE_CHANGES) {
+    const reason = P.gatewayTokenCloseReason(change); // EXACTLY what gateway/server.ts passes to closeAll
+    const v = S.classifySocketClose({ code: P.WS_CLOSE_POLICY_VIOLATION, reason });
+    assert.deepEqual(v, { retry: false, kind: "gateway-token", change }, reason);
+    // ...and the parser is the exact inverse of the builder, so neither side can widen alone.
+    assert.equal(P.parseGatewayTokenCloseReason(reason), change);
+  }
+  // The OTHER producer's shared constant must stay on the no-false-alarm side of the split.
+  const refused = S.classifySocketClose({ code: 1008, reason: P.SHELL_LOOPBACK_ONLY_CLOSE_REASON });
+  assert.deepEqual(refused, { retry: false, kind: "policy", reason: P.SHELL_LOOPBACK_ONLY_CLOSE_REASON });
+  // NEGATIVE CONTROL for the parser: it must reject anything the builder cannot have produced, or the
+  // round-trip above would pass for a parser that simply says yes.
+  for (const bogus of ["", "gateway token", "gateway token expired", "gateway token revoked ",
+    "GATEWAY TOKEN REVOKED", P.SHELL_LOOPBACK_ONLY_CLOSE_REASON, null, undefined]) {
+    assert.equal(P.parseGatewayTokenCloseReason(bogus), null, `${bogus}`);
+  }
+  assert.equal(S.WS_CLOSE_POLICY_VIOLATION, P.WS_CLOSE_POLICY_VIOLATION, "one definition of 1008, re-exported");
+});
+
+// ── handleSocketClose: the schedule-or-stop decision itself (card 04314fbc) ──────────────────────────
+// `onSocketClose` returns a verdict and leaves the decision to the caller, which is how CompanionChat
+// came to turn ANY 1008 — including an unrecognised one — into a "token revoked" pill. This unit runs
+// exactly ONE named branch, so the collapse is no longer expressible at a call site.
+const recorder = () => {
+  const ran = [];
+  return {
+    ran,
+    actions: {
+      retry: () => ran.push(["retry"]),
+      tokenDead: (change) => ran.push(["tokenDead", change]),
+      refused: (reason) => ran.push(["refused", reason]),
+    },
+  };
+};
+
+check("a retryable close runs ONLY retry — never a terminal branch", () => {
+  for (const code of [1000, 1001, 1006, 1011, 4001]) {
+    const r = recorder();
+    const v = S.handleSocketClose({ code, reason: "" }, r.actions, () => {});
+    assert.deepEqual(r.ran, [["retry"]], `code ${code}`);
+    assert.deepEqual(v, { retry: true });
+  }
+});
+
+check("a gateway-token 1008 runs ONLY tokenDead, carrying the change, and raises the lock", () => {
+  for (const change of P.GATEWAY_TOKEN_CLOSE_CHANGES) {
+    mem.clear(); G.resetGatewayLockForTest();
+    const r = recorder();
+    S.handleSocketClose({ code: 1008, reason: P.gatewayTokenCloseReason(change) }, r.actions);
+    assert.deepEqual(r.ran, [["tokenDead", change]], change);
+    assert.equal(G.gatewayTokenRevoked(), change, "the banner's own state still gets set");
+    assert.equal(G.gatewayLock(), true);
+  }
+});
+
+check("a policy 1008 runs ONLY refused — and must NOT claim the credential is dead", () => {
+  for (const reason of [P.SHELL_LOOPBACK_ONLY_CLOSE_REASON, "", "some future policy", "gateway token expired"]) {
+    mem.clear(); G.resetGatewayLockForTest();
+    const r = recorder();
+    S.handleSocketClose({ code: 1008, reason }, r.actions);
+    assert.deepEqual(r.ran, [["refused", reason]], reason);
+    assert.equal(G.gatewayTokenRevoked(), null, `${reason}: no false revoked claim`);
+    assert.equal(G.gatewayLock(), false, `${reason}: no banner`);
+  }
+});
+
+// ── createRetryLoop: a seed/reseed loop that a terminal close can END (card 04314fbc) ────────────────
+// The fleet provider's two seed fetches used to retry on a bare `setTimeout(seed, 1000)` that the
+// terminal-close branch never cleared, so a revoke landing while a seed was in flight left a 1 Hz
+// guaranteed-401 loop running forever.
+const fakeTimers = () => {
+  let nextId = 1;
+  const armed = new Map();
+  return {
+    armed,
+    deps: {
+      setTimer: (fn, ms) => { const id = nextId++; armed.set(id, { fn, ms }); return id; },
+      clearTimer: (id) => { armed.delete(id); },
+    },
+    fire: (id) => { const t = armed.get(id); armed.delete(id); t.fn(); },
+    only: () => { assert.equal(armed.size, 1, `expected exactly one armed timer, saw ${armed.size}`); return [...armed.keys()][0]; },
+  };
+};
+
+check("a retry loop rides the SHARED capped ladder, not a fixed 1s interval", () => {
+  const t = fakeTimers();
+  const loop = S.createRetryLoop(t.deps);
+  const delays = [];
+  for (let i = 0; i < 6; i++) { loop.schedule(() => {}); delays.push(loop.pendingDelay()); t.fire(t.only()); }
+  assert.deepEqual(delays, [1000, 2000, 4000, 8000, 10000, 10000],
+    "a fixed SOCKET_RECONNECT_MIN_MS retry would read [1000, 1000, 1000, ...]");
+  loop.reset();
+  loop.schedule(() => {});
+  assert.equal(loop.pendingDelay(), 1000, "a successful attempt restarts the ladder");
+});
+
+check("stop() cancels the PENDING attempt and refuses every later one — permanently", () => {
+  const t = fakeTimers();
+  const loop = S.createRetryLoop(t.deps);
+  let attempts = 0;
+  loop.schedule(() => { attempts++; });
+  assert.equal(t.armed.size, 1, "armed");
+  assert.equal(loop.stopped(), false);
+
+  loop.stop();
+  assert.equal(t.armed.size, 0, "the in-flight timer is CLEARED, not left to fire");
+  assert.equal(loop.pendingDelay(), null);
+  assert.equal(loop.stopped(), true);
+
+  // The exact shape of the bug: the fetch that was already in flight rejects AFTER the terminal close
+  // and asks for one more retry. It must get nothing, now and forever.
+  for (let i = 0; i < 50; i++) loop.schedule(() => { attempts++; });
+  assert.equal(t.armed.size, 0, "a stopped loop arms no timer at all");
+  assert.equal(attempts, 0, "and never runs the attempt");
+});
+
+check("an un-stopped loop DOES keep retrying — the positive control for the check above", () => {
+  // Without this, "nothing was armed" would pass just as happily for a loop that never arms anything.
+  const t = fakeTimers();
+  const loop = S.createRetryLoop(t.deps);
+  let attempts = 0;
+  const attempt = () => { attempts++; loop.schedule(attempt); }; // the real failing-fetch shape
+  loop.schedule(attempt);
+  for (let i = 0; i < 5; i++) t.fire(t.only());
+  assert.equal(attempts, 5, "a live loop re-arms after each attempt");
+  assert.equal(t.armed.size, 1, "and is still armed");
+});
+
+check("schedule() REPLACES the pending attempt rather than stacking a second timer", () => {
+  const t = fakeTimers();
+  const loop = S.createRetryLoop(t.deps);
+  loop.schedule(() => {});
+  loop.schedule(() => {});
+  loop.schedule(() => {});
+  assert.equal(t.armed.size, 1, "three schedules must never leave three timers armed");
+});
+
+check("two retry loops are INDEPENDENT — stopping one must not stop the other", () => {
+  const t = fakeTimers();
+  const a = S.createRetryLoop(t.deps);
+  const b = S.createRetryLoop(t.deps);
+  a.schedule(() => {});
+  b.schedule(() => {});
+  a.stop();
+  assert.equal(a.stopped(), true);
+  assert.equal(b.stopped(), false, "the module must hold no shared stopped flag");
+  assert.equal(t.armed.size, 1, "only a's timer was cleared");
 });
 
 console.log(`\n${pass} check(s) passed`);

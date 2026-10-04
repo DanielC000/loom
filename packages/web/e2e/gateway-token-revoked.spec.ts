@@ -33,17 +33,31 @@ let rig: GatewayProxyRig;
 test.beforeAll(async () => { rig = await startGatewayProxyRig(); });
 test.afterAll(async () => { await rig?.stop(); });
 
-/** Records every WebSocket the PAGE constructs, and keeps the last one so a test can close it with a chosen code.
- *  Only records and holds a reference — it never substitutes the socket, so the app's own feed still runs for real. */
+/** Records every WebSocket the PAGE constructs AND every close event those sockets receive, and keeps the last
+ *  socket so a test can close it with a chosen code. Only records and holds a reference — it never substitutes the
+ *  socket, so the app's own feed still runs for real, and the close listener is added with `addEventListener` so it
+ *  never clobbers the app's own `onclose`.
+ *
+ *  Card 04314fbc: the close CODE and REASON are recorded here because the whole web fix depends on reading them, and
+ *  `readyState === CLOSED` — which is all this spec used to check — is equally true of a bare `terminate()` (code
+ *  1006, empty reason) and of any other close. Asserting CLOSED proves the socket shut, never WHY. */
 const INSTRUMENT = () => {
-  const w = window as unknown as { __wsOpens: string[]; __wsLast: WebSocket | null };
+  const w = window as unknown as {
+    __wsOpens: string[];
+    __wsLast: WebSocket | null;
+    __wsCloses: { url: string; code: number; reason: string }[];
+  };
   w.__wsOpens = [];
+  w.__wsCloses = [];
   w.__wsLast = null;
   const Native = window.WebSocket;
   const Patched = function (this: unknown, url: string | URL, protocols?: string | string[]) {
     const sock = protocols === undefined ? new Native(url) : new Native(url, protocols);
     w.__wsOpens.push(String(url));
     w.__wsLast = sock;
+    sock.addEventListener("close", (e) => {
+      w.__wsCloses.push({ url: String(url), code: (e as CloseEvent).code, reason: (e as CloseEvent).reason });
+    });
     return sock;
   } as unknown as typeof WebSocket;
   Patched.prototype = Native.prototype;
@@ -54,6 +68,8 @@ const INSTRUMENT = () => {
 };
 
 const fleetOpens = () => (window as unknown as { __wsOpens: string[] }).__wsOpens.filter((u) => u.includes("/ws/fleet")).length;
+const fleetCloses = () => (window as unknown as { __wsCloses: { url: string; code: number; reason: string }[] })
+  .__wsCloses.filter((c) => c.url.includes("/ws/fleet"));
 
 /** Open the proxy-origin page with the token already stored, and wait until its /ws/fleet feed is genuinely live. */
 async function openConnectedPage(page: import("@playwright/test").Page): Promise<void> {
@@ -82,6 +98,11 @@ test("CONTROL: the instrument works and the reconnect loop is alive — a RETRYA
   // as retryable — so this measures the SAME instrument on the SAME socket, differing only in the close code.
   await page.evaluate(() => (window as unknown as { __wsLast: WebSocket | null }).__wsLast?.close(4001, "control"));
   await expect.poll(() => page.evaluate(fleetOpens), { timeout: 20_000 }).toBeGreaterThan(before);
+  // CONTROL for the close recorder the revoke test reads: it reports the code and reason it was actually given,
+  // not a constant. Without this, "code 1008, reason 'gateway token revoked'" over there would pass just as
+  // happily for a recorder that hard-coded them.
+  expect(await page.evaluate(fleetCloses))
+    .toEqual(expect.arrayContaining([expect.objectContaining({ code: 4001, reason: "control" })]));
   // ...and a retryable close must NOT be mistaken for a dead credential.
   await expect(page.getByText("This access token was")).toHaveCount(0);
   await expect(page.getByText("This address needs a gateway token.")).toHaveCount(0);
@@ -119,7 +140,16 @@ test("a revoked token closes the live socket, stops the reconnect loop, and says
   // The re-entry action is on screen: this banner's own paste field, not a second surface.
   await expect(page.getByLabel("Gateway token")).toBeVisible();
 
-  // The socket is really shut, with the policy-violation code and the daemon's own reason.
+  // The socket is really shut — AND with the policy-violation code and the daemon's own reason, which is the
+  // premise the whole fix rests on. `terminate()` runs one line after `close(1008, reason)` in
+  // GatewayTokenSocketRegistry.closeAll, and a terminate that won that race would deliver 1006 with an empty
+  // reason; the page would still stop retrying (1006 is retryable, but the fallback poll's 401 locks the banner
+  // anyway) while losing every revoke-specific behaviour. So read the CloseEvent, not just readyState.
+  await expect
+    .poll(() => page.evaluate(fleetCloses).then((c) => c.length), { timeout: 10_000 })
+    .toBeGreaterThan(0);
+  const closes = await page.evaluate(fleetCloses);
+  expect(closes.at(-1)).toEqual(expect.objectContaining({ code: 1008, reason: "gateway token revoked" }));
   expect(await page.evaluate(() => {
     const s = (window as unknown as { __wsLast: WebSocket | null }).__wsLast;
     return s ? s.readyState : -1;

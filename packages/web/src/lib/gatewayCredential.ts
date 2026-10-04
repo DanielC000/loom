@@ -12,6 +12,8 @@
  * file has its OWN discriminator (`code: "gateway-token-required"`, sent only in the remote 401) and its own copy.
  */
 
+import type { GatewayTokenCloseChange } from "@loom/shared";
+
 /** Per-ORIGIN storage key — a proxied browser's origin (`https://box.ts.net`) has its own localStorage, so this
  *  never collides with the loopback key on `http://127.0.0.1:4317`. */
 const GATEWAY_TOKEN_STORAGE_KEY = "loom.gatewayToken";
@@ -155,8 +157,12 @@ export function subscribeGatewayLinkRejected(fn: (rejected: boolean) => void): (
  * work — so the banner needs to say which happened, and `lib/socketReconnect.ts` resolves it from the
  * close reason rather than guessing. Distinct state from `locked`, but it SETS the lock too: every later
  * request with the dead token 401s anyway, and the banner's paste field is already the re-entry action.
+ *
+ * The four names are `GatewayTokenCloseChange` from `@loom/shared` — the same list the daemon builds its
+ * close reason from (card 04314fbc), aliased here so every existing `GatewayTokenChange` import still
+ * resolves while there is only ONE definition of what the four are.
  */
-export type GatewayTokenChange = "revoked" | "paused" | "rotated" | "deleted";
+export type GatewayTokenChange = GatewayTokenCloseChange;
 let tokenRevoked: GatewayTokenChange | null = null;
 const revokedListeners = new Set<(change: GatewayTokenChange | null) => void>();
 export function gatewayTokenRevoked(): GatewayTokenChange | null { return tokenRevoked; }
