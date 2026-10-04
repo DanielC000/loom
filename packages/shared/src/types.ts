@@ -2915,6 +2915,21 @@ export interface CompanionConfigMasked {
   allowedChatId: string;
   /** The boot-binding authorization scope. */
   chatScope: "dm" | "group";
+  /**
+   * Whether this companion's FIRST binding has already been seeded from `allowedChatId`. Card a8480338
+   * narrowed the bootstrap seed to fire only while this is false, so once it flips true, editing
+   * `allowedChatId` never re-binds anything — the only rebind path is `POST /api/companion/bindings`.
+   * Surfaced here (card 72bd4322) so the human UI can say which of the two things `allowedChatId` is
+   * currently doing instead of implying it still drives inbound routing.
+   *
+   * A reader must NOT re-derive this from the bindings list. A NON-EMPTY list does imply seeded (the
+   * binding write marks it in the same transaction — card 3d19ecc7), but ZERO bindings is genuinely
+   * ambiguous: never-seeded (the seed is still pending) vs seeded-then-REVOKED (it will never fire again).
+   * Collapsing those two is precisely the bug a8480338 fixed, so the flag has to ride the config read.
+   * Note this says nothing about the field's OTHER job: `allowedChatId` remains the live fallback proactive
+   * home (`homeChatId`) whenever no explicit home is set, seeded or not.
+   */
+  bindingsSeeded: boolean;
   /** Proactive heartbeat cadence in minutes (0 = off). */
   heartbeatIntervalMinutes: number;
   /**

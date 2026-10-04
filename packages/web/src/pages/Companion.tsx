@@ -433,12 +433,16 @@ function CompanionCreate({ onCreate, pending, error, onCancel }: {
 }
 
 // ── Shared config fields (channel / token / chat / cadence / home / enabled) ─────
-function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault }: {
+function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault, bindingsSeeded }: {
   form: CompanionConfigForm;
   set: <K extends keyof CompanionConfigForm>(k: K, v: CompanionConfigForm[K]) => void;
   mode: "create" | "edit";
   currentToken?: string; // the masked "••••1234" for the edit-mode read-only display
   heartbeatPromptDefault?: string; // the resolved default prompt text — shown as a placeholder, never seeded into the field (card b95e3bd0)
+  // Whether the first binding has already been seeded from allowedChatId (card 72bd4322). Straight off the
+  // masked config — never derived from the bindings list, which cannot tell revoked from never-seeded.
+  // Undefined on create (nothing is seeded yet by definition).
+  bindingsSeeded?: boolean;
 }) {
   return (
     <>
@@ -470,12 +474,16 @@ function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault }:
         </Field>
       </div>
 
-      <Field label="Allowed chat id" sub={mode === "create" ? "the owner DM chat — arms routing (writes a binding)" : "boot-seed only · edit routing under Access"}>
+      <Field label={mode === "create" ? "Allowed chat id" : "Initial chat id"}
+        sub={mode === "create" ? "the owner DM chat — arms routing (writes a binding)" : "first-binding seed · also the default proactive home"}>
         <Input value={form.allowedChatId} onChange={(e) => set("allowedChatId", e.target.value)} placeholder="e.g. 123456789" spellCheck={false} />
         {mode === "edit" && (
-          <span style={hint}>
-            Live inbound routing is owned by the binding under <strong style={{ color: color.text }}>Access</strong> —
-            editing this only changes the boot-seed default the daemon reads on a cold start.
+          <span style={{ ...hint, maxWidth: "76ch" }}>
+            Inbound routing is owned by the binding under <strong style={{ color: color.text }}>Access</strong>
+            {bindingsSeeded
+              ? <> — this no longer seeds one; rebind there to move where messages arrive.</>
+              : <> — this seeds the first one on the next daemon start.</>}
+            {" "}It is also the default <strong style={{ color: color.text }}>Proactive home</strong> while none is set.
           </span>
         )}
       </Field>
@@ -678,7 +686,7 @@ function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onCh
       {editing ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <ConfigFields form={form} set={set} mode={cfg ? "edit" : "create"} currentToken={cfg ? maskedToken(cfg) : undefined}
-            heartbeatPromptDefault={cfg?.heartbeatPromptDefault} />
+            heartbeatPromptDefault={cfg?.heartbeatPromptDefault} bindingsSeeded={cfg?.bindingsSeeded} />
           {(localErr || save.error) && <span style={errStyle}>{localErr ?? errorText(save.error)}</span>}
           <div style={{ display: "flex", gap: 8 }}>
             <Button variant="primary" disabled={save.isPending} onClick={submit}>{save.isPending ? "Saving…" : "Save"}</Button>
@@ -692,7 +700,7 @@ function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onCh
             <Chip label="token" value={maskedToken(cfg)} />
             <Chip label="channel" value={cfg.channel} tone="cyan" />
             <Chip label="scope" value={cfg.chatScope} />
-            <Chip label="chat" value={cfg.allowedChatId} />
+            <Chip label="initial chat" value={cfg.allowedChatId} />
             <Chip label="heartbeat" value={cfg.heartbeatIntervalMinutes ? `${cfg.heartbeatIntervalMinutes}m` : "off"} tone={cfg.heartbeatIntervalMinutes ? "phosphor" : "muted"} />
             <Chip label="home" value={cfg.home ? `${cfg.home.channel}:${cfg.home.chatId}` : "unset"} tone={cfg.home ? undefined : "muted"} />
           </div>

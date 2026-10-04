@@ -431,6 +431,9 @@ export function maskCompanionConfig(
     channel: row.channel,
     allowedChatId: row.allowedChatId,
     chatScope: row.chatScope,
+    // card 72bd4322: the human UI cannot derive this (zero bindings is ambiguous between never-seeded and
+    // seeded-then-revoked — see CompanionConfigMasked.bindingsSeeded's own doc), so it rides the config read.
+    bindingsSeeded: row.bindingsSeeded,
     heartbeatIntervalMinutes: row.heartbeatIntervalMinutes,
     // card b95e3bd0: carry the RAW stored value (null when unset) rather than pre-resolving to the
     // default — resolving here is what let a save that never touched this field pin today's default

@@ -142,6 +142,27 @@ try {
     check("masked: envPinned TRUE when env config targets this row's sessionId (env would override on next boot)", maskCompanionConfig(row, db.getCompanionHome("sess-1"), envMatch).envPinned === true);
     const envOther = { LOOM_COMPANION_BOT_TOKEN: "t", LOOM_COMPANION_CHAT_ID: "c", LOOM_COMPANION_SESSION_ID: "other-sess" };
     check("masked: envPinned FALSE when env targets a DIFFERENT session", maskCompanionConfig(row, db.getCompanionHome("sess-1"), envOther).envPinned === false);
+    // bindingsSeeded (card 72bd4322): the masked read must CARRY it, because the human UI cannot derive it.
+    // `allowedChatId` seeds the FIRST binding only (factory.ts's `!cfg.bindingsSeeded` guard, card
+    // a8480338); afterwards editing it never re-binds. The UI can infer "seeded" from a NON-EMPTY bindings
+    // list, but the zero-bindings-plus-token case is genuinely AMBIGUOUS (never-seeded vs seeded-then-
+    // revoked) — deriving it from the list would reproduce in the UI the exact bug a8480338 fixed, so the
+    // flag has to ride the config read. A NUMERIC chat id here because a dm-scope telegram binding with a
+    // non-numeric chatId is refused at the upsert chokepoint (card 94754bbe).
+    const seedRow = db.upsertCompanionConfig({
+      sessionId: "sess-seed", botTokenBlob: blob, channel: "telegram", allowedChatId: "123456789",
+      chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true,
+    });
+    check("masked: bindingsSeeded FALSE on a fresh row that has never been bound", maskCompanionConfig(seedRow, db.getCompanionHome("sess-seed")).bindingsSeeded === false);
+    db.upsertCompanionBinding({ sessionId: "sess-seed", channel: "telegram", chatId: "123456789", scope: "dm" });
+    check("masked: bindingsSeeded TRUE after the first upsertCompanionBinding", maskCompanionConfig(db.getCompanionConfig("sess-seed"), db.getCompanionHome("sess-seed")).bindingsSeeded === true);
+    // THE load-bearing one for the UI: revoking the binding leaves ZERO bindings but must NOT reset the
+    // flag — that residual true is the only thing distinguishing "revoked, will never re-seed" from "never
+    // seeded, will seed on next start", and the two are indistinguishable from the bindings list alone.
+    db.deleteCompanionBinding("sess-seed", "telegram");
+    check("masked: bindingsSeeded STAYS true after the binding is revoked (zero bindings, still seeded)",
+      db.listCompanionBindings().filter((b) => b.sessionId === "sess-seed").length === 0
+      && maskCompanionConfig(db.getCompanionConfig("sess-seed"), db.getCompanionHome("sess-seed")).bindingsSeeded === true);
     db.close();
   }
 
