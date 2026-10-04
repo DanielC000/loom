@@ -1659,6 +1659,32 @@ type RedirectResult = Omit<EnqueueResult, "landsAt"> & {
 };
 
 /**
+ * `enqueueDurableNudge`'s optional `opts.onOutcome` signal (card `a21f5c9e`) — see that method's own
+ * decision comment and decision record for the full "dispatched:true is not delivered:true" rule.
+ */
+type EnqueueDurableNudgeOutcome =
+  | { dispatched: true; result: EnqueueResult & { msgId: string } }
+  | { dispatched: false; error: unknown };
+
+// @decision a21f5c9e — thrown by enqueueDurableMessage's post-effect db.appendEvent write; `landed` is
+//  true ONLY for deliveryState "queued" (never "dropped", where this write is the only effect) — only
+//  enqueueDurableNudge's dispatch() inspects it; every OTHER caller must keep seeing a plain throw.
+class PostEffectPersistError extends Error {
+  readonly landed: boolean;
+  readonly deliveryState: EnqueueResult["deliveryState"];
+  readonly result: EnqueueResult;
+  readonly msgId: string;
+  constructor(message: string, opts: { landed: boolean; deliveryState: EnqueueResult["deliveryState"]; result: EnqueueResult; msgId: string; cause: unknown }) {
+    super(message, { cause: opts.cause });
+    this.name = "PostEffectPersistError";
+    this.landed = opts.landed;
+    this.deliveryState = opts.deliveryState;
+    this.result = opts.result;
+    this.msgId = opts.msgId;
+  }
+}
+
+/**
  * {@link SessionService.redirectManagerForEmergencyRecycle}'s return shape — deliberately NOT
  * `RedirectResult` alone: the merge-danger-window refusal (see that method's own doc) never reaches
  * `deliverRedirect` at all, so there is no `RedirectResult` to report in that case. `fired:false` means
@@ -5628,17 +5654,49 @@ export class SessionService {
    * @decision 90b9e904 — must not hardcode `kind:"warning"` here — the wake/poll/event-trigger call sites
    *  need `kind:"agent"` (a companion wake needs `route` too); `opts` defaults to `{}`, reproducing the
    *  old behavior byte-for-byte for every pre-existing caller.
+   * @decision a21f5c9e — `opts.onOutcome` fires exactly once with `dispatched:false` ONLY when the enqueue
+   *  itself never landed (never because `waitForMcpSeen` "rejected" — it never does); every other outcome,
+   *  including a "dropped" `deliveryState`, is `dispatched:true` — do not read that as "delivered now".
    */
   enqueueDurableNudge(
     id: string, role: SessionRole | null, text: string, taskId: string | null = null,
-    opts: { kind?: QueuedMessageKind; route?: CompanionRoute } = {},
+    opts: { kind?: QueuedMessageKind; route?: CompanionRoute; onOutcome?: (outcome: EnqueueDurableNudgeOutcome) => void } = {},
   ): void {
     const kind = opts.kind ?? "warning";
-    const { route } = opts;
-    const dispatch = (): void => { this.enqueueDurableMessage(id, text, { sender: "system", kind, taskId, route }); };
+    const { route, onOutcome } = opts;
+    // @decision a21f5c9e — `onOutcome` must be invoked ONLY through `fire`, exactly once: never call it
+    //  directly from `dispatch` or a `.then` handler, and never let it throw back out into a caller.
+    let fired = false;
+    const fire = (outcome: EnqueueDurableNudgeOutcome): void => {
+      if (fired) return;
+      fired = true;
+      try { onOutcome?.(outcome); } catch (e) {
+        console.warn(`[enqueue-durable-nudge] onOutcome callback itself threw for ${id.slice(0, 8)} (ignored — the outcome was already delivered): ${(e as Error)?.message ?? e}`);
+      }
+    };
+    const dispatch = (): void => {
+      try {
+        const result = this.enqueueDurableMessage(id, text, { sender: "system", kind, taskId, route });
+        fire({ dispatched: true, result });
+      } catch (e) {
+        // @decision a21f5c9e — a landed PostEffectPersistError still means the enqueue landed; report
+        //  dispatched:true from its carried result, never a false total-loss signal.
+        if (e instanceof PostEffectPersistError && e.landed) {
+          console.warn(`[enqueue-durable-nudge] durable nudge dispatch to ${id.slice(0, 8)} landed (${e.deliveryState}) but its durability write failed: ${(e.cause as Error)?.message ?? e.cause}`);
+          fire({ dispatched: true, result: { ...e.result, msgId: e.msgId } });
+        } else {
+          console.warn(`[enqueue-durable-nudge] durable nudge dispatch to ${id.slice(0, 8)} threw unexpectedly (nothing was ever recorded): ${(e as Error)?.message ?? e}`);
+          fire({ dispatched: false, error: e });
+        }
+      }
+    };
     if (usesOrchestrationMcp(role)) {
-      void this.pty.waitForMcpSeen(id).then(dispatch).catch((e: unknown) => {
+      // waitForMcpSeen NEVER rejects (see its own doc, pty/host.ts) — the two-arg `.then` form is used
+      // anyway so `dispatch`'s own internal try/catch is the ONLY thing that can report `dispatched:false`
+      // on this path, never a second, unrelated rejection handler re-firing on top of it.
+      void this.pty.waitForMcpSeen(id).then(dispatch, (e: unknown) => {
         console.warn(`[enqueue-durable-nudge] deferred durable nudge to ${id.slice(0, 8)} failed unexpectedly: ${(e as Error)?.message ?? e}`);
+        fire({ dispatched: false, error: e });
       });
     } else {
       dispatch();
@@ -9284,12 +9342,24 @@ export class SessionService {
       //  redrive of a companion-routed dispatch would otherwise silently downgrade to a plain nudge.
       // @decision d09d58e7 — reportEventId joins the same list — without it, a reconstructed record can
       //  never be purge-matched by purgeQueuedByReportEventIds once its report has already been read.
-      this.db.appendEvent({
-        id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId: ctx.sender, workerSessionId: recipientId, taskId: ctx.taskId ?? null,
-        kind: "session_message_queued",
-        detail: { msgId, text: framedText, sender: ctx.sender, kind, rootMsgId, chainDepth, giveUpHeldUntil: ctx.giveUpHeldUntil, route: ctx.route, reportEventId: ctx.reportEventId },
-      });
+      // @decision a21f5c9e — Round 3 reverted Round 2's swallow here (for "dropped" this write is the
+      //  ONLY effect) — throw `PostEffectPersistError`; every other caller still sees a throw as before.
+      try {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId: ctx.sender, workerSessionId: recipientId, taskId: ctx.taskId ?? null,
+          kind: "session_message_queued",
+          detail: { msgId, text: framedText, sender: ctx.sender, kind, rootMsgId, chainDepth, giveUpHeldUntil: ctx.giveUpHeldUntil, route: ctx.route, reportEventId: ctx.reportEventId },
+        });
+      } catch (e) {
+        // Append the cause's own message — every existing catch site that logs `(e as Error).message`
+        // (e.g. carryPendingToSuccessor) must still see the real failure (SQLITE_BUSY etc.), not just
+        // this wrapper's own framing; `.cause` alone isn't enough for a caller that never reads it.
+        throw new PostEffectPersistError(
+          `failed to persist the durable session_message_queued record for ${recipientId} (deliveryState=${r.deliveryState}): ${(e as Error)?.message ?? e}`,
+          { landed: r.deliveryState === "queued", deliveryState: r.deliveryState, result: r, msgId, cause: e },
+        );
+      }
     }
     // msgId is returned UNCONDITIONALLY (not just on the held path) so a caller that needs to correlate
     // its OWN follow-up event to this exact enqueue attempt (deliverRedirect's redirect_worker event, card

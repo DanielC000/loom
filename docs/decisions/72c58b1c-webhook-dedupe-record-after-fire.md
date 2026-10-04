@@ -160,7 +160,10 @@ unchanged by anything in this card.
   inside `PtyHost.setBusy`'s own two callers) that can throw on failure MUST be made non-fatal (best-effort,
   its own try/catch) the same way — never let it become a new way for a successful fire to look like a
   failed one. See the "Scope of 'invariant restored'" note above: this is an open-ended obligation on future
-  changes, not a closed proof about the current code.
+  changes, not a closed proof about the current code. Card `a21f5c9e` extends this SAME rule onto wake
+  mode's new `enqueueDurableNudge`-routed branch: "provably had no effect" there means `dispatched:false`
+  (the `waitForMcpSeen` wait itself failed, so nothing was ever durably recorded) — see that record for why
+  a "dropped" `deliveryState` no longer counts as "no effect" once the message has actually been dispatched.
 - Do not "fix" wake mode's `resume()` the same way `startNew` was fixed — it does not have the same defect
   class (see the reviewer-confirmed reasoning above); doing so would be unnecessary convergence with no
   bug behind it. This does NOT extend to `submit()`'s own trailing `setBusy` call — that one WAS a real
@@ -174,7 +177,8 @@ unchanged by anything in this card.
 - Do not treat the four sibling `discovery_block_injection` `appendEvent` sites or `reconcileFailedSpawn`'s
   orphan-pty behavior as still open — Round 3's ruling deliberately left both for their own card, and card
   `40738f24` closed both; see that card's own decision record for what changed, not this one.
-- Do not read this record as proof `fireWebhookTarget` "mirrors `EventTriggerService.fire`'s own wake/spawn
-  branching exactly" — that historical claim went stale when that path moved to
-  `SessionService.enqueueDurableNudge` (card 90b9e904); the two are similar in shape, not converged, and
-  card 90b9e904 owns any future convergence, not this card.
+- Do not read this record as describing `fireWebhookTarget`'s CURRENT wake-mode branching — card `90b9e904`
+  moved `EventTriggerService.fire` onto the MCP-seen-gated durable `SessionService.enqueueDurableNudge`, and
+  card `a21f5c9e` converged webhook ingress's wake mode onto the SAME helper (with a bare-test-stub fallback
+  to the raw `enqueueStdin` branch this record describes). See `a21f5c9e`'s own record for the converged
+  behavior and for why "reject ⇒ undo" no longer means the same thing it did when this record was written.

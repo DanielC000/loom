@@ -36,12 +36,15 @@ export interface WebhookIngressDb {
   recordWebhookDelivery: Db["recordWebhookDelivery"];
   deleteWebhookDelivery: Db["deleteWebhookDelivery"];
   updateWebhookEndpointLastFired: Db["updateWebhookEndpointLastFired"];
+  /** Card a21f5c9e — the wake-mode target's role, so `fireWebhookTarget` can pass it to
+   *  `SessionService.enqueueDurableNudge` (it needs to know whether to gate on `waitForMcpSeen`). */
+  getSession: Db["getSession"];
 }
 
 export interface WebhookIngressDeps {
   db: WebhookIngressDb;
-  sessions: Pick<SessionService, "startNew" | "resume">;
-  pty: Pick<PtyHost, "isAlive" | "enqueueStdin">;
+  sessions: Pick<SessionService, "startNew" | "resume" | "enqueueDurableNudge">;
+  pty: Pick<PtyHost, "isAlive">;
   /** Envelope key file override — test seam only (mirrors connections/store.ts's `keyPath`). */
   keyPath?: string;
   /** Injectable per-endpoint spawn-rate limiter — test seam (mirrors createRemoteRateLimiter's own shape
@@ -51,29 +54,53 @@ export interface WebhookIngressDeps {
   /** Injectable clock — test seam (mirrors spawnRateLimiter's own shape), so a test can pin `now` to a
    *  fixed instant instead of depending on the real wall clock. Defaults to `Date.now`. */
   now?: () => number;
+  /** Card a21f5c9e — injectable per-(endpoint,deliveryId) replay-cooldown limiter — test seam, same shape
+   *  as `spawnRateLimiter`. See `REPLAY_COOLDOWN_MS`'s own doc for what this bounds and why. */
+  replayCooldownLimiter?: SlidingWindowCounter;
+  replayCooldownMs?: number;
 }
 
-/** Deliver an already-verified, already-deduped event to its endpoint's wake/spawn target — similar in
- *  shape to `EventTriggerService`'s historical wake/spawn branching, though that path has since moved to
- *  `SessionService.enqueueDurableNudge` (card 90b9e904); not converged with this one here.
+/** Card a21f5c9e — at most ONE fire ATTEMPT per (endpoint, deliveryId) per this window (checked BEFORE the
+ *  dedupe row is recorded, same shape as the per-endpoint spawn-rate cap just below it). Without it, a
+ *  captured delivery replayed against a permanently-broken target would undo-and-refire on every single
+ *  replay, bounded only by the per-endpoint spawn-rate cap (`DEFAULT_SPAWN_RATE_PER_MIN`) — up to 10
+ *  dedupe-row write/delete cycles a minute, and for spawn mode, 10 new (immediately-exited) session rows a
+ *  minute, indefinitely, for as long as the target stays broken. A replay blocked by this gate never
+ *  records a dedupe row at all (mirrors the rate-limiter's own "never record a dropped delivery" rule), so
+ *  it is ALWAYS harmless to a later genuine redelivery — the fire's own `.catch()` still ALWAYS undoes the
+ *  dedupe row on failure, unconditionally; this gate bounds how often that cycle can repeat, it never skips
+ *  the undo itself. See the decision record for why a per-id attempt CAP was rejected in favor of this
+ *  cooldown, and what a legitimately-retrying sender experiences. */
+export const REPLAY_COOLDOWN_MS = 60_000;
+
+/** Deliver an already-verified, already-deduped event to its endpoint's wake/spawn target.
  *
  *  @decision 72c58b1c — every branch must reject on a failure that means NO delivery effect happened, and
  *  only that; the caller's `.catch()` undoes the dedupe row on that basis alone. See the decision record
- *  for the full rule, the two throw/no-throw branches' individual guarantees, and known residuals. */
+ *  for the full rule, the two throw/no-throw branches' individual guarantees, and known residuals.
+ *  @decision a21f5c9e — wake mode now converges onto the SAME MCP-seen-gated durable
+ *  `SessionService.enqueueDurableNudge` path `EventTriggerService.fire` uses (card 90b9e904); "reject"
+ *  here no longer means the same thing it used to — see the decision record for the full rule. */
 async function fireWebhookTarget(deps: WebhookIngressDeps, endpoint: WebhookEndpointRow, kickoff: string, nowIso: string): Promise<void> {
   if (endpoint.mode === "wake") {
     const sessionId = endpoint.targetSessionId!;
     if (!deps.pty.isAlive(sessionId)) await deps.sessions.resume(sessionId);
-    // kind:"agent" — a webhook-driven nudge is its own turn, never mashed with anything else queued.
-    const result = deps.pty.enqueueStdin(sessionId, kickoff, "system", undefined, undefined, "agent");
-    // enqueueStdin's failure signal is `deliveryState === "dropped"`, NEVER `delivered:false` alone
-    // (decision 13e32e1d: a "queued"/held outcome is a successful, durable enqueue that will be retried,
-    // not a drop) — reading `delivered:false` here would wrongly reject an outcome that will still
-    // deliver. Only a genuine drop (e.g. reason "session-dead") must reject, or this branch resolves
-    // successfully on a silently lost nudge and the dedupe row never gets undone.
-    if (result.deliveryState === "dropped") {
-      throw new Error(`enqueueStdin dropped the webhook nudge for session ${sessionId} (reason: ${result.reason ?? "none given"})`);
-    }
+    const role = deps.db.getSession(sessionId)?.role ?? null;
+    await new Promise<void>((resolve, reject) => {
+      deps.sessions.enqueueDurableNudge(sessionId, role, kickoff, null, {
+        kind: "agent",
+        onOutcome: (outcome) => {
+          // `dispatched:false` is the ONE case the enqueue itself never landed — nothing is sitting in
+          // the recipient's pty state AND no durable record survived either — reject so the caller undoes
+          // the dedupe row, same as the pre-convergence "dropped" rejection. `dispatched:true` (even for an
+          // underlying "dropped" `deliveryState`, or a post-effect durability write that failed on an
+          // already-landed "queued" enqueue — see the decision record's Round 3) means something real
+          // survives the attempt; it is NOT the same guarantee as immediate delivery.
+          if (outcome.dispatched) resolve();
+          else reject(new Error(`enqueueDurableNudge never dispatched the webhook nudge for session ${sessionId} (the enqueue itself never landed)`));
+        },
+      });
+    });
   } else {
     deps.sessions.startNew(endpoint.agentId!, { kickoffPrompt: kickoff });
   }
@@ -96,6 +123,8 @@ export function registerWebhookIngress(app: FastifyInstance, deps: WebhookIngres
   const rateLimiter = deps.spawnRateLimiter ?? new SlidingWindowCounter();
   const spawnRatePerMin = deps.spawnRatePerMin ?? DEFAULT_SPAWN_RATE_PER_MIN;
   const now = deps.now ?? Date.now;
+  const replayCooldownMs = deps.replayCooldownMs ?? REPLAY_COOLDOWN_MS;
+  const replayCooldownLimiter = deps.replayCooldownLimiter ?? new SlidingWindowCounter(replayCooldownMs);
   // Deprecation warning for a generic endpoint still on the LEGACY (pre-07af871d) signature format —
   // logged ONCE per endpoint id (disclosure-safe: no payload/secret/signature content), so a human running
   // the daemon notices without the log line repeating on every single delivery.
@@ -155,6 +184,22 @@ export function registerWebhookIngress(app: FastifyInstance, deps: WebhookIngres
         return reply.code(200).send({ ok: true, rateLimited: true });
       }
 
+      // Replay-cooldown gate (card a21f5c9e), checked BEFORE the dedupe row is written — SAME shape and
+      // SAME reasoning as the rate-limit check just above: a target that fails EVERY fire must not let a
+      // replayed delivery undo-and-refire unboundedly (bounded only by the rate cap above). At most one
+      // fire ATTEMPT per (endpoint, deliveryId) per `replayCooldownMs`; a replay blocked here records NO
+      // dedupe row, so it never swallows a genuine later redelivery — it just gets a fresh chance once the
+      // cooldown elapses. Keyed on the COMPOSITE `${endpoint.id}:${deliveryId}`, never deliveryId alone
+      // (collision across unrelated endpoints) or endpoint.id alone (that's the rate limiter's job).
+      // @decision a21f5c9e — a cooldown-blocked replay is NEVER `duplicate:true` (it reaches this gate
+      // only after a prior fire failed and undid its own row) — 429 + Retry-After + `{replayCooldown:true}`.
+      if (!replayCooldownLimiter.allow(`${endpoint.id}:${deliveryId}`, 1, nowMs)) {
+        const retryAfterSec = Math.max(1, Math.ceil(replayCooldownLimiter.retryAfterMs(`${endpoint.id}:${deliveryId}`, nowMs) / 1000));
+        // eslint-disable-next-line no-console
+        console.warn(`[webhook] endpoint ${endpoint.id} replay cooldown`);
+        return reply.code(429).header("Retry-After", String(retryAfterSec)).send({ replayCooldown: true });
+      }
+
       let payload: unknown;
       try { payload = JSON.parse(rawBody.toString("utf8")); } catch { payload = rawBody.toString("utf8"); }
       // The untrusted-DATA envelope (must-fix) — reuses poll-format.ts's established framing.
@@ -176,9 +221,9 @@ export function registerWebhookIngress(app: FastifyInstance, deps: WebhookIngres
       deps.db.recordWebhookDelivery(endpoint.id, deliveryId, nowIso, cutoffIso);
 
       fireWebhookTarget(deps, endpoint, kickoff, nowIso).catch((err) => {
-        // A failed fire (resume/startNew throwing, or enqueueStdin reporting a drop — see
-        // fireWebhookTarget's own doc) must not leave this delivery permanently deduped for the rest of the
-        // retention window (card 72c58b1c) — undo the row recorded above so a genuine redelivery of the
+        // A failed fire (resume/startNew throwing, or enqueueStdin/enqueueDurableNudge reporting a drop —
+        // see fireWebhookTarget's own doc) must not leave this delivery permanently deduped for the rest of
+        // the retention window (card 72c58b1c) — undo the row recorded above so a genuine redelivery of the
         // SAME event gets a real chance to fire. The original fire error is logged FIRST and
         // unconditionally: a failure to remove the row (SQLITE_BUSY, a closed db at shutdown) must never
         // suppress the record of what actually broke.

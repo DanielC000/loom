@@ -15,7 +15,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   5. Oversize -> 413, BEFORE any endpoint lookup or verify work runs.
 //   6. Untrusted-payload envelope present in the kickoff prompt.
 //   7. Per-endpoint spawn-rate cap: request #11 within a minute is ACK'd but does not spawn.
-//   8. Wake-mode delivery: resume() called only when not already alive; enqueueStdin always called.
+//   8. Wake-mode delivery: resume() called only when not already alive; enqueueDurableNudge always called.
 //   9. Unknown/disabled endpoint -> the SAME 404 either way.
 //  10. (card 07af871d) Replay-with-a-fresh-delivery-id-header: a github/generic-legacy delivery replayed
 //      under a NEW, never-seen delivery-id header (signature otherwise untouched/still valid) must dedupe
@@ -119,13 +119,21 @@ try {
   const wakeEnqueues = [];
   let resumeCalls = 0;
   const aliveSessions = new Set();
-  const sessionsStub = {
-    startNew: (agentId, opts) => { spawnCalls.push({ agentId, opts }); return { id: `spawned-${spawnCalls.length}` }; },
-    resume: (sessionId) => { resumeCalls++; return { id: sessionId }; },
-  };
   const ptyStub = {
     isAlive: (sessionId) => aliveSessions.has(sessionId),
     enqueueStdin: (sessionId, text, source, _onDeliver, _route, kind) => { wakeEnqueues.push({ sessionId, text, source, kind }); return { delivered: true }; },
+  };
+  // Card a21f5c9e Round 2 (item 4): `enqueueDurableNudge` is now a REQUIRED dependency (the raw
+  // pty.enqueueStdin fallback was deleted from ingress.ts) — this stub stands in for it, delegating to
+  // the SAME `ptyStub.enqueueStdin` above so `wakeEnqueues` still records what was actually dispatched
+  // and `opts.kind` is forwarded, same as production's `enqueueDurableMessage` would.
+  const sessionsStub = {
+    startNew: (agentId, opts) => { spawnCalls.push({ agentId, opts }); return { id: `spawned-${spawnCalls.length}` }; },
+    resume: (sessionId) => { resumeCalls++; return { id: sessionId }; },
+    enqueueDurableNudge: (id, _role, text, _taskId, opts) => {
+      const result = ptyStub.enqueueStdin(id, text, "system", undefined, undefined, opts.kind);
+      opts.onOutcome({ dispatched: true, result: { ...result, msgId: `stub-${id}` } });
+    },
   };
   const stub = {};
   const app = await buildServer({
@@ -492,6 +500,10 @@ try {
         resume: () => ({}),
       },
       pty: { isAlive: () => false, enqueueStdin: () => ({ delivered: true }) },
+      // This block tests the DEDUPE-UNDO logic (card 72c58b1c) in isolation, immediately redelivering the
+      // SAME event with no real elapsed time — disable the SEPARATE replay-cooldown gate (card a21f5c9e,
+      // webhook-enqueue-durable-nudge.mjs owns ITS coverage) so it doesn't block this scenario's own redeliveries.
+      replayCooldownMs: 0,
     });
     await ffApp.ready();
     const ffUrl = `/hooks/${ffEndpoint.path}`;
@@ -535,14 +547,17 @@ try {
     }
   }
 
-  // ===================== (15, card 72c58b1c) wake-mode: an enqueueStdin DROP must fail the fire too =====
-  // fireWebhookTarget's wake-mode branch used to ignore enqueueStdin's return value entirely. enqueueStdin
-  // reports failure as a RETURN VALUE (EnqueueResult), never a throw — so a genuinely dropped nudge
-  // (deliveryState:"dropped", e.g. the target session died between the isAlive/resume check and the
-  // enqueue) used to resolve the fire's promise successfully, never trip the .catch(), and leave the
-  // dedupe row in place on a silently lost delivery — the same swallow the (14) fix addresses, through a
-  // path that fix didn't cover. Also proves the OTHER polarity (decision 13e32e1d): a "queued"/held
-  // outcome (delivered:false but NOT dropped) is a REAL success and must not be treated as a failure.
+  // ===================== (15, card 72c58b1c + a21f5c9e Round 2 item 4) wake-mode: `enqueueDurableNudge`
+  // reporting dispatched:false must fail the fire; dispatched:true must NOT, regardless of the underlying
+  // deliveryState. The raw `pty.enqueueStdin` fallback this scenario originally drove was DELETED from
+  // ingress.ts (card a21f5c9e Round 2, item 4) — it was reachable only from a bare test stub, never from
+  // production, and as originally written (15a)/(15b) asserted that a "dropped" deliveryState alone
+  // undoes the dedupe row, which is the OPPOSITE of the real `enqueueDurableNudge`-routed contract: per
+  // decision a21f5c9e Part 1, `enqueueDurableMessage` durably records the dispatch regardless of the
+  // underlying deliveryState, so `dispatched` (not deliveryState) is what decides the outcome — see
+  // webhook-enqueue-durable-nudge.mjs's Part 1 for the unit-level coverage of that rule. This block now
+  // proves the SAME rule end to end through the real route, with `sessions.enqueueDurableNudge` as the
+  // (now-mandatory) dependency.
   {
     const dbWD = new Db(dbFile("wake-drop.db"));
     const nowWD = new Date().toISOString();
@@ -557,7 +572,7 @@ try {
       name: "Wake-drop target", sourceType: "generic", secret: "wd-secret-abc", mode: "wake",
       targetSessionId: "wd-target-sess", agentId: null,
     });
-    let wdEnqueueResult = { delivered: false, deliveryState: "dropped", reason: "session-dead" };
+    let wdOutcome = { dispatched: false, error: new Error("simulated: the enqueue itself never landed") };
     const wdEnqueueCalls = [];
     const wdApp = Fastify();
     const originalError2 = console.error;
@@ -566,41 +581,52 @@ try {
     try {
       registerWebhookIngress(wdApp, {
         db: dbWD,
-        sessions: { startNew: () => { throw new Error("should not be called (wake mode)"); }, resume: () => ({}) },
-        pty: { isAlive: () => true, enqueueStdin: (...args) => { wdEnqueueCalls.push(args); return wdEnqueueResult; } },
+        sessions: {
+          startNew: () => { throw new Error("should not be called (wake mode)"); },
+          resume: () => ({}),
+          enqueueDurableNudge: (id, role, text, taskId, opts) => {
+            wdEnqueueCalls.push({ id, role, text, taskId, opts });
+            opts.onOutcome(wdOutcome);
+          },
+        },
+        pty: { isAlive: () => true },
+        // Same reason as (14) above: disable the separate replay-cooldown gate (card a21f5c9e) so it
+        // doesn't block this scenario's own immediate redeliveries.
+        replayCooldownMs: 0,
       });
       await wdApp.ready();
       const wdUrl = `/hooks/${wdEndpoint.path}`;
       const { payload, headers } = signGeneric("wd-secret-abc", '{"i":"wake-drop"}', "wd-delivery-1");
 
-      // (15a) a DROPPED enqueue must be treated as a failed fire.
-      wdEnqueueResult = { delivered: false, deliveryState: "dropped", reason: "session-dead" };
+      // (15a) dispatched:false (nothing was ever durably recorded) must be treated as a failed fire.
+      wdOutcome = { dispatched: false, error: new Error("simulated: the enqueue itself never landed") };
       const r1 = await wdApp.inject({ method: "POST", url: wdUrl, payload, headers });
-      check("(15a) a wake delivery whose enqueueStdin DROPS -> still 200 (ACK sent before the fire)", r1.statusCode === 200);
+      check("(15a) a wake delivery whose enqueueDurableNudge reports dispatched:false -> still 200 (ACK sent before the fire)", r1.statusCode === 200);
       await settle();
-      check("(15a) ...and enqueueStdin was actually called once", wdEnqueueCalls.length === 1);
-      check("(15a) ...and the drop was logged as a fire failure", errorLines2.some((l) => l.includes("fire failed") && l.includes("dropped")));
-      check("(15a) ...and, critically, the dedupe row was REMOVED (a dropped enqueue is NOT a silent success)",
+      check("(15a) ...and enqueueDurableNudge was actually called once", wdEnqueueCalls.length === 1);
+      check("(15a) ...and the non-dispatch was logged as a fire failure", errorLines2.some((l) => l.includes("fire failed")));
+      check("(15a) ...and, critically, the dedupe row was REMOVED (dispatched:false means nothing was ever recorded)",
         dbWD.hasWebhookDelivery(wdEndpoint.id, "generic:wd-delivery-1") === false);
 
-      // Redeliver the SAME event once the session comes back (enqueue now succeeds as "handed-off").
-      wdEnqueueResult = { delivered: true, deliveryState: "handed-off" };
+      // Redeliver the SAME event once the target comes back (enqueueDurableNudge now dispatches).
+      wdOutcome = { dispatched: true, result: { delivered: true, deliveryState: "handed-off", msgId: "wd-m2" } };
       const r2 = await wdApp.inject({ method: "POST", url: wdUrl, payload, headers });
-      check("(15a) redelivering after a dropped enqueue -> 200, NOT flagged duplicate", r2.statusCode === 200 && JSON.parse(r2.payload).duplicate !== true);
+      check("(15a) redelivering after dispatched:false -> 200, NOT flagged duplicate", r2.statusCode === 200 && JSON.parse(r2.payload).duplicate !== true);
       await settle();
-      check("(15a) ...and it actually enqueued this time (not permanently swallowed by the earlier drop)", wdEnqueueCalls.length === 2);
+      check("(15a) ...and it actually dispatched this time (not permanently swallowed by the earlier non-dispatch)", wdEnqueueCalls.length === 2);
       check("(15a) ...and the dedupe row exists again", dbWD.hasWebhookDelivery(wdEndpoint.id, "generic:wd-delivery-1") === true);
 
-      // (15b) the OTHER polarity: a "queued"/held outcome (delivered:false, deliveryState:"queued") is a
-      // REAL success per decision 13e32e1d — must NOT be treated as a failure.
+      // (15b) the disclosed behavior change (decision a21f5c9e Part 1): dispatched:true, even with an
+      // underlying "dropped" deliveryState, must NOT be treated as a failure — enqueueDurableMessage
+      // already durably recorded it, and it redrives on the recipient's next resume.
       errorLines2.length = 0;
-      wdEnqueueResult = { delivered: false, deliveryState: "queued", queued: true };
+      wdOutcome = { dispatched: true, result: { delivered: false, deliveryState: "dropped", reason: "session-dead", msgId: "wd-m3" } };
       const { payload: p3, headers: h3 } = signGeneric("wd-secret-abc", '{"i":"wake-queued"}', "wd-delivery-2");
       const r3 = await wdApp.inject({ method: "POST", url: wdUrl, payload: p3, headers: h3 });
-      check("(15b) a wake delivery whose enqueueStdin returns delivered:false but deliveryState:'queued' -> 200", r3.statusCode === 200);
+      check("(15b) a wake delivery whose enqueueDurableNudge reports dispatched:true (even with a 'dropped' deliveryState) -> 200", r3.statusCode === 200);
       await settle();
-      check("(15b) ...NOT logged as a fire failure (a queued/held outcome is a real success, not a drop)", errorLines2.length === 0);
-      check("(15b) ...and the dedupe row is KEPT (not treated as a drop)", dbWD.hasWebhookDelivery(wdEndpoint.id, "generic:wd-delivery-2") === true);
+      check("(15b) ...NOT logged as a fire failure (dispatched:true is never a failure, regardless of deliveryState)", errorLines2.length === 0);
+      check("(15b) ...and the dedupe row is KEPT (durably recorded, redrives on resume)", dbWD.hasWebhookDelivery(wdEndpoint.id, "generic:wd-delivery-2") === true);
     } finally {
       console.error = originalError2;
       await wdApp.close();

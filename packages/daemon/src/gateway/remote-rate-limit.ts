@@ -68,6 +68,17 @@ export class SlidingWindowCounter {
     }
     return allowed;
   }
+  /** Milliseconds until `key`'s oldest tracked hit ages out of the window (i.e. until a refused `allow`
+   *  would next succeed) — 0 if the key has no tracked hits. Read-only: never mutates or sweeps. Lets a
+   *  caller that just received a refusal compute a Retry-After without re-deriving the window logic. */
+  retryAfterMs(key: string, nowMs: number): number {
+    const hits = this.hits.get(key);
+    if (!hits || hits.length === 0) return 0;
+    // `hits` is maintained in time order (a kept/filtered prefix, with new hits pushed at the end — see
+    // `allow` above), so the oldest surviving hit is always index 0; no need to re-scan for the minimum.
+    const oldest = hits[0] as number;
+    return Math.max(0, this.windowMs - (nowMs - oldest));
+  }
   /** Number of live (non-empty) keys currently tracked — exposed for the eviction/bound tests. */
   get size(): number {
     return this.hits.size;
