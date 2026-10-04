@@ -14,24 +14,37 @@
 // only READS that config; it mints nothing.
 import { resolveConfig } from "@loom/shared";
 import type { OrchestrationEvent, Project, Session } from "@loom/shared";
+import { guardedFetch } from "../connections/boundedFetch.js";
 
 /** The network primitive (injectable for tests). Resolves on completion; rejects on error/timeout. */
 export type WebhookPoster = (url: string, body: unknown, timeoutMs: number) => Promise<void>;
 
-/** Default poster: a single bounded `fetch` POST. The AbortController caps a hung endpoint. */
-const defaultPost: WebhookPoster = async (url, body, timeoutMs) => {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-  } finally {
-    clearTimeout(timer);
+/**
+ * Default poster: routed through the shared `guardedFetch` helper (card 731aa517 round 2) — the
+ * human-set `hook.url` IS itself the secret here (e.g. a Slack incoming-webhook URL), so a redirect must
+ * never be auto-followed and a hung endpoint is bounded. `treatRedirectAsError` stays at its default
+ * (`true`): no known webhook provider legitimately redirects a POST target. The response body is never
+ * read — `onEvent`'s caller logs (never retries) on a throw, but a large/slow 2xx body still has no use
+ * here, so success is judged by HTTP status alone and the unread body is cancelled rather than
+ * buffered-and-capped, instead of letting a slow/oversized-but-delivered body turn into a throw.
+ */
+export const defaultPost: WebhookPoster = async (url, body, timeoutMs) => {
+  const guarded = await guardedFetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    timeoutMs,
+  });
+  if (!guarded.ok) {
+    // Distinct, diagnosable reasons per kind — status code only, NEVER the Location header or the URL
+    // itself (the URL is the secret here).
+    if (guarded.kind === "redirect") throw new Error(`alert webhook refused a redirect (HTTP ${guarded.status})`);
+    throw new Error(guarded.error);
   }
+  const status = guarded.response.status;
+  await guarded.response.body?.cancel().catch(() => {});
+  guarded.cancelTimeout();
+  if (status < 200 || status >= 300) throw new Error(`alert webhook endpoint returned ${status}`);
 };
 
 /** The DB reads the emitter needs (narrowed for testability — only a project/session lookup). */

@@ -23,6 +23,7 @@ import type { ChannelAdapter, InboundAttachment, InboundHandler, InboundMessage 
 import { cappedBackoff, runWithReconnect } from "./resilience.js";
 import { COMMAND_MENU } from "./commands.js";
 import { LOOM_HOME } from "../paths.js";
+import { guardedFetch } from "../connections/boundedFetch.js";
 
 /** Telegram's cloud-API file-download size cap (Companion Voice epic, VOICE-P2). */
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
@@ -146,6 +147,15 @@ export interface TelegramAdapterOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Override the reconnect backoff (tests). */
   backoffMs?: (attempt: number) => number;
+  /** fetch override for `downloadAttachment`'s guardedFetch call — the hermetic test seam (card
+   *  731aa517; never makes a real network call in tests). Defaults to the global `fetch`. */
+  fetchImpl?: typeof fetch;
+  /** `downloadAttachment` timeout override (TEST ONLY — lets a hang/redirect test use a short bound
+   *  instead of waiting out the real DOWNLOAD_TIMEOUT_MS). Defaults to DOWNLOAD_TIMEOUT_MS. */
+  downloadTimeoutMs?: number;
+  /** `downloadAttachment` byte-cap override (TEST ONLY — lets an oversized test use a small bound
+   *  instead of streaming the real 20MB MAX_AUDIO_BYTES). Defaults to MAX_AUDIO_BYTES. */
+  maxAudioBytes?: number;
 }
 
 /**
@@ -161,6 +171,9 @@ export function createTelegramAdapter(
   const bot: TelegramBotLike = opts.bot ?? (new Bot(botToken) as unknown as TelegramBotLike);
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const backoffMs = opts.backoffMs ?? cappedBackoff();
+  const fetchImpl = opts.fetchImpl;
+  const downloadTimeoutMs = opts.downloadTimeoutMs ?? DOWNLOAD_TIMEOUT_MS;
+  const maxAudioBytes = opts.maxAudioBytes ?? MAX_AUDIO_BYTES;
   let stopped = false;
 
   // ERROR BOUNDARY 1 — a per-update try/catch: a throw in normalize/onInbound (e.g. an enqueueStdin throw)
@@ -252,18 +265,35 @@ export function createTelegramAdapter(
     async downloadAttachment(attachment) {
       if (!attachment.fileId || !bot.api.getFile) return null;
       let dest: string | undefined;
-      // ONE AbortController for the WHOLE operation — connect/TTFB (the fetch call) AND the full body
-      // stream (threaded into Readable.fromWeb below) — so a mid-download stall is bounded exactly like a
-      // slow connect, not just the initial response.
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+      // `guardedFetch` (connections/boundedFetch.ts, card 731aa517) arms ONE AbortController/timer for
+      // the WHOLE operation — connect/TTFB (the fetch call) AND, since we keep using its `signal` and
+      // only call `cancelTimeout()` ourselves once done, the full body stream below too (threaded into
+      // Readable.fromWeb) — so a mid-download stall is bounded exactly like a slow connect. It also
+      // guarantees `redirect:"manual"` — the bot token rides the URL PATH here (not a header), so a
+      // followed redirect could otherwise hand an attacker-controlled host a request carrying it.
+      let cancelTimeout: (() => void) | undefined;
       try {
         const file = await bot.api.getFile(attachment.fileId);
         if (!file?.file_path) return null;
         // Telegram's cloud-API file-download URL (bot-token-scoped — never a body-supplied path).
         const url = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
-        const res = await fetch(url, { signal: controller.signal });
-        if (!res.ok || !res.body) return null;
+        const guarded = await guardedFetch(url, { timeoutMs: downloadTimeoutMs, fetchImpl });
+        if (!guarded.ok) {
+          // Distinct, diagnosable reason for a refused redirect — status code only, NEVER the Location
+          // header or the URL (which carries the bot token) — so a real Telegram redirect shows up as a
+          // clear "refused a redirect" failure instead of a generic one.
+          throw new Error(guarded.kind === "redirect"
+            ? `telegram attachment download refused a redirect (HTTP ${guarded.status})`
+            : guarded.error);
+        }
+        cancelTimeout = guarded.cancelTimeout;
+        const res = guarded.response;
+        if (!res.ok || !res.body) {
+          // Cancel the unread body (card 731aa517 round 2) so the connection can be released — nothing
+          // downstream will ever read it either way.
+          await res.body?.cancel().catch(() => {});
+          return null;
+        }
         const dir = path.join(LOOM_HOME, "tmp", "companion-audio");
         fs.mkdirSync(dir, { recursive: true });
         dest = path.join(dir, `${randomUUID()}${path.extname(file.file_path) || ".ogg"}`);
@@ -275,11 +305,11 @@ export function createTelegramAdapter(
         const capStream = new Transform({
           transform(chunk: Buffer, _enc, callback) {
             bytes += chunk.length;
-            if (bytes > MAX_AUDIO_BYTES) { callback(new Error("attachment exceeds the size cap")); return; }
+            if (bytes > maxAudioBytes) { callback(new Error("attachment exceeds the size cap")); return; }
             callback(null, chunk);
           },
         });
-        await pipeline(Readable.fromWeb(res.body, { signal: controller.signal }), capStream, fs.createWriteStream(dest));
+        await pipeline(Readable.fromWeb(res.body, { signal: guarded.signal }), capStream, fs.createWriteStream(dest));
         const filePath = dest;
         return {
           filePath,
@@ -291,7 +321,7 @@ export function createTelegramAdapter(
         if (dest) { try { await fs.promises.unlink(dest); } catch { /* best-effort cleanup of a partial file */ } }
         return null;
       } finally {
-        clearTimeout(timer);
+        cancelTimeout?.();
       }
     },
   };

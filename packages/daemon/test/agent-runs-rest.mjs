@@ -144,6 +144,12 @@ try {
     c.agentId === "aEndpoint" && c.input?.q === "hi" && c.schema?.type === "object" && c.keyId === keyAId && c.webhook === "http://localhost:9/hook");
   const happyRunId = happy.json().runId;
 
+  // ---- card 731aa517 round 2: webhook must be a well-formed URL, not merely a string ----
+  const startCountBeforeMalformed = startCalls.length;
+  const malformedWebhook = await postRun(tokenA, { agent: "aEndpoint", input: {}, webhook: "not a url" });
+  check("A4b malformed webhook (not a URL) → 400", malformedWebhook.statusCode === 400);
+  check("A4b malformed webhook started NO run", startCalls.length === startCountBeforeMalformed);
+
   // ---- idempotency: a replay returns the SAME runId and starts NO second run ----
   const idemPayload = { agent: "aEndpoint", input: { n: 1 }, idempotencyKey: "abc-123" };
   const i1 = await postRun(tokenA, idemPayload);

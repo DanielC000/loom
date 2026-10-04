@@ -3,6 +3,7 @@ import { execSync, execFile } from "node:child_process";
 import type { UsageLimitsStatus, UsageWindow, UsageExtra } from "@loom/shared";
 import { resolveExecutable } from "../pty/resolve-bin.js";
 import { claudeCredentialsPath, CLAUDE_BINARY_NAME } from "../pty/claude-doctrine.js";
+import { boundedFetch } from "../connections/boundedFetch.js";
 
 /**
  * ACCOUNT-WIDE Claude plan-usage poller — the source of Mission Control's plan-usage strip.
@@ -26,6 +27,12 @@ import { claudeCredentialsPath, CLAUDE_BINARY_NAME } from "../pty/claude-doctrin
 
 const USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_BETA = "oauth-2025-04-20";
+// Card 731aa517: this request carries the host's own Claude OAuth Bearer token. Routed through the
+// shared boundedFetch helper (connections/boundedFetch.ts) — manual redirect (never auto-followed,
+// so the token can't be re-sent to a 3xx Location), a hard timeout, and a streamed byte cap. The
+// endpoint is a fixed constant, never user-configurable, so a redirect here has no legitimate case.
+const USAGE_FETCH_TIMEOUT_MS = 8_000;
+const USAGE_FETCH_MAX_BYTES = 65_536;
 // HarnessAdapter seam (card 2b099e48): the literal credentials-file location is claude-specific and now
 // owned by pty/claude-doctrine.ts#claudeCredentialsPath (Windows-first: %USERPROFILE%\.claude\.credentials.json;
 // macOS uses the Keychain — unavailable there).
@@ -44,6 +51,11 @@ export interface UsageStatusDeps {
   fetchImpl?: typeof fetch;
   /** User-Agent version override (tests); production derives it from `claude --version` (cached). */
   userAgentVersion?: string;
+  /** boundedFetch timeoutMs override (TEST ONLY — lets a hang/redirect test use a short bound instead of
+   *  waiting out the real USAGE_FETCH_TIMEOUT_MS). Defaults to USAGE_FETCH_TIMEOUT_MS in production. */
+  fetchTimeoutMs?: number;
+  /** boundedFetch maxResponseBytes override (TEST ONLY). Defaults to USAGE_FETCH_MAX_BYTES in production. */
+  fetchMaxResponseBytes?: number;
 }
 
 let cachedClaudeVersion: string | null = null;
@@ -180,6 +192,8 @@ export class UsageStatusPoller {
   private readonly endpoint: string;
   private readonly fetchImpl: typeof fetch;
   private readonly versionOverride?: string;
+  private readonly fetchTimeoutMs: number;
+  private readonly fetchMaxResponseBytes: number;
 
   constructor(deps: UsageStatusDeps = {}) {
     this.intervalMs = deps.intervalMs ?? 60_000;
@@ -187,6 +201,8 @@ export class UsageStatusPoller {
     this.endpoint = deps.endpoint ?? USAGE_ENDPOINT;
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.versionOverride = deps.userAgentVersion;
+    this.fetchTimeoutMs = deps.fetchTimeoutMs ?? USAGE_FETCH_TIMEOUT_MS;
+    this.fetchMaxResponseBytes = deps.fetchMaxResponseBytes ?? USAGE_FETCH_MAX_BYTES;
   }
 
   /** The cached status — served to every client (god-eye read-only). */
@@ -204,7 +220,7 @@ export class UsageStatusPoller {
         return;
       }
       const version = this.versionOverride ?? claudeVersion();
-      const res = await this.fetchImpl(this.endpoint, {
+      const result = await boundedFetch(this.endpoint, {
         headers: {
           Authorization: `Bearer ${cred.token}`,
           "anthropic-beta": OAUTH_BETA,
@@ -212,13 +228,23 @@ export class UsageStatusPoller {
           // LOAD-BEARING: without claude-code/<version> the request is hard rate-limited (429s).
           "User-Agent": `claude-code/${version}`,
         },
+        timeoutMs: this.fetchTimeoutMs,
+        maxResponseBytes: this.fetchMaxResponseBytes,
+        fetchImpl: this.fetchImpl,
       });
-      if (!res.ok) {
-        const hint = res.status === 401 ? "token rejected (401) — re-login with `claude`" : `usage endpoint returned ${res.status}`;
+      if (!result.ok) {
+        const hint = result.kind === "redirect"
+          ? `usage endpoint refused a redirect (HTTP ${result.status})`
+          : `usage fetch failed: ${result.error}`;
         this.cache = unavailable(hint, fetchedAt);
         return;
       }
-      const json = (await res.json()) as unknown;
+      if (result.status < 200 || result.status >= 300) {
+        const hint = result.status === 401 ? "token rejected (401) — re-login with `claude`" : `usage endpoint returned ${result.status}`;
+        this.cache = unavailable(hint, fetchedAt);
+        return;
+      }
+      const json = JSON.parse(result.text) as unknown;
       this.cache = parseUsagePayload(json, fetchedAt);
     } catch (err) {
       this.cache = unavailable(`usage fetch failed: ${(err as Error).message}`, fetchedAt);

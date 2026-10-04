@@ -56,7 +56,10 @@ async function bootGate() {
   let calls = 0;
   const poller = new UsageStatusPoller({
     credentialsPath,
-    fetchImpl: async () => { calls++; return { ok: true, status: 200, json: async () => fakePayload }; },
+    // The poller routes through the shared boundedFetch helper (card 731aa517), which streams a real
+    // Response's `.body` — so the fake fetchImpl must return an actual Response (not a plain {ok,status,
+    // json()} stand-in) for the body text to be readable at all (mirrors usage-status.mjs's own fix).
+    fetchImpl: async () => { calls++; return new Response(JSON.stringify(fakePayload), { status: 200 }); },
   });
   const started = !isUsagePollerSuppressed();
   if (started) poller.start();
@@ -64,9 +67,9 @@ async function bootGate() {
   // the poll's own completion instead of a blind sleep. When suppressed, start() was never invoked at
   // all, so there is nothing async to wait for: calls===0 is already the final answer, not a race to
   // bound. NOTE: poll on `getStatus().available`, not on `calls` — `calls` increments synchronously as
-  // soon as fetchImpl is INVOKED (inside pollOnce, before its own `await res.json()` and before
-  // `this.cache` is actually assigned), so it settles before the poll has genuinely finished; `available`
-  // only flips once pollOnce has fully run and written the cache, which is the state these checks need.
+  // soon as fetchImpl is INVOKED (inside pollOnce, before its body is ever read and before `this.cache`
+  // is actually assigned), so it settles before the poll has genuinely finished; `available` only flips
+  // once pollOnce has fully run and written the cache, which is the state these checks need.
   if (started) {
     const deadline = Date.now() + 2_000;
     while (poller.getStatus().available !== true && Date.now() < deadline) await sleep(5);

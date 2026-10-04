@@ -5249,6 +5249,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // listed it. Refuse here for a clean 403 (startRun ALSO enforces this as the choke-point invariant).
     if (deps.db.getAgent(b.agent)?.endpoint !== true) return reply.code(403).send({ error: "agent is not an endpoint" });
     if (b.webhook !== undefined && b.webhook !== null && typeof b.webhook !== "string") return reply.code(400).send({ error: "webhook must be a string URL" });
+    // Card 731aa517 round 2: unlike orchestration.alertWebhook.url (validated with z.string().url() at
+    // write time), this field was only checked to be a string — a malformed URL reached guardedFetch
+    // unvalidated. One-line parity fix; alertWebhook's own zod schema lives one layer up (platform.ts).
+    if (typeof b.webhook === "string" && b.webhook) { try { new URL(b.webhook); } catch { return reply.code(400).send({ error: "webhook must be a valid URL" }); } }
     if (b.idempotencyKey !== undefined && b.idempotencyKey !== null && typeof b.idempotencyKey !== "string") return reply.code(400).send({ error: "idempotencyKey must be a string" });
     const webhook = (b.webhook as string | undefined) ?? null;
     const idempotencyKey = typeof b.idempotencyKey === "string" && b.idempotencyKey ? b.idempotencyKey : null;

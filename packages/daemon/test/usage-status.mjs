@@ -85,7 +85,10 @@ const LIVE = {
   check("poll: network error → available:false + reason", net.available === false && /ECONNREFUSED|fetch/i.test(net.reason));
 
   // 401 → available:false mentioning re-login
-  const p401 = new UsageStatusPoller({ credentialsPath: okCred, userAgentVersion: "9.9.9", fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({}) }) });
+  // The poller now routes through the shared boundedFetch helper (card 731aa517), which streams a real
+  // Response's `.body` — so the fake fetchImpl must return an actual Response (not a plain {ok,status,
+  // json()} stand-in) for the body text to be readable at all.
+  const p401 = new UsageStatusPoller({ credentialsPath: okCred, userAgentVersion: "9.9.9", fetchImpl: async () => new Response(JSON.stringify({}), { status: 401 }) });
   await p401.pollOnce();
   const s401 = p401.getStatus();
   check("poll: 401 → available:false mentioning re-login", s401.available === false && /401|login/i.test(s401.reason));
@@ -95,7 +98,7 @@ const LIVE = {
   const pOk = new UsageStatusPoller({
     credentialsPath: okCred,
     userAgentVersion: "1.2.3",
-    fetchImpl: async (_url, init) => { sentHeaders = init.headers; return { ok: true, status: 200, json: async () => LIVE }; },
+    fetchImpl: async (_url, init) => { sentHeaders = init.headers; return new Response(JSON.stringify(LIVE), { status: 200 }); },
   });
   await pOk.pollOnce();
   check("poll: 200 valid → available:true", pOk.getStatus().available === true);
@@ -117,7 +120,7 @@ const LIVE = {
     credentialsPath: lateCred,
     userAgentVersion: "9.9.9",
     intervalMs: 3_600_000, // long — we drive the recovery tick manually
-    fetchImpl: async () => { loginFetches++; return { ok: true, status: 200, json: async () => LIVE }; },
+    fetchImpl: async () => { loginFetches++; return new Response(JSON.stringify(LIVE), { status: 200 }); },
   });
   pLogin.start();
   await settle();
@@ -138,7 +141,7 @@ const LIVE = {
     credentialsPath: okIdem,
     userAgentVersion: "9.9.9",
     intervalMs: 3_600_000,
-    fetchImpl: async () => { primeFetches++; return { ok: true, status: 200, json: async () => LIVE }; },
+    fetchImpl: async () => { primeFetches++; return new Response(JSON.stringify(LIVE), { status: 200 }); },
   });
   pIdem.start();
   pIdem.start(); // second call must be a no-op

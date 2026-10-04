@@ -52,6 +52,7 @@ import { lineageResolvedPendingOp, lineageRootId, liveLineageSuccessor } from ".
 import { composeWorkerStartupPrompt, buildWorkerRepoContext, type WorkerRepoContext, type ReviewOfInfo } from "./worker-prompt.js";
 import { composeReviveKickoff, type ReviveSpawnSpec } from "./worker-revive.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
+import { guardedFetch } from "../connections/boundedFetch.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
 import { listSkills as listSkillStore } from "../skills/store.js";
 import { buildFramedMemoryRecall } from "../companion/memory-recall.js";
@@ -2150,20 +2151,30 @@ const FROM_MANAGER_HEADER_RE = new RegExp(`^\\[${FROM_MANAGER_TAG}(?::[a-z-]+)?\
 // peer-message-recycle-inheritance.mjs's negative control — under-labelling fails closed, over-matching does not.
 const PEER_MESSAGE_FRAME_RE = new RegExp(`^\\[${FROM_MANAGER_TAG} · [^\\]]*\\]\\n`);
 
-/** Default run-webhook poster: one bounded `fetch` POST; the AbortController caps a hung endpoint. */
-const defaultRunWebhookPost: RunWebhookPoster = async (url, body, timeoutMs) => {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-  } finally {
-    clearTimeout(timer);
+/**
+ * Default run-webhook poster: routed through the shared `guardedFetch` helper (card 731aa517 round 2) —
+ * the caller-supplied `run.webhookUrl` can itself be a secret, so a redirect must never be auto-followed
+ * and a hung endpoint is bounded, same posture as the alert-webhook poster. The response body is never
+ * read — `deliverRunWebhook`'s caller retries on ANY throw, so a large/slow 2xx body (which this poster
+ * has no use for) must never itself turn an already-delivered POST into a throw/retry; success is judged
+ * by HTTP status alone, and the unread body is cancelled rather than buffered-and-capped.
+ */
+export const defaultRunWebhookPost: RunWebhookPoster = async (url, body, timeoutMs) => {
+  const guarded = await guardedFetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    timeoutMs,
+  });
+  if (!guarded.ok) {
+    // Distinct, diagnosable reasons per kind — status code only, NEVER the Location header or the URL.
+    if (guarded.kind === "redirect") throw new Error(`run webhook refused a redirect (HTTP ${guarded.status})`);
+    throw new Error(guarded.error);
   }
+  const status = guarded.response.status;
+  await guarded.response.body?.cancel().catch(() => {});
+  guarded.cancelTimeout();
+  if (status < 200 || status >= 300) throw new Error(`run webhook endpoint returned ${status}`);
 };
 
 /**
