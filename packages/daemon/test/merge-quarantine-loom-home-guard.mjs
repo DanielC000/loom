@@ -37,11 +37,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //        counts as "before") — same as createworktree-loom-home-guard.mjs's own (iii). A STATIC
 //        `import {...} from "../dist/..."` is hoisted ahead of EVERY top-level statement in its own file
 //        regardless of textual position, so predicate (a)'s "textually before" is only a valid proxy for
-//        a DYNAMIC `await import(...)` — a file relying on (a) with a static dist import would need
-//        conversion to dynamic import first (this is exactly what card 500fe2df's own fix did for
-//        vault-commit-quarantine.mjs and git-writer-kill-confirm.mjs); not re-detected here as its own
-//        check, since the existing `DIST_IMPORT_RE` already matches both forms identically and a human
-//        fixing a real offender will hit this the same way the fix above did.
+//        a DYNAMIC `await import(...)`. CLOSED (not just named): predicate (a) now passes ONLY when the
+//        file has NO static dist import anywhere at all — `hasStaticDistImport` below, single-line only
+//        (same limitation as (iii)) — a file with even one static dist import must satisfy (b) instead,
+//        regardless of where a `useOwnLoomHome(`/`process.env.LOOM_HOME =` sits relative to it. This is
+//        exactly the trap card 500fe2df's own fix hit in vault-commit-quarantine.mjs and
+//        git-writer-kill-confirm.mjs (both converted to dynamic imports as part of that fix, specifically
+//        so predicate (a) could ever apply to them).
 // This guard's own source is excluded from the scan (its prose/fixtures mention the patterns).
 //
 // Run: node packages/daemon/test/merge-quarantine-loom-home-guard.mjs (no build needed — pure source-text scan)
@@ -57,8 +59,19 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 const DIST_IMPORT_RE = /(?:import\s*\(|from\s*|import\s+)["']\.\.\/dist\//;
+// A STATIC import line: `import` followed by whitespace with NO `(` immediately after (that shape is
+// always a dynamic `import(...)` expression, never a static declaration — ECMAScript grammar has no
+// static form spelled `import (`/`import(` with the "import" keyword followed directly by an open paren).
+// Single-line only, same limitation as DIST_IMPORT_RE/the (iii) gap above — a static import whose `from
+// "../dist/..."` clause is wrapped onto a later line is not detected; see GAPS (iv).
+const STATIC_DIST_IMPORT_LINE_RE = /^\s*import\s+(?!\()[^\n]*["']\.\.\/dist\//;
 const HOME_SET_RE = /\buseOwnLoomHome\s*\(|process\.env\.LOOM_HOME\s*=(?!=)/;
 const HERMETIC_RE = /\brequireHermeticEnv\s*\(/;
+
+/** True iff `text` contains ANY static (non-dynamic) `../dist/` import — see STATIC_DIST_IMPORT_LINE_RE. */
+function hasStaticDistImport(text) {
+  return text.split("\n").some((line) => STATIC_DIST_IMPORT_LINE_RE.test(line));
+}
 
 /** Every line in `text` that calls `enterMergeQuarantine(` as a RAISE, OR `mergeBranch(` with its OWN
  *  `timeoutMs` on the same line — never a `//`/`*` comment line, never `enterMergeQuarantine`'s own
@@ -82,7 +95,10 @@ export function classify(raw) {
   const firstTrigger = t.indexOf(triggers[0]);
   const dist = t.search(DIST_IMPORT_RE);
   const set = t.search(HOME_SET_RE);
-  if (set >= 0 && dist >= 0 && set < dist) return "pass-a";
+  // (iv): predicate (a) is only a valid proxy for "ran before the dist import" when EVERY dist import in
+  // the file is dynamic — a single static one hoists ahead of everything, including a `set` that sits
+  // textually earlier.
+  if (set >= 0 && dist >= 0 && set < dist && !hasStaticDistImport(t)) return "pass-a";
   const herm = t.search(HERMETIC_RE);
   if (herm >= 0 && herm < firstTrigger) return "pass-b";
   return "fail";
@@ -106,6 +122,15 @@ ctl("mergeBranch( WITH timeoutMs, nothing set → fail", TIMED_MERGE_CALL, "fail
 ctl("useOwnLoomHome before the dist import (timed mergeBranch call)", `useOwnLoomHome("x-");\n${TIMED_MERGE_CALL}`, "pass-a");
 ctl("requireHermeticEnv before the call, no pre-import set (form b, timed mergeBranch call)",
   `import { requireHermeticEnv } from "./_guard.mjs";\nrequireHermeticEnv();\n${TIMED_MERGE_CALL}`, "pass-b");
+
+// (iv) — the static-import-hoisting trap itself (card 500fe2df's manager follow-up): useOwnLoomHome()
+// textually BEFORE a STATIC dist import is NOT actually before it at runtime (static imports hoist), so
+// predicate (a) must refuse this shape outright rather than pass it.
+const STATIC_IMPORT_QUARANTINE_CALL = `import { enterMergeQuarantine } from "../dist/git/merge-quarantine.js";\nenterMergeQuarantine(r, b, "x");\n`;
+ctl("(iv) useOwnLoomHome textually before a STATIC dist import + trigger → fail (hoisting defeats it)",
+  `useOwnLoomHome("x-");\n${STATIC_IMPORT_QUARANTINE_CALL}`, "fail");
+ctl("(iv) same STATIC dist import, but requireHermeticEnv before the call → pass-b (form (b) is immune to hoisting)",
+  `import { requireHermeticEnv } from "./_guard.mjs";\nrequireHermeticEnv();\n${STATIC_IMPORT_QUARANTINE_CALL}`, "pass-b");
 
 // ── the real corpus ─────────────────────────────────────────────────────────────────────────────────────
 const tally = { "n/a": 0, "pass-a": 0, "pass-b": 0, fail: 0 };
