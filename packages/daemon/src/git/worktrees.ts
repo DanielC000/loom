@@ -8,8 +8,8 @@ import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv } from "./bounded.js";
-import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv } from "./bounded.js";
+import { withCanonicalIndexLock, RepoQuarantinedError, resolveGitDirsSync } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
@@ -108,7 +108,7 @@ export interface StaleBaseInfo {
 // @decision 44c28799 — bound EVERY git op in this file to 15s, via boundedGit/boundedMergeGit: a hung child
 // never throws, so try/catch alone can't catch it (the 2026-06-03 boot-outage fix). Don't lower the ceiling
 // casually — it's sized to fail a genuinely wedged op fast, not to rush a slow-but-legitimate one.
-const GIT_OP_TIMEOUT_MS = 15_000;
+export const GIT_OP_TIMEOUT_MS = 15_000; // exported so a test can assert the floored value, not restate it
 
 /**
  * Injectable seam for the bounded git ops. Lets a test simulate a hanging git child with a tiny budget
@@ -6819,7 +6819,7 @@ export async function verifyReviewedTipChain(
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string, expectedMainlineBranch?: string, expectedMainlineRef?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -6843,13 +6843,157 @@ export async function mergeBranch(
   }
 }
 
+// Round 3 (card 9f5ae011): a short, bounded, WITNESSED delay before trusting a lock is genuinely
+// abandoned — not a disguised fixed wait, since the persistence check below re-stats and compares rather
+// than merely sleeping and assuming. Within the card's own suggested ~1-2s range; not empirically tuned
+// against a live contending git process (unreproducible deterministically) — raise it if a real false
+// removal ever surfaces.
+const LOCK_PERSISTENCE_CHECK_DELAY_MS = 1500;
+
+// MEASURED on this host (card 9f5ae011, round 3 self-test): `fs.statSync(...).mtimeMs` can read UP TO
+// ~2ms AHEAD of a `Date.now()` sample taken immediately after the write that produced it — Node's
+// `Date.now()` and the filesystem's own mtime clock are not the same clock. Without this tolerance, the
+// upper-bound check below could spuriously refuse OUR OWN just-written lock as "postdating" a
+// `killConfirmedAt` captured a few microseconds earlier, purely from clock skew, not a real foreign
+// process. Generous margin over the measured ~2ms, while still far tighter than any real race window.
+const LOCK_MTIME_CLOCK_SKEW_TOLERANCE_MS = 50;
+
+type LockRemovalResult =
+  | { removed: true; reason: string; lockPath: string; mtimeMs: number }
+  | {
+      removed: false;
+      reasonCode: "no-lock" | "unresolved-git-dir" | "predates-attempt" | "postdates-confirmation" | "disappeared" | "unstable" | "unlink-failed";
+      reason: string;
+      lockPath?: string;
+      mtimeMs?: number;
+    };
+
+/**
+ * `resetOrSkip`'s own lock-removal guard: a real `.git/index.lock` a CONFIRMED-killed reset left behind
+ * makes the next retry fail at once (reproduced via `taskkill /T /F` on Windows) — this removes it, but
+ * ONLY when every one of these holds, so a retry is never gambled against unrelated state:
+ *   (a) the caller has already checked {@link treeDeathConfirmed} on the error that triggered this —
+ *       never an unconfirmed kill or an unrelated non-kill failure, both of which never call this;
+ *   (b) the lock file's own mtime falls INSIDE this attempt's own window, each bound widened by
+ *       {@link LOCK_MTIME_CLOCK_SKEW_TOLERANCE_MS} (MEASURED on this host: `fs.statSync(...).mtimeMs` and
+ *       `Date.now()` are not the same clock and can disagree by ~1-2ms either direction — without this,
+ *       the guard could spuriously refuse OUR OWN lock from clock noise alone): not older than
+ *       `attemptStartedAt` (this reset attempt's own wall-clock start — a long-lived unrelated lock is
+ *       never touched) and not newer than `killConfirmedAt` (round 3 — captured by the caller in its catch
+ *       block, BEFORE calling this, the instant OUR OWN kill was confirmed dead; our own child cannot have
+ *       written the lock any later than that, so a lock newer than this belongs to a DIFFERENT, still-live
+ *       git process — an IDE refresh, an owner shell, a second daemon — racing us);
+ *   (c) the lock PERSISTS byte-for-byte (same mtime + size) across a short, WITNESSED wait (round 3,
+ *       {@link LOCK_PERSISTENCE_CHECK_DELAY_MS}) — a live process still holding the lock typically renames
+ *       or rewrites it quickly (git renames `index.lock` onto `index` the instant it finishes), so a lock
+ *       that visibly changes or vanishes during this delay is live, not abandoned;
+ *   (d) the canonical-index mutex is held — true BY CONSTRUCTION here: this is only ever reached from
+ *       `resetOrSkip`, itself only ever reached from `mergeBranchLocked`, which only ever runs INSIDE
+ *       `withCanonicalIndexLock`. This is an IN-PROCESS guard ONLY (round 3) — it excludes a concurrent
+ *       call from elsewhere in THIS daemon, never a foreign OS process that never acquires our mutex at
+ *       all. The residual (b)+(c) do NOT close: guard (b)'s own window spans this reset attempt's actual
+ *       duration (≈ `resetTimeoutMs`, ≥15s at the floor) — NOT narrow in wall-clock terms. What actually
+ *       limits the risk there is git's own `O_EXCL` lock-creation semantics: a SECOND process cannot
+ *       create the same `index.lock` path while ours still exists, so whatever lock we observe can only
+ *       ever be one process's at a time, regardless of how wide window (b) is. Guard (c) is the guard that
+ *       genuinely narrows: it catches only a foreign operation whose own hold on the lock lasts SHORTER
+ *       than `LOCK_PERSISTENCE_CHECK_DELAY_MS` (round 3, 1.5s) — a foreign process holding the lock for
+ *       1.5s or longer would still pass every guard here. Narrowed to that residual, never eliminated.
+ * Resolved via {@link resolveGitDirsSync}'s `privateDir` (where `index`/`index.lock` actually live),
+ * never a bare `path.join(repoPath, ".git", "index.lock")` — the robust resolution this codebase already
+ * uses elsewhere, correct even though the canonical repo is always an ordinary checkout in practice.
+ * Exported for `removeLeakedCanonicalIndexLockIfSafe`'s own direct hermetic test (round 3), same
+ * precedent as {@link GIT_OP_TIMEOUT_MS}'s own export.
+ *
+ * @decision 9f5ae011 — any failed guard returns `removed:false` and the caller must give up rather than
+ * retry (a retry against a lock still present fails identically) — EXCEPT `reasonCode: "no-lock"`, where
+ * the caller MAY retry anyway since there's nothing to remove.
+ */
+export async function removeLeakedCanonicalIndexLockIfSafe(
+  repoPath: string,
+  attemptStartedAt: number,
+  killConfirmedAt: number,
+): Promise<LockRemovalResult> {
+  const dirs = resolveGitDirsSync(repoPath);
+  if (!dirs) return { removed: false, reasonCode: "unresolved-git-dir", reason: "could not resolve the canonical repo's git directory" };
+  const lockPath = path.join(dirs.privateDir, "index.lock");
+  let stat: fs.Stats;
+  try { stat = fs.statSync(lockPath); } catch { return { removed: false, reasonCode: "no-lock", reason: "no .git/index.lock is present" }; }
+  if (stat.mtimeMs < attemptStartedAt - LOCK_MTIME_CLOCK_SKEW_TOLERANCE_MS) {
+    return {
+      removed: false, reasonCode: "predates-attempt",
+      reason: `lock mtime (${new Date(stat.mtimeMs).toISOString()}) predates this reset attempt's own start (${new Date(attemptStartedAt).toISOString()}) by more than the ${LOCK_MTIME_CLOCK_SKEW_TOLERANCE_MS}ms clock-skew tolerance`,
+      lockPath, mtimeMs: stat.mtimeMs,
+    };
+  }
+  if (stat.mtimeMs > killConfirmedAt + LOCK_MTIME_CLOCK_SKEW_TOLERANCE_MS) {
+    return {
+      removed: false, reasonCode: "postdates-confirmation",
+      reason: `lock mtime (${new Date(stat.mtimeMs).toISOString()}) postdates this kill's own confirmation (${new Date(killConfirmedAt).toISOString()}) by more than the ${LOCK_MTIME_CLOCK_SKEW_TOLERANCE_MS}ms clock-skew tolerance — our own child was already confirmed dead by then, so a DIFFERENT, still-live git process must have created it`,
+      lockPath, mtimeMs: stat.mtimeMs,
+    };
+  }
+  await new Promise<void>((resolve) => setTimeout(resolve, LOCK_PERSISTENCE_CHECK_DELAY_MS));
+  let restat: fs.Stats;
+  try {
+    restat = fs.statSync(lockPath);
+  } catch {
+    return {
+      removed: false, reasonCode: "disappeared",
+      reason: `a live process was still actively using it`,
+      lockPath, mtimeMs: stat.mtimeMs,
+    };
+  }
+  if (restat.mtimeMs !== stat.mtimeMs || restat.size !== stat.size) {
+    return {
+      removed: false, reasonCode: "unstable",
+      reason: `the lock changed during a ${LOCK_PERSISTENCE_CHECK_DELAY_MS}ms persistence check (mtime/size differ) — a live process is still actively writing it`,
+      lockPath, mtimeMs: stat.mtimeMs,
+    };
+  }
+  try {
+    fs.unlinkSync(lockPath);
+  } catch (e) {
+    return { removed: false, reasonCode: "unlink-failed", reason: `failed to remove it: ${(e as Error).message}`, lockPath, mtimeMs: stat.mtimeMs };
+  }
+  return {
+    removed: true,
+    reason: `mtime ${new Date(stat.mtimeMs).toISOString()}, attempt started ${new Date(attemptStartedAt).toISOString()}, persisted unchanged across the ${LOCK_PERSISTENCE_CHECK_DELAY_MS}ms check`,
+    lockPath, mtimeMs: stat.mtimeMs,
+  };
+}
+
+/** Give-up wording for `resetOrSkip`'s retry gate (round 3, CR item 3) — branches on WHY the lock removal
+ *  was refused so the message never claims a lock is present when it already isn't, or vice versa.
+ *  `"no-lock"` never reaches this — `resetOrSkip` retries on it instead of giving up.
+ *
+ * @decision 9f5ae011 (round 4) — every clause stays ownership-NEUTRAL ("found", never "left"/"held", since
+ * the caller already says "was confirmed-killed") and never repeats a conclusion `removal.reason` states. */
+export function describeLockGiveUp(removal: LockRemovalResult & { removed: false }): string {
+  const lockPath = removal.lockPath ?? ".git/index.lock";
+  switch (removal.reasonCode) {
+    case "unlink-failed":
+      return `left a leaked ${lockPath} that could not be removed (${removal.reason})`;
+    case "predates-attempt":
+    case "postdates-confirmation":
+    case "unstable":
+      return `found a ${lockPath} that may not be ours (${removal.reason}) — before removing it by hand, check whether a git process is still running against this repo first`;
+    case "disappeared":
+      return `found a ${lockPath} that vanished during a persistence check (${removal.reason}) — likely a live process, not our own leaked lock, so nothing was removed`;
+    case "unresolved-git-dir":
+      return `could not even be checked for a leaked lock (${removal.reason})`;
+    case "no-lock":
+      return removal.reason; // unreachable — resetOrSkip retries on "no-lock" before ever calling this
+  }
+}
+
 // `opId` (board card 5a7692a4): purely for attribution on the in-memory danger-window tracker (see
 // merge-danger-window.ts) — a caller with no op identity handy (a test, or any future caller) just gets an
 // unattributed window entry (repo/branch only), never a functional difference in what this function does.
 async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string, expectedMainlineBranch?: string, expectedMainlineRef?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean }> {
   // QUARANTINE CHECK moved to the TRUE convergence point, `withCanonicalIndexLock` (git/repo-lock.ts) —
   // this function only ever runs INSIDE that lock (see `mergeBranch` above), so a check re-derived here
   // would be unreachable dead code: a quarantined repo now never gets this far.
@@ -7004,27 +7148,72 @@ async function mergeBranchLocked(
   // @decision 8d8fa497 — returns `{message, quarantined}`, not a bare string: every caller below must be
   // able to tell "ordinary cleanup failure" apart from "this cleanup itself just found/raised a
   // quarantine" without string-matching `message`.
-  async function resetOrSkip(context: string): Promise<{ message: string; quarantined?: boolean } | null> {
+  // @decision 9f5ae011 — ALSO returns `transient`: set when this cleanup's own reset was CONFIRMED
+  // killed and either couldn't safely retry or retried and failed anyway — never when quarantined, its
+  // own separate, already-terminal signal.
+  async function resetOrSkip(context: string): Promise<{ message: string; quarantined?: boolean; transient?: boolean } | null> {
     if (hadUnstagedDirtAtEntry) {
       return { message: `skipped automatic cleanup (${context}) because the canonical repo already had unstaged tracked changes before this merge attempt — resetting would risk discarding them; a human must resolve the canonical checkout by hand, and the next merge attempt will refuse loudly on any staged residue this left behind` };
     }
-    try {
-      // @decision 24c0bdba — kill-confirmed: this cleanup mutates the same canonical index/tree a later
-      // op (or another merge, once the lock releases) will touch — never abandon it on a bare timeout.
-      await killableCanonicalRaw(repoPath, ["reset", "--hard", "HEAD"], timeoutMs, `git reset --hard (canonical, ${context})`, deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
-      return null;
-    } catch (e) {
-      // @decision bde5d1fe — re-checked AND already quarantined (never THIS call's own kill) — refuse,
-      // never re-raise.
-      if (e instanceof RepoQuarantinedError) return { message: `reset --hard (${context}) refused — canonical repo is quarantined: ${e.message}`, quarantined: true };
-      // @decision 24c0bdba (round 4) — this IS itself a mutating canonical call; an unconfirmed kill of
-      // ITS OWN child quarantines the repo too, the same as every other mutating call on this path.
-      if (treeDeathUnconfirmed(e)) {
-        raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason(`reset --hard (${context}) could not be confirmed dead after a kill`), opId);
-        return { message: `reset --hard (${context})'s process tree could not be confirmed dead after a kill — quarantining the repo; canonical repo may need manual inspection: ${(e as Error).message}`, quarantined: true };
+    // @decision 9f5ae011 — this cleanup failing leaves the CANONICAL repo staged-dirty, refusing every
+    // later merge until a human intervenes — give it a floor independent of the caller's own (possibly
+    // small) `timeoutMs`. Narrows, never eliminates, the window where this call itself starves under load.
+    const resetTimeoutMs = Math.max(timeoutMs, GIT_OP_TIMEOUT_MS);
+    const attemptReset = async (isRetry: boolean): Promise<{ message: string; quarantined?: boolean; transient?: boolean } | null> => {
+      const attemptStartedAt = Date.now();
+      try {
+        // @decision 24c0bdba — kill-confirmed: this cleanup mutates the same canonical index/tree a later
+        // op (or another merge, once the lock releases) will touch — never abandon it on a bare timeout.
+        await killableCanonicalRaw(repoPath, ["reset", "--hard", "HEAD"], resetTimeoutMs, `git reset --hard (canonical, ${context}${isRetry ? ", retry" : ""})`, deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
+        return null;
+      } catch (e) {
+        // @decision bde5d1fe — re-checked AND already quarantined (never THIS call's own kill) — refuse,
+        // never re-raise.
+        if (e instanceof RepoQuarantinedError) return { message: `reset --hard (${context}) refused — canonical repo is quarantined: ${e.message}`, quarantined: true };
+        // @decision 24c0bdba (round 4) — this IS itself a mutating canonical call; an unconfirmed kill of
+        // ITS OWN child quarantines the repo too, the same as every other mutating call on this path.
+        if (treeDeathUnconfirmed(e)) {
+          raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason(`reset --hard (${context}) could not be confirmed dead after a kill`), opId);
+          return { message: `reset --hard (${context})'s process tree could not be confirmed dead after a kill — quarantining the repo; canonical repo may need manual inspection: ${(e as Error).message}`, quarantined: true };
+        }
+        // @decision 9f5ae011 (round 2) — gated on `treeDeathConfirmed` (a TYPED positive signal), never on
+        // "any non-quarantine, non-unconfirmed error" — that over-broad gate also retried an UNRELATED git
+        // failure, and even a genuine confirmed kill's retry fails at once against its own leaked lock.
+        if (!isRetry && treeDeathConfirmed(e)) {
+          // @decision 9f5ae011 (round 3) — captured FIRST, before any stat call: the instant OUR OWN kill
+          // was confirmed dead, the upper bound a leaked lock's own mtime must not exceed (see
+          // removeLeakedCanonicalIndexLockIfSafe's own doc, guard (b)).
+          const killConfirmedAt = Date.now();
+          const removal = await removeLeakedCanonicalIndexLockIfSafe(repoPath, attemptStartedAt, killConfirmedAt);
+          if (removal.removed) {
+            // eslint-disable-next-line no-console
+            console.log(`[git] mergeBranchLocked: ${context}'s reset --hard was confirmed-killed — removed its leaked ${removal.lockPath} (${removal.reason}) — retrying once at ${resetTimeoutMs}ms: ${(e as Error).message}`);
+            return attemptReset(true);
+          }
+          // @decision 9f5ae011 (round 3) — "no-lock" is not a failed guard: nothing to remove, and the
+          // retried reset takes its own lock, so it's safe to retry anyway.
+          if (removal.reasonCode === "no-lock") {
+            // eslint-disable-next-line no-console
+            console.log(`[git] mergeBranchLocked: ${context}'s reset --hard was confirmed-killed, but left no leaked .git/index.lock — retrying once at ${resetTimeoutMs}ms: ${(e as Error).message}`);
+            return attemptReset(true);
+          }
+          // eslint-disable-next-line no-console
+          console.log(`[git] mergeBranchLocked: ${context}'s reset --hard was confirmed-killed, but its leaked .git/index.lock was not safely removable (${removal.reason}) — giving up rather than retrying into a guaranteed-repeat failure: ${(e as Error).message}`);
+          return {
+            message: `reset --hard (${context}) was confirmed-killed and ${describeLockGiveUp(removal)} — canonical repo may have STAGED residue; run \`git diff --cached\` in the canonical checkout to inspect it — later merges on this repo will refuse at the staged-dirt entry check until a human cleans up: ${(e as Error).message}`,
+            transient: true,
+          };
+        }
+        if (isRetry) {
+          return {
+            message: `reset --hard (${context}) failed after a confirmed-killed retry — canonical repo may have STAGED residue; run \`git diff --cached\` in the canonical checkout to inspect it, and check for a leaked .git/index.lock too — later merges on this repo will refuse at the staged-dirt entry check until a human cleans up: ${(e as Error).message}`,
+            transient: true,
+          };
+        }
+        return { message: `reset --hard (${context}) failed — canonical repo may have residue: ${(e as Error).message}` };
       }
-      return { message: `reset --hard (${context}) failed — canonical repo may have residue: ${(e as Error).message}` };
-    }
+    };
+    return attemptReset(false);
   }
 
   // @decision d69d4858 — re-verify the landed branch too: a commit may already exist by this point, so
@@ -7104,7 +7293,7 @@ async function mergeBranchLocked(
       conflicted = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (canonical, post-squash)")).trim() !== "";
     } catch (e) {
       const cleanup = await resetOrSkip("post-squash-probe-failure cleanup");
-      return { ok: false, reason: `failed to inspect canonical index for conflicts after squash: ${(e as Error).message}${cleanup ? ` (${cleanup.message})` : ""}`, ...(cleanup?.quarantined ? { quarantined: true } : {}) };
+      return { ok: false, reason: `failed to inspect canonical index for conflicts after squash: ${(e as Error).message}${cleanup ? ` (${cleanup.message})` : ""}`, ...(cleanup?.quarantined ? { quarantined: true } : {}), ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}) };
     }
     if (conflicted) {
       // The cleanup that's supposed to leave the canonical repo UNTOUCHED can ITSELF fail (busy index lock,
@@ -7112,7 +7301,7 @@ async function mergeBranchLocked(
       // partial-index residue. SURFACE it via `reason` so the caller knows the canonical repo needs recovery
       // rather than trusting the (now false) "untouched" guarantee.
       const cleanup = await resetOrSkip("conflict cleanup");
-      if (cleanup) return { ok: false, conflict: true, reason: cleanup.message, ...(cleanup.quarantined ? { quarantined: true } : {}) };
+      if (cleanup) return { ok: false, conflict: true, reason: cleanup.message, ...(cleanup.quarantined ? { quarantined: true } : {}), ...(cleanup.transient ? { transient: true, residuePossible: true } : {}) };
       return { ok: false, conflict: true };
     }
     // DEFENSE IN DEPTH (card e076d2a2, item 4): a `rawError` from our OWN `git merge --squash` means OUR
@@ -7151,9 +7340,10 @@ async function mergeBranchLocked(
           dirtyOverlap: true,
           reason: `canonical repo has local content that would be overwritten by this merge (git refuses to clobber it): ${rawErrorMessage}${cleanup ? ` (${cleanup.message})` : ""}`,
           ...(cleanup?.quarantined ? { quarantined: true } : {}),
+          ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}),
         };
       }
-      return { ok: false, reason: cleanup ? `git merge --squash failed (${cleanup.message})` : "git merge --squash failed", ...(cleanup?.quarantined ? { quarantined: true } : {}) };
+      return { ok: false, reason: cleanup ? `git merge --squash failed (${cleanup.message})` : "git merge --squash failed", ...(cleanup?.quarantined ? { quarantined: true } : {}), ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}) };
     }
     // No conflict, no rawError. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code
     // handling is unreliable — see isBranchMerged.) Empty after the residue-clear above is a GENUINE empty index.
@@ -7166,7 +7356,7 @@ async function mergeBranchLocked(
       staged = (await withTimeout(git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, staged check)")).trim() !== "";
     } catch (e) {
       const cleanup = await resetOrSkip("staged-probe-failure cleanup");
-      return { ok: false, reason: `failed to inspect canonical index staged diff after squash: ${(e as Error).message}${cleanup ? ` (${cleanup.message})` : ""}`, ...(cleanup?.quarantined ? { quarantined: true } : {}) };
+      return { ok: false, reason: `failed to inspect canonical index staged diff after squash: ${(e as Error).message}${cleanup ? ` (${cleanup.message})` : ""}`, ...(cleanup?.quarantined ? { quarantined: true } : {}), ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}) };
     }
     if (!staged) {
       // Clean no-op: classify so the caller can distinguish "already merged" from "no diff to merge". The
@@ -7200,11 +7390,15 @@ async function mergeBranchLocked(
       const cleanup = await resetOrSkip("title-html-entity cleanup");
       return {
         ok: false,
+        // @decision 9f5ae011 (round 2) — "restored to its pre-merge state" used to be stated
+        // unconditionally even when `cleanup` was truthy (skipped/quarantined/transient/failed, i.e. NOT
+        // restored); the content cause (the HTML entity) stays the lead reason either way.
         reason: `squash subject contains an HTML entity ("${subjectGuard.match}") — would become a PERMANENT, ` +
           `unrewritable mainline commit subject (this has already happened once: commit fe2c1c6b). Retitle the ` +
-          `card (tasks_update) to a clean subject, then re-confirm. Squash phase aborted before landing; ` +
-          `canonical repo restored to its pre-merge state.${cleanup ? ` (${cleanup.message})` : ""}`,
+          `card (tasks_update) to a clean subject, then re-confirm. Squash phase aborted before landing` +
+          (cleanup ? `: ${cleanup.message}` : `; canonical repo restored to its pre-merge state.`),
         ...(cleanup?.quarantined ? { quarantined: true } : {}),
+        ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}),
       };
     }
     // The worker-commit-log body (card 8b7b81e0 DoD-3) needs the branch's OWN pre-landing commit range —
@@ -7299,7 +7493,7 @@ async function mergeBranchLocked(
         }
       }
       const cleanup = await resetOrSkip("commit-failure cleanup");
-      return { ok: false, reason: cleanup ? `squash commit failed: ${(e as Error).message} (${cleanup.message})` : `squash commit failed: ${(e as Error).message}`, ...(cleanup?.quarantined ? { quarantined: true } : {}) };
+      return { ok: false, reason: cleanup ? `squash commit failed: ${(e as Error).message} (${cleanup.message})` : `squash commit failed: ${(e as Error).message}`, ...(cleanup?.quarantined ? { quarantined: true } : {}), ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}) };
     }
     // Re-read HEAD after a successful commit. NOT "unconditionally reached from both branches": a failure
     // now returns straight out of the catch above, having already re-verified truthfully via its own HEAD

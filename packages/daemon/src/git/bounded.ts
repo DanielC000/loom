@@ -78,6 +78,25 @@ function isMarkedUnconfirmedKill(e: unknown): boolean {
 }
 
 /**
+ * The POSITIVE twin of {@link UNCONFIRMED_KILL}: a non-enumerable marker meaning "we killed this child AND
+ * positively confirmed the whole process tree actually died." Set only at {@link spawnCanonicalGitTree}'s
+ * two `confirmed:true` sites and propagated by {@link withTimeoutKillingChild} alongside
+ * {@link UNCONFIRMED_KILL} — a caller must check {@link treeDeathConfirmed} directly, never infer this from
+ * "not unconfirmed" (which also matches an unrelated non-kill failure).
+ *
+ * @decision 9f5ae011 (round 2) — mutually exclusive with {@link UNCONFIRMED_KILL} by construction: every
+ * site that marks one is the disjoint if/else branch of the site that marks the other.
+ */
+const CONFIRMED_KILL = Symbol("loom.confirmedKill");
+function markConfirmedKill<E extends Error>(e: E): E {
+  Object.defineProperty(e, CONFIRMED_KILL, { value: true, enumerable: false, configurable: true });
+  return e;
+}
+function isMarkedConfirmedKill(e: unknown): boolean {
+  return e instanceof Error && (e as unknown as Record<symbol, unknown>)[CONFIRMED_KILL] === true;
+}
+
+/**
  * Like {@link withTimeout}, but for a caller that CANNOT tolerate the underlying child outliving the
  * wrapper's settlement — concretely, a call made inside a lock that guards shared on-disk state. Unlike
  * {@link withTimeout}, this does not settle independently on expiry: it calls `controller.abort()` (`p`'s
@@ -137,6 +156,7 @@ export function withTimeoutKillingChild<T>(
         if (!timedOut) { reject(e); return; }
         const wrapped = new Error(`${label} exceeded ${ms}ms (git child killed): ${e?.message ?? e}`);
         if (isMarkedUnconfirmedKill(e)) markUnconfirmedKill(wrapped);
+        else if (isMarkedConfirmedKill(e)) markConfirmedKill(wrapped);
         reject(wrapped);
       },
     );
@@ -162,13 +182,23 @@ export function withTimeoutKillingChild<T>(
  * OUTER {@link withTimeoutKillingChild} wrapper already gave up and settled first via its own
  * `giveUpTimer` (round 3, Code Review B-1/B-2: a caller uses this to auto-clear a quarantine it entered on
  * an outer give-up, once the real answer eventually arrives). Never invoked on the non-aborted path.
+ *
+ * `spawnImpl` (default the real `spawn`) is a test seam, EXPORTED for it (card 9f5ae011, round 3) — the
+ * real marker application (`markConfirmedKill`/`markUnconfirmedKill`) lives entirely inside this
+ * function's `close` handler below, reachable hermetically ONLY by substituting the OS-level spawn: a
+ * fake child whose `pid` is `null` takes the SAME unconditional-confirm branch this function already uses
+ * for a real win32 close (see below), with zero real process involved and zero platform dependence — see
+ * `bounded-git-kill-marker-exclusivity.mjs`'s `[confirmed, real marker]` case, which deletes
+ * `markConfirmedKill` to confirm this goes RED. Production call sites never pass this — the default is
+ * the real `spawn`, byte-identical to before this param existed.
  */
-function spawnCanonicalGitTree(
+export function spawnCanonicalGitTree(
   repoPath: string,
   env: Record<string, string | undefined> | undefined,
   signal: AbortSignal,
   killGraceMs: number,
   onTreeDeathSettled?: (confirmed: boolean) => void,
+  spawnImpl: typeof spawn = spawn,
 ): Pick<SimpleGit, "raw"> {
   // Cast: simple-git's own `raw` is a heavily overloaded `Response<string>`-returning signature (chainable
   // builder methods included) that a plain `(...args) => Promise<string>` can never structurally satisfy —
@@ -180,7 +210,7 @@ function spawnCanonicalGitTree(
     const rawArgs = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
     const args = [...CANONICAL_GIT_CONFIG_ARGS, ...rawArgs];
     return new Promise<string>((resolve, reject) => {
-      const child = spawn("git", args, {
+      const child = spawnImpl("git", args, {
         cwd: repoPath,
         env: prepareCanonicalEnv(env),
         windowsHide: true,
@@ -230,13 +260,13 @@ function spawnCanonicalGitTree(
             // pipe open indefinitely instead — `close` then never fires at all, and the OUTER
             // `withTimeoutKillingChild` give-up timer (itself now tagged unconfirmed) is what catches it.
             onTreeDeathSettled?.(true);
-            reject(new Error("Abort signal received"));
+            reject(markConfirmedKill(new Error("Abort signal received")));
             return;
           }
           const confirmed = await confirmProcessGroupDead(pid, killGraceMs);
           onTreeDeathSettled?.(confirmed);
           const e = new Error(confirmed ? "Abort signal received" : "Abort signal received (process tree not fully confirmed dead)");
-          if (!confirmed) markUnconfirmedKill(e);
+          if (confirmed) markConfirmedKill(e); else markUnconfirmedKill(e);
           reject(e);
         })();
       });
@@ -276,6 +306,30 @@ export function treeDeathUnconfirmed(e: unknown): boolean {
   if (isMarkedUnconfirmedKill(e)) return true;
   const msg = (e as Error)?.message ?? "";
   return UNCONFIRMED_TREE_RE.test(msg) || GIVE_UP_RE.test(msg);
+}
+
+/**
+ * True iff `e` represents a kill whose whole process tree was POSITIVELY CONFIRMED dead — checks
+ * {@link markConfirmedKill}'s typed marker first; the `$`-anchored message-regex fallback exists ONLY for
+ * a test-seam `gitFactory` call (bypasses this file's real kill machinery entirely, so no marker is ever
+ * attached) that manufactures a confirmed-kill-shaped message directly — see
+ * merge-confirm-verdict-cache-solo-merge-transient.mjs. The anchor is what keeps this disjoint from
+ * {@link treeDeathUnconfirmed}'s own two message shapes, both of which carry trailing text after "Abort
+ * signal received" that this regex's `$` refuses to match.
+ *
+ * @decision 9f5ae011 (round 2) — a caller gating a retry (or a leaked-lock removal) on "confirmed" must
+ * check THIS function, never infer it from `!treeDeathUnconfirmed(e)` — that negation also matches an
+ * unrelated non-kill failure, which is the exact over-broad gate this function exists to replace.
+ *
+ * @decision 9f5ae011 (round 3) — the `(git child killed): ` PREFIX is load-bearing: simple-git's OWN
+ * `abortPlugin` throws a bare, unprefixed, unmarked "Abort signal received" on ANY aborted call anywhere,
+ * and this regex must never widen to match that bare shape as confirmed.
+ */
+const CONFIRMED_TREE_RE = /\(git child killed\): Abort signal received$/;
+export function treeDeathConfirmed(e: unknown): boolean {
+  if (isMarkedConfirmedKill(e)) return true;
+  const msg = (e as Error)?.message ?? "";
+  return CONFIRMED_TREE_RE.test(msg);
 }
 
 /**

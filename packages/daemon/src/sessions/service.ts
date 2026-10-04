@@ -763,6 +763,10 @@ type ConfirmMergeResult = {
    *  a real content conflict; classified `"union-merge-transient"`, in `NEVER_CACHED_OUTCOMES` — the hang
    *  clearing is invisible to a branch-keyed cache. Never set alongside `conflict`/`quarantined`. */
   unionMergeTransient?: boolean;
+  /** @decision 9f5ae011 — the squash/commit-step's OWN cleanup (`resetOrSkip`) was CONFIRMED
+   *  kill-timed-out, even after its one retry — mirrors `unionMergeTransient` one layer later:
+   *  classified `"solo-merge-transient"`, in `NEVER_CACHED_OUTCOMES`. */
+  soloMergeTransient?: boolean;
   /** @decision 77b8319b — set alongside `branchDiverted:true` ONLY on the early watermark-corrupt/unreadable
    *  refusal (mirrors `MergeBatchResult.watermarkUnreadable`): the checkout may be fine, it's the STORED
    *  RECORD that's untrustworthy, so a caller must not claim "restore the checkout" for this reason. */
@@ -17791,6 +17795,21 @@ export class SessionService {
         evt("merge_rejected", { reason: "solo_merge_quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: merge.reason, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, quarantined: true };
       }
+      // @decision 9f5ae011 — the squash/commit step's OWN cleanup can itself be CONFIRMED kill-timed-out
+      // (even after its one retry), never an ordinary content failure — mirrors `union.transient` above,
+      // checked before the generic rejected fallback so the cleared condition is never cached.
+      if (merge.transient) {
+        const why = merge.reason ?? "the squash/commit step's own cleanup could not be confirmed to have succeeded";
+        // @decision 9f5ae011 — never claim "nothing was changed" when `merge.residuePossible` is true, and
+        // name the EXACT check (`git diff --cached`) an operator needs to run — mirrors `union.residuePossible`'s own wording one layer later.
+        const residueNote = merge.residuePossible
+          ? " This looks like a transient git/host condition (a hung git child) — the canonical repo may carry STAGED, uncommitted content from this merge's own squash; run `git diff --cached` in the canonical checkout to inspect it before relying on a re-confirm, which will retry the merge rather than replay this result."
+          : " This looks like a transient git/host condition, not a problem with the branch's content; a plain re-confirm will retry the merge rather than replay this result.";
+        const detailText = `${why}; worktree retained.${residueNote}`;
+        const { suppressed, sha } = await rejectNotify("solo_merge_transient", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "solo_merge_transient", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, soloMergeTransient: true };
+      }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       // Card 4b7ff996 CR follow-up: derive "is this the canonical-checkout-is-dirty failure class" from
       // the REASON STRING itself, not from a second ad-hoc boolean — `merge.dirtyOverlap` only ever covers
@@ -20532,7 +20551,10 @@ export class SessionService {
         // @decision 8c3d6c04 — `unionMergeTransient` classifies distinctly too, checked before the
         // fallback: a transient git-child condition clearing must see a fresh re-attempt, never a stale
         // cached rejection from before it cleared.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.merged ? "merged" : "rejected"),
+        // @decision 9f5ae011 — `soloMergeTransient` classifies distinctly too, same reasoning one layer
+        // later: `resetOrSkip`'s own confirmed-kill cleanup clearing must see a fresh re-attempt, never a
+        // stale cached rejection from before it cleared.
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

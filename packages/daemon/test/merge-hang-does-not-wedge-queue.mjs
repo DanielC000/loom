@@ -164,6 +164,12 @@ function installConfirmableHangingHook(repo) {
 const guard = (ms, label) => new Promise((resolve) => setTimeout(() => resolve({ __guardFired: label }), ms));
 
 const QUARANTINE_RE = /QUARANTINED/;
+// @decision 9f5ae011 (round 2) — the exact prefix `stagedCanonicalDirtRefusalMessage` (git/worktrees.ts)
+// always emits, same regex service.ts's own `isStagedCanonicalRefusal` checks. The op1-cleanup-residue
+// checks below used to claim "refused by the STAGED-DIRT entry check" while only asserting "refused, and
+// not by quarantine" — true of ANY other non-quarantine failure too, not specifically this one. Matching
+// this exact prefix is what actually proves it.
+const STAGED_DIRT_RE = /^MERGE REFUSED — the canonical repo has STAGED, uncommitted changes/;
 // Card 8d8fa497: THE load-invariant this whole file actually needs — independent of WHICH internal call
 // lost the kill-confirm race (a "which site" textual invariant does not hold at arbitrary load; see the
 // header doc above) — is that op1's OWN reported `quarantined` state must AGREE with what op2 (a separate,
@@ -219,7 +225,18 @@ try {
   // (and a future maintainer) which branch of the conditional below actually fired on a given host.
   console.log(`[A/op2] info: ${JSON.stringify({ ok: op2Result?.ok, reason: op2Result?.reason, op1Quarantined: op1Result?.quarantined })}`);
   checkOp1Op2QuarantineAgreement("A", op1Result, op2Result);
-  if (op2Result?.ok === true) {
+  // Card 9f5ae011: a THIRD, structurally distinct shape — op1's commit was CONFIRMED killed (never
+  // quarantined), but its OWN cleanup reset (resetOrSkip) then ALSO confirmed-kill-timed-out, even after
+  // its one retry, leaving the canonical repo genuinely staged-dirty from THIS op's own squash. Keyed on
+  // op1's own structural `transient` field (never on refusal text) — this is NOT a quarantine, so op2 is
+  // refused by the ENTRY-TIME STAGED-DIRT check instead.
+  if (op1Result?.transient === true) {
+    check("[A/op2] (op1's own cleanup confirmed-killed, residue left) op2 is refused SPECIFICALLY by the STAGED-DIRT entry check's own verbatim refusal text, never a quarantine or some other unrelated failure",
+      op2Result?.ok === false && STAGED_DIRT_RE.test(op2Result?.reason ?? "") && !QUARANTINE_RE.test(op2Result?.reason ?? ""));
+    const finalTree = git(repoA, "ls-tree -r --name-only HEAD");
+    check("[A/op2] (residue) neither branch's file landed on main — the canonical repo is untouched by the refused op2",
+      !finalTree.includes("file-a.txt") && !finalTree.includes("file-b.txt"));
+  } else if (op2Result?.ok === true) {
     // op1's kill WAS confirmed on this host — no quarantine was raised, so op2 landed normally. Verify
     // it's a REAL, correctly-labeled merge, not a vacuous pass.
     const finalTree = git(repoA, "ls-tree -r --name-only HEAD");
@@ -272,7 +289,15 @@ try {
   check(`[B/op2] a SUBSEQUENT merge for a DIFFERENT branch of the SAME repo is still ADMITTED (settled in ${Math.round(op2BElapsedMs)}ms) — not wedged behind op1's hang`,
     op2BResult?.__guardFired !== "op2B");
   checkOp1Op2QuarantineAgreement("B", op1BResult, op2BResult);
-  if (op2BResult?.ok === true) {
+  // Card 9f5ae011: same third shape as scenario A — keyed on op1's own structural `transient` field, never
+  // on refusal text.
+  if (op1BResult?.transient === true) {
+    check("[B/op2] (op1's own cleanup confirmed-killed, residue left) op2 is refused SPECIFICALLY by the STAGED-DIRT entry check's own verbatim refusal text, never a quarantine or some other unrelated failure",
+      op2BResult?.ok === false && STAGED_DIRT_RE.test(op2BResult?.reason ?? "") && !QUARANTINE_RE.test(op2BResult?.reason ?? ""));
+    const finalTreeB = git(repoB, "ls-tree -r --name-only HEAD");
+    check("[B/op2] (residue) neither branch's file landed on main — the canonical repo is untouched by the refused op2",
+      !finalTreeB.includes("file-a.txt") && !finalTreeB.includes("file-b.txt"));
+  } else if (op2BResult?.ok === true) {
     const finalTreeB = git(repoB, "ls-tree -r --name-only HEAD");
     check("[B/op2] (kill confirmed) branch-b's file landed in the canonical repo", finalTreeB.includes("file-b.txt"));
     check("[B/op2] (kill confirmed) branch-a's file did NOT land (its op failed/timed out, never silently committed)", !finalTreeB.includes("file-a.txt"));

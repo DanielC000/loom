@@ -36,8 +36,11 @@ export type PendingOpOutcome = string;
  *  would serve the stale refusal forever. Never cache or replay it.
  *  @decision 8c3d6c04 — "union-merge-transient": a union-merge failure caused by a momentary git-child
  *  condition (confirmed-kill timeout, or an EAGAIN/EMFILE/ENFILE/EBUSY spawn error), not branch/main
- *  content — a branch-keyed cache key can't see the host condition clear. Never cache or replay it. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "ff-unverified", "quarantined", "union-merge-transient"]);
+ *  content — a branch-keyed cache key can't see the host condition clear. Never cache or replay it.
+ *  @decision 9f5ae011 — "solo-merge-transient": the squash/commit step's own cleanup (`resetOrSkip`) was
+ *  itself confirmed-kill-timed-out, even after its one retry — same reasoning as "union-merge-transient",
+ *  one layer later. A branch-keyed cache key can't see the host condition clear. Never cache or replay it. */
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the
