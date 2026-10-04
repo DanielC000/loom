@@ -33,8 +33,11 @@ export type PendingOpOutcome = string;
  *  branch-keyed cache key can't see a restored checkout, so a cached replay would be stale. Never cache either.
  *  @decision 7e5b23e7 — "quarantined": a refusal about the CANONICAL REPO being quarantined, not the
  *  branch — a branch-keyed cache key can't see a human's later quarantine-clear, so a cached replay
- *  would serve the stale refusal forever. Never cache or replay it. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "ff-unverified", "quarantined"]);
+ *  would serve the stale refusal forever. Never cache or replay it.
+ *  @decision 8c3d6c04 — "union-merge-transient": a union-merge failure caused by a momentary git-child
+ *  condition (confirmed-kill timeout, or an EAGAIN/EMFILE/ENFILE/EBUSY spawn error), not branch/main
+ *  content — a branch-keyed cache key can't see the host condition clear. Never cache or replay it. */
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "ff-unverified", "quarantined", "union-merge-transient"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

@@ -744,6 +744,10 @@ type ConfirmMergeResult = {
   branchDiverted?: boolean;
   observedBranch?: string | null;
   unverified?: boolean;
+  /** @decision 8c3d6c04 — a pre-squash union-merge failure caused by a TRANSIENT git-child condition, never
+   *  a real content conflict; classified `"union-merge-transient"`, in `NEVER_CACHED_OUTCOMES` — the hang
+   *  clearing is invisible to a branch-keyed cache. Never set alongside `conflict`/`quarantined`. */
+  unionMergeTransient?: boolean;
   /** @decision 77b8319b — set alongside `branchDiverted:true` ONLY on the early watermark-corrupt/unreadable
    *  refusal (mirrors `MergeBatchResult.watermarkUnreadable`): the checkout may be fine, it's the STORED
    *  RECORD that's untrustworthy, so a caller must not claim "restore the checkout" for this reason. */
@@ -2220,6 +2224,16 @@ class AdmissionReunionFailedError extends Error {
     // a human clears it, not just this one. Carried separately from `why` (this op's own operation-specific
     // reason) so the handler can append the repo-wide remedy text without hand-writing it.
     public readonly quarantined?: boolean,
+    /** @decision 8c3d6c04 — mirrors `mergeMainIntoWorktree`'s own `transient`: set only for a
+     *  `union_merge_failed_at_admission` whose root cause is a confirmed-kill timeout or a transient
+     *  spawn-error code, never a real content conflict. */
+    public readonly transient?: boolean,
+    /** @decision 8c3d6c04 round 2 — mirrors `mergeMainIntoWorktree`'s own `residuePossible`: never claim
+     *  "nothing changed" alongside `transient` when this is also true. */
+    public readonly residuePossible?: boolean,
+    /** @decision 8c3d6c04 round 2 — mirrors `mergeMainIntoWorktree`'s own `dirtyWorktree`: the worktree was
+     *  already dirty before the admission-time re-union was attempted. */
+    public readonly dirtyWorktree?: boolean,
   ) {
     super(`admission-time re-union failed (${failReason}): ${why}`);
     this.name = "AdmissionReunionFailedError";
@@ -2424,6 +2438,13 @@ export class SessionService {
    *  other call through to the real `canonicalGit` and intercepting only the one it targets. `undefined`
    *  in every existing test constructor ⇒ `mergeBranch`'s own default, byte-identical to before this seam. */
   private readonly soloMergeGitFactory?: BoundedGitDeps["gitFactory"];
+  /** TEST SEAM (card 8c3d6c04), SAME shape as {@link soloMergeGitFactory}: git factory for the solo PRE-
+   *  SQUASH union-merge (`mergeMainIntoWorktree`, both the ordinary pre-gate call and the admission-time
+   *  reunion), so a hermetic test can drive a REAL `confirmWorkerMergeTracked` through a FAKE union-merge
+   *  failure (confirmed-kill timeout, a transient spawn-error code, …) without a real spawn/kill. `undefined`
+   *  in every existing test constructor ⇒ `mergeMainIntoWorktree`'s own default, byte-identical to before
+   *  this seam existed. */
+  private readonly unionMergeGitFactory?: BoundedGitDeps["gitFactory"];
   /** Public read of {@link spawnOpRetainMs} in whole minutes — lets `worker_spawn`'s own pending-note/
    *  description text (mcp/orchestration.ts) state the REAL configured window instead of a hardcoded
    *  copy that could drift from {@link SPAWN_OP_RETAIN_MS} on a future change to either. Rounds to the
@@ -2720,6 +2741,8 @@ export class SessionService {
       batchFfGitFactory?: BatchGitDeps["gitFactory"];
       /** TEST SEAM (card d69d4858): git factory for the SOLO `mergeBranch` call's whole git surface — see the field's own doc. */
       soloMergeGitFactory?: BoundedGitDeps["gitFactory"];
+      /** TEST SEAM (card 8c3d6c04): git factory for the solo pre-squash union-merge — see the field's own doc. */
+      unionMergeGitFactory?: BoundedGitDeps["gitFactory"];
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
@@ -2736,6 +2759,7 @@ export class SessionService {
     this.spawnOpRetainMs = opts?.spawnOpRetainMs ?? SPAWN_OP_RETAIN_MS;
     this.batchFfGitFactory = opts?.batchFfGitFactory;
     this.soloMergeGitFactory = opts?.soloMergeGitFactory;
+    this.unionMergeGitFactory = opts?.unionMergeGitFactory;
     this.heldProbeGitFactory = opts?.heldProbeGitFactory;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
@@ -15944,7 +15968,7 @@ export class SessionService {
       // Card 13fc5227: a HELD branch (owedBase set) is never "already landed" as a whole — its late range is still owed, so it must not take the already-landed shortcut.
       const preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs });
       if (!preLanded) {
-        const union = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs }, owedBase, branch);
+        const union = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, gitFactory: this.unionMergeGitFactory }, owedBase, branch);
         if (!union.ok) {
           // Card 7e5b23e7: a quarantine raised (or already in force) by the union-merge's own kill-confirm
           // is NOT an ordinary union failure — the canonical repo now refuses EVERY merge until a human
@@ -15957,14 +15981,26 @@ export class SessionService {
             evt("merge_rejected", { reason: "union_merge_quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
             return { merged: false, reason: union.reason, detailText, notified: !suppressed, opId: thisOpId, quarantined: true };
           }
+          // @decision 8c3d6c04 round 2 — a worktree ALREADY dirty before the union-merge was attempted
+          // reuses the EXISTING `gateWorktreeDirty`/"worktree-dirty" never-cached outcome (same helper every
+          // other before-gate dirt refusal uses) rather than a new classification string.
+          if (union.dirtyWorktree) return refuseWorktreeDirty("before-gate", union.reason ?? "the worktree carries uncommitted changes that would be overwritten by the union-merge");
           const why = union.conflict ? (union.reason ?? "branch conflicts with current main — rebase/resolve before merge") : (union.reason ?? "union merge failed");
           const failReason = union.conflict ? "union_conflict" : "union_merge_failed";
+          // @decision 8c3d6c04 — `union.transient` is never set alongside `union.conflict`, so this note
+          // only ever fires for the genuinely non-conflict branch; keeps the nudge HONEST (not a vague
+          // "may be transient" hedge) once the structural signal says so for certain.
+          // @decision 8c3d6c04 round 2 — never claim "nothing was changed" when `union.residuePossible` is
+          // true: that case can leave staged, uncommitted merge content in the worktree.
+          const transientNote = !union.transient ? "" : union.residuePossible
+            ? " This looks like a transient git/host condition (a hung git child) — the worktree may have been left with partial, uncommitted merge content from the interrupted attempt; inspect/reset it before relying on a re-confirm, which will retry the merge rather than replay this result."
+            : " This looks like a transient git/host condition (a hung git child or a brief spawn resource limit), not a problem with the branch or main's content — nothing was changed; a plain re-confirm will retry the merge rather than replay this result.";
           // Card 522cf573 DoD 4: squash phase never reached — the union-merge (a pre-gate step) failed
           // before the gate or the squash itself ever ran.
-          const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained.`;
+          const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained.${transientNote}`;
           const { suppressed, sha } = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
           evt("merge_rejected", { reason: failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
-          return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId };
+          return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, ...(union.transient ? { unionMergeTransient: true } : {}) };
         }
         // GATE-BASE CAPTURE (card eda70da6): `union.mainSha` is the canonical main tip THIS union-merge
         // itself read and unioned into the worktree — the exact sha the tree the gate is about to validate
@@ -16679,13 +16715,13 @@ export class SessionService {
             // @decision 7e5b23e7 — `allowRetry:false`: this call holds a scarce, fleet-shared gate slot;
             // the one-bounded-retry elsewhere in `mergeMainIntoWorktree` would double the worst-case time
             // every other queued merge on the fleet is blocked behind.
-            const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, allowRetry: false }, owedBase, branch);
+            const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, allowRetry: false, gitFactory: this.unionMergeGitFactory }, owedBase, branch);
             if (!reunion.ok) {
               const why = reunion.conflict
                 ? (reunion.reason ?? "branch conflicts with current main — rebase/resolve before merge")
                 : (reunion.reason ?? "union merge failed");
               if (reunion.quarantined) throw new AdmissionReunionFailedError("union_merge_quarantined_at_admission", why, true);
-              throw new AdmissionReunionFailedError(reunion.conflict ? "union_conflict_at_admission" : "union_merge_failed_at_admission", why);
+              throw new AdmissionReunionFailedError(reunion.conflict ? "union_conflict_at_admission" : "union_merge_failed_at_admission", why, undefined, reunion.transient, reunion.residuePossible, reunion.dirtyWorktree);
             }
             gateBaseMainHead = reunion.mainSha;
           }
@@ -16811,13 +16847,23 @@ export class SessionService {
           evt("merge_rejected", { reason: err.failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
           return { merged: false, reason: err.why, detailText, notified: !suppressed, opId: thisOpId, quarantined: true };
         }
+        // @decision 8c3d6c04 round 2 — a worktree ALREADY dirty before the admission-time re-union was
+        // attempted reuses the SAME never-cached `gateWorktreeDirty` outcome as the pre-gate site.
+        if (err.dirtyWorktree) return refuseWorktreeDirty("before-gate", err.why);
+        // @decision 8c3d6c04 — `err.transient` is only ever set for `union_merge_failed_at_admission`; the
+        // old blanket hedge below stays for the remaining, genuinely-unknown non-conflict case only.
+        // @decision 8c3d6c04 round 2 — never claim "nothing was changed" when `err.residuePossible` is true.
         const cause = err.failReason === "union_conflict_at_admission"
           ? " (canonical main advanced while this merge waited in the gate queue, and the advance conflicts with this branch's own content — re-confirm once resolved.)"
-          : " (an admission-time re-union with canonical main, which had moved during the queue wait, failed for a reason unrelated to a content conflict — see the error above; this may be a transient git/filesystem issue, not necessarily main's advance itself.)";
+          : !err.transient
+            ? " (an admission-time re-union with canonical main, which had moved during the queue wait, failed for a reason unrelated to a content conflict — see the error above; this may be a transient git/filesystem issue, not necessarily main's advance itself.)"
+            : err.residuePossible
+              ? " (an admission-time re-union with canonical main, which had moved during the queue wait, hit a transient git/host condition — the worktree may have been left with partial, uncommitted merge content from the interrupted attempt; inspect/reset it before relying on a re-confirm.)"
+              : " (an admission-time re-union with canonical main, which had moved during the queue wait, hit a transient git/host condition — not a content conflict; nothing was changed, and a plain re-confirm will retry rather than replay this result.)";
         const detailText = `${err.why}; squash phase never reached, canonical repo untouched, worktree retained.${cause}`;
         const { suppressed, sha } = await rejectNotify(err.failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: err.failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: err.why, detailText, notified: !suppressed, opId: thisOpId };
+        return { merged: false, reason: err.why, detailText, notified: !suppressed, opId: thisOpId, ...(err.transient ? { unionMergeTransient: true } : {}) };
       };
       // @decision 68155573 — EVERY retry of this op is a CONTINUATION link of the ONE `runExclusive`
       //  admission below (slot + repo guard + worktree held straight through); never re-enter `runExclusive`
@@ -20246,7 +20292,10 @@ export class SessionService {
         // @decision 7e5b23e7 — `quarantined` classifies distinctly from an ordinary "rejected", checked
         // before the plain merged-else-rejected fallback: a human clearing the quarantine must see a
         // fresh re-confirm, never a stale cached refusal from before the clear.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.merged ? "merged" : "rejected"),
+        // @decision 8c3d6c04 — `unionMergeTransient` classifies distinctly too, checked before the
+        // fallback: a transient git-child condition clearing must see a fresh re-attempt, never a stale
+        // cached rejection from before it cleared.
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

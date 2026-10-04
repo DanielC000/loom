@@ -6199,9 +6199,23 @@ const UNION_MERGE_TIMEOUT_FLOOR_MS = 45_000;
  *  seam) — never a still-possibly-alive orphan. */
 const TIMEOUT_SHAPED_RE = /exceeded \d+ms/;
 
+/**
+ * @decision 8c3d6c04 — do not add a code to this set on a hunch, and do not treat an unlisted code (incl.
+ * `ENOENT`/`EACCES`) as transient: a missing/unexecutable git binary does not heal on retry, so caching
+ * toward "deterministic" by default is the safe failure mode.
+ */
+const TRANSIENT_SPAWN_ERROR_CODES: ReadonlySet<string> = new Set(["EAGAIN", "EMFILE", "ENFILE", "EBUSY"]);
+
+/** True iff `e` carries one of {@link TRANSIENT_SPAWN_ERROR_CODES} — a STRUCTURED check (the OS-assigned
+ *  `.code`), never a message-text match. */
+function isTransientSpawnErrorCode(e: unknown): boolean {
+  const code = (e as NodeJS.ErrnoException)?.code;
+  return typeof code === "string" && TRANSIENT_SPAWN_ERROR_CODES.has(code);
+}
+
 export async function mergeMainIntoWorktree(
   repoPath: string, worktreePath: string, deps: BoundedGitDeps = {}, owedBase?: string, branch?: string,
-): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string; quarantined?: boolean }> {
+): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; dirtyWorktree?: boolean }> {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   // @decision 7e5b23e7 — only the two mutating merge calls below use this floor; every other git call in
   // this function (the cheap reads above/below, and computeOwedLanding's own merge-tree probes) keeps the
@@ -6215,7 +6229,11 @@ export async function mergeMainIntoWorktree(
   try {
     mainSha = (await withTimeout(repoGit.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (main)")).trim();
   } catch (e) {
-    return { ok: false, reason: `failed to resolve main tip: ${(e as Error).message}` };
+    // @decision 8c3d6c04 — nothing lands from this bare read (no mutation), so a timeout OR a transient
+    // spawn-error code here is always safe to mark `transient:true`; never add kill-confirmation to this
+    // read as part of closing that gap — file a separate card instead (see the decision record).
+    const transient = TIMEOUT_SHAPED_RE.test((e as Error)?.message ?? "") || isTransientSpawnErrorCode(e);
+    return { ok: false, reason: `failed to resolve main tip: ${(e as Error).message}`, ...(transient ? { transient: true } : {}) };
   }
 
   // `mainSha` (card eda70da6) rides along on EVERY success return below — it's the canonical main tip
@@ -6269,7 +6287,11 @@ export async function mergeMainIntoWorktree(
       commit = (await wtRaw([...identityArgs, "commit-tree", landing.tree, "-p", tip, "-p", mainSha, "-m", `Merge main into branch (owed commits over ${owedBase.slice(0, 8)})`])).trim();
     } catch (e) {
       const d = describeGitFailure(e);
-      return { ok: false, reason: d.refusal ? `refused, nothing changed: ${d.text}` : `late-range union of main into the worktree failed: ${d.text}` };
+      // @decision 8c3d6c04 — these are bare-`withTimeout` reads/a `commit-tree` write of a dangling object
+      // (nothing lands: no ref moves, no working-tree mutation), so the SAME "nothing lands, retry is
+      // always safe" reasoning as the main-tip resolve above applies to a timeout here too.
+      const transient = !d.refusal && (TIMEOUT_SHAPED_RE.test(d.text) || isTransientSpawnErrorCode(e));
+      return { ok: false, reason: d.refusal ? `refused, nothing changed: ${d.text}` : `late-range union of main into the worktree failed: ${d.text}`, ...(transient ? { transient: true } : {}) };
     }
 
     // `--ff-only` either lands instantly or fails with NO merge in progress (no MERGE_HEAD, no partial
@@ -6286,6 +6308,11 @@ export async function mergeMainIntoWorktree(
         return head === expectedHead && dirty === "";
       } catch { return false; }
     };
+    // @decision 8c3d6c04 round 3 — the owed-landing `--ff-only` path's own pre-attempt dirt check, matching
+    // the plain-union path's `preMergeStamp`/`preMergeDirty` (declared further below, out of this branch's
+    // reach since this `if (owedBase)` block always returns before falling through to it).
+    const preOwedStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs, gitFactory: deps.gitFactory });
+    const preOwedDirty = preOwedStamp.dirty;
 
     for (let attempt = 1; ; attempt++) {
       try {
@@ -6300,6 +6327,12 @@ export async function mergeMainIntoWorktree(
         const d = describeGitFailure(e);
         const isConfirmedKillTimeout = !d.refusal && TIMEOUT_SHAPED_RE.test(d.text);
         if (isConfirmedKillTimeout && (await verifyOwedLanded())) return { ok: true, merged: true, mainSha };
+        // @decision 8c3d6c04 round 3 — matches the plain-union path: a NON-timeout failure on a tree
+        // already dirty before this attempt classifies as dirtyWorktree, never on a confirmed-kill timeout
+        // (residue there may need more than a plain commit) and never on a refusal (its own cause).
+        if (preOwedDirty && !isConfirmedKillTimeout && !d.refusal) {
+          return { ok: false, reason: `late-range union of main into the worktree failed: ${d.text} (the worktree already carried uncommitted changes before this merge was attempted)`, dirtyWorktree: true };
+        }
         // Card 7e5b23e7 — ONE bounded retry, gated on all three: (i) a confirmed-kill timeout (never
         // treeDeathUnconfirmed/a refusal, both already returned above), (ii) verify-landed just said no,
         // (iii) the worktree is independently verified back at its pre-attempt state.
@@ -6310,7 +6343,11 @@ export async function mergeMainIntoWorktree(
           console.log(`[union-merge] owed-landing fast-forward timed out (confirmed dead), worktree verified clean — retrying once (${worktreePath})`);
           continue;
         }
-        return { ok: false, reason: d.refusal ? `refused, nothing changed: ${d.text}` : `late-range union of main into the worktree failed: ${d.text}` };
+        // @decision 8c3d6c04 — a confirmed-kill timeout here (even one that already exhausted the one
+        // internal retry above) still describes momentary host/process conditions, not the branch's or
+        // main's content; same for a transient spawn-error code. Never set alongside a refusal.
+        const transient = isConfirmedKillTimeout || (!d.refusal && isTransientSpawnErrorCode(e));
+        return { ok: false, reason: d.refusal ? `refused, nothing changed: ${d.text}` : `late-range union of main into the worktree failed: ${d.text}`, ...(transient ? { transient: true } : {}) };
       }
     }
   }
@@ -6342,15 +6379,19 @@ export async function mergeMainIntoWorktree(
       return head === expectedHead && dirty === "";
     } catch { return false; }
   };
-  let preAttemptHead: string | undefined;
-  try {
-    preAttemptHead = (await withTimeout(wtGit.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (pre-merge)")).trim();
-  } catch { /* best-effort; undefined ⇒ the retry's clean-check below can never be satisfied, so no retry is attempted rather than risk comparing against an unknown baseline */ }
+  // @decision 8c3d6c04 round 2 — reuses `computeWorktreeGateStamp` (never a second, hand-rolled dirt
+  // check) for the pre-attempt HEAD and whether the worktree was ALREADY dirty before this merge ran.
+  const preMergeStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs, gitFactory: deps.gitFactory });
+  const preAttemptHead = preMergeStamp.head ?? undefined;
+  const preMergeDirty = preMergeStamp.dirty;
 
   for (let attempt = 1; ; attempt++) {
     let mergeThrew = false;
     let mergeErr = "";
     let mergeRefused = false;
+    // @decision 8c3d6c04 — the raw error object, kept alongside `mergeErr`'s extracted text so a later
+    // spawn-error-code check (`isTransientSpawnErrorCode`) can read its structured `.code`.
+    let mergeErrObj: unknown;
     try {
       await killableCanonicalRaw(worktreePath, [...identityArgs, "merge", "--no-edit", mainSha], mergeTimeoutMs, "git merge main into worktree", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
     } catch (e) {
@@ -6363,6 +6404,7 @@ export async function mergeMainIntoWorktree(
       const d = describeGitFailure(e); // surfaced in the reason: a canonicalGit refusal (unblankable merge driver) must not read as a bare "failed"
       mergeErr = d.text;
       mergeRefused = d.refusal;
+      mergeErrObj = e;
     }
 
     const isConfirmedKillTimeout = mergeThrew && !mergeRefused && TIMEOUT_SHAPED_RE.test(mergeErr);
@@ -6381,7 +6423,9 @@ export async function mergeMainIntoWorktree(
       if (mergeHeadRead.state === "unreadable") {
         // Same rule as the `--quit` failure below: never silently report ok:true over something we could
         // not actually confirm — a failed read is not evidence of absence.
-        return { ok: false, reason: `union merge landed but MERGE_HEAD could not be read to confirm whether cleanup is needed: ${mergeHeadRead.error}` };
+        // @decision 8c3d6c04 round 2 — this block is gated on `isConfirmedKillTimeout && verifyUnionLanded()`:
+        // the union ALREADY LANDED (HEAD moved) — never `transient` ("nothing changed" would be false here).
+        return { ok: false, reason: `the merge of main landed, but MERGE_HEAD could not be read to confirm whether cleanup is needed: ${mergeHeadRead.error} — re-confirm to continue (the branch tip has moved)` };
       }
       if (mergeHeadRead.state === "absent") return { ok: true, merged: true, mainSha }; // the common case: nothing left to clean up
       const mergeHeadSha = mergeHeadRead.sha;
@@ -6410,10 +6454,10 @@ export async function mergeMainIntoWorktree(
       // report that now, loudly, instead of a false ok:true.
       const mergeHeadAfterRead = await readMergeHead();
       if (mergeHeadAfterRead.state === "unreadable") {
-        return { ok: false, reason: `union merge landed but could not confirm MERGE_HEAD was cleared afterward: ${mergeHeadAfterRead.error}` };
+        return { ok: false, reason: `the merge of main landed, but could not confirm MERGE_HEAD was cleared afterward: ${mergeHeadAfterRead.error} — re-confirm to continue (the branch tip has moved)` };
       }
       if (mergeHeadAfterRead.state === "present") {
-        return { ok: false, reason: `union merge landed but its in-progress merge state (MERGE_HEAD) could not be cleared: MERGE_HEAD still present (${mergeHeadAfterRead.sha.slice(0, 8)})` };
+        return { ok: false, reason: `the merge of main landed, but its in-progress merge state (MERGE_HEAD) could not be cleared: MERGE_HEAD still present (${mergeHeadAfterRead.sha.slice(0, 8)}) — re-confirm to continue (the branch tip has moved)` };
       }
       return { ok: true, merged: true, mainSha };
     }
@@ -6461,6 +6505,13 @@ export async function mergeMainIntoWorktree(
       if (abortQuarantined) return { ok: false, quarantined: true, reason: abortQuarantineReason };
       if (mergeRefused) return { ok: false, reason: `refused, nothing changed: ${mergeErr}` };
 
+      // @decision 8c3d6c04 round 3 — `!isConfirmedKillTimeout` is load-bearing: a confirmed-kill timeout on
+      // an already-dirty tree must fall through to the ordinary residue/transient handling below, unchanged
+      // — "commit" advice is wrong when the interrupted merge may have folded residue into that same dirt.
+      if (preMergeDirty && !isConfirmedKillTimeout) {
+        return { ok: false, reason: (mergeErr ? `git merge main into worktree failed: ${mergeErr}` : "git merge main into worktree failed") + " (the worktree already carried uncommitted changes before this merge was attempted)", dirtyWorktree: true };
+      }
+
       // Card 7e5b23e7 — ONE bounded retry, gated on all three: (i) a confirmed-kill timeout, (ii)
       // verify-landed already said no (checked above), (iii) the worktree is independently verified back
       // at ITS OWN pre-attempt HEAD (never racing whatever the abort may or may not have cleaned up).
@@ -6477,7 +6528,13 @@ export async function mergeMainIntoWorktree(
       const residueNote = isConfirmedKillTimeout
         ? " (a confirmed-kill timeout here can leave staged, uncommitted merge content in the worktree with no MERGE_HEAD to abort — merge --abort had nothing to act on; inspect/reset the worktree before retrying)"
         : "";
-      return { ok: false, reason: (mergeErr ? `git merge main into worktree failed: ${mergeErr}` : "git merge main into worktree failed") + residueNote };
+      // @decision 8c3d6c04 — a confirmed-kill timeout (even one that already exhausted the one internal
+      // retry above) or a transient spawn-error code describes momentary host/process conditions, not the
+      // branch's or main's content. Never set alongside a refusal (`mergeRefused` already returned above).
+      const transient = isConfirmedKillTimeout || (!mergeRefused && isTransientSpawnErrorCode(mergeErrObj));
+      // @decision 8c3d6c04 round 2 — `residuePossible` mirrors `residueNote`: a caller must never claim
+      // "nothing was changed" when this is true (staged, uncommitted merge content may be sitting there).
+      return { ok: false, reason: (mergeErr ? `git merge main into worktree failed: ${mergeErr}` : "git merge main into worktree failed") + residueNote, ...(transient ? { transient: true } : {}), ...(residueNote ? { residuePossible: true } : {}) };
     }
     return { ok: true, merged: true, mainSha };
   }
