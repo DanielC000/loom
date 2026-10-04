@@ -2717,6 +2717,10 @@ export class OrchestrationMcpRouter {
     // Every real caller below re-derives ownership itself (the exact-match `parentSessionId !==
     // managerSessionId` throw in each sessions.* method) — this helper never gates anything; it only
     // repairs the row before that independent check runs. Hence the name: self-heal, not a guard.
+    // Card 164f7915: this is WHY the stale-parent/queued-self-check gap that card fixed (gating
+    // confirmWorkerMergeTracked's supersedeQueuedSelfCheck call on isExactWorkerOwner) never surfaced via
+    // `worker_merge_confirm` in production — this relink runs BEFORE that method is ever called, so its
+    // exact-id check rarely has anything stale left to gate on for THIS entry point.
     const selfHealWorkerLink = (workerSessionId: string, op: string) => {
       const w = db.getSession(workerSessionId);
       if (!w || w.parentSessionId === managerSessionId) return w; // no row, or already correctly linked

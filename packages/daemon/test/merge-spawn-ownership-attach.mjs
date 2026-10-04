@@ -184,6 +184,73 @@ try {
   }
 
   // =============================================================================================
+  // MERGE (3b): card 164f7915, ROUND 2 (Code Review 2471d6b8 of commit 71022460) — a recycled SUCCESSOR
+  // attaches to a genuinely RUNNING op, not merely a retained/cached hit (MERGE (3) above is the TTL-
+  // retained shape; this is the running one). The worker is NON-live at recycle time — the exact residual
+  // `reparentLiveWorkers` (process_state='live'-gated) leaves behind, so the worker's parentSessionId
+  // stays pointed at the now-dead predecessor FOREVER. Round 1's own fix (an early exact-id refusal
+  // hoisted before `pendingOps.attach()`) wrongly refused this exact caller — the successor's id can never
+  // equal that stale parentSessionId. Only the lineage check (656e326f) may gate this attach-reachable path.
+  // =============================================================================================
+  {
+    const P = "msoa-merge-successor-running", repo = makeRepo();
+    const { worktreePath, branch } = await createWorktree(repo, P, "tm3b");
+    fs.writeFileSync(path.join(worktreePath, "feat3b.txt"), "work\n");
+    commitAll(worktreePath, "feat3b", GIT_ID);
+    seedProject(P, repo, "pnpm gate");
+    const workerId = `${P}-wkr`;
+    db.insertTask({ id: "tm3b", projectId: P, title: "tm3b", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    // NON-live at recycle time — reparentLiveWorkers never touches this row.
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: `${P}-owner`, taskId: "tm3b", worktreePath, branch });
+
+    let releaseGate;
+    const gateHold = new Promise((res) => { releaseGate = res; });
+    let gateCalls = 0;
+    // SMALL budget on purpose (unlike the GENEROUS one `svc` uses elsewhere in this file): every call in
+    // this scenario deliberately races a HELD-OPEN gate, so a generous budget would block each of those
+    // calls (and this test) for its full length before degrading, and would let the owner's own mint
+    // degrade to a stale pending result LONG before `releaseGate` is ever reached — never re-observed
+    // against the real settle afterward. Mirrors the small-budget pattern merge-rest-route-tracked.mjs's
+    // held-gate scenarios already use.
+    const svcHeld = new SessionService(db, host, new OrchestrationControl(), {
+      reapWorktreeProcesses: noReap, syncAttachBudgetMs: 50,
+      runGate: async () => { gateCalls++; await gateHold; return { passed: true }; },
+    });
+
+    const ownerPromise = svcHeld.confirmWorkerMergeTracked(`${P}-owner`, workerId);
+    await ownerPromise; // degrades to {settled:false} almost immediately (small budget, gate still held)
+    check("(merge successor-running) [setup] the owner's op is genuinely RUNNING (not yet settled)",
+      svcHeld.peekPendingMerge(workerId)?.state === "running");
+    const ownerOpId = svcHeld.peekPendingMerge(workerId)?.opId;
+
+    const successor = await svcHeld.recycleManager(`${P}-owner`, "handoff");
+    check("(merge successor-running) owner recycled successfully", !!successor?.id);
+    stopSeamPty(successor.id);
+    check("(merge successor-running) [setup] the worker's parentSessionId is STILL the dead predecessor (the residual)",
+      db.getSession(workerId).parentSessionId === `${P}-owner`);
+
+    // Negative control FIRST, while still running: an unrelated manager is still refused.
+    const foreignWhileRunning = await svcHeld.confirmWorkerMergeTracked(`${P}-foreign`, workerId);
+    check("(merge successor-running) an UNRELATED manager is refused while the op is still running",
+      foreignWhileRunning.settled === true && foreignWhileRunning.ok === false && /not your worker/.test(foreignWhileRunning.error?.message ?? ""));
+
+    const viaSuccessor = await svcHeld.confirmWorkerMergeTracked(successor.id, workerId);
+    check("(merge successor-running) [ROUND 2] the successor ATTACHES to the still-RUNNING op — not refused as 'not your worker'",
+      viaSuccessor.settled === false);
+    check("(merge successor-running) the attach names the SAME opId the owner's call minted",
+      viaSuccessor.settled === false && viaSuccessor.op?.opId === ownerOpId);
+
+    releaseGate("go");
+    await svcHeld.pendingOps.waitBriefly(`merge:${workerId}`, 30_000);
+    // Re-call (rather than re-await the owner's own already-degraded promise above) to fetch the REAL
+    // settled result via the SAME dedupe-attach path a genuine poll would use.
+    const ownerResult = await svcHeld.confirmWorkerMergeTracked(successor.id, workerId);
+    check("(merge successor-running) the owner's original op settles + merges once released",
+      ownerResult.settled === true && ownerResult.ok === true && ownerResult.value?.merged === true);
+    check("(merge successor-running) exactly ONE real gate invocation total — the successor's attach never re-minted", gateCalls === 1);
+  }
+
+  // =============================================================================================
   // MERGE (4): FALLBACK-AFTER-RECYCLE — mergeBatchTracked's runFallback calls confirmWorkerMergeTracked
   // with a worker's CURRENT resolved owner (resolveLineageOwnerForWorker), which it derives from the
   // worker's OWN row and only ever hands back a value that already equals the row's current

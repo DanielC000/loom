@@ -61,7 +61,7 @@ function makeRepo(repo) {
   commitAll(repo, "init", GIT_ID);
 }
 
-async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProcessState = "live" } = {}) {
+async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProcessState = "live", workerProcessState = "exited" } = {}) {
   registerForCleanup(reposDir);
   const db = new Db();
   dbs.push(db);
@@ -86,7 +86,7 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   worktrees.push(worktreePath);
   fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work\n");
   commitAll(worktreePath, "feature.txt", GIT_ID);
-  db.insertSession({ id: workerId, projectId: projId, agentId: `agent-mrt-w-${sfx}`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+  db.insertSession({ id: workerId, projectId: projId, agentId: `agent-mrt-w-${sfx}`, engineSessionId: null, title: null, cwd: worktreePath, processState: workerProcessState, resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
   return { db, mgrId, projId, taskId, workerId };
 }
 
@@ -350,6 +350,68 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   const finalResult = await sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
   check("(recycled-owner) once released, the SAME in-flight op settles for real and merges", finalResult.settled === true && finalResult.ok === true && finalResult.value?.merged === true);
   check("(recycled-owner) still exactly ONE real gate invocation total across all three calls", gateCalls === 1);
+}
+
+// ── (7) card 164f7915, ROUND 2 (Code Review 2471d6b8 of commit 71022460) — the REST route's OWN retry
+//        loop captures `managerSessionId` from `worker.parentSessionId` ONCE (gateway/server.ts, BEFORE
+//        `confirmWorkerMergeUntilSettled`'s `while` loop ever starts) and reuses that SAME value on every
+//        internal retry — the loop never re-reads the worker row. A manager recycle landing MID-WAIT
+//        reparents a LIVE worker (`reparentLiveWorkers`) to a successor, so every retry AFTER that point
+//        carries an id that is lineage-matching but no longer EXACT. Round 1's own fix (an early exact-id
+//        refusal hoisted before `pendingOps.attach()` in `confirmWorkerMergeTracked`) answered every one
+//        of those retries 400 "not your worker" even while the already-running op it should have attached
+//        to kept going and genuinely landed the merge. Round 2 removes that early refusal: the retry loop
+//        must keep reporting STILL-WAITING (never refused) across the reparent, then settle for real once
+//        the gate releases.
+{
+  const sfx = `reparent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-mrt-reparent-${sfx}`);
+  const { db, mgrId, projId, workerId } = await setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs: 60_000, workerProcessState: "live" });
+
+  let releaseGate;
+  const gateHold = new Promise((res) => { releaseGate = res; });
+  let gateCalls = 0;
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    runGate: async () => { gateCalls++; await gateHold; return { passed: true }; },
+    syncAttachBudgetMs: 50,
+  });
+
+  // The REST route's own call shape: this captures `mgrId` for the ENTIRE lifetime of the call below.
+  const pRest = sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
+  await gateSpawnedAtLeastOnce(() => gateCalls, "(rest-reparent) gate spawned");
+
+  // Mid-wait: a manager recycle lands — reparentLiveWorkers relinks the LIVE worker to a successor, and
+  // the predecessor retires. `pRest`'s own captured `mgrId` is now stale (lineage-matching, not exact).
+  const successorId = `mrt-mgr-reparent-successor-${sfx}`;
+  db.insertAgent({ id: `agent-mrt-reparent-successor-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: successorId, projectId: projId, agentId: `agent-mrt-reparent-successor-${sfx}`, engineSessionId: null, title: null, cwd: os.tmpdir(), processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", recycledFrom: mgrId });
+  const reparented = db.reparentLiveWorkers(mgrId, successorId);
+  db.setProcessState(mgrId, "exited");
+  check("(rest-reparent) [setup] the LIVE worker WAS reparented to the successor mid-wait",
+    reparented === 1 && db.getSession(workerId).parentSessionId === successorId);
+
+  // A direct retry call on the SAME (now stale) captured mgrId, mirroring exactly what the loop's own
+  // `while` body does internally — must be STILL-WAITING (lineage-attached to the running op), never
+  // refused as "not your worker".
+  const oneRetry = await sessions.confirmWorkerMergeTracked(mgrId, workerId, undefined, { skipDeadOwnerRecovery: true });
+  check("(rest-reparent) [ROUND 2] a retry on the stale captured id is STILL-WAITING, never refused as 'not your worker'",
+    oneRetry.settled === false);
+  check("(rest-reparent) that retry attached to the SAME still-running op (lineage dedupe, never evict-and-remint)",
+    gateCalls === 1);
+
+  // OBSERVABLE, not a fixed wait: the durable tombstone row for this op is still genuinely 'pending' (the
+  // real gate is still held open) — proves the top-level call can't have settled yet, without racing a
+  // sleep against it (a fixed-wait non-occurrence check can't tell "didn't happen" from "hasn't happened
+  // YET" in one trial).
+  const reparentRows = db.listPendingGateOps().filter((r) => r.key === `merge:${workerId}`);
+  check("(rest-reparent) the underlying op's tombstone is still 'pending' — the top-level call can't have settled yet",
+    reparentRows.length === 1 && reparentRows[0]?.state === "pending");
+
+  releaseGate("go");
+  const finalResult = await pRest;
+  check("(rest-reparent) [ROUND 2] once released, the SAME in-flight op — attached across the reparent — settles and merges for real",
+    finalResult.settled === true && finalResult.ok === true && finalResult.value?.merged === true);
+  check("(rest-reparent) exactly ONE real gate invocation across the whole retry loop, before AND after the reparent", gateCalls === 1);
 }
 
 console.log(failures === 0

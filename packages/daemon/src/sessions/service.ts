@@ -8573,6 +8573,13 @@ export class SessionService {
     return rootOf(aSessionId) === rootOf(bSessionId);
   }
 
+  /** @decision 164f7915 — the ONLY exact-id ownership predicate the supersedeQueuedSelfCheck gate and
+   *  confirmWorkerMerge's own deep guard may use; never re-derive a second exact-id comparison for either,
+   *  or they can silently drift apart again. Deliberately stricter than `sameManagerLineage` above. */
+  private isExactWorkerOwner(managerSessionId: string, worker: { parentSessionId?: string | null } | undefined | null): boolean {
+    return !!worker && worker.parentSessionId === managerSessionId;
+  }
+
   /** @decision 656e326f — the SAME `isRetainedResultUsable` predicate `spawnWorkerTracked`/
    *  `reviveWorkerTracked` pass to `pendingOps.attach()`, shared from one place so their matching
    *  `foreignSpawnGuard` call can never silently diverge from it. */
@@ -15478,7 +15485,7 @@ export class SessionService {
     // "can't determine it" and cancels nothing (its fail-safe), which would be correct for an untracked call
     // (no PendingOpRegistry entry to speak of) — but per the note above, no current caller is untracked.
     const worker = this.db.getSession(workerSessionId);
-    if (!worker || worker.parentSessionId !== managerSessionId) throw new NotYourWorkerError();
+    if (!worker || !this.isExactWorkerOwner(managerSessionId, worker)) throw new NotYourWorkerError();
     if (!worker.branch) throw new Error("worker has no branch");
     const project = this.db.getProject(worker.projectId);
     if (!project) throw new Error("project not found");
@@ -19539,12 +19546,17 @@ export class SessionService {
   /**
    * AUTO-SUPERSEDE (card 8d585277 — the manager's own primary ask, and the live incident: three
    * gate-green branches serialized behind a single merge lane while each worker's OWN now-moot self-check
-   * still occupied a queue slot). A manager calling `worker_merge_confirm` has, by construction, ALREADY
-   * decided this worker's queued `run_gate` self-check is moot — the merge gate re-validates independently
-   * (or REUSE-A-GREEN-SELF-CHECK reuses a settled one; see `confirmWorkerMerge`'s own doc) either way.
-   * Reclaims that slot the instant the decision is made, unconditional on what this confirm call goes on
-   * to decide (idempotent-already-merged, stranded-work refusal, a gate rejection, or a clean merge all
-   * equally mean the self-check's OWN result is no longer relevant to anyone).
+   * still occupied a queue slot). A manager calling `worker_merge_confirm` AS THIS WORKER'S EXACT OWNER
+   * has, by construction, ALREADY decided this worker's queued `run_gate` self-check is moot — the merge
+   * gate re-validates independently (or REUSE-A-GREEN-SELF-CHECK reuses a settled one; see
+   * `confirmWorkerMerge`'s own doc) either way. Reclaims that slot the instant the decision is made,
+   * unconditional on what THIS confirm call goes on to decide (idempotent-already-merged, stranded-work
+   * refusal, a gate rejection, or a clean merge all equally mean the self-check's OWN result is no longer
+   * relevant to anyone) — but this method is itself called ONLY when the caller IS the exact owner
+   * (`isExactWorkerOwner`, card 164f7915 round 2): a lineage-matching-but-not-exact caller merely attaching
+   * to this worker's in-flight or cached op never reaches this method at all, so the reclaim is
+   * unconditional across OUTCOMES, never across CALLERS. See 164f7915's record for why exempting that
+   * lineage-only case is a real, bounded trade-off rather than a free one.
    *
    * QUEUED ONLY — DELIBERATE (manager-approved shape, Report-and-STOP checkpoint): if the self-check has
    * already been ADMITTED (a real process is running), this does NOTHING — no process is ever killed on
@@ -19557,19 +19569,17 @@ export class SessionService {
    * this automatic path.
    */
   private supersedeQueuedSelfCheck(workerSessionId: string, callerProjectId: string | null): void {
-    // PROJECT SCOPE (Code Review finding B2-1): this fires BEFORE `confirmWorkerMerge`'s own "not your
-    // worker" ownership check ever runs (that check lives deep in the call chain this method's own caller
-    // invokes LATER — see confirmWorkerMergeTracked below), so it cannot rely on that check having already
-    // authorized the caller. A `null` caller project (an unresolvable managerSessionId) refuses rather
-    // than superseding unscoped — fail closed, matching `cancelGateOp`'s own refusal shape.
+    // PROJECT SCOPE (Code Review finding B2-1 — gated by card 164f7915's `isExactWorkerOwner` check at
+    // this method's ONLY call site, round 2): every caller reaching here already owns this worker by
+    // EXACT id, not merely lineage. `callerProjectId` still fails closed on a null/unresolvable manager,
+    // purely to scope the cancel, not as a stand-in for ownership.
     if (!callerProjectId) return;
     const gateKey = `gate:${workerSessionId}`;
     const pending = this.pendingOps.peek(gateKey);
     if (!pending || pending.state !== "running") return; // nothing outstanding to supersede
-    // WORDING: this fires BEFORE the confirm's own outcome is known (see the doc above), and a
-    // same-project peer manager can reach here for a worker it doesn't own (the ownership check runs
-    // LATER and can still refuse — e.g. "not your worker"). So this text must read correctly whether the
-    // confirm goes on to merge OR gets refused — state only what's true unconditionally: a manager in
+    // WORDING: this fires BEFORE the confirm's own OUTCOME is known (see the doc above) — its genuine
+    // owner's confirm can still end in stranded-work, a gate rejection, or a clean merge. So this text
+    // must read correctly across all of those — state only what's true unconditionally: a manager in
     // this project called worker_merge_confirm for this worker, which supersedes the queued self-check
     // regardless of what that confirm call itself goes on to decide. Never assert a merge happened.
     this.gateSemaphore.cancelQueuedForSession(
@@ -20050,6 +20060,10 @@ export class SessionService {
     if (!this.sameManagerLineage(managerSessionId, this.db.getSession(workerSessionId)?.parentSessionId)) {
       return { settled: true, ok: false, error: new NotYourWorkerError() };
     }
+    // @decision 164f7915 — ROUND 2: no exact-id refusal belongs on this attach-reachable path (that
+    // regressed 656e326f); the only ownership gate here is the lineage check above. See the
+    // `isExactWorkerOwner` guard around `supersedeQueuedSelfCheck` below instead.
+
     // LINEAGE-RESOLVED KEY (card `3a2dac9c`, DoD-2 — "resolve at the read, never rewrite at the write"
     // applied to this write path too): if a predecessor's merge op is STILL RUNNING anywhere backward in
     // this worker's `recycledFrom` chain, attach to THAT key instead of minting a fresh one under
@@ -20076,16 +20090,11 @@ export class SessionService {
     // has already settled.
     const lineageOp = lineageResolvedPendingOp(this.db, "merge", (k) => this.pendingOps.peek(k), workerSessionId);
     const key = lineageOp && lineageOp.view.state === "running" ? lineageOp.key : `merge:${workerSessionId}`;
-    // Unconditional and BEFORE everything else below — see supersedeQueuedSelfCheck's own doc for why this
-    // fires regardless of what this confirm call itself goes on to decide. PROJECT-SCOPED to the CALLING
-    // manager's own project (Code Review finding B2-1) — this does NOT re-derive "is this actually your
-    // worker" (that ownership check still lives, unchanged, inside confirmWorkerMerge below); it only
-    // ensures a caller from a DIFFERENT project can never cancel this worker's queued self-check as a side
-    // effect of even attempting a call that's about to be refused for that same reason. Runs on EVERY call
-    // including a skipDeadOwnerRecovery retry — it targets a DIFFERENT key (`gate:${workerSessionId}`,
-    // the worker's own self-check) and is a no-op when nothing is queued there, so repeating it costs
-    // nothing and still supersedes a self-check that gets queued mid-loop.
-    this.supersedeQueuedSelfCheck(workerSessionId, this.db.getSession(managerSessionId)?.projectId ?? null);
+    // @decision 164f7915 — ROUND 2: gated on EXACT ownership, never merely lineage — see this card's
+    // record for why a lineage-only caller must skip this call rather than mint-and-cancel for nothing.
+    if (this.isExactWorkerOwner(managerSessionId, this.db.getSession(workerSessionId))) {
+      this.supersedeQueuedSelfCheck(workerSessionId, this.db.getSession(managerSessionId)?.projectId ?? null);
+    }
     // @decision 27ea069e — a RUNNING op whose owning manager's whole lineage is dead is evicted here so
     // this call starts a genuinely fresh confirm; a live (or still-resuming) owner's op is left alone.
     //
