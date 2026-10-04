@@ -8494,7 +8494,12 @@ export class PtyHost {
     // `live.busy` freshly cleared by that same `healIfStuck` call, moments after enqueueing — without this
     // check, that clears the path to an immediate direct submit() here, defeating the hold entirely.
     // Card 850eb55c (round 2): same sibling relationship, now also vs `Live.startupCycleInFlight`'s own doc.
-    if (live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !this.deferForHumanDraft(live) && !stillGiveUpHeld && !this.isHumanSubmitHeld(live) && !this.isBlockedOnUnresolvedBootDialog(live) && !live.startupCycleInFlight) {
+    // @decision b5ab3aa4 — do not treat this as sufficient on its own to submit immediately: it proves
+    // only that THIS SESSION could take a turn right now, never that no older entry is already queued.
+    const idleEligible = live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !this.deferForHumanDraft(live) && !stillGiveUpHeld && !this.isHumanSubmitHeld(live) && !this.isBlockedOnUnresolvedBootDialog(live) && !live.startupCycleInFlight;
+    // @decision b5ab3aa4 — do not drop the `live.pending.length === 0` conjunct: without it, a new arrival
+    // can jump an older entry that just became eligible in this same call, breaking FIFO delivery order.
+    if (idleEligible && live.pending.length === 0) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
       // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
@@ -8542,11 +8547,11 @@ export class PtyHost {
     // entry (card 9e27f4d2). Stamped whenever the caller supplied it (even an already-expired deadline —
     // harmless: `isGiveUpHeld` just reads false immediately, same as never having been stamped).
     let insertAt = live.pending.length;
+    const id = randomUUID();
+    // `mintedAtGen` rides along PRISTINE (card 4af5aefa) — annotated fresh at actual drain time
+    // (`joinSubmittedText`, called from `drainPending`), never baked in here.
+    const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}), ...(ownerTextSeq !== undefined ? { ownerTextSeq } : {}) };
     {
-      const id = randomUUID();
-      // `mintedAtGen` rides along PRISTINE (card 4af5aefa) — annotated fresh at actual drain time
-      // (`joinSubmittedText`, called from `drainPending`), never baked in here.
-      const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}), ...(ownerTextSeq !== undefined ? { ownerTextSeq } : {}) };
       // @decision eac3464d — a SAME-SENDER agent-kind arrival reorders to land right after that
       // sender's own last (eligible) queued entry, never the FIFO tail, so same-sender coalescing has
       // something adjacent to work with; NEVER past a give-up-held or giveUpGen-tagged entry.
@@ -8604,18 +8609,42 @@ export class PtyHost {
       }
       live.pending.splice(insertAt, 0, entry);
     }
+    // @decision b5ab3aa4 — do not submit this entry alone when `idleEligible` is true here: drain through
+    // `drainPending` instead, or an older eligible entry sitting behind it is skipped past.
+    if (idleEligible) {
+      // M2 GUARD: same invariant as the immediate branch above — reaching here mid turn-finalize would
+      // mean an `await` leaked between setBusy(false) and drainPending in deliverHook.
+      if (this.finalizingTurn) {
+        throw new Error("M2 invariant violated: enqueueStdin reached the idle-drain path mid turn-finalize — an `await` leaked between setBusy(false) and drainPending in deliverHook (host.ts).");
+      }
+      this.drainPending(sessionId);
+      if (!live.pending.includes(entry)) {
+        // M1 GUARD: same invariant as the immediate branch above — drainPending's own submit() call must
+        // have armed busy synchronously for this to have actually gone out.
+        if (!live.busy) {
+          throw new Error("M1 invariant violated: drainPending did not arm busy synchronously for an entry handed to it from enqueueStdin's idle-drain path (host.ts).");
+        }
+        return { delivered: true, deliveryState: "handed-off" };
+      }
+      // Fell through: this entry wasn't part of the leading run drainPending just drained (e.g. an older,
+      // equally-eligible entry ahead of it belongs to a different route/kind, per drainPending's own
+      // coalescing rules) — it stays queued, correctly FIFO-ordered behind whatever just drained, and
+      // will drain on a later call.
+    }
     // `queued:true` reports this HELD outcome as the success it is (this text is durably recorded and
     // WILL be delivered at the next turn boundary UNLESS redelivery is ultimately exhausted, in which
     // case it is PARKED and the sender is notified instead of silently dropped — see
     // `handleGiveUpExhausted` in sessions/service.ts, card 417cea0a), instead of leaving a
     // `delivered:false` reader to wonder whether it's a drop. `busyForMs` is only meaningful while the
     // hold is actually busy-caused (not-ready/composer-dirty/rate-limited holds have no busy-since edge
-    // to measure from). `position` is `insertAt`'s own 1-based index (card eac3464d DoD-2): almost
-    // always the tail (`live.pending.length` post-insert, byte-identical to pre-eac3464d), but for a
-    // same-sender agent-kind reorder it's the entry's REAL queue position, not the tail — reporting the
-    // tail here would silently lie about where a reordered message actually landed.
+    // to measure from). `position` is this entry's REAL current index in `live.pending` (card b5ab3aa4:
+    // re-derived fresh here, not `insertAt`'s own insert-time index — the push-then-drain attempt just
+    // above can remove entries AHEAD of this one, shifting it down): almost always the tail, but for a
+    // same-sender agent-kind reorder (or a partial drain that left this entry behind) it's the entry's
+    // REAL queue position, not the tail — reporting a stale position here would silently lie about where
+    // this message actually sits.
     const busyForMs = live.busySince != null ? Date.now() - live.busySince : undefined;
-    return { delivered: false, position: insertAt + 1, reason: "held", queued: true, landsAt: "next-turn-boundary", busyForMs, deliveryState: "queued" };
+    return { delivered: false, position: live.pending.indexOf(entry) + 1, reason: "held", queued: true, landsAt: "next-turn-boundary", busyForMs, deliveryState: "queued" };
   }
 
   /**
