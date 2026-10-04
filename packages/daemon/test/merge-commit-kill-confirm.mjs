@@ -473,6 +473,12 @@ check("[scenario 5] merge1 (whose hook's own descendant escapes the tree-kill) i
 if (s5.merge1?.ok === false) {
   check("[scenario 5] merge1 failed for the TIMEOUT/kill reason specifically (not vacuously for something else)",
     KILL_REASON_RE.test(s5.merge1?.reason ?? ""));
+  // Card 8d8fa497: merge1 is the op whose OWN commit call raised this quarantine (an escaped descendant,
+  // never confirmed dead) — its own result must say so directly, not merely be inferable from merge2's
+  // SEPARATE refusal below (merge1's own `reason` text never contains the literal word "QUARANTINED" — see
+  // docs/decisions/8d8fa497-*.md — so `quarantined:true` on merge1 itself is the only reliable signal).
+  check("[scenario 5] merge1's OWN result carries quarantined:true — not just inferred from merge2's refusal",
+    s5.merge1?.quarantined === true);
 }
 check("[scenario 5] merge2 (a DIFFERENT branch, same repo, attempted immediately after) is refused by the QUARANTINE, not a generic failure",
   s5.merge2?.ok === false && /QUARANTINED/.test(s5.merge2?.reason ?? ""));

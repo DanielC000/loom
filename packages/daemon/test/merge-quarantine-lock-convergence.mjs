@@ -147,6 +147,9 @@ try {
     const res = await mergeBranch(repo, "loom/mqlc-branch", "Quarantine Test Card");
     check("(mergeBranch) refuses via the lock-level check (mergeBranchLocked's own copy is now dead code)", res.ok === false);
     check("(mergeBranch) refusal names the quarantine", /QUARANTINED/i.test(res.reason ?? ""));
+    // Card 8d8fa497: the lock-level RepoQuarantinedError catch (mergeBranch, worktrees.ts) must set
+    // `quarantined:true` on its own result too, same as every in-function raise/discover site.
+    check("(mergeBranch) result carries quarantined:true", res.quarantined === true);
     check("(mergeBranch) canonical HEAD did NOT move", git(repo, "rev-parse HEAD") === headBefore);
 
     clearMergeQuarantine(repo);

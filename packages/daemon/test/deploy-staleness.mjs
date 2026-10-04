@@ -234,24 +234,44 @@ const { computeDeployStaleness: computeDeployStalenessRawUnwrapped, newestMtimeM
 // load, so this suite retries ONLY the specific, narrowly-matched transient-timeout shape, a small FIXED
 // number of times — logging every retried attempt so it is visible in gate output, never silent — and
 // still fails loud if the evidence doesn't support a timeout, never masking a real regression.
-const GIT_TIMEOUT_RETRY_MAX_ATTEMPTS = 3;
+// Card 8d8fa497: renamed from `_MAX_ATTEMPTS` — this is a MINIMUM attempt count, not a cap (see the
+// GIT_TIMEOUT_RETRY_DEADLINE_MS doc below for why a bare count can't be the real bound on its own).
+const GIT_TIMEOUT_RETRY_MIN_ATTEMPTS = 3;
 // Just under production's own GIT_TIMEOUT_MS (1000ms), with slack for scheduling jitter right at the
 // boundary. Used only where production swallows the specific git error (no reason string to key off) and
 // elapsed wall time is the sole available evidence that a timeout — not a fast, unrelated failure — is
 // what happened.
 const GIT_TIMEOUT_EVIDENCE_MS = 900;
+// Card 8d8fa497: ONE wall-clock deadline shared by BOTH retry layers below — `computeDeployStalenessRaw`'s
+// own inner retry AND `computeAtCapWithRetry`'s outer retry around it. Before this, each layer had its OWN
+// independent `GIT_TIMEOUT_RETRY_MIN_ATTEMPTS`-count budget, so their WORST-CASE attempt counts multiplied
+// (an outer retry re-running an inner retry that itself re-tries up to 3 times) while still being able to
+// exhaust in just a couple of unlucky draws per layer — measured directly against a real gate run:
+// successive (23m) attempts took 3235ms then 6195ms, each individually load-robust by
+// GIT_TIMEOUT_EVIDENCE_MS's own standard, yet the fixed per-layer counts still ran out before a clean
+// attempt landed. A single shared deadline, passed down from the outermost caller, keeps the COMBINED
+// retry budget time-boxed instead of twice-multiplied. `computeDeployStalenessRaw` always makes at least
+// `GIT_TIMEOUT_RETRY_MIN_ATTEMPTS` real attempts regardless of the deadline — a single slow attempt must
+// never be reported as "exhausted" having retried zero times — and callers that pass no `deadlineAt` at
+// all (every OTHER call site in this file) get the exact pre-existing behavior: a fixed
+// `GIT_TIMEOUT_RETRY_MIN_ATTEMPTS`-count cap, unaffected by this card.
+const GIT_TIMEOUT_RETRY_DEADLINE_MS = 60_000;
 // Unambiguous: computeDeployStaleness's own `unavailable()` call sites set this EXACT reasonKind/reason
 // shape only when its one unconditional `runGit` call throws (see deploy-staleness.ts's own `unavailable`
 // call sites) — never for an intentional, non-timeout unavailable state (e.g. no .git, a missing dist
 // entry), which carry a different reasonKind or reason text and must never be retried.
 const isTransientGitTimeout = (result) =>
   result?.available === false && result?.reasonKind === "could-not-measure" && /ETIMEDOUT/i.test(result?.reason ?? "");
-function computeDeployStalenessRaw(options) {
+// `deadlineAt` (a `performance.now()`-scale timestamp) is OPTIONAL — omitted, this behaves exactly as
+// before (a fixed `GIT_TIMEOUT_RETRY_MIN_ATTEMPTS`-count cap). Passed down by `computeAtCapWithRetry` so
+// its own deadline also governs THIS function's inner retries, see the doc above.
+function computeDeployStalenessRaw(options, deadlineAt) {
   let attempt = 1;
   for (;;) {
     const result = computeDeployStalenessRawUnwrapped(options);
-    if (!isTransientGitTimeout(result) || attempt >= GIT_TIMEOUT_RETRY_MAX_ATTEMPTS) return result;
-    console.log(`RETRY (${attempt}/${GIT_TIMEOUT_RETRY_MAX_ATTEMPTS}) computeDeployStaleness hit a transient git ETIMEDOUT under host load (reason: ${JSON.stringify(result.reason)}) — retrying`);
+    const deadlinePassed = deadlineAt === undefined || performance.now() >= deadlineAt;
+    if (!isTransientGitTimeout(result) || (attempt >= GIT_TIMEOUT_RETRY_MIN_ATTEMPTS && deadlinePassed)) return result;
+    console.log(`RETRY (${attempt}) computeDeployStaleness hit a transient git ETIMEDOUT under host load (reason: ${JSON.stringify(result.reason)}) — retrying`);
     attempt++;
   }
 }
@@ -263,19 +283,27 @@ function computeDeployStalenessRaw(options) {
 // that to a bare `null` return (deploy-staleness.ts). That surfaces as `builtContentMatchesHead:null`/
 // `stale:true` with `available` staying `true` throughout — a shape `isTransientGitTimeout` above
 // structurally cannot see (it only ever inspects `available`). Proven via fault injection at
-// (23m-fault-proof) below. Reuses the SAME `GIT_TIMEOUT_RETRY_MAX_ATTEMPTS`/`GIT_TIMEOUT_EVIDENCE_MS`
-// evidence rule (23o) already established, never a second copy: a SLOW (>= `GIT_TIMEOUT_EVIDENCE_MS`),
-// unexpectedly-non-true result is retried (logged, bounded); a FAST unexpected result is a real regression
-// and must fail loud on the very first attempt, never be silently retried away.
+// (23m-fault-proof) below. Reuses the SAME `GIT_TIMEOUT_EVIDENCE_MS` evidence rule (23o) already
+// established, never a second copy: a SLOW (>= `GIT_TIMEOUT_EVIDENCE_MS`), unexpectedly-non-true result is
+// retried (logged, bounded); a FAST unexpected result is a real regression and must fail loud on the very
+// first attempt, never be silently retried away.
+//
+// Card 8d8fa497: derives ONE `deadlineAt` from its OWN start and threads it into EVERY
+// `computeDeployStalenessRaw` call below — see `GIT_TIMEOUT_RETRY_DEADLINE_MS`'s own doc above for why a
+// SHARED deadline (not two independent per-layer attempt counts) is what actually bounds the combined
+// retry budget here.
 function computeAtCapWithRetry(options, label) {
   let result;
   let attempt = 1;
+  const startedAt = performance.now();
+  const deadlineAt = startedAt + GIT_TIMEOUT_RETRY_DEADLINE_MS;
   for (;;) {
     const t0 = performance.now();
-    result = computeDeployStalenessRaw(options);
+    result = computeDeployStalenessRaw(options, deadlineAt);
     const elapsedMs = performance.now() - t0;
-    if (result.builtContentMatchesHead === true || elapsedMs < GIT_TIMEOUT_EVIDENCE_MS || attempt >= GIT_TIMEOUT_RETRY_MAX_ATTEMPTS) return result;
-    console.log(`RETRY (${attempt}/${GIT_TIMEOUT_RETRY_MAX_ATTEMPTS}) (${label}): builtContentMatchesHead came back ${result.builtContentMatchesHead} and the call took ${Math.round(elapsedMs)}ms (>= ${GIT_TIMEOUT_EVIDENCE_MS}ms) — consistent with one of the per-file \`git show\` calls hitting production's GIT_TIMEOUT_MS=1000ms bound under host load, not a real regression; retrying`);
+    const budgetExhausted = attempt >= GIT_TIMEOUT_RETRY_MIN_ATTEMPTS && performance.now() >= deadlineAt;
+    if (result.builtContentMatchesHead === true || elapsedMs < GIT_TIMEOUT_EVIDENCE_MS || budgetExhausted) return result;
+    console.log(`RETRY (${attempt}, ${Math.round(performance.now() - startedAt)}ms/${GIT_TIMEOUT_RETRY_DEADLINE_MS}ms elapsed) (${label}): builtContentMatchesHead came back ${result.builtContentMatchesHead} and the call took ${Math.round(elapsedMs)}ms (>= ${GIT_TIMEOUT_EVIDENCE_MS}ms) — consistent with one of the per-file \`git show\` calls hitting production's GIT_TIMEOUT_MS=1000ms bound under host load, not a real regression; retrying`);
     attempt++;
   }
 }
@@ -1347,8 +1375,8 @@ try {
       const raceT0 = performance.now();
       rRacePatched = computeDeployStalenessRaw({ distEntry: raceDistEntry2, repoRoot: raceRepo, processBuiltSha: raceBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
       raceElapsedMs = performance.now() - raceT0;
-      if (racePatchFired2 || raceElapsedMs < GIT_TIMEOUT_EVIDENCE_MS || raceAttempt >= GIT_TIMEOUT_RETRY_MAX_ATTEMPTS) break;
-      console.log(`RETRY (${raceAttempt}/${GIT_TIMEOUT_RETRY_MAX_ATTEMPTS}) (23o): the nested/ readdirSync patch did not fire and the call took ${Math.round(raceElapsedMs)}ms (>= ${GIT_TIMEOUT_EVIDENCE_MS}ms) — consistent with an earlier git call hitting production's GIT_TIMEOUT_MS=1000ms bound under host load, not Code Review B1's regression; retrying`);
+      if (racePatchFired2 || raceElapsedMs < GIT_TIMEOUT_EVIDENCE_MS || raceAttempt >= GIT_TIMEOUT_RETRY_MIN_ATTEMPTS) break;
+      console.log(`RETRY (${raceAttempt}/${GIT_TIMEOUT_RETRY_MIN_ATTEMPTS}) (23o): the nested/ readdirSync patch did not fire and the call took ${Math.round(raceElapsedMs)}ms (>= ${GIT_TIMEOUT_EVIDENCE_MS}ms) — consistent with an earlier git call hitting production's GIT_TIMEOUT_MS=1000ms bound under host load, not Code Review B1's regression; retrying`);
       raceAttempt++;
     }
   } finally {

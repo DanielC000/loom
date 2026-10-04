@@ -17734,6 +17734,19 @@ export class SessionService {
         });
         return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, branchDiverted: merge.branchDiverted, unverified: merge.unverified, observedBranch: merge.observedBranch ?? null, divertedSha: merge.divertedSha };
       }
+      // Card 8d8fa497 — mergeBranch/mergeBranchLocked now set `quarantined:true` on every quarantine it
+      // raises or finds during the squash/commit step itself (git/worktrees.ts), the same way the
+      // pre-admission check and the pre-squash union-merge quarantine above already do. Checked BEFORE the
+      // generic rejected fallback, same posture as those two. The fix here is the SIGNAL (the field) and
+      // the WORDING (reason/detailText) — classifyOutcome already keys off `quarantined` generically (see
+      // decisions 7e5b23e7/8d8fa497), so the never-cached behavior this unlocks needs no change there.
+      if (merge.quarantined) {
+        const quarantineCheck = assertRepoNotQuarantined(repoPath);
+        const detailText = `${merge.reason ?? "the squash/commit step raised a canonical-repo quarantine"}${quarantineCheck.ok ? "" : ` ${quarantineCheck.reason}`}; worktree retained.`;
+        const { suppressed, sha } = await rejectNotify("solo_merge_quarantined", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "solo_merge_quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: merge.reason, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, quarantined: true };
+      }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       // Card 4b7ff996 CR follow-up: derive "is this the canonical-checkout-is-dirty failure class" from
       // the REASON STRING itself, not from a second ad-hoc boolean — `merge.dirtyOverlap` only ever covers

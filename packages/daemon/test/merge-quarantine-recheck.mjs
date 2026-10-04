@@ -220,6 +220,9 @@ try {
 
     check("(S4) mergeBranch refuses", result.ok === false);
     check("(S4) refusal names the quarantine, not a generic squash-commit failure", /quarantined/i.test(result.reason ?? ""));
+    // Card 8d8fa497: the commit-catch's RepoQuarantinedError branch (worktrees.ts) must set
+    // `quarantined:true` on its own result too, same as every in-function raise/discover site.
+    check("(S4) result carries quarantined:true", result.quarantined === true);
     // Code Review of b4315b52, item 4 — the refusal must make the real STAGED residue visible (the squash
     // already landed before this refusal) and name the `git reset --hard` a human needs after clearing —
     // otherwise the NEXT solo merge attempt would itself refuse at the entry-time dirty-tree check with no

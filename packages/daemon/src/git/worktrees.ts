@@ -6764,7 +6764,7 @@ export async function verifyReviewedTipChain(
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string, expectedMainlineBranch?: string, expectedMainlineRef?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -6780,7 +6780,8 @@ export async function mergeBranch(
   try {
     return await withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip, expectedMainlineBranch, expectedMainlineRef));
   } catch (e) {
-    if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message };
+    // @decision 8d8fa497 — mirror every in-function quarantine site below: set `quarantined:true` here too.
+    if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message, quarantined: true };
     throw e;
   } finally {
     resumeVaultAutoCommit(repoPath, pauseToken);
@@ -6793,7 +6794,7 @@ export async function mergeBranch(
 async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string, expectedMainlineBranch?: string, expectedMainlineRef?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean }> {
   // QUARANTINE CHECK moved to the TRUE convergence point, `withCanonicalIndexLock` (git/repo-lock.ts) —
   // this function only ever runs INSIDE that lock (see `mergeBranch` above), so a check re-derived here
   // would be unreachable dead code: a quarantined repo now never gets this far.
@@ -6900,11 +6901,12 @@ async function mergeBranchLocked(
       } catch (e) {
         // @decision bde5d1fe — re-checked AND already quarantined (never THIS call's own kill) — refuse,
         // never re-raise (no kill happened here to auto-clear later).
-        if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message };
+        // @decision 8d8fa497 — set `quarantined:true` on both branches below, never just the reason text.
+        if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message, quarantined: true };
         // @decision 24c0bdba (round 4) — fail CLOSED + QUARANTINE on an unconfirmed tree-kill here too.
         if (treeDeathUnconfirmed(e)) {
           raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("in-progress-merge residue clear could not be confirmed dead after a kill"), opId);
-          return { ok: false, reason: `in-progress-merge residue clear's process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${(e as Error).message}` };
+          return { ok: false, reason: `in-progress-merge residue clear's process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${(e as Error).message}`, quarantined: true };
         }
         // Surfaced explicitly rather than falling into the outer catch below, whose "no residue to clear"
         // reasoning does not apply here: we already know there IS residue (the signal above was affirmative)
@@ -6944,9 +6946,12 @@ async function mergeBranchLocked(
   // @decision 06b5c47f — resetOrSkip SKIPS the reset (never a mixed `git reset HEAD`) when unstaged dirt
   // predated this merge attempt — a mixed reset only unstages the squash's diff, leaving it as silent
   // unstaged noise the NEXT merge would proceed onto instead of refusing.
-  async function resetOrSkip(context: string): Promise<string | null> {
+  // @decision 8d8fa497 — returns `{message, quarantined}`, not a bare string: every caller below must be
+  // able to tell "ordinary cleanup failure" apart from "this cleanup itself just found/raised a
+  // quarantine" without string-matching `message`.
+  async function resetOrSkip(context: string): Promise<{ message: string; quarantined?: boolean } | null> {
     if (hadUnstagedDirtAtEntry) {
-      return `skipped automatic cleanup (${context}) because the canonical repo already had unstaged tracked changes before this merge attempt — resetting would risk discarding them; a human must resolve the canonical checkout by hand, and the next merge attempt will refuse loudly on any staged residue this left behind`;
+      return { message: `skipped automatic cleanup (${context}) because the canonical repo already had unstaged tracked changes before this merge attempt — resetting would risk discarding them; a human must resolve the canonical checkout by hand, and the next merge attempt will refuse loudly on any staged residue this left behind` };
     }
     try {
       // @decision 24c0bdba — kill-confirmed: this cleanup mutates the same canonical index/tree a later
@@ -6956,14 +6961,14 @@ async function mergeBranchLocked(
     } catch (e) {
       // @decision bde5d1fe — re-checked AND already quarantined (never THIS call's own kill) — refuse,
       // never re-raise.
-      if (e instanceof RepoQuarantinedError) return `reset --hard (${context}) refused — canonical repo is quarantined: ${e.message}`;
+      if (e instanceof RepoQuarantinedError) return { message: `reset --hard (${context}) refused — canonical repo is quarantined: ${e.message}`, quarantined: true };
       // @decision 24c0bdba (round 4) — this IS itself a mutating canonical call; an unconfirmed kill of
       // ITS OWN child quarantines the repo too, the same as every other mutating call on this path.
       if (treeDeathUnconfirmed(e)) {
         raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason(`reset --hard (${context}) could not be confirmed dead after a kill`), opId);
-        return `reset --hard (${context})'s process tree could not be confirmed dead after a kill — quarantining the repo; canonical repo may need manual inspection: ${(e as Error).message}`;
+        return { message: `reset --hard (${context})'s process tree could not be confirmed dead after a kill — quarantining the repo; canonical repo may need manual inspection: ${(e as Error).message}`, quarantined: true };
       }
-      return `reset --hard (${context}) failed — canonical repo may have residue: ${(e as Error).message}`;
+      return { message: `reset --hard (${context}) failed — canonical repo may have residue: ${(e as Error).message}` };
     }
   }
 
@@ -7043,16 +7048,16 @@ async function mergeBranchLocked(
     try {
       conflicted = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (canonical, post-squash)")).trim() !== "";
     } catch (e) {
-      const cleanupIssue = await resetOrSkip("post-squash-probe-failure cleanup");
-      return { ok: false, reason: `failed to inspect canonical index for conflicts after squash: ${(e as Error).message}${cleanupIssue ? ` (${cleanupIssue})` : ""}` };
+      const cleanup = await resetOrSkip("post-squash-probe-failure cleanup");
+      return { ok: false, reason: `failed to inspect canonical index for conflicts after squash: ${(e as Error).message}${cleanup ? ` (${cleanup.message})` : ""}`, ...(cleanup?.quarantined ? { quarantined: true } : {}) };
     }
     if (conflicted) {
       // The cleanup that's supposed to leave the canonical repo UNTOUCHED can ITSELF fail (busy index lock,
       // read-only tree); swallowing it would assert a clean "conflict" while the repo is left with unmerged/
       // partial-index residue. SURFACE it via `reason` so the caller knows the canonical repo needs recovery
       // rather than trusting the (now false) "untouched" guarantee.
-      const cleanupIssue = await resetOrSkip("conflict cleanup");
-      if (cleanupIssue) return { ok: false, conflict: true, reason: cleanupIssue };
+      const cleanup = await resetOrSkip("conflict cleanup");
+      if (cleanup) return { ok: false, conflict: true, reason: cleanup.message, ...(cleanup.quarantined ? { quarantined: true } : {}) };
       return { ok: false, conflict: true };
     }
     // DEFENSE IN DEPTH (card e076d2a2, item 4): a `rawError` from our OWN `git merge --squash` means OUR
@@ -7066,8 +7071,9 @@ async function mergeBranchLocked(
     if (rawError) {
       // @decision bde5d1fe — already quarantined at the squash re-check (never THIS attempt's own kill) —
       // refuse directly; resetOrSkip would just refuse too, so skip the redundant call.
+      // @decision 8d8fa497 — set `quarantined:true` on this and the following branch too.
       if (rawErrorObject instanceof RepoQuarantinedError) {
-        return { ok: false, reason: `git merge --squash refused — canonical repo is quarantined: ${rawErrorMessage}` };
+        return { ok: false, reason: `git merge --squash refused — canonical repo is quarantined: ${rawErrorMessage}`, quarantined: true };
       }
       // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill: resetOrSkip's own
       // reset --hard would race whatever might still be alive, never touch the repo further in that case.
@@ -7076,21 +7082,23 @@ async function mergeBranchLocked(
         return {
           ok: false,
           reason: `git merge --squash's process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${rawErrorMessage}`,
+          quarantined: true,
         };
       }
-      const cleanupIssue = await resetOrSkip("rawError cleanup");
+      const cleanup = await resetOrSkip("rawError cleanup");
       // @decision 4b7ff996 — squash-time backstop for the race window between this admission preflight and
       // this squash: classify a matching rawError as dirtyOverlap:true, never a generic failure — and always
-      // include rawErrorMessage regardless of cleanupIssue, the only place the overwritten path is named.
+      // include rawErrorMessage regardless of cleanup, the only place the overwritten path is named.
       const dirtyOverlap = !!rawErrorMessage && /would be overwritten by merge/i.test(rawErrorMessage);
       if (dirtyOverlap) {
         return {
           ok: false,
           dirtyOverlap: true,
-          reason: `canonical repo has local content that would be overwritten by this merge (git refuses to clobber it): ${rawErrorMessage}${cleanupIssue ? ` (${cleanupIssue})` : ""}`,
+          reason: `canonical repo has local content that would be overwritten by this merge (git refuses to clobber it): ${rawErrorMessage}${cleanup ? ` (${cleanup.message})` : ""}`,
+          ...(cleanup?.quarantined ? { quarantined: true } : {}),
         };
       }
-      return { ok: false, reason: cleanupIssue ? `git merge --squash failed (${cleanupIssue})` : "git merge --squash failed" };
+      return { ok: false, reason: cleanup ? `git merge --squash failed (${cleanup.message})` : "git merge --squash failed", ...(cleanup?.quarantined ? { quarantined: true } : {}) };
     }
     // No conflict, no rawError. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code
     // handling is unreliable — see isBranchMerged.) Empty after the residue-clear above is a GENUINE empty index.
@@ -7102,8 +7110,8 @@ async function mergeBranchLocked(
     try {
       staged = (await withTimeout(git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, staged check)")).trim() !== "";
     } catch (e) {
-      const cleanupIssue = await resetOrSkip("staged-probe-failure cleanup");
-      return { ok: false, reason: `failed to inspect canonical index staged diff after squash: ${(e as Error).message}${cleanupIssue ? ` (${cleanupIssue})` : ""}` };
+      const cleanup = await resetOrSkip("staged-probe-failure cleanup");
+      return { ok: false, reason: `failed to inspect canonical index staged diff after squash: ${(e as Error).message}${cleanup ? ` (${cleanup.message})` : ""}`, ...(cleanup?.quarantined ? { quarantined: true } : {}) };
     }
     if (!staged) {
       // Clean no-op: classify so the caller can distinguish "already merged" from "no diff to merge". The
@@ -7134,13 +7142,14 @@ async function mergeBranchLocked(
     // run) — never rely on the pre-gate check alone; reuse checkTitleHtmlEntities, never a second pattern.
     const subjectGuard = checkTitleHtmlEntities(subject, false);
     if (subjectGuard) {
-      const cleanupIssue = await resetOrSkip("title-html-entity cleanup");
+      const cleanup = await resetOrSkip("title-html-entity cleanup");
       return {
         ok: false,
         reason: `squash subject contains an HTML entity ("${subjectGuard.match}") — would become a PERMANENT, ` +
           `unrewritable mainline commit subject (this has already happened once: commit fe2c1c6b). Retitle the ` +
           `card (tasks_update) to a clean subject, then re-confirm. Squash phase aborted before landing; ` +
-          `canonical repo restored to its pre-merge state.${cleanupIssue ? ` (${cleanupIssue})` : ""}`,
+          `canonical repo restored to its pre-merge state.${cleanup ? ` (${cleanup.message})` : ""}`,
+        ...(cleanup?.quarantined ? { quarantined: true } : {}),
       };
     }
     // The worker-commit-log body (card 8b7b81e0 DoD-3) needs the branch's OWN pre-landing commit range —
@@ -7182,6 +7191,7 @@ async function mergeBranchLocked(
       // @decision bde5d1fe — already quarantined at the re-check; refuse directly, never re-raise. Name
       // the real staged residue the squash already left behind (Code Review of b4315b52, item 4) so a
       // human knows a `git reset --hard` is needed once cleared, or the NEXT merge refuses at entry too.
+      // @decision 8d8fa497 — set `quarantined:true` on this and the following branch too.
       if (e instanceof RepoQuarantinedError) {
         return {
           ok: false,
@@ -7189,6 +7199,7 @@ async function mergeBranchLocked(
             `holds ${branch}'s STAGED squash residue (the squash itself already landed in the index before ` +
             `this refusal); once the quarantine clears, run \`git reset --hard\` in the canonical repo FIRST, ` +
             `or every later solo merge attempt will itself refuse at the staged-dirty-tree entry check`,
+          quarantined: true,
         };
       }
       // Code Review (card 24c0bdba, finding B1 residual): the tree-kill's OWN confirmation can itself come
@@ -7199,6 +7210,7 @@ async function mergeBranchLocked(
         return {
           ok: false,
           reason: `squash commit's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${(e as Error).message}`,
+          quarantined: true,
         };
       }
       // m1 (Code Review): a bare "HEAD moved" is not enough to trust as OUR commit — verify it is
@@ -7231,8 +7243,8 @@ async function mergeBranchLocked(
           };
         }
       }
-      const cleanupIssue = await resetOrSkip("commit-failure cleanup");
-      return { ok: false, reason: cleanupIssue ? `squash commit failed: ${(e as Error).message} (${cleanupIssue})` : `squash commit failed: ${(e as Error).message}` };
+      const cleanup = await resetOrSkip("commit-failure cleanup");
+      return { ok: false, reason: cleanup ? `squash commit failed: ${(e as Error).message} (${cleanup.message})` : `squash commit failed: ${(e as Error).message}`, ...(cleanup?.quarantined ? { quarantined: true } : {}) };
     }
     // Re-read HEAD after a successful commit. NOT "unconditionally reached from both branches": a failure
     // now returns straight out of the catch above, having already re-verified truthfully via its own HEAD

@@ -19,6 +19,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // override for), making that scenario impractical to exercise fast here; NOT independently reproduced by
 // this file. Documented here rather than silently absent — see the round-2 DoD's own test-coverage note.
 //
+// Card 8d8fa497 adds a FOURTH site: `mergeBranchLocked`'s own squash/commit-step quarantine (git/
+// worktrees.ts), which now also sets `quarantined:true` on its result the same way the three sites above
+// already did — before this card it didn't, so `confirmWorkerMergeTracked` fell through to a plain
+// "rejected" classification (cached, replayed after a clear). Reached here DETERMINISTICALLY via the
+// `soloMergeGitFactory` test seam: an INDEPENDENT quarantine (simulating a concurrent, unrelated op) is
+// raised right after the squash stages content, so the commit step's own `assertRepoNotQuarantined`
+// re-check (inside `killableCanonicalRaw`) throws `RepoQuarantinedError` for real — the SAME shape
+// merge-quarantine-recheck.mjs's SCENARIO 4 already proves at the `mergeBranch` layer, exercised here
+// through the FULL service layer instead, to prove the NEW `solo_merge_quarantined` routing in
+// `sessions/service.ts` reaches the same classifyOutcome/NEVER_CACHED_OUTCOMES chokepoint.
+//
 // Exercises `SessionService.confirmWorkerMergeTracked` directly against a REAL git repo/worktree (no
 // stubbed git — only the gate command itself is stubbed), mirroring
 // merge-confirm-verdict-cache-squash-refusal.mjs's own setup pattern for the sibling fb525c31
@@ -28,7 +39,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
@@ -111,10 +122,61 @@ async function setupWorkerProject(sfx, reposDir, gateCommand = "pnpm gate") {
   void token;
 }
 
+// ── SOLO SQUASH/COMMIT-STEP QUARANTINE (card 8d8fa497): mergeBranchLocked's OWN internal raise, reached
+// through the FULL confirmWorkerMergeTracked service layer — quarantined:true, never cached ─────────────
+{
+  const sfx = `sq-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-mcvcq-${sfx}`);
+  const { db, mgrId, workerId, repo, branch } = await setupWorkerProject(sfx, reposDir);
+  let gateCalls = 0;
+  let injected = false;
+  // A REAL-git-backed passthrough (never a canned response), same shape as merge-quarantine-recheck.mjs's
+  // own `injectingGitFactory` — the injection hook fires right after the squash stages content, raising a
+  // REAL, independent quarantine before the commit step's own `assertRepoNotQuarantined` re-check runs.
+  const soloMergeGitFactory = (repoPath) => ({
+    raw: async (args) => {
+      const rawArgs = Array.isArray(args[0]) ? args[0] : args;
+      const out = execFileSync("git", rawArgs, { cwd: repoPath, encoding: "utf8" });
+      if (rawArgs[0] === "merge" && rawArgs[1] === "--squash" && !injected) {
+        injected = true;
+        enterMergeQuarantine(repo, "unrelated-concurrent-op", "manufactured for solo_merge_quarantined test");
+      }
+      return out;
+    },
+  });
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    syncAttachBudgetMs: 60_000, runGate: async () => { gateCalls++; return { passed: true, steps: [] }; },
+    soloMergeGitFactory,
+  });
+
+  const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  check("(solo-squash-quarantine) op settled, NOT merged, refused by the quarantine the squash step itself raised", r1.settled === true && r1.ok && r1.value.merged === false);
+  // Distinguishes this from the entry-time backstop above: the gate already ran for real (squash/commit
+  // only happen AFTER a green gate), so a quarantine raised here is genuinely the NEW, fourth site.
+  check("(solo-squash-quarantine) the gate DID run for real before the squash/commit step (not the entry-time backstop)", gateCalls === 1);
+  check("(solo-squash-quarantine) op's result carries quarantined:true", r1.ok && r1.value.quarantined === true);
+  check("(solo-squash-quarantine) op's reason names the concrete human remedy (reused assertRepoNotQuarantined text)", r1.ok && /POST \/internal\/merge-quarantine\/clear/.test(r1.value.reason ?? ""));
+
+  clearMergeQuarantine(repo);
+  check("(solo-squash-quarantine) the quarantine is cleared", !activeMergeQuarantineFor(repo));
+  // The refusal's own reason names the real remedy (asserted above): the squash already staged content in
+  // the canonical index before this refusal, and clearing the quarantine alone does not touch it — a human
+  // must `git reset --hard` FIRST, or the next attempt refuses again at the staged-dirty-tree entry check
+  // (a DIFFERENT, correctly-working refusal, not the bug this scenario is about). Do that now, exactly as
+  // instructed, before proving the re-attempt itself is not served from a stale cache.
+  execFileSync("git", ["reset", "--hard", "HEAD"], { cwd: repo });
+
+  const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  check("(solo-squash-quarantine) after the human clears the quarantine AND resets the staged residue, the re-call does NOT replay the stale refusal — it actually re-attempts (gate runs again)", gateCalls === 2 && r2.cacheHit === undefined);
+  check("(solo-squash-quarantine) and the re-attempt actually merges (the quarantine was the only thing standing in the way)", r2.settled === true && r2.ok && r2.value.merged === true);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — confirmWorkerMergeTracked's entry-time quarantine backstop: a quarantined repo refuses " +
     "every merge before any gate lane (quarantined:true, concrete remedy text), and — the round-2 fix this " +
     "file proves — the refusal is NEVER cached: once a human clears the quarantine, a plain re-confirm at " +
-    "the SAME commit actually re-attempts instead of replaying the stale refusal."
+    "the SAME commit actually re-attempts instead of replaying the stale refusal. (Card 8d8fa497) the FOURTH " +
+    "site — mergeBranchLocked's own squash/commit-step quarantine, reached through the full service layer — " +
+    "carries the same quarantined:true/never-cached guarantee."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

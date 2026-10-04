@@ -32,11 +32,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // always ADMITTED promptly, never left waiting on op1) — and treats op2's OWN outcome (succeed vs.
 // refused-by-quarantine) as CONDITIONAL on what actually happened to op1's kill, logging both for
 // diagnosis rather than hard-asserting a platform-specific outcome this file does not own proving.
-// SCENARIO B (new) adds the unconditional positive case the card's own DoD calls for: a hook that hangs
-// via a plain `node` child (a native executable on every platform — no MSYS/posix-fork-emulation escape)
-// is RELIABLY kill-confirmed, so the repo is never quarantined and a subsequent merge for a different
-// branch of the same repo STILL LANDS — the original, pre-quarantine contract this file was written to
-// prove, still true for a hook whose death the tree-kill can actually confirm.
+// SCENARIO B (new) adds the positive case the card's own DoD calls for: a hook that hangs via a plain
+// `node` child (a native executable on every platform — no MSYS/posix-fork-emulation escape) has its OWN
+// kill reliably confirmed — ON A QUIET HOST. Card 8d8fa497 (reproduced directly under synthetic host load,
+// see that card's decision record): under genuine contention this is NOT a structural guarantee the way
+// scenario A's MSYS fork-emulation escape is — it is a RACE between `withTimeoutKillingChild`'s own
+// give-up timer and the real OS-level tree-kill confirmation, and a native `node` child merely has much
+// BETTER odds of winning that race than an MSYS process, not a certainty. Reproduced twice, two different
+// ways: op1's OTHER internal canonical git calls (a bare-withTimeout read probe, or that probe's own
+// cleanup) can independently exceed op1's tiny test-only timeout and quarantine unrelated to the hook
+// (1 FAIL in 5 runs); separately, under even heavier load, the hook's OWN kill-confirm can itself lose the
+// race too (1 FAIL in 8 runs — op1's own reason read the exact same give-up wording a genuinely
+// unconfirmable hook produces). So neither op1's nor op2's outcome is assertable unconditionally here, and
+// no "which site caused it" textual invariant holds at arbitrary load either — both are logged and left
+// CONDITIONAL, mirroring scenario A's own posture exactly; this scenario's only remaining value over
+// scenario A is that it demonstrates the GREEN case actually occurs (op2 lands) when host load permits it.
 //
 // RED PROOF (original defect, card 44c28799 — see the worker's own report for the exact observed output):
 // reverting ONLY `git/worktrees.ts` and re-running this file's mutex-queue assertion shows op1 taking the
@@ -153,6 +163,27 @@ function installConfirmableHangingHook(repo) {
 // admitted within any reasonable window", not a real pass/fail ambiguity.
 const guard = (ms, label) => new Promise((resolve) => setTimeout(() => resolve({ __guardFired: label }), ms));
 
+const QUARANTINE_RE = /QUARANTINED/;
+// Card 8d8fa497: THE load-invariant this whole file actually needs — independent of WHICH internal call
+// lost the kill-confirm race (a "which site" textual invariant does not hold at arbitrary load; see the
+// header doc above) — is that op1's OWN reported `quarantined` state must AGREE with what op2 (a separate,
+// immediately-following op against the SAME canonical repo) actually observes. This is a HARD assertion,
+// not log-only, and it is exactly this card's own bug made checkable: pre-fix, `quarantined` did not exist
+// on mergeBranch's result at all, so whenever op1 itself raised a quarantine, op2's own refusal carried no
+// corresponding signal on op1's side — this function goes RED on that pre-fix shape (see the worker's own
+// report / docs/decisions/8d8fa497-*.md for the RED proof, via this file's load harness and the
+// deterministic scenario 5 in merge-commit-kill-confirm.mjs).
+function checkOp1Op2QuarantineAgreement(label, op1Result, op2Result) {
+  const op2QuarantinedRefusal = op2Result?.ok === false && QUARANTINE_RE.test(op2Result?.reason ?? "");
+  if (op1Result?.quarantined === true) {
+    check(`[${label}] AGREEMENT: op1 reported quarantined:true, so op2 must be refused BY THE QUARANTINE specifically`,
+      op2QuarantinedRefusal);
+  } else {
+    check(`[${label}] AGREEMENT: op1 did NOT report quarantined, so op2 must NOT be refused by a quarantine (it may land, or fail for an unrelated reason)`,
+      !op2QuarantinedRefusal);
+  }
+}
+
 try {
   // ===== SCENARIO A — an ordinary, un-engineered real hang. The QUEUE invariant (op2 is always admitted
   // promptly) is this file's actual subject and is asserted unconditionally; op2's OWN outcome depends on
@@ -186,8 +217,8 @@ try {
     op2Result?.__guardFired !== "op2");
   // DoD (card 755afc26): print op2's actual result/reason unconditionally — this is what tells a reader
   // (and a future maintainer) which branch of the conditional below actually fired on a given host.
-  console.log(`[A/op2] info: ${JSON.stringify({ ok: op2Result?.ok, reason: op2Result?.reason })}`);
-  const QUARANTINE_RE = /QUARANTINED/;
+  console.log(`[A/op2] info: ${JSON.stringify({ ok: op2Result?.ok, reason: op2Result?.reason, op1Quarantined: op1Result?.quarantined })}`);
+  checkOp1Op2QuarantineAgreement("A", op1Result, op2Result);
   if (op2Result?.ok === true) {
     // op1's kill WAS confirmed on this host — no quarantine was raised, so op2 landed normally. Verify
     // it's a REAL, correctly-labeled merge, not a vacuous pass.
@@ -224,22 +255,36 @@ try {
   check(`[B/op1] the op whose commit hit a CONFIRMABLE hung pre-commit hook settles within its bounded timeout (${Math.round(op1BElapsedMs)}ms, cap ~${BOUND_MS}ms)`,
     op1BResult?.__guardFired !== "op1B" && op1BElapsedMs < HOOK_SLEEP_S * 1000);
   check("[B/op1] the hung op reports failure (never a false success)", op1BResult?.ok === false);
-  check("[B/op1] op1's kill was CONFIRMED — no quarantine wording in its own failure reason",
-    !QUARANTINE_RE.test(op1BResult?.reason ?? ""));
+  // Card 8d8fa497: op1's own reason NEVER contains the literal word "QUARANTINED" whether or not op1
+  // itself raised a quarantine (that word is coined only by a LATER caller's refusal — see
+  // docs/decisions/8d8fa497-*.md), so a regex check here was always VACUOUS, and a "which site" invariant
+  // is ALSO false under sufficiently severe load — reproduced directly (1 FAIL in 8 runs: op1's own reason
+  // read "squash commit's git process tree could not be confirmed dead ... giving up (hung git child?)",
+  // the SAME give-up race that makes an MSYS hook unconfirmable in scenario A beating a native `node`
+  // child's confirmation too under enough contention — a RACE whose odds differ, not a structural
+  // guarantee). The one invariant that DOES hold regardless of which site lost the race is checked below,
+  // after op2 settles: op1's own `quarantined` field must agree with what op2 actually observes.
 
   const t3 = performance.now();
   const op2BResult = await Promise.race([op2B, guard(GUARD_MS, "op2B")]);
   const op2BElapsedMs = performance.now() - t3;
-  console.log(`[B/op2] info: ${JSON.stringify({ ok: op2BResult?.ok, reason: op2BResult?.reason })}`);
+  console.log(`[B/op2] info: ${JSON.stringify({ ok: op2BResult?.ok, reason: op2BResult?.reason, op1Quarantined: op1BResult?.quarantined })}`);
   check(`[B/op2] a SUBSEQUENT merge for a DIFFERENT branch of the SAME repo is still ADMITTED (settled in ${Math.round(op2BElapsedMs)}ms) — not wedged behind op1's hang`,
     op2BResult?.__guardFired !== "op2B");
-  check("[B/op2] the subsequent merge actually SUCCEEDED — a confirmed kill never quarantines the repo", op2BResult?.ok === true);
-
-  const finalTreeB = git(repoB, "ls-tree -r --name-only HEAD");
-  check("[B/op2] branch-b's file landed in the canonical repo", finalTreeB.includes("file-b.txt"));
-  check("[B/op2] branch-a's file did NOT land (its op failed/timed out, never silently committed)", !finalTreeB.includes("file-a.txt"));
-  const logB = git(repoB, "--no-pager log --format=%B");
-  check("[B/op2] the landed commit carries branch-b's own trailer", logB.includes("Loom-Worker-Branch: loom/hang-b"));
+  checkOp1Op2QuarantineAgreement("B", op1BResult, op2BResult);
+  if (op2BResult?.ok === true) {
+    const finalTreeB = git(repoB, "ls-tree -r --name-only HEAD");
+    check("[B/op2] (kill confirmed) branch-b's file landed in the canonical repo", finalTreeB.includes("file-b.txt"));
+    check("[B/op2] (kill confirmed) branch-a's file did NOT land (its op failed/timed out, never silently committed)", !finalTreeB.includes("file-a.txt"));
+    const logB = git(repoB, "--no-pager log --format=%B");
+    check("[B/op2] (kill confirmed) the landed commit carries branch-b's own trailer", logB.includes("Loom-Worker-Branch: loom/hang-b"));
+  } else {
+    check("[B/op2] (kill unconfirmed) op2 is refused by the QUARANTINE specifically, not a generic/vacuous failure",
+      QUARANTINE_RE.test(op2BResult?.reason ?? ""));
+    const finalTreeB = git(repoB, "ls-tree -r --name-only HEAD");
+    check("[B/op2] (kill unconfirmed) neither branch's file landed — the canonical repo is untouched by the refused op",
+      !finalTreeB.includes("file-a.txt") && !finalTreeB.includes("file-b.txt"));
+  }
   check("[B/repo] no stale index.lock left behind by the killed hung commit", !fs.existsSync(path.join(repoB, ".git", "index.lock")));
 } finally {
   for (const d of tmpDirs) {
