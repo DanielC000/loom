@@ -72,7 +72,7 @@ import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
 import { readAndClearMergeDangerLatches, describeMergeDangerLatchAtBoot } from "./git/merge-danger-latch.js";
 import { reenterMergeQuarantinesAtBoot } from "./git/merge-quarantine.js";
-import { runGracefulTeardown } from "./graceful-teardown.js";
+import { runGracefulTeardown, computeFlushVaultsStepBudgetMs, reportAndConsumeHardShutdownWatchdogRecord } from "./graceful-teardown.js";
 
 async function main(): Promise<void> {
   // Card 572dd777 DoD-3: this boot's own start time, captured as the very first statement of main() so
@@ -104,6 +104,11 @@ async function main(): Promise<void> {
   // non-zero exit at any point past here leaves a diagnosable crashlog under .loom (a real crash once
   // left no log signature at all). Idempotent + fail-safe; never throws.
   installCrashHandlers();
+  // Card 347b3584 round 2: report (then consume) any hard-exit-watchdog record a PRIOR run's graceful
+  // teardown left behind — the one-time, loud operator surface for a firing whose own stderr line may
+  // never have been seen (worker stderr is relayed through what was, by definition, a blocked main loop).
+  // Best-effort; never gates boot.
+  try { reportAndConsumeHardShutdownWatchdogRecord(); } catch { /* best-effort; never block boot */ }
   // @decision f1366911 — gracefulShutdown is registered as a boot-safe STUB here, before any boot
   // await, and reassigned in place (further down) to the full teardown once every subsystem it closes
   // over actually exists — never re-declared, and the signal loop below must never be duplicated later.
@@ -1492,7 +1497,14 @@ async function main(): Promise<void> {
   // Card 7f9444f3 audit: this function's only two writes (the `console.log` above and the
   // `codescapeSupervisor.stop()` call) are ALREADY each individually try/catch-guarded, so a throw here
   // (EPIPE included) can never escape this function — safe as-is, no change needed for that card.
-  sessions.setShutdownCleanup(flushVaultsAndStopCodescape);
+  //
+  // Card 347b3584 round 2: this step's own hard-exit-watchdog budget, derived from versioner.ts's REAL
+  // timeout constants (never a copied number) and how many vaults THIS process actually flushes —
+  // `vaultVersioners.length` is fixed by this point in boot. Fixed once here and threaded to both call
+  // sites below (gracefulShutdown's own `step()` call, and `requestDaemonRestart`'s analogous one via
+  // `setShutdownCleanup`) so the two never drift onto different figures.
+  const flushVaultsStepBudgetMs = computeFlushVaultsStepBudgetMs(vaultVersioners.length);
+  sessions.setShutdownCleanup(flushVaultsAndStopCodescape, flushVaultsStepBudgetMs);
 
   // Vault push-status visibility (task f48ee77d): the auto-committer above is commit-only BY DESIGN —
   // pushing is a human-only trust-boundary action (git/writer.ts GitWriter.push()), never something this
@@ -1689,20 +1701,29 @@ async function main(): Promise<void> {
     // guard entirely and turned a clean stop into a phantom crash.log. Wrapping the whole body (not just
     // that one write) means the guard below always runs, and no future write/throw added to this
     // teardown sequence can reopen either hole — see graceful-teardown.ts for the full reasoning.
-    runGracefulTeardown(() => {
+    runGracefulTeardown((step) => {
+      step("writeShutdownMarker");
       writeShutdownMarker({ kind: isSignal ? "signal" : "intentional", reason, signal: isSignal ? reason : null });
       // Crash/shutdown transcript backstop: snapshot every LIVE session's engine transcript BEFORE we
       // exit. The pty onExit hook (the per-session snapshot trigger) never fires on a signal-kill, so
       // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
       // Best-effort + never-throws (snapshotAllLive swallows per-session failures); must not block exit.
+      step("snapshotAllLive");
       try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
       // Vault flush + codescape-supervisor stop: shared with `daemon_restart`'s exit path — see
       // flushVaultsAndStopCodescape's own doc above for why this is factored out and what each half does.
+      // Card 347b3584 round 2: this step gets its OWN derived budget (flushVaultsStepBudgetMs, computed
+      // once above), never the watchdog's flat per-step default — a healthy multi-minute flush must not
+      // be killed mid `git commit`.
+      step("flushVaultsAndStopCodescape", flushVaultsStepBudgetMs);
       flushVaultsAndStopCodescape();
       // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
       // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).
+      step("companionStop");
       void companionController.stop().catch(() => { /* never block the exit */ });
+      step("watchersStop");
       scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); worktreeVanishedWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop();
+      step("finalLog");
       console.log(`[shutdown] graceful stop (${reason})`);
     }, () => process.exit(0)); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
     // Gate-aware exit (board card 5a7692a4): this path used to `process.exit(0)` unconditionally, with

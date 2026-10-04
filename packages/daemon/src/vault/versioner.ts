@@ -41,13 +41,18 @@ function escapeRegExp(s: string): string {
 
 /** @decision 509716cc — never leave a new plumbing-tier git call in this module unbounded; route it
  *  through boundedVaultGit with this ceiling. An unbounded hang here previously blocked the whole
- *  daemon's post-restart fleet resume, invisibly (HTTP stays up). */
-const VAULT_GIT_OP_TIMEOUT_MS = 15_000;
+ *  daemon's post-restart fleet resume, invisibly (HTTP stays up).
+ *
+ *  Exported (card 347b3584 round 2) so graceful-teardown.ts can DERIVE its own shutdown-cleanup step
+ *  budget from this real bound rather than copying the number. */
+export const VAULT_GIT_OP_TIMEOUT_MS = 15_000;
 
 /** @decision 816f0056 — never tighten this ceiling to match VAULT_GIT_OP_TIMEOUT_MS or git checkout's
  *  15s bound — the goal is "no infinite hang," not "fail fast"; a tight bound converts a slow-but-working
- *  flush into a guaranteed, silent commit-drop (sized off a measured ~11.6s git add -A on a 20k-file vault). */
-const VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS = 5 * 60_000;
+ *  flush into a guaranteed, silent commit-drop (sized off a measured ~11.6s git add -A on a 20k-file vault).
+ *
+ *  Exported (card 347b3584 round 2) — see VAULT_GIT_OP_TIMEOUT_MS's own doc just above for why. */
+export const VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS = 5 * 60_000;
 
 /**
  * `maxBuffer` for all three of `flushSync`'s `execSync` calls (card 816f0056 review round 2, finding 1).

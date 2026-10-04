@@ -63,6 +63,7 @@ import { resolveCodescapeLastIngested } from "../codescape/manifest.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
 import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult, type RequestDaemonRestartResult } from "../orchestration/restart.js";
+import { armHardShutdownWatchdog, GRACEFUL_TEARDOWN_HARD_EXIT_MS } from "../graceful-teardown.js";
 import { currentDeployStaleness } from "../served-status.js";
 import { advisoryBuildStamp, type DeployStalenessResult } from "../deploy-staleness.js";
 import { computeWakeImpact } from "../orchestration/wake-impact.js";
@@ -2723,9 +2724,14 @@ export class SessionService {
    * `process.exit()` emits no signal). Set post-construction via {@link setShutdownCleanup} — index.ts
    * wires it up once `vaultVersioners` is ready, which is AFTER `SessionService` is constructed — rather
    * than threaded through the constructor `opts` like `codescape` above. `undefined` until then (and in
-   * every existing test constructor) ⇒ `this.shutdownCleanup?.()`, never a bare call.
+   * every existing test constructor) ⇒ `this.shutdownCleanup?.run()`, never a bare call.
+   *
+   * `flushVaultsStepBudgetMs` (card 347b3584 round 2) is this SAME cleanup's own hard-exit-watchdog step
+   * budget, carried alongside `run` so this path's `watchdog.step("flushVaultsAndStopCodescape", …)` call
+   * (below) can use the IDENTICAL derived figure `gracefulShutdown`'s own call to that step uses — never
+   * a second, independently-computed copy that could drift from it.
    */
-  private shutdownCleanup: (() => void) | undefined;
+  private shutdownCleanup: { run: () => void; flushVaultsStepBudgetMs: number } | undefined;
   /**
    * Card 8e84e4a6: process-wide single-flight for {@link requestDaemonRestart}'s build-and-exit
    * sequence. Two overlapping calls (two managers, Lead + manager, or an MCP client retrying mid-build)
@@ -2800,10 +2806,12 @@ export class SessionService {
    * Card d671f1b8 — register the shared vault-flush + codescape-stop cleanup (see the field doc above),
    * so {@link requestDaemonRestart} can run it. Called once at boot from index.ts, after `vaultVersioners`
    * is ready; a test that wants the restart path's cleanup call observable can call this directly with a
-   * fake instead of threading a real vault versioner through.
+   * fake instead of threading a real vault versioner through. `flushVaultsStepBudgetMs` (card 347b3584
+   * round 2) defaults to the watchdog's own flat per-step default — real boot always passes its derived
+   * figure explicitly; the default here only keeps every existing test call (one arg) unchanged.
    */
-  setShutdownCleanup(fn: () => void): void {
-    this.shutdownCleanup = fn;
+  setShutdownCleanup(fn: () => void, flushVaultsStepBudgetMs: number = GRACEFUL_TEARDOWN_HARD_EXIT_MS): void {
+    this.shutdownCleanup = { run: fn, flushVaultsStepBudgetMs };
   }
 
   // @decision 0e4a859a — MUST stay presence-gated on purpose (codescape is a private product), mirroring
@@ -4316,7 +4324,11 @@ export class SessionService {
   // git flush itself takes
   async requestDaemonRestart(
     callerSessionId: string, reason: string,
-    deps: { buildDeps?: BuildDeps; exit?: (code: number) => void; mergeDangerGraceMs?: number; isSupervisorAlive?: () => Promise<SupervisorLivenessResult> } = {},
+    deps: {
+      buildDeps?: BuildDeps; exit?: (code: number) => void; mergeDangerGraceMs?: number; isSupervisorAlive?: () => Promise<SupervisorLivenessResult>;
+      /** TEST SEAM (card 347b3584): swap the real worker_threads-backed watchdog for a fake/short one. */
+      armHardShutdownWatchdog?: typeof armHardShutdownWatchdog; watchdogHardExitMs?: number;
+    } = {},
   ): Promise<RequestDaemonRestartResult> {
     const caller = this.db.getSession(callerSessionId);
     if (!caller || (caller.role !== "manager" && caller.role !== "platform")) {
@@ -4536,8 +4548,15 @@ export class SessionService {
     // future edit to the registered cleanup can't turn a restart into a non-relaunching crash" true by
     // construction, matching the reasoning flushVaultsAndStopCodescape's own doc already gives for why
     // ITS internal codescapeSupervisor.stop() call is guarded the same way.
+    // @decision 347b3584 — this does NOT go through runGracefulTeardown (see that card's own record):
+    // it shares only `cleanup` with gracefulShutdown, so it needs its OWN hard-exit watchdog arm, with
+    // RESTART_EXIT_CODE as the intended code — never assume gracefulShutdown's own arm covers this path.
     setTimeout(() => {
-      try { cleanup?.(); } catch { /* never block the restart exit */ }
+      const watchdog = (deps.armHardShutdownWatchdog ?? armHardShutdownWatchdog)({
+        hardExitMs: deps.watchdogHardExitMs, intendedExitCode: RESTART_EXIT_CODE, label: "daemon_restart",
+      });
+      try { watchdog.step("flushVaultsAndStopCodescape", cleanup?.flushVaultsStepBudgetMs); cleanup?.run(); } catch { /* never block the restart exit */ }
+      watchdog.disarm();
       exit(RESTART_EXIT_CODE);
       // Card 8e84e4a6 Code Review MINOR 1: the single-flight lock stays LATCHED (see the clearing logic
       // below `attempt`'s own closing `})()`) until the point the exit has actually been INVOKED, not
