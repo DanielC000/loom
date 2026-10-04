@@ -28,6 +28,7 @@ import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
+import { waitUntil } from "./_wait.mjs";
 
 const TMP = mkdtempManaged("loom-ws-close-reason-");
 process.env.LOOM_HOME = TMP;
@@ -186,8 +187,10 @@ try {
     // attached after injectWS resolves can miss the frame entirely (project memory: injectws-first-frame-needs-oninit).
     const onInit = (ws) => { ws.on("close", (code, reason) => { closeInfo = { code, reason: reason?.toString() ?? "" }; }); };
     await app.injectWS(`/ws/term/${SHELL_ID}`, { headers, socket: REMOTE }, { onInit });
-    const end = Date.now() + 2000;
-    while (closeInfo === null && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+    // The shared poll helper, not a fixed sleep: it returns the instant the frame lands and its expiry is
+    // a diagnostic, so the assertions below read the captured event rather than a timer's say-so.
+    try { await waitUntil(() => closeInfo !== null, { timeoutMs: 2000, label: "shell refusal close frame" }); }
+    catch { /* the checks below report it; a throw here would hide the other producers' results */ }
 
     check("(5) shell refusal: the remote socket was closed", closeInfo !== null);
     eq("(5) shell refusal: close CODE", closeInfo?.code, WS_CLOSE_POLICY_VIOLATION);
@@ -217,8 +220,8 @@ try {
     };
     const sock = await app.injectWS(`/ws/term/${AGENT_ID}`, { headers, socket: REMOTE });
     sock.send(JSON.stringify({ type: "repaint" }));
-    const end = Date.now() + 2000;
-    while (!repaints.includes(AGENT_ID) && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+    try { await waitUntil(() => repaints.includes(AGENT_ID), { timeoutMs: 2000, label: "agent repaint round-trip" }); }
+    catch { /* reported by the check below */ }
     check("(6) a remote peer's AGENT terminal stays open and served (repaint round-trips)",
       repaints.includes(AGENT_ID));
     try { sock.terminate?.(); } catch { /* best effort */ }
