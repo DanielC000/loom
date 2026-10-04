@@ -8,10 +8,15 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-// LOOM_HOME may be spelled differently (a symlink, a relative path, differing case on win32) across two
-// near-simultaneous invocations that are nonetheless targeting the SAME real directory — canonicalize so
-// both resolve to the identical guard target. Handles a not-yet-existing home under a symlinked ancestor
-// too — see the decision record's "Guard key derivation under a symlinked ancestor" section.
+// LOOM_HOME may be spelled differently (a symlink, a relative path, differing case on win32, or — on
+// win32 — an 8.3 short name like `LONGNA~1` alongside its long form) across two near-simultaneous
+// invocations that are nonetheless targeting the SAME real directory — canonicalize so both resolve to
+// the identical guard target. Handles a not-yet-existing home under a symlinked ancestor too — see the
+// decision record's "Guard key derivation under a symlinked ancestor" section. Uses `realpathSync.native`
+// rather than the plain `realpathSync`: the plain JS-land implementation does NOT expand an 8.3 short
+// name (measured: it returns `LONGDI~1` byte-for-byte unchanged), so a short-named and long-named spelling
+// of the SAME home would otherwise hash to two different guard keys; the native binding resolves both to
+// the identical canonical long path (card d1c87a06).
 // @decision 4e026f35
 function canonicalLoomHome(loomHome) {
   const resolved = path.resolve(loomHome);
@@ -20,7 +25,7 @@ function canonicalLoomHome(loomHome) {
   for (;;) {
     let real;
     try {
-      real = fs.realpathSync(existing);
+      real = fs.realpathSync.native(existing);
     } catch (err) {
       if (err && err.code === "ENOENT") {
         const parent = path.dirname(existing);

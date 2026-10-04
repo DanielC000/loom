@@ -535,7 +535,7 @@ export const LOOM_HOME_WRITE_DENY_REGISTRY: readonly LoomHomeWriteDenyEntry[] = 
   { relPath: "loom.db-shm", kind: "file" }, // SQLite WAL-mode sibling of loom.db — same as above
   { relPath: "secret.key", kind: "file" },
   { relPath: "gateway-loopback.key", kind: "file" },
-  { relPath: ".env", kind: "file" }, // loaded by the repo-root scripts/daemon-supervisor.mjs (`path.join(LOOM_HOME, ".env")`, outside this package) — registered here regardless of the guard test's packages/daemon/src-only scan
+  { relPath: ".env", kind: "file" }, // loaded by the repo-root scripts/daemon-supervisor.mjs AND bin/loom.mjs (via the shared bin/lib/env-file.mjs, card d1c87a06) — both outside this package, each via `path.join(loomHome(), ".env")` — registered here regardless of the guard test's packages/daemon/src-only scan
   { relPath: ".gitignore", kind: "file" }, // defense-in-depth for secret.key (see ensureLoomHomeGitignore below) — denying this keeps an agent from quietly un-ignoring it
   { relPath: "skill-provenance.json", kind: "file" },
   { relPath: "restart-intent.json", kind: "file" },

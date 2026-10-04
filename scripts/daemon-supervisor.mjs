@@ -19,7 +19,7 @@ import path from "node:path";
 import http from "node:http";
 import { createRotatingLog } from "./lib/rotating-log.mjs";
 import { createLineTimestamper } from "./lib/line-timestamp.mjs";
-import { loadDotEnvFile, fillEnvDefaults } from "./lib/env-file.mjs";
+import { loadDotEnvFile, fillEnvDefaults } from "../bin/lib/env-file.mjs";
 import { installEpipeTolerantStdio } from "./lib/epipe-tolerant-stdio.mjs";
 import { acquireStartGuard } from "../bin/lib/start-guard.mjs";
 

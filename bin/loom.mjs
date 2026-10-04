@@ -27,6 +27,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { CHANNELS, isValidChannel, installSpecFor, readChannel, writeChannel } from "./update-config.mjs";
 import { commandLineOf, matchesRecordedEntry } from "./lib/cmdline-identity.mjs";
 import { acquireStartGuard } from "./lib/start-guard.mjs";
+import { loadDotEnvFile, fillEnvDefaults } from "./lib/env-file.mjs";
 
 // UV_THREADPOOL_SIZE (task dea6728e, defense-in-depth): the default libuv pool is only 4 threads, so a
 // small handful of wedged fs ops could starve fs/dns/crypto process-wide. `startDetached`/`loom service`
@@ -164,10 +165,32 @@ export function normalizeUrlHost(h) {
 
 function isValidPort(p) { return Number.isInteger(p) && p >= 1 && p <= 65535; }
 
-// Effective port: an explicit --port wins, else env LOOM_PORT, else the default. Validated (mirrors the
-// original bare behavior, which also errored on a bad env LOOM_PORT).
+// Card d1c87a06: `scripts/daemon-supervisor.mjs` already fills LOOM_PORT (among other flags) from
+// `<LOOM_HOME>/.env` when the real shell env doesn't set it, so `daemon:stable:detach` and `loom start
+// --detach` must resolve the SAME effective port for the SAME LOOM_HOME. Applied LAZILY (inside
+// `resolvePort`, not at module load), ONCE per process — importing this file for its pure functions
+// (parseArgs/isDirectInvocation, in cli-direct-invocation.mjs/cli-service.mjs) must stay side-effect-
+// free. `LOOM_HOME` itself is excluded (card ac3efca3): the file was LOCATED using the already-resolved
+// `loomHome()`, so a `LOOM_HOME=` line inside it can never relocate that file.
+// NOT LOOM_PORT-only: `fillEnvDefaults` fills EVERY key `.env` sets that the real shell env doesn't
+// already have, mutating `process.env` — so for the PACKAGED CLI (`loom start [--detach]`, and `loom
+// service`'s unit/plist/Task-Scheduler definition, which runs `loom start --no-open`) this is also what
+// forwards every OTHER `.env`-set flag (e.g. `LOOM_CODESCAPE_ENABLED`) to the daemon, not just the port —
+// matching what `daemon-supervisor.mjs` already did. Intentional and safe: `.env` is on
+// `LOOM_HOME_WRITE_DENY_REGISTRY` (packages/daemon/src/paths.ts), so an agent can never plant a key there.
+let loomHomeEnvFileApplied = false;
+function applyLoomHomeEnvFileOnce() {
+  if (loomHomeEnvFileApplied) return;
+  loomHomeEnvFileApplied = true;
+  fillEnvDefaults(process.env, loadDotEnvFile(path.join(loomHome(), ".env")), ["LOOM_HOME"]);
+}
+
+// Effective port: an explicit --port wins, else env LOOM_PORT (including one filled in from
+// `<LOOM_HOME>/.env`), else the default. Validated (mirrors the original bare behavior, which also
+// errored on a bad env LOOM_PORT).
 function resolvePort(explicit) {
   if (explicit !== undefined) return explicit; // already validated in parseArgs
+  applyLoomHomeEnvFileOnce();
   const p = process.env.LOOM_PORT ? Number(process.env.LOOM_PORT) : DEFAULT_PORT;
   if (!isValidPort(p)) { console.error(`loom: invalid port '${p}' (expected 1-65535)`); process.exit(2); }
   return p;

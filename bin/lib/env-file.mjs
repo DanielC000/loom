@@ -1,7 +1,14 @@
-// Small, dependency-free loader for a file-based .env, used by daemon-supervisor.mjs so an operator
-// can toggle feature flags (e.g. LOOM_CODESCAPE_ENABLED) in <LOOM_HOME>/.env and have a daemon_restart
-// (in-process, exit 75 — reuses this process's env, not a fresh shell) pick them up, instead of
-// requiring shell state + a full manual relaunch. No dotenv dependency in the tree; Node built-ins only.
+// Small, dependency-free loader for a file-based .env. Originally written for daemon-supervisor.mjs so
+// an operator can toggle feature flags (e.g. LOOM_CODESCAPE_ENABLED) in <LOOM_HOME>/.env and have a
+// daemon_restart (in-process, exit 75 — reuses this process's env, not a fresh shell) pick them up,
+// instead of requiring shell state + a full manual relaunch. Lives under `bin/lib/` (not `scripts/lib/`)
+// — same reasoning as `start-guard.mjs`'s own location — so `bin/loom.mjs` can import it too: only `bin/`
+// ships in the published `loomctl` npm package (see scripts/build-npm-package.mjs), so a helper either
+// of the published CLI's own entry points needs can't live under `scripts/`. Card d1c87a06: both
+// `bin/loom.mjs`'s `resolvePort` and `scripts/daemon-supervisor.mjs` now read `<LOOM_HOME>/.env` through
+// this SAME module, so a `LOOM_PORT` set only via that file resolves identically for `loom start --detach`
+// and `daemon:stable:detach` — and therefore compute the same start-guard (home, port) key. No dotenv
+// dependency in the tree; Node built-ins only.
 import fs from "node:fs";
 
 /**

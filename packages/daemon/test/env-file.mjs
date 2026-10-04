@@ -1,8 +1,9 @@
-// Hermetic unit test for scripts/lib/env-file.mjs (the daemon-supervisor's file-based .env loader).
+// Hermetic unit test for bin/lib/env-file.mjs (the shared file-based .env loader used by both
+// `bin/loom.mjs` and `scripts/daemon-supervisor.mjs` — card d1c87a06).
 // NO daemon, NO build — pure fs against a throwaway temp dir.
 //
-// Card 9936097b: lives under packages/daemon/test/ (not scripts/) so `test-daemon.mjs`'s hermetic
-// discovery walk picks it up automatically — no wiring edit needed anywhere. `scripts/lib/env-file.mjs`
+// Card 9936097b: lives under packages/daemon/test/ (not scripts/ or bin/) so `test-daemon.mjs`'s hermetic
+// discovery walk picks it up automatically — no wiring edit needed anywhere. `bin/lib/env-file.mjs`
 // lives outside packages/daemon, but a plain relative import across that boundary already has a
 // precedent in this same directory (see ci-gate.mjs's `../../../scripts/...` import).
 // Run directly: node packages/daemon/test/env-file.mjs
@@ -10,7 +11,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseDotEnv, loadDotEnvFile, fillEnvDefaults } from "../../../scripts/lib/env-file.mjs";
+import { parseDotEnv, loadDotEnvFile, fillEnvDefaults } from "../../../bin/lib/env-file.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
