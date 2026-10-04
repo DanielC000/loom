@@ -4307,15 +4307,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // an enormous file can't blow up memory. nosniff so the browser honours our declared Content-Type.
   // @decision 68bef69c — the CSP/Content-Disposition headers below are a trust boundary, not polish:
   // never serve these bytes without them, and never drop the application/pdf carve-out.
-  app.get("/api/projects/:id/vault/raw", async (req, reply) => {
+  // ONE shared header-building path for GET and HEAD so they can't drift (card 3c783791) — both route
+  // registrations below call this before touching the body.
+  const resolveVaultRawHeaders = (
+    req: FastifyRequest,
+    reply: FastifyReply,
+  ): { ok: true; stat: NonNullable<ReturnType<typeof statVaultFile>> } | { ok: false } => {
     const p = deps.db.getProject((req.params as { id: string }).id);
-    if (!p) return reply.code(404).send({ error: "project not found" });
-    if (!p.vaultPath) return reply.code(400).send({ error: "project has no vault" });
+    if (!p) { reply.code(404).send({ error: "project not found" }); return { ok: false }; }
+    if (!p.vaultPath) { reply.code(400).send({ error: "project has no vault" }); return { ok: false }; }
     const rel = (req.query as { path?: string }).path ?? "";
-    if (!rel) return reply.code(400).send({ error: "path required" });
+    if (!rel) { reply.code(400).send({ error: "path required" }); return { ok: false }; }
     const stat = statVaultFile(p.vaultPath, rel); // null on traversal/symlink-escape/missing/non-file
-    if (!stat) return reply.code(404).send({ error: "file not found" });
-    if (stat.size > VAULT_RAW_MAX_BYTES) return reply.code(413).send({ error: "file too large" });
+    if (!stat) { reply.code(404).send({ error: "file not found" }); return { ok: false }; }
+    if (stat.size > VAULT_RAW_MAX_BYTES) { reply.code(413).send({ error: "file too large" }); return { ok: false }; }
     const ctype = vaultFileContentType(rel);
     reply
       .header("Content-Type", ctype)
@@ -4335,7 +4340,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // Belt and braces for the one family a browser really executes: make it a download, not a
     // document, so the CSP is not the only thing between an untrusted .svg and this origin.
     if (isActiveDocumentContentType(ctype)) reply.header("Content-Disposition", "attachment");
-    return reply.send(fs.createReadStream(stat.real));
+    return { ok: true, stat };
+  };
+  // @decision 3c783791 — keep this an EXPLICIT app.head(), registered BEFORE app.get() below, and
+  // never construct a read stream here: either change silently reopens the whole-file-read-on-HEAD bug.
+  app.head("/api/projects/:id/vault/raw", async (req, reply) => {
+    const r = resolveVaultRawHeaders(req, reply);
+    if (!r.ok) return reply;
+    return reply.send();
+  });
+  app.get("/api/projects/:id/vault/raw", async (req, reply) => {
+    const r = resolveVaultRawHeaders(req, reply);
+    if (!r.ok) return reply;
+    return reply.send(fs.createReadStream(r.stat.real));
   });
 
   // Vault WRITE (HUMAN/REST + the role-gated PLATFORM exception). No loom-tasks/orchestration MCP tool
