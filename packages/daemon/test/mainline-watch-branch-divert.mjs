@@ -27,6 +27,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        (from, to) as a later divert — a same-commit checkout never moves the tip) is never clobbered.
 //   (D7) THE NUDGE TEXT for a divert names the expected/observed branch and a checkout/reset-route remedy, never
 //        the generic sha-level "git log A..B" / "bypass the merge gate" framing.
+//   (D8) Card 1b56c0a9's premise, REFUTED: a raw `update-ref` of main made WHILE a different branch is checked
+//        out, then canonical switches BACK to main before the next check, is NOT silently absorbed — the next
+//        check falls into the normal sha-compare path (branches agree again) and still reads refs/heads/main's
+//        own reflog, which still carries the bare update-ref's empty-message entry, so reflog-raw-write fires.
+//   (D9) The same scenario, compound ordering: a check runs ONCE WHILE still diverted (its own branch-diverted
+//        alert, watermark untouched) before canonical ever switches back — proving that detour doesn't swallow
+//        the raw write either. This is also the regression discriminator for the 2a6a292a bug this card's own
+//        premise assumed had returned: if the divert arm re-stamped the watermark to the stray branch (the old
+//        bug), the SECOND check here would see a branch mismatch forever and never reach reflog-raw-write.
 //
 // Run: 1) build daemon (pnpm build), 2) LOOM_CODEX_BIN=<nonexistent> node test/mainline-watch-branch-divert.mjs
 import fs from "node:fs";
@@ -239,6 +248,58 @@ try {
   check("(D7) the divert nudge gives a checkout remedy and a reset-for-rename remedy naming the real route, never the generic sha-level 'git log A..B' / 'bypass the merge gate' framing", /check out "main"/.test(nudgeTextD7) && nudgeTextD7.includes("/api/projects/:id/mainline-watermark/reset") && !/git log/.test(nudgeTextD7) && !/bypass of the merge gate/.test(nudgeTextD7));
   const nudgeTextD7boot = MW.mainlineMovedNudgeText({ branch: "stray-branch-name", repoKey: "primary", from: "a".repeat(40), to: "b".repeat(40), evidence: ["branch-diverted"], suspectShas: ["b".repeat(40)], atBoot: true, expectedBranch: "main" });
   check("(D7) atBoot wording differs (found when the daemon started) while the remedy stays the same", nudgeTextD7boot.includes("found when the daemon started") && nudgeTextD7boot.includes('"main"'));
+
+  // ── (D8) card 1b56c0a9: a raw `update-ref` of main made WHILE a DIFFERENT branch is checked out,
+  //        then canonical switches BACK to main before the next check — is this silently absorbed by
+  //        the switch (the card's own premise)? REFUTED by repro: the next check falls into the
+  //        NORMAL sha-compare path (head.branch === w.branch again) and the reflog of refs/heads/main
+  //        still carries the bare update-ref's empty-message entry, so reflog-raw-write still fires.
+  const wBeforeD8 = watermark();
+  const strayBranch5 = `mwbd-stray-rawwrite-${sfx}`;
+  git(P.repo, "checkout", "-q", "-b", strayBranch5);
+  fs.writeFileSync(path.join(P.repo, "bypass-d8.ts"), "export const bypassD8 = 1;\n");
+  git(P.repo, "add", "-A");
+  const d8TreeCommit = git(P.repo, "commit-tree", git(P.repo, "write-tree"), "-p", wBeforeD8.sha, "-m", "");
+  git(P.repo, "update-ref", MAINREF, d8TreeCommit); // the raw bypass itself — empty-message reflog entry on refs/heads/main
+  check("(D8) setup: refs/heads/main now at the bypass commit while a DIFFERENT branch is checked out", git(P.repo, "rev-parse", MAINREF) === d8TreeCommit);
+  check("(D8) setup: HEAD is still the stray branch (update-ref never touches HEAD)", canonBranch() === strayBranch5);
+  git(P.repo, "checkout", "-q", MAIN); // the switch BACK — this is the move the card claims absorbs the bypass
+  check("(D8) setup: canonical back on MAIN, now AT the bypass tip", canonBranch() === MAIN && canonHead() === d8TreeCommit);
+  git(P.repo, "branch", "-q", "-D", strayBranch5);
+  const d8Sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000, runGate: async () => PASS, reapWorktreeProcesses: noReap });
+  const countBeforeD8 = mwEvents().length;
+  const checkedTipD8 = await d8Sessions.checkMainlineMove({ projectId: P.projId, repoKey: "primary", repoPath: P.repo, managerSessionId: P.mgrId, workerSessionId: null, taskId: null });
+  const evD8 = mwEvents().slice(countBeforeD8);
+  check("(D8) checkMainlineMove returns the bypass tip (it classified the move, then stored it)", checkedTipD8 === d8TreeCommit);
+  check("(D8) THE REFUTATION: exactly ONE event fires, evidence reflog-raw-write, from the pre-bypass sha to the bypass tip — NOT silently absorbed by the switch back", evD8.length === 1 && evD8[0].detail.evidence?.join() === "reflog-raw-write" && evD8[0].detail.from === wBeforeD8.sha && evD8[0].detail.to === d8TreeCommit);
+  check("(D8) the watermark advances to the bypass tip only AFTER the alert fired (store/retain rule — not a silent heal)", watermark()?.branch === MAIN && watermark()?.sha === d8TreeCommit);
+
+  // ── (D9) COMPOUND ORDERING: a landing attempt's own check runs WHILE still diverted (files its own
+  //        branch-diverted alert, watermark untouched) BEFORE canonical ever switches back — proving
+  //        that detour doesn't swallow or interfere with catching the raw write once it does switch
+  //        back. This is the realistic ordering: Loom calls checkMainlineMove on every landing
+  //        attempt, so it is very likely to observe the divert before anyone switches back.
+  const wBeforeD9 = watermark();
+  const strayBranch6 = `mwbd-stray-rawwrite-compound-${sfx}`;
+  git(P.repo, "checkout", "-q", "-b", strayBranch6);
+  fs.writeFileSync(path.join(P.repo, "bypass-d9.ts"), "export const bypassD9 = 1;\n");
+  git(P.repo, "add", "-A");
+  const d9TreeCommit = git(P.repo, "commit-tree", git(P.repo, "write-tree"), "-p", wBeforeD9.sha, "-m", "");
+  git(P.repo, "update-ref", MAINREF, d9TreeCommit);
+  const d9Sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000, runGate: async () => PASS, reapWorktreeProcesses: noReap });
+  const countBeforeD9divert = mwEvents().length;
+  const checkedTipD9divert = await d9Sessions.checkMainlineMove({ projectId: P.projId, repoKey: "primary", repoPath: P.repo, managerSessionId: P.mgrId, workerSessionId: null, taskId: null });
+  check("(D9) setup: a check WHILE still diverted returns null (never a tip to land on)", checkedTipD9divert === null);
+  const evD9divert = mwEvents().slice(countBeforeD9divert);
+  check("(D9) setup: the divert-time check files its OWN branch-diverted alert, watermark untouched", evD9divert.length === 1 && evD9divert[0].detail.evidence?.join() === "branch-diverted" && watermark()?.sha === wBeforeD9.sha);
+  git(P.repo, "checkout", "-q", MAIN);
+  check("(D9) canonical back on MAIN, at the bypass tip", canonBranch() === MAIN && canonHead() === d9TreeCommit);
+  git(P.repo, "branch", "-q", "-D", strayBranch6);
+  const countBeforeD9 = mwEvents().length;
+  const checkedTipD9 = await d9Sessions.checkMainlineMove({ projectId: P.projId, repoKey: "primary", repoPath: P.repo, managerSessionId: P.mgrId, workerSessionId: null, taskId: null });
+  const evD9 = mwEvents().slice(countBeforeD9);
+  check("(D9) THE DISCRIMINATOR: the SECOND check, now back on MAIN, still catches the raw write (reflog-raw-write, from wBeforeD9.sha to the bypass tip) — the divert-time detour did not swallow it", checkedTipD9 === d9TreeCommit && evD9.length === 1 && evD9[0].detail.evidence?.join() === "reflog-raw-write" && evD9[0].detail.from === wBeforeD9.sha && evD9[0].detail.to === d9TreeCommit);
+  check("(D9) the watermark advances to the bypass tip only after this second alert", watermark()?.branch === MAIN && watermark()?.sha === d9TreeCommit);
 } finally {
   try { db.close(); } catch { /* already closed */ }
 }
