@@ -53,8 +53,10 @@ try {
       reapWorktreeProcesses: async (worktreePath, opts) => { reapCalls.push({ worktreePath, excludePids: opts?.excludePids ?? [] }); return { killedPids: [] }; },
     });
 
-    sessions.stopWorker(P.mgrId, P.workerId, "hard");
-    // The sweep is fire-and-forget — poll for the reap call landing instead of a blind sleep.
+    await sessions.stopWorker(P.mgrId, P.workerId, "hard");
+    // The underlying reap is still fire-and-forget (sweepWorktreeStrays never awaits it) even though
+    // stopWorker itself is now async (card 289f2607, cancelWorkerGateThenSweep) — poll for the reap call
+    // landing instead of a blind sleep.
     // TIMING-GUARD-SAFE: bounded OBSERVED poll on reapCalls, not a single fixed wait — card c976f009
     // converted the prior blind sleep(50).
     { const d = Date.now() + 2_000; while (!reapCalls.some((c) => c.worktreePath === P.worktreePath) && Date.now() < d) await sleep(5); }
@@ -99,8 +101,9 @@ try {
       reapWorktreeProcesses: async (worktreePath) => { reapCalls.push(worktreePath); return { killedPids: [] }; },
     });
 
-    const n = sessions.killAllWorkers();
-    // Fire-and-forget sweep, same as (A) — poll for both reap calls landing instead of a blind sleep.
+    const n = await sessions.killAllWorkers();
+    // The underlying reap is still fire-and-forget, same as (A) — poll for both reap calls landing
+    // instead of a blind sleep.
     // TIMING-GUARD-SAFE: poll-observes-prior-step — `n` (checked below) is captured synchronously above,
     // before this poll even starts, and the two seeded live workers (W1/W2) are the only ones that can
     // ever produce a reap call in this fixture, so observing both present IS `reapCalls.length === 2`;

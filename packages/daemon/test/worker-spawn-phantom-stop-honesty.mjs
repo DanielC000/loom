@@ -139,7 +139,7 @@ try {
   await rejects("(B) worker_spawn on the held task is rejected",
     () => svc.spawnWorker("mgr1", { taskId: taskB, agentId: "agentDev", kickoffPrompt: "GO" }), "already has a live worker");
 
-  const stopResB = svc.stopWorker("mgr1", phantomB.id, "hard");
+  const stopResB = await svc.stopWorker("mgr1", phantomB.id, "hard");
   check("(B) worker_stop reports {stopped:false} — NEVER a lying {stopped:true} — when there's no live pty",
     stopResB.stopped === false && typeof stopResB.reason === "string" && stopResB.reason.length > 0);
   check("(B) the phantom row is now reconciled to 'exited'", db.getSession(phantomB.id).processState === "exited");

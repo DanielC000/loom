@@ -987,7 +987,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.control.resume(scope ?? "global");
     return { ok: true, pausedScopes: deps.control.pausedScopes() };
   });
-  app.post("/api/orchestration/kill", async () => ({ stopped: deps.sessions.killAllWorkers() }));
+  app.post("/api/orchestration/kill", async () => ({ stopped: await deps.sessions.killAllWorkers() }));
   app.get("/api/orchestration/status", async () => ({ pausedScopes: deps.control.pausedScopes(), schedulerEnabled: deps.schedulerEnabled ?? false }));
   // --- Daemon version (Releases v1, Part 3) — the user-facing `loom` package version, read at RUNTIME
   // from the umbrella package.json (loomVersion() walks up to the `name:"loom"` package.json; NO hardcoded

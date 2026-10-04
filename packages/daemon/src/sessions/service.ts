@@ -389,6 +389,19 @@ interface RetainedWorktreeRecord {
  */
 export type GateCancelScope = { kind: "project" } | { kind: "own"; sessionId: string };
 
+/**
+ * True when `entry` is gateType `"worker"` — i.e. a worker's own `run_gate` self-check, NEVER a
+ * merge/deploy entry, even one stamped with that same `sessionId` (a solo merge confirm's descriptor
+ * carries `sessionId: workerSessionId` too). Shared by `cancelGateOp`'s `{kind:"own"}` worker-scope
+ * refusal and `cancelWorkerGateThenSweep`'s own-entries filter, so the two can never drift on what
+ * counts as "this worker's own gate op".
+ *
+ * @decision 289f2607 — gateType, not just sessionId, decides what a worker's stop may ever touch.
+ */
+function isWorkerSelfCheckGate(entry: GateSnapshotEntry): boolean {
+  return entry.gateType === "worker";
+}
+
 /** One entry in {@link SessionService.getRetainedWorktrees}'s result — a worktree Pass B of
  *  {@link SessionService.reconcileOrchestrationOnBoot} found still holding work (`worktreeHasWork`
  *  returned true) and therefore did NOT reclaim. Purely observational: nothing here feeds back into any
@@ -2432,6 +2445,12 @@ export class SessionService {
    *  settle-lineage) no longer has to block on a real ~12-16s wall-clock sleep to cross it — it sets this
    *  small and sleeps just past IT instead, at the same logical outcome. */
   private readonly syncAttachBudgetMs: number;
+  /** Card 289f2607: poll interval for {@link cancelWorkerGateThenSweep}'s bounded wait (bounded overall
+   *  by {@link gateCancelVerifyMs}, reused rather than a second duplicate knob) while it waits to see
+   *  whether a cancelled gate op actually clears {@link GateSemaphore.snapshot} before deciding whether
+   *  `stopWorker`/`killAllWorkers` may safely sweep the worker's worktree. Test-only override so a
+   *  hermetic test whose fake gate never clears doesn't have to wait out the real production interval. */
+  private readonly stopGateCancelPollMs: number;
   private readonly finalizeWorkerDeathPolls: number;
   /** Test-only override for {@link SPAWN_OP_RETAIN_MS} (mirrors `gateOpRetainMs` above) — defaults to the
    *  real production constant. A hermetic test proving a re-call AFTER the window still falls through to
@@ -2760,6 +2779,8 @@ export class SessionService {
       codescape?: CodescapeSupervisor;
       gateOpRetainMs?: number;
       gateCancelVerifyMs?: number;
+      /** TEST SEAM (card 289f2607): poll interval for `cancelWorkerGateThenSweep`'s bounded wait — see that field's own doc. */
+      stopGateCancelPollMs?: number;
       syncAttachBudgetMs?: number;
       /** TEST SEAM (card 7cd2cb11): polls (x100ms each) of the merge finalize "is the worker's pty dead yet" wait. Default 50 (~5s), unchanged in production. */
       finalizeWorkerDeathPolls?: number;
@@ -2784,6 +2805,7 @@ export class SessionService {
     this.snapshotReflogs = opts?.snapshotGateReflogs ?? snapshotGateReflogs;
     this.gateOpRetainMs = opts?.gateOpRetainMs ?? GATE_OP_RETAIN_MS;
     this.gateCancelVerifyMs = opts?.gateCancelVerifyMs ?? SessionService.DEFAULT_GATE_CANCEL_VERIFY_MS;
+    this.stopGateCancelPollMs = opts?.stopGateCancelPollMs ?? 100;
     this.syncAttachBudgetMs = opts?.syncAttachBudgetMs ?? SYNC_ATTACH_BUDGET_MS;
     this.finalizeWorkerDeathPolls = opts?.finalizeWorkerDeathPolls ?? 50;
     this.spawnOpRetainMs = opts?.spawnOpRetainMs ?? SPAWN_OP_RETAIN_MS;
@@ -5618,7 +5640,7 @@ export class SessionService {
     // OWNERSHIP SCOPE (card a0d912f5, worker surface only — see this method's own doc for why gateType is
     // part of this check, not just sessionId).
     if (restrictToOwnerSessionId) {
-      if (entry.gateType !== "worker") {
+      if (!isWorkerSelfCheckGate(entry)) {
         return { outcome: "refused", reason: "this op is a merge/deploy gate, not your own run_gate self-check — workers may only cancel their own gate op", opId: entry.opId ?? opId };
       }
       if (entry.sessionId !== restrictToOwnerSessionId) {
@@ -8910,7 +8932,7 @@ export class SessionService {
    *  this call worth recording, even when the main pty was never actually alive) and report honestly:
    *  a stale 'live' row with nothing actually running is reconciled to 'exited' right here — which is
    *  also what releases `liveSessionIdForTask`'s mutex for a phantom that predates this fix. */
-  stopWorker(managerSessionId: string, workerSessionId: string, mode: StopMode): { stopped: boolean; reason?: string } {
+  async stopWorker(managerSessionId: string, workerSessionId: string, mode: StopMode): Promise<{ stopped: boolean; reason?: string }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     const wasAlive = this.pty.isAlive(workerSessionId);
@@ -8924,20 +8946,26 @@ export class SessionService {
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "stop_worker",
     });
     this.retireWorkerSession(workerSessionId, "worker_stop");
-    this.sweepWorktreeStrays(worker);
+    await this.cancelWorkerGateThenSweep(worker);
     return wasAlive ? { stopped: true } : { stopped: false, reason: "no live pty for this session" };
   }
 
   /**
-   * Emergency kill switch (§17a): HARD-stop every live worker pty across ALL managers, then latch
-   * the global pause so nothing new spawns until an explicit resume. "Stop everything now" — the
-   * distinct sibling of pause ("stop taking on more"). onExit reconciles each pty to processState
-   * 'exited'. Returns the number of live workers we issued a hard stop to.
+   * Emergency kill switch (§17a): latch the global pause FIRST, then HARD-stop every live worker pty
+   * across ALL managers. "Stop everything now" — the distinct sibling of pause ("stop taking on more").
+   * onExit reconciles each pty to processState 'exited'. Returns the number of live workers we issued a
+   * hard stop to.
+   *
+   * @decision 289f2607 — pause latched BEFORE any await (never after), closing a cap-queue-drain race.
    */
-  killAllWorkers(): number {
-    const live = this.db.listAllSessions().filter((s) => s.role === "worker" && s.processState === "live");
-    for (const w of live) { this.pty.stop(w.id, "hard"); this.retireWorkerSession(w.id, "kill_all_workers"); this.sweepWorktreeStrays(w); }
+  async killAllWorkers(): Promise<number> {
     this.control.pause("global");
+    const live = this.db.listAllSessions().filter((s) => s.role === "worker" && s.processState === "live");
+    for (const w of live) this.pty.stop(w.id, "hard");
+    await Promise.all(live.map(async (w) => {
+      this.retireWorkerSession(w.id, "kill_all_workers");
+      await this.cancelWorkerGateThenSweep(w);
+    }));
     return live.length;
   }
 
@@ -15261,6 +15289,52 @@ export class SessionService {
   }
 
   /**
+   * @decision 289f2607 — never sweep a worker's worktree for strays without first (boundedly) cancelling
+   * any WORKER-gateType op live for that worker's own sessionId; a MERGE/DEPLOY entry (see
+   * {@link isWorkerSelfCheckGate}) is re-checked both up front AND right before the sweep, and skips it.
+   */
+  private async cancelWorkerGateThenSweep(worker: Session): Promise<void> {
+    const mine = (): GateSnapshotEntry[] => this.gateSemaphore.snapshot().entries.filter((e) => e.sessionId === worker.id);
+    // A solo merge confirm's GateDescriptor carries `sessionId: workerSessionId` too (see
+    // isWorkerSelfCheckGate's own doc) — so a bare sessionId filter would wrongly treat the worker's own
+    // MERGE/DEPLOY gate as something this stop path may cancel. It must not: a running merge/deploy
+    // ignores an external cancel signal anyway (cancelGateOp refuses that same cancel), and withdrawing a
+    // QUEUED one would silently drop the manager's own worker_merge_confirm. Skip the sweep immediately —
+    // no bounded wait — leaving any merge/deploy entry for this worker completely untouched.
+    const firstNonSelfCheck = (): GateSnapshotEntry | undefined => mine().find((e) => !isWorkerSelfCheckGate(e));
+    if (firstNonSelfCheck()) {
+      console.log(`[stop-worker] skipping worktree-stray sweep for ${worker.id} — a ${firstNonSelfCheck()?.gateType} gate op is live for this session (never cancelled by a stop)`);
+      return;
+    }
+    const ownEntries = (): GateSnapshotEntry[] => mine().filter(isWorkerSelfCheckGate);
+    const live = ownEntries();
+    if (live.length > 0) {
+      const detail = `worker ${worker.id} stopped`;
+      for (const entry of live) {
+        if (entry.phase === "running") this.gateSemaphore.cancelRunning(entry.id, detail);
+        else this.gateSemaphore.cancelQueuedForSession(worker.id, entry.gateType, entry.projectId, "manual", detail);
+      }
+      const deadline = Date.now() + this.gateCancelVerifyMs;
+      while (ownEntries().length > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, this.stopGateCancelPollMs));
+      }
+    }
+    if (ownEntries().length > 0) {
+      console.log(`[stop-worker] skipping worktree-stray sweep for ${worker.id} — a gate op is still live for this session after the bounded cancel wait (${this.gateCancelVerifyMs}ms)`);
+      return;
+    }
+    // Round 3 (card 289f2607): re-check for a non-self-check entry that may have been ENQUEUED for this
+    // session during the bounded wait above — the top-of-method check only saw a snapshot taken before
+    // the wait started, so a merge confirm queued mid-wait would otherwise slip through to the sweep.
+    const lateNonSelfCheck = firstNonSelfCheck();
+    if (lateNonSelfCheck) {
+      console.log(`[stop-worker] skipping worktree-stray sweep for ${worker.id} — a ${lateNonSelfCheck.gateType} gate op is live for this session (enqueued during the cancel wait; never cancelled by a stop)`);
+      return;
+    }
+    this.sweepWorktreeStrays(worker);
+  }
+
+  /**
    * Best-effort worktree-path-scoped process sweep for a worker being stopped (card 3564fd1e — the reap
    * gap: `stopWorker`/`killAllWorkers` used to do nothing beyond `pty.stop()`, which only kills the
    * worker's own pty tree — node-pty's conpty kill path walking _getConsoleProcessList() on Windows (not
@@ -15271,8 +15345,8 @@ export class SessionService {
    * swept on a plain stop — it lingered, un-reaped, until whatever later removed the worktree or ran a
    * gate. Excludes the worker's own live pty pid (mirrors the pre-gate sweep in confirmWorkerMerge): the
    * worktree-path reap is meant to catch OTHER strays, not race `pty.stop()`'s own kill of the worker
-   * itself (which owns that job, including honoring a "graceful" stop's shutdown window). Fire-and-forget:
-   * this must never make `stopWorker`/`killAllWorkers` async or throw.
+   * itself (which owns that job, including honoring a "graceful" stop's shutdown window). Called only via
+   * {@link cancelWorkerGateThenSweep}, never directly.
    */
   private sweepWorktreeStrays(worker: Session): void {
     const worktreePath = worker.worktreePath ?? worker.cwd;

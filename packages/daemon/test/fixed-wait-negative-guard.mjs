@@ -153,9 +153,9 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 //     the poll actually observes (wake.ts ~line 200, "claim the slot first") — so by the time the poll's
 //     condition is true, the delete has already happened even earlier in the same synchronous iteration.
 //   • worker-stop-reap.mjs ("(B) killAllWorkers reports the correct live-worker count (2, not the live
-//     manager too)"): reads `n`, captured SYNCHRONOUSLY before the poll ever starts
-//     (`const n = sessions.killAllWorkers();` runs to completion, including its own return value, before
-//     the poll's first check) — the poll doesn't race it at all, whatever it's waiting for.
+//     manager too)"): reads `n`, captured before the poll ever starts
+//     (`const n = await sessions.killAllWorkers();` runs to completion, including its own return value,
+//     before the poll's first check) — the poll doesn't race it at all, whatever it's waiting for.
 //   • worker-stop-reap.mjs ("(B) exactly two reap calls were made (the live manager was never swept)"):
 //     killAllWorkers only ever iterates the two seeded live workers (W1/W2) — there is no third live
 //     worker in this fixture for a stray reap call to come from, so `reapCalls.includes(W1.worktreePath)

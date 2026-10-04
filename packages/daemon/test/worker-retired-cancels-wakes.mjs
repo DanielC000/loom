@@ -160,7 +160,7 @@ try {
     const { wakeId } = h.wakes.schedule(wkr, { delaySeconds: 60, note: "check back" });
     check("(1 pre) wake scheduled", !!h.db.getWake(wakeId));
 
-    const res = h.sessions.stopWorker(mgr, wkr, "hard"); // hard: the fake pty's kill() fires onExit synchronously
+    const res = await h.sessions.stopWorker(mgr, wkr, "hard"); // hard: the fake pty's kill() fires onExit synchronously
     check("(1) stopWorker reports it stopped a live pty", res.stopped === true);
     check("(1) the worker's wake is CANCELLED", h.db.listWakesForSession(wkr).length === 0);
     const retired = h.db.listEventsForWorker(wkr).find((e) => e.kind === "worker_retired");
@@ -209,7 +209,7 @@ try {
     h.wakes.schedule(wkrA, { delaySeconds: 60, note: "a" });
     h.wakes.schedule(wkrB, { delaySeconds: 60, note: "b" });
 
-    const n = h.sessions.killAllWorkers();
+    const n = await h.sessions.killAllWorkers();
     check("(2) killAllWorkers reports it stopped 2 live workers", n === 2);
     check("(2) BOTH workers' wakes are cancelled", h.db.listWakesForSession(wkrA).length === 0 && h.db.listWakesForSession(wkrB).length === 0);
     check("(2) BOTH workers are marked worker_retired with reason kill_all_workers",

@@ -3594,7 +3594,7 @@ export class OrchestrationMcpRouter {
         }
         try {
           selfHealWorkerLink(workerSessionId!, "worker_stop");
-          return ok(sessions.stopWorker(managerSessionId, workerSessionId!, mode ?? "graceful"));
+          return ok(await sessions.stopWorker(managerSessionId, workerSessionId!, mode ?? "graceful"));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
