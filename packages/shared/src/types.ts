@@ -2962,7 +2962,15 @@ export interface CompanionConfigMasked {
    * itself, same as the daemon's own runtime resolution (`companion/store.ts`'s `buildConfigFromRow`).
    */
   heartbeatPrompt: string | null;
-  /** The resolved default proactive-prompt text used when `heartbeatPrompt` is unset (`DEFAULT_HEARTBEAT_PROMPT`). */
+  /**
+   * The proactive-prompt text this companion's UNSET `heartbeatPrompt` actually resolves to — NOT a fixed
+   * constant. For an `envPinned` row it is `LOOM_COMPANION_HEARTBEAT_PROMPT` (when that var is set), because
+   * the boot path writes env straight into the row; otherwise it is the built-in `DEFAULT_HEARTBEAT_PROMPT`.
+   * card e731bc77: reporting the constant for an env-pinned companion made the UI's placeholder misstate
+   * what the heartbeat would send. Treat it as the DURABLE answer (what survives a restart), which is the
+   * same horizon the `envPinned` flag below speaks to: within the current process a just-cleared override
+   * resolves to the constant until the next boot re-pins env.
+   */
   heartbeatPromptDefault: string;
   /** The proactive HOME channel target (app_meta-backed, daemon-global), or null when unset. */
   home: CompanionRoute | null;

@@ -438,7 +438,10 @@ function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault, b
   set: <K extends keyof CompanionConfigForm>(k: K, v: CompanionConfigForm[K]) => void;
   mode: "create" | "edit";
   currentToken?: string; // the masked "••••1234" for the edit-mode read-only display
-  heartbeatPromptDefault?: string; // the resolved default prompt text — shown as a placeholder, never seeded into the field (card b95e3bd0)
+  // What this companion's BLANK field actually resolves to — shown as a placeholder, never seeded into the
+  // field (card b95e3bd0). Not necessarily the built-in default: env-pinned companions report their
+  // LOOM_COMPANION_HEARTBEAT_PROMPT here (card e731bc77), so never relabel this as "the default text".
+  heartbeatPromptDefault?: string;
   // Whether the first binding has already been seeded from allowedChatId (card 72bd4322). Straight off the
   // masked config — never derived from the bindings list, which cannot tell revoked from never-seeded.
   // Undefined on create (nothing is seeded yet by definition).
@@ -496,7 +499,11 @@ function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault, b
         <div />
       </div>
 
-      <Field label="Heartbeat prompt" sub="proactive turn text · blank = default">
+      {/* "blank uses the shown default" rather than "blank = default": the placeholder is NOT always the
+          built-in constant. For an env-pinned companion it is LOOM_COMPANION_HEARTBEAT_PROMPT (card
+          e731bc77), so pointing the copy AT the rendered placeholder keeps it true either way — and the
+          env-pinned Callout above already names env as the thing that overrides this row. */}
+      <Field label="Heartbeat prompt" sub="proactive turn text · blank uses the shown default">
         <textarea value={form.heartbeatPrompt} onChange={(e) => set("heartbeatPrompt", e.target.value)}
           placeholder={heartbeatPromptDefault || "Check in — anything worth surfacing?"} rows={2} spellCheck={false}
           style={{
@@ -677,7 +684,7 @@ function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onCh
       </div>
 
       {cfg?.envPinned && (
-        <Callout tone="amber">
+        <Callout tone="amber" testId="companion-env-pinned-notice">
           <code>LOOM_COMPANION_*</code> env is set for this session — it will <strong>override</strong> these
           values on the next daemon restart. Edit the env (or unset it) to make a REST change stick.
         </Callout>
@@ -2377,10 +2384,10 @@ function DeleteCompanionSection({ companion, label, onDeleted }: { companion: Co
   );
 }
 
-function Callout({ tone, children }: { tone: "amber"; children: ReactNode }) {
+function Callout({ tone, children, testId }: { tone: "amber"; children: ReactNode; testId?: string }) {
   const c = tone === "amber" ? color.amber : color.cyan;
   return (
-    <div style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: "rgba(232,168,68,0.06)" }}>
+    <div data-testid={testId} style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: "rgba(232,168,68,0.06)" }}>
       <span aria-hidden style={{ color: c }}>▲</span>
       <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, lineHeight: 1.5 }}>{children}</span>
     </div>

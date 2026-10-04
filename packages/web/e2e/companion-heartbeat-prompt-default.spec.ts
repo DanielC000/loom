@@ -88,3 +88,85 @@ test("Manage tab: an unrelated save never pins the default heartbeat prompt as a
   const postBody = await postSave.json();
   expect(postBody.heartbeatPrompt).toBeNull();
 });
+// ── card e731bc77: the placeholder is the SERVER's resolved default, never a hardcoded constant ──────
+//
+// THE PRE-EXISTING DEFECT (daemon-side, fixed in `maskCompanionConfig`): `heartbeatPromptDefault` reported
+// the built-in `DEFAULT_HEARTBEAT_PROMPT` even for an env-pinned companion, whose unset override actually
+// resolves to `LOOM_COMPANION_HEARTBEAT_PROMPT` (the boot path writes env straight into the row). So the
+// Manage form's placeholder misstated what the heartbeat would send.
+//
+// ⚠️ WHAT THIS SPEC DOES AND DOES NOT PROVE — read before trusting it as the card's evidence:
+//   • It PROVES the web contract: the placeholder renders whatever `heartbeatPromptDefault` carries,
+//     verbatim, and the env-pinned Callout rides alongside it. A future refactor that re-hardcodes the
+//     default text into the component fails here. That is the regression this leg exists to lock.
+//   • It does NOT prove the daemon resolves env — the env-pinned read below is FABRICATED via
+//     `page.route`, because `envPinned` requires LOOM_COMPANION_* in the DAEMON's own env naming a
+//     pre-existing session id, which the shared worker fixture cannot seed (and which would arm a real
+//     Telegram long-poll). That half belongs to `packages/daemon/test/companion-config.mjs`, which pins
+//     all four arms of the resolution and was shown RED against pre-fix `store.ts`.
+//   • The web needed NO code change for the value itself (b95e3bd0 already wired the placeholder to the
+//     server field) — only the field's sub-label, which said "blank = default" and now points at the
+//     rendered placeholder instead, since that text is no longer always the built-in default.
+//
+// BOTH POLARITIES, SAME ELEMENT, SAME SESSION: the real (not env-pinned) daemon read first — placeholder
+// IS the built-in constant and no Callout — then the same textarea under the env-pinned read. A
+// one-polarity check would pass on a component that ignored the server value entirely.
+test("Manage tab: the heartbeat-prompt placeholder follows the server's resolved default, env-pinned included", async ({ page, loomDaemon }) => {
+  const name = `Ada-${randomUUID().slice(0, 8)}`;
+  const companion = await loomDaemon.seedCompanion({ name });
+  seededConfigSessionIds.push(companion.sessionId);
+
+  const ENV_PROMPT = `Env-pinned check-in ${randomUUID().slice(0, 8)}: only ping me about the deploy.`;
+  const openEditor = async () => {
+    await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+    const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+    if (await pickerBtn.count()) {
+      await pickerBtn.click();
+      await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
+    }
+    await page.getByRole("tab", { name: "Manage" }).click();
+    const section = page.locator("section").filter({ hasText: "Run configuration" });
+    await section.getByRole("button", { name: "Edit" }).click();
+    return section;
+  };
+
+  // ── BEFORE: the REAL daemon read. Not env-pinned, so the resolved default IS the built-in constant. ──
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+  const plainSection = await openEditor();
+  const plainPrompt = plainSection.locator("textarea");
+  await expect(plainPrompt).toHaveValue(""); // still unset — the placeholder is the only default surface
+  await expect(plainPrompt).toHaveAttribute("placeholder", /Proactive check-in/);
+  await expect(plainPrompt).not.toHaveAttribute("placeholder", ENV_PROMPT);
+  // The sub-label points AT the placeholder rather than naming "the default" (card e731bc77 copy).
+  await expect(plainSection.getByText("proactive turn text · blank uses the shown default")).toBeVisible();
+  await expect(plainSection.getByTestId("companion-env-pinned-notice")).toHaveCount(0);
+
+  // ── AFTER: the SAME companion read back as env-pinned. Patch only OUR row in the real list response —
+  // every other companion on the shared worker daemon is passed through untouched, and the FIXTURE
+  // IDENTITY is asserted inside the handler (our sessionId must be present, or the leg is meaningless).
+  let patchedOurRow = false;
+  await page.route(
+    (url) => url.pathname === "/api/companion/config",
+    async (route) => {
+      const res = await route.fetch();
+      const rows = await res.json();
+      const ours = rows.filter((r: { sessionId: string }) => r.sessionId === companion.sessionId);
+      expect(ours).toHaveLength(1); // fixture identity: we are patching OUR seeded companion, not a sibling's
+      expect(ours[0].heartbeatPrompt).toBeNull(); // still inheriting — the state the default field describes
+      ours[0].envPinned = true;
+      ours[0].heartbeatPromptDefault = ENV_PROMPT;
+      patchedOurRow = true;
+      await route.fulfill({ response: res, json: rows });
+    },
+  );
+
+  await page.reload();
+  const envSection = await openEditor();
+  expect(patchedOurRow).toBe(true); // the override really served this render (not a cached pre-route read)
+  const envPrompt = envSection.locator("textarea");
+  await expect(envPrompt).toHaveValue(""); // unchanged: a default is shown, never seeded into the field
+  await expect(envPrompt).toHaveAttribute("placeholder", ENV_PROMPT);
+  await expect(envPrompt).not.toHaveAttribute("placeholder", /Proactive check-in/);
+  // ...and the env-pinned Callout is what tells the human WHERE that unfamiliar placeholder comes from.
+  await expect(envSection.getByTestId("companion-env-pinned-notice")).toContainText("override");
+});

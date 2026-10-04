@@ -420,7 +420,13 @@ export function maskCompanionConfig(
       tokenLast4 = ""; // corrupt/undecryptable blob — never leak, never throw
     }
   }
-  const envPinned = !!env && readCompanionConfig(env)?.sessionId === row.sessionId;
+  // ONE env resolve serves both `envPinned` and `heartbeatPromptDefault` below — and it is deliberately
+  // `readCompanionConfig`, the SAME resolver the boot path feeds its row write from, not a re-derivation of
+  // the `LOOM_COMPANION_HEARTBEAT_PROMPT || DEFAULT` precedence. That matters for the half-configured case:
+  // env carrying ONLY a heartbeat prompt (no token/chat/session) resolves to null here, so it pins nothing
+  // and reports nothing — exactly as the boot path treats it.
+  const envCfg = env ? readCompanionConfig(env) : null;
+  const envPinned = !!envCfg && envCfg.sessionId === row.sessionId;
   return {
     sessionId: row.sessionId,
     configured: true,
@@ -440,7 +446,17 @@ export function maskCompanionConfig(
     // text as a permanent override. heartbeatPromptDefault lets the caller render/apply the default
     // without destroying the stored-vs-default distinction.
     heartbeatPrompt: row.heartbeatPrompt,
-    heartbeatPromptDefault: DEFAULT_HEARTBEAT_PROMPT,
+    // card e731bc77: report what UNSET actually resolves to for THIS companion, not the bare constant. For
+    // an env-pinned row, `LOOM_COMPANION_HEARTBEAT_PROMPT` is what the boot path writes into the row
+    // (`resolveAllCompanionConfigs`), so a cleared override is re-pinned to the env text on the next start
+    // — reporting the constant there made the UI's placeholder misstate what the heartbeat will send.
+    // `envCfg.heartbeatPrompt` is already env-or-constant, so an env-pinned row with no prompt var set
+    // still reports the constant. ⚠️ SCOPE: this is the DURABLE answer, which the `envPinned` callout the
+    // UI already renders also speaks to. Within the CURRENT process a REST-cleared override resolves to the
+    // constant instead — the hot reconcile runs `resolveAllEnabledConfigs` (no env bootstrap), so the env
+    // text only re-lands at boot. Don't "fix" that divergence here: it belongs to env precedence, not to
+    // this masking edge.
+    heartbeatPromptDefault: envPinned ? envCfg.heartbeatPrompt : DEFAULT_HEARTBEAT_PROMPT,
     home,
     enabled: row.enabled,
     envPinned,

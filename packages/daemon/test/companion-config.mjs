@@ -142,6 +142,30 @@ try {
     check("masked: envPinned TRUE when env config targets this row's sessionId (env would override on next boot)", maskCompanionConfig(row, db.getCompanionHome("sess-1"), envMatch).envPinned === true);
     const envOther = { LOOM_COMPANION_BOT_TOKEN: "t", LOOM_COMPANION_CHAT_ID: "c", LOOM_COMPANION_SESSION_ID: "other-sess" };
     check("masked: envPinned FALSE when env targets a DIFFERENT session", maskCompanionConfig(row, db.getCompanionHome("sess-1"), envOther).envPinned === false);
+    // card e731bc77: heartbeatPromptDefault must report what an UNSET override actually resolves to for
+    // THIS companion, not the bare constant. The boot path writes LOOM_COMPANION_HEARTBEAT_PROMPT straight
+    // into the row (resolveAllCompanionConfigs), so for an env-pinned companion a cleared override is
+    // re-pinned to the env text on the next start — reporting DEFAULT_HEARTBEAT_PROMPT there made the UI
+    // placeholder misstate what the heartbeat would send. These five pin each arm of that resolution.
+    const ENV_PROMPT = "Env-pinned check-in: only ping me about the deploy.";
+    const envWithPrompt = { ...envMatch, LOOM_COMPANION_HEARTBEAT_PROMPT: ENV_PROMPT };
+    const maskedEnvPrompt = maskCompanionConfig(row, db.getCompanionHome("sess-1"), envWithPrompt);
+    check("masked: heartbeatPromptDefault is the ENV prompt when env-pinned AND LOOM_COMPANION_HEARTBEAT_PROMPT is set",
+      maskedEnvPrompt.heartbeatPromptDefault === ENV_PROMPT && maskedEnvPrompt.envPinned === true);
+    check("masked: the env-pinned default did NOT also become a stored override (heartbeatPrompt stays raw null)",
+      maskedEnvPrompt.heartbeatPrompt === null);
+    // env pins this session but sets NO prompt var ⇒ still the built-in constant (readCompanionConfig
+    // resolves env-or-constant itself, so this arm needs no separate branch in the masking edge).
+    check("masked: heartbeatPromptDefault falls back to the constant when env pins this session but sets no prompt",
+      maskCompanionConfig(row, db.getCompanionHome("sess-1"), envMatch).heartbeatPromptDefault === DEFAULT_HEARTBEAT_PROMPT);
+    // An env prompt aimed at a DIFFERENT session must never leak into this row's reported default.
+    check("masked: an env prompt for ANOTHER session never leaks into this row's default",
+      maskCompanionConfig(row, db.getCompanionHome("sess-1"), { ...envOther, LOOM_COMPANION_HEARTBEAT_PROMPT: ENV_PROMPT }).heartbeatPromptDefault === DEFAULT_HEARTBEAT_PROMPT);
+    // HALF-CONFIGURED env (a prompt var but no token/chat/session) boots no companion at all —
+    // readCompanionConfig returns null — so it must pin nothing and report nothing. This arm is the reason
+    // the masking edge routes through that resolver instead of reading the env var directly.
+    check("masked: a prompt var with no token/chat/session pins nothing (half-configured env is never a companion)",
+      maskCompanionConfig(row, db.getCompanionHome("sess-1"), { LOOM_COMPANION_HEARTBEAT_PROMPT: ENV_PROMPT }).heartbeatPromptDefault === DEFAULT_HEARTBEAT_PROMPT);
     // bindingsSeeded (card 72bd4322): the masked read must CARRY it, because the human UI cannot derive it.
     // `allowedChatId` seeds the FIRST binding only (factory.ts's `!cfg.bindingsSeeded` guard, card
     // a8480338); afterwards editing it never re-binds. The UI can infer "seeded" from a NON-EMPTY bindings
