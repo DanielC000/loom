@@ -66,7 +66,7 @@ export const MTIME_SKEW_TOLERANCE_MS = Number(process.env.LOOM_CODEX_MTIME_SKEW_
 
 /** Bounded cache mirroring `claude-transcript.ts#resolvedPathCache` — a repeat lookup for an id already
  *  found by the recursive scan below skips rescanning the whole dated tree. */
-const RESOLVED_PATH_CACHE_MAX = 500;
+export const RESOLVED_PATH_CACHE_MAX = 500;
 const resolvedPathCache = new Map<string, string>();
 function rememberResolvedPath(conversationId: string, filePath: string): void {
   resolvedPathCache.delete(conversationId);
@@ -118,7 +118,14 @@ function scanForConversationId(root: string, conversationId: string): string | n
 export function resolveTranscriptFile(_cwd: string, conversationId: string): string | null {
   const cachedHit = resolvedPathCache.get(conversationId);
   if (cachedHit !== undefined) {
-    if (fs.existsSync(cachedHit)) return cachedHit;
+    if (fs.existsSync(cachedHit)) {
+      // Card 5b7884c4: a hit must refresh recency (delete + re-set, same as a fresh insert below) or
+      // this degenerates into insertion-order FIFO — an id resolved on every spawn would still get
+      // evicted on schedule just because something else was inserted after it, never because it went
+      // cold. Mirrors card 677379ad's identical fix to sessionMetaCache.
+      rememberResolvedPath(conversationId, cachedHit);
+      return cachedHit;
+    }
     resolvedPathCache.delete(conversationId);
   }
   const found =
