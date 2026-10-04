@@ -90,15 +90,24 @@ check("viewSource: a scriptable image is carried as a data: URL (opaque origin),
   }
 });
 
-check("viewSource: NO source is ever both same-origin AND scriptable — the invariant, swept over every type", () => {
-  // The property the two functions above exist to guarantee, asserted directly rather than inferred from
-  // them: for every type, `kind === "blob"` (same-origin) implies the minted type is not scriptable.
+check("viewSource: a same-origin blob is NEVER minted with a type other than the three this module allows — not merely 'not a scriptable image/*+xml', which a regression could satisfy by accident", () => {
+  // `isScriptableImageType` recognises exactly ONE scriptable family (image/*+xml). Asserting a same-origin
+  // blob's type against ONLY that predicate would pass a regression where `viewBlobType`'s fail-closed
+  // fallback returned something else scriptable — e.g. "text/html" — since text/html is not image/*+xml and
+  // so reads as "not scriptable" to that narrow check, while a navigated text/html document executes a
+  // <script> exactly like a navigated SVG does. Assert the POSITIVE allowlist instead: the only types this
+  // module ever mints for a same-origin blob are a non-+xml image/* (viewBlobType), application/pdf
+  // (viewBlobType), or DOWNLOAD_BLOB_TYPE (the fail-closed fallback, and the only type a download ever
+  // gets) — anything else failing this is itself the bug, however it got minted.
+  const isAllowedSameOriginBlobType = (type) =>
+    type === V.DOWNLOAD_BLOB_TYPE || type === "application/pdf" ||
+    (typeof type === "string" && type.startsWith("image/") && !type.endsWith("+xml"));
   for (const t of ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/svg+xml",
     "IMAGE/SVG+XML", "image/svg+xml; charset=utf-8", "image/anything+xml", "application/pdf", "text/html",
     "text/xml", "application/xml", "application/xhtml+xml", "application/javascript", "text/plain",
     "image-ish/svg+xml", "application/octet-stream", "", null, undefined]) {
     const s = V.viewSource(t);
-    if (s.kind === "blob") assert.equal(V.isScriptableImageType(s.type), false, `same-origin blob of a scriptable type: ${String(t)}`);
+    if (s.kind === "blob") assert.ok(isAllowedSameOriginBlobType(s.type), `same-origin blob minted an unexpected type ${JSON.stringify(s.type)} for input ${String(t)}`);
   }
 });
 

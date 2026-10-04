@@ -86,8 +86,10 @@ export function viewBlobType(contentType: string | null | undefined): string {
  *   ever minted with a type `viewBlobType` has already cleared as non-scriptable.
  * - `data` — a `data:` URL, used for exactly the types `blob` must refuse. A `data:` URL has no origin
  *   to inherit: navigating to one yields an OPAQUE origin with no access to the app origin's
- *   `localStorage` (where the gateway token lives), and Chrome blocks top-level `data:` navigation
- *   outright, so both of 68bef69c's server-side defences have a client-side equivalent again.
+ *   `localStorage` (where the gateway token lives) — that opaque origin, not any navigation block, is
+ *   the load-bearing defence. Chrome additionally blocks a RENDERER-initiated top-level `data:`
+ *   navigation (a link click, `window.location`), but a BROWSER-initiated one (the address bar,
+ *   `page.goto` in a test) still proceeds, so the nav block alone must never be treated as sufficient.
  */
 export type VaultViewSource = { kind: "blob" | "data"; type: string };
 export function viewSource(contentType: string | null | undefined): VaultViewSource {

@@ -33,15 +33,17 @@ type AssetState =
   | { status: "error"; url: null; message: string };
 
 /**
- * Resolve a vault path to something a browser can load. `purpose` picks how the bytes are carried:
- * `"view"` asks `viewSource` (a renderable object URL for `<img>`/`<object>`, a `data:` URL for the
- * scriptable image types that must not get one), `"download"` always forces an inert
- * `application/octet-stream` object URL so it can never be navigated into a scriptable document.
+ * Resolve a vault path to something a browser can load, via `viewSource` — a renderable object URL for
+ * `<img>`/`<object>`, or a `data:` URL for the scriptable image types that must not get one.
+ *
+ * (There is no `"download"` purpose here: `VaultDownloadLink` below mints its own inert
+ * `application/octet-stream` blob directly rather than going through this hook — a download is a one-shot
+ * action on click, not a reactive resource a render needs to hold, fetch on mount, and revoke on unmount.)
  *
  * On a `direct` mode (loopback) this never fetches at all — it resolves synchronously to the raw URL on the
  * first render, so the loopback path keeps the browser's own streaming/range-request behaviour.
  */
-export function useVaultAsset(projectId: string, path: string, purpose: "view" | "download" = "view"): AssetState {
+export function useVaultAsset(projectId: string, path: string, purpose: "view" = "view"): AssetState {
   const mode = vaultAssetMode(isRemoteOrigin());
   const direct = mode === "direct" ? api.vaultRawUrl(projectId, path) : null;
   const [state, setState] = useState<AssetState>(
@@ -60,9 +62,7 @@ export function useVaultAsset(projectId: string, path: string, purpose: "view" |
     setState({ status: "loading", url: null });
     void api.vaultRawBlob(projectId, path)
       .then(async ({ blob, contentType }) => {
-        const source = purpose === "download"
-          ? { kind: "blob" as const, type: DOWNLOAD_BLOB_TYPE }
-          : viewSource(contentType);
+        const source = viewSource(contentType);
         const typed = new Blob([blob], { type: source.type });
         if (source.kind === "data") {
           // A `data:` URL rather than a same-origin object URL, because these bytes ARE a scriptable
@@ -88,7 +88,7 @@ export function useVaultAsset(projectId: string, path: string, purpose: "view" |
       live = false;
       if (owned.current) { URL.revokeObjectURL(owned.current); owned.current = null; }
     };
-  }, [mode, projectId, path, purpose]);
+  }, [mode, projectId, path]);
 
   return state;
 }
