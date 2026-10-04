@@ -54,6 +54,14 @@ const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const { seedSetupHome, seedSetupAuditorAgent, SETUP_PROJECT_NAME, SETUP_AGENT_NAME, SETUP_AUDITOR_AGENT_NAME } = await import("../dist/setup/seed.js");
 const { maybeAutoLaunchSetup, SETUP_FIRST_RUN_KEY } = await import("../dist/setup/first-run.js");
 
+// Card 2365cc22 made scripts/test-daemon.mjs set LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1 in EVERY test child's
+// env as a central backstop against an accidental real auto-launch. This file is the deliberate
+// exception: it exists specifically to exercise the UNSUPPRESSED auto-launch path (cases (1)/(2)/(7) and
+// more), so it must clear an inherited flag before any case runs, or those cases would see 'suppressed'
+// instead of the real outcome under test. Case (8) still manages the flag itself (set, then delete) to
+// test the SUPPRESSED path on its own terms.
+delete process.env.LOOM_SUPPRESS_FIRST_RUN_LAUNCH;
+
 const now = new Date().toISOString();
 
 // Fake pty: capture createPty (spawn) calls; no real claude, no real signals. Mirrors setup-singleton.mjs.
