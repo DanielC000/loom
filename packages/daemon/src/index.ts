@@ -17,7 +17,7 @@ import { runBootRecoveryPrefix } from "./sessions/boot-backstop.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedDefaultCapabilities, migrateGithubCapabilityToBinary } from "./capabilities/seed.js";
-import { seedPlatformHome, migratePlatformPrompts, PLATFORM_PROJECT_NAME } from "./platform/seed.js";
+import { seedPlatformHome, migratePlatformPrompts, getPlatformHomePaths } from "./platform/seed.js";
 import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js";
@@ -643,12 +643,7 @@ async function main(): Promise<void> {
     // vaultPath). When the Platform project was never seeded (LOOM_DEV off), resolves to `{repoPaths: [],
     // vaultPath: null}`, which loom-home-deny.ts treats as a no-op for every entry — unchanged from before
     // this field existed.
-    getPlatformHomePaths: () => {
-      const p = db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
-      if (!p) return { repoPaths: [], vaultPath: null };
-      const liveCwds = db.listSessionCwdsForProjectRole(p.id, "platform");
-      return { repoPaths: [...new Set([p.repoPath, ...liveCwds])], vaultPath: p.vaultPath };
-    },
+    getPlatformHomePaths: () => getPlatformHomePaths(db),
     // Card c8f855e1: advisory [loom:prompt-stale] banner on a fresh kickoff that claims "new project / empty board".
     decorateStartupPrompt: ({ projectId, role, prompt }) =>
       composePromptStaleBanner(prompt, { role, countBoardCards: () => db.countTasks(projectId) }),

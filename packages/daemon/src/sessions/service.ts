@@ -91,8 +91,8 @@ import { readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
 import { deferredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
 import { mergeConfigOverride, validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { appendTaskBodySection, checkTitleHtmlEntities } from "../mcp/tasks.js";
-import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
-import { SETUP_PROJECT_NAME } from "../setup/seed.js";
+import { resolveLivePlatformHome } from "../platform/seed.js";
+import { resolveLiveSetupHome } from "../setup/seed.js";
 import { checkPeerMessageRateLimit, checkNotifyLeadRateLimit } from "./peer-message-guard.js";
 import { planColumnLayout, setProjectConfigSafe, type DesiredColumn } from "../tasks/columns.js";
 import { resolveIdPrefix, getByIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
@@ -9987,7 +9987,7 @@ export class SessionService {
     sigLabel: string,
   ): { leadNotified: boolean; leadBoardTaskId?: string } {
     if (!isLoomDev()) return { leadNotified: false };
-    const home = this.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+    const home = resolveLivePlatformHome(this.db);
     if (!home) return { leadNotified: false };
 
     // Dedup the BOARD TASK per session id (never per timer fire/boot): a resumed session that gets stuck
@@ -10687,10 +10687,11 @@ export class SessionService {
     const caller = this.db.getSession(managerSessionId);
     if (!caller || caller.role !== "manager") throw new Error("platform_escalate is a manager-only surface");
     // HARDCODED target: the reserved Platform home — never an arbitrary projectId from the manager.
-    // NAME-SCOPED: resolve by PLATFORM_PROJECT_NAME, not a bare `.find(reserved)` — a second reserved home
-    // (the ungated "Getting Started" setup home) now coexists, so "the one reserved project" is ambiguous
-    // and would mis-file the escalation into the wrong home.
-    const home = this.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+    // MARKER-SCOPED (card 5dff8d08): resolve via resolvePlatformHome, not a bare `.find(reserved)` or a
+    // name compare — a second reserved home (the ungated "Platform" setup home) now coexists, so "the one
+    // reserved project" is ambiguous, and a name-only lookup would stop finding this home the moment a
+    // human renames it via PATCH /api/projects/:id, mis-filing or dropping the escalation.
+    const home = resolveLivePlatformHome(this.db);
     if (!home) throw new Error("no reserved Loom Platform project exists — cannot escalate");
 
     // @decision 97c2c37b — a still-open, same-title escalation is reused (never duplicated) unless its
@@ -11443,9 +11444,10 @@ export class SessionService {
     const caller = this.db.getSession(auditorSessionId);
     if (!caller || caller.role !== "auditor") throw new Error("audit_file_finding is an auditor-only surface");
     // HARDCODED target: the reserved Platform home — never an arbitrary projectId from the Auditor.
-    // NAME-SCOPED: resolve by PLATFORM_PROJECT_NAME, not a bare `.find(reserved)` — the ungated setup home
-    // ("Getting Started") is also reserved now, so the name-agnostic lookup would mis-file the finding.
-    const home = this.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+    // MARKER-SCOPED (card 5dff8d08): resolve via resolvePlatformHome, not a bare `.find(reserved)` or a
+    // name compare — the ungated "Platform" setup home is also reserved now, so a name-agnostic lookup
+    // would mis-file the finding, and a name-only one would stop resolving after a human rename.
+    const home = resolveLivePlatformHome(this.db);
     if (!home) throw new Error("no reserved Loom Platform project exists — cannot file finding");
 
     // SERVER-SIDE DEDUPE (makes the trust-boundary "dedupe-guarded" claim TRUE, mirrors suggestPresetPrompt):
@@ -11493,9 +11495,9 @@ export class SessionService {
   /**
    * END-USER Auditor improvement suggestion (loom-user-audit `audit_suggest_improvement`, End-User Platform
    * tier B3 — WRITE A) — the de-privileged, user-workspace twin of auditFileFinding. MIRRORS its shape but
-   * files to the USER'S OWN reserved home — the "Getting Started" setup home (NAME-SCOPED via
-   * getReservedProjectByName(SETUP_PROJECT_NAME)), NOT the dev "Loom Platform" home — onto its `inbox`
-   * column with an `[Auditor]` title prefix, so a suggestion lands where the user already looks. The target
+   * files to the USER'S OWN reserved home — the "Platform" setup home (MARKER-SCOPED via resolveSetupHome,
+   * card 5dff8d08), NOT the dev "Loom Platform" home — onto its `inbox` column with an `[Auditor]` title
+   * prefix, so a suggestion lands where the user already looks. The target
    * is HARDCODED server-side (the caller passes NO projectId), so this can never become a general
    * cross-project task-write and can never target Loom Platform or an arbitrary id. Caller-role check
    * (defense in depth — the tool is also workspace-auditor-gated at the router): refuses anything but a
@@ -11513,10 +11515,11 @@ export class SessionService {
   ): { taskId: string; projectId: string; deliveryStatus: DeliveryStatus } | { error: string } {
     const caller = this.db.getSession(auditorSessionId);
     if (!caller || caller.role !== "workspace-auditor") return { error: "audit_suggest_improvement is a workspace-auditor-only surface" };
-    // HARDCODED target: the user's OWN reserved "Getting Started" home — NAME-SCOPED so it is NEVER the dev
-    // "Loom Platform" home and NEVER an arbitrary caller-supplied id. Absent home ⇒ no-op safely (the
-    // surface stays alive; the suggestion is simply not filed).
-    const home = this.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    // HARDCODED target: the user's OWN reserved "Platform" setup home — MARKER-SCOPED (card 5dff8d08) so
+    // it is NEVER the dev "Loom Platform" home, NEVER an arbitrary caller-supplied id, and keeps resolving
+    // after a human rename. Absent home ⇒ no-op safely (the surface stays alive; the suggestion is simply
+    // not filed).
+    const home = resolveLiveSetupHome(this.db);
     if (!home) return { error: "no reserved \"Platform\" home exists — cannot file the suggestion" };
 
     const severity = (input.severity ?? "").trim() || "unspecified";
@@ -11585,16 +11588,17 @@ export class SessionService {
 
   /**
    * The CONFINED messaging primitive behind both workspace-auditor handoffs (board card 5eb8438a). It can
-   * reach EXACTLY ONE session: the LIVE operator of the user's OWN reserved "Getting Started" home (role
-   * "setup" — the singleton Platform operator, SETUP_AGENT_NAME — IN that home, NAME-SCOPED so it is never
-   * the dev "Loom Platform" Lead and never an arbitrary id). The caller passes NO target; this resolves it
+   * reach EXACTLY ONE session: the LIVE operator of the user's OWN reserved "Platform" setup home (role
+   * "setup" — the singleton Platform operator, SETUP_AGENT_NAME — IN that home, MARKER-SCOPED via
+   * resolveSetupHome (card 5dff8d08) so it is never the dev "Loom Platform" Lead, never an arbitrary id,
+   * and keeps resolving after a human rename). The caller passes NO target; this resolves it
    * server-side, so the auditor can never address any other session (no arbitrary cross-session messaging —
    * the load-bearing containment). Best-effort, mirroring platformEscalate's Lead nudge: returns `boarded`
    * if no home / no live operator (the suggestion cards are the durable inbox), else the live `enqueueStdin`
    * outcome classified (delivered-live | queued). NEVER throws.
    */
   private nudgeHomeOperator(note: string): DeliveryStatus {
-    const home = this.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    const home = resolveLiveSetupHome(this.db);
     if (!home) return "boarded";
     const operator = this.db
       .listAllSessions()

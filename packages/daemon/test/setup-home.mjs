@@ -493,45 +493,62 @@ try {
   // The id-collision check (`markedId !== otherId`) alone is blind here: when the OTHER home's marker was
   // NEVER stamped, otherId is undefined, and any real id string !== undefined — so a marker mis-stamped to
   // the OTHER home's row used to pass validation and be trusted. RED on a22d42ce.
+  //
+  // Card 5dff8d08 round 3 narrowed WHAT counts as rejection-worthy evidence here (see
+  // reserved-home-markers.ts's own doc + decision record): a marker is now rejected on name-adjacent
+  // grounds only when a DIFFERENT, genuinely real row matching THIS home's own name candidates exists —
+  // never merely because the mis-stamped row happens to be named like the other side. That means these
+  // (12a)/(12b) fixtures must seed the REAL home FIRST (so a genuine competing candidate actually exists),
+  // then corrupt the marker onto an unrelated fake row — reproducing a corruption of an ALREADY-SET-UP
+  // install, which is the realistic shape of this bug. Self-healing now lands back on the REAL existing
+  // home (never mints a redundant 3rd project) rather than minting a brand-new empty one beside the fake.
 
-  // (12a) setup's marker mis-stamped to the (pre-marker, unmarked) "Loom Platform" row.
+  // (12a) the REAL "Platform" setup home already exists; setup's marker is then corrupted to point at an
+  // unrelated, pre-marker (unmarked) "Loom Platform" row instead.
   const dbU = new Db(path.join(tmpHome, "marker-name-collision.db"));
   seedDefaultProfiles(dbU);
+  seedSetupHome(dbU); // the REAL setup home, correctly marked
+  const realSetupHomeU = dbU.getReservedProjectByName(SETUP_PROJECT_NAME);
+  check("(12a setup) the real setup home is seeded + correctly marked", dbU.getMeta(SETUP_HOME_PROJECT_ID_KEY) === realSetupHomeU.id);
   const preMarkerPlatId2 = "pre-marker-platform-2";
   dbU.insertProject({ id: preMarkerPlatId2, name: PLATFORM_PROJECT_NAME, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
   check("(12a) the 'Loom Platform' home exists with NO platform marker stamped yet", dbU.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === undefined);
-  dbU.setMeta(SETUP_HOME_PROJECT_ID_KEY, preMarkerPlatId2); // mis-stamp: setup's marker points at the platform home
+  dbU.setMeta(SETUP_HOME_PROJECT_ID_KEY, preMarkerPlatId2); // corrupt: setup's marker now points at the platform home
   const seededU = seedSetupHome(dbU);
-  check("(12a) seedSetupHome does NOT trust a setup marker pointing at the platform home (mints the real setup home instead of no-opping)",
-    seededU.length > 0);
-  check("(12a) exactly TWO reserved homes now (the platform home + the freshly seeded real setup home)",
+  check("(12a) seedSetupHome does NOT trust the corrupted marker, but does NOT mint a 3rd project either — the REAL home already exists, so this is a no-op",
+    seededU.length === 0);
+  check("(12a) still exactly TWO reserved homes (the real setup home + the fake platform-named orphan) — no 3rd minted",
     dbU.listAllProjects().filter((p) => p.reserved).length === 2);
   const seededAudU = seedSetupAuditorAgent(dbU);
   check("(12a) seedSetupAuditorAgent attaches the auditor to the REAL setup home", seededAudU === SETUP_AUDITOR_AGENT_NAME);
   check("(12a) the 'Loom Platform' home gets NO Workspace Auditor (or any) agent attached — not mistaken for the setup home",
     dbU.listAgents(preMarkerPlatId2).length === 0);
-  const realSetupHomeU = dbU.getReservedProjectByName(SETUP_PROJECT_NAME);
   check("(12a) the Workspace Auditor landed on the real 'Platform' setup home",
-    !!realSetupHomeU && dbU.listAgents(realSetupHomeU.id).some((a) => a.name === SETUP_AUDITOR_AGENT_NAME));
-  check("(12a) the setup marker self-heals to the real setup home's id, not the mis-stamped platform id",
-    !!realSetupHomeU && dbU.getMeta(SETUP_HOME_PROJECT_ID_KEY) === realSetupHomeU.id);
+    dbU.listAgents(realSetupHomeU.id).some((a) => a.name === SETUP_AUDITOR_AGENT_NAME));
+  check("(12a) the setup marker self-heals BACK to the real setup home's id, not the corrupted platform id",
+    dbU.getMeta(SETUP_HOME_PROJECT_ID_KEY) === realSetupHomeU.id);
   dbU.close();
 
-  // (12b) the exact mirror: platform's marker mis-stamped to the (pre-marker, unmarked) "Platform" setup row.
+  // (12b) the exact mirror: the REAL "Loom Platform" home already exists; platform's marker is then
+  // corrupted to point at an unrelated, pre-marker (unmarked) "Platform" setup row instead.
   const dbV = new Db(path.join(tmpHome, "marker-name-collision-platform.db"));
   seedDefaultProfiles(dbV);
+  seedPlatformHome(dbV); // the REAL platform home, correctly marked
+  const realPlatHomeV = dbV.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+  check("(12b setup) the real platform home is seeded + correctly marked", dbV.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === realPlatHomeV.id);
   const preMarkerSetupId2 = "pre-marker-setup-2";
   dbV.insertProject({ id: preMarkerSetupId2, name: SETUP_PROJECT_NAME, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: true });
   check("(12b) the 'Platform' setup home exists with NO setup marker stamped yet", dbV.getMeta(SETUP_HOME_PROJECT_ID_KEY) === undefined);
-  dbV.setMeta(PLATFORM_HOME_PROJECT_ID_KEY, preMarkerSetupId2); // mis-stamp: platform's marker points at the setup home
+  dbV.setMeta(PLATFORM_HOME_PROJECT_ID_KEY, preMarkerSetupId2); // corrupt: platform's marker now points at the setup home
   const seededPlatV = seedPlatformHome(dbV);
-  check("(12b) seedPlatformHome does NOT trust a platform marker pointing at the setup home (mints the real platform home instead of no-opping)",
-    seededPlatV.length > 0);
+  check("(12b) seedPlatformHome does NOT trust the corrupted marker, but does NOT mint a 3rd project either — the REAL home already exists, so this is a no-op",
+    seededPlatV.length === 0);
+  check("(12b) still exactly TWO reserved homes (the real platform home + the fake setup-named orphan) — no 3rd minted",
+    dbV.listAllProjects().filter((p) => p.reserved).length === 2);
   check("(12b) the setup home gets NO Platform Lead/Auditor agents attached — not mistaken for the platform home",
     dbV.listAgents(preMarkerSetupId2).length === 0);
-  const realPlatHomeV = dbV.getReservedProjectByName(PLATFORM_PROJECT_NAME);
-  check("(12b) the platform marker self-heals to the real platform home's id, not the mis-stamped setup id",
-    !!realPlatHomeV && dbV.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === realPlatHomeV.id);
+  check("(12b) the platform marker self-heals BACK to the real platform home's id, not the corrupted setup id",
+    dbV.getMeta(PLATFORM_HOME_PROJECT_ID_KEY) === realPlatHomeV.id);
   dbV.close();
 
   // ===================== (13) card a47dd144 ROUND 2 fix #2 — an ARCHIVED home must still count as

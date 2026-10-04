@@ -12,6 +12,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (5) THE REGRESSION FIX — with BOTH reserved homes seeded ("Getting Started" + "Loom Platform"),
 //       /api/platform/home returns "Loom Platform" (NEVER "Getting Started") and the new /api/setup/home
 //       returns "Getting Started" + its Setup Assistant agent — the name-scoped lookups never cross.
+//   (6) card 5dff8d08 — BOTH discovery routes now resolve their home via the stable marker
+//       (resolvePlatformHome/resolveSetupHome), not a raw name lookup: after a human rename of EITHER
+//       reserved home (PATCH /api/projects/:id — allowed; only repoPath rebind/archive/delete are refused
+//       for p.reserved), the route STILL resolves it (200, same project id) instead of 404ing.
 // Run: 1) build (turbo builds shared first), 2) node test/platform-home-rest.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -171,6 +175,44 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
   }
 }
 
+// ===================== (6) card 5dff8d08 — MARKER-SCOPED resolution survives a human rename =====
+// The bug this card fixes: /api/platform/home and /api/setup/home used to resolve their home with a raw
+// `db.getReservedProjectByName(...)`, which goes blind the moment a human renames the reserved project via
+// PATCH /api/projects/:id (allowed for `name` — only repoPath rebind/archive/delete are refused for
+// p.reserved). After the fix both routes resolve via the stable app_meta id marker instead.
+{
+  const db = new Db(path.join(TMP, "loom-rename.db"));
+  seedDefaultProfiles(db);
+  seedSetupHome(db);
+  seedPlatformHome(db);
+  const setupHome = db.listAllProjects().find((p) => p.reserved && p.name === SETUP_PROJECT_NAME);
+  const platHome = db.listAllProjects().find((p) => p.reserved && p.name === PLATFORM_PROJECT_NAME);
+
+  // The human rename — the exact write PATCH /api/projects/:id performs on `name`.
+  db.updateProject(setupHome.id, { name: "My Renamed Setup Home" });
+  db.updateProject(platHome.id, { name: "My Renamed Platform Home" });
+
+  const app = await buildApp(db);
+  try {
+    const plat = await app.inject({ method: "GET", url: "/api/platform/home" });
+    check("(6) GET /api/platform/home → 200 AFTER a human rename (not 404)", plat.statusCode === 200);
+    check("(6) /api/platform/home still resolves the SAME project id after the rename",
+      plat.json().project?.id === platHome.id);
+    check("(6) /api/platform/home's returned project now carries the renamed name",
+      plat.json().project?.name === "My Renamed Platform Home");
+
+    const setup = await app.inject({ method: "GET", url: "/api/setup/home" });
+    check("(6) GET /api/setup/home → 200 AFTER a human rename (not 404)", setup.statusCode === 200);
+    check("(6) /api/setup/home still resolves the SAME project id after the rename",
+      setup.json().project?.id === setupHome.id);
+    check("(6) /api/setup/home's returned project now carries the renamed name",
+      setup.json().project?.name === "My Renamed Setup Home");
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 // ===================== (3) no reserved project → 404 (both routes) =====================
 {
   const db = new Db(path.join(TMP, "loom-empty.db")); // fresh DB, NO seeds at all
@@ -189,6 +231,6 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GET /api/platform/home returns the reserved 'Loom Platform' home + its Lead/Auditor agents, the ordinary picker still hides the reserved project (no P1 regression), both discovery routes 404 rather than inventing a home when none is seeded, liveSessions surfaces LIVE sessions over recency (a stopped Lead can't mask a live one — the duplicate-singleton guard), and with BOTH reserved homes seeded the name-scoped lookups never cross: /api/platform/home → 'Loom Platform', /api/setup/home → 'Getting Started' + its Setup Assistant agent."
+  ? "\n✅ ALL PASS — GET /api/platform/home returns the reserved 'Loom Platform' home + its Lead/Auditor agents, the ordinary picker still hides the reserved project (no P1 regression), both discovery routes 404 rather than inventing a home when none is seeded, liveSessions surfaces LIVE sessions over recency (a stopped Lead can't mask a live one — the duplicate-singleton guard), with BOTH reserved homes seeded the name-scoped lookups never cross: /api/platform/home → 'Loom Platform', /api/setup/home → 'Getting Started' + its Setup Assistant agent, and (card 5dff8d08) both routes keep resolving the same home by its stable marker after a human rename instead of 404ing."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

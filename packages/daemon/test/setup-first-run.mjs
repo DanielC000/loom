@@ -5,7 +5,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // deletes all their projects). RUN-SHAPED (boot behavior) but driven HERMETICALLY: a REAL Db +
 // SessionService against a FAKE pty (createPty seam — no real claude, no network), exactly like
 // setup-singleton.mjs. The reserved "Platform" setup home + its Setup Assistant agent are seeded by the
-// REAL seedSetupHome (E1-4), so the by-name resolution is exercised end-to-end.
+// REAL seedSetupHome (E1-4), so the marker-based resolution (resolveSetupHome, card 5dff8d08) is
+// exercised end-to-end.
 //
 // Proves the DoD (all 4 cases + the two guard reasons):
 //   (1) FRESH/EMPTY install        → maybeAutoLaunchSetup launches ONCE: a 'setup' session is spawned and
@@ -22,6 +23,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //                                     attempt) but NO pty spawned; a 2nd call reads 'marker-set', not
 //                                     're-suppressed'.
 //   (9) flag unset (default)       → byte-identical to pre-flag behavior: fresh install still auto-launches.
+//   (10) card 5dff8d08             → a human rename of the reserved setup home (PATCH /api/projects/:id,
+//                                     allowed for `name`) does NOT make a fresh install read as agent-missing
+//                                     — resolveSetupHome still finds it by its stable marker.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/setup-first-run.mjs
 import fs from "node:fs";
@@ -198,11 +202,27 @@ try {
   check("(9) flag unset → fresh install still auto-launches (default OFF, additive)", r9.launched === true && typeof r9.sessionId === "string");
   check("(9) flag unset → ONE pty spawned", hostUnsuppressed.spawned.length === 1);
   dbUnsuppressed.close();
+
+  // ===== (10) card 5dff8d08 — a human rename of the reserved home does not break first-run resolution =====
+  const dbRenamed = new Db(path.join(tmpHome, "renamed.db"));
+  seedDefaultProfiles(dbRenamed);
+  seedSetupHome(dbRenamed); // seeds + backfills the stable marker (mirrors boot order)
+  const homeRenamed = dbRenamed.getReservedProjectByName(SETUP_PROJECT_NAME);
+  dbRenamed.updateProject(homeRenamed.id, { name: "My Renamed Onboarding Home" }); // the human rename
+  check("(10-pre) the home is genuinely renamed", dbRenamed.getProject(homeRenamed.id)?.name === "My Renamed Onboarding Home");
+  check("(10-pre) the OLD raw name lookup now goes blind (the bug this card fixes)",
+    dbRenamed.getReservedProjectByName(SETUP_PROJECT_NAME) === undefined);
+  const hostRenamed = new SeamHost(events);
+  const r10 = maybeAutoLaunchSetup(dbRenamed, new SessionService(dbRenamed, hostRenamed, new OrchestrationControl()));
+  check("(10) fresh install with a RENAMED home → STILL launches (not 'agent-missing')", r10.launched === true && typeof r10.sessionId === "string");
+  check("(10) the launched session is bound to the SAME (renamed) home's operator agent",
+    dbRenamed.getSession(r10.sessionId)?.agentId === dbRenamed.listAgents(homeRenamed.id).find((a) => a.name === SETUP_AGENT_NAME)?.id);
+  dbRenamed.close();
 } finally {
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — first-run auto-launch fires EXACTLY once on an empty install, stamps a daemon-global app_meta marker at launch, and never re-triggers (restart or later project-deletion); guarded by emptiness + the marker."
+  ? "\n✅ ALL PASS — first-run auto-launch fires EXACTLY once on an empty install, stamps a daemon-global app_meta marker at launch, and never re-triggers (restart or later project-deletion); guarded by emptiness + the marker; and (card 5dff8d08) a human rename of the reserved setup home never breaks the operator-agent resolution it depends on."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

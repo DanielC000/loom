@@ -574,6 +574,18 @@ try {
   check("(8b) resolvesEscalation on the taskIds batch path is REJECTED",
     typeof batchLinkRejected.error === "string" && /taskIds batch/.test(batchLinkRejected.error));
 
+  // ===================== (8c) card 5dff8d08 — resolveEscalationLink survives a human rename of pHome =====
+  // The earlier (8) call already resolved + backfilled the stable marker. Rename the reserved Platform
+  // home the way PATCH /api/projects/:id would, then confirm resolvesEscalation still resolves against it.
+  db.updateProject("pHome", { name: "My Renamed Loom Platform" });
+  check("(8c setup) the reserved Platform home is genuinely renamed", db.getProject("pHome")?.name === "My Renamed Loom Platform");
+  const esc3 = svc.platformEscalate("M", { title: "resolvesEscalation-after-rename test escalation", detail: "evidence 3", severity: "medium" });
+  check("(8c setup) a third escalation was filed (platformEscalate itself survives the rename too)", !!esc3.taskId && !esc3.error);
+  const fixCard3 = await call("project_task_create", { projectId: "pTarget", title: "fix(x): filed after the Platform home rename", resolvesEscalation: esc3.taskId });
+  check("(8c) resolvesEscalation STILL resolves against the renamed Platform home (create succeeds)", !!fixCard3.id && !fixCard3.error);
+  check("(8c) db.findEscalationTriage resolves to the new destination card after the rename",
+    db.findEscalationTriage(esc3.taskId)?.destinationTaskId === fixCard3.id);
+
   await client.close();
 
   // ===================== (3) TRUST GATE — ABSENT from every agent-facing surface =====================

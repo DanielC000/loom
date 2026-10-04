@@ -31,7 +31,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //       at the end of this file already uses). (M1) LOOM_DEV off: no-op, event-only. (M2) LOOM_DEV on,
 //       no live Lead: a durable board task still files (mirrors `platformEscalate`'s durable-first
 //       design) but no live nudge. (M3) a live, past-boot Lead: ONE enqueueStdin call to the Lead (never
-//       to the stuck manager — the self-nudge rule is unaffected) plus the board task. (M4) the Lead is
+//       to the stuck manager — the self-nudge rule is unaffected) plus the board task. (M3b) card 5dff8d08:
+//       the SAME live-Lead-nudge scenario as (M3), but AFTER a human rename of the reserved Platform home
+//       (PATCH /api/projects/:id) — notifyLeadOfStuckManager must still resolve it via the stable marker
+//       (resolveLivePlatformHome) and still file onto the SAME project id. (M4) the Lead is
 //       ITSELF live-and-pre-boot: suppress the live nudge (same hazard (D) guards for a manager parent)
 //       but the board task still files. (M5) a SECOND stuck episode for the SAME session id reuses the
 //       EXISTING board task (never a duplicate `insertTask`), while the live-nudge-to-Lead itself is NOT
@@ -297,6 +300,35 @@ try {
     // This file shares ONE `db` across every (M1)-(M5) scenario (same pattern (A)-(E) already use) — retire
     // this scenario's OWN Lead row so the NEXT scenario's `listAllSessions().find(role==="platform"&&live)`
     // lookup can never pick up a stale lead from an earlier scenario instead of its own fresh one.
+    db.setProcessState(lead, "exited");
+  }
+
+  // ===================== (M3b) card 5dff8d08 — THE SAME (M3) scenario, but the reserved Platform home =====
+  // =====================       has been renamed (the human REST rename, PATCH /api/projects/:id) between ==
+  // =====================       the marker's backfill (M2/M3 already resolved it once) and this call. ======
+  {
+    const RENAMED_HOME = "My Renamed Loom Platform";
+    db.updateProject(home, { name: RENAMED_HOME });
+    check("(M3b setup) the reserved Platform home is genuinely renamed", db.getProject(home)?.name === RENAMED_HOME);
+
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `cbdsns-m3b-mgr-${sfx}`, lead = `cbdsns-m3b-lead-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: lead, role: "platform" });
+    pty.setLive(mgr); pty.setLive(lead); pty.setPastBoot(lead);
+
+    sessions.handleClaudeBootDialogStuck(mgr, { timeoutMs: 150_000, signatureName: "external-imports", role: "manager" });
+
+    const events = db.listEventsForWorker(mgr).filter((e) => e.kind === "claude_boot_dialog_stuck");
+    check("(M3b) AFTER the rename, leadNotified is STILL true (not silently false)", events[0]?.detail?.leadNotified === true);
+    const taskId = events[0]?.detail?.leadBoardTaskId;
+    check("(M3b) a leadBoardTaskId is STILL filed", typeof taskId === "string");
+    check("(M3b) the filed task still lands on the SAME (renamed) reserved home project id",
+      typeof taskId === "string" && db.getTask(taskId)?.projectId === home);
+    const toLead = pty.enqueueCalls.filter((c) => c.id === lead);
+    check("(M3b) exactly ONE enqueueStdin call STILL reaches the Lead after the rename", toLead.length === 1);
     db.setProcessState(lead, "exited");
   }
 

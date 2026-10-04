@@ -2,10 +2,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Card 7aa0cc30: the LOOM_DEV Platform Lead's `project_update` (mcp/platform.ts) had NO `project.reserved`
 // guard at all — only `project_archive` had one. At the time, `hasReservedProjectNamed` (db.ts) found the
 // reserved home purely by NAME, so a Lead-driven RENAME via `project_update` would make the next boot's
-// seed pass miss that lookup and mint a SECOND reserved home under the original name. Card a47dd144 round
-// 2 later made the SEED lookup itself survive a rename (a stable id marker), but ~11 OTHER runtime
-// lookups (sessions/service.ts, gateway/server.ts, mcp/platform.ts) still resolve these homes by name
-// only (card 5dff8d08, not yet fixed) — the refusal below stays in place for THAT reason now.
+// seed pass miss that lookup and mint a SECOND reserved home under the original name. Card 5dff8d08 later
+// made EVERY runtime lookup across the daemon survive a rename (the stable id marker,
+// resolveLiveSetupHome/resolveLivePlatformHome), so the refusal below is no longer a correctness
+// workaround — it is kept anyway, DELIBERATELY, as a least-privilege choice: renaming a reserved home
+// stays a human-REST-only administrative action, never surfaced on this or any agent-facing tool.
 //
 // Proves the DoD:
 //   (1) renaming a RESERVED project via project_update is REFUSED, and the stored name is UNCHANGED;
@@ -118,6 +119,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Platform Lead's project_update refuses an actual NAME CHANGE on a reserved/system project (the seed pass itself now survives a rename via card a47dd144's marker, but ~11 other name-only runtime lookups don't yet — card 5dff8d08) while leaving a same-name no-op, a vaultPath/repoPath/config edit, and a non-reserved rename all unaffected."
+  ? "\n✅ ALL PASS — the Platform Lead's project_update refuses an actual NAME CHANGE on a reserved/system project — DELIBERATELY, a least-privilege choice (renaming stays human-REST-only), not because any runtime lookup would still break (card 5dff8d08 made them all survive a rename) — while leaving a same-name no-op, a vaultPath/repoPath/config edit, and a non-reserved rename all unaffected."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

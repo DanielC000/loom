@@ -334,6 +334,18 @@ try {
   check("(c2) workspaceAuditSuggest refuses a non-workspace-auditor caller (auditor) — no task, just {error}",
     typeof refusedRole.error === "string" && !refusedRole.taskId);
 
+  // (c3) card 5dff8d08 — workspaceAuditSuggest survives a human rename of the reserved setup home. The
+  // earlier (c) call already resolved + backfilled the stable marker; rename the home the way
+  // PATCH /api/projects/:id would and confirm the write still lands on the SAME project (done BEFORE the
+  // archive case below, which permanently removes pSetup from service).
+  db.updateProject("pSetup", { name: "My Renamed Setup Home" });
+  check("(c3 setup) the reserved setup home is genuinely renamed", db.getProject("pSetup")?.name === "My Renamed Setup Home");
+  const renamedCountBefore = db.listTasks("pSetup").length;
+  const afterRename = svc.workspaceAuditSuggest("WSA", { title: "suggestion filed after a home rename", detail: "evidence" });
+  check("(c3) workspaceAuditSuggest STILL resolves + files onto the SAME reserved home after the rename",
+    afterRename.projectId === "pSetup" && !afterRename.error && !!afterRename.taskId);
+  check("(c3) exactly one new task landed on the renamed home", db.listTasks("pSetup").length === renamedCountBefore + 1);
+
   // Absent-home path: ARCHIVE the "Platform" setup home (getReservedProjectByName excludes archived) so the
   // reserved home is now absent → {error}, files nothing (no throw-crash of the surface). Done last so it
   // doesn't perturb the earlier write-A assertions.

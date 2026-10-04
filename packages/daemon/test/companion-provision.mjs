@@ -14,6 +14,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      but NOT a manually-bound (provisioned:false) pre-existing session.
 //   5. MULTI-COMPANION (the old single-companion pre-spawn 409 is GONE): provisioning a 2nd companion while
 //      one is already enabled now SUCCEEDS — a distinct session spawns and arms its OWN gateway concurrently.
+//   8. Card 5dff8d08: the default-agent resolution (no explicit agentId) resolves the reserved "Platform"
+//      setup home via the stable marker (resolveSetupHome), not a raw name lookup — a human rename of the
+//      home (PATCH /api/projects/:id) must not break the default-Companion-rig provision path.
 //   7. Card a8480338 fix round (Code Review MINOR 2): a companion PROVISIONED over this REST route sets
 //      bindingsSeeded:true at write time (never through factory.ts's bootstrap-seed path) — proven both as
 //      a direct row read, AND end to end: revoke the Telegram binding, rebuild the gateway through the REAL
@@ -58,7 +61,7 @@ const { resolveAllEnabledConfigs } = await import("../dist/companion/store.js");
 const { InAppChannel, IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
 const { decryptSecret, encryptSecret } = await import("../dist/keys/envelope.js");
 const { buildServer } = await import("../dist/gateway/server.js");
-const { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME } = await import("../dist/setup/seed.js");
+const { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME, seedSetupHome } = await import("../dist/setup/seed.js");
 
 const TELEGRAM = "telegram";
 const TOKEN = "8111111111:AAprovision-token-secret";
@@ -486,6 +489,29 @@ try {
     createCompanionGateway(cfg, () => ({ delivered: true }), rig.db);
     check("(7) THE FIX: rebuilding the gateway after a revoke does NOT re-seed the REST-provisioned binding", rig.db.listCompanionBindings().filter((b) => b.sessionId === sid).length === 0);
   }
+  // ============ Part 8 — card 5dff8d08: default-agent resolution survives a human rename ============
+  // The home is seeded as SETUP_PROJECT_NAME ("Platform") by makeRig via a raw insertProject (NOT the real
+  // seedSetupHome), so — unlike production boot, where seedSetupHome always runs first and stamps the
+  // marker before any request can reach gateway/server.ts — this rig's home carries NO marker yet. Run
+  // seedSetupHome once to backfill the marker exactly like boot does (it finds the already-inserted home
+  // by name and no-ops on agents/checklist — see setup-home.mjs (8) for that backfill behavior in
+  // isolation), THEN rename — otherwise this test would exercise a home state production never produces.
+  {
+    const rig = await makeRig("p8.db"); rigs.push(rig);
+    const homeBefore = rig.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    check("(8 setup) the home starts out named SETUP_PROJECT_NAME", !!homeBefore);
+    seedSetupHome(rig.db); // backfill the stable marker onto the already-seeded home (mirrors boot order)
+    check("(8 setup) backfilling the marker did not add a 2nd agent (still just the Companion rig)",
+      rig.db.listAgents(homeBefore.id).length === 1);
+    rig.db.updateProject(homeBefore.id, { name: "My Renamed Companion Home" });
+    check("(8 setup) the home is genuinely renamed", rig.db.getProject(homeBefore.id)?.name === "My Renamed Companion Home");
+
+    const res = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("(8) default provision AFTER a home rename → 201 (not 400 'no default Companion rig is available')", res.statusCode === 201);
+    check("(8) a session was spawned on the bundled Companion agent despite the rename", rig.spawned.length === 1);
+    const sid = rig.spawned[0];
+    check("(8) the spawned session is bound to the SAME companion agent", rig.db.getSession(sid)?.agentId === rig.companionAgentId);
+  }
 } finally {
   for (const r of rigs) { try { await r.app.close(); } catch { /* ignore */ } try { r.db.close(); } catch { /* ignore */ } }
   cleanupPathSync(tmpHome);
@@ -493,6 +519,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — POST /api/companion/provision one-shot provisions a companion: a DEFAULT (no-token) provision spawns a session + config + in-app binding and arms the in-app gateway with NO Telegram adapter, a botToken provision ALSO writes the Telegram dm binding + arms the adapter (token encrypted, masked to last-4), a post-spawn write failure tears the spawned session down with no orphan, and delete retires a PROVISIONED session but leaves a manually-bound one running — human-only, claude-free."
+  ? "\n✅ ALL PASS — POST /api/companion/provision one-shot provisions a companion: a DEFAULT (no-token) provision spawns a session + config + in-app binding and arms the in-app gateway with NO Telegram adapter, a botToken provision ALSO writes the Telegram dm binding + arms the adapter (token encrypted, masked to last-4), a post-spawn write failure tears the spawned session down with no orphan, delete retires a PROVISIONED session but leaves a manually-bound one running, and (card 5dff8d08) the default-agent resolution keeps finding the Companion rig by the reserved home's stable marker after a human rename — human-only, claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

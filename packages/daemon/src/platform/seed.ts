@@ -43,9 +43,9 @@ export { PLATFORM_PROJECT_NAME };
 /**
  * The reserved platform project's display name (also the idempotency-by-presence anchor),
  * re-exported above from `projects/reserved-home-markers.ts` (card a47dd144 round 2 — moved there,
- * alongside SETUP_PROJECT_NAME/LEGACY_SETUP_PROJECT_NAME, so `resolveReservedHomeByMarker`'s collision
- * check can recognise the OTHER home's name without the two seed files importing one another; every
- * existing importer of `PLATFORM_PROJECT_NAME` from this file is unaffected).
+ * alongside SETUP_PROJECT_NAME/LEGACY_SETUP_PROJECT_NAME, so both seed files can see each other's display
+ * name without importing one another; every existing importer of `PLATFORM_PROJECT_NAME` from this file
+ * is unaffected).
  */
 
 /**
@@ -120,9 +120,18 @@ export const PLATFORM_PROMPT_REFRESH: Readonly<Record<string, { prior: string; c
 /**
  * Resolve the reserved platform home by its stable app_meta id marker (card a47dd144), falling back to
  * a NAME match for an install that pre-dates the marker — or whose marker fails validation (gone, not
- * reserved, or colliding with the setup home's own marker id OR name — round 2) — and backfilling the
- * marker the instant a name match is found. See reserved-home-markers.ts's resolveReservedHomeByMarker
+ * reserved, colliding with the setup home's own marker id, or — card 5dff8d08 — this row's name looks
+ * like the setup home's AND a DIFFERENT, LIVE platform home genuinely exists elsewhere) — and backfilling
+ * the marker the instant a name match is found. See reserved-home-markers.ts's resolveReservedHomeByMarker
  * for the shared validation logic.
+ *
+ * Module-private: used only by this file's own `migratePlatformPrompts`/`seedPlatformHome` and by
+ * `resolveLivePlatformHome` below (card 5dff8d08) — never export this again for an external call site.
+ * ARCHIVE-AGNOSTIC by design (round 2) — needed so the seeder's own idempotency gate
+ * (`if (resolvePlatformHome(db)) return [];`) treats an archived reserved home as already-seeded rather
+ * than minting a live duplicate beside it. Do NOT call this directly from a runtime (non-seeder) call
+ * site — an archived reserved project is not a valid target to act on even though its marker still
+ * resolves it; use the exported `resolveLivePlatformHome` instead.
  */
 function resolvePlatformHome(db: Db): Project | undefined {
   return resolveReservedHomeByMarker(
@@ -132,6 +141,33 @@ function resolvePlatformHome(db: Db): Project | undefined {
     [PLATFORM_PROJECT_NAME],
     [SETUP_PROJECT_NAME, LEGACY_SETUP_PROJECT_NAME],
   );
+}
+
+/**
+ * Card 5dff8d08: the LIVE-only twin of `resolvePlatformHome`, for every RUNTIME (non-seeder) call site —
+ * mirrors the pre-card `db.getReservedProjectByName`'s archive-EXCLUSIVE contract, now surviving a human
+ * rename too. An archived reserved home (unreachable via any write surface today — both
+ * `DELETE /api/projects/:id` and the Platform Lead's `project_archive` refuse a `p.reserved` project) must
+ * still read as "no home" to a runtime call site, exactly as it did before this card, rather than being
+ * treated as actionable just because its stable marker still resolves it.
+ */
+export function resolveLivePlatformHome(db: Db): Project | undefined {
+  const home = resolvePlatformHome(db);
+  return home && !home.archivedAt ? home : undefined;
+}
+
+/**
+ * Card 5dff8d08: pure extraction of index.ts's `getPlatformHomePaths` spawn-time callback body (the
+ * LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY feed — see index.ts's own doc comment on that field for the
+ * full `repoPaths`-union rationale), so it's unit-testable without booting the whole daemon. Resolves the
+ * home by `resolveLivePlatformHome` (marker-first, live-only) rather than by name, so a renamed home stays
+ * covered by the deny registry instead of silently dropping out of it.
+ */
+export function getPlatformHomePaths(db: Db): { repoPaths: string[]; vaultPath: string | null } {
+  const p = resolveLivePlatformHome(db);
+  if (!p) return { repoPaths: [], vaultPath: null };
+  const liveCwds = db.listSessionCwdsForProjectRole(p.id, "platform");
+  return { repoPaths: [...new Set([p.repoPath, ...liveCwds])], vaultPath: p.vaultPath };
 }
 
 /**

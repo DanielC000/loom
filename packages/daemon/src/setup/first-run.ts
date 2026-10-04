@@ -1,6 +1,6 @@
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
-import { SETUP_PROJECT_NAME, SETUP_AGENT_NAME } from "./seed.js";
+import { resolveLiveSetupHome, SETUP_AGENT_NAME } from "./seed.js";
 import { isFirstRunLaunchSuppressed } from "../paths.js";
 
 /**
@@ -28,9 +28,10 @@ export type FirstRunResult =
  * spawn that throws still consumes the single attempt — a fresh user gets at most one auto-launch, and
  * the always-available Setup page is the recovery path rather than a re-spawn loop on every boot.
  *
- * Resolves the reserved "Getting Started" home + its Setup Assistant agent (seeded by seedSetupHome, E1-4)
- * by name; returns {launched:false, reason:"agent-missing"} (no marker stamped) if either is absent, so a
- * misconfigured install can still auto-launch on a later boot once the seed lands.
+ * Resolves the reserved "Platform" setup home + its Setup Assistant agent (seeded by seedSetupHome, E1-4)
+ * via resolveLiveSetupHome (card 5dff8d08 — marker-first, surviving a human rename of the home, archive-
+ * excluded), not a raw name lookup; returns {launched:false, reason:"agent-missing"} (no marker stamped)
+ * if either is absent, so a misconfigured install can still auto-launch on a later boot once the seed lands.
  *
  * `LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1` (see paths.ts › isFirstRunLaunchSuppressed) pre-suppresses ONLY the
  * spawn below — the marker is still stamped exactly as today (so this attempt still counts as the one
@@ -40,7 +41,7 @@ export type FirstRunResult =
 export function maybeAutoLaunchSetup(db: Db, sessions: SessionService): FirstRunResult {
   if (db.getMeta(SETUP_FIRST_RUN_KEY)) return { launched: false, reason: "marker-set" };
   if (db.listProjects().length > 0) return { launched: false, reason: "has-projects" };
-  const home = db.getReservedProjectByName(SETUP_PROJECT_NAME);
+  const home = resolveLiveSetupHome(db);
   const agent = home ? db.listAgents(home.id).find((a) => a.name === SETUP_AGENT_NAME) : undefined;
   if (!agent) return { launched: false, reason: "agent-missing" };
   // Stamp FIRST — the exactly-once guarantee must hold even if the spawn below throws.

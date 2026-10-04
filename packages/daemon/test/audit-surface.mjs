@@ -413,6 +413,15 @@ try {
     dupB.deduped === true && dupB.taskId === dupA.taskId && dupB.projectId === "pHome");
   check("(b7) dedupe: only ONE task was actually created across the two files", db.listTasks("pHome").length === dupCountBefore + 1);
 
+  // (b8) card 5dff8d08 — audit_file_finding (auditFileFinding) survives a human rename of the reserved
+  // Platform home. The earlier (b) call already resolved + backfilled the stable marker; rename the home
+  // the same way PATCH /api/projects/:id would and confirm the finding still lands on the SAME project.
+  db.updateProject("pHome", { name: "My Renamed Loom Platform" });
+  check("(b8 setup) the reserved Platform home is genuinely renamed", db.getProject("pHome")?.name === "My Renamed Loom Platform");
+  const afterRename = await call("audit_file_finding", { title: "finding filed after a home rename", detail: "evidence", severity: "medium" });
+  check("(b8) audit_file_finding STILL resolves + files onto the SAME reserved home after the rename (not an error)",
+    afterRename.projectId === "pHome" && !afterRename.error && !!afterRename.taskId);
+
   // ============ (f) LEAST-PRIVILEGE READ-ONLY REPO TOOLS — code-awareness for the 7-lens gap-hunt ============
   // A fixture "Loom source" tree the auditor reads; LOOM_REPO_ROOT points loomRepoRoot() at it (the test
   // seam). The DoD: the reads work, SKIP node_modules, honour the glob filter, and are CONFINED to the root

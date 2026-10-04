@@ -87,8 +87,8 @@ import { cloneAgentCore, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-co
 import { resetProfileToBundled } from "../profiles/seed.js";
 import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
-import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
-import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME, seedOperatorAgent } from "../setup/seed.js";
+import { resolveLivePlatformHome } from "../platform/seed.js";
+import { resolveLiveSetupHome, COMPANION_AGENT_NAME, seedOperatorAgent } from "../setup/seed.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
@@ -1951,7 +1951,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!deps.db.getAgent(b.agentId.trim())) return reply.code(404).send({ error: "agent not found" });
       agentId = b.agentId.trim();
     } else {
-      const home = deps.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+      const home = resolveLiveSetupHome(deps.db);
       const companionAgent = home ? deps.db.listAgents(home.id).find((a) => a.name === COMPANION_AGENT_NAME) : undefined;
       if (!home || !companionAgent) return reply.code(400).send({ error: "no default Companion rig is available — pass an explicit agentId" });
       if (findEnabledAgentCollision(deps.db, companionAgent.id)) {
@@ -3877,11 +3877,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // spawn/stop/schedule controls reuse the EXISTING agent-session, stop, and schedule REST routes.
   // 404 only if no reserved home exists (impossible after boot-seed). ---
   app.get("/api/platform/home", async (_req, reply) => {
-    // NAME-SCOPED: resolve the Platform home by PLATFORM_PROJECT_NAME, NOT a bare `.find(reserved)`. A
-    // second reserved home (the ungated "Platform" setup home) now coexists, so "the one reserved project"
-    // is ambiguous and could return the setup home instead of Loom Platform (the live regression this
-    // fixes). The setup home has its own discovery route below (GET /api/setup/home).
-    const found = deps.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+    // MARKER-SCOPED (card 5dff8d08): resolve the Platform home via resolvePlatformHome, NOT a bare
+    // `.find(reserved)` or a name compare. A second reserved home (the ungated "Platform" setup home) now
+    // coexists, so "the one reserved project" is ambiguous and could return the setup home instead of Loom
+    // Platform; and a name-only lookup silently stops finding this home the moment a human renames it via
+    // PATCH /api/projects/:id. The setup home has its own discovery route below (GET /api/setup/home).
+    const found = resolveLivePlatformHome(deps.db);
     if (!found) return reply.code(404).send({ error: "no reserved Loom Platform project" });
     // Card 6bfc3bfb: redact sessionEnv on this reserved project like GET /api/projects — Platform.tsx
     // never reads config.sessionEnv back out of this response (it only reads project.reserved/name/id).
@@ -3906,15 +3907,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- Setup home discovery (Setup Assistant E1-7): the reserved "Platform" setup project + its Setup
   // Assistant agent(s), surfaced to the dedicated Setup page AND the project picker (this home is hidden
   // from GET /api/projects, so this READ-ONLY route is how the web discovers it). MIRRORS /api/platform/home
-  // but NAME-SCOPED to the SETUP home (getReservedProjectByName(SETUP_PROJECT_NAME)) — the setup home must
-  // NEVER be returned by a Platform-home lookup, nor vice-versa (distinct names: "Platform" vs "Loom
-  // Platform"). Unlike the platform home this is UNGATED (the setup home seeds for every loomctl user, no
-  // LOOM_DEV). READ-ONLY: the human attach/stop controls reuse the EXISTING agent-session + stop REST
-  // routes; the web fetches this to find + attach the Setup Assistant session (liveSessions lets it reuse an
-  // already-live one instead of minting a duplicate). 404 only if no setup home exists (impossible after
-  // boot-seed). ---
+  // but MARKER-SCOPED (card 5dff8d08) to the SETUP home via resolveSetupHome — the setup home must NEVER
+  // be returned by a Platform-home lookup, nor vice-versa, and must keep resolving even after a human
+  // renames either home via PATCH /api/projects/:id. Unlike the platform home this is UNGATED (the setup
+  // home seeds for every loomctl user, no LOOM_DEV). READ-ONLY: the human attach/stop controls reuse the
+  // EXISTING agent-session + stop REST routes; the web fetches this to find + attach the Setup Assistant
+  // session (liveSessions lets it reuse an already-live one instead of minting a duplicate). 404 only if
+  // no setup home exists (impossible after boot-seed). ---
   app.get("/api/setup/home", async (_req, reply) => {
-    const foundSetup = deps.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    const foundSetup = resolveLiveSetupHome(deps.db);
     if (!foundSetup) return reply.code(404).send({ error: "no reserved setup home" });
     // Card 6bfc3bfb: redact sessionEnv on this reserved project like GET /api/platform/home above —
     // nothing in the setup UI reads config.sessionEnv back out of this response.
