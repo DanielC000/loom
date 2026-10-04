@@ -709,7 +709,8 @@ function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onCh
             <Chip label="scope" value={cfg.chatScope} />
             <Chip label="initial chat" value={cfg.allowedChatId} />
             <Chip label="heartbeat" value={cfg.heartbeatIntervalMinutes ? `${cfg.heartbeatIntervalMinutes}m` : "off"} tone={cfg.heartbeatIntervalMinutes ? "phosphor" : "muted"} />
-            <Chip label="home" value={cfg.home ? `${cfg.home.channel}:${cfg.home.chatId}` : "unset"} tone={cfg.home ? undefined : "muted"} />
+            <Chip label="home" value={cfg.home ? `${cfg.home.channel}:${cfg.home.chatId}`
+              : `unset → ${cfg.effectiveHome.channel}:${cfg.effectiveHome.chatId}`} tone={cfg.home ? undefined : "muted"} />
           </div>
           <p style={{ ...hint, margin: 0 }}>Changes apply on the next daemon restart.</p>
           <p style={{ ...hint, margin: 0 }}>

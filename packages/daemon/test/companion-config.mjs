@@ -187,6 +187,28 @@ try {
     check("masked: bindingsSeeded STAYS true after the binding is revoked (zero bindings, still seeded)",
       db.listCompanionBindings().filter((b) => b.sessionId === "sess-seed").length === 0
       && maskCompanionConfig(db.getCompanionConfig("sess-seed"), db.getCompanionHome("sess-seed")).bindingsSeeded === true);
+    // card 9a42e660: `effectiveHome` must report what an UNSET `home` actually resolves to for THIS
+    // companion — through the SAME resolver the send path uses (`resolveHomeRoute`/`buildConfigFromRow`),
+    // never a re-derivation. `home` itself stays the RAW stored value (null when unset) so a reader can
+    // still tell set-from-unset; `row` here is "sess-1" (channel: "telegram", allowedChatId: "chat-1"),
+    // with no app_meta home ever set for it in this block.
+    check("masked: home is the raw null when unset", masked.home === null);
+    check(
+      "masked: effectiveHome falls back to channel/allowedChatId when home is unset (the send path's own fallback)",
+      JSON.stringify(masked.effectiveHome) === JSON.stringify({ channel: "telegram", chatId: "chat-1" }),
+    );
+    // Arm 2: once a real home IS stored, effectiveHome must equal it exactly — never the allowedChatId
+    // fallback — proving effectiveHome isn't just a constant echo of allowedChatId.
+    db.setCompanionHome("sess-1", { channel: "telegram", chatId: "chat-home-explicit" });
+    const maskedWithHome = maskCompanionConfig(row, db.getCompanionHome("sess-1"));
+    check(
+      "masked: home carries the raw stored route once set",
+      JSON.stringify(maskedWithHome.home) === JSON.stringify({ channel: "telegram", chatId: "chat-home-explicit" }),
+    );
+    check(
+      "masked: effectiveHome equals the stored home (not the allowedChatId fallback) once a home is set",
+      JSON.stringify(maskedWithHome.effectiveHome) === JSON.stringify({ channel: "telegram", chatId: "chat-home-explicit" }),
+    );
     db.close();
   }
 

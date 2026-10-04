@@ -359,6 +359,17 @@ export function findEnabledAgentCollision(
 }
 
 /**
+ * The ONE resolver for what a row's proactive home actually routes to: the stored app_meta `home` when
+ * set, else the row's own channel/allowedChatId (the live fallback — see `CompanionConfigMasked.allowedChatId`'s
+ * own doc on this second job). Shared by `buildConfigFromRow` (the send path) and `maskCompanionConfig`'s
+ * `effectiveHome` (card 9a42e660) so a masked read reports the SAME target the send path would actually use,
+ * never a re-derivation that could drift from it.
+ */
+function resolveHomeRoute(home: CompanionRoute | null, row: CompanionConfigRow): CompanionRoute {
+  return { channel: home?.channel ?? row.channel, chatId: home?.chatId ?? row.allowedChatId };
+}
+
+/**
  * Build a single CompanionConfig from an ENABLED row (caller filters on `enabled` — this never re-checks
  * it), or null when the token blob fails to decrypt (corrupt / lost key — logged, never a crash). Shared by
  * `resolveAllEnabledConfigs` for every enabled row.
@@ -381,13 +392,14 @@ function buildConfigFromRow(row: CompanionConfigRow, home: CompanionRoute | null
     }
   }
   // Home comes from app_meta (the single source), with the env-style default (channel / allowedChatId).
+  const effectiveHome = resolveHomeRoute(home, row);
   return {
     botToken,
     allowedChatId: row.allowedChatId,
     sessionId: row.sessionId,
     chatScope: row.chatScope,
-    homeChannel: home?.channel ?? row.channel,
-    homeChatId: home?.chatId ?? row.allowedChatId,
+    homeChannel: effectiveHome.channel,
+    homeChatId: effectiveHome.chatId,
     heartbeatIntervalMinutes: row.heartbeatIntervalMinutes,
     heartbeatPrompt: row.heartbeatPrompt || DEFAULT_HEARTBEAT_PROMPT,
     bindingsSeeded: row.bindingsSeeded,
@@ -458,6 +470,11 @@ export function maskCompanionConfig(
     // this masking edge.
     heartbeatPromptDefault: envPinned ? envCfg.heartbeatPrompt : DEFAULT_HEARTBEAT_PROMPT,
     home,
+    // card 9a42e660: `home` above is the RAW stored value (null when unset) — a masked read otherwise says
+    // "no home" for a companion whose heartbeat actually has one, since the send path falls back to
+    // allowedChatId (`buildConfigFromRow`). `effectiveHome` reports what an unset home resolves to, through
+    // the SAME `resolveHomeRoute` the send path itself calls, never a re-derivation that could drift from it.
+    effectiveHome: resolveHomeRoute(home, row),
     enabled: row.enabled,
     envPinned,
     createdAt: row.createdAt,

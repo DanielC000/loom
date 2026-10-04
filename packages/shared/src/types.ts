@@ -2972,8 +2972,19 @@ export interface CompanionConfigMasked {
    * resolves to the constant until the next boot re-pins env.
    */
   heartbeatPromptDefault: string;
-  /** The proactive HOME channel target (app_meta-backed, daemon-global), or null when unset. */
+  /** The RAW stored proactive HOME channel target (app_meta-backed, daemon-global), or null when unset. */
   home: CompanionRoute | null;
+  /**
+   * What an UNSET `home` actually resolves to for THIS companion — NOT a fixed fallback a reader must
+   * re-derive. The send path (`buildConfigFromRow`, companion/store.ts) falls back to
+   * `{channel: row.channel, chatId: row.allowedChatId}` when no app_meta home is set; `home` above stays
+   * the raw stored value (null when unset) so a reader can still distinguish set-from-unset, but a caller
+   * that wants the actual delivery target must read THIS field, computed through the same resolver the
+   * send path calls (`resolveHomeRoute`) rather than a re-derivation. card 9a42e660: a masked read's `home`
+   * used to say "no home" for a companion whose heartbeat actually had one — same shape as
+   * `heartbeatPromptDefault` above (card e731bc77).
+   */
+  effectiveHome: CompanionRoute;
   /** Whether this config is enabled — a disabled config is treated as OFF at boot. */
   enabled: boolean;
   /**
