@@ -48,6 +48,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     GitWriter's own resolveOperationalHomeToplevelRefusal) — a non-git DESCENDANT of a reserved home
 //     must be refused at PROPOSE time, never sail past this check and only fail once GitWriter itself is
 //     invoked at confirm time.
+//   - Card e9e7e467: GitWriter.commit's `warning`/`residue` are relayed on a successful commit (both the
+//     confirm/propose path and the direct/warm-window path) as a SANITIZED, count-only note — never the
+//     real file name/path, since this reply can be relayed into an external chat the owner reads from.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-git-push.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -808,6 +811,82 @@ try {
     db.close();
   }
 
+  // ============ card e9e7e467: GitWriter.commit's warning/residue are relayed (confirm/propose path) ============
+  // GitWriter.commit's own `residue` warning joins the swept-in paths verbatim — this tool's reply can be
+  // relayed into an external chat the owner reads from, so the companion surface must render a SANITIZED,
+  // count-only note (never the real file name) rather than dropping the warning entirely (the pre-fix
+  // shape: {status, hash} only).
+  {
+    const db = tmpDb();
+    const vault = initRepo(path.join(fixturesRoot, "residue-vault"));
+    const proj = "proj-residue";
+    seedProject(db, proj, "Residue warning", vault);
+    const companionSess = "companion-residue";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "git-push", projectId: proj, mode: "act", config: { targets: ["vault"], authoredContent: true } });
+    const pty = makeFakePty("the owner said: commit my vault");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    // Stage a file OUT OF BAND (simulating an escaped descendant's orphaned residue) BEFORE git_commit's
+    // own `add -A` ever runs — this is exactly what GitWriter.commit's own `residue` field names.
+    fs.writeFileSync(path.join(vault, "secret-residue-name.md"), "# sensitive filename\n");
+    git(vault, "add", "secret-residue-name.md");
+    fs.writeFileSync(path.join(vault, "intended.md"), "# intended change\n");
+
+    const proposed = await call(client, "git_commit", { project: proj, target: "vault", message: "intended commit" });
+    check("residue setup: propose succeeds", proposed.status === "proposed");
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const committed = await call(client, "git_commit", { project: proj, target: "vault", message: "intended commit" });
+    check("residue (confirm path): commit lands", committed.status === "committed" && typeof committed.hash === "string");
+    check("residue (confirm path): the reply now carries a warning (RED on pre-fix code: dropped entirely)", typeof committed.warning === "string");
+    check("residue (confirm path): warning names the swept-in COUNT", /\b1\b/.test(committed.warning ?? ""));
+    check("residue (confirm path): warning NEVER includes the sensitive file name/path", !(committed.warning ?? "").includes("secret-residue-name"));
+    check("residue (confirm path): real git history actually has BOTH files (residue really was swept in)",
+      git(vault, "show", "--stat", "HEAD").includes("secret-residue-name.md") && git(vault, "show", "--stat", "HEAD").includes("intended.md"));
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ card e9e7e467: same warning relay on the DIRECT (warm-window, no-propose) commit path ============
+  {
+    const db = tmpDb();
+    const vault = initRepo(path.join(fixturesRoot, "residue-direct-vault"));
+    const proj = "proj-residue-direct";
+    seedProject(db, proj, "Residue warning (direct)", vault);
+    const companionSess = "companion-residue-direct";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "git-push", projectId: proj, mode: "act", config: { targets: ["vault"] } });
+    const pty = makeFakePty('the owner said: commit with message "first"');
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    // Step up the trust window first (cold propose + confirm), exactly like the Tier-A test above.
+    fs.writeFileSync(path.join(vault, "one.md"), "# one\n");
+    await call(client, "git_commit", { project: proj, target: "vault", message: "first" });
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const stepUp = await call(client, "git_commit", { project: proj, target: "vault", message: "first" });
+    check("residue (direct path) setup: step-up commits", stepUp.status === "committed");
+
+    // Now warm — stage out-of-band residue, then a DIRECT (no-propose) commit.
+    fs.writeFileSync(path.join(vault, "two.md"), "# two\n");
+    git(vault, "add", "two.md");
+    fs.writeFileSync(path.join(vault, "three.md"), "# three\n");
+    pty.setOwnerText('the owner said: commit again with message "second"');
+    const direct = await call(client, "git_commit", { project: proj, target: "vault", message: "second" });
+    check("residue (direct path): commits directly (no propose)", direct.status === "committed");
+    check("residue (direct path): the reply still carries a warning (RED on pre-fix code: dropped entirely)", typeof direct.warning === "string");
+    check("residue (direct path): warning NEVER includes the sensitive file name/path", !(direct.warning ?? "").includes("two.md"));
+
+    await client.close();
+    db.close();
+  }
+
   // ============ additive: byte-identical companion surface with NO git-push grant ============
   {
     const db = tmpDb();
@@ -833,6 +912,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — git-push (git_commit Tier A / git_push Tier X) is registered only under an act-mode grant; a configured targets allowlist gates which repo a call may touch, per-target (a vault-only grant rejects \"repo\" and vice versa); the vault target resolves to the GOVERNING repo root (never a raw subfolder path, never Obsidian-Git-managed, never auto-inited); the repo target resolves directly to project.repoPath (an unset repoPath is a structured error) and commits/pushes end-to-end for real; git_commit's message defaults to requiring a verbatim owner quote (relaxed only by an explicit per-project authoredContent:true); a cold Tier-A window steps up once and ARMS itself so a later commit applies directly, while git_push's Tier X ALWAYS proposes first (even inside that same warm window) with a bounded ahead-count+latest-subject confirm disclosure and never arms/extends the window on commit; token-mismatch is retryable and a propose→confirm payload mismatch is rejected without committing; a clean tree surfaces GitWriter's own structured error; Primitive A / no-route / failed-delivery all fail closed; a live per-request row-read gates BOTH grant AND revoke (deleting the grant removes both tools on the very next buildServer/request); and the surface is fully additive with no grant."
+  ? "\n✅ ALL PASS — git-push (git_commit Tier A / git_push Tier X) is registered only under an act-mode grant; a configured targets allowlist gates which repo a call may touch, per-target (a vault-only grant rejects \"repo\" and vice versa); the vault target resolves to the GOVERNING repo root (never a raw subfolder path, never Obsidian-Git-managed, never auto-inited); the repo target resolves directly to project.repoPath (an unset repoPath is a structured error) and commits/pushes end-to-end for real; git_commit's message defaults to requiring a verbatim owner quote (relaxed only by an explicit per-project authoredContent:true); a cold Tier-A window steps up once and ARMS itself so a later commit applies directly, while git_push's Tier X ALWAYS proposes first (even inside that same warm window) with a bounded ahead-count+latest-subject confirm disclosure and never arms/extends the window on commit; token-mismatch is retryable and a propose→confirm payload mismatch is rejected without committing; a clean tree surfaces GitWriter's own structured error; Primitive A / no-route / failed-delivery all fail closed; a live per-request row-read gates BOTH grant AND revoke (deleting the grant removes both tools on the very next buildServer/request); a successful commit's warning/residue is relayed as a sanitized, count-only note on both the confirm and the direct/warm-window path, never the real file name; and the surface is fully additive with no grant."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

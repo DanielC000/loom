@@ -20,14 +20,16 @@ export default function Git() {
   const branches = useQuery({ queryKey: ["git-branches", projectId], queryFn: () => api.gitBranches(projectId), enabled: !!projectId, retry: false });
   const log = useQuery({ queryKey: ["git-log", projectId], queryFn: () => api.gitLog(projectId), enabled: !!projectId, retry: false });
 
-  const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ ok: boolean; text: string; warning?: string } | null>(null);
   const [message, setMessage] = useState("");
   const [newBranch, setNewBranch] = useState("");
 
   // Every write refetches branches + log so the view reflects the new HEAD/commit, and surfaces the
-  // structured result (ok or git's own error) in the shared feedback line.
+  // structured result (ok or git's own error) in the shared feedback line. `warning` (card e9e7e467) is
+  // GitWriter.commit's own non-blocking warning (oversized/stripped/residue) — rendered alongside an
+  // OK commit, never instead of it.
   const refresh = () => { qc.invalidateQueries({ queryKey: ["git-branches", projectId] }); qc.invalidateQueries({ queryKey: ["git-log", projectId] }); };
-  const report = (ok: boolean, text: string) => setFeedback({ ok, text });
+  const report = (ok: boolean, text: string, warning?: string) => setFeedback({ ok, text, warning });
 
   const checkout = useMutation({
     meta: { inlineError: true },
@@ -44,7 +46,7 @@ export default function Git() {
   const commit = useMutation({
     meta: { inlineError: true },
     mutationFn: (msg: string) => api.gitCommit(projectId, msg),
-    onSuccess: (r) => { refresh(); if (r.ok) setMessage(""); report(r.ok, r.ok ? `Committed ${r.hash?.slice(0, 7)}` : (r.error ?? "commit failed")); },
+    onSuccess: (r) => { refresh(); if (r.ok) setMessage(""); report(r.ok, r.ok ? `Committed ${r.hash?.slice(0, 7)}` : (r.error ?? "commit failed"), r.ok ? r.warning : undefined); },
     onError: (e) => report(false, errorText(e)),
   });
   const push = useMutation({
@@ -65,6 +67,11 @@ export default function Git() {
               <span style={{ fontFamily: font.mono, fontSize: 12, color: feedback.ok ? color.phosphor : color.red }}>
                 {feedback.ok ? "✓ " : "✗ "}{feedback.text}
               </span>
+              {feedback.warning && (
+                <div data-git-commit-warning style={{ fontFamily: font.mono, fontSize: 12, color: color.amber, marginTop: 6 }}>
+                  ⚠ {feedback.warning}
+                </div>
+              )}
             </Panel>
           )}
 

@@ -682,7 +682,7 @@ export const api = {
   gitCreateBranch: (projectId: string, name: string) =>
     post<{ ok: boolean; branch?: string; error?: string }>(`/api/projects/${projectId}/git/branch`, { name }),
   gitCommit: (projectId: string, message: string) =>
-    post<{ ok: boolean; hash?: string; error?: string }>(`/api/projects/${projectId}/git/commit`, { message }),
+    post<{ ok: boolean; hash?: string; warning?: string; residue?: string[]; error?: string }>(`/api/projects/${projectId}/git/commit`, { message }),
   gitPush: (projectId: string) =>
     post<{ ok: boolean; branch?: string; error?: string }>(`/api/projects/${projectId}/git/push`),
   board: (projectId: string) =>

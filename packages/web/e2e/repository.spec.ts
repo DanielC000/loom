@@ -9,6 +9,9 @@
 //      the consolidation kept each pane project-scoped (unlike Automation's god-eye tables).
 //   5. A REAL write action on the Git tab (create a branch) produces an observable state change — a new
 //      branch chip + the success feedback line — proving the Git pane is fully functional inside the shell.
+//   6. (Card e9e7e467) A commit that sweeps in pre-staged residue renders a VISIBLE warning line on the
+//      Git tab, naming the swept-in file — the local/trusted counterpart to the companion's sanitized,
+//      count-only relay of the same GitWriter.commit warning (test/companion-git-push.mjs).
 //
 // Builds on the shared `loomDaemon` fixture (card c3fd1d68); vault.spec.ts is the on-disk-seeding template
 // this follows (the Repository Files tab reads the same vaultPath). Each test seeds its OWN project (repo +
@@ -25,6 +28,7 @@ import path from "node:path";
 // Segmented) proves which BODY is mounted, not merely which tab highlighted.
 const FILES_BODY_PLACEHOLDER = "Filter files…";
 const GIT_BODY_PLACEHOLDER = "new-branch-name";
+const GIT_COMMIT_PLACEHOLDER = "commit message (stages all changes)";
 
 const seededDirs: string[] = [];
 test.afterAll(() => {
@@ -165,6 +169,33 @@ test.describe("repository (Vault + Git consolidation)", () => {
     // The genuinely-empty hint must NOT appear for a broken (not empty) repo — that's the other half of
     // the card's DoD: a real empty repo must still show it, a broken one must never.
     await expect(commitsPane.getByText("no commits yet")).toHaveCount(0);
+  });
+
+  // Card e9e7e467: GitWriter.commit's own `warning`/`residue` (an out-of-band already-staged file swept
+  // into the commit) must render VISIBLY on the Git tab after a commit — not be silently dropped. Unlike
+  // the companion's sanitized relay (count-only, see test/companion-git-push.mjs), the web Git panel is a
+  // local, trusted surface, so it shows GitWriter's own full warning text verbatim, incl. the real path.
+  test("a commit with pre-staged residue renders a visible warning naming the swept-in file", async ({ page, loomDaemon }) => {
+    const { id, repoDir } = await seedRepoProject(loomDaemon.baseURL);
+    await pinActiveProject(page, id);
+    await page.goto(`${loomDaemon.baseURL}/repository?tab=git`);
+
+    // Stage a file OUT OF BAND (simulating an escaped descendant's orphaned residue) BEFORE the Commit
+    // button's own `add -A` ever runs — exactly what GitWriter.commit's own `residue` field names.
+    writeFileSync(path.join(repoDir, "secret-residue-name.md"), "# sensitive filename\n", "utf8");
+    execFileSync("git", ["-C", repoDir, "add", "secret-residue-name.md"]);
+    writeFileSync(path.join(repoDir, "intended.md"), "# intended change\n", "utf8");
+
+    await page.getByPlaceholder(GIT_COMMIT_PLACEHOLDER).fill("intended commit via e2e");
+    await page.getByRole("button", { name: "Commit" }).click();
+
+    // AFTER: the ordinary success line still renders...
+    await expect(page.getByText(/^✓ Committed/)).toBeVisible();
+    // ...AND the warning line is now visible (RED on pre-fix code: the warning was dropped entirely).
+    const warning = page.locator("[data-git-commit-warning]");
+    await expect(warning).toBeVisible();
+    await expect(warning).toContainText(/\b1\b/); // names the swept-in COUNT
+    await expect(warning).toContainText("secret-residue-name.md"); // local/trusted surface: full detail
   });
 
   test("a real action on the Files tab produces an observable state change (open a note → it renders)", async ({ page, loomDaemon }) => {

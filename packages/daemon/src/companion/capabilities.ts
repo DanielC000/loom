@@ -2724,6 +2724,18 @@ function truncateSubject(s: string): string {
   return s.length > GIT_PUSH_SUBJECT_MAX ? `${s.slice(0, GIT_PUSH_SUBJECT_MAX - 1)}…` : s;
 }
 
+/** Card e9e7e467 — `GitWriter.commit`'s own `warning`/`residue` named file paths and sizes (the
+ *  oversized-file warning names a path, the residue warning joins the swept-in paths verbatim). This
+ *  tool's reply can be relayed into an external chat channel the owner reads from, so never forward
+ *  `warning` or `residue` verbatim here — say only THAT something was swept in and HOW MANY files,
+ *  never a file name/path. The web Git panel (a local, trusted surface) still gets the full text. */
+function companionCommitWarning(committed: { warning?: string; residue?: string[] }): string | undefined {
+  if (committed.residue?.length) {
+    return `${committed.residue.length} file(s) that were already staged before this commit were swept in too (not necessarily part of what you asked for) — check the Git panel for which.`;
+  }
+  return committed.warning ? "this commit also triggered a warning — check the Git panel for details." : undefined;
+}
+
 /**
  * `git-push` (Framework §4, card a3c3ade8) — ACT-only (mirrors `media-out`/`session-steer`/
  * `session-spawn`'s own `hasActGrant` gate; no read half). Two tools:
@@ -2777,6 +2789,9 @@ const GIT_PUSH: CompanionCapability = {
           "see or relay any prompt/token — just tell the owner you've requested their confirmation) and " +
           "returns {status:'proposed', expiresAt}. Only once the owner replies to THAT message do you " +
           "call git_commit AGAIN with the SAME arguments to actually commit it ({status:'committed'}). " +
+          "A successful commit MAY also carry a `warning` string — e.g. other file(s) that were already " +
+          "staged before this call got swept in too; tell the owner plainly, in your own words, without " +
+          "naming any specific file (the daemon never tells you which). " +
           "Nothing is ever pushed by this tool — call git_push separately (it ALWAYS confirms, every time).",
         inputSchema: { project: z.string(), target: z.enum(GIT_PUSH_TARGETS), message: z.string() },
       },
@@ -2826,7 +2841,8 @@ const GIT_PUSH: CompanionCapability = {
           }
           const committed = await ctx.git(resolved.repoPath).commit(message);
           if (!committed.ok) return ok({ error: committed.error });
-          return ok({ status: "committed", hash: committed.hash });
+          const warning = companionCommitWarning(committed);
+          return ok({ status: "committed", hash: committed.hash, ...(warning ? { warning } : {}) });
         }
 
         // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first.
@@ -2841,7 +2857,8 @@ const GIT_PUSH: CompanionCapability = {
           if (!committed.ok) return ok({ error: committed.error });
           // Tier-A step-up ARMS the trust window for subsequent Tier-A calls (session-trust friction only).
           onStepUpCommitted(ctx.trustWindow, "A", friction, frictionScope);
-          return ok({ status: "committed", hash: committed.hash });
+          const warning = companionCommitWarning(committed);
+          return ok({ status: "committed", hash: committed.hash, ...(warning ? { warning } : {}) });
         }
         if (confirmOutcome.reason === "token-mismatch") {
           return ok({ status: "confirm-mismatch", error: "that doesn't contain the exact confirm token — ask the owner to reply again with it verbatim" });
