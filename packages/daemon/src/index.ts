@@ -6,6 +6,7 @@ import { resolveConfig, resolveCodescapeIntegrationPath } from "@loom/shared";
 import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, LOOPBACK_SECRET_PATH, isUsagePollerSuppressed } from "./paths.js";
 import { installCrashHandlers, installEpipeTolerantStdio, hadCrashLogAtBoot as computeHadCrashLogAtBoot } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
+import { HANDLED_SIGNALS, makeBootShutdownStub } from "./boot-shutdown-stub.js";
 import { Db } from "./db.js";
 import { startGatewayListeners, type RemoteEndpointRef } from "./gateway/remote-listener.js";
 import { getOrCreateLoopbackSecret } from "./gateway/loopback-secret.js";
@@ -103,6 +104,22 @@ async function main(): Promise<void> {
   // non-zero exit at any point past here leaves a diagnosable crashlog under .loom (a real crash once
   // left no log signature at all). Idempotent + fail-safe; never throws.
   installCrashHandlers();
+  // @decision f1366911 — gracefulShutdown is registered as a boot-safe STUB here, before any boot
+  // await, and reassigned in place (further down) to the full teardown once every subsystem it closes
+  // over actually exists — never re-declared, and the signal loop below must never be duplicated later.
+  let gracefulShutdown: ((reason: string) => void) | null = null;
+  // Set below, once `new Db()` runs — the stub's `closeDb` dependency reads this reference at CALL time
+  // (not at stub-creation time), so it correctly no-ops if a stop arrives before the DB even opens.
+  let dbForShutdown: Db | null = null;
+  gracefulShutdown = makeBootShutdownStub({
+    writeShutdownMarker,
+    closeDb: () => dbForShutdown?.close(),
+    exit: (code) => process.exit(code),
+    log: (message) => console.log(message),
+  });
+  for (const sig of HANDLED_SIGNALS) {
+    process.on(sig, () => gracefulShutdown!(sig));
+  }
   ensureDirs();
   const seeded = seedGlobalSkills();
   if (seeded.length) console.log(`[boot] seeded global skill(s): ${seeded.join(", ")}`);
@@ -116,6 +133,7 @@ async function main(): Promise<void> {
   const bootBackupCfg = resolveBackupConfig();
   if (bootBackupCfg.enabled) await takeBackup({ reason: "boot", keep: bootBackupCfg.keep });
   const db = new Db();
+  dbForShutdown = db; // lets the boot-safe shutdown stub registered above best-effort close it
   // Card 14f14d92: snapshot every project's resume doc BEFORE anything below can spawn/resume an agent
   // that might touch it — the resume doc is load-bearing (injected into every manager spawn) and had no
   // backup at all; `rotation-check.ts` only ever VERIFIED an archive a caller claimed to have written, it
@@ -925,11 +943,9 @@ async function main(): Promise<void> {
   // warmed and every codex spawn hit the cold `fs.existsSync` path.
   prewarmCodexVersionAsync();
 
-  // The graceful-shutdown path, shared by the SIGINT/SIGTERM handlers and the loopback
-  // POST /internal/shutdown control hook (`loom stop`). Assigned BELOW, after the watchers it closes
-  // over exist; the endpoint only fires at request time (long after boot), so this ref is always
-  // populated by then. The buildServer thunk delegates to it.
-  let gracefulShutdown: ((reason: string) => void) | null = null;
+  // gracefulShutdown (boot-safe stub registered near installCrashHandlers() above, upgraded in place to
+  // the full teardown further down) is already declared and assigned. The buildServer thunk below
+  // delegates to it via this same mutable reference.
 
   // Epic 2c-2 (UI half) — periodic npm-registry "update available" check + the self-update trigger.
   // The watcher polls dist-tags for `loomctl` on the persisted channel (PACKAGED installs only; a
@@ -1645,19 +1661,22 @@ async function main(): Promise<void> {
     console.warn(`[boot] first-run setup auto-launch failed (continuing boot): ${(err as Error).message}`);
   }
 
-  // The one graceful-teardown path — invoked by a SIGINT/SIGTERM/SIGHUP signal AND by the loopback
-  // POST /internal/shutdown control hook (the cross-platform `loom stop`, since Windows has no SIGTERM).
+  // The full graceful-teardown path — REASSIGNS the `gracefulShutdown` binding (declared + given its
+  // boot-safe stub value near installCrashHandlers() above) now that every subsystem it closes over
+  // below is actually constructed. Invoked by a SIGINT/SIGTERM/SIGHUP signal AND by the loopback
+  // POST /internal/shutdown control hook (the cross-platform `loom stop`, since Windows has no SIGTERM) —
+  // the signal handlers were already registered early and read this same mutable reference, so no new
+  // registration is needed here.
   gracefulShutdown = (reason: string) => {
     // Shutdown-reason marker (card 42cf3944): a signal-driven stop used to leave NO trace — crash.log
     // only fires on a fatal, and a signal exits 0 (clean, by design), so it was indistinguishable from a
     // hard crash after the fact (a real incident cost a whole session chasing a phantom crash that was
     // really the machine sleeping). Write it FIRST, before any other teardown step that could stall/throw,
-    // and classify: a raw signal name (SIGINT/SIGTERM/SIGHUP — see HANDLED_SIGNALS below, referenced here
-    // as a closure over a `const` initialized further down but always assigned before this function can
-    // actually run) is an unexpected OS signal; anything else reaching this path (today: only "POST
-    // /internal/shutdown") is the owner's own intentional stop — recorded as such, not masqueraded as a
-    // signal. `daemon_restart` never calls this path at all (see the exit-75 branch below `main`), so its
-    // own restart-intent.json remains the sole marker for that flow — untouched here.
+    // and classify: a raw signal name (SIGINT/SIGTERM/SIGHUP — see the imported HANDLED_SIGNALS) is an
+    // unexpected OS signal; anything else reaching this path (today: only "POST /internal/shutdown") is
+    // the owner's own intentional stop — recorded as such, not masqueraded as a signal. `daemon_restart`
+    // never calls this path at all (see the exit-75 branch below `main`), so its own restart-intent.json
+    // remains the sole marker for that flow — untouched here.
     const isSignal = (HANDLED_SIGNALS as readonly string[]).includes(reason);
     // Card 7f9444f3: the ENTIRE teardown body below is best-effort inside runGracefulTeardown's try —
     // a real crash showed the LAST console.log here (just before the gate-aware exit) throwing EPIPE on a
@@ -1689,14 +1708,9 @@ async function main(): Promise<void> {
     // ceiling regardless of what the merge does — runGracefulTeardown always awaits it before exiting. See
     // merge-danger-window.ts for the full mechanism.
   };
-  // SIGINT/SIGTERM plus SIGHUP — Node also emits SIGHUP for the Windows console-close case (closing the
-  // terminal window) as well as the POSIX hangup case, so listing it here covers that win32 path too,
-  // with no extra plumbing. Declared here (used by gracefulShutdown's classification above via closure,
-  // and by the registration loop below) so both stay in sync off ONE list.
-  const HANDLED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
-  for (const sig of HANDLED_SIGNALS) {
-    process.on(sig, () => gracefulShutdown!(sig));
-  }
+  // The SIGINT/SIGTERM/SIGHUP handlers were already registered early (near installCrashHandlers()
+  // above, off the imported HANDLED_SIGNALS) — do not register them again here; a second loop would
+  // double-fire this teardown on a real signal.
 }
 
 main().catch((err) => {

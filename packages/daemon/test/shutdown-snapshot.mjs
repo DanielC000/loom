@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
-import { gracefulShutdownRegion } from "./_graceful-region.mjs";
+import { gracefulShutdownRegion, signalHandlerRegion } from "./_graceful-region.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-shutdown-snap-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -120,9 +120,40 @@ try {
   check("(5) the graceful-shutdown path invokes snapshotAllLive before exit",
     /snapshotAllLive\s*\(/.test(region) && region.indexOf("snapshotAllLive") < region.indexOf("process.exit(0)"));
   // And the SIGINT/SIGTERM handler must delegate to that shared path (so a signal-kill still snapshots).
-  const sigIdx = indexJs.indexOf('"SIGINT"');
-  const sigRegion = sigIdx >= 0 ? indexJs.slice(sigIdx, sigIdx + 400) : "";
+  // Card f1366911 round 2: this used to anchor on the FIRST occurrence of the `"SIGINT"` string literal
+  // and scan forward — but f1366911 moved HANDLED_SIGNALS (and its `"SIGINT"` literal) out of index.ts
+  // into boot-shutdown-stub.ts, so that literal no longer appears in dist/index.js at all; indexOf silently
+  // returned -1, sigRegion was "", and the check FAILED LOUDLY rather than vacuously passing — correct
+  // failure mode, wrong anchor for the new structure. signalHandlerRegion() anchors on the registration
+  // loop itself (`for (const sig of HANDLED_SIGNALS) { ... }`), which is still unique and still the real
+  // site where a live signal is wired to gracefulShutdown (now via the `let` binding, upgraded in place
+  // from the boot-safe stub to the full teardown — see @decision f1366911 in src/index.ts).
+  const sigRegion = signalHandlerRegion(indexJs);
   check("(5) the SIGINT/SIGTERM handler delegates to gracefulShutdown", /gracefulShutdown\s*\(/.test(sigRegion));
+
+  // (5-sig-control, card f1366911) signalHandlerRegion() is anchored + bounded, not a free scan — prove it
+  // still discriminates a REAL regression: a handler that captures gracefulShutdown into a frozen local
+  // alias AT REGISTRATION TIME (defeating the whole stub-upgrade pattern, since the alias would forever
+  // call the boot-safe stub even after gracefulShutdown is reassigned to the full teardown) must still be
+  // caught — the loop body in that shape never mentions `gracefulShutdown(` at all.
+  {
+    const syntheticGood = [
+      "  for (const sig of HANDLED_SIGNALS) {",
+      "    process.on(sig, () => gracefulShutdown(sig));",
+      "  }",
+    ].join("\n");
+    check("(5-sig-control) POSITIVE: the real registration shape still delegates",
+      /gracefulShutdown\s*\(/.test(signalHandlerRegion(syntheticGood)));
+
+    const syntheticBad = [
+      "  const earlyShutdown = gracefulShutdown;",
+      "  for (const sig of HANDLED_SIGNALS) {",
+      "    process.on(sig, () => earlyShutdown(sig));",
+      "  }",
+    ].join("\n");
+    check("(5-sig-control) NEGATIVE: a frozen-alias handler (never re-reads gracefulShutdown) is caught",
+      !/gracefulShutdown\s*\(/.test(signalHandlerRegion(syntheticBad)));
+  }
 
   // (5-control, card 36afbbdd) gracefulShutdownRegion() (_graceful-region.mjs, shared with
   // periodic-snapshot.mjs and graceful-shutdown-epipe-resilience.mjs) now strips comments internally.

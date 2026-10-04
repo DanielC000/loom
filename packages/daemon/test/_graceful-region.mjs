@@ -29,3 +29,23 @@ export function gracefulShutdownRegion(indexJs) {
   const end = closeParen >= 0 ? closeParen + 1 : codeOnly.length;
   return codeOnly.slice(start, end);
 }
+
+// Card f1366911 round 2: structurally bound the `for (const sig of HANDLED_SIGNALS) { ... }` registration
+// loop in dist/index.js. Since card f1366911 moved HANDLED_SIGNALS' definition (and its "SIGINT" literal)
+// out of index.ts into boot-shutdown-stub.ts, the literal string "SIGINT" no longer appears in dist/
+// index.js at all — a scanner anchored on that literal silently finds nothing (indexOf returns -1) rather
+// than failing loudly. Anchor on the registration loop itself instead, which f1366911's own
+// boot-shutdown-registered-before-listen.mjs already proves is unique (exactly one such loop in the file).
+// Bounded to the loop's own body (first "}" after the loop's opening "{") so a comment or unrelated code
+// before/after the loop can't be swept in — the loop body is a single arrow-function statement with no
+// nested braces, so the first "}" is genuinely the loop's close.
+export function signalHandlerRegion(indexJs) {
+  const codeOnly = stripComments(indexJs);
+  const start = codeOnly.indexOf("HANDLED_SIGNALS) {");
+  if (start < 0) return ""; // anchor gone — assertions on "" fail loudly, which is the point
+  const openBrace = codeOnly.indexOf("{", start);
+  if (openBrace < 0) return codeOnly.slice(start);
+  const closeBrace = codeOnly.indexOf("}", openBrace);
+  const end = closeBrace >= 0 ? closeBrace + 1 : codeOnly.length;
+  return codeOnly.slice(start, end);
+}
