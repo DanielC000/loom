@@ -8,6 +8,7 @@ import { resolveCodescapeProjectId } from "./manifest.js";
 import { probeAdvertisedTools } from "./tools-probe.js";
 import { writeToolDriftState, writeBuildDriftState } from "./drift-notice.js";
 import { codescapeUnclassifiedTools } from "../pty/host.js";
+import { winCmdShimSpawnTarget } from "../pty/resolve-bin.js";
 
 /**
  * Codescape fleet-daemon wiring epic, foundation. Under `isCodescapeSupervisorEnabled()`, Loom starts +
@@ -305,15 +306,23 @@ function runBounded(command: string, args: string[], cwd: string, timeoutMs: num
     };
     let child: ChildProcess;
     try {
-      child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env } : {}) });
-    } catch {
+      // Card 8ddd12c6: a resolved `.cmd`/`.bat` host-tool shim (e.g. an npm-global `codescape` install on
+      // Windows) is parsed and spawned as node + its real entry script, never routed through `cmd.exe` —
+      // see winCmdShimSpawnTarget's own doc. Resolving it here (inside the try) means an unrecognised
+      // shim's refusal throw is surfaced below exactly like any other synchronous spawn failure.
+      const target = winCmdShimSpawnTarget(command, args);
+      child = spawn(target.command, target.args, { cwd, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env } : {}) });
+    } catch (err) {
+      // Card 8ddd12c6: surface the real spawn failure (e.g. the EINVAL this wrapper exists to avoid, or
+      // any other synchronous spawn throw) into the captured output tail instead of a bare "exit null".
+      capture(Buffer.from(`spawn failed: ${(err as Error)?.message ?? String(err)}`));
       finish(false, null);
       return;
     }
     child.stdout?.on("data", capture);
     child.stderr?.on("data", capture);
     const timer = setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* noop */ } finish(false, null); }, timeoutMs);
-    child.on("error", () => { clearTimeout(timer); finish(false, null); });
+    child.on("error", (err) => { capture(Buffer.from(`spawn error: ${(err as Error)?.message ?? String(err)}`)); clearTimeout(timer); finish(false, null); });
     child.on("exit", (code) => { clearTimeout(timer); finish(code === 0, code); });
   });
 }
@@ -365,15 +374,19 @@ function runBoundedSplit(command: string, args: string[], cwd: string, timeoutMs
     };
     let child: ChildProcess;
     try {
-      child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    } catch {
+      // Card 8ddd12c6: same `.cmd`/`.bat` shim handling as runBounded above — resolved inside the try so
+      // an unrecognised shim's refusal throw surfaces below like any other synchronous spawn failure.
+      const target = winCmdShimSpawnTarget(command, args);
+      child = spawn(target.command, target.args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      err.onData(Buffer.from(`spawn failed: ${(e as Error)?.message ?? String(e)}`));
       finish(false, null);
       return;
     }
     child.stdout?.on("data", out.onData);
     child.stderr?.on("data", err.onData);
     const timer = setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* noop */ } finish(false, null); }, timeoutMs);
-    child.on("error", () => { clearTimeout(timer); finish(false, null); });
+    child.on("error", (e) => { err.onData(Buffer.from(`spawn error: ${(e as Error)?.message ?? String(e)}`)); clearTimeout(timer); finish(false, null); });
     child.on("exit", (code) => { clearTimeout(timer); finish(code === 0, code); });
   });
 }
@@ -1152,7 +1165,13 @@ export class CodescapeSupervisor {
    */
   private trySpawnChild(command: string, args: string[]): ChildProcess | null {
     try {
-      return spawn(command, args, { cwd: this.homeDir, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CODESCAPE_HOME: this.homeDir } });
+      // Card 8ddd12c6: same `.cmd`/`.bat` shim handling as runBounded/runBoundedSplit above — resolved
+      // inside the try so an unrecognised shim's refusal throw surfaces below like any other spawn failure.
+      const target = winCmdShimSpawnTarget(command, args);
+      return spawn(target.command, target.args, {
+        cwd: this.homeDir, stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, CODESCAPE_HOME: this.homeDir },
+      });
     } catch (err) {
       console.warn(`[codescape] serve spawn failed: ${(err as Error).message}`);
       // Never a "healthy" run — a synchronous throw means no child ever came up. Clearing spawnedAt (it

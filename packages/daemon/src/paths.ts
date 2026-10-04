@@ -425,11 +425,13 @@ export function isCodescapeEnabled(codescapeEnabled: boolean, dbPath?: string): 
  * compiled-binary path, or a bare PATH-resolvable name), returns the correct `{command, args}` spawn pair:
  *   - a `.js`/`.mjs`/`.cjs` path runs via node explicitly (`process.execPath`, the script as its one arg);
  *   - anything else resolves through {@link resolveExecutable} (PATH + Windows PATHEXT, e.g. a `.cmd`
- *     npm shim or a compiled binary) and launches directly with NO shell — sidesteps the shell-quoting
- *     concerns `git/worktrees.ts:166` documents for its own `shell:true` installs (an argv element here
- *     never needs quoting).
+ *     npm shim or a compiled binary) and is returned as a plain `{command, args}` pair.
  * The caller appends its OWN subcommand args (e.g. `["mcp"]`, `["mcp", "--graph", graphPath]`) after this
- * resolves the base command+args.
+ * resolves the base command+args — and MUST pass the resulting FULL argv through
+ * `pty/resolve-bin.ts#winCmdShimSpawnTarget` immediately before `spawn()` (card 8ddd12c6): Node throws a
+ * synchronous `EINVAL` spawning a `.cmd`/`.bat` npm shim directly with no `shell:true` (the CVE-2024-27980
+ * mitigation), so that resolver parses the shim and reroutes to node + its real entry script instead —
+ * this resolver's own `{command, args}` is NOT yet spawn-safe on its own for that shape.
  */
 const HOST_TOOL_SCRIPT_RE = /\.[mc]?js$/;
 export function resolveHostToolBin(bin: string): { command: string; args: string[] } {
