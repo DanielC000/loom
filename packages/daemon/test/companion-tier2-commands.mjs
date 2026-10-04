@@ -394,10 +394,17 @@ try {
       closeTrustWindow: () => { throw new Error("closeTrustWindow must not be reached on a group refusal"); },
     };
     for (const name of allNames.filter((n) => n !== "voice")) {
-      const result = await commandHandler(name)(undefined, groupRoute, inMemoryVoicePrefs(), unreachableDeps);
-      const refuses = GROUP_REFUSAL_RE.test(result.ack);
-      check(`dmOnly parity: '/${name}' handler's real group-route refusal (${refuses}) matches its dmOnly flag (${dmOnlyNames.includes(name)})`,
-        refuses === dmOnlyNames.includes(name));
+      // Code Review 3fb91c99 nit: a deps-spy throw (a dmOnly-parity mismatch that lets a handler reach an
+      // "unreachable" dep) must record exactly one FAIL naming the offending command, never abort the
+      // whole loop — an uncaught throw here would silently skip every check for every command after it.
+      try {
+        const result = await commandHandler(name)(undefined, groupRoute, inMemoryVoicePrefs(), unreachableDeps);
+        const refuses = GROUP_REFUSAL_RE.test(result.ack);
+        check(`dmOnly parity: '/${name}' handler's real group-route refusal (${refuses}) matches its dmOnly flag (${dmOnlyNames.includes(name)})`,
+          refuses === dmOnlyNames.includes(name));
+      } catch (err) {
+        check(`dmOnly parity: '/${name}' handler threw instead of returning an ack (${err?.message ?? err})`, false);
+      }
     }
   }
 

@@ -60,7 +60,7 @@ export interface TelegramBotLike {
      *  `?.`. */
     setMyCommands?(
       commands: { command: string; description: string }[],
-      other?: { scope: { type: "all_private_chats" | "all_group_chats" } },
+      other?: { scope: { type: "all_private_chats" | "all_group_chats" | "default" } },
     ): Promise<unknown>;
     /** Resolve a Telegram `file_id` to its download path (Companion Voice epic, VOICE-P2). Optional on the
      *  seam so an existing test fake bot (no voice-download tests) stays valid. */
@@ -208,8 +208,14 @@ export function createTelegramAdapter(
       // Register the native "/" command menu (Companion Voice epic, VOICE-P1; split into two scoped menus,
       // card d100843f) — best-effort, fire-and-forget: a failure (network / bad token) is logged, never
       // thrown, and never blocks/delays the poll loop below. `?.` guards a test fake bot that doesn't
-      // implement setMyCommands (companion-telegram.mjs). TWO separate calls, one per Telegram scope, so a
-      // group chat's native menu never advertises a DM-only command its handler would just refuse.
+      // implement setMyCommands (companion-telegram.mjs). THREE separate, independent calls, one per
+      // Telegram scope, so a group chat's native menu never advertises a DM-only command its handler would
+      // just refuse — including the DEFAULT scope (card e32faaf0, Code Review 3fb91c99): an existing bot
+      // may still carry a leftover default-scope menu from before d100843f split the scoped calls out, and
+      // that leftover is exactly the DM-only menu this fix exists to hide from groups. Registering
+      // GROUP_COMMAND_MENU there too (rather than deleteMyCommands) means a group whose own all_group_chats
+      // call fails (transient error / rate limit) still falls back to the least-advertising menu instead of
+      // the stale DM-only one. Each call stands alone — one failing must never block or skip the others.
       void bot.api.setMyCommands?.(PRIVATE_COMMAND_MENU, { scope: { type: "all_private_chats" } }).catch((err) => {
         // eslint-disable-next-line no-console
         console.error(`[companion] telegram setMyCommands (private) failed: ${describeError(err)}`);
@@ -217,6 +223,10 @@ export function createTelegramAdapter(
       void bot.api.setMyCommands?.(GROUP_COMMAND_MENU, { scope: { type: "all_group_chats" } }).catch((err) => {
         // eslint-disable-next-line no-console
         console.error(`[companion] telegram setMyCommands (group) failed: ${describeError(err)}`);
+      });
+      void bot.api.setMyCommands?.(GROUP_COMMAND_MENU, { scope: { type: "default" } }).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error(`[companion] telegram setMyCommands (default) failed: ${describeError(err)}`);
       });
       // Fire-and-forget the RESILIENT poll loop: runWithReconnect re-runs bot.start() after a backoff on
       // any drop, until stop() flips `stopped`. A startup failure (bad token / network) is logged, never

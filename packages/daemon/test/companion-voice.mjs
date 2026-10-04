@@ -353,24 +353,31 @@ try {
       };
     }
     {
-      // Card d100843f: start() registers TWO scoped menus (never one undifferentiated global call) — a
-      // full "all_private_chats" menu and a DM-only-command-free "all_group_chats" menu — so a group
-      // chat's native "/" menu never advertises a command its handler would just refuse.
+      // Card d100843f: start() registers scoped menus (never one undifferentiated global call) — a full
+      // "all_private_chats" menu and a DM-only-command-free "all_group_chats" menu — so a group chat's
+      // native "/" menu never advertises a command its handler would just refuse. Card e32faaf0 (Code
+      // Review 3fb91c99 of d100843f) adds a THIRD call: the SAME DM-only-command-free menu registered at
+      // the "default" scope too, so an existing bot's leftover pre-d100843f default-scope menu (the
+      // full, DM-including one) is overwritten rather than left to shadow the new scoped calls whenever a
+      // group's own all_group_chats call fails.
       const fake = makeFakeBot();
       const adapter = createTelegramAdapter("tok", () => {}, { bot: fake.bot, sleep: async () => {} });
       adapter.start();
       await tick();
-      // NEGATIVE CONTROL (card d100843f DoD): a single undifferentiated call — the behavior before this
-      // fix — would fail BOTH of the next two checks: length !== 2 is the only thing this line proves
-      // RED on the pre-fix shape; the two checks below prove WHICH two calls are expected.
-      check("telegram start(): registers exactly TWO scoped command menus (not one global call)", fake.commandCalls.length === 2);
+      // NEGATIVE CONTROL (card d100843f/e32faaf0 DoD): a single undifferentiated call — the behavior
+      // before d100843f — would fail every check below: length !== 3 is the only thing this line proves
+      // RED on that pre-fix shape; the checks below prove WHICH three calls are expected.
+      check("telegram start(): registers exactly THREE scoped command menus (not one global call)", fake.commandCalls.length === 3);
       const privateCall = fake.commandCalls.find((c) => c.other?.scope?.type === "all_private_chats");
       const groupCall = fake.commandCalls.find((c) => c.other?.scope?.type === "all_group_chats");
+      const defaultCall = fake.commandCalls.find((c) => c.other?.scope?.type === "default");
       check("telegram start(): one call scoped to all_private_chats", !!privateCall);
       check("telegram start(): one call scoped to all_group_chats", !!groupCall);
+      check("telegram start(): one call scoped to default", !!defaultCall);
       check("telegram start(): the private-scope menu includes /lang and /voice", privateCall?.commands?.some((c) => c.command === "lang") && privateCall?.commands?.some((c) => c.command === "voice"));
       check("telegram start(): the private-scope menu IS the shared PRIVATE_COMMAND_MENU (menu/handlers never drift)", JSON.stringify(privateCall?.commands) === JSON.stringify(PRIVATE_COMMAND_MENU));
       check("telegram start(): the group-scope menu IS the shared GROUP_COMMAND_MENU (menu/handlers never drift)", JSON.stringify(groupCall?.commands) === JSON.stringify(GROUP_COMMAND_MENU));
+      check("telegram start(): the default-scope menu IS the shared GROUP_COMMAND_MENU too (the least-advertising menu, not the full one)", JSON.stringify(defaultCall?.commands) === JSON.stringify(GROUP_COMMAND_MENU));
       // Exact command set, not just a subset: the group menu must OMIT every DM-only command.
       const groupMenuNames = (groupCall?.commands ?? []).map((c) => c.command);
       check("telegram start(): the group-scope menu omits /new, /reset, /lock, /refresh, /export", ["new", "reset", "lock", "refresh", "export"].every((n) => !groupMenuNames.includes(n)));
@@ -388,6 +395,35 @@ try {
         await adapter.stop();
       } catch { threw = true; }
       check("a bot with no setMyCommands (legacy fake shape) does not throw (guarded with ?.)", threw === false);
+    }
+    {
+      // Code Review 3fb91c99 Minor 2: each setMyCommands call must be INDEPENDENT — a rejection on one
+      // scope must never block/skip the others, and start() (the poll loop) must still complete. This is
+      // the test that would go RED if the three calls were ever refactored into a sequential `await`
+      // chain inside one try/catch (the all_private_chats rejection would then throw before the
+      // all_group_chats/default calls are ever issued, and — since start() currently fires these
+      // fire-and-forget BEFORE the poll loop, not awaited by it — a thrown rejection bubbling into
+      // start()'s own body would also abort the poll loop beneath it).
+      const fake = makeFakeBot();
+      fake.bot.api.setMyCommands = async (commands, other) => {
+        fake.commandCalls.push({ commands, other });
+        if (other?.scope?.type === "all_private_chats") throw new Error("boom: rate limited");
+      };
+      let pollLoopStarted = false;
+      const adapter = createTelegramAdapter("tok", () => {}, {
+        bot: { ...fake.bot, async start(opts) { pollLoopStarted = true; opts?.onStart?.({ username: "loombot" }); await new Promise(() => {}); } },
+        sleep: async () => {},
+      });
+      let threwSynchronously = false;
+      try {
+        adapter.start();
+      } catch { threwSynchronously = true; }
+      await tick();
+      check("a rejected all_private_chats setMyCommands does not throw synchronously out of start()", threwSynchronously === false);
+      check("…and the all_group_chats call still happens", fake.commandCalls.some((c) => c.other?.scope?.type === "all_group_chats"));
+      check("…and the default-scope call still happens", fake.commandCalls.some((c) => c.other?.scope?.type === "default"));
+      check("…and the poll loop (bot.start()) still runs", pollLoopStarted === true);
+      await adapter.stop();
     }
   }
 } finally {
