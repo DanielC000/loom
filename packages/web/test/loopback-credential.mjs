@@ -4,12 +4,20 @@
 //   node --experimental-strip-types packages/web/test/loopback-credential.mjs
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import {
+import { register } from "node:module";
+
+// Card a1ec70a6: loopbackCredential.ts now has a REAL runtime import of ./credentialVerify (the shared
+// three-state verify), written extensionless in the bundler style the app uses, which Node's own resolver
+// cannot follow. `_tsxLoaderHook.mjs` exists for exactly that; registering it means the import below must
+// be DYNAMIC, since a static one in this same file would be hoisted and resolved before `register()` runs.
+register("./_tsxLoaderHook.mjs", import.meta.url);
+
+const {
   errorText, CREDENTIAL_LOCKED_TEXT,
   isCredentialGuardFailure, isCredentialGuardMessage, isCredentialSocketFailure,
   credentialLock, noteCredentialLock, clearCredentialLock, subscribeCredentialLock,
   resetCredentialLockForTest,
-} from "../src/lib/loopbackCredential.ts";
+} = await import("../src/lib/loopbackCredential.ts");
 
 let pass = 0;
 const check = (name, fn) => { resetCredentialLockForTest(); fn(); pass++; console.log(`ok   ${name}`); };

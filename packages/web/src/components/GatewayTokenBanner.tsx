@@ -3,8 +3,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Button, Dot, Input } from "./ui";
 import { color, font, radius } from "../theme";
 import {
-  clearGatewayLock, dismissGatewayLinkRejected, gatewayLinkRejected, gatewayLock, gatewayTokenRevoked, getGatewayToken, setGatewayToken,
-  subscribeGatewayLinkRejected, subscribeGatewayLock, subscribeGatewayTokenRevoked, verifyGatewayTokenAgainstDaemon,
+  clearGatewayLock, dismissGatewayLinkOutcome, gatewayLinkCopy, gatewayLinkOutcome, gatewayLock, gatewayTokenRevoked,
+  getGatewayToken, pendingGatewayToken, retryPendingGatewayToken, storeVerifiedGatewayToken,
+  subscribeGatewayLinkOutcome, subscribeGatewayLock, subscribeGatewayTokenRevoked,
 } from "../lib/gatewayCredential";
 
 /**
@@ -23,14 +24,26 @@ import {
  */
 export function GatewayTokenBanner() {
   const lockedNow = useSyncExternalStore(subscribeGatewayLock, gatewayLock, () => false);
-  const linkRejected = useSyncExternalStore(subscribeGatewayLinkRejected, gatewayLinkRejected, () => false);
+  // Card a1ec70a6: three-state, so a check that never reached the daemon is not reported as a refusal.
+  const linkOutcome = useSyncExternalStore(subscribeGatewayLinkOutcome, gatewayLinkOutcome, () => null);
   const revoked = useSyncExternalStore(subscribeGatewayTokenRevoked, gatewayTokenRevoked, () => null);
-  const locked = lockedNow || linkRejected;
+  const locked = lockedNow || linkOutcome !== null;
   const qc = useQueryClient();
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const holdsToken = getGatewayToken() !== null;
+  // Offered only while a candidate is actually held — the one outcome a retry can change.
+  const retryable = linkOutcome === "unverified" && pendingGatewayToken() !== null;
+  // Card a1ec70a6: the link wording is a PURE helper (`gatewayLinkCopy`), the twin of the loopback banner's
+  // `loopbackLinkCopy`, so every variant is readable by a unit test instead of being trapped in this JSX.
+  // `retryable` is passed in for the same reason it is there: the copy must not name a Retry that is not
+  // being rendered beside it.
+  const linkCopy = linkOutcome === null ? null : gatewayLinkCopy(linkOutcome, holdsToken, retryable);
+  // A real lock (or a revocation) is an OBSERVED refusal of this browser, so it keeps the headline; a link
+  // outcome that coincides with one is appended as its own line below rather than replacing it.
+  const linkLeads = !lockedNow && revoked === null && linkCopy !== null;
 
   useEffect(() => { if (locked) { setValue(""); setError(null); } }, [locked]);
 
@@ -41,16 +54,32 @@ export function GatewayTokenBanner() {
     if (!candidate) { setError("That looked empty — paste the token."); return; }
     setChecking(true);
     setError(null);
-    // PROVE it before storing: a remote-class read must authenticate, so 200 ⇔ the token verified.
-    const ok = await verifyGatewayTokenAgainstDaemon(candidate);
+    // PROVE it before storing, through the shared verify-then-store chokepoint: a remote-class read must
+    // authenticate, so a 2xx ⇔ the token verified.
+    const outcome = await storeVerifiedGatewayToken(candidate);
     setChecking(false);
-    if (!ok) { setError("The daemon refused that token — check you copied all of it."); return; }
-    if (!setGatewayToken(candidate)) { setError("This browser refused to store it (private mode?)."); return; }
+    if (outcome === "refused") { setError("The daemon refused that token — check you copied all of it."); return; }
+    // NOT a refusal: nothing answered for the token either way, so this says exactly that rather than
+    // blaming the paste — and rather than blaming the connection, which a 403 or a throttle would belie.
+    if (outcome === "unverified") { setError("Didn't get an answer about that token — nothing was saved. Try again."); return; }
+    if (outcome === "unstorable") { setError("This browser refused to store it (private mode?)."); return; }
     setValue(""); // don't leave the secret sitting in component state
     clearGatewayLock();
     void qc.invalidateQueries(); // let anything that failed while locked settle
     // The live panes hold sockets opened without a token; a reload is the simplest correct way to reconnect them.
     window.location.reload();
+  };
+
+  // Re-check a candidate whose first check never reached the daemon (the helper stores + reloads on a
+  // success, so only the outcomes that keep us here need wording).
+  const retry = async () => {
+    setRetrying(true);
+    setError(null);
+    const outcome = await retryPendingGatewayToken();
+    setRetrying(false);
+    if (outcome === "unverified") setError("Still no answer about that token — the link's one is still held.");
+    else if (outcome === "rejected") setError("The daemon refused that link's token, so it was discarded.");
+    else if (outcome === "unstorable") setError("This browser refused to store it (private mode?).");
   };
 
   return (
@@ -60,17 +89,30 @@ export function GatewayTokenBanner() {
       <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}>
         <span style={{ color: color.text }}>
           <strong style={{ color: color.red, fontWeight: 600 }}>
-            {revoked ? `This access token was ${revoked}.` : lockedNow ? "This address needs a gateway token." : "A link's gateway token was refused."}
+            {linkLeads && linkCopy
+              ? linkCopy.headline
+              : revoked
+              ? `This access token was ${revoked}.`
+              : "This address needs a gateway token."}
           </strong>{" "}
-          {revoked
+          {/* A link outcome's wording lives in lib/gatewayCredential (pure, and unit-tested per variant):
+              it must never claim a refusal for an unanswered check, never claim the daemon was unreachable
+              (a 403 or a coded throttle came FROM it), and never name a Retry that is not rendered below. */}
+          {linkLeads && linkCopy
+            ? linkCopy.detail
+            : revoked
             ? `Loom closed this browser's live connections because the gateway token it holds was ${revoked} on the daemon. Paste a current token to sign in again.`
-            : !lockedNow
-            ? "The token in the ?gwtoken= link you opened was not accepted, so it was NOT saved; the token this browser already holds is unchanged."
             : holdsToken
             ? "The daemon refused the token this browser holds (revoked, paused or mistyped)."
             : "You reached Loom through a reverse proxy, so every request must present a gateway token."}{" "}
           {lockedNow && !revoked ? "Nothing loads until it does. " : ""}This address serves reads, answering requests and steering sessions only.
         </span>
+        {/* Both at once: the lock (or the revocation) keeps the headline, and the link outcome still gets
+            said — otherwise a held candidate's Retry button would appear below with nothing explaining what
+            it retries, which is exactly what the round-3 review found here. */}
+        {!linkLeads && linkCopy
+          ? <span style={{ color: color.textDim }} data-testid="gateway-link-note">{linkCopy.headline} {linkCopy.detail}</span>
+          : null}
         <span style={{ color: color.textDim }}>
           On the machine running the daemon, mint one over loopback (see <code style={{ color: color.cyan, background: color.panel2,
             border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "1px 5px" }}>POST /api/gateway-tokens</code> in
@@ -95,7 +137,12 @@ export function GatewayTokenBanner() {
           <Button variant="primary" onClick={() => void unlock()} disabled={checking || !value.trim()}>
             {checking ? "Checking…" : "Use token"}
           </Button>
-          {!lockedNow ? <Button onClick={() => dismissGatewayLinkRejected()}>Dismiss</Button> : null}
+          {retryable
+            ? <Button onClick={() => void retry()} disabled={retrying} data-testid="gateway-link-retry">
+                {retrying ? "Checking…" : "Retry the link's token"}
+              </Button>
+            : null}
+          {!lockedNow ? <Button onClick={() => dismissGatewayLinkOutcome()}>Dismiss</Button> : null}
           {error ? <span style={{ color: color.red }}>{error}</span> : null}
         </div>
         <span style={{ color: color.textMuted }}>

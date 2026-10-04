@@ -21,6 +21,7 @@ import { taskMatchesSearch } from "../lib/taskFilter";
 // Priority chip + metadata live in one place so the board and the /terminals task card never drift.
 import { PRIORITY_META, PriorityChip, prio } from "../components/priority";
 import { errorText } from "../lib/loopbackCredential";
+import { submitDraft } from "../lib/draftSubmit";
 
 const PRIORITIES: TaskPriority[] = ["p0", "p1", "p2", "p3"];
 // Everything the detail drawer can write, in ONE place — the drawer's `onSave` prop, the mutation that
@@ -214,7 +215,9 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
       )}
       {projectId && board.data && (
         <>
-          <NewTask repos={repos} onCreate={(title, repoKey) => create.mutate({ title, repoKey })}
+          {/* `mutateAsync`, not `mutate`: NewTask has to AWAIT the create to know whether clearing the
+              typed title is safe (card a1ec70a6). It still surfaces the failure inline via create.error. */}
+          <NewTask repos={repos} onCreate={(title, repoKey) => create.mutateAsync({ title, repoKey })}
             error={create.error ? errorText(create.error) : null} />
           <FilterBar search={search} onSearch={setSearch} columns={board.data.columns}
             priFilter={priFilter} onTogglePri={togglePri} colFilter={colFilter} onToggleCol={toggleCol}
@@ -1499,13 +1502,28 @@ function DescriptionVoiceNote({ speech }: { speech: SpeechRecognitionApi }) {
   );
 }
 
-function NewTask({ repos, onCreate, error }: { repos: RepoRegistryEntry[]; onCreate: (title: string, repoKey: string | null) => void; error: string | null }) {
+function NewTask({ repos, onCreate, error }: { repos: RepoRegistryEntry[]; onCreate: (title: string, repoKey: string | null) => Promise<unknown>; error: string | null }) {
   const [title, setTitle] = useState("");
   // Which repo the new card targets. "" = primary (the default, and the ONLY option a single-repo project
   // has). Deliberately NOT reset on submit: filing several cards against the same repo in a row is the
   // normal multi-repo rhythm, and re-picking every time would be pure friction.
   const [repoKey, setRepoKey] = useState("");
-  const submit = () => { if (title.trim()) { onCreate(title, repoKey || null); setTitle(""); } };
+  // Card a1ec70a6: the title is cleared only once the create RESOLVES — and only if it still holds the
+  // submitted text, so typing on while the write is in flight doesn't get eaten either. `submitDraft` owns
+  // both rules; passing `setTitle` straight through is what lets it apply the second one (it hands over a
+  // functional update). The ref is the re-entry guard (`creating` state is only the visible half — it has
+  // not re-rendered when a second click in the same tick reads it).
+  const [creating, setCreating] = useState(false);
+  const inFlight = useRef(false);
+  const submit = () => {
+    void submitDraft({
+      draft: title,
+      inFlight: () => inFlight.current,
+      setInFlight: (v) => { inFlight.current = v; setCreating(v); },
+      create: () => onCreate(title, repoKey || null),
+      updateDraft: setTitle,
+    });
+  };
   // flexWrap + a shrinkable, growing input: on a narrow viewport the button wraps below instead of
   // forcing the row (and the page) to overflow horizontally. Enter submits (keyboard parity with the button).
   return (
@@ -1525,7 +1543,9 @@ function NewTask({ repos, onCreate, error }: { repos: RepoRegistryEntry[]; onCre
             {repos.map((r) => <option key={r.key} value={r.key}>{r.key}</option>)}
           </Select>
         )}
-        <Button variant="primary" disabled={!title.trim()} onClick={submit}>Add to Inbox</Button>
+        <Button variant="primary" disabled={!title.trim() || creating} onClick={submit}>
+          {creating ? "Adding…" : "Add to Inbox"}
+        </Button>
       </div>
       {error && (
         <span role="alert" style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.5 }}>{error}</span>

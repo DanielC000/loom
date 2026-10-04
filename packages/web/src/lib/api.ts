@@ -178,11 +178,17 @@ export interface TemplateApplyResult { agents: Agent[]; tasks: Task[]; }
 //
 // Storage + the `?token=` capture moved to lib/loopbackCredential.ts (card 093981dd) so ONE module owns
 // them; `getLoopbackToken` is re-exported below because Terminal.tsx/CompanionChat.tsx import it here.
-captureTokenFromUrl();
+// Card a1ec70a6: verifies before storing (async, like the gateway path below) — a crafted `?token=` link
+// can no longer evict the working secret this browser holds; it reloads once after a GOOD one lands so
+// requests that raced the capture reconnect with it.
+void captureTokenFromUrl();
 // Card 4cbbc343: the gateway token a browser needs behind a trusted reverse proxy — a SEPARATE param and storage key.
 void captureGatewayTokenFromUrl(); // verifies before storing (async); a bad link never overwrites a working token
 
-export { getLoopbackToken, setLoopbackToken } from "./loopbackCredential";
+// Only the READ is re-exported. Card a1ec70a6: the writer is module-private in loopbackCredential.ts, so
+// there is no longer any way to store the secret except through its verify-then-store chokepoint — a
+// language-enforced version of the rule, rather than a convention a source scan has to police.
+export { getLoopbackToken } from "./loopbackCredential";
 
 function authHeaders(): Record<string, string> {
   // Card 4cbbc343: on a proxied (non-loopback) origin the credential is the gateway token, never the loopback secret.

@@ -4,11 +4,26 @@
 // alter the loopback credential's (card 093981dd) behaviour. Run:
 //   node --experimental-strip-types packages/web/test/gateway-credential.mjs
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { register } from "node:module";
+
+// Card a1ec70a6: both credential modules now have a REAL runtime import of ./credentialVerify (the shared
+// three-state verify), written extensionless in the bundler style the app uses, which Node's own resolver
+// cannot follow. `_tsxLoaderHook.mjs` exists for exactly that; registering it means the module imports
+// below must be DYNAMIC, since a static one here would be hoisted and resolved before `register()` runs.
+register("./_tsxLoaderHook.mjs", import.meta.url);
 
 // A tiny in-memory window/localStorage so the storage helpers run off-browser (the module guards `window`).
+// sessionStorage is where an UNCHECKED candidate waits for a retry — never the live credential slot.
 const mem = new Map();
+const session = new Map();
 globalThis.window = {
   localStorage: { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => { mem.set(k, String(v)); } },
+  sessionStorage: {
+    getItem: (k) => (session.has(k) ? session.get(k) : null),
+    setItem: (k, v) => { session.set(k, String(v)); },
+    removeItem: (k) => { session.delete(k); },
+  },
   location: { hostname: "box.tail1.ts.net", href: "https://box.tail1.ts.net:8443/board?gwtoken=GW-TOKEN&x=1" },
   history: { replaceState: (_s, _t, url) => { globalThis.window.location.href = String(url); } },
 };
@@ -16,8 +31,23 @@ globalThis.window = {
 const G = await import("../src/lib/gatewayCredential.ts");
 const L = await import("../src/lib/loopbackCredential.ts");
 
+const DEFAULT_HREF = "https://box.tail1.ts.net:8443/board?gwtoken=GW-TOKEN&x=1";
+const LOOPBACK_KEY = "loom.loopbackToken";
+// Card a1ec70a6 round 3: `seedLoopbackTokenForTest` is gone — the loopback module exports NO write path at
+// all now, so a test that wants a browser already holding a loopback secret seeds its own fake storage.
+const seedHeldLoopbackSecret = (secret) => { mem.set(LOOPBACK_KEY, secret); };
+
 let pass = 0;
-const check = (name, fn) => { mem.clear(); G.resetGatewayLockForTest(); L.resetCredentialLockForTest(); fn(); pass++; console.log(`ok   ${name}`); };
+const reset = () => {
+  mem.clear();
+  session.clear();
+  G.resetGatewayLockForTest();
+  L.resetCredentialLockForTest();
+  globalThis.window.location.href = DEFAULT_HREF;
+  // Restored per case: the reload-loop cases below replace it with a throwing / silently no-op one.
+  globalThis.window.history.replaceState = (_s, _t, url) => { globalThis.window.location.href = String(url); };
+};
+const check = (name, fn) => { reset(); fn(); pass++; console.log(`ok   ${name}`); };
 
 check("isRemoteOrigin: loopback hostnames are NOT remote; a tailnet/other host IS", () => {
   for (const h of ["127.0.0.1", "localhost", "LOCALHOST", "[::1]", "::1"]) assert.equal(G.isRemoteOrigin(h), false, h);
@@ -50,13 +80,15 @@ check("storage: a SEPARATE key from the loopback token; set/get round-trips; emp
   assert.equal(G.setGatewayToken("  gw-abc \n"), true);
   assert.equal(G.getGatewayToken(), "gw-abc");
   assert.equal(L.getLoopbackToken(), null, "writing the gateway token never touches the loopback key");
-  L.setLoopbackToken("loop-secret");
+  seedHeldLoopbackSecret("loop-secret");
   assert.equal(G.getGatewayToken(), "gw-abc", "…nor the other way round");
+  assert.equal(L.getLoopbackToken(), "loop-secret", "control: the seed really did land in the loopback slot");
 });
 
 // captureGatewayTokenFromUrl is async (it VERIFIES before persisting), so it has its own async harness.
-const acheck = async (name, fn) => { mem.clear(); G.resetGatewayLockForTest(); L.resetCredentialLockForTest(); globalThis.window.location.href = "https://box.tail1.ts.net:8443/board?gwtoken=GW-TOKEN&x=1"; await fn(); pass++; console.log(`ok   ${name}`); };
-const GOOD = async () => true, BAD = async () => false;
+const acheck = async (name, fn) => { reset(); await fn(); pass++; console.log(`ok   ${name}`); };
+// Card a1ec70a6: the injected verifier is THREE-state now. UNKNOWN is the one that is not a refusal.
+const GOOD = async () => "valid", BAD = async () => "invalid", UNREACHED = async () => "unknown";
 
 await acheck("captureGatewayTokenFromUrl (token VERIFIES): stored into the gateway key, stripped from the URL, other params kept, page reloaded", async () => {
   let reloads = 0;
@@ -75,10 +107,10 @@ await acheck("captureGatewayTokenFromUrl (token REFUSED): NOTHING is stored, a W
   assert.equal(G.getGatewayToken(), "owner-working-token", "a crafted link must never clobber the owner's token");
   assert.equal(globalThis.window.location.href.includes("gwtoken"), false, "a rejected token must not linger in the address bar either");
   assert.equal(reloads, 0);
-  assert.equal(G.gatewayLinkRejected(), true, "the rejection is shown");
+  assert.equal(G.gatewayLinkOutcome(), "rejected", "the rejection is shown");
   assert.equal(G.gatewayLock(), false, "…but the banner does NOT claim a token is missing when the browser holds a working one");
-  G.dismissGatewayLinkRejected();
-  assert.equal(G.gatewayLinkRejected(), false);
+  G.dismissGatewayLinkOutcome();
+  assert.equal(G.gatewayLinkOutcome(), null);
 });
 
 await acheck("captureGatewayTokenFromUrl (REFUSED, no token held): also raises the gateway lock so the banner asks for one", async () => {
@@ -89,9 +121,9 @@ await acheck("captureGatewayTokenFromUrl (REFUSED, no token held): also raises t
 });
 
 await acheck("captureGatewayTokenFromUrl: a successful verify clears a previous link-rejection; no param / loopback origin do nothing", async () => {
-  G.noteGatewayLinkRejected(false);
+  G.noteGatewayLinkOutcome("rejected", false);
   assert.equal(await G.captureGatewayTokenFromUrl(GOOD, () => {}, true), "stored");
-  assert.equal(G.gatewayLinkRejected(), false);
+  assert.equal(G.gatewayLinkOutcome(), null);
   mem.clear();
   globalThis.window.location.href = "https://box.tail1.ts.net:8443/?token=LOOPBACK-ONLY";
   assert.equal(await G.captureGatewayTokenFromUrl(GOOD, () => {}, true), "none", "a ?token= param is the LOOPBACK credential's, never captured here");
@@ -100,6 +132,199 @@ await acheck("captureGatewayTokenFromUrl: a successful verify clears a previous 
   assert.equal(await G.captureGatewayTokenFromUrl(GOOD, () => {}, false), "none", "nothing on a loopback origin reads a gateway token");
   assert.equal(G.getGatewayToken(), null);
   assert.equal(globalThis.window.location.href.includes("gwtoken"), false);
+});
+
+// ── card a1ec70a6: the same three-state rule as the loopback path, on this path's own probe ───────────
+await acheck("verifyGatewayTokenAgainstDaemon: 2xx is `valid`, a 401 is `invalid`, and a 404 proves NOTHING here", async () => {
+  const seen = [];
+  for (const [status, expected] of [[200, "valid"], [204, "valid"], [401, "invalid"], [404, "unknown"], [403, "unknown"], [429, "unknown"], [502, "unknown"]]) {
+    globalThis.fetch = async (url, init) => { seen.push({ url, init }); return { status }; };
+    assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), expected, String(status));
+  }
+  assert.equal(seen[0].url, "/api/version", "a Tier-1 read a remote-class request must authenticate");
+  assert.equal(seen[0].init.headers.authorization, "Bearer gw-candidate");
+  globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
+  assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "unknown");
+  // The predicate difference from loopback is deliberate, and this is the case that proves it: a proxied
+  // origin is exactly where some intermediary, not the daemon, may answer a path it does not route.
+  globalThis.fetch = async () => ({ status: 404 });
+  assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "unknown",
+    "a 404 is proof of passage on the LOOPBACK probe only — never here");
+});
+
+// ── card a1ec70a6 round 3 item 3: the daemon's OWN second refusal status, and only that one ───────────
+await acheck("verifyGatewayTokenAgainstDaemon: the failed-auth 429 WITH the daemon's code is `invalid`; a bare 429 stays `unknown`", async () => {
+  // The daemon answers a coded 429 only to a request whose token just FAILED verification (verify-first,
+  // card cf9ebab9), so it IS a refusal this token earned — reporting it as "we learned nothing" sends the
+  // user to retry a token the daemon has already rejected.
+  globalThis.fetch = async () => ({ status: 429, json: async () => ({ error: "too many failed attempts — try again later", code: "gateway-token-required" }) });
+  assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "invalid");
+  globalThis.fetch = async () => ({ status: 429, json: async () => ({ error: "rate limit exceeded" }) });
+  assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "unknown",
+    "a BARE throttle says nothing about whether the credential was ever looked at");
+  globalThis.fetch = async () => ({ status: 429, json: async () => { throw new SyntaxError("Unexpected token <"); } });
+  assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "unknown",
+    "an unreadable body proves nothing either way — and must not reject the verify");
+  // The widening must NOT leak to a status an intermediary could have authored, whatever body rides it.
+  globalThis.fetch = async () => ({ status: 403, json: async () => ({ code: "gateway-token-required" }) });
+  assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "unknown",
+    "a pre-auth 403 never reached the token check at all");
+  globalThis.fetch = async () => ({ status: 502, json: async () => ({ code: "gateway-token-required" }) });
+  assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "unknown", "…nor a proxy's own 5xx");
+});
+
+await acheck("the coded 429 reaches the CAPTURE path as a refusal: the held token survives and the rejection is surfaced", async () => {
+  G.setGatewayToken("owner-working-token");
+  globalThis.fetch = async () => ({ status: 429, json: async () => ({ error: "too many failed attempts", code: "gateway-token-required" }) });
+  let reloads = 0;
+  // The REAL verifier here, not an injected one: this is the end-to-end proof that the classification above
+  // is what the capture path actually acts on.
+  assert.equal(await G.captureGatewayTokenFromUrl(undefined, () => { reloads++; }, true), "rejected");
+  assert.equal(G.getGatewayToken(), "owner-working-token");
+  assert.equal(G.gatewayLinkOutcome(), "rejected", "…and NOT 'unverified': the daemon did answer about this token");
+  assert.equal(G.pendingGatewayToken(), null, "a refusal is final — nothing held for a retry that cannot help");
+  assert.equal(reloads, 0);
+});
+
+// ── card a1ec70a6 round 3 item 1 (BLOCKING): the reload-loop guard, the twin of the loopback one ──────
+// The round-2 change wrapped `replaceState` in a try/catch, which stops a throw from rejecting the promise
+// — but this path had no "already holding exactly this token" early return, so a strip that THREW (caught)
+// or silently NO-OPPED left `?gwtoken=` in the URL and the capture still verified → stored → reload(), and
+// the reload re-entered on the same URL. Measured pre-fix: 5 reloads for 5 re-entries, i.e. an unbounded
+// loop in a real browser. Both failure shapes get their own case because they reach the same state by
+// different routes, and the try/catch only ever addressed one of them.
+await acheck("captureGatewayTokenFromUrl: re-opening a link carrying the ALREADY-held token is a no-op — no verify, no reload", async () => {
+  G.setGatewayToken("GW-TOKEN");
+  const seen = [];
+  const wouldReject = async (t) => { seen.push(t); return "invalid"; }; // a consult shows up as a failure here
+  let reloads = 0;
+  assert.equal(await G.captureGatewayTokenFromUrl(wouldReject, () => { reloads++; }, true), "stored");
+  assert.deepEqual(seen, [], "nothing to prove: this is the token we already hold");
+  assert.equal(reloads, 0, "…and nothing to reconnect");
+  assert.equal(G.getGatewayToken(), "GW-TOKEN");
+  assert.equal(G.gatewayLinkOutcome(), null, "a no-op is not an outcome worth a banner");
+});
+
+await acheck("captureGatewayTokenFromUrl: a THROWING replaceState is swallowed, and the already-held guard bounds the reload", async () => {
+  globalThis.window.history.replaceState = () => { throw new Error("replaceState unavailable"); };
+  let reloads = 0;
+  assert.equal(await G.captureGatewayTokenFromUrl(GOOD, () => { reloads++; }, true), "stored");
+  assert.equal(G.getGatewayToken(), "GW-TOKEN");
+  assert.equal(globalThis.window.location.href.includes("gwtoken=GW-TOKEN"), true, "the strip genuinely failed");
+  assert.equal(reloads, 1, "the first pass still reconnects");
+  // The re-entry a reload would cause, on the SAME still-unstripped URL: it must stop here.
+  assert.equal(await G.captureGatewayTokenFromUrl(GOOD, () => { reloads++; }, true), "stored");
+  assert.equal(reloads, 1, "…and no further reload: that is the loop guard, not the strip");
+});
+
+await acheck("captureGatewayTokenFromUrl: a SILENTLY NO-OP replaceState is bounded by the same guard", async () => {
+  // The shape the try/catch cannot see at all: a browser (or a hostile override) whose replaceState
+  // returns normally and changes nothing. Pre-fix this measured 5 reloads for 5 re-entries.
+  globalThis.window.history.replaceState = () => { /* returns cleanly, strips nothing */ };
+  let reloads = 0;
+  for (let i = 0; i < 5; i++) {
+    assert.equal(await G.captureGatewayTokenFromUrl(GOOD, () => { reloads++; }, true), "stored", `re-entry ${i}`);
+  }
+  assert.equal(globalThis.window.location.href.includes("gwtoken=GW-TOKEN"), true, "the strip genuinely no-opped");
+  assert.equal(reloads, 1, "ONE reload across five re-entries — pre-fix this was five, and in a browser unbounded");
+});
+
+await acheck("captureGatewayTokenFromUrl (UNCHECKED): nothing stored, no refusal claimed, no lock, and the candidate is HELD", async () => {
+  G.setGatewayToken("owner-working-token");
+  let reloads = 0;
+  assert.equal(await G.captureGatewayTokenFromUrl(UNREACHED, () => { reloads++; }, true), "unverified");
+  assert.equal(G.getGatewayToken(), "owner-working-token", "an unproven candidate never overwrites a working token");
+  assert.equal(G.gatewayLinkOutcome(), "unverified", "its OWN outcome — the banner copy keyed on it must not say 'refused'");
+  assert.equal(G.pendingGatewayToken(), "GW-TOKEN", "held, so a retry has something to prove");
+  assert.equal(globalThis.window.location.href.includes("gwtoken"), false, "…and still stripped from the address bar");
+  assert.equal(reloads, 0);
+});
+
+await acheck("captureGatewayTokenFromUrl (UNCHECKED, no token held): still no lock — 'this address needs a token' is not what happened", async () => {
+  assert.equal(await G.captureGatewayTokenFromUrl(UNREACHED, () => {}, true), "unverified");
+  assert.equal(G.gatewayLock(), false,
+    "the lock asserts the daemon demanded a token; an unanswered check observed nothing of the kind");
+  assert.equal(G.pendingGatewayToken(), "GW-TOKEN");
+});
+
+await acheck("retryPendingGatewayToken: stores on a later success, keeps the hold while still unknown, drops it on a refusal", async () => {
+  await G.captureGatewayTokenFromUrl(UNREACHED, () => {}, true);
+  assert.equal(await G.retryPendingGatewayToken(UNREACHED, () => {}), "unverified");
+  assert.equal(G.pendingGatewayToken(), "GW-TOKEN", "a retry that learned nothing keeps the candidate");
+  let reloads = 0;
+  assert.equal(await G.retryPendingGatewayToken(GOOD, () => { reloads++; }), "stored");
+  assert.equal(G.getGatewayToken(), "GW-TOKEN");
+  assert.equal(G.pendingGatewayToken(), null);
+  assert.equal(G.gatewayLinkOutcome(), null);
+  assert.equal(reloads, 1);
+  assert.equal(L.getLoopbackToken(), null, "the loopback key is never touched by any of this");
+});
+
+await acheck("retryPendingGatewayToken: nothing held is `none`; a refusal is terminal", async () => {
+  assert.equal(await G.retryPendingGatewayToken(GOOD, () => {}), "none");
+  await G.captureGatewayTokenFromUrl(UNREACHED, () => {}, true);
+  assert.equal(await G.retryPendingGatewayToken(BAD, () => {}), "rejected");
+  assert.equal(G.pendingGatewayToken(), null);
+  assert.equal(G.gatewayLinkOutcome(), "rejected");
+});
+
+await acheck("the two credentials' holds are separate: a gateway candidate never shows up as a loopback one", async () => {
+  await G.captureGatewayTokenFromUrl(UNREACHED, () => {}, true);
+  assert.equal(G.pendingGatewayToken(), "GW-TOKEN");
+  assert.equal(L.pendingLoopbackToken(), null);
+  assert.equal(L.loopbackLinkOutcome(), null, "…nor as a loopback link outcome");
+});
+
+// ── card a1ec70a6 round 3 item 4: the gateway banner's COPY, pure — the twin of loopbackLinkCopy ───────
+check("gatewayLinkCopy: a refusal ONLY for the daemon's own answer, no unreachability claim, no unrendered Retry", () => {
+  for (const holdsToken of [true, false]) {
+    const rejected = G.gatewayLinkCopy("rejected", holdsToken);
+    assert.match(rejected.headline, /refused/, "a real refusal says so plainly");
+    assert.match(rejected.detail, /was not accepted/);
+
+    const unverified = G.gatewayLinkCopy("unverified", holdsToken);
+    const text = `${unverified.headline} ${unverified.detail}`;
+    for (const word of [/refus/i, /not accepted/i, /reject/i, /invalid/i]) {
+      assert.equal(word.test(text), false, `an unanswered check must not read as a refusal (${word})`);
+    }
+    // Round 3 item 3, as copy: `unknown` also covers answers the DAEMON sent — a pre-auth 403, a bare
+    // throttle — so no variant may blame the connection for them.
+    for (const word of [/could not reach/i, /unreachable/i, /offline/i, /reachable/i]) {
+      assert.equal(word.test(text), false, `a 403 or a throttle came FROM the daemon (${word})`);
+    }
+    assert.match(unverified.headline, /could not be checked/);
+    assert.match(unverified.detail, /did not get an answer/i);
+    // The Retry sentence is printed only when a candidate is genuinely HELD — a sessionStorage that
+    // refused us leaves the outcome unverified with no button, and the copy must not name one.
+    assert.equal(/\bRetry\b/.test(unverified.detail), false, "no hold ⇒ no Retry offered ⇒ no Retry promised");
+    assert.match(G.gatewayLinkCopy("unverified", holdsToken, true).detail, /\bRetry\b/);
+
+    const unstorable = G.gatewayLinkCopy("unstorable", holdsToken);
+    assert.match(unstorable.detail, /was accepted/, "this one DID verify — the browser is what refused it");
+  }
+  assert.match(G.gatewayLinkCopy("rejected", true).detail, /unchanged/,
+    "the one true claim survives: a refusal left the held token alone");
+  assert.match(G.gatewayLinkCopy("unverified", false).detail, /stays locked/,
+    "…and a browser holding no token is told this address is locked, whatever the outcome");
+  for (const outcome of ["rejected", "unverified", "unstorable"]) {
+    const copy = G.gatewayLinkCopy(outcome, false);
+    assert.equal(/\bunchanged\b/.test(`${copy.headline} ${copy.detail}`), false,
+      `${outcome}: nothing is 'unchanged' on a browser holding no token`);
+  }
+});
+
+check("GatewayTokenBanner takes its link wording from the pure helper, and explains the Retry under a lock", () => {
+  const src = fs.readFileSync(new URL("../src/components/GatewayTokenBanner.tsx", import.meta.url), "latin1");
+  assert.ok(src.includes("This address needs a gateway token."), "positive control: the scan is reading the real banner");
+  assert.ok(src.includes("gatewayLinkCopy("), "the wording must come from the pure helper this file asserts");
+  // The round-3 finding: a lockedNow/revoked banner kept the lock headline and dropped the link copy
+  // entirely, while still rendering the Retry button — a button with nothing saying what it retries.
+  assert.ok(src.includes("!linkLeads && linkCopy"),
+    "a lock-led banner must STILL say what the Retry rendered beside it is retrying");
+  assert.equal(/could not reach the daemon/i.test(src), false,
+    "…and the unreachability claim must not survive inlined in the JSX either");
+  assert.ok(/could not reach the daemon/i.test("Loom could not reach the daemon to check"),
+    "negative control: the pattern does match the bad copy");
 });
 
 check("withGatewayAuth: adds the bearer on a REMOTE origin (reads too); never overrides one the caller set", () => {
