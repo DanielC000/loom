@@ -38,7 +38,15 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
 // Contract-faithful PtyStub (mirrors host onDeliver semantics; identical to the durability test's): a
 // session must be `live` to receive; a `busy`/not-ready recipient QUEUES + stores onDeliver; an idle one
-// delivers immediately (and, like the host, does NOT fire onDeliver). drainOne() = a turn boundary.
+// delivers immediately (and, like the real host, does NOT fire onDeliver on that branch — decision
+// 2ca18433, unchanged by card 0075e20b's fix). drainOne() = a turn boundary.
+//
+// Card 0075e20b: every scenario below sets the recipient BUSY before redriving, so none of them exercise
+// this stub's own `idle → immediate` branch — that branch (and the caller-side fix for it, since
+// `redriveQueuedMessage` now resolves the durable record itself on `delivered:true` rather than relying
+// on `onDeliver`) is covered separately, in redrive-idle-immediate-ondeliver-gap.mjs. This stub's own
+// mechanics are left untouched here: the fix is entirely caller-side (SessionService), not a change to
+// what enqueueStdin itself returns or when it fires onDeliver.
 class PtyStub {
   constructor() { this.q = new Map(); this.live = new Set(); this.busy = new Set(); }
   setLive(id, on = true) { if (on) this.live.add(id); else this.live.delete(id); }

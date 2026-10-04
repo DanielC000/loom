@@ -2434,6 +2434,21 @@ export type EnqueueDeliveryReason = "session-dead" | "held" | "shell-terminal";
  * (`staleDirective`/`parkedDirective` — see `staleDirectiveProjection` in mcp/orchestration.ts). `"queued"`
  * and `"dropped"` are the SAME per-branch identity `delivered`/`reason`/`queued` already convey.
  * @decision 9da2a435 — why `deliveryState` exists alongside `delivered` instead of replacing it.
+ *
+ * THE `onDeliver`/`delivered:true` CONTRACT (card 0075e20b): `delivered:true` means the entry was handed
+ * off NOW — on claude, via EITHER the pure-immediate idle-submit branch (decision 2ca18433: never fires
+ * `onDeliver`) or the push-then-drain branch (pushes the entry then synchronously drains it, firing
+ * `onDeliver` inside THIS SAME call, before this result is even returned). `onDeliver` fires reliably
+ * only for an entry that was HELD and LATER drained by a separate `drainPending`/`consumePending` call —
+ * so a caller that needs deterministic resolution of something it persisted (an existing durable record)
+ * on `delivered:true` OWNS that resolution itself; it must not assume `onDeliver` will do it. Both
+ * `redriveQueuedMessage` and `carryPendingToSuccessor`'s remint-fallback (sessions/service.ts) follow this:
+ * they resolve/clear their own bookkeeping right after a `delivered:true` return, idempotently, so a
+ * same-call `onDeliver` that already fired (the push-then-drain case) is a harmless no-op. Codex's own
+ * immediate branch (`enqueueStdinCodex`) differs — it fires `onDeliver` unconditionally, by design (its
+ * simpler push+drain model has no M1/M2 synchronous-ordering window to protect) — a stated asymmetry, not
+ * drift; see decision 2ca18433's own record for why. A caller must not rely on that harness difference
+ * either way: resolve on `delivered:true` regardless of which harness answered.
  */
 export type EnqueueResult = {
   delivered: boolean;

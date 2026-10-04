@@ -7062,6 +7062,18 @@ export class SessionService {
         // branch so both are greppable the same way.
         // eslint-disable-next-line no-console
         console.log(`[redrive] re-enqueued msgId=${msgId} rootMsgId=${rootMsgId} for ${recipientId} (held=${r.delivered !== true})`);
+        // Card 0075e20b: `r.delivered` means `enqueueStdin` took a HANDED-OFF branch — either the pure
+        // immediate idle-submit (which, by decision 2ca18433, NEVER fires `onDeliver`) or the push-then-
+        // drain branch (which fires it synchronously, inside this very call, via `drainPending`). Resolve
+        // and clear the in-flight mark HERE, unconditionally, rather than leaving it to `onDeliver` alone:
+        // for the pure-immediate case nothing else ever will, which is exactly the duplicate-redrive gap
+        // this card closes; for the push-then-drain case `onDeliver` already did it, so this is a harmless
+        // idempotent no-op (`resolveQueuedMessage`'s own `isQueuedMessageDelivered` guard, `clearRedriveInFlight`'s
+        // own `Map.delete`). See `EnqueueResult`'s own doc (pty/host.ts) for the stated contract this follows.
+        if (r.delivered) {
+          this.clearRedriveInFlight(msgId);
+          this.resolveQueuedMessage(msgId, { recipientId, sender });
+        }
         return "reEnqueued";
       }
       // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → not actually
@@ -10257,8 +10269,19 @@ export class SessionService {
    * (drainPending / consumePending), and by the boot scan to RETIRE a message whose recipient is
    * gone/superseded (`reason`). Idempotent via the delivered-marker check, and NEVER throws (a
    * delivery-marking fault must not disturb the host drain or gate boot). A msgId that was never persisted
-   * (immediate delivery) simply records a harmless marker with no queued counterpart — but onDeliver is
-   * only ever attached to a HELD entry, so that can't occur.
+   * (immediate delivery) simply records a harmless marker with no queued counterpart. This DOES occur in
+   * practice (card 0075e20b, correcting this comment's own prior "onDeliver is only ever attached to a
+   * HELD entry, so that can't occur" claim): `enqueueDurableMessage`'s push-then-drain branch can push an
+   * entry onto `live.pending`, have `drainPending` synchronously drain-and-resolve it (firing `onDeliver`
+   * here) ALL WITHIN THE SAME `enqueueStdin` call, before the caller's own `!r.delivered` check — which
+   * decides whether to persist the `session_message_queued` row in the first place — ever runs. The
+   * resulting orphan `session_message_delivered` marker is harmless BY DESIGN: every reader of the durable
+   * inbox (`listUndeliveredQueuedMessages`/`listUnresolvedQueuedMessagesForWorker`, db.ts) starts from
+   * `kind = 'session_message_queued'` and anti-joins against this kind, so a delivered marker with no
+   * queued sibling is simply never selected by either. Left as-is (not "fixed") — see this method's own
+   * callers for the one case that DOES need caller-side resolution (an ALREADY-persisted record, e.g.
+   * `redriveQueuedMessage`/`carryPendingToSuccessor`'s remint-fallback), which now resolves explicitly on
+   * `delivered:true` rather than relying on this timing.
    *
    * @decision 9da2a435 — despite the event kind name, this is a HAND-OFF stamp, not an engine-confirmed
    * delivery; resolve via `staleDirective`/`parkedDirective`'s give-up chain walk, never this stamp alone.
@@ -10406,7 +10429,7 @@ export class SessionService {
         const chainDepthForRearm = chainDepth ?? 0;
         const kindForRearm: QueuedMessageKind = kind ?? "agent";
         try {
-          this.pty.enqueueStdin(
+          const rRearm = this.pty.enqueueStdin(
             oldId, text, "system",
             (reason?: string) => this.resolveQueuedMessage(oldMsgId, { recipientId: oldId, reason, sender }),
             route, kindForRearm, undefined, undefined, undefined, sender,
@@ -10416,6 +10439,12 @@ export class SessionService {
               reportEventId,
             },
           );
+          // Card 0075e20b — same caller-side contract as `redriveQueuedMessage`: a `delivered:true` hand-off
+          // may have taken the pure-immediate branch, which never fires `onDeliver` (decision 2ca18433), so
+          // resolve this record ourselves rather than leave it to a callback that might never run. Idempotent
+          // (resolveQueuedMessage's own `isQueuedMessageDelivered` guard) against the push-then-drain branch,
+          // where `onDeliver` already fired synchronously inside the call above.
+          if (rRearm.delivered) this.resolveQueuedMessage(oldMsgId, { recipientId: oldId, sender });
         } catch (e2) {
           console.error(`[recycle] re-arming the failed carry (msgId=${oldMsgId}) back onto ${oldId.slice(0, 8)} ALSO failed — this record is now stuck unresolved with nothing driving its delivery:`, (e2 as Error).message);
         }

@@ -22,6 +22,16 @@ It takes an OPTIONAL `reason`: the drain/pull paths call it with NO arg (a plain
 - Do not invoke `onDeliver` from the immediate idle-submit path — that path already returns `delivered:true` synchronously; firing it there would double-count delivery and risk the load-bearing M1/M2 busy-gate ordering.
 - Do not let a human-facing delete/edit/reorder mutator touch a `source: 'system'` entry — that boundary stops an agent's queued report from being rewritten out from under it.
 
+## Card 0075e20b amendment — the claude-side non-fire still stands; a caller that needs resolution on `delivered:true` now does it itself
+
+The prohibition above (never fire `onDeliver` from claude's immediate idle-submit path) is UNCHANGED — this amendment does not override it. What changed: `redriveQueuedMessage` and `carryPendingToSuccessor`'s remint-fallback (`sessions/service.ts`) were found relying on `onDeliver` to resolve an ALREADY-PERSISTED `session_message_queued` record on a redrive into a live, idle, empty-pending recipient. That redrive takes the pure-immediate branch, which never fires `onDeliver` by the rule above — so the record stayed permanently unresolved, and a later boot's `recoverUndeliveredMessagesOnBoot` redrove (delivered) the same message a second time: a genuine duplicate. Fix (card 0075e20b): both callers now resolve/clear their own bookkeeping themselves, right after a `delivered:true` return, instead of waiting on `onDeliver` — idempotently (`resolveQueuedMessage`'s own `isQueuedMessageDelivered` guard, `clearRedriveInFlight`'s own `Map.delete`), so a same-call `onDeliver` that DID already fire (the push-then-drain branch — see `EnqueueResult`'s own doc, `pty/host.ts`) is a harmless no-op. `enqueueDurableMessage`'s OWN fresh-dispatch path is deliberately left unchanged — see `resolveQueuedMessage`'s own doc (`sessions/service.ts`) for why there is nothing to resolve there on `delivered:true` (the row is never persisted in the first place).
+
+**Codex differs here, by design, not drift:** `enqueueStdinCodex`'s own immediate branch fires `onDeliver` unconditionally — safe for codex because its simpler push+drain model (lead ruling #3(c)) has no M1/M2 synchronous-ordering window to protect, unlike claude's `submit()` path. A caller must NOT rely on this harness difference either way — resolve explicitly on `delivered:true` regardless of which harness answered, exactly as the two fixed call sites now do.
+
+**Do not (3):**
+- Do not re-add `onDeliver`-firing to claude's immediate branch to "fix" a future resolution gap — fix it caller-side (resolve on `delivered:true`, idempotently), the way card 0075e20b did; the M1/M2 concern above is still live and unverified for that path.
+- Do not assume codex's own `onDeliver`-fires-on-immediate behavior generalizes to claude, or vice versa — a caller needing deterministic resolution must handle both harnesses the same way itself, never lean on firing-timing that differs between them.
+
 ## `recoverUndeliveredMessagesOnBoot` is the single re-enqueue owner
 
 The OTHER half of the dedup above: `recoverUndeliveredMessagesOnBoot` (`sessions/service.ts`) is the one

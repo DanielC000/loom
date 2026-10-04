@@ -13,6 +13,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // resolve" — a message delivered straight as a turn is never persisted as a durable `session_message_
 // queued`, so submit() never calls it either). This test covers the codex-only scope that's actually real.
 //
+// Card 0075e20b amendment: this file's own scenario still holds unchanged (codex fires `onDeliver`
+// unconditionally on its immediate branch; claude still never does on ITS immediate branch — neither
+// changed). What DID change is caller-side: `redriveQueuedMessage`/`carryPendingToSuccessor` (sessions/
+// service.ts) no longer assume `onDeliver` will resolve an ALREADY-PERSISTED durable record on a
+// `delivered:true` hand-off — they resolve it themselves, idempotently, regardless of which harness
+// answered. See `EnqueueResult`'s own doc (pty/host.ts) and docs/decisions/2ca18433-…md's "Card 0075e20b
+// amendment" section for the full contract this asymmetry is now a STATED choice under, not drift.
+//
 // THE FIX: `enqueueStdinCodex`'s idle-submit branch now guards the call exactly like its siblings:
 // `if (onDeliver) { try { onDeliver(); } catch { ... } }`.
 //
