@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
+import { performance } from "node:perf_hooks";
 import { LOOM_HOME } from "./paths.js";
 import { waitForMergeDangerWindowsToClear } from "./git/merge-danger-window.js";
 import { VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS, VAULT_GIT_OP_TIMEOUT_MS } from "./vault/versioner.js";
@@ -123,8 +124,9 @@ const MAX_STEP_NAME_BYTES = 64;
 // Shared buffer layout — Int32 header [0,16) + BigInt64 deadline [16,24) + step name [24, 24+MAX...):
 //   [0,4) DONE flag · [4,8) step-name length · [8,12) GENERATION counter (round 3, see HEADER_GEN_INDEX)
 //   [12,16) reserved/padding, so the BigInt64 deadline stays 8-byte aligned · [16,24) CURRENT ABSOLUTE
-//   DEADLINE (epoch ms, BigInt64 since Int32 overflows) · [24,...) UTF-8 step name, written before its
-//   length is stored so a worker observing a non-zero length also observes the name bytes before it.
+//   DEADLINE (epoch-scale monotonic (timeOrigin+performance.now()), BigInt64 since Int32 overflows) ·
+//   [24,...) UTF-8 step name, written before its length is stored so a worker observing a non-zero
+//   length also observes the name bytes before it.
 const HEADER_DONE_INDEX = 0;
 const HEADER_STEP_NAME_LEN_INDEX = 1;
 // @decision 347b3584 — never wait on HEADER_DONE_INDEX for the per-step deadline race: it only ever
@@ -227,6 +229,23 @@ export function reportAndConsumeHardShutdownWatchdogRecord(): HardShutdownWatchd
 }
 
 /**
+ * A monotonic, wall-clock-independent "epoch-like" ms reading: `performance.timeOrigin` is fixed once per
+ * PROCESS (not per-thread — verified directly: a Worker created seconds after process start reports the
+ * identical `timeOrigin` the main thread does) and `performance.now()` advances via the OS monotonic clock
+ * (`uv_hrtime`), never the adjustable wall clock. Summing them gives a value on the same numeric scale as
+ * `Date.now()` (useful for sanity/forensics) that tracks real elapsed time even across an NTP correction or
+ * a wall-clock step, which `Date.now()` itself cannot — see round 6 of the decision record for the one
+ * residual this does NOT paper over (CLOCK_MONOTONIC's suspend semantics differ by platform).
+ *
+ * @decision 347b3584 — round 6: never go back to `Date.now()` for deadline arithmetic (arm, step(), or the
+ * worker's own wait-loop read) — a forward wall-clock step can fire this watchdog EARLY, mid `git commit`;
+ * a backward step can fire it LATE, reintroducing the original incident's unbounded hang.
+ */
+function monotonicNowMs(): number {
+  return performance.timeOrigin + performance.now();
+}
+
+/**
  * Arms an off-main-thread watchdog that force-exits the WHOLE process, preserving `intendedExitCode`, if
  * nobody calls `step()`/`disarm()` often enough to keep pushing the deadline forward. Runs via a real OS
  * thread (`worker_threads`, `Atomics.wait` on a `SharedArrayBuffer`), never a main-thread timer, and on
@@ -239,6 +258,16 @@ export function reportAndConsumeHardShutdownWatchdogRecord(): HardShutdownWatchd
  * @decision 347b3584 — never swap this for a main-thread `setTimeout`, and never swap the win32 kill for
  * a bare `process.kill`: neither can survive/preserve a custom exit code against a synchronously-blocked
  * main thread, which is exactly the case this exists to cover.
+ *
+ * Round 6 Code Review: this used to take an injectable `now?: () => number` as a "test seam" — removed.
+ * It only ever skewed the MAIN-thread write side while the real worker always reads the real clock, so a
+ * skewed `now` here just makes the two sides disagree about the deadline for no reason a real caller would
+ * ever want — and if a test armed this IN-PROCESS (not a real child) with a `now` skewed enough to read as
+ * already-elapsed, the watchdog would genuinely `TerminateProcess`/`SIGKILL` the TEST RUNNER'S OWN process
+ * (the worker shares `process.pid` with whatever process armed it — see the decision record's own
+ * "never forget .unref()" note for the identical hazard). The test suite instead proves BOTH the
+ * main-thread write side and the worker's read side via sibling-dist-file source patches, never a runtime
+ * DI parameter — see round 6 of the decision record.
  */
 export function armHardShutdownWatchdog(opts: {
   hardExitMs?: number;
@@ -252,7 +281,7 @@ export function armHardShutdownWatchdog(opts: {
   const nameBytes = new Uint8Array(sab, SAB_HEADER_BYTES, MAX_STEP_NAME_BYTES);
   // Initial deadline — covers the window between arming and the first step() call (e.g. a hang during
   // the arm itself, or a caller that never calls step() at all).
-  Atomics.store(deadline, 0, BigInt(Date.now() + defaultStepBudgetMs));
+  Atomics.store(deadline, 0, BigInt(Math.round(monotonicNowMs() + defaultStepBudgetMs)));
 
   // Best-effort: create the record file's directory up front (cheap, synchronous, main thread) so a
   // FIRED watchdog's own write (from inside the worker, under time pressure) never has to mkdir first.
@@ -286,7 +315,7 @@ export function armHardShutdownWatchdog(opts: {
         nameBytes.set(encoded);
         Atomics.store(header, HEADER_STEP_NAME_LEN_INDEX, encoded.length);
         const budget = budgetMs ?? defaultStepBudgetMs;
-        Atomics.store(deadline, 0, BigInt(Date.now() + budget));
+        Atomics.store(deadline, 0, BigInt(Math.round(monotonicNowMs() + budget)));
         // Round 3 finding 2: increment the generation BEFORE notifying, and wake waiters on the
         // GENERATION index, never the DONE-flag index — see HEADER_GEN_INDEX's own doc for the lost-
         // wakeup this closes. The worker's Atomics.wait(header, HEADER_GEN_INDEX, observedGen, ...) is an
@@ -329,6 +358,12 @@ function buildWatchdogWorkerSource(): string {
 const { workerData } = require("node:worker_threads");
 const { execFileSync } = require("node:child_process");
 const fsMod = require("node:fs");
+const { performance } = require("node:perf_hooks");
+
+// @decision 347b3584 — round 6: read the deadline against performance.timeOrigin+performance.now()
+// (monotonic, process-wide — verified identical to the main thread's own reading), never Date.now() —
+// see monotonicNowMs's own doc for why.
+function monotonicNowMs() { return performance.timeOrigin + performance.now(); }
 
 const { sab, intendedExitCode, label, recordPath } = workerData;
 const HEADER_DONE_INDEX = ${HEADER_DONE_INDEX};
@@ -355,7 +390,7 @@ function currentStepName() {
 function waitForDeadlineOrDisarm() {
   let observedGen = Atomics.load(header, HEADER_GEN_INDEX);
   for (;;) {
-    const remaining = Number(Atomics.load(deadline, 0)) - Date.now();
+    const remaining = Number(Atomics.load(deadline, 0)) - monotonicNowMs();
     if (remaining <= 0) return "fired";
     Atomics.wait(header, HEADER_GEN_INDEX, observedGen, remaining);
     if (Atomics.load(header, HEADER_DONE_INDEX) === 1) return "disarmed";

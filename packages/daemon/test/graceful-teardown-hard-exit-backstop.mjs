@@ -39,6 +39,17 @@
 // fixture that genuinely calls disarm() (round 3 nitpick 7) — it used to run the SAME fixture/args as (C)
 // below, which deliberately never disarms, so (B) never actually exercised the path its own name claimed.
 //
+// Round 6 (card e34cb710) ALSO adds: the watchdog's deadline arithmetic moved from Date.now() (wall-clock)
+// to performance.timeOrigin+performance.now() (monotonic) on both the main-thread write side (arm/step())
+// and the worker's own read side — see the decision record's own round 6 section for the full rationale
+// and the sleep/hibernate residual. No runtime DI seam is used for either side (delta Code Review: an
+// injectable `now` could arm an in-process watchdog with an already-elapsed deadline and SIGKILL the test
+// runner's own process); both sides are proven via sibling-dist-file patches instead — regex-reverting the
+// worker's own read line, or BOTH main-thread write call sites, back to literal Date.now(), paired with a
+// constant offset applied to the WORKER's Date.now() (read-side proof) or the FIXTURE's own parent-thread
+// Date.now() before arming (write-side proof). Every check measures the durable watchdog RECORD FILE's
+// appearance time, never process-exit timing, to stay immune to win32 kill-path overhead under load.
+//
 // HERMETIC: no real daemon boot (dist/index.js is never spawned), no *-real-spawn* shape. Every real
 // child process here is one of this file's own tiny fixtures under test/fixtures/, spawned directly, and
 // each of THOSE fixtures now also calls requireHermeticEnv() itself (round 3 finding 8) — a real incident
@@ -71,6 +82,44 @@ const PER_STEP_BUDGET = path.join(FIXTURES_DIR, "_graceful-teardown-per-step-bud
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+const DIST_DIR = path.join(__dirname, "..", "dist");
+const REAL_DIST_PATH = path.join(DIST_DIR, "graceful-teardown.js");
+
+// Shared by every sibling-dist-patch technique in this file (win32 PS-script patch below, and the round 6
+// clock-monotonicity patch) — hoisted here (was previously nested inside the win32-only block) so both can
+// use the SAME pid-liveness check without duplicating it.
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // `EPERM` means the pid EXISTS but this process lacks permission to signal it (a different user's
+    // process, or a privilege gap) — that's still ALIVE, never grounds to delete its file. `ESRCH` (no
+    // such process) is the one outcome that actually means dead, which is what the bare `false` below
+    // still covers.
+    return err?.code === "EPERM";
+  }
+}
+
+// Sweeps a stale `graceful-teardown.<prefix>-<pid>-<rand>.js` sibling left behind by a prior run that
+// crashed/was killed before its own `finally` cleanup ran (a packed npm tarball never has one in the first
+// place, so this only ever prunes test-run debris). Never removes a LIVE sibling's file — a concurrently
+// running copy of this same test file has its own pid baked into its own filename and stays untouched.
+function sweepStaleDistSiblings(prefix) {
+  let names = [];
+  try { names = fs.readdirSync(DIST_DIR); } catch { return 0; }
+  const re = new RegExp(`^graceful-teardown\\.${prefix}-(\\d+)-[a-z0-9]+\\.js$`);
+  let removed = 0;
+  for (const name of names) {
+    const m = re.exec(name);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pid === process.pid || isPidAlive(pid)) continue;
+    try { fs.unlinkSync(path.join(DIST_DIR, name)); removed++; } catch { /* best-effort */ }
+  }
+  return removed;
+}
 
 // ---------------------------------------------------------------------------------------------------
 // (1) IN-PROCESS: runGracefulTeardown's own orchestration, against a FAKE arm (never a real worker/kill)
@@ -466,40 +515,16 @@ for (const intendedExitCode of [0, 75]) {
 // RED/GREEN numbers and why.
 // ---------------------------------------------------------------------------------------------------
 if (process.platform === "win32") {
-  const distDir = path.join(__dirname, "..", "dist");
+  const distDir = DIST_DIR;
 
   // Card 0dc09fab round 2 item 4: a stale `graceful-teardown.winrace-<pid>-*.js` sibling can survive a
   // prior run that crashed/was killed before its own `finally` cleanup ran (and a packed npm tarball would
   // never have one in the first place, so this only ever prunes test-run debris) — sweep anything whose
   // pid is no longer alive before this run creates its own. Never removes a LIVE sibling's file: another
   // concurrently-running copy of this same test file (the load-robustness proof) has its own pid baked
-  // into its own filename and stays untouched.
-  function isPidAlive(pid) {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (err) {
-      // `EPERM` means the pid EXISTS but this process lacks permission to signal it (a different user's
-      // process, or a privilege gap) — that's still ALIVE, never grounds to delete its file. `ESRCH` (no
-      // such process) is the one outcome that actually means dead, which is what the bare `false` below
-      // still covers.
-      return err?.code === "EPERM";
-    }
-  }
-  function sweepStaleWinraceSiblings() {
-    let names = [];
-    try { names = fs.readdirSync(distDir); } catch { return 0; }
-    let removed = 0;
-    for (const name of names) {
-      const m = /^graceful-teardown\.winrace-(\d+)-[a-z0-9]+\.js$/.exec(name);
-      if (!m) continue;
-      const pid = Number(m[1]);
-      if (pid === process.pid || isPidAlive(pid)) continue;
-      try { fs.unlinkSync(path.join(distDir, name)); removed++; } catch { /* best-effort */ }
-    }
-    return removed;
-  }
-  const sweptCount = sweepStaleWinraceSiblings();
+  // into its own filename and stays untouched. (`isPidAlive`/the sweep mechanics are shared — see their
+  // hoisted definitions above, used by both this block and the round 6 clock-monotonicity patch below.)
+  const sweptCount = sweepStaleDistSiblings("winrace");
   if (sweptCount > 0) console.log(`  (swept ${sweptCount} stale graceful-teardown.winrace-*.js sibling(s) with no live owner)`);
 
   // Card 0dc09fab round 2 item 1: the decision-point signal is a DURABLE FILE WRITE (the same
@@ -685,6 +710,289 @@ if (process.platform === "win32") {
     asideFilesAfterFirst.every((f) => asideFilesAfterSecond.includes(f)),
   );
   asideFilesSeenSoFar = asideFilesAfterSecond;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Round 6 (card e34cb710): the watchdog's deadline arithmetic used to be Date.now()-based (wall-clock) —
+// a forward wall-clock step (NTP correction, sleep/resume waking into a later time) could fire the
+// watchdog EARLY, mid a legitimate step (e.g. mid `git commit` inside flushVaultsAndStopCodescape); a
+// backward step could fire it LATE, reintroducing the original unbounded-hang incident. The fix reads the
+// deadline against a MONOTONIC clock (performance.timeOrigin + performance.now()) on BOTH sides:
+//   - the main-thread WRITE side (armHardShutdownWatchdog's initial arm, and step()) — delta CR: there is
+//     NO runtime DI seam here. An injectable `now` only ever skewed this side while the real worker always
+//     reads the real clock, and arming IN-PROCESS with a skewed `now` that reads as already-elapsed would
+//     genuinely TerminateProcess/SIGKILL the TEST RUNNER's own process (see armHardShutdownWatchdog's own
+//     doc comment). Proven instead via a sibling-dist-file patch that regex-reverts BOTH write call sites
+//     back to literal Date.now(), with the FIXTURE's own (parent) Date.now skewed before arming — the
+//     worker's read side is left REAL/untouched throughout, isolating this one variable.
+//   - the worker's own READ side (buildWatchdogWorkerSource) — also can't receive an injected function
+//     across the thread boundary, so proven via a sibling-dist-file patch that regex-reverts the worker's
+//     one changed line back to Date.now(), with ONLY the WORKER's own Date.now skewed (never the main
+//     thread's) — the mirror image of the write-side proof.
+//
+// MEASUREMENT (delta CR: avoid flakiness from win32 kill overhead): every check below measures how long
+// it takes the durable watchdog RECORD FILE (HARD_SHUTDOWN_WATCHDOG_RECORD_PATH) to appear, never
+// process-exit timing. The record is written synchronously inside the worker BEFORE any kill attempt, so
+// this signal carries none of the PowerShell/TerminateProcess variance that can grow significantly under
+// a loaded gate (see round 4 of the decision record) — a hazard process-exit timing is exposed to. The
+// child is still reaped afterward for hygiene (a "does not fire" case is left genuinely alive until this
+// test kills it), but that cleanup never feeds into an assertion.
+//
+// Proves BOTH directions, on BOTH sides, on BOTH the pre-fix ("legacy") and the real fixed code:
+//   WORKER-READ side — a jump applied to the WORKER's own Date.now() only, from its very first call:
+//     FORWARD (+5min): legacy's record fires almost immediately (RED); fixed fires at the correct
+//       ~hardExitMs mark (GREEN)
+//     BACKWARD (-5min): legacy's record does NOT appear within a generous bounded window (RED — the
+//       unbounded-hang shape); fixed still fires on time (GREEN) — "a backward jump does not prevent
+//       firing on the fixed code"
+//   MAIN-THREAD-WRITE side — a skew applied to the FIXTURE's (parent) own Date.now() before arming:
+//     BACKWARD (-5min, parent thinks it's EARLIER): legacy-main's computed deadline reads as already
+//       elapsed relative to the real (unskewed) worker clock — fires almost immediately (RED); fixed is
+//       unaffected (GREEN)
+//     FORWARD (+5min, parent thinks it's LATER): legacy-main's computed deadline reads as minutes away —
+//       does NOT appear within a generous bounded window (RED); fixed is unaffected (GREEN)
+//   (The write-side polarity MIRRORS the read-side polarity — a forward skew on the SUBTRAHEND (the
+//   worker's read) shrinks `remaining`, while a forward skew on the MINUEND (the deadline the write
+//   computes) grows it. Both directions are tested on both sides so neither polarity is missed.)
+//
+// Every wait below is bounded via pollUntil (no fixed sleep-then-assume anywhere in this section).
+// ---------------------------------------------------------------------------------------------------
+{
+  const sweptCount = sweepStaleDistSiblings("clockshim");
+  if (sweptCount > 0) console.log(`  (swept ${sweptCount} stale graceful-teardown.clockshim-*.js sibling(s) with no live owner)`);
+
+  const originalDistTextBeforeClockTest = fs.readFileSync(REAL_DIST_PATH, "utf8");
+  const LEGACY_REMAINING_ANCHOR = "const remaining = Number(Atomics.load(deadline, 0)) - monotonicNowMs();";
+  const LEGACY_REMAINING_REPLACEMENT = "const remaining = Number(Atomics.load(deadline, 0)) - Date.now();";
+  const WORKERDATA_ANCHOR = "const { sab, intendedExitCode, label, recordPath } = workerData;";
+  const MAIN_ARM_ANCHOR = "Atomics.store(deadline, 0, BigInt(Math.round(monotonicNowMs() + defaultStepBudgetMs)));";
+  const MAIN_ARM_REPLACEMENT = "Atomics.store(deadline, 0, BigInt(Math.round(Date.now() + defaultStepBudgetMs)));";
+  const MAIN_STEP_ANCHOR = "Atomics.store(deadline, 0, BigInt(Math.round(monotonicNowMs() + budget)));";
+  const MAIN_STEP_REPLACEMENT = "Atomics.store(deadline, 0, BigInt(Math.round(Date.now() + budget)));";
+  for (const [anchorLabel, anchor] of [
+    ["worker read", LEGACY_REMAINING_ANCHOR],
+    ["workerData destructure", WORKERDATA_ANCHOR],
+    ["main-thread arm write", MAIN_ARM_ANCHOR],
+    ["main-thread step write", MAIN_STEP_ANCHOR],
+  ]) {
+    if (!originalDistTextBeforeClockTest.includes(anchor)) {
+      throw new Error(
+        `round 6 clock test: the expected '${anchorLabel}' anchor was not found in dist/graceful-teardown.js ` +
+        "— the patch is a no-op, refusing to silently test nothing",
+      );
+    }
+  }
+
+  // Builds a sibling dist file for the WORKER-READ dimension: `variant` controls whether the worker's
+  // deadline READ uses the real fixed monotonic clock ("fixed") or is regex-reverted to the pre-fix
+  // Date.now() read ("legacy"); `jumpByMs` injects a constant offset applied to the WORKER's OWN Date.now()
+  // from its very first call onward (never the main thread's). Writes to a unique sibling path under
+  // dist/ (never mutates the real file in place — see the byte-identical check at the end of this section).
+  async function withWorkerReadClockJump(variant, jumpByMs, fn) {
+    let text = originalDistTextBeforeClockTest;
+    if (variant === "legacy") {
+      text = text.replace(LEGACY_REMAINING_ANCHOR, LEGACY_REMAINING_REPLACEMENT);
+    }
+    const shimSnippet =
+      `${WORKERDATA_ANCHOR}\n` +
+      `// TEST-PATCH (card e34cb710): simulate a wall-clock jump — affects ONLY this worker's own ` +
+      `Date.now(), never the main thread's.\n` +
+      `const __clockShimRealDateNow = Date.now.bind(Date);\n` +
+      `Date.now = function() { return __clockShimRealDateNow() + (${jumpByMs}); };`;
+    text = text.replace(WORKERDATA_ANCHOR, shimSnippet);
+    const patchedPath = path.join(DIST_DIR, `graceful-teardown.clockshim-${process.pid}-${Math.random().toString(36).slice(2, 8)}.js`);
+    fs.writeFileSync(patchedPath, text);
+    try {
+      return await fn(pathToFileURL(patchedPath).href);
+    } finally {
+      try { fs.unlinkSync(patchedPath); } catch { /* best-effort cleanup of this test's own scratch file */ }
+    }
+  }
+
+  // Builds a sibling dist file for the MAIN-THREAD-WRITE dimension: "legacy-main" regex-reverts BOTH the
+  // arm and step() deadline writes back to literal Date.now(); "fixed" passes an empty module override
+  // (every OTHER non-win32 test in this file does the same — imports the REAL dist directly, no sibling
+  // needed). The clock skew itself is applied in the FIXTURE's own process (spawnAndObserveRecord's
+  // `parentSkewMs`), never inside this patch — this patch only controls which clock the write sites
+  // literally reference.
+  async function withMainThreadWriteVariant(variant, fn) {
+    if (variant === "fixed") {
+      return fn("");
+    }
+    const text = originalDistTextBeforeClockTest
+      .replace(MAIN_ARM_ANCHOR, MAIN_ARM_REPLACEMENT)
+      .replace(MAIN_STEP_ANCHOR, MAIN_STEP_REPLACEMENT);
+    const patchedPath = path.join(DIST_DIR, `graceful-teardown.clockshim-${process.pid}-${Math.random().toString(36).slice(2, 8)}.js`);
+    fs.writeFileSync(patchedPath, text);
+    try {
+      return await fn(pathToFileURL(patchedPath).href);
+    } finally {
+      try { fs.unlinkSync(patchedPath); } catch { /* best-effort cleanup of this test's own scratch file */ }
+    }
+  }
+
+  // Spawns the sync-hang fixture and measures how long it takes the durable watchdog RECORD FILE to
+  // appear — never process-exit timing (see this section's own header for why). Clears any pre-existing
+  // record before spawning (the path is shared across this whole test file's run). Bounded by `windowMs`
+  // via pollUntil. Reaps the child afterward for hygiene only — a "does not fire" case is left genuinely
+  // alive until killed here; that cleanup is never itself asserted on.
+  async function spawnAndObserveRecord(modulePath, hardExitMsArg, parentSkewMs, windowMs) {
+    try { fs.unlinkSync(HARD_SHUTDOWN_WATCHDOG_RECORD_PATH); } catch { /* fine if it doesn't exist yet */ }
+    const t0 = performance.now();
+    const args = [SYNC_HANG, String(hardExitMsArg), "0", modulePath ?? ""];
+    if (parentSkewMs !== null) args.push(String(parentSkewMs));
+    const child = spawn(process.execPath, args, { stdio: "pipe" });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { out += d; });
+    let exited = false;
+    child.on("exit", () => { exited = true; });
+
+    const recordAppeared = await pollUntil(() => fs.existsSync(HARD_SHUTDOWN_WATCHDOG_RECORD_PATH), { timeoutMs: windowMs, intervalMs: 20 });
+    const elapsedAtRecordMs = recordAppeared ? performance.now() - t0 : null;
+
+    if (!exited) {
+      await pollUntil(() => exited, { timeoutMs: 3000, intervalMs: 20 });
+    }
+    if (!exited) {
+      try { child.kill("SIGKILL"); } catch { /* best-effort cleanup of this test's own child */ }
+      await pollUntil(() => exited, { timeoutMs: 3000, intervalMs: 20 });
+    }
+    try { fs.unlinkSync(HARD_SHUTDOWN_WATCHDOG_RECORD_PATH); } catch { /* best-effort — the next sub-test pre-clears anyway */ }
+    return { recordAppeared, elapsedAtRecordMs, out };
+  }
+
+  const clockHardExitMs = 3000;
+  const forwardJumpMs = 300_000; // +5min
+  const backwardJumpMs = -300_000; // -5min
+  // The record-file signal carries none of the win32-kill-overhead variance process-exit timing would —
+  // this window only needs to cover real deadline-check evaluation plus OS thread-scheduling jitter.
+  const clockWindowMs = clockHardExitMs + 1500;
+  const greenFloorMs = clockHardExitMs - 400;
+  const redCeilingMs = clockHardExitMs * 0.5;
+
+  // --- WORKER-READ side ----------------------------------------------------------------------------
+
+  {
+    const r = await withWorkerReadClockJump("legacy", forwardJumpMs, (mod) => spawnAndObserveRecord(mod, clockHardExitMs, null, clockWindowMs));
+    check(
+      "[round 6, worker-read, forward jump, legacy] the pre-fix (Date.now()-based) worker's deadline " +
+      "record fires EARLY — the deadline reads as already elapsed against the jumped wall clock (RED: " +
+      "proves the historical bug AND that this shim can actually trigger it)",
+      r.recordAppeared,
+    );
+    check(
+      "[round 6, worker-read, forward jump, legacy] it fired WELL before the correct hardExitMs mark",
+      r.recordAppeared && r.elapsedAtRecordMs < redCeilingMs,
+    );
+    console.log(`  (elapsedAtRecordMs=${r.recordAppeared ? Math.round(r.elapsedAtRecordMs) : "never"}, hardExitMs=${clockHardExitMs} — expected early)`);
+  }
+
+  {
+    const r = await withWorkerReadClockJump("fixed", forwardJumpMs, (mod) => spawnAndObserveRecord(mod, clockHardExitMs, null, clockWindowMs));
+    check(
+      "[round 6, worker-read, forward jump, fixed] the real monotonic-clock worker's record is UNAFFECTED " +
+      "by the forward jump — still fires (GREEN)",
+      r.recordAppeared,
+    );
+    check(
+      "[round 6, worker-read, forward jump, fixed] it fired at the correct ~hardExitMs mark, not early",
+      r.recordAppeared && r.elapsedAtRecordMs >= greenFloorMs,
+    );
+    console.log(`  (elapsedAtRecordMs=${r.recordAppeared ? Math.round(r.elapsedAtRecordMs) : "never"}, hardExitMs=${clockHardExitMs} — expected ~on time)`);
+  }
+
+  {
+    const r = await withWorkerReadClockJump("legacy", backwardJumpMs, (mod) => spawnAndObserveRecord(mod, clockHardExitMs, null, clockWindowMs));
+    check(
+      "[round 6, worker-read, backward jump, legacy] the pre-fix worker's record does NOT appear within a " +
+      "generous bounded window — the deadline reads as minutes away (RED: reintroduces the original " +
+      "unbounded-hang incident this whole backstop exists to prevent)",
+      !r.recordAppeared,
+    );
+    console.log(`  (recordAppeared=${r.recordAppeared} within windowMs=${clockWindowMs} — expected false)`);
+  }
+
+  {
+    const r = await withWorkerReadClockJump("fixed", backwardJumpMs, (mod) => spawnAndObserveRecord(mod, clockHardExitMs, null, clockWindowMs));
+    check(
+      "[round 6, worker-read, backward jump, fixed] a backward jump does NOT prevent firing on the fixed " +
+      "code — the record still appears (GREEN)",
+      r.recordAppeared,
+    );
+    check(
+      "[round 6, worker-read, backward jump, fixed] it fired at the correct ~hardExitMs mark, not stuck",
+      r.recordAppeared && r.elapsedAtRecordMs >= greenFloorMs,
+    );
+    console.log(`  (elapsedAtRecordMs=${r.recordAppeared ? Math.round(r.elapsedAtRecordMs) : "never"}, hardExitMs=${clockHardExitMs} — expected ~on time)`);
+  }
+
+  // --- MAIN-THREAD-WRITE side ----------------------------------------------------------------------
+
+  {
+    const r = await withMainThreadWriteVariant("legacy-main", (mod) => spawnAndObserveRecord(mod, clockHardExitMs, backwardJumpMs, clockWindowMs));
+    check(
+      "[round 6, main-thread write, backward skew, legacy-main] the pre-fix (Date.now()-based) ARM/step() " +
+      "writes compute a deadline that already reads as elapsed against the real (unskewed) worker clock — " +
+      "fires EARLY (RED: proves the write-side half of the historical bug, with exactly the revert the " +
+      "manager asked for)",
+      r.recordAppeared,
+    );
+    check(
+      "[round 6, main-thread write, backward skew, legacy-main] it fired WELL before the correct hardExitMs mark",
+      r.recordAppeared && r.elapsedAtRecordMs < redCeilingMs,
+    );
+    console.log(`  (elapsedAtRecordMs=${r.recordAppeared ? Math.round(r.elapsedAtRecordMs) : "never"}, hardExitMs=${clockHardExitMs} — expected early)`);
+  }
+
+  {
+    const r = await withMainThreadWriteVariant("fixed", (mod) => spawnAndObserveRecord(mod, clockHardExitMs, backwardJumpMs, clockWindowMs));
+    check(
+      "[round 6, main-thread write, backward skew, fixed] the real monotonic-clock ARM/step() writes are " +
+      "UNAFFECTED by the parent's skewed Date.now() — still fires (GREEN)",
+      r.recordAppeared,
+    );
+    check(
+      "[round 6, main-thread write, backward skew, fixed] it fired at the correct ~hardExitMs mark, not early",
+      r.recordAppeared && r.elapsedAtRecordMs >= greenFloorMs,
+    );
+    console.log(`  (elapsedAtRecordMs=${r.recordAppeared ? Math.round(r.elapsedAtRecordMs) : "never"}, hardExitMs=${clockHardExitMs} — expected ~on time)`);
+  }
+
+  {
+    const r = await withMainThreadWriteVariant("legacy-main", (mod) => spawnAndObserveRecord(mod, clockHardExitMs, forwardJumpMs, clockWindowMs));
+    check(
+      "[round 6, main-thread write, forward skew, legacy-main] the pre-fix ARM/step() writes compute a " +
+      "deadline minutes away relative to the real worker clock — does NOT appear within a generous " +
+      "bounded window (RED: the write-side mirror of the unbounded-hang shape)",
+      !r.recordAppeared,
+    );
+    console.log(`  (recordAppeared=${r.recordAppeared} within windowMs=${clockWindowMs} — expected false)`);
+  }
+
+  {
+    const r = await withMainThreadWriteVariant("fixed", (mod) => spawnAndObserveRecord(mod, clockHardExitMs, forwardJumpMs, clockWindowMs));
+    check(
+      "[round 6, main-thread write, forward skew, fixed] a forward skew on the parent's Date.now() does " +
+      "NOT prevent firing on the fixed code — the record still appears (GREEN)",
+      r.recordAppeared,
+    );
+    check(
+      "[round 6, main-thread write, forward skew, fixed] it fired at the correct ~hardExitMs mark, not stuck",
+      r.recordAppeared && r.elapsedAtRecordMs >= greenFloorMs,
+    );
+    console.log(`  (elapsedAtRecordMs=${r.recordAppeared ? Math.round(r.elapsedAtRecordMs) : "never"}, hardExitMs=${clockHardExitMs} — expected ~on time)`);
+  }
+
+  // Requirement: the sibling-dist patch technique must restore byte-identically — the REAL installed file
+  // is never mutated in place (every patch above wrote to its own unique sibling and unlinked it), proven
+  // directly here rather than assumed from the mechanism's own construction.
+  const originalDistTextAfterClockTest = fs.readFileSync(REAL_DIST_PATH, "utf8");
+  check(
+    "[round 6] dist/graceful-teardown.js is byte-identical before and after every sibling-dist-patch run " +
+    "in this section (the real file was never mutated in place)",
+    originalDistTextAfterClockTest === originalDistTextBeforeClockTest,
+  );
 }
 
 // ---------------------------------------------------------------------------------------------------

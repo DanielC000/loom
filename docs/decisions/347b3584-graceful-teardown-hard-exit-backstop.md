@@ -279,6 +279,105 @@ already rotted once, at only 57ms of margin). And the aside-file-count assertion
 immediately-prior `fs.renameSync()` under heavy filesystem I/O — a genuine miss (the file never appears)
 still fails exactly as before.
 
+## Round 6 (card e34cb710, 2026-10-04)
+
+Delta CR 126bc284 of round 3 flagged that the watchdog's deadline arithmetic was wall-clock (`Date.now()`
+epoch `BigInt` in the shared buffer) at all 3 sites that touch it: the initial arm, every `step()` re-arm
+(both on the main thread), and the watchdog worker's own `remaining = deadline - Date.now()` read. A
+forward wall-clock step (an NTP correction, or the host sleeping/resuming into a later wall time) between a
+write and the worker's later read makes `remaining` read smaller than real elapsed time → the watchdog
+fires EARLY, potentially mid `git commit` inside `flushVaultsAndStopCodescape` — the exact "silently
+dropped commit" harm round 2 already fixed once for a different reason. A backward step does the
+opposite: `remaining` reads larger than real elapsed time → the watchdog fires LATE or never within any
+practical bound, reintroducing the original 2026-10-03/04 unbounded-hang incident this whole backstop
+exists to prevent. This was a real, live gap present in every round landed so far — none of them touched
+the clock basis.
+
+**The fix:** both the main-thread writes (arm, `step()`) and the worker's own read now compute the
+deadline/`remaining` against `performance.timeOrigin + performance.now()` (`monotonicNowMs()`) instead of
+`Date.now()`. `performance.now()` is backed by `uv_hrtime()` (libuv), which never reads the adjustable wall
+clock — it is immune to an NTP correction, a manual clock change, DST, or leap seconds by construction.
+`performance.timeOrigin` is fixed once per PROCESS, not per-thread — verified directly on this host (Node
+v22.16.0): a `Worker` created 2 seconds after process start reports the IDENTICAL `timeOrigin` the main
+thread does (delta 0ms), so the main thread's and the watchdog worker's independent
+`performance.timeOrigin + performance.now()` readings are directly comparable with no cross-thread
+reconciliation needed — this matches `perf_hooks`'s own documented wording ("the current node PROCESS
+began"), not an undocumented implementation accident.
+
+The persisted firing record's `firedAt` field (`HardShutdownWatchdogRecord`) is deliberately left as
+`new Date().toISOString()` — it is forensic display only, never read back for arithmetic, so there is no
+correctness reason to change it, and doing so would make the on-disk record harder for a human operator to
+read at a glance.
+
+### Delta Code Review (card e34cb710, same day)
+
+The first version of this fix gave `armHardShutdownWatchdog` an optional `now?: () => number` DI seam
+(defaulting to the real `monotonicNowMs`) so the main-thread arm/`step()` writes could be driven
+deterministically by a test. **Removed.** It only ever skews the MAIN-thread write side while the real
+worker always reads the real clock — a real caller has no legitimate reason to want the two sides to
+disagree, and arming IN-PROCESS (not a real child) with a `now` skewed enough to read as already-elapsed
+would genuinely `TerminateProcess`/`SIGKILL` the TEST RUNNER'S OWN process, since the worker shares
+`process.pid` with whatever process armed it (the identical hazard this file's own "never forget
+`.unref()`" note already names for a left-armed in-process watchdog). The seam was also never actually
+exercised by anything in the test suite — it was dead code offering a real hazard with no benefit.
+
+**Both the main-thread write side AND the worker's read side are instead proven via sibling-dist-file
+source patches, never a runtime DI parameter** — extending the same technique the worker-read proof
+already used:
+- **Worker-read proof (unchanged):** regex-reverts the worker's one changed line back to a `Date.now()`
+  read ("legacy"), with a constant offset applied to ONLY the worker's own `Date.now()` (never the main
+  thread's), simulating a forward or backward wall-clock jump landing on the SUBTRAHEND of `remaining =
+  deadline - workerClock`.
+- **Main-thread-write proof (new):** regex-reverts BOTH the arm and `step()` deadline writes back to
+  literal `Date.now()` ("legacy-main"), with the SYNC-HANG FIXTURE's own (parent) `Date.now()` skewed
+  before arming — a worker thread's `Date` global is independent of its parent's, so this skew reaches
+  only the write side, never the worker's own (always real, unskewed) read. This is the MINUEND of the
+  same formula, so the polarity is the mirror of the read-side proof: a BACKWARD parent skew (parent
+  thinks it's earlier) computes a deadline that already reads as elapsed relative to the real worker clock
+  → fires early (RED); a FORWARD parent skew (parent thinks it's later) computes a deadline minutes away →
+  does not fire within a bounded window (RED). Both proven against the real fixed code too (GREEN,
+  unaffected either direction).
+
+**Measurement switched from process-exit timing to the durable watchdog RECORD FILE's appearance time.**
+The record is written synchronously inside the worker BEFORE any kill attempt is even made, so this signal
+carries none of the win32 PowerShell/`TerminateProcess` variance that round 4 already measured growing
+significantly under a loaded (e.g. 3-lane) gate — a hazard the original process-exit-timing version of
+this test was directly exposed to (its own GREEN/RED margin was observed as tight as ~2.8s under load).
+The spawned child is still reaped afterward for test hygiene (a RED "does not fire" case is left genuinely
+alive until this test kills it), but that reap is never itself part of any assertion.
+
+All 8 scenarios (2 clock directions × {worker-read, main-thread-write} × {legacy, fixed}) proven in
+`graceful-teardown-hard-exit-backstop.mjs`.
+
+**Residual, stated honestly rather than assumed (the card's own instruction): what does a monotonic clock
+do across host sleep/hibernate, and does that differ by platform?** Checked against primary sources, not
+memory:
+
+- **Windows:** `QueryPerformanceCounter` (QPC) — what libuv's `uv__hrtime` calls directly on win32 (`src/
+  win/util.c`) — is documented by Microsoft to return "the total number of ticks that have occurred since
+  the Windows operating system was started, **including the time when the machine was in a sleep state
+  such as standby, hibernate, or connected standby**," and separately, "QPC is completely independent of
+  the system time and UTC" and "is the performance counter monotonic (non-decreasing)? Yes. QPC does not
+  go backward." (Microsoft Learn, "Acquiring high-resolution time stamps.") So on this project's owner
+  host (Windows), the fix's monotonic deadline correctly counts real elapsed time THROUGH a sleep/
+  hibernate — a step's budget "spends" sleep time the same way a wall clock would, without the NTP-jump
+  hazard this round exists to remove.
+- **Linux (the CI target, `ubuntu-latest`):** libuv's `uv__hrtime` there (`src/unix/linux.c`) uses
+  `clock_gettime(CLOCK_MONOTONIC, …)` (or `CLOCK_MONOTONIC_COARSE` for the separate "fast" clock type Node
+  does not use for `performance.now()` — both are in the same monotonic family). Per the Linux
+  `clock_gettime(2)` man page, `CLOCK_MONOTONIC` explicitly **does NOT count time that the system is
+  suspended** — `CLOCK_BOOTTIME` is the separate, suspend-aware sibling clock, and libuv does not use it
+  here. So on Linux, a host suspend occurring while the watchdog is armed effectively PAUSES its budget:
+  the real wall-clock time until firing can exceed the configured `hardExitMs`/step budget by (up to) the
+  suspended duration, since suspended time is never counted against it.
+- **This is a genuine, accepted, platform-divergent residual, not a regression** — the OLD `Date.now()`-
+  based code was unconditionally WORSE on both platforms (vulnerable to firing EARLY from a mere NTP
+  correction, no suspend involved at all, which is the more dangerous direction: a mid-write kill). The
+  fix removes that hazard uniformly. What it does NOT give is "the watchdog fires within `hardExitMs` of
+  real wall-clock time no matter what," only "within `hardExitMs` of real elapsed PROCESSING time,
+  excluding suspension on Linux" — a difference that only matters if the host suspends WHILE the watchdog
+  is armed, a narrower window than "any NTP correction, anytime."
+
 ## Do not
 
 - Do not assume the try/catch around `teardown()` in `runGracefulTeardown` protects against a hang — it
@@ -420,3 +519,33 @@ still fails exactly as before.
   a name-presence check can never fail even when a regression reintroduces the exact collision this section
   exists to catch. Re-read the file's own content after the second rename and assert the field that would
   actually be overwritten.
+- Do not go back to `Date.now()` for ANY of the watchdog's deadline arithmetic (round 6, card e34cb710) —
+  the main-thread arm/`step()` writes, or the worker's own `remaining` read. A forward wall-clock step
+  fires it EARLY (mid-write); a backward step fires it LATE/never, reintroducing the original unbounded-
+  hang incident. Use `performance.timeOrigin + performance.now()` (`monotonicNowMs()`) on both sides.
+- Do not assume a monotonic clock's behavior across host sleep/hibernate is the same on every platform
+  (round 6) — verified against primary sources, not memory: Windows' QPC (what `uv_hrtime` uses there)
+  counts sleep/hibernate/standby time; Linux's `CLOCK_MONOTONIC` (what `uv_hrtime` uses there) does NOT.
+  State this residual honestly rather than claiming blanket "immune to sleep" — see round 6's own section
+  for the citations and why it's an accepted narrowing, not a regression, versus the old `Date.now()` code.
+- Do not fold a test's own cleanup kill into the SAME "did it exit" flag used to assert a negative (round
+  6, card e34cb710) — proving "the legacy worker does NOT fire within a bounded window" needs the test to
+  forcibly kill the still-alive child once that window elapses (so the next sub-test isn't left with an
+  orphaned process), but if that forced kill's own `exit` event sets the identical flag the assertion
+  reads, the check passes VACUOUSLY — it was fired by the test's own cleanup, not the watchdog. Capture
+  "exited naturally within the window" as a value BEFORE ever deciding whether to intervene, and never
+  let the cleanup branch overwrite it. Caught directly: an early version of this round's own backward-
+  jump test reported `exited:true` and only printing the elapsed time (just over the window's own bound,
+  not anywhere near `hardExitMs`) revealed the exit was the test's own `SIGKILL`, not a real watchdog fire.
+- Do not give `armHardShutdownWatchdog` a runtime `now?: () => number` test seam (delta Code Review, card
+  e34cb710) — it only ever skews the main-thread write side while the real worker always reads the real
+  clock, so a skewed `now` just makes the two sides disagree for no caller's benefit, and arming
+  IN-PROCESS with it set to read as already-elapsed would genuinely `TerminateProcess`/`SIGKILL` the TEST
+  RUNNER'S OWN process (the worker shares `process.pid` with its arming process). Prove BOTH the
+  main-thread write side and the worker's read side via sibling-dist-file source patches instead.
+- Do not measure this round's RED/GREEN proofs by process-EXIT timing (delta Code Review, card e34cb710)
+  — the win32 kill path's PowerShell overhead can grow enough under a loaded gate to eat the margin
+  between a GREEN (on-time) and a RED (early) result (observed as tight as ~2.8s under load on the
+  original exit-timing version of this test). Measure the durable watchdog RECORD FILE's appearance time
+  instead — it is written synchronously inside the worker BEFORE any kill attempt, so it carries none of
+  that variance. Still reap the spawned child afterward for hygiene; never fold that cleanup into a check.
