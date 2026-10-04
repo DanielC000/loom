@@ -29,6 +29,7 @@ import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } fr
 import { resolveCapabilityServer, RESERVED_CAPABILITY_SLUGS, type CapabilityDefRow } from "../capabilities/registry.js";
 import { inTestMode } from "../db.js";
 import { stripEscapeAndControlChars } from "../security/control-chars.js";
+import { resolveGitDirsSync } from "../git/repo-lock.js";
 
 /**
  * @decision b987f086 — the project-level codex-incompatibility reason, named distinctly from the profile-field reasons in
@@ -4774,6 +4775,29 @@ export class PtyHost {
     const target = norm(cwd);
     for (const other of this.liveCodex.values()) {
       if (other.alive && norm(other.cwd) === target) return true;
+    }
+    return false;
+  }
+  /** Is any live `CodexLive` entry's RESOLVED `commonDir` the same as `commonDir`, AND is that session's own
+   *  `cwd` the NON-worktree case (`privateDir === commonDir`)? Resolves each live codex session's OWN git
+   *  dirs rather than comparing `cwd` directly, since `cwd` is never a worker's own `commonDir`. Read live
+   *  off `this.liveCodex` on every call — never cached.
+   *
+   *  @decision 29f22d83 — NOT inert in production (companion revive/boot-resume interleave with the boot
+   *  sweep calling this); the `privateDir === commonDir` narrowing keeps an ordinary live codex WORKER
+   *  (always a linked worktree) from ever blocking a prune it has no relationship to. */
+  public hasLiveCodexSessionAtCommonDir(commonDir: string): boolean {
+    const norm = (p: string): string => {
+      let r: string;
+      try { r = fs.realpathSync(p); } catch { r = path.resolve(p); }
+      r = r.replace(/[\\/]+$/, "");
+      return process.platform === "win32" ? r.toLowerCase() : r;
+    };
+    const target = norm(commonDir);
+    for (const other of this.liveCodex.values()) {
+      if (!other.alive) continue;
+      const dirs = resolveGitDirsSync(other.cwd);
+      if (dirs && dirs.privateDir === dirs.commonDir && norm(dirs.commonDir) === target) return true;
     }
     return false;
   }

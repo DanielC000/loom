@@ -8,6 +8,7 @@ import { resolveExecutable } from "./resolve-bin.js";
 import { SKILLS_DIR } from "../paths.js";
 import { roleDoctrineSkillName } from "../skills/inject.js";
 import { resolveGitDirsSync } from "../git/repo-lock.js";
+import { CLAUDE_DOCTRINE_DIR } from "./claude-dirname.js";
 
 /**
  * HarnessAdapter seam (multi-harness epic df1f94b0, Phase 1, card 353f6dc4): the codex adapter's
@@ -544,6 +545,11 @@ export function withCodexRoleDoctrine(prompt: string, role: string | null | unde
   return [pointer, note, adapted].filter((p): p is string => p !== null).join("\n\n");
 }
 
+/** The exact header `skills/inject.ts#hideFromGit` also writes above its own skill/manifest/settings
+ *  entries — kept byte-identical between the two files so {@link pruneStaleCodexDoctrineExclude}'s
+ *  marker-scoped scan recognizes a run written by EITHER injector, not just this one. */
+const LOOM_EXCLUDE_HEADER = "# loom-managed exclusions (injected per session; do not commit)";
+
 /** Append `entry` to `commonDir`'s shared `.git/info/exclude` — the ORIGINAL, repo-wide behavior. Used
  *  only for the NON-worktree case (`privateDir === commonDir`: a plain repo, or the submodule-shaped
  *  canonical repo `codex-doctrine-injection.mjs`'s fixture covers) — there is nothing to leak across
@@ -556,7 +562,7 @@ function appendToSharedExclude(commonDir: string, entry: string): void {
   let cur = ""; try { cur = fs.readFileSync(excludePath, "utf8"); } catch { /* none */ }
   if (cur.split(/\r?\n/).includes(entry)) return;
   const prefix = cur === "" || cur.endsWith("\n") ? "" : "\n";
-  try { fs.appendFileSync(excludePath, `${prefix}# loom-managed exclusions (injected per session; do not commit)\n${entry}\n`); } catch { /* ignore */ }
+  try { fs.appendFileSync(excludePath, `${prefix}${LOOM_EXCLUDE_HEADER}\n${entry}\n`); } catch { /* ignore */ }
 }
 
 /**
@@ -576,6 +582,301 @@ function hideCodexDoctrineFromGit(cwd: string): void {
   const { privateDir, commonDir } = dirs;
   if (privateDir !== commonDir) return; // linked worktree: no safe exclude location — isCodexDoctrinePath filters cover it instead
   appendToSharedExclude(commonDir, `/${CODEX_DOCTRINE_FILE}`);
+}
+
+/** Whether `line` is an exclude entry EITHER this file's {@link appendToSharedExclude} OR
+ *  `skills/inject.ts#hideFromGit`/`doctrineGitExcludeEntries` could have written under
+ *  {@link LOOM_EXCLUDE_HEADER} — the full set `pruneStaleCodexDoctrineExclude` must recognize so it never
+ *  mistakes a skill/manifest/settings entry for the stale codex one it's scoped to remove. */
+function isKnownLoomExcludeEntry(line: string): boolean {
+  return line === `/${CODEX_DOCTRINE_FILE}`
+    || line === `/${CLAUDE_DOCTRINE_DIR}/settings.local.json`
+    || line.startsWith(`/${CLAUDE_DOCTRINE_DIR}/skills/`);
+}
+
+/** Bounded timeout for the INITIAL async `fs.promises` steps {@link pruneStaleCodexDoctrineExclude}
+ *  performs against a shared `info/exclude` — the entry read+stat, and (when there's something to remove)
+ *  the tmp-file write+chmod. Mirrors {@link CODEX_DOCTRINE_LS_FILES_TIMEOUT_MS}'s role for the git
+ *  `ls-files` check below: an unreachable network-mounted repo (a stale UNC path, a hung mount) must never
+ *  let this boot-time sweep hang indefinitely on THOSE steps. Using `fs.promises` rather than the `*Sync`
+ *  family keeps a hang off the MAIN event loop there (the I/O runs on libuv's threadpool, never the JS
+ *  thread) — this timeout additionally bounds how long any ONE repo's prune can occupy a threadpool slot
+ *  for them, so a single wedged repo can't eventually starve the shared pool either.
+ *
+ *  Deliberately does NOT cover the final commit step (round 4, card `29f22d83`): the re-read, byte-compare,
+ *  and rename that close the lost-update race run as one plain SYNCHRONOUS block (`fs.readFileSync`/
+ *  `fs.renameSync`), with no timeout at all — see that function's own doc for why atomicity there requires
+ *  giving up both the async-off-the-JS-thread property and the timeout this constant provides elsewhere. */
+const PRUNE_EXCLUDE_IO_TIMEOUT_MS = 5_000;
+
+/** Race `promise` against a `ms`-bound timeout; rejects with a plain `Error` naming `label` on expiry.
+ *  Never leaves the loser unhandled: whichever side settles second is a no-op, and a late rejection from
+ *  `promise` after the timeout already fired is swallowed here rather than becoming an unhandled rejection
+ *  elsewhere. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (v) => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); },
+      (e) => { if (settled) return; settled = true; clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
+/** One line of an exclude file, paired with its OWN original line terminator (`"\r\n"`, `"\r"`, `"\n"`, or
+ *  `""` for a final line with no trailing newline). Splitting this way — rather than `split(/\r?\n/)` and
+ *  rejoining with a single chosen separator — is what lets {@link pruneStaleCodexDoctrineExclude} delete
+ *  exactly one stale line's bytes (its text plus its own terminator) while leaving every other line's
+ *  terminator untouched: a CRLF file stays CRLF, a file mixing line endings keeps each line's own, and a
+ *  file with no final trailing newline keeps lacking one — all without separate "did the file end in a
+ *  newline" bookkeeping, since that's just the last entry's `eol` field. */
+interface ExcludeLine { text: string; eol: string; }
+
+function splitExcludeLinesPreservingEol(content: string): ExcludeLine[] {
+  const out: ExcludeLine[] = [];
+  const re = /\r\n|\r|\n/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    out.push({ text: content.slice(last, m.index), eol: m[0] });
+    last = re.lastIndex;
+  }
+  if (last < content.length) out.push({ text: content.slice(last), eol: "" });
+  return out;
+}
+
+/** Outcome {@link pruneStaleCodexDoctrineExclude} resolves to. `skip-live-codex` mirrors
+ *  {@link removeStaleCodexDoctrineArtifact}'s own outcome of the same name: a stale entry WAS found but a
+ *  live codex session still sharing this `commonDir` makes removing it unsafe right now. `lost-update`
+ *  (round 3, card `29f22d83`) means a stale entry was found and was about to be removed, but a final
+ *  synchronous re-read right before the rename found the file had changed since it was first read (a
+ *  concurrent writer — see {@link PruneDoneMarkerStore}'s doc) — nothing was written; the next boot's
+ *  sweep retries. */
+export type StaleExcludePruneOutcome = "removed" | "none" | "no-file" | "error" | "skip-live-codex" | "lost-update";
+
+/** The minimal store {@link pruneStaleCodexDoctrineExclude} needs to make itself a genuine one-shot per
+ *  `commonDir` (round 4, card `29f22d83`, item 2) — structurally satisfied by `Db` (`db.ts`), passed by
+ *  duck typing rather than importing the whole class here (this module has no other dependency on `db.ts`
+ *  and shouldn't gain one just for two methods). Round 3 tried an IN-FILE marker comment instead
+ *  (`PRUNE_DONE_MARKER_TEXT`); that never shipped — its own "none" branch never stamped it (contradicting
+ *  its doc), and more fundamentally it meant writing into every clean user repo's `info/exclude` just to
+ *  record Loom's OWN bookkeeping. An `app_meta` row, keyed per commonDir (see
+ *  {@link pruneDoneMetaKeyForCommonDir}), carries that state in Loom's own store instead — nothing is
+ *  ever written into a repo that was never stale to begin with. */
+export interface PruneDoneMarkerStore {
+  getMeta(key: string): string | undefined;
+  setMeta(key: string, value: string): void;
+}
+
+/** The `app_meta` key for `commonDir`'s done-marker — normalized the SAME way
+ *  {@link pruneStaleCodexDoctrineExcludesAtBoot}'s own `seenCommonDirs` dedupe already normalizes a
+ *  commonDir (case-insensitive on win32 only), so the two can never disagree about identity. Stamped
+ *  (via `store.setMeta`) only on a terminal `"removed"` or `"none"` outcome — never on `skip-live-codex`,
+ *  `lost-update`, `no-file`, or `error`, each of which must remain retriable on a later boot. */
+function pruneDoneMetaKeyForCommonDir(commonDir: string): string {
+  const norm = process.platform === "win32" ? commonDir.toLowerCase() : commonDir;
+  return `codex-doctrine-stale-exclude-pruned:${norm}`;
+}
+
+/**
+ * Idempotent removal of a stale `/AGENTS.md` line this module itself wrote into `commonDir`'s shared
+ * `info/exclude` before card 9bf0db97 stopped writing it for a LINKED worktree. That write used to happen
+ * unconditionally (round 1, see docs/decisions/9bf0db97-…), so a repo whose codex worker once ran in a
+ * linked worktree before the fix can still carry the line in its MAIN checkout's `info/exclude` (the
+ * shared commonDir, read for every worktree including the main one) — silently hiding a human's own later
+ * root `AGENTS.md` there from `git status`/`git add -A`. Called on every boot via
+ * {@link pruneStaleCodexDoctrineExcludesAtBoot}, but genuinely a one-shot per `commonDir` since round 4 —
+ * see {@link PruneDoneMarkerStore}'s own doc for the mechanism.
+ *
+ * Scoped to a recognized Loom-managed run: only a line that is itself {@link LOOM_EXCLUDE_HEADER} starts a
+ * run, and within that run ONLY the line in the FIRST position right after the header is ever a removal
+ * candidate — matching the one shape every historical Loom write actually produced
+ * (`HEADER\n/AGENTS.md\n`, its own one-entry block). A later line in the same run that happens to read
+ * `/AGENTS.md` (for example a human's `echo /AGENTS.md >> .git/info/exclude`, which lands directly after
+ * whichever Loom run — typically `hideFromGit`'s skills entries — was written last, with no header of its
+ * own in between) is recognized as part of the run for scan-continuation purposes but is NEVER a removal
+ * candidate purely by matching the text; it survives untouched, exactly like a user-authored `/AGENTS.md`
+ * line sitting entirely outside any run. `hideFromGit`'s own skill/manifest/settings entries sharing the
+ * same header are likewise never removed. A header left with nothing recognized under it (its one-entry
+ * run was the removed stale line) is dropped too, rather than left as orphaned noise. If removing the
+ * first-position entry would leave a SURVIVING recognized `/AGENTS.md`-shaped line (round 3's own two-boot
+ * bug — see decision `29f22d83`'s round-3 section) as the new first-position line under that SAME header,
+ * the header is dropped instead of re-emitted, so no future pass can ever mistake that survivor for round
+ * 1's write; this is what keeps the position-based rule from re-triggering itself across boots.
+ *
+ * Byte-preserving: reads/writes via `latin1` (a reversible 1-byte-to-1-code-unit mapping, unlike `utf8`,
+ * which can silently corrupt a byte sequence that isn't valid UTF-8) and via {@link ExcludeLine}'s
+ * per-line terminator, so a CRLF file, a file mixing terminators, or a file holding non-UTF-8 user bytes
+ * elsewhere comes back byte-identical except for the removed line and its own terminator. The write is
+ * atomic (temp file + rename, mirroring `skills/inject.ts`'s own manifest write) and preserves the
+ * original file's mode (read via `fs.promises.stat` before writing, applied to the temp file via
+ * `fs.promises.chmod` before the rename) rather than letting the temp file's umask-derived mode silently
+ * replace it.
+ *
+ * Lost-update guard (round 4, card `29f22d83`, item 1 — round 3's own version of this left a real gap:
+ * its re-read happened BEFORE the tmp write, so a concurrent sync writer landing during the writeFile/
+ * chmod/rename `await` chain that followed was never caught, and the reviewer reproduced exactly that
+ * against round 3's build). Fixed by reordering: write + chmod the TMP file first (that part stays async —
+ * nothing in the real file has changed yet), then perform the final re-read, byte-compare, and rename as
+ * ONE synchronous block (`fs.readFileSync`/`fs.renameSync`, no `await` or yield anywhere inside it) —
+ * nothing else can run on this process's single JS thread between the compare and the commit, so an
+ * IN-PROCESS writer (`hideFromGit`/`appendToSharedExclude`, both plain sync `fs` calls — boot resume's own
+ * `resumeFleetOnBoot` → `injectSkills` → `hideFromGit` path is a realistic one) can no longer interleave. A
+ * mismatch aborts with `"lost-update"`, cleans up the tmp file, and leaves the real file for the next
+ * boot's sweep to retry — no done-marker is stamped on this path. Residual: an EXTERNAL, out-of-process
+ * writer (a human's text editor, another `git` client) racing the OS-level moment between the sync read
+ * and the sync rename is not closed by this fix and can't be from inside one Node process; this module
+ * accepts that as a lower-probability window than the in-process one it fixes.
+ *
+ * `hasLiveCodexSessionAtCommonDir`, when supplied, is re-checked immediately before the destructive write
+ * (not only reasoned about by the caller beforehand) — mirrors {@link removeStaleCodexDoctrineArtifact}'s
+ * own live-session re-check discipline. See that decision's own "Two-path asymmetry" note for why this
+ * guard exists even though no REAL codex worker today can share a `commonDir` this way (workers always run
+ * in a linked worktree, where `hideCodexDoctrineFromGit` never writes this entry at all) — it defends a
+ * currently-dead-but-still-tested non-worktree write path, not a live production race.
+ *
+ * Residual (round 3, item 4, unchanged by round 4): a user who hand-places their OWN `/AGENTS.md` line
+ * directly first after a Loom header — the one position this function must treat as a removal candidate —
+ * is indistinguishable from round 1's write and is removed exactly once. The done-marker then permanently
+ * protects against a repeat; it cannot protect that one placement the first time, since nothing
+ * distinguishes it from the real bug this function exists to fix.
+ *
+ * @decision 29f22d83 — never remove a `/AGENTS.md`-shaped line that isn't in the FIRST position directly
+ * after {@link LOOM_EXCLUDE_HEADER} in its own run — that is what keeps this from ever touching a human's
+ * own hand-written exclude entry, including one that lands immediately after a Loom-written run.
+ */
+export async function pruneStaleCodexDoctrineExclude(
+  commonDir: string,
+  store: PruneDoneMarkerStore,
+  hasLiveCodexSessionAtCommonDir?: (commonDir: string) => boolean,
+): Promise<StaleExcludePruneOutcome> {
+  const metaKey = pruneDoneMetaKeyForCommonDir(commonDir);
+  if (store.getMeta(metaKey) !== undefined) return "none"; // permanently settled — not even a read this boot
+
+  const excludePath = path.join(commonDir, "info", "exclude");
+  let buf: Buffer;
+  let mode: number | null;
+  try {
+    const [b, stat] = await withTimeout(
+      Promise.all([fs.promises.readFile(excludePath), fs.promises.stat(excludePath)]),
+      PRUNE_EXCLUDE_IO_TIMEOUT_MS,
+      `reading ${excludePath}`,
+    );
+    buf = b;
+    mode = stat.mode;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return "no-file"; // never marked done — see store's own doc
+    console.log(`[codex-doctrine] stale-exclude prune failed to read ${excludePath}: ${(e as Error)?.message ?? String(e)}`);
+    return "error";
+  }
+  // latin1: a reversible 1-byte-to-1-code-unit mapping — preserves CRLF and any non-UTF-8 user byte
+  // sequence exactly, unlike "utf8" which can corrupt bytes outside valid UTF-8.
+  const lines = splitExcludeLinesPreservingEol(buf.toString("latin1"));
+
+  const out: ExcludeLine[] = [];
+  let removedAny = false;
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line === undefined) break; // unreachable given the loop guard above; satisfies noUncheckedIndexedAccess
+    if (line.text === LOOM_EXCLUDE_HEADER) {
+      let j = i + 1;
+      const kept: ExcludeLine[] = [];
+      while (j < lines.length) {
+        const candidate = lines[j];
+        if (candidate === undefined || !isKnownLoomExcludeEntry(candidate.text)) break;
+        if (j === i + 1 && candidate.text === `/${CODEX_DOCTRINE_FILE}`) removedAny = true;
+        else kept.push(candidate);
+        j++;
+      }
+      if (kept.length > 0) {
+        // Round 3, item 1(a): if the surviving first entry is ITSELF '/AGENTS.md'-shaped, re-emitting it
+        // right after the header would recreate the exact shape this function treats as a removal
+        // candidate, so a surviving line — textually indistinguishable from the stale one — would die on
+        // the NEXT boot. Drop the header instead: the line still survives, just no longer directly after
+        // a header, so no future scan can ever mistake it for round 1's write again.
+        if (kept[0]!.text === `/${CODEX_DOCTRINE_FILE}`) out.push(...kept);
+        else out.push(line, ...kept);
+      } // else: the header's whole run was just the stale entry — drop it too
+      i = j;
+      continue;
+    }
+    out.push(line);
+    i++;
+  }
+  if (!removedAny) {
+    store.setMeta(metaKey, new Date().toISOString()); // nothing stale, and never will be (round 1's write path is gone)
+    return "none";
+  }
+
+  // Re-check immediately before the destructive write, not only at call entry — see this function's own
+  // doc + decision 9bf0db97's "Two-path asymmetry" note.
+  if (hasLiveCodexSessionAtCommonDir?.(commonDir)) return "skip-live-codex";
+
+  const next = Buffer.from(out.map((r) => r.text + r.eol).join(""), "latin1");
+  const tmp = `${excludePath}.loom-tmp`;
+  try {
+    await withTimeout(fs.promises.writeFile(tmp, next), PRUNE_EXCLUDE_IO_TIMEOUT_MS, `writing ${tmp}`);
+    if (mode !== null) { try { await fs.promises.chmod(tmp, mode); } catch { /* best effort — e.g. unsupported on this fs */ } }
+    // Round 4, item 1: the final check and the commit MUST be one synchronous block — see this function's
+    // own doc for why round 3's async re-read-then-await-chain still lost a concurrent in-process write.
+    const current = fs.readFileSync(excludePath);
+    if (!current.equals(buf)) {
+      try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+      console.log(`[codex-doctrine] stale-exclude prune aborting for ${excludePath}: the file changed since it was read (likely a concurrent write) — leaving it for the next boot`);
+      return "lost-update";
+    }
+    fs.renameSync(tmp, excludePath);
+  } catch (e) {
+    try { await fs.promises.rm(tmp, { force: true }); } catch { /* best effort */ }
+    console.log(`[codex-doctrine] stale-exclude prune failed to write ${excludePath}: ${(e as Error)?.message ?? String(e)}`);
+    return "error";
+  }
+  store.setMeta(metaKey, new Date().toISOString());
+  return "removed";
+}
+
+/**
+ * Boot-time sweep: prune the stale `/AGENTS.md` exclude line (see {@link pruneStaleCodexDoctrineExclude})
+ * from every distinct registered repo's shared `info/exclude`. Called on every boot, but since round 4
+ * each `commonDir` only ever does real work once — {@link PruneDoneMarkerStore} makes the per-repo prune
+ * a permanent no-op after its first completed scan.
+ *
+ * @decision 29f22d83 — its own doc states exactly what is (and, importantly, what is NOT) bounded in this
+ * sweep, and why this runs at boot rather than piggybacking on the next codex spawn into a repo.
+ *
+ * Dedupes by resolved `commonDir` (case-insensitive on win32) so a multi-repo project naming the same
+ * physical repo twice, or two projects sharing one repo, only ever does the work once. Never throws; a
+ * single repo's failure is logged and skipped, never aborting the sweep for the rest.
+ */
+export async function pruneStaleCodexDoctrineExcludesAtBoot(
+  repoPaths: string[],
+  store: PruneDoneMarkerStore,
+  hasLiveCodexSessionAtCommonDir?: (commonDir: string) => boolean,
+): Promise<{ repoPath: string }[]> {
+  const removed: { repoPath: string }[] = [];
+  const seenCommonDirs = new Set<string>();
+  for (const repoPath of new Set(repoPaths)) {
+    const dirs = resolveGitDirsSync(repoPath);
+    if (!dirs) continue;
+    const key = process.platform === "win32" ? dirs.commonDir.toLowerCase() : dirs.commonDir;
+    if (seenCommonDirs.has(key)) continue;
+    seenCommonDirs.add(key);
+    let outcome: StaleExcludePruneOutcome;
+    try {
+      outcome = await pruneStaleCodexDoctrineExclude(dirs.commonDir, store, hasLiveCodexSessionAtCommonDir);
+    } catch (e) {
+      console.log(`[codex-doctrine] stale-exclude prune threw for ${repoPath}: ${(e as Error)?.message ?? String(e)}`);
+      continue;
+    }
+    if (outcome === "removed") removed.push({ repoPath });
+  }
+  return removed;
 }
 
 /**

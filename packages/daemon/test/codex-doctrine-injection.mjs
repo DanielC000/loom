@@ -292,6 +292,408 @@ let firstBlock = null;
   }
 }
 
+// --- card 29f22d83: pruneStaleCodexDoctrineExclude — an idempotent removal of a stale '/AGENTS.md' line
+// left over from round 1's unconditional write (before card 9bf0db97 scoped it away from linked
+// worktrees). Must remove ONLY a Loom-written entry in the FIRST position of a recognized run under
+// LOOM_EXCLUDE_HEADER (round 2), never hideFromGit's own skill/manifest/settings entries sharing that same
+// header, and never a user-authored '/AGENTS.md' line sitting outside any such run — even one with
+// identical text, even one landing directly after a Loom-written run. Round 3 fixed a two-boot user-line-
+// loss bug (the header-drop fix below) and tried an in-file done-marker for one-shot-per-commonDir — that
+// marker never shipped (its own "none" branch never stamped it) and was replaced in round 4 by a
+// `PruneDoneMarkerStore` (an app_meta-shaped key/value store, faked here in-memory) keyed per commonDir, so
+// nothing is ever written into a clean user repo's exclude file just to record Loom's own bookkeeping.
+// Round 4 also closed a real lost-update window: round 3's own fix re-read the file BEFORE three more
+// `await`s (tmp write, chmod, rename) — a concurrent in-process writer landing in THAT window still got
+// clobbered. The fix moves the final read+compare+rename into one synchronous block with no `await` or
+// yield inside it. --------------------------------------------------------------------------------------
+{
+  const { pruneStaleCodexDoctrineExclude, pruneStaleCodexDoctrineExcludesAtBoot } = await import("../dist/pty/codex-doctrine.js");
+  const LOOM_HEADER = "# loom-managed exclusions (injected per session; do not commit)";
+
+  // A hermetic, in-memory fake of PruneDoneMarkerStore (the real one is Db's getMeta/setMeta) — a fresh one
+  // per test fixture unless the fixture itself needs to prove persistence ACROSS calls (e.g. a two-boot
+  // scenario), in which case one instance is deliberately reused across those calls.
+  function makeMemMetaStore() {
+    const map = new Map();
+    return { getMeta: (k) => map.get(k), setMeta: (k, v) => { map.set(k, v); }, _map: map };
+  }
+
+  // --- a missing exclude file is a no-op: no throw, no file/dir created, and — never marked done, since
+  // there's nothing to protect against re-scanning (see PruneDoneMarkerStore's own doc). -------------------
+  {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-missing-");
+    const store = makeMemMetaStore();
+    const outcome = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
+    check("missing info/exclude: outcome is 'no-file'", outcome === "no-file");
+    check("missing info/exclude: no info/ dir was created as a side effect", !fs.existsSync(path.join(cwd, ".git", "info")));
+    check("missing info/exclude: no done-marker was stamped (nothing to protect)", store._map.size === 0);
+  }
+
+  // --- the real stale-entry shape (round-1 era), produced via the REAL injectCodexDoctrine path on a
+  // non-worktree repo (privateDir === commonDir) — the actual historical output, not a hand-guessed one. --
+  {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-stale-");
+    injectCodexDoctrine(cwd, "worker"); // writes the real '/AGENTS.md' entry under LOOM_HEADER via appendToSharedExclude
+    const excludePath = path.join(cwd, ".git", "info", "exclude");
+    const before = fs.readFileSync(excludePath, "utf8");
+    check("setup: the real injection wrote the stale '/AGENTS.md' entry", before.split(/\r?\n/).includes("/AGENTS.md"));
+
+    const store = makeMemMetaStore();
+    const outcome = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
+    check("a genuinely Loom-written '/AGENTS.md' line: outcome is 'removed'", outcome === "removed");
+    const after = fs.readFileSync(excludePath, "utf8");
+    check("the stale '/AGENTS.md' line is gone", !after.split(/\r?\n/).includes("/AGENTS.md"));
+    check("the now-orphaned header (its whole run was just the stale entry) is dropped too, not left as noise",
+      !after.includes(LOOM_HEADER));
+    check("round 4: the file holds nothing else — the done-marker lives in the STORE, never written into the file",
+      after === "");
+
+    // --- idempotent on a second run, now via the store's done-marker, which short-circuits before any read ---
+    const outcome2 = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
+    check("second run: outcome is 'none' (the store's done-marker short-circuits before any scan)", outcome2 === "none");
+    check("second run: content unchanged", fs.readFileSync(excludePath, "utf8") === after);
+  }
+
+  // --- marker-scoped: a Loom-written '/AGENTS.md' entry is removed, hideFromGit's own skill/manifest/
+  // settings entries sharing the SAME header are kept, and a user-authored '/AGENTS.md' line sitting
+  // OUTSIDE any Loom-managed run is kept untouched even though it's byte-identical text. -------------------
+  {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-mixed-");
+    const excludePath = path.join(cwd, ".git", "info", "exclude");
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    const content = [
+      "# a human's own hand-written exclude comment",
+      "/build",
+      LOOM_HEADER,
+      "/.claude/skills/worker",
+      "/.claude/skills/.loom-skills.json",
+      "/.claude/settings.local.json",
+      LOOM_HEADER,
+      "/AGENTS.md", // the stale codex entry — its own append-call block (one call = one entry, the real shape)
+      "# the project's own later hand-added note",
+      "/AGENTS.md", // a user's own exclude entry, OUTSIDE any Loom-managed run — must survive
+      "",
+    ].join("\n");
+    fs.writeFileSync(excludePath, content);
+
+    const store = makeMemMetaStore();
+    const outcome = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
+    check("mixed file: outcome is 'removed'", outcome === "removed");
+    const after = fs.readFileSync(excludePath, "utf8");
+    const afterLines = after.split(/\r?\n/);
+
+    check("the human's own unrelated comment+entry before any Loom header survive",
+      afterLines.includes("# a human's own hand-written exclude comment") && afterLines.includes("/build"));
+    check("hideFromGit's skill entry survives", afterLines.includes("/.claude/skills/worker"));
+    check("hideFromGit's manifest entry survives", afterLines.includes("/.claude/skills/.loom-skills.json"));
+    check("hideFromGit's settings.local.json entry survives", afterLines.includes("/.claude/settings.local.json"));
+    check("the codex header's own now-empty run is dropped — only the skills header remains (one header line total)",
+      afterLines.filter((l) => l === LOOM_HEADER).length === 1);
+    check("the project's own later hand-added comment survives", afterLines.includes("# the project's own later hand-added note"));
+    check("the user's own '/AGENTS.md' line OUTSIDE any Loom run survives (never touched, despite identical text)",
+      afterLines.filter((l) => l === "/AGENTS.md").length === 1);
+    check("the trailing newline is preserved (file still ends with one)", after.endsWith("\n"));
+
+    // --- idempotent on a second run ---
+    const outcome2 = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
+    check("mixed file second run: outcome is 'none'", outcome2 === "none");
+    check("mixed file second run: content unchanged", fs.readFileSync(excludePath, "utf8") === after);
+  }
+
+  // --- round 2, item 1 (BLOCKING, CR ce9c4156): a '/AGENTS.md' line directly following a SKILLS run with
+  // no header of its own in between — exactly where `echo /AGENTS.md >> .git/info/exclude` lands right
+  // after a claude worker's own hideFromGit write — must SURVIVE. Only the FIRST line right after a header
+  // is ever a removal candidate; this one is NOT in that position, so it must never be swept in just for
+  // matching isKnownLoomExcludeEntry's text. This is the exact RED case that failed on 29228734: the old
+  // run-continuation scan treated every recognized entry in a run as equally removable regardless of
+  // position, and removed this line. ---------------------------------------------------------------------
+  {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-adjacent-user-");
+    const excludePath = path.join(cwd, ".git", "info", "exclude");
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    const content = [
+      LOOM_HEADER,
+      "/.claude/skills/worker",
+      "/.claude/skills/.loom-skills.json",
+      "/.claude/settings.local.json",
+      "/AGENTS.md", // a user's own line, landing directly after the skills run — NOT the stale codex write
+      "",
+    ].join("\n");
+    fs.writeFileSync(excludePath, content);
+
+    const outcome = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), makeMemMetaStore());
+    check("a user '/AGENTS.md' directly adjacent to a skills run: outcome is 'none' (nothing Loom-written to remove)",
+      outcome === "none");
+    const after = fs.readFileSync(excludePath, "utf8");
+    check("round 2 item 1: the adjacent user '/AGENTS.md' line SURVIVES (RED on 29228734 — it used to be swept)",
+      after.split(/\r?\n/).includes("/AGENTS.md"));
+    check("round 2 item 1: content is completely unchanged (true no-op, not merely 'not removed')", after === content);
+  }
+
+  // --- round 2, item 2: CRLF round-trip. The real stale entry sits in a CRLF file (a Windows-authored
+  // exclude, or any repo a Windows git client touched) — every SURVIVING line's terminator must come back
+  // byte-identical, never silently normalized to LF. --------------------------------------------------------
+  {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-crlf-");
+    const excludePath = path.join(cwd, ".git", "info", "exclude");
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    const content = [
+      "# a human's own CRLF comment",
+      "/build",
+      LOOM_HEADER,
+      "/AGENTS.md",
+      "",
+    ].join("\r\n");
+    fs.writeFileSync(excludePath, content);
+
+    const before = fs.readFileSync(excludePath);
+    const crBefore = before.filter((b) => b === 0x0d).length;
+    check("setup: before has 4 CRLF-terminated lines (comment, /build, header, stale entry)", crBefore === 4);
+
+    const outcome = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), makeMemMetaStore());
+    check("CRLF file: outcome is 'removed'", outcome === "removed");
+    const afterBuf = fs.readFileSync(excludePath);
+    const after = afterBuf.toString("latin1");
+    check("CRLF file: the stale entry is gone", !after.includes("/AGENTS.md"));
+    check("CRLF file: surviving lines keep CRLF, never silently flipped to bare LF — and round 4 writes nothing else into the file (the done-marker lives in the store)",
+      after === "# a human's own CRLF comment\r\n/build\r\n");
+    // 2 lines removed (the header AND the stale entry — its whole run was just the one entry, so the
+    // header is dropped too), each contributing exactly 1 CR of its own \r\n terminator.
+    check("round 2 item 2: CR count dropped by exactly 2 (the removed header + entry's own terminators), nothing else re-encoded",
+      afterBuf.filter((b) => b === 0x0d).length === crBefore - 2);
+  }
+
+  // --- round 2, item 2: non-UTF-8 bytes elsewhere in the file must survive byte-identical — a utf8
+  // read/write would have silently mangled this (the replacement-character trap). ------------------------
+  {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-nonutf8-");
+    const excludePath = path.join(cwd, ".git", "info", "exclude");
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    // 0xE9 alone ("é" in latin-1) is NOT valid standalone UTF-8 — a utf8-decode-then-reencode round-trip
+    // replaces it with U+FFFD (0xEF 0xBF 0xBD in utf8), which is byte-visible and easy to assert against.
+    const commentLine = Buffer.from([0x23, 0x20, 0xe9, 0x0a]); // "# \xE9\n"
+    const rest = Buffer.from(`${LOOM_HEADER}\n/AGENTS.md\n`, "utf8");
+    fs.writeFileSync(excludePath, Buffer.concat([commentLine, rest]));
+
+    const outcome = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), makeMemMetaStore());
+    check("non-UTF-8 file: outcome is 'removed'", outcome === "removed");
+    const after = fs.readFileSync(excludePath);
+    check("round 2 item 2: the non-UTF-8 byte (0xE9) survives untouched, never replaced with U+FFFD, and nothing else is appended (round 4: the done-marker lives in the store)",
+      after.length === 4 && after[0] === 0x23 && after[1] === 0x20 && after[2] === 0xe9 && after[3] === 0x0a);
+  }
+
+  // --- round 2, item 3: atomic write preserves the original file's mode (posix only — win32 has no
+  // meaningful chmod bits to assert on). ---------------------------------------------------------------
+  if (process.platform !== "win32") {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-mode-");
+    injectCodexDoctrine(cwd, "worker");
+    const excludePath = path.join(cwd, ".git", "info", "exclude");
+    fs.chmodSync(excludePath, 0o640);
+    const modeBefore = fs.statSync(excludePath).mode & 0o777;
+    check("setup: exclude file mode is 0640 before prune", modeBefore === 0o640);
+
+    const outcome = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), makeMemMetaStore());
+    check("mode-preservation: outcome is 'removed'", outcome === "removed");
+    const modeAfter = fs.statSync(excludePath).mode & 0o777;
+    check("round 2 item 3: the atomic temp+rename write preserves the original file's mode (0640), not the temp file's umask-derived mode",
+      modeAfter === 0o640);
+  }
+
+  // --- round 2, item 5: a live codex session sharing this commonDir blocks the destructive write, checked
+  // RIGHT BEFORE the write (not only reasoned about by the caller) — mirrors
+  // removeStaleCodexDoctrineArtifact's own 'skip-live-codex' discipline. Asserted by proving the guard
+  // callback is actually invoked WITH this commonDir, not merely that the outcome matches. -----------------
+  {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-livecodex-");
+    injectCodexDoctrine(cwd, "worker");
+    const excludePath = path.join(cwd, ".git", "info", "exclude");
+    const before = fs.readFileSync(excludePath, "utf8");
+    const commonDir = path.join(cwd, ".git");
+    let calledWith = null;
+    const outcome = await pruneStaleCodexDoctrineExclude(commonDir, makeMemMetaStore(), (c) => { calledWith = c; return true; });
+    check("live codex session sharing commonDir present → outcome 'skip-live-codex'", outcome === "skip-live-codex");
+    check("live codex session present → exclude file left untouched", fs.readFileSync(excludePath, "utf8") === before);
+    check("the live-codex guard was actually invoked with this commonDir (not short-circuited earlier)", calledWith === commonDir);
+  }
+
+  // --- boot sweep: dedupes by resolved commonDir and only reports the repos it actually touched. Also
+  // wires the live-session guard through to every repo it prunes. -------------------------------------------
+  {
+    const repoA = makeFakeRepo("loom-codex-doctrine-prune-boot-a-");
+    injectCodexDoctrine(repoA, "worker");
+    const repoB = makeFakeRepo("loom-codex-doctrine-prune-boot-b-"); // clean — nothing stale to remove
+    const removed = await pruneStaleCodexDoctrineExcludesAtBoot([repoA, repoA, repoB], makeMemMetaStore()); // repoA listed twice — dedup
+    check("boot sweep reports exactly one removal (repoA)", removed.length === 1 && removed[0].repoPath === repoA);
+    check("boot sweep actually cleaned repoA's exclude file",
+      !fs.readFileSync(path.join(repoA, ".git", "info", "exclude"), "utf8").includes("/AGENTS.md"));
+  }
+
+  // --- round 2, item 6: commonDir dedupe with a REAL linked worktree + its main checkout (not just a
+  // literal duplicate path string) — `git worktree add` genuinely shares one commonDir across two distinct
+  // repoPaths, which is the actual shape the dedupe exists to collapse. -------------------------------------
+  {
+    const main = mkdtempManaged("loom-codex-doctrine-prune-boot-wt-main-");
+    execSync("git init -q", { cwd: main });
+    execSync('git config user.email "test@test.com"', { cwd: main });
+    execSync('git config user.name "test"', { cwd: main });
+    fs.writeFileSync(path.join(main, "README.md"), "x");
+    execSync("git add -A", { cwd: main });
+    execSync('git commit -q -m "init"', { cwd: main });
+    // round 4, item 4: derive the sibling worktree dir name from `main`'s OWN mkdtemp-random suffix, not a
+    // fixed literal — a fixed name can collide across concurrent test runs sharing the same temp root.
+    const worktreeDir = `${main}-wt`;
+    registerForCleanup(worktreeDir);
+    execSync(`git worktree add -q -b loom-test-wt "${worktreeDir}"`, { cwd: main });
+    injectCodexDoctrine(main, "worker"); // writes the real stale entry into the MAIN checkout's shared exclude
+
+    const removed = await pruneStaleCodexDoctrineExcludesAtBoot([main, worktreeDir], makeMemMetaStore()); // two DISTINCT repoPaths, one commonDir
+    check("round 2 item 6: a linked worktree + its main checkout share one commonDir — pruned exactly once",
+      removed.length === 1);
+    check("round 2 item 6: the reported repoPath is whichever of the two the sweep visited first (main, by Set-iteration order)",
+      removed.length === 1 && removed[0].repoPath === main);
+    check("round 2 item 6: the shared exclude is actually cleaned",
+      !fs.readFileSync(path.join(main, ".git", "info", "exclude"), "utf8").includes("/AGENTS.md"));
+  }
+
+  // --- round 3, item 1 (BLOCKING, delta CR cb4dae72): two-boot user-line loss. Loom's stale '/AGENTS.md'
+  // sits directly before a user's own identically-texted '/AGENTS.md' under the SAME header — removing only
+  // the first one must NOT leave the user's line re-emitted as the new first-position entry under a
+  // surviving header, or it dies on the NEXT boot. RED on 54db23dc: boot 1 removed Loom's line but kept the
+  // header, producing `HEADER\n/AGENTS.md\n` — indistinguishable from the original stale shape — so boot 2
+  // deleted the user's own line. One store instance reused across both calls, since this is exactly the
+  // "two boots, same commonDir" scenario the store exists to make idempotent. --------------------------------
+  {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-twoboot-");
+    const excludePath = path.join(cwd, ".git", "info", "exclude");
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    const content = [
+      LOOM_HEADER,
+      "/AGENTS.md", // Loom's stale entry (round 1 era) — the only removal candidate (first position)
+      "/AGENTS.md", // the user's own, landing immediately after — byte-identical, must survive BOTH boots
+      "",
+    ].join("\n");
+    fs.writeFileSync(excludePath, content);
+    const store = makeMemMetaStore();
+
+    const outcome1 = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
+    check("two-boot: boot 1 outcome is 'removed'", outcome1 === "removed");
+    const afterBoot1 = fs.readFileSync(excludePath, "utf8");
+    check("round 3 item 1(a): boot 1 — the user's '/AGENTS.md' line survives, with the header DROPPED (not re-emitted ahead of it), and round 4: nothing else is written into the file itself",
+      afterBoot1 === "/AGENTS.md\n");
+    check("round 4 item 2: the done-marker was stamped in the STORE on this 'removed' outcome", store._map.size === 1);
+
+    const outcome2 = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
+    check("round 3 item 1: boot 2 outcome is 'none' (RED on 54db23dc: this used to be 'removed', deleting the user's line)",
+      outcome2 === "none");
+    const afterBoot2 = fs.readFileSync(excludePath, "utf8");
+    check("round 3 item 1: boot 2 — the user's '/AGENTS.md' line STILL survives (the actual two-boot bug)",
+      afterBoot2.split(/\r?\n/).includes("/AGENTS.md"));
+    check("round 3 item 1: boot 2 is a true no-op — content unchanged from after boot 1", afterBoot2 === afterBoot1);
+  }
+
+  // --- round 4, item 2 (BLOCKING, replaces round 3's in-file marker test): the STORE'S done-marker makes
+  // the prune a true one-shot — even a FRESH header-then-'/AGENTS.md' shape landing in the file AFTER a
+  // "none" scan already marked this commonDir done must never be touched. Deliberately starts from a
+  // "none" outcome (an exclude file with nothing stale) — round 3's own marker design never stamped this
+  // branch at all, which was exactly the blocking defect the delta CR found. ---------------------------------
+  {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-nonestamp-");
+    const excludePath = path.join(cwd, ".git", "info", "exclude");
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    fs.writeFileSync(excludePath, "# just a human's own comment, nothing Loom-managed here\n");
+    const store = makeMemMetaStore();
+
+    const outcome1 = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
+    check("round 4 item 2: a clean file scans to outcome 'none'", outcome1 === "none");
+    check("round 4 item 2: the 'none' outcome DOES stamp the store's done-marker (round 3's in-file marker never did)",
+      store._map.size === 1);
+
+    // Simulate a fresh header+'/AGENTS.md' run landing AFTER that "none" scan (a hand edit, or hypothetically
+    // a future bug reintroducing round 1's write pattern) — the store's marker must make this permanently
+    // invisible to a LATER call using the SAME store.
+    fs.appendFileSync(excludePath, `${LOOM_HEADER}\n/AGENTS.md\n`);
+    const outcome2 = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
+    check("round 4 item 2: once the store's done-marker is set, prune is a permanent no-op — it never reads the file again",
+      outcome2 === "none");
+    check("round 4 item 2: the newly-appended '/AGENTS.md' survives untouched — proof this is a STORE-marker skip, not a structural one",
+      fs.readFileSync(excludePath, "utf8").includes("/AGENTS.md"));
+  }
+
+  // --- round 4, item 1 (BLOCKING, replaces round 3's lost-update test): hideFromGit/appendToSharedExclude
+  // write with plain SYNC fs calls and can land in the async gap this function's own awaits open up. Round
+  // 3's own fix re-read the file BEFORE the tmp write/chmod/rename `await` chain — leaving exactly that
+  // chain's own window uncaught (the reviewer reproduced this against dist). Round 4 moves the final check
+  // to run synchronously immediately before the rename, so this test injects the concurrent append INSIDE
+  // the tmp write itself — the precise window round 3 missed. ------------------------------------------------
+  {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-lostupdate-");
+    injectCodexDoctrine(cwd, "worker");
+    const excludePath = path.join(cwd, ".git", "info", "exclude");
+    const commonDir = path.join(cwd, ".git");
+
+    const originalWriteFile = fs.promises.writeFile;
+    fs.promises.writeFile = async (...args) => {
+      const [target] = args;
+      // Trigger only for THIS function's own tmp-file write, not any other writeFile call that might run
+      // concurrently in the same process — simulating hideFromGit landing exactly inside that window.
+      if (typeof target === "string" && target.endsWith(".loom-tmp")) {
+        fs.appendFileSync(excludePath, "/added-concurrently\n");
+      }
+      return originalWriteFile.apply(fs.promises, args);
+    };
+    let outcome;
+    const store = makeMemMetaStore();
+    try {
+      outcome = await pruneStaleCodexDoctrineExclude(commonDir, store);
+    } finally {
+      fs.promises.writeFile = originalWriteFile;
+    }
+    check("round 4 item 1: a concurrent write landing INSIDE the tmp write aborts with 'lost-update'", outcome === "lost-update");
+    const after = fs.readFileSync(excludePath, "utf8");
+    check("round 4 item 1: the concurrently-added line survives (never clobbered)", after.includes("/added-concurrently"));
+    check("round 4 item 1: the stale '/AGENTS.md' entry is STILL there too (nothing was removed on this aborted pass)",
+      after.split(/\r?\n/).includes("/AGENTS.md"));
+    check("round 4 item 1: no done-marker was stamped in the store on an aborted pass", store._map.size === 0);
+
+    // --- a later retry (no injected race) succeeds normally, keeping the concurrent line intact ---
+    const outcome2 = await pruneStaleCodexDoctrineExclude(commonDir, store);
+    check("round 4 item 1: a later retry (no race) succeeds", outcome2 === "removed");
+    const after2 = fs.readFileSync(excludePath, "utf8");
+    check("round 4 item 1: the retry still preserves the concurrently-added line", after2.includes("/added-concurrently"));
+    check("round 4 item 1: the retry removes the stale entry", !after2.split(/\r?\n/).includes("/AGENTS.md"));
+  }
+
+  // --- round 3, item 3: make the commonDir-dedupe test discriminating. `removed.length === 1` after feeding
+  // two repoPaths sharing one commonDir stays true even with `seenCommonDirs` deleted outright, because a
+  // second REAL visit onto an already-pruned (marker-stamped) file is ALSO a no-op, for an unrelated reason
+  // (this function's own idempotency). Using a live-session callback that ALWAYS reports a live session
+  // keeps the file's removable shape UNCHANGED across repeated visits (the write never happens), so a
+  // second visit — if dedupe were absent — would reach the callback again: counting invocations is what
+  // actually discriminates, not `removed.length`. ------------------------------------------------------------
+  {
+    const main = mkdtempManaged("loom-codex-doctrine-prune-dedupe-count-main-");
+    execSync("git init -q", { cwd: main });
+    execSync('git config user.email "test@test.com"', { cwd: main });
+    execSync('git config user.name "test"', { cwd: main });
+    fs.writeFileSync(path.join(main, "README.md"), "x");
+    execSync("git add -A", { cwd: main });
+    execSync('git commit -q -m "init"', { cwd: main });
+    // round 4, item 4: derive the sibling worktree dir name from `main`'s OWN mkdtemp-random suffix, not a
+    // fixed literal — a fixed name can collide across concurrent test runs sharing the same temp root.
+    const worktreeDir = `${main}-wt`;
+    registerForCleanup(worktreeDir);
+    execSync(`git worktree add -q -b loom-test-wt-dedupe-count "${worktreeDir}"`, { cwd: main });
+    injectCodexDoctrine(main, "worker"); // writes the real stale entry into the shared exclude
+
+    let calls = 0;
+    const removed = await pruneStaleCodexDoctrineExcludesAtBoot([main, worktreeDir], makeMemMetaStore(), () => { calls++; return true; });
+    check("round 3 item 3: the live-session callback (invoked only on a genuine removal attempt) runs exactly ONCE — proves the SAME commonDir was visited only once, not merely that removed.length happens to be 1",
+      calls === 1);
+    check("round 3 item 3: nothing was removed (every visit reported a live codex session, so the write never happened)",
+      removed.length === 0);
+  }
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — injectCodexDoctrine creates/refreshes a Loom-owned AGENTS.md for worker-role codex sessions only, never clobbers a repo's own real file, discloses when it skips a repo-owned AGENTS.md, and — for a linked worktree, where it reports as an ordinary untracked file instead (round 2) — never lets the worker's own global excludes get replaced or the injected artifact get auto-committed."
   : `\n❌ ${failures} FAILURE(S).`);

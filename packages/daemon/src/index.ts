@@ -42,7 +42,7 @@ import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
 import { UsageStatusPoller, prewarmClaudeVersionAsync } from "./orchestration/usage-status.js";
-import { prewarmCodexVersionAsync } from "./pty/codex-doctrine.js";
+import { prewarmCodexVersionAsync, pruneStaleCodexDoctrineExcludesAtBoot } from "./pty/codex-doctrine.js";
 import { WakeService } from "./orchestration/wake.js";
 import { PollService } from "./orchestration/poll.js";
 import { EventTriggerService } from "./orchestration/event-triggers.js";
@@ -1179,6 +1179,28 @@ async function main(): Promise<void> {
       const opText = latch.opId ? `, op ${latch.opId}` : "";
       console.warn(`[boot] we exited inside a merge window on ${latch.repoPath} (branch '${latch.branch}'${opText}) — the residue scan that would normally cross-reference this failed, so its tree state is UNKNOWN; a human should check \`git status\`/\`git diff --cached\` there by hand.`);
     }
+  });
+
+  // Card 29f22d83: cleanup of a stale `/AGENTS.md` exclude line a pre-9bf0db97 codex spawn may have left in
+  // a registered repo's shared `info/exclude` (see that card's own decision record for why this is scoped
+  // to a recognized Loom-managed run, never any `/AGENTS.md` line). `db` is passed as the per-commonDir
+  // done-marker store (round 4) — see `PruneDoneMarkerStore`'s own doc — so this is called every boot but
+  // only ever does real work once per commonDir. Deferred via `setImmediate` to stay off the pre-listen
+  // path: this has no security-gate urgency, so it must never delay accepting requests.
+  //
+  // @decision 29f22d83 — only the initial read/stat and tmp-file write/chmod are bounded async I/O; the
+  // per-repo git-dir resolution AND the final commit step (round 4's sync re-read/compare/rename) are
+  // NOT — see `PRUNE_EXCLUDE_IO_TIMEOUT_MS`'s own doc and the record's residual note for why.
+  setImmediate(() => {
+    pruneStaleCodexDoctrineExcludesAtBoot([...canonicalRepoPaths], db, (commonDir) => pty.hasLiveCodexSessionAtCommonDir(commonDir))
+      .then((removed) => {
+        for (const r of removed) {
+          console.log(`[boot] removed a stale codex AGENTS.md exclude entry from ${r.repoPath}'s shared info/exclude (left behind before card 9bf0db97; card 29f22d83)`);
+        }
+      })
+      .catch((err) => {
+        console.warn(`[boot] stale codex-doctrine exclude cleanup failed (continuing boot): ${(err as Error).message}`);
+      });
   });
 
   // Boot-revive (bug 4cc7826d, companion/revive.ts): revive each bound session BEFORE the controller wires
