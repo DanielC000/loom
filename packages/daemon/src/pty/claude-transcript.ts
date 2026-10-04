@@ -63,7 +63,7 @@ export function otherProjectTranscriptDenyRules(otherProjectId: string, otherPro
  * window's "no `await`" invariant); resolvedPathCache below bounds the cost instead. Do not cache the
  * readdir scan itself — a TTL'd listing misses a file rotation writes into an already-scanned dir.
  */
-const RESOLVED_PATH_CACHE_MAX = 500; // mirrors walkState's MAX_TRACKED_WALKS bound in sessions/transcript.ts — never grows unbounded
+export const RESOLVED_PATH_CACHE_MAX = 500; // mirrors walkState's MAX_TRACKED_WALKS bound in sessions/transcript.ts — never grows unbounded
 const resolvedPathCache = new Map<string, string>(); // engineSessionId -> last-resolved fallback-scan hit
 
 function rememberResolvedPath(engineSessionId: string, filePath: string): void {
@@ -85,7 +85,14 @@ export function resolveTranscriptFile(cwd: string, engineSessionId: string): str
 
   const cachedHit = resolvedPathCache.get(engineSessionId);
   if (cachedHit !== undefined) {
-    if (fs.existsSync(cachedHit)) return cachedHit;
+    if (fs.existsSync(cachedHit)) {
+      // Card 422a8c66: a hit must refresh recency (delete + re-set, same as a fresh insert below) or
+      // this degenerates into insertion-order FIFO — an id resolved on every call would still get
+      // evicted on schedule just because something else was inserted after it, never because it went
+      // cold. Mirrors card 5b7884c4's identical fix to codex-transcript.ts's resolvedPathCache.
+      rememberResolvedPath(engineSessionId, cachedHit);
+      return cachedHit;
+    }
     resolvedPathCache.delete(engineSessionId); // stale — the file moved/vanished since caching; rescan for real
   }
 
