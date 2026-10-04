@@ -417,9 +417,11 @@ export function formatGateTimingSummaryLines(results, wallClockMs, { topN = 20 }
 // need a real `claude` spawn or mutate shared state — read `gateway-loopback.key` after the daemon is up
 // and send it as `Authorization: Bearer`, same fix, same pattern (see test/_loopback-auth.mjs). Verified
 // green (exit 0) against a fresh isolated daemon before removal.
+// mcp-scope REMOVED: rewritten to build TaskMcpRouter in-process over InMemoryTransport.
+// @decision 44b7774a — do not reintroduce a live-daemon/LOOM_PORT spawn in that file.
 export const NOT_HERMETIC = new Set([
   "integration-e2e", "orchestration-e2e", "manager-live", "messaging", "orch-scope",
-  "orch-spawn", "mcp-scope", "recycle", "scheduler-drain",
+  "orch-spawn", "recycle", "scheduler-drain",
   "scheduler-disabled", "usage-limit-detect", "usage-limit-resume", "worker-report", "autonomy-rails",
   "busy-flag", "merge-gate", "board-consistency", "skills-e2e",
   "merge-confirm-slow-gate-pending", // ~20s wall-clock (a real 15s gate) + needs a manually-started daemon
