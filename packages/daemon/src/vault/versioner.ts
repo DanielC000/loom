@@ -54,6 +54,180 @@ export const VAULT_GIT_OP_TIMEOUT_MS = 15_000;
  *  Exported (card 347b3584 round 2) — see VAULT_GIT_OP_TIMEOUT_MS's own doc just above for why. */
 export const VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS = 5 * 60_000;
 
+/** @decision 227d9f0b — never copy this as a raw ms literal; always derive from the imported
+ *  VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS, and never lower the margin — see the decision record. */
+const VAULT_LOCK_STALE_THRESHOLD_MS = VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS * 3;
+
+/** One stale-lock detection result — see {@link detectStaleVaultLock}. */
+export interface StaleVaultLockInfo {
+  lockPath: string;
+  ageMs: number;
+  mtimeMs: number;
+}
+
+/**
+ * Stat-only, locale-independent primary detector for a stale `.git/index.lock`: reads the lock file's own
+ * `mtime` directly off disk, never a git error message. `root` is the resolved governing repo root (the
+ * same value `commitVault`/`flushSync` already operate on).
+ *
+ * NOT every vault repo is a plain repo: `root` may be a linked git WORKTREE, whose `.git` is a FILE (a
+ * `gitdir: <path>` pointer), not a directory — its own `index.lock` lives in the PRIVATE gitdir that
+ * pointer names, never under `<root>/.git/`. Resolved via {@link resolveLeaseGitDir} (the SAME
+ * gitfile-aware resolution the pause lease already uses), never a direct `path.join(root, ".git", …)`.
+ * @decision 227d9f0b — see the decision record's round-2 section for why the old direct-join form
+ *  silently never found a worktree vault's real lock at all.
+ *
+ * No git dir resolvable at all (not a repo, per {@link resolveLeaseGitDir}) → nothing to detect, `null`.
+ * No lock file at all → not stale (the common case, `null`). A lock present but younger than
+ * `opts.thresholdMs` → also not stale: a real, still-progressing `git add -A`/commit on a large or
+ * network-backed vault legitimately holds it for up to {@link VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS}.
+ *
+ * @decision 227d9f0b — never message-classify the git error as the primary signal here (needs a locale
+ *  pin this module's add/commit calls don't carry) — see the decision record.
+ */
+export function detectStaleVaultLock(
+  root: string,
+  opts?: { thresholdMs?: number; nowMs?: number },
+): StaleVaultLockInfo | null {
+  const gitDir = resolveLeaseGitDir(root);
+  if (!gitDir) return null;
+  const lockPath = path.join(gitDir, "index.lock");
+  let stat: fs.Stats;
+  try { stat = fs.statSync(lockPath); } catch { return null; }
+  const threshold = opts?.thresholdMs ?? VAULT_LOCK_STALE_THRESHOLD_MS;
+  const now = opts?.nowMs ?? Date.now();
+  const ageMs = now - stat.mtimeMs;
+  if (ageMs < threshold) return null;
+  return { lockPath, ageMs, mtimeMs: stat.mtimeMs };
+}
+
+/**
+ * Locale-sensitive (English-only git fatal text), measured verbatim against this host's real git:
+ * "fatal: Unable to create '<path>/index.lock': File exists." Annotates a filed alert's
+ * `detail.corroboratedByMessage` for a human reading it.
+ *
+ * @decision 227d9f0b — SECONDARY corroborator only; never gate detection on this — see the decision record.
+ */
+const STALE_LOCK_MESSAGE_RE = /Unable to create '[^']*index\.lock':\s*File exists\.?/i;
+
+function staleLockMessageCorroborates(err: unknown): boolean {
+  return err instanceof Error && STALE_LOCK_MESSAGE_RE.test(err.message);
+}
+
+/** Marker filename for {@link maybeAlertStaleVaultLock}'s on-disk dedupe — same `.git/`-scoped-file
+ *  convention as the pause lease / push-outcome record below (chokidar-ignored, never git-tracked). */
+const VAULT_LOCK_ALERT_MARKER_FILENAME = "loom-vault-lock-alert.json";
+
+/** The marker path for an already-resolved real git dir (round 2) — mirrors {@link pauseLeasePath}; both
+ *  {@link maybeAlertStaleVaultLock} and its clear-side twin below build it from the SAME resolved dir. */
+function vaultLockAlertMarkerPath(gitDir: string): string {
+  return path.join(gitDir, VAULT_LOCK_ALERT_MARKER_FILENAME);
+}
+
+/**
+ * Detect + (at most once per distinct lock instance) file a durable, owner-visible
+ * `vault_index_lock_stale` orchestration event naming the repo, the lock's age, and the exact human
+ * removal command. Dedupe is keyed on the lock file's OWN mtime, persisted in a small marker file next to
+ * the real git dir (round 2: {@link resolveLeaseGitDir}, not a direct `<commitPath>/.git` join — see
+ * {@link detectStaleVaultLock}'s own doc) — a 5s-debounced auto-commit retry storm (or a 30-minute watcher
+ * tick) against the SAME still-stuck lock only files ONE event; a genuinely NEW lock instance (a different
+ * mtime) re-fires.
+ *
+ * The marker is written ONLY after `appendEvent` itself SUCCEEDS, and ONLY when `lockAlert.db` is set —
+ * see the decision record's round-2 section for why the round-1 unconditional write could silence a
+ * genuinely stuck lock forever.
+ * @decision 227d9f0b — never write the marker before a successful appendEvent; a failed/absent write must
+ *  leave no marker, so the next tick/commit/flush retries filing the event from scratch.
+ *
+ * Best-effort throughout: a marker read/write fault or a failed `appendEvent` never throws into any of
+ * this function's callers (`VaultVersioner.commit()`'s swallow, `flushSync()`'s warn path, and the
+ * proactive `VaultPushStatusWatcher` tick).
+ *
+ * `lockAlert.db` absent (every pre-existing `VaultVersioner`/`VaultPushStatusWatcher` construction) →
+ * detection still runs (so a test can assert on the return value) but no event is filed and no marker is
+ * written — matches this module's established "optional dep, silent no-op when absent" posture.
+ *
+ * @decision 227d9f0b — never add auto-removal gated on this detector — see the decision record for why
+ *  no sound Windows liveness proof exists for this today.
+ */
+export function maybeAlertStaleVaultLock(
+  commitPath: string,
+  lockAlert: { db?: Pick<Db, "appendEvent">; projectId?: string },
+  err?: unknown,
+): StaleVaultLockInfo | null {
+  let info: StaleVaultLockInfo | null;
+  try { info = detectStaleVaultLock(commitPath); } catch { return null; }
+  if (!info) return null;
+  const gitDir = resolveLeaseGitDir(commitPath);
+  if (!gitDir) return info; // detectStaleVaultLock just resolved one — defensive only, should not happen
+  const markerPath = vaultLockAlertMarkerPath(gitDir);
+  try {
+    const prev = JSON.parse(fs.readFileSync(markerPath, "utf8")) as { lockMtimeMs?: number };
+    if (prev?.lockMtimeMs === info.mtimeMs) return info; // already alerted for this exact lock instance
+  } catch { /* no marker yet, or unreadable — proceed to alert */ }
+  if (lockAlert.db) {
+    const command = process.platform === "win32"
+      ? `Remove-Item -Force "${info.lockPath}"`
+      : `rm -f "${info.lockPath}"`;
+    try {
+      lockAlert.db.appendEvent({
+        id: randomUUID(),
+        ts: new Date().toISOString(),
+        managerSessionId: "",
+        kind: "vault_index_lock_stale",
+        detail: {
+          ...(lockAlert.projectId ? { projectId: lockAlert.projectId } : {}),
+          repoPath: commitPath,
+          lockPath: info.lockPath,
+          ageMs: info.ageMs,
+          command,
+          caveat: "Make sure no editor or git GUI is actually mid-operation on this repo before removing the lock.",
+          ...(staleLockMessageCorroborates(err) ? { corroboratedByMessage: true } : {}),
+        },
+      });
+      // @decision 227d9f0b — mark this lock instance "alerted" only once the durable write lands; a
+      // throw here skips straight to the catch below, writing no marker, so the next call retries.
+      try {
+        fs.writeFileSync(markerPath, JSON.stringify({ lockMtimeMs: info.mtimeMs, notifiedAt: new Date().toISOString() }));
+      } catch { /* best-effort */ }
+    } catch { /* best-effort — never let a failed audit write break the caller's own flow */ }
+  }
+  return info;
+}
+
+/**
+ * The CLEAR half of {@link maybeAlertStaleVaultLock} (card 227d9f0b round 2): once a repo's marker is
+ * present AND its lock has since disappeared, files a paired `vault_index_lock_cleared` event and removes
+ * the marker — mirroring the `claude_boot_dialog_stuck`/`_resolved` pairing; see the decision record's
+ * round-2 section for the full "no marker"/"still stuck"/"no db" no-op cases and why removal is gated on
+ * the append succeeding first. Runs ONLY from {@link VaultPushStatusWatcher.tick} — never from
+ * `commit()`/`flushSync()`, which never observe a clear on their own failure path. Never throws.
+ */
+function maybeClearStaleVaultLockAlert(
+  commitPath: string,
+  lockAlert: { db?: Pick<Db, "appendEvent">; projectId?: string },
+): void {
+  if (!lockAlert.db) return;
+  try {
+    const gitDir = resolveLeaseGitDir(commitPath);
+    if (!gitDir) return;
+    const markerPath = vaultLockAlertMarkerPath(gitDir);
+    if (!fs.existsSync(markerPath)) return; // nothing was ever alerted here — nothing to clear
+    if (fs.existsSync(path.join(gitDir, "index.lock"))) return; // still stuck — not cleared yet
+    lockAlert.db.appendEvent({
+      id: randomUUID(),
+      ts: new Date().toISOString(),
+      managerSessionId: "",
+      kind: "vault_index_lock_cleared",
+      detail: {
+        ...(lockAlert.projectId ? { projectId: lockAlert.projectId } : {}),
+        repoPath: commitPath,
+      },
+    });
+    fs.rmSync(markerPath);
+  } catch { /* best-effort — never let a failed clear-check break the caller's own flow */ }
+}
+
 /**
  * `maxBuffer` for all three of `flushSync`'s `execSync` calls (card 816f0056 review round 2, finding 1).
  * Node's 1 MiB default covers combined stdout+stderr, and `git add -A` emits ONE "LF will be replaced by
@@ -734,8 +908,12 @@ const PAUSE_LEASE_FILENAME = "loom-vault-pause.json";
  *
  * @decision 7673d096 — never stat `<commitPath>/.git` directly here again; always resolve the toplevel
  * first, or this function silently no-ops for a subdir-bound repoPath.
+ *
+ * **Exported (card 227d9f0b round 2)** so {@link detectStaleVaultLock}/{@link maybeAlertStaleVaultLock}
+ * reuse this SAME gitfile-aware resolution for the stale-lock path + its dedupe marker, rather than a
+ * second, worktree-blind `path.join(commitPath, ".git", …)` — see those functions' own docs.
  */
-function resolveLeaseGitDir(commitPath: string): string | null {
+export function resolveLeaseGitDir(commitPath: string): string | null {
   const toplevel = resolveGitToplevelSync(commitPath);
   const gitPath = path.join(toplevel, ".git");
   let stat: fs.Stats;
@@ -875,6 +1053,12 @@ export class VaultVersioner {
      *  this; lets a test force {@link whenReady}'s bound down to milliseconds instead of waiting out a
      *  real 60s timeout to prove the timeout path names its failure. */
     private whenReadyTimeoutMs = WHEN_READY_TIMEOUT_MS,
+    /** Card 227d9f0b — optional: lets `commit()`/`flushSync()` file a durable, owner-visible
+     *  `vault_index_lock_stale` event when they detect a stale `.git/index.lock` (see
+     *  `maybeAlertStaleVaultLock`). Appended at the tail so every pre-existing positional test
+     *  construction stays byte-identical; absent in all of them, so the alert path is a silent no-op
+     *  there — never required for correctness. */
+    private lockAlert?: { db?: Pick<Db, "appendEvent">; projectId?: string },
   ) {
     this.commitPath = vaultPath;
     this.git = boundedVaultGit(vaultPath, gitDeps).git;
@@ -883,6 +1067,12 @@ export class VaultVersioner {
   /** The resolved governing repo root this instance watches + commits (valid after `start()`). */
   get commitRoot(): string {
     return this.commitPath;
+  }
+
+  /** The project id this instance's lock-alert events are stamped with, if any (card 227d9f0b) — read
+   *  by `startVaultVersioners`' own caller to wire `VaultPushStatusWatcher`'s proactive check per path. */
+  get projectId(): string | undefined {
+    return this.lockAlert?.projectId;
   }
 
   async start(): Promise<void> {
@@ -1064,7 +1254,11 @@ export class VaultVersioner {
     // Route through the shared commit path (at the resolved repo root) so UI writes and auto-commits
     // stay consistent. commitVault re-confirms root === commitPath, so it commits (not backs off) here.
     try { await commitVault(this.commitPath, `loom: auto-commit ${new Date().toISOString()}`); }
-    catch { /* best-effort */ }
+    catch (err) {
+      // Card 227d9f0b — a stale .git/index.lock surfaces as an ordinary commitVault throw here; detect
+      // + (at most once per lock instance) file the owner-visible alert before swallowing it as before.
+      maybeAlertStaleVaultLock(this.commitPath, this.lockAlert ?? {}, err);
+    }
   }
 
   async stop(): Promise<void> {
@@ -1172,6 +1366,9 @@ export class VaultVersioner {
         ? `the "${currentOp!.label}" call exceeded its ~${currentOp!.timeoutMs}ms bound (hung git child? — see this method's own doc for exactly what survives the kill and what doesn't)`
         : ((err as Error)?.message ?? String(err));
       console.warn(`[vault-versioner] ${this.commitPath} shutdown flush FAILED — a pending commit may have been dropped: ${detail}`);
+      // Card 227d9f0b — the orphan this timeout abandoned may be exactly what's holding the lock; detect
+      // + (at most once per lock instance) file the owner-visible alert.
+      maybeAlertStaleVaultLock(this.commitPath, this.lockAlert ?? {}, err);
       return false;
     }
   }
@@ -1302,14 +1499,25 @@ export interface VaultPushStatusWatcherDeps {
   getCommitPaths: () => string[];
   /** Tick cadence override in ms (tests use a short interval; the daemon uses the default). */
   intervalMs?: number;
+  /** Card 227d9f0b — optional: when present, each tick ALSO runs a stat-only (no git exec) stale
+   *  `.git/index.lock` check (see `detectStaleVaultLock`/`maybeAlertStaleVaultLock`) against every commit
+   *  path, so an idle vault with no pending edit still surfaces a stuck lock. Absent by default — every
+   *  pre-existing construction (bare `getCommitPaths`) stays byte-identical and this side of `tick()` is
+   *  a no-op. */
+  db?: Pick<Db, "appendEvent">;
+  /** Optional per-path project-id lookup for the stale-lock alert's `detail.projectId` stamp — absent or
+   *  returning `undefined` for a path just omits the stamp (see `maybeAlertStaleVaultLock`'s own doc). */
+  projectIdForPath?: (commitPath: string) => string | undefined;
 }
 
 const DEFAULT_VAULT_PUSH_CHECK_INTERVAL_MS = 30 * 60_000; // 30 minutes — a backlog nudge, not a hot loop
 
 /**
  * Periodic "N vault commits un-pushed" ticker — twin of `DbBackupWatcher` (index.ts), same start/stop
- * shape and best-effort posture. Read-only + additive: every tick only runs `logVaultPushStatus` (git
- * status reads), never a write, never a push.
+ * shape and best-effort posture. Read-only w.r.t. git (every tick's push-status half only runs
+ * `logVaultPushStatus` — git status reads, never a write, never a push); when `deps.db` is set, the SAME
+ * tick also runs `maybeAlertStaleVaultLock`'s stat-only check per commit path, which CAN write a small
+ * on-disk dedupe marker and a durable orchestration event (card 227d9f0b) — never a git call either way.
  */
 export class VaultPushStatusWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -1317,7 +1525,20 @@ export class VaultPushStatusWatcher {
 
   /** Run one check (best-effort; never throws). Exposed so a test can drive it directly. */
   async tick(): Promise<VaultPushStatus[]> {
-    try { return await logVaultPushStatus(this.deps.getCommitPaths()); }
+    const commitPaths = this.deps.getCommitPaths();
+    if (this.deps.db) {
+      // Card 227d9f0b — stat-only (no git exec); per-path, so one bad path can't suppress the rest.
+      for (const p of commitPaths) {
+        const lockAlert = { db: this.deps.db, projectId: this.deps.projectIdForPath?.(p) };
+        try { maybeAlertStaleVaultLock(p, lockAlert); }
+        catch { /* best-effort — a bad path must never kill the tick */ }
+        // Round 2: pair the alert above with its CLEAR half — a lock alerted on an earlier tick that has
+        // since disappeared files vault_index_lock_cleared and drops the marker.
+        try { maybeClearStaleVaultLockAlert(p, lockAlert); }
+        catch { /* best-effort — a bad path must never kill the tick */ }
+      }
+    }
+    try { return await logVaultPushStatus(commitPaths); }
     catch { return []; } // best-effort — a bad tick must never kill the ticker or the daemon
   }
 
@@ -1464,7 +1685,10 @@ export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number 
       if (seen.has(key)) continue; // already watching this repo root
       seen.add(key);
       if (ctx.externallyManaged) continue; // Obsidian-Git owns this history — no loom watcher/commit
-      const versioner = new VaultVersioner(vaultPath, opts?.debounceMs);
+      // Card 227d9f0b — threads db + the owning project's id through so a stale-lock alert this instance
+      // files (commit()/flushSync()) carries detail.projectId; appended positionally at the tail, see
+      // the constructor's own doc for why the three intermediate args stay explicit `undefined`.
+      const versioner = new VaultVersioner(vaultPath, opts?.debounceMs, undefined, undefined, undefined, { db, projectId: project.id });
       await versioner.start();
       started.push(versioner);
     } catch (err) {

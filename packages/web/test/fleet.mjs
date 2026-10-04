@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
-  activeBootStuckAlerts,
+  activeBootStuckAlerts, activeVaultLockAlerts,
 } from "../src/lib/fleet.ts";
 
 let pass = 0;
@@ -235,6 +235,71 @@ check("card 43084723 — GREEN: the fix (one unconditional, kind-filtered fetch)
   const alerts = activeBootStuckAlerts([stuck], (sessionId) => sessionId === "W"); // only W is live; M1 is not
   assert.equal(alerts.length, 1, "GREEN: W's alert surfaces — keyed/checked on W's OWN liveness, never M1's");
   assert.equal(alerts[0].sessionId, "W");
+});
+
+// ── VAULT LOCK pairing (card 227d9f0b round 2) — mirrors the BOOT STUCK pairing tests above, keyed by
+// detail.repoPath instead of a session id, with NO liveness filter (a stale vault lock isn't owned by
+// any live session). ──────────────────────────────────────────────────────────────────────────────────
+let vlSeq = 0;
+const vaultLockEv = (o = {}) => ({
+  id: `vl-${++vlSeq}`,
+  ts: o.ts ?? new Date(vlSeq).toISOString(),
+  kind: o.kind ?? "vault_index_lock_stale",
+  workerSessionId: null,
+  managerSessionId: "",
+  taskId: null,
+  detail: o.detail ?? { repoPath: "/vault/a" },
+});
+
+check("activeVaultLockAlerts: a lone stale event surfaces an alert", () => {
+  const stale = vaultLockEv({ detail: { repoPath: "/vault/a" } });
+  const alerts = activeVaultLockAlerts([stale]);
+  assert.equal(alerts.length, 1, "stale only ⇒ item");
+  assert.equal(alerts[0].id, stale.id);
+});
+
+check("activeVaultLockAlerts: a stale event followed by its cleared counterpart clears the alert", () => {
+  const stale = vaultLockEv({ detail: { repoPath: "/vault/b" }, ts: "2026-01-01T00:00:00.000Z" });
+  const cleared = vaultLockEv({ kind: "vault_index_lock_cleared", detail: { repoPath: "/vault/b" }, ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeVaultLockAlerts([stale, cleared]);
+  assert.equal(alerts.length, 0, "stale then cleared ⇒ none");
+});
+
+check("activeVaultLockAlerts: a cleared event followed by a NEW stale episode re-surfaces the alert", () => {
+  const cleared = vaultLockEv({ kind: "vault_index_lock_cleared", detail: { repoPath: "/vault/c" }, ts: "2026-01-01T00:00:00.000Z" });
+  const stale = vaultLockEv({ detail: { repoPath: "/vault/c" }, ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeVaultLockAlerts([cleared, stale]);
+  assert.equal(alerts.length, 1, "cleared then stale ⇒ item — latest wins, in EITHER order in the input array");
+  assert.equal(alerts[0].detail.repoPath, "/vault/c");
+});
+
+check("activeVaultLockAlerts: unsorted input is sorted internally — order of the array passed in doesn't matter", () => {
+  const stale = vaultLockEv({ detail: { repoPath: "/vault/d" }, ts: "2026-01-01T00:00:00.000Z" });
+  const cleared = vaultLockEv({ kind: "vault_index_lock_cleared", detail: { repoPath: "/vault/d" }, ts: "2026-01-01T00:00:01.000Z" });
+  // Pass cleared BEFORE stale in array order — the function must sort by `ts`, not trust array order.
+  const alerts = activeVaultLockAlerts([cleared, stale]);
+  assert.equal(alerts.length, 0, "still clears — sorted by ts internally, not by array position");
+});
+
+check("activeVaultLockAlerts: independent repoPaths are tracked separately — one cleared, one still stale", () => {
+  const staleA = vaultLockEv({ detail: { repoPath: "/vault/e" } });
+  const staleB = vaultLockEv({ detail: { repoPath: "/vault/f" }, ts: "2026-01-01T00:00:00.000Z" });
+  const clearedB = vaultLockEv({ kind: "vault_index_lock_cleared", detail: { repoPath: "/vault/f" }, ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeVaultLockAlerts([staleA, staleB, clearedB]);
+  assert.equal(alerts.length, 1, "only the still-stale repoPath surfaces");
+  assert.equal(alerts[0].detail.repoPath, "/vault/e");
+});
+
+check("activeVaultLockAlerts: an event with no detail.repoPath is dropped defensively, never crashes", () => {
+  const malformed = vaultLockEv({ detail: {} });
+  const alerts = activeVaultLockAlerts([malformed]);
+  assert.equal(alerts.length, 0, "no repoPath to key on ⇒ dropped, not surfaced");
+});
+
+check("activeVaultLockAlerts: an unrelated event kind is ignored", () => {
+  const other = { ...vaultLockEv({ detail: { repoPath: "/vault/g" } }), kind: "merge_done" };
+  const alerts = activeVaultLockAlerts([other]);
+  assert.equal(alerts.length, 0, "a non-vault-lock kind never surfaces here");
 });
 
 console.log(`\n${pass} passed`);

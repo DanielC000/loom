@@ -1543,6 +1543,9 @@ async function main(): Promise<void> {
   const vaultPushStatusWatcher = new VaultPushStatusWatcher({
     getCommitPaths: () => vaultVersioners.map((v) => v.commitRoot),
     intervalMs: Number(process.env.LOOM_VAULT_PUSH_CHECK_INTERVAL_MS) || undefined,
+    // Card 227d9f0b — lets each tick ALSO run the proactive, stat-only stale-lock check.
+    db,
+    projectIdForPath: (commitPath) => vaultVersioners.find((v) => v.commitRoot === commitPath)?.projectId,
   });
   vaultPushStatusWatcher.start();
 

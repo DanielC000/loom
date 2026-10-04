@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "./api";
-import { activeBootStuckAlerts, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
+import { activeBootStuckAlerts, activeVaultLockAlerts, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -163,6 +163,21 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     refetchInterval: 4000,
   });
   const bootStuckEvents = bootStuckEventsQuery.data ?? [];
+
+  // Card 227d9f0b: a stale vault .git/index.lock alert is filed `managerSessionId:""` (daemon-global — no
+  // session owns a vault watcher), so it can never be attributed to any live manager's own event stream
+  // (the `eventQueries` fan-out below) — same reason `claude_boot_dialog_stuck` above gets its own
+  // dedicated kind-filtered query rather than feeding `allEvents`.
+  // Round 2: also fetches the paired `vault_index_lock_cleared` kind so `activeVaultLockAlerts` (lib/fleet.ts,
+  // mirroring `activeBootStuckAlerts`) can drop an item once a later clear supersedes it, instead of
+  // persisting until a NEWER stale episode for the same repo replaces it (decision 227d9f0b's round-2
+  // section — this superseded round 1's "no cleared counterpart" call).
+  const vaultLockEventsQuery = useQuery({
+    queryKey: ["orchEventsByKind", "vault_index_lock_stale", "vault_index_lock_cleared"],
+    queryFn: () => api.orchestrationEventsByKinds(["vault_index_lock_stale", "vault_index_lock_cleared"]),
+    refetchInterval: 15000,
+  });
+  const activeVaultLocks = activeVaultLockAlerts(vaultLockEventsQuery.data ?? []);
 
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
@@ -325,6 +340,15 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     items.push({
       key: `ce-${e.id}`, tone: "red", kind: "CONTEXT OVERFLOW", sessionId: e.managerSessionId,
       text: `manager ${e.managerSessionId.slice(0, 8)} — ignored ${detail.unanswered ?? "?"} recycle nudges at ~${detail.pct ?? "?"}% context; will overflow without a handoff`,
+    });
+  }
+  for (const e of activeVaultLocks) {
+    const detail = (e.detail ?? {}) as { repoPath?: string; command?: string; ageMs?: number };
+    const ageMin = typeof detail.ageMs === "number" ? Math.round(detail.ageMs / 60000) : null;
+    items.push({
+      key: `vl-${e.id}`, tone: "red", kind: "VAULT LOCK STUCK",
+      text: `${detail.repoPath ?? "a vault repo"} — .git/index.lock stuck` +
+        `${ageMin !== null ? ` for ~${ageMin}min` : ""}; run: ${detail.command ?? "(see event detail)"}`,
     });
   }
   for (const e of latestGiveUpRecovery.values()) {

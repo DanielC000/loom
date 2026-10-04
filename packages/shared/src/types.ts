@@ -1768,6 +1768,26 @@ export type OrchestrationEventKind =
   // deploy that ships it and can never be back-filled — do not difference it against a pre-this-change
   // figure (a different instrument, a retention-bounded floor, not a measurement).
   | "engine_session_rotated"
+  // A vault's governing repo (VaultVersioner.commit()/flushSync(), or the proactive
+  // VaultPushStatusWatcher tick) found a stale `.git/index.lock` — `detail` carries { repoPath, lockPath,
+  // ageMs, command, caveat, corroboratedByMessage? }. Filed `managerSessionId: ""` (daemon-global). Audit-
+  // only, same posture as `engine_session_rotated`/`discovery_block_injection` — deliberately excluded
+  // from `EVENT_TRIGGER_EVENT_KINDS`/`GATE_HISTORY_KINDS`/`ORCH_ACTIVITY_KINDS`/`REPORT_RESOLVED_EVENT_KINDS`.
+  // @decision 227d9f0b — never add auto-removal gated on this kind; detection/dedupe/why-no-auto-removal
+  //  all live at vault/versioner.ts's maybeAlertStaleVaultLock, never restated here.
+  | "vault_index_lock_stale"
+  // Card 227d9f0b round 2 — the CLEAR half of the kind above: a repo whose stale-lock marker was present
+  // and whose lock has since disappeared (vault/versioner.ts's maybeClearStaleVaultLockAlert, run from
+  // VaultPushStatusWatcher.tick()). `detail` carries { repoPath, projectId? } — same shape minus the
+  // lock-specific fields, which no longer apply once cleared. Paired against `vault_index_lock_stale` by
+  // `detail.repoPath`, latest-wins, exactly like `claude_boot_dialog_stuck`/`_resolved` (see that pair's
+  // own doc) — the web attention surface (`lib/fleet.ts`'s `activeVaultLockAlerts`) drops the item once a
+  // later `_cleared` exists for the same repoPath. Filed `managerSessionId: ""` (daemon-global), same
+  // posture as `vault_index_lock_stale`. Never classified as a fresh owner-attention alert on its own
+  // (a clear retires an existing alert, it never raises one) and never added to `EVENT_TRIGGER_EVENT_KINDS`/
+  // `GATE_HISTORY_KINDS`/`ORCH_ACTIVITY_KINDS`/`REPORT_RESOLVED_EVENT_KINDS`, for the same reason the
+  // `stale` kind is excluded from those.
+  | "vault_index_lock_cleared"
   // OBSERVABILITY ONLY — records whether a PRIVATE, presence-gated per-project discovery block was
   // appended to a spawn/recycle's startupPrompt, filed at all FIVE real injection call sites in the
   // daemon's own `sessions/service.ts`. WHAT the block is and WHY it's gated stays documented
@@ -1861,6 +1881,8 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   worker_retired: true,
   worker_retirement_lifted: true,
   manager_session_barred: true,
+  vault_index_lock_stale: true,
+  vault_index_lock_cleared: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

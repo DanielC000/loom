@@ -54,6 +54,14 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
   `rate_limit_bailed`, `usage_latch_cleared`, `session_message_gave_up`, `paste_length_loss`,
   `paste_tripwire_give_up`, `prompt_mismatch_unresolved`, `repeated_tool_call`,
   `codex_submit_unconfirmed`, `codex_boot_stuck`,
+  `vault_index_lock_stale` (card `227d9f0b` — the only durable record that a vault auto-commit/shutdown-
+  flush found a stuck `.git/index.lock`; filed `managerSessionId:""` since no session owns a vault
+  watcher, so without this it would be unfindable by any project-scoped read the instant the filing
+  daemon process cycles — there is no session/task row to lose here, only the explicit `detail.projectId`
+  stamp this card's own call sites set),
+  `vault_index_lock_cleared` (card `227d9f0b` round 2 — the paired CLEAR half of the kind above, filed the
+  same `managerSessionId:""` way for the same reason; without durability here the "stuck → cleared"
+  history for a given repo would lose its resolve half the instant the daemon process cycles),
   `claude_boot_dialog_stuck` (card `01160ae3` — claude's analog of `codex_boot_stuck`: the only durable
   trace that an unattended spawn hung on a blocking CLI dialog before SessionStart ever fired),
   `claude_boot_dialog_resolved` (card `b1da256d` — the RESOLVE half of the pair above; survives for the

@@ -163,3 +163,27 @@ export function activeBootStuckAlerts(
   }
   return out;
 }
+
+// ── VAULT LOCK pairing (card 227d9f0b round 2) ──────────────────────────────────────────────────────────
+// Same latest-wins pairing shape as activeBootStuckAlerts above, keyed by detail.repoPath instead of a
+// session id: given a combined, unsorted vault_index_lock_stale/vault_index_lock_cleared event stream,
+// returns the STILL-ACTIVE stale alerts — a later _cleared event for the same repoPath drops the item
+// instead of waiting for a NEWER stale episode to replace it (round 1's accepted-but-scoped limitation;
+// see decision 227d9f0b's round-2 section). No liveness filter here — unlike a boot-dialog alert, a stale
+// vault lock isn't owned by any live session, so there's nothing to drop it on.
+export function activeVaultLockAlerts(events: readonly OrchestrationEvent[]): OrchestrationEvent[] {
+  const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+  const latest = new Map<string, OrchestrationEvent>();
+  for (const e of sorted) {
+    if (e.kind !== "vault_index_lock_stale" && e.kind !== "vault_index_lock_cleared") continue;
+    const repoPath = (e.detail as { repoPath?: string } | undefined)?.repoPath;
+    if (!repoPath) continue; // can't key a per-repo pairing without one — drop defensively
+    latest.set(repoPath, e);
+  }
+  const out: OrchestrationEvent[] = [];
+  for (const e of latest.values()) {
+    if (e.kind !== "vault_index_lock_stale") continue; // a vault_index_lock_cleared is the latest → cleared.
+    out.push(e);
+  }
+  return out;
+}
