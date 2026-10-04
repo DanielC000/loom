@@ -104,12 +104,19 @@ export function skillWriteData(
       // store copy of, or otherwise touch, the bundled/dev skill set.
       return { error: `"${name}" is a bundled Loom skill — skill_write is bounded to USER skills and cannot modify the bundled/dev skill set. Edit a bundled skill via the Skills UI.` };
     }
-    // loom-platform: edit the SOURCE-OF-TRUTH bundled ASSET. Write the store copy first, then publish it
-    // to the shipped asset via the existing validated human-REST publish path (store→asset). store==asset
-    // afterwards (diverged:false) — the asset→reset end-state the Lead's workflow targets.
+    // loom-platform: edit the SOURCE-OF-TRUTH bundled ASSET. Agent-driven (the Lead, not a human) — clear
+    // any stale stamp first and abort before any content lands if that fails, then write the store copy
+    // and publish it to the shipped asset via the existing validated human-REST publish path (store→
+    // asset). store==asset afterwards (diverged:false) — the asset→reset end-state the Lead's workflow
+    // targets.
+    //
+    // @decision 509176c8 — clear-first, abort-on-failure, mirroring writeSkill's own "agent" branch: never
+    // let agent content land while a stale "human" stamp could still vouch for it.
+    if (!clearSkillProvenance(name)) {
+      return { error: `failed to clear "${name}"'s provenance stamp before writing agent content — nothing was written; retry` };
+    }
     if (!writeSkill(name, content)) return { error: "invalid skill name" };
     if (!publishSkillToBundled(name)) return { error: `failed to publish "${name}" to its bundled asset` };
-    clearSkillProvenance(name); // best-effort — this lands bundled content under `name` (decision record 9a3dea30)
     return { ok: true, name, bundled: true, target: "asset", skill: listSkills().find((s) => s.name === name) ?? null };
   }
   // USER skill (both surfaces): write the user store only. ALWAYS an agent-authored write (card

@@ -25,7 +25,7 @@ fs.mkdirSync(path.join(assetSkillsDir, "core-doctrine"), { recursive: true });
 process.env.LOOM_ASSET_SKILLS = assetSkillsDir; // BEFORE importing — store.ts computes ASSET_SKILLS at load
 
 const { injectSkills } = await import("../dist/skills/inject.js");
-const { writeSkill, skillProvenance } = await import("../dist/skills/store.js");
+const { writeSkill, skillProvenance, clearSkillProvenance, stampSkillProvenanceHuman } = await import("../dist/skills/store.js");
 
 const skillMd = (name) => `---\nname: ${name}\ndescription: test skill ${name}\n---\n\n# ${name}\n`;
 
@@ -101,6 +101,36 @@ try {
   const deliveredOperator = readDelivered(cwdOperator);
   check("(e) locked role (operator) default: human-written skill still delivered", deliveredOperator.includes("human-skill"));
   check("(e) locked role (operator) default: agent-written skill still withheld", !deliveredOperator.includes("agent-skill"));
+
+  // (f) card 35099271 item 4 — the FORCE-INCLUDE of a locked role's own operating-doctrine skill must
+  // respect the SAME provenance trust check as the deliver-all filter above, not bypass it. Simulate the
+  // 9a3dea30 collision shape directly under the role-doctrine name itself: "setup-assistant" (the "setup"
+  // role's ROLE_DOCTRINE_SKILL entry) is BOTH bundled (an asset dir exists) AND stamped "agent".
+  fs.mkdirSync(path.join(assetSkillsDir, "setup-assistant"), { recursive: true });
+  fs.writeFileSync(path.join(assetSkillsDir, "setup-assistant", "SKILL.md"), skillMd("setup-assistant"));
+  writeSkill("setup-assistant", skillMd("setup-assistant"), "agent"); // the collision: bundled name, agent stamp
+  check("(f) precondition: setup-assistant is bundled", fs.existsSync(path.join(assetSkillsDir, "setup-assistant", "SKILL.md")));
+  check("(f) precondition: setup-assistant is agent-stamped", skillProvenance("setup-assistant") === "agent");
+
+  const cwdSetupCollisionPre = path.join(root, "setup-collision-pre-cwd");
+  fs.mkdirSync(cwdSetupCollisionPre, { recursive: true });
+  injectSkills(cwdSetupCollisionPre, "sess-setup-collision-pre", null, "setup");
+  check("(f) fixed: agent-stamped role-doctrine skill is WITHHELD, not force-included", !readDelivered(cwdSetupCollisionPre).includes("setup-assistant"));
+
+  // Resolve via a "human" stamp (e.g. a human re-saved it through the UI) — force-include must now deliver it.
+  check("(f) stamp setup-assistant human", stampSkillProvenanceHuman("setup-assistant") === true);
+  const cwdSetupHuman = path.join(root, "setup-human-cwd");
+  fs.mkdirSync(cwdSetupHuman, { recursive: true });
+  injectSkills(cwdSetupHuman, "sess-setup-human", null, "setup");
+  check("(f) human-stamped role-doctrine skill IS force-included", readDelivered(cwdSetupHuman).includes("setup-assistant"));
+
+  // Resolve via clearing the stamp (e.g. renameAsideAgentCollision ran) — now bare isBundledSkill trusts it.
+  check("(f) clear setup-assistant stamp", clearSkillProvenance("setup-assistant") === true);
+  check("(f) setup-assistant now unstamped", skillProvenance("setup-assistant") === null);
+  const cwdSetupCleared = path.join(root, "setup-cleared-cwd");
+  fs.mkdirSync(cwdSetupCleared, { recursive: true });
+  injectSkills(cwdSetupCleared, "sess-setup-cleared", null, "setup");
+  check("(f) bundled (unstamped) role-doctrine skill IS force-included", readDelivered(cwdSetupCleared).includes("setup-assistant"));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

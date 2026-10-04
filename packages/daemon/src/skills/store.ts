@@ -559,14 +559,22 @@ function pickRenameAsideName(base: string): string | null {
  *  any `# <heading>` in the body) untouched. A renamed-aside skill whose SKILL.md still declares the OLD
  *  name hands an unlocked session two skills both claiming that name — a harness collision; see the
  *  decision record on {@link renameAsideAgentCollision} below. Content with no frontmatter `name:` line
- *  is returned unchanged. */
+ *  is returned unchanged. Strips a leading UTF-8 BOM before matching (re-prepended to the result if
+ *  present) — an un-stripped BOM defeats the absolute-start `^---` anchor below, same hazard and fix as
+ *  companion/capabilities.ts's `hasCompanionReadOptOut` (decision record sha:319ae2cc). */
 export function renameFrontmatterName(content: string, newName: string): string {
-  const fm = content.match(/^(---\r?\n)([\s\S]*?)(\r?\n---)/);
+  const hasBom = content.charCodeAt(0) === 0xfeff;
+  const body0 = hasBom ? content.slice(1) : content;
+  const fm = body0.match(/^(---\r?\n)([\s\S]*?)(\r?\n---)/);
   if (!fm || fm[1] === undefined || fm[2] === undefined || fm[3] === undefined) return content;
   const [whole, open, body, close] = fm as [string, string, string, string];
-  if (!/^name:\s*.*$/m.test(body)) return content;
-  const newBody = body.replace(/^name:\s*.*$/m, `name: ${newName}`);
-  return open + newBody + close + content.slice(whole.length);
+  // `[ \t]*`, NOT `\s*` — `\s` matches a literal newline too, so on an EMPTY `name:` value the old `\s*`
+  // consumed the line's own newline and kept eating into the NEXT frontmatter line via `.*$`, deleting it
+  // when replaced. `[ \t]*` can never cross a line boundary.
+  if (!/^name:[ \t]*.*$/m.test(body)) return content;
+  const newBody = body.replace(/^name:[ \t]*.*$/m, `name: ${newName}`);
+  const rewritten = open + newBody + close + body0.slice(whole.length);
+  return hasBom ? "﻿" + rewritten : rewritten;
 }
 
 export interface RenameAsideCollisionResult {
@@ -914,16 +922,27 @@ export function resolveSkillFile(
  * never touched should not need a second action to catch up. That call is best-effort (try/catch,
  * matching its boot sibling autoFastForwardPristineSkills): SKILL.md has ALREADY been written and its
  * base ALREADY advanced by this point, so an EPERM/EBUSY on one reference file must not 500 the whole
- * REST response for what is otherwise a successful adopt. Returns the new skill, or null if not a
- * bundled skill / invalid name / write failed.
+ * REST response for what is otherwise a successful adopt. Returns the new skill; null if not a bundled
+ * skill / invalid name / write failed; `{error:"provenance-stamp-failed"}` if the content landed but the
+ * human-provenance stamp (below) did not — a DISTINCT outcome from null, never folded into it, since the
+ * REST caller must tell a human "adopted, but retry the stamp" rather than a misleading "not found".
+ *
+ * @decision 35099271 — order is content → stamp → writeBase; writeBase must never run before the stamp
+ * succeeds. See the decision record's "Round 2" section for why.
  */
-export function adoptSkillUpdate(name: string, resolvedContent: string): { name: string; content: string } | null {
+export function adoptSkillUpdate(
+  name: string,
+  resolvedContent: string,
+): { name: string; content: string } | { error: "provenance-stamp-failed" } | null {
   if (!isValidSkillName(name)) return null;
   const v = threeVersions(name);
   if (!v) return null;
   if (!writeSkill(name, resolvedContent)) return null;
+  // Stamp "human" AFTER content has landed, never before. This call vouches for the content this REST
+  // request actually adopted, not for whatever happened to be on disk already.
+  // @decision 35099271 — see the decision record for the full ordering rationale.
+  if (!stampSkillProvenanceHuman(name)) return { error: "provenance-stamp-failed" };
   writeBase(name, v.shipped); // base = shipped: the update is now adopted (clears updateAvailable)
-  clearSkillProvenance(name); // best-effort — this lands bundled content under `name` (decision record 9a3dea30)
   try { advancePristineExtraFiles(name); } catch { /* best-effort — SKILL.md adopt already succeeded */ }
   return readSkill(name);
 }
@@ -957,16 +976,76 @@ function parseProvenanceMap(text: string): Record<string, SkillProvenance> | nul
   } catch { return null; }
 }
 
+/** Best-effort narrow salvage of "agent" stamps out of a provenance-map file's raw CORRUPT TEXT that just
+ *  failed `parseProvenanceMap` — passed in directly by the caller as the bytes it already holds in memory,
+ *  never re-read from the renamed-aside backup file. That matters: if the rename-aside itself fails (e.g.
+ *  EPERM — see `readProvenanceMap`'s own rename attempt below), no backup file ever exists at `backupPath`
+ *  to read, but the corrupt bytes are still sitting right here in `text` — so salvage still runs and still
+ *  recovers whatever it can; `writeProvenanceMap`'s own still-corrupt-on-disk check is what keeps the
+ *  recovered map from being persisted over live corrupt evidence in that case, not this function declining
+ *  to look.
+ *
+ *  Deliberately "agent" ONLY, via a narrow regex scan rather than a second JSON parse (the file already
+ *  failed one) — never "human": a falsely-recovered "human" entry would wrongly VOUCH for content nobody
+ *  reviewed (fail-open, unsafe), so "human" is never salvaged.
+ *
+ *  A falsely-recovered "agent" entry is NOT always merely a withholding. For an ORDINARY user skill it is
+ *  (fail-closed, safe) — but for a BUNDLED name, a stale/misattributed "agent" entry makes the next boot's
+ *  `renameAsideAgentCollision` believe the store still holds unreviewed agent content under that name, and
+ *  it moves the whole directory ASIDE to reseed pristine bundled content in its place. If what's actually
+ *  there is a human's own copy (reset/adopted/edited), that is not a withholding — it is a real content
+ *  DISPLACEMENT the human never asked for. The corrupt bytes can produce exactly that ambiguity: a
+ *  duplicate key from a single malformed write, or two write "generations" glued together by the
+ *  corruption, can leave the SAME name matching both `"<name>":"agent"` and `"<name>":"human"` somewhere in
+ *  the bytes — the regex scan alone cannot tell which one is the real, later-written value. So any name
+ *  whose bytes ALSO contain a `"<name>":"human"` match anywhere is treated as ambiguous and skipped
+ *  entirely (reads unknown, same as an unrecovered name), rather than guessing "agent" and risking the
+ *  displacement above; a name recovered is only ever one with NO such conflicting match. Matches are
+ *  re-validated against `isValidSkillName`, so there is no injection surface from scanning untrusted
+ *  corrupt bytes.
+ *
+ *  @decision 9a3dea30 — recovers a stamp that would otherwise be lost PERMANENTLY; see the decision
+ *  record's corrupt-map residual section. */
+function salvageAgentStampsFromCorruptBackup(text: string): Record<string, SkillProvenance> {
+  const out = emptyProvenanceMap();
+  const humanNames = new Set<string>();
+  const humanRe = /"([a-z0-9][a-z0-9-]{0,63})"\s*:\s*"human"/g;
+  let hm: RegExpExecArray | null;
+  while ((hm = humanRe.exec(text)) !== null) {
+    const name = hm[1];
+    if (name !== undefined) humanNames.add(name);
+  }
+  const agentRe = /"([a-z0-9][a-z0-9-]{0,63})"\s*:\s*"agent"/g;
+  let m: RegExpExecArray | null;
+  while ((m = agentRe.exec(text)) !== null) {
+    const name = m[1];
+    if (name !== undefined && isValidSkillName(name) && !humanNames.has(name)) out[name] = "agent";
+  }
+  return out;
+}
+
 /** Read the whole provenance map. A missing file is the normal case (nothing stamped yet, or a store
  *  that predates this tracking) ⇒ empty map, never an error.
  *
  *  A CORRUPT file (unparsable JSON, or valid JSON that isn't an object) is never silently swallowed into
  *  an in-memory {} and left on disk: the very next write through `writeProvenanceMap` would persist that
  *  near-empty map OVER the corrupt file, destroying whatever real stamps it held with no way back. Instead
- *  the corrupt file is renamed aside to a timestamped sibling (`<file>.corrupt-<ms>`) BEFORE returning {} —
+ *  the corrupt file is renamed aside to a timestamped sibling (`<file>.corrupt-<ms>`) BEFORE returning —
  *  so a later write creates a brand-new file rather than overwriting evidence, and the corrupt bytes stay
- *  recoverable for inspection. Every name then reads as unknown provenance (fail-closed via
- *  `skillProvenance`'s own null default) until a human re-saves the skill through the UI and re-stamps it.
+ *  recoverable for inspection. `salvageAgentStampsFromCorruptBackup` then best-effort-recovers any
+ *  unambiguous "agent" entries out of the in-memory `text` (not a re-read of the backup file — that keeps
+ *  recovery working even when the rename-aside above itself failed) and persists them into the fresh map,
+ *  so most of the exposure below is closed immediately rather than left open until a human re-saves. Every
+ *  OTHER name reads as unknown provenance until a human re-saves that skill through the UI and re-stamps
+ *  it. That is fail-CLOSED for an ordinary user skill (null is treated as agent-written by callers deciding
+ *  trust), but fail-OPEN for a bundled-name collision whose "agent" stamp the salvage couldn't recover (a
+ *  truly unparsable backup, an ambiguous name skipped because the bytes also matched "human", or a name the
+ *  regex scan missed): `null !== "agent"` is also true, so
+ *  `isBundledSkill(n) && skillProvenance(n) !== "agent"` admits a still-unresolved agent-stamped collision
+ *  the corruption erased the record of — and unlike the corruption itself, that lost record is PERMANENT
+ *  (the backup is never read back by anything else) when the salvage can't recover it.
+ *
+ *  @decision 9a3dea30 — see the decision record's corrupt-map residual section for the full argument.
  *
  *  @decision 509176c8 — if the rename-aside ITSELF fails (e.g. EPERM), `writeProvenanceMap` independently
  *  re-checks the file for corruption and refuses to write rather than trusting this function alone to have
@@ -979,8 +1058,17 @@ function readProvenanceMap(): Record<string, SkillProvenance> {
   const backupPath = `${SKILL_PROVENANCE_FILE}.corrupt-${Date.now()}`;
   try { fs.renameSync(SKILL_PROVENANCE_FILE, backupPath); }
   catch { /* best-effort — writeProvenanceMap refuses to overwrite a still-corrupt file regardless */ }
-  console.log(`[skills] provenance map at ${SKILL_PROVENANCE_FILE} is corrupt — moved aside to ${backupPath}; every stamp reads unknown (fail closed) until a human re-saves`);
-  return emptyProvenanceMap();
+  const salvaged = salvageAgentStampsFromCorruptBackup(text);
+  const salvagedNames = Object.keys(salvaged);
+  // Persist immediately when the rename-aside above succeeded: the corrupt file is gone, so this targets a
+  // fresh file and never overwrites evidence. When the rename-aside instead FAILED, the corrupt file is
+  // still live at SKILL_PROVENANCE_FILE — writeProvenanceMap's own on-disk corruption re-check (not this
+  // call site) is what refuses that write and keeps the corrupt evidence intact; this call is harmless
+  // either way. Best-effort — an unpersisted salvage is still returned for THIS call; only a later call
+  // would re-lose it.
+  if (salvagedNames.length) writeProvenanceMap(salvaged);
+  console.log(`[skills] provenance map at ${SKILL_PROVENANCE_FILE} is corrupt — moved aside to ${backupPath}; every OTHER stamp reads unknown until a human re-saves (fail-closed for an ordinary user skill; fail-OPEN for an unresolved bundled-name collision not recovered below — see decision record 9a3dea30)${salvagedNames.length ? `; recovered ${salvagedNames.length} "agent" stamp(s) from the backup: ${salvagedNames.join(", ")}` : "; no \"agent\" stamps were recoverable from the backup"}`);
+  return salvaged;
 }
 
 /** Who wrote `name`'s CURRENT content — "agent" (loom-setup/loom-platform skill_write/skill_edit),
@@ -1025,12 +1113,31 @@ export function clearSkillProvenance(name: string): boolean {
   return writeProvenanceMap(map);
 }
 
+/** Stamp `name`'s provenance as "human"; true iff it landed. For the HUMAN-REST paths that land content
+ *  under a bundled `name` (reset, adopt, publish) — these call this instead of `clearSkillProvenance`: a
+ *  human actually vouched for this content, so the positive "human" claim is both more accurate and more
+ *  durable than merely clearing to unstamped. An agent-driven write path (the Lead's `skill_write`) must
+ *  keep using `clearSkillProvenance` instead — an agent actor is never entitled to a "human" stamp.
+ *  @decision 35099271 — call this only AFTER the content write has landed; see the decision record. */
+export function stampSkillProvenanceHuman(name: string): boolean {
+  const map = readProvenanceMap();
+  map[name] = "human";
+  return writeProvenanceMap(map);
+}
+
 /** Create or overwrite a skill's SKILL.md. Returns false on an invalid name — or, for an "agent" write,
  *  when the provenance downgrade below fails. `provenance`, when passed, stamps WHO authored this write
  *  ("agent" for the loom-setup/loom-platform MCP surfaces, "human" for the Skills UI/REST routes — see
- *  `SKILL_PROVENANCE_FILE`'s own doc comment in paths.ts). Omit it (as every pre-existing internal caller,
- *  e.g. `adoptSkillUpdate`'s bundled-only path, does) to leave provenance untouched — bundled-skill writes
- *  never need it, since locked-role filtering checks `isBundledSkill` before ever consulting provenance.
+ *  `SKILL_PROVENANCE_FILE`'s own doc comment in paths.ts). Omit it (as `adoptSkillUpdate`'s bundled-only
+ *  content write does) to leave provenance untouched here — that caller stamps separately, via its own
+ *  explicit `stampSkillProvenanceHuman`/`clearSkillProvenance` call, AFTER this write lands.
+ *
+ *  Locked-role filtering (`skills/inject.ts`) does NOT skip provenance for a bundled name — `isBundledSkill`
+ *  alone was the round-3 cut of card `509176c8`, but card `9a3dea30`'s round 2 reinstated a provenance
+ *  check on TOP of it (`isBundledSkill(n) && skillProvenance(n) !== "agent"`), to catch an agent-written
+ *  user skill that collides with a LATER-shipped bundled name of the same name. Bundled-skill content
+ *  writes here still never pass `provenance` themselves, but the stamp their caller applies afterward is
+ *  what that filter actually reads.
  *
  *  @decision 509176c8 — the "agent" branch downgrades the stamp FIRST and aborts the whole write if that
  *  fails, so agent content can never land while the stamp still reads "human". The "human" branch stamps
@@ -1086,15 +1193,22 @@ export function deleteSkill(name: string): boolean {
  * file (e.g. a Windows AV lock) must not throw AFTER the destructive rmSync+cpSync above has ALREADY
  * discarded the old store contents: the route would 500 while the store is actually correct, and every
  * write here is unconditional + per-file atomic, so a second Reset click simply converges the rest.
+ *
+ * Returns `true` on a clean reset; `false` if not a bundled skill / invalid name (nothing happened);
+ * `{error:"provenance-stamp-failed"}` if the content was discarded+restored but the human-provenance
+ * stamp (below) did not land — a DISTINCT, truthy-but-not-`true` outcome the REST caller must check for
+ * and surface as its own failure, never folded into the generic "not a bundled skill" `false` case.
  */
-export function resetSkillToBundled(name: string): boolean {
+export function resetSkillToBundled(name: string): boolean | { error: "provenance-stamp-failed" } {
   if (!isValidSkillName(name)) return false;
   const src = path.join(ASSET_SKILLS, name);
   try { if (!fs.statSync(src).isDirectory()) return false; } catch { return false; } // not a bundled skill
   const dest = path.join(SKILLS_DIR, name);
   fs.rmSync(dest, { recursive: true, force: true });
   fs.cpSync(src, dest, { recursive: true });
-  clearSkillProvenance(name); // best-effort — this lands bundled content under `name` (decision record 9a3dea30)
+  // Stamp "human" AFTER content has landed, never before — mirrors adoptSkillUpdate's sibling call.
+  // @decision 35099271 — see the decision record for the full ordering rationale.
+  const stamped = stampSkillProvenanceHuman(name);
   // mine = base = shipped: a full discard also re-syncs the base snapshot, clearing any update-available.
   const shipped = readFileOrNull(assetMd(name));
   if (shipped != null) writeBase(name, shipped);
@@ -1106,7 +1220,7 @@ export function resetSkillToBundled(name: string): boolean {
       if (shippedFile != null) writeFileBaseSnapshot(name, relPath, shippedFile);
     }
   } catch { /* best-effort — the store contents above are already correct; a stray base is self-healing on retry */ }
-  return true;
+  return stamped ? true : { error: "provenance-stamp-failed" };
 }
 
 /** The directory `publishSkillToBundled` writes into (the bundled-asset skills dir) — exposed so a caller

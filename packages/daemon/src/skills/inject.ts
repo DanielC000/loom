@@ -31,6 +31,16 @@ export function roleDoctrineSkillName(role: string | null | undefined): string |
   return (role && ROLE_DOCTRINE_SKILL[role as SessionRole]) || null;
 }
 
+/** Whether a locked role should trust store skill `n` — bundled-but-not-agent-stamped, or explicitly
+ *  human-stamped. Provenance-only, never content-equality. The SHARED gate for both locked-role trust
+ *  checks in `injectSkills` below (the `want` filter and the force-included role-doctrine skill), so the
+ *  two can never diverge.
+ *
+ *  @decision 9a3dea30 — provenance-only, never content-equality; see the decision record. */
+function isTrustedForLockedRole(n: string): boolean {
+  return (isBundledSkill(n) && skillProvenance(n) !== "agent") || skillProvenance(n) === "human";
+}
+
 /** Per-session injected-skill record for a shared `.claude/skills`: `{ "<sessionId>": ["worker", …] }`.
  *  Keyed by session so a concurrent session sharing the cwd never strips another's (or the repo's) skills. */
 type Manifest = Record<string, string[]>;
@@ -266,13 +276,23 @@ export function injectSkills(cwd: string, sessionId: string, subset?: string[] |
   const want = subset && subset.length
     ? storeNames.filter((n) => subset.includes(n))
     : isLockedRole
-      ? storeNames.filter((n) => (isBundledSkill(n) && skillProvenance(n) !== "agent") || skillProvenance(n) === "human")
+      ? storeNames.filter(isTrustedForLockedRole)
       : storeNames;
   // FORCE-INCLUDE the role's operating-doctrine skill regardless of the subset (a profile whose subset
   // omits "worker"/"orchestrate"/… must still ship its role doctrine). Only when present in the store and
   // not already wanted; a no-subset session already has every store skill, so this only bites under a subset.
+  //
+  // For a LOCKED role, "force" must still respect the SAME provenance trust check the `want` filter above
+  // already applies — otherwise an agent-stamped collision under the role's own doctrine name (the
+  // 9a3dea30 shape) bypasses the locked-role filter entirely via this one path. Shares `isTrustedForLockedRole`
+  // with the `want` filter above so the two can never diverge; a non-locked role is unaffected
+  // (`!isLockedRole` short-circuits true).
   const roleSkill = role ? ROLE_DOCTRINE_SKILL[role] : undefined;
-  if (roleSkill && storeNames.includes(roleSkill) && !want.includes(roleSkill)) want.push(roleSkill);
+  if (roleSkill && storeNames.includes(roleSkill) && !want.includes(roleSkill)) {
+    const roleSkillTrusted = !isLockedRole || isTrustedForLockedRole(roleSkill);
+    if (roleSkillTrusted) want.push(roleSkill);
+    else console.log(`[skills] withholding role-doctrine skill '${roleSkill}' from a locked role's session: its store copy is agent-written, not human/bundled-trusted`);
+  }
 
   const manifestPath = path.join(targetDir, MANIFEST);
   const manifest = readManifest(manifestPath, sessionId);

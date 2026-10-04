@@ -53,7 +53,7 @@ process.env.USERPROFILE = sandboxHome;     // Windows
 process.env.HOME = sandboxHome;            // POSIX
 
 const store = await import("../dist/skills/store.js");
-const { writeSkill, deleteSkill, skillProvenance, isBundledSkill, listSkills } = store;
+const { writeSkill, deleteSkill, skillProvenance, isBundledSkill, listSkills, adoptSkillUpdate, resetSkillToBundled, stampSkillProvenanceHuman, publishSkillToBundled, skillUpdateAvailable } = store;
 const { injectSkills } = await import("../dist/skills/inject.js");
 const { SKILL_PROVENANCE_FILE } = await import("../dist/paths.js");
 const { skillWriteData } = await import("../dist/mcp/skillTools.js");
@@ -63,6 +63,8 @@ const { buildServer } = await import("../dist/gateway/server.js");
 const skillMd = (name, tag = "") => `---\nname: ${name}\ndescription: test skill ${name}\n---\n\n# ${name}\n${tag}\n`;
 const writeAsset = (name, content) => { fs.mkdirSync(path.join(assetDir, name), { recursive: true }); fs.writeFileSync(path.join(assetDir, name, "SKILL.md"), content); };
 const readStoreFile = (name) => fs.readFileSync(path.join(skillsDir, name, "SKILL.md"), "utf8");
+const baseDir = path.join(home, "skill-base"); // mirrors paths.ts's SKILL_BASE_DIR = join(LOOM_HOME, "skill-base")
+const writeBaseFile = (name, content) => { fs.mkdirSync(baseDir, { recursive: true }); fs.writeFileSync(path.join(baseDir, `${name}.md`), content); };
 
 try {
   // =====================================================================================================
@@ -151,6 +153,81 @@ try {
     fs.renameSync = originalRenameSync;
   }
   check("(2b) once rename-aside works again, the next read cleans up the corrupt file", (() => { skillProvenance("blocked-human"); return !fs.existsSync(SKILL_PROVENANCE_FILE); })());
+
+  // =====================================================================================================
+  // (2c) card 35099271 round 2 — SALVAGE: a TRUNCATED (not byte-scrambled) corrupt file — the common real-
+  //      world shape — still containing recognizable "agent" entries must recover them, since the stamp
+  //      loss is otherwise PERMANENT (the renamed-aside backup is never read back by anything else).
+  //      "human" entries are NEVER salvaged (see the decision record's corrupt-map residual section for
+  //      why only "agent" is safe to recover from untrusted corrupt bytes).
+  // =====================================================================================================
+  check("precondition: salvage-agent stamped agent", writeSkill("salvage-agent", skillMd("salvage-agent"), "agent") === true);
+  check("precondition: salvage-human stamped human", writeSkill("salvage-human", skillMd("salvage-human"), "human") === true);
+  const goodMapText = fs.readFileSync(SKILL_PROVENANCE_FILE, "utf8");
+  check("precondition: the real map really does contain both entries", goodMapText.includes('"salvage-agent":"agent"') && goodMapText.includes('"salvage-human":"human"'));
+  // Drop the trailing closing brace and leave a dangling key so JSON.parse throws, while every entry's own
+  // text (including both of the above) survives intact.
+  const truncated = `${goodMapText.slice(0, -1)}, "dangling":`;
+  fs.writeFileSync(SKILL_PROVENANCE_FILE, truncated);
+  check("(2c) salvage: the agent stamp is recovered, not read as unknown", skillProvenance("salvage-agent") === "agent");
+  check("(2c) salvage: the human stamp is NEVER recovered (fail-closed, unchanged from round 1)", skillProvenance("salvage-human") === null);
+  // The recovery must be PERSISTED (not just returned for the triggering call) — a later, independent read
+  // must still see it without re-parsing a backup that no longer exists at the live path.
+  check("(2c) salvage persisted: a later independent read still sees the recovered agent stamp", skillProvenance("salvage-agent") === "agent");
+
+  // =====================================================================================================
+  // (2c) card 35099271 round 3, item 1 — AMBIGUOUS NAMES: corrupt bytes can hold the SAME name claiming
+  //      both "agent" and "human" — a duplicate key from one malformed write, or two write "generations"
+  //      glued together by the corruption. Salvaging "agent" there would be wrong: for a bundled name it
+  //      would make the next boot's renameAsideAgentCollision DISPLACE a human's real copy, not merely
+  //      withhold a skill. Any name matching both must be skipped (reads unknown), while an unambiguous
+  //      sibling name in the SAME corrupt bytes must still be recovered.
+  // =====================================================================================================
+
+  // Shape 1: a literal duplicate key within what looks like one object — "foo" claims BOTH values, "bar"
+  // claims only "agent" (unambiguous) — plus a dangling trailing key so JSON.parse still throws.
+  const dupKeyCorrupt = '{"foo":"agent","bar":"agent","foo":"human","dangling":';
+  fs.writeFileSync(SKILL_PROVENANCE_FILE, dupKeyCorrupt);
+  check("(2c) duplicate-key shape: the ambiguous name ('foo') is SKIPPED, not salvaged as agent", skillProvenance("foo") === null);
+  check("(2c) duplicate-key shape: the UNAMBIGUOUS sibling name ('bar') is still recovered", skillProvenance("bar") === "agent");
+  check("(2c) duplicate-key shape: ambiguous skip persists on a later independent read", skillProvenance("foo") === null);
+
+  // Shape 2: two write "generations" glued together by the corruption — e.g. a stale write's bytes
+  // immediately followed by a newer write's bytes, never forming one coherent JSON document. "alpha" claims
+  // "agent" in the first generation and "human" in the second (ambiguous); "gamma" claims only "agent" in
+  // the second generation (unambiguous).
+  const concatGenCorrupt = '{"alpha":"agent"}{"alpha":"human","gamma":"agent","dangling":';
+  fs.writeFileSync(SKILL_PROVENANCE_FILE, concatGenCorrupt);
+  check("(2c) concatenated-generations shape: the ambiguous name ('alpha') is SKIPPED, not salvaged as agent", skillProvenance("alpha") === null);
+  check("(2c) concatenated-generations shape: the UNAMBIGUOUS name ('gamma') is still recovered", skillProvenance("gamma") === "agent");
+  check("(2c) concatenated-generations shape: ambiguous skip persists on a later independent read", skillProvenance("alpha") === null);
+
+  // =====================================================================================================
+  // (2c) card 35099271 round 3, item 2 — SALVAGE FROM IN-MEMORY TEXT: when the rename-aside itself fails
+  //      (e.g. EPERM), no backup file is ever written to `backupPath` — the salvage must still recover an
+  //      unambiguous "agent" entry from the bytes `readProvenanceMap` already holds in memory, not give up
+  //      because there is nothing at `backupPath` to re-read. Same fs.renameSync fault injection as (2b).
+  // =====================================================================================================
+  const epermCorrupt = '{"eperm-agent":"agent","dangling":';
+  const originalRenameSync2 = fs.renameSync;
+  fs.renameSync = (src, dest) => {
+    if (src === SKILL_PROVENANCE_FILE) throw new Error("simulated EPERM — rename-aside blocked");
+    return originalRenameSync2(src, dest);
+  };
+  try {
+    fs.writeFileSync(SKILL_PROVENANCE_FILE, epermCorrupt);
+    check("(2c) EPERM + salvage: an unambiguous agent stamp is STILL recovered despite the blocked rename-aside", skillProvenance("eperm-agent") === "agent");
+    check("(2c) EPERM + salvage: the corrupt file is still live at the original path (rename was blocked)", fs.readFileSync(SKILL_PROVENANCE_FILE, "utf8") === epermCorrupt);
+  } finally {
+    fs.renameSync = originalRenameSync2;
+  }
+  // Once rename-aside can succeed again, the corrupt file moves aside for real and — because this backup
+  // DOES contain a recoverable entry (unlike (2b)'s GARBAGE2, which has none) — the salvaged map is
+  // persisted into a fresh, valid live file.
+  skillProvenance("eperm-agent");
+  let freshMapText = null;
+  try { freshMapText = fs.readFileSync(SKILL_PROVENANCE_FILE, "utf8"); } catch { /* checked below */ }
+  check("(2c) EPERM + salvage: once rename-aside works again, the recovered stamp is persisted to a fresh, valid file", (() => { try { return freshMapText !== null && JSON.parse(freshMapText)["eperm-agent"] === "agent"; } catch { return false; } })());
 
   // =====================================================================================================
   // (4) Prototype-pollution-shaped read: a skill literally named "constructor" is a VALID name (NAME_RE).
@@ -247,6 +324,138 @@ try {
   check("(5b) PUT /api/skills/:name succeeds", putRes.statusCode === 200);
   check("(5b) PUT /api/skills/:name re-stamps human", skillProvenance("rest-created") === "human");
 
+  // =====================================================================================================
+  // (6) card 35099271 item 1 — adoptSkillUpdate / resetSkillToBundled / skillWriteData's bundled-asset
+  //     publish branch must each surface a failed provenance-stamp write as its OWN distinct outcome,
+  //     never silently proceed as if the write succeeded. Same EISDIR fault injection as section (1).
+  // =====================================================================================================
+  const provTmp2 = `${SKILL_PROVENANCE_FILE}.tmp`;
+
+  // (6a) adoptSkillUpdate: content lands (write-then-stamp ordering), but the stamp write fails.
+  writeAsset("adopt-stamp-fail", skillMd("adopt-stamp-fail", "SHIPPED"));
+  check("(6a) precondition: existing store copy", writeSkill("adopt-stamp-fail", skillMd("adopt-stamp-fail", "OLD")) === true);
+  fs.mkdirSync(provTmp2, { recursive: true });
+  try {
+    const adoptResult = adoptSkillUpdate("adopt-stamp-fail", skillMd("adopt-stamp-fail", "NEW"));
+    check("(6a) adoptSkillUpdate returns {error:\"provenance-stamp-failed\"}, not the skill, not null", adoptResult !== null && typeof adoptResult === "object" && adoptResult.error === "provenance-stamp-failed");
+    check("(6a) the content WAS written despite the stamp failure", readStoreFile("adopt-stamp-fail").includes("NEW"));
+  } finally {
+    fs.rmSync(provTmp2, { recursive: true, force: true });
+  }
+  const adoptOk = adoptSkillUpdate("adopt-stamp-fail", skillMd("adopt-stamp-fail", "NEW2"));
+  check("(6a) adopt succeeds once unblocked", adoptOk?.content?.includes("NEW2") === true);
+  check("(6a) provenance now human", skillProvenance("adopt-stamp-fail") === "human");
+
+  // (6b) resetSkillToBundled: content IS discarded+restored, but the stamp write fails.
+  writeAsset("reset-stamp-fail", skillMd("reset-stamp-fail", "SHIPPED"));
+  check("(6b) precondition: existing store copy", writeSkill("reset-stamp-fail", skillMd("reset-stamp-fail", "OLD")) === true);
+  fs.mkdirSync(provTmp2, { recursive: true });
+  try {
+    const resetResult = resetSkillToBundled("reset-stamp-fail");
+    check("(6b) resetSkillToBundled returns {error:\"provenance-stamp-failed\"}, not true", resetResult !== true && typeof resetResult === "object" && resetResult.error === "provenance-stamp-failed");
+    check("(6b) the content WAS reset despite the stamp failure", readStoreFile("reset-stamp-fail").includes("SHIPPED") && !readStoreFile("reset-stamp-fail").includes("OLD"));
+  } finally {
+    fs.rmSync(provTmp2, { recursive: true, force: true });
+  }
+  const resetOk = resetSkillToBundled("reset-stamp-fail");
+  check("(6b) reset succeeds once unblocked", resetOk === true);
+  check("(6b) provenance now human", skillProvenance("reset-stamp-fail") === "human");
+
+  // (6c) skillWriteData's bundled-asset publish branch (the Lead's agent-driven skill_write) must return
+  // an { error } when its clearSkillProvenance fails — never silently { ok: true }. clearSkillProvenance
+  // short-circuits to true (no write attempted) when nothing is stamped, so pre-stamp "agent" first —
+  // otherwise this would pass vacuously without ever exercising the write-failure path.
+  //
+  // Card 35099271 round 2: clear-first, abort-BEFORE-write ordering (mirrors writeSkill's own "agent"
+  // branch, @decision 509176c8) — the fault-injected clear must now fail BEFORE any content lands, so the
+  // store copy stays at its PRE-CALL content, never the new content under an unresolved stamp failure.
+  writeAsset("lead-publish-stamp-fail", skillMd("lead-publish-stamp-fail", "OLD"));
+  check("(6c) precondition: pre-stamped agent so clearSkillProvenance has something to clear", writeSkill("lead-publish-stamp-fail", skillMd("lead-publish-stamp-fail", "OLD"), "agent") === true);
+  fs.mkdirSync(provTmp2, { recursive: true });
+  try {
+    const swResult = skillWriteData({ name: "lead-publish-stamp-fail", content: skillMd("lead-publish-stamp-fail", "NEW"), confirm: true }, { allowBundledAsset: true });
+    check("(6c) skill_write returns an error when clearSkillProvenance fails", typeof swResult.error === "string" && !swResult.ok);
+    check("(6c) fixed: clear-first ordering means the new content was NEVER written while the clear is unresolved", readStoreFile("lead-publish-stamp-fail").includes("OLD") && !readStoreFile("lead-publish-stamp-fail").includes("NEW"));
+    check("(6c) the stale \"agent\" stamp is still present (clear never ran to completion)", skillProvenance("lead-publish-stamp-fail") === "agent");
+  } finally {
+    fs.rmSync(provTmp2, { recursive: true, force: true });
+  }
+  const swOk = skillWriteData({ name: "lead-publish-stamp-fail", content: skillMd("lead-publish-stamp-fail", "NEW2"), confirm: true }, { allowBundledAsset: true });
+  check("(6c) skill_write succeeds once unblocked", swOk.ok === true);
+  check("(6c) unblocked write actually landed the new content", readStoreFile("lead-publish-stamp-fail").includes("NEW2"));
+  check("(6c) fixed: the stamp is left null, never \"human\" — an agent actor is never entitled to that", skillProvenance("lead-publish-stamp-fail") === null);
+
+  // =====================================================================================================
+  // (7) card 35099271 item 2 — the HUMAN REST publish route stamps "human", and fails the response (not
+  //     a silent 200) when that stamp write fails. The agent-driven skill_write path above (6c) is
+  //     deliberately NOT affected — it stays on clearSkillProvenance, never "human".
+  // =====================================================================================================
+  writeAsset("rest-publish-human", skillMd("rest-publish-human", "OLD"));
+  check("(7) precondition: rest-publish-human stamped agent (simulating a prior MCP write)", writeSkill("rest-publish-human", skillMd("rest-publish-human", "EDITED"), "agent") === true);
+  process.env.LOOM_DEV = "1"; // dev/self-host edition (read at call time by isLoomDev)
+  try {
+    const pubRes = await app.inject({ method: "POST", url: "/api/skills/rest-publish-human/publish" });
+    check("(7) POST /api/skills/:name/publish 200", pubRes.statusCode === 200 && pubRes.json().ok === true);
+    check("(7) publish actually pushed the store edit into the asset", fs.readFileSync(path.join(assetDir, "rest-publish-human", "SKILL.md"), "utf8").includes("EDITED"));
+    check("(7) publish stamps human (even though the pre-existing stamp was agent)", skillProvenance("rest-publish-human") === "human");
+
+    // Stamp-write failure path: the publish itself (asset write) must still succeed; only the
+    // provenance record lags — the route must fail loudly (500), never a silent 200.
+    fs.mkdirSync(provTmp2, { recursive: true });
+    try {
+      const pubFailRes = await app.inject({ method: "POST", url: "/api/skills/rest-publish-human/publish" });
+      check("(7) publish 500s when the human-stamp write fails (not a silent 200)", pubFailRes.statusCode === 500);
+      check("(7) the asset WAS still published despite the stamp failure", fs.readFileSync(path.join(assetDir, "rest-publish-human", "SKILL.md"), "utf8").includes("EDITED"));
+    } finally {
+      fs.rmSync(provTmp2, { recursive: true, force: true });
+    }
+  } finally {
+    delete process.env.LOOM_DEV;
+  }
+
+  // =====================================================================================================
+  // (8) card 35099271 round 2, item 1 — adopt ORDERING through REST: content → stamp → writeBase, never
+  //     writeBase before the stamp. A failed stamp must leave `updateAvailable` TRUE (writeBase never ran),
+  //     so the route's own "retry to re-stamp it" advice is actually true — the retry must land 200, not
+  //     409 "no update available". This is the shape that would go RED if writeBase ran before the stamp.
+  // =====================================================================================================
+  writeAsset("adopt-rest-order", skillMd("adopt-rest-order", "SHIPPED"));
+  writeBaseFile("adopt-rest-order", skillMd("adopt-rest-order", "OLD")); // base behind shipped -> update available
+  check("(8) precondition: existing store copy (mine == base, clean fast-forward)", writeSkill("adopt-rest-order", skillMd("adopt-rest-order", "OLD")) === true);
+  check("(8) precondition: update is available", skillUpdateAvailable("adopt-rest-order") === true);
+  fs.mkdirSync(provTmp2, { recursive: true });
+  try {
+    const adoptFailRes = await app.inject({ method: "POST", url: "/api/skills/adopt-rest-order/adopt", payload: { content: skillMd("adopt-rest-order", "SHIPPED") } });
+    check("(8) adopt 500s when the stamp write fails (not a silent 200)", adoptFailRes.statusCode === 500);
+    check("(8) fixed: updateAvailable STAYS true after a failed stamp — writeBase never ran ahead of it", skillUpdateAvailable("adopt-rest-order") === true);
+  } finally {
+    fs.rmSync(provTmp2, { recursive: true, force: true });
+  }
+  const adoptRetryRes = await app.inject({ method: "POST", url: "/api/skills/adopt-rest-order/adopt", payload: { content: skillMd("adopt-rest-order", "SHIPPED") } });
+  check("(8) fixed: retry succeeds 200, never 409 \"no update available\"", adoptRetryRes.statusCode === 200);
+  check("(8) retry actually adopted the content", readStoreFile("adopt-rest-order").includes("SHIPPED"));
+  check("(8) retry stamps human", skillProvenance("adopt-rest-order") === "human");
+  check("(8) update is now resolved", skillUpdateAvailable("adopt-rest-order") === false);
+
+  // =====================================================================================================
+  // (9) /reset REST coverage for the same stamp-failure shape (6b already drove resetSkillToBundled
+  //     directly; this drives it through the REST route). resetSkillToBundled's own order (stamp before
+  //     writeBase) was ALREADY correct — this is coverage, not a behavior change.
+  // =====================================================================================================
+  writeAsset("reset-rest-order", skillMd("reset-rest-order", "SHIPPED"));
+  check("(9) precondition: existing divergent store copy", writeSkill("reset-rest-order", skillMd("reset-rest-order", "OLD")) === true);
+  fs.mkdirSync(provTmp2, { recursive: true });
+  try {
+    const resetFailRes = await app.inject({ method: "POST", url: "/api/skills/reset-rest-order/reset" });
+    check("(9) reset 500s when the stamp write fails (not a silent 200)", resetFailRes.statusCode === 500);
+    check("(9) the content WAS still reset despite the stamp failure", readStoreFile("reset-rest-order").includes("SHIPPED") && !readStoreFile("reset-rest-order").includes("OLD"));
+  } finally {
+    fs.rmSync(provTmp2, { recursive: true, force: true });
+  }
+  const resetRetryRes = await app.inject({ method: "POST", url: "/api/skills/reset-rest-order/reset" });
+  check("(9) retry succeeds 200", resetRetryRes.statusCode === 200);
+  check("(9) retry stamps human", skillProvenance("reset-rest-order") === "human");
+
   await app.close();
   db.close();
 } finally {
@@ -254,6 +463,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — provenance write ordering, corrupt-map safety, bare-isBundledSkill locked-role trust, and the Object.prototype read bug are all fixed."
+  ? "\n✅ ALL PASS — provenance write ordering, corrupt-map safety, bare-isBundledSkill locked-role trust, the Object.prototype read bug, card 35099271's stamp-failure outcomes (adopt/reset/skill_write/publish), and round 2's adopt/reset REST ordering are all fixed."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

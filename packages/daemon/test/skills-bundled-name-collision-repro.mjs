@@ -21,10 +21,14 @@
 //     still passes through. Asserted as the known, accepted limitation, not treated as a failure.
 //  8. Round 2, item 2 — every write path that lands genuinely-bundled content under a name must clear a
 //     stale "agent" stamp: resetSkillToBundled, adoptSkillUpdate, and the loom-platform bundled-asset
-//     skill_write (skillWriteData with allowBundledAsset:true).
+//     skill_write (skillWriteData with allowBundledAsset:true). Card 35099271 item 1 later superseded
+//     "clears" with "stamps human" for the two genuine human-REST paths (reset, adopt) — the agent-driven
+//     skill_write path (8c) is unchanged (still clears, per that same card).
 //  9. Round 2, item 3 — fault injection on the crash-safety step-3 stamp clear itself (the one store.ts
 //     ~597 of commit 2b89bbd3 silently ignored): seedGlobalSkills() must skip fresh-seeding that name
 //     THIS boot, then self-heal and seed it on the very next boot.
+//  10. Card 35099271 item 5 — renameFrontmatterName: an empty `name:` value must not delete the NEXT
+//      frontmatter line, and a leading UTF-8 BOM must not make the rewrite a silent no-op.
 //
 // Sets LOOM_HOME (store) AND LOOM_ASSET_SKILLS (bundled-asset lookup) to TEMP dirs BEFORE importing dist
 // (paths.ts/store.ts/seed.ts all read both at module load). No claude, no live daemon, nothing outside the
@@ -49,7 +53,7 @@ process.env.LOOM_ASSET_SKILLS = assetSkillsDir; // BEFORE importing — store.ts
 const { injectSkills } = await import("../dist/skills/inject.js");
 const {
   writeSkill, skillProvenance, isBundledSkill, readSkill, listSkills, renameAsideAgentCollision,
-  resetSkillToBundled, adoptSkillUpdate,
+  resetSkillToBundled, adoptSkillUpdate, renameFrontmatterName,
 } = await import("../dist/skills/store.js");
 const { seedGlobalSkills } = await import("../dist/skills/seed.js");
 const { skillWriteData } = await import("../dist/mcp/skillTools.js");
@@ -293,7 +297,9 @@ try {
   injectLocked(N8A, cwd8aPre);
   check("[8a] pre-fix: round2 item1's guard wrongly withholds it from a locked role under the stale stamp", !readDelivered(cwd8aPre).includes(N8A));
   check("[8a] resetSkillToBundled succeeds", resetSkillToBundled(N8A) === true);
-  check("[8a] fixed: resetSkillToBundled clears the stale stamp", skillProvenance(N8A) === null);
+  // card 35099271 item 1 superseded "clears" with "stamps human" on this HUMAN-REST path — either way the
+  // stale "agent" stamp is gone, which is what matters for the locked-role delivery check below.
+  check("[8a] fixed: resetSkillToBundled re-stamps human (no longer the stale agent stamp)", skillProvenance(N8A) === "human");
   const cwd8aPost = freshCwd("item2a-post");
   injectLocked(N8A, cwd8aPost);
   check("[8a] fixed: now delivered to a locked role", readDelivered(cwd8aPost).includes(N8A));
@@ -311,7 +317,8 @@ try {
   check("[8b] pre-fix: round2 item1's guard wrongly withholds it from a locked role under the stale stamp", !readDelivered(cwd8bPre).includes(N8B));
   const adopted8b = adoptSkillUpdate(N8B, SHIPPED8B);
   check("[8b] adoptSkillUpdate succeeds", adopted8b?.content === SHIPPED8B);
-  check("[8b] fixed: adoptSkillUpdate clears the stale stamp", skillProvenance(N8B) === null);
+  // card 35099271 item 1 superseded "clears" with "stamps human" on this HUMAN-REST path.
+  check("[8b] fixed: adoptSkillUpdate re-stamps human (no longer the stale agent stamp)", skillProvenance(N8B) === "human");
   const cwd8bPost = freshCwd("item2b-post");
   injectLocked(N8B, cwd8bPost);
   check("[8b] fixed: now delivered to a locked role", readDelivered(cwd8bPost).includes(N8B));
@@ -393,11 +400,48 @@ try {
   const deliveredHealed = readDelivered(cwdHealed);
   check("[9] self-healed end-to-end: bundled name now delivered to a locked role", deliveredHealed.includes(N9));
   check("[9] self-healed end-to-end: the renamed-aside agent skill is still withheld", !deliveredHealed.includes(R9));
+
+  // =======================================================================================================
+  // 10. Card 35099271 item 5 — renameFrontmatterName: an EMPTY `name:` value must never delete the NEXT
+  //     frontmatter line, and a leading UTF-8 BOM must not make the whole rewrite silently a no-op.
+  // =======================================================================================================
+  // (10a) non-empty name: value — the ordinary case, unaffected.
+  const ordinary = "---\nname: old-name\ndescription: has a description\n---\n\n# body\n";
+  const ordinaryRenamed = renameFrontmatterName(ordinary, "new-name");
+  check("[10a] ordinary rename: name updated", ordinaryRenamed.includes("name: new-name"));
+  check("[10a] ordinary rename: description line SURVIVES", ordinaryRenamed.includes("description: has a description"));
+
+  // (10b) the bug: an EMPTY `name:` value immediately followed by another frontmatter line. The OLD
+  // `\s*` regex could consume the line's own newline and keep eating into the next line via `.*$`,
+  // deleting it on replace. Must survive intact.
+  const emptyName = "---\nname:\ndescription: must not be deleted\n---\n\n# body\n";
+  const emptyNameRenamed = renameFrontmatterName(emptyName, "fixed-name");
+  check("[10b] empty name: value rewritten", emptyNameRenamed.includes("name: fixed-name"));
+  check("[10b] fixed: the NEXT frontmatter line (description) is NOT deleted", emptyNameRenamed.includes("description: must not be deleted"));
+
+  // (10c) trailing whitespace after an empty `name:` (still same line) — same hazard, slightly different
+  // shape (whitespace before the newline rather than none at all).
+  const emptyNameTrailingWs = "---\nname:   \ndescription: also must not be deleted\n---\n\n# body\n";
+  const emptyNameTrailingWsRenamed = renameFrontmatterName(emptyNameTrailingWs, "fixed-name2");
+  check("[10c] empty (whitespace-only) name: value rewritten", emptyNameTrailingWsRenamed.includes("name: fixed-name2"));
+  check("[10c] fixed: the next frontmatter line survives", emptyNameTrailingWsRenamed.includes("description: also must not be deleted"));
+
+  // (10d) a leading UTF-8 BOM must not make the whole function a silent no-op (the absolute-start `^---`
+  // anchor never matches past a BOM otherwise), and the BOM must survive in the output.
+  const withBom = "﻿---\nname: bom-old\ndescription: bom desc\n---\n\n# body\n";
+  const withBomRenamed = renameFrontmatterName(withBom, "bom-new");
+  check("[10d] BOM-prefixed content: name actually rewritten (not a silent no-op)", withBomRenamed.includes("name: bom-new") && !withBomRenamed.includes("name: bom-old"));
+  check("[10d] BOM is preserved at the very start of the output", withBomRenamed.charCodeAt(0) === 0xfeff);
+
+  // (10e) no frontmatter `name:` line at all — unaffected, returns content unchanged (pre-existing
+  // contract, not part of this fix, but asserted so a future change to the regex can't silently break it).
+  const noName = "---\ndescription: no name field\n---\n\n# body\n";
+  check("[10e] no name: field — content returned unchanged", renameFrontmatterName(noName, "whatever") === noName);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — round 1 fix (basic collision, idempotency, both fault-injection points, both non-regression cases, the documented residual) AND round 2 (self-host live-asset window, every bundled-write-path stamp clear, the fault-tolerant skip-seed-this-boot behavior, and the frontmatter rename) all verified end to end."
+  ? "\n✅ ALL PASS — round 1 fix (basic collision, idempotency, both fault-injection points, both non-regression cases, the documented residual) AND round 2 (self-host live-asset window, every bundled-write-path stamp clear, the fault-tolerant skip-seed-this-boot behavior, and the frontmatter rename), PLUS card 35099271 item 5 (renameFrontmatterName's empty-name + BOM fixes), all verified end to end."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

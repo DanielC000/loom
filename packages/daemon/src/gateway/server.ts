@@ -75,7 +75,7 @@ import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainmen
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
 import { isActiveDocumentContentType, listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
-import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile } from "../skills/store.js";
+import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile, stampSkillProvenanceHuman } from "../skills/store.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
 import { validateAgentPatch } from "../agents/validate.js";
@@ -3949,7 +3949,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/skills/:name/reset", async (req, reply) => {
     const { name } = req.params as { name: string };
     if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
-    if (!resetSkillToBundled(name)) return reply.code(404).send({ error: "no bundled version for this skill" });
+    const result = resetSkillToBundled(name);
+    if (result === false) return reply.code(404).send({ error: "no bundled version for this skill" });
+    // `result` is `true` (clean) or `{error:"provenance-stamp-failed"}` (content reset, stamp didn't
+    // land — see resetSkillToBundled's own doc). The latter must never read as "no bundled version": the
+    // content IS reset; only the provenance record lags.
+    if (result !== true) return reply.code(500).send({ error: "reset to the bundled version, but failed to record its provenance as human-reviewed — retry to re-stamp it" });
     return readSkill(name);
   });
   // "What shipped changed" since the user's last sync: base + current shipped asset, for the web to render
@@ -4028,7 +4033,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       content = m.merged;
     }
     const updated = adoptSkillUpdate(name, content);
-    if (!updated) return reply.code(404).send({ error: "no bundled version for this skill" });
+    if (updated === null) return reply.code(404).send({ error: "no bundled version for this skill" });
+    // `{error:"provenance-stamp-failed"}` means the content WAS adopted but the human-provenance stamp
+    // didn't land (see adoptSkillUpdate's own doc) — must never read as "no bundled version".
+    if ("error" in updated) return reply.code(500).send({ error: "adopted the update, but failed to record its provenance as human-reviewed — retry to re-stamp it" });
     return updated;
   });
   // Inverse of reset: publish the store's edited SKILL.md back into the repo's bundled asset so the edit
@@ -4042,6 +4050,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
     if (!isLoomDev()) return reply.code(403).send({ error: "publish to repo is a dev/self-host-only feature" });
     if (!publishSkillToBundled(name)) return reply.code(404).send({ error: "no bundled version for this skill" });
+    // The human clicking Publish vouched for this content — stamp "human" so a stale "agent" stamp (e.g.
+    // from an earlier failed clear elsewhere) can never make a later boot mistake this now-published,
+    // human-reviewed content for an unresolved agent-written collision. See decision record 35099271.
+    if (!stampSkillProvenanceHuman(name)) return reply.code(500).send({ error: "published to the bundled asset, but failed to record its provenance as human-reviewed — retry to re-stamp it" });
     return { ok: true };
   });
 

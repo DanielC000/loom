@@ -24,8 +24,11 @@ non-malicious cases and was reverted in round 3:
   that simply hasn't been reseeded yet, wrongly read as untrusted because `mine != shipped`.
 
 Direction (a), approved and implemented here: instead of widening the READ-side trust check (which is what
-kept reintroducing content-equality brittleness), close the hole at the one place the collision can
-actually arise — `seedGlobalSkills()` itself. `renameAsideAgentCollision(name)` (`skills/store.ts`) runs
+kept reintroducing content-equality brittleness), close the hole at the seed-time path — believed, at the
+time this paragraph was written, to be the only place the collision could arise. **That belief did not
+survive round 2 below**, which found a second window (the self-host live-asset read), and a corrupt-map
+window (card `35099271`, see the residual section) narrows it further still — direction (a) closes the
+seed-time case; it was never "the one place". `renameAsideAgentCollision(name)` (`skills/store.ts`) runs
 for every bundled asset name, every boot, BEFORE the existing seed-if-absent check: if the store already
 holds an AGENT-stamped dir under that name, the whole dir is renamed aside to a fresh, non-colliding
 user-skill name (content preserved verbatim), the provenance stamp follows it, and the normal fresh-seed
@@ -68,6 +71,71 @@ provenance map existed — stamping either as `"agent"` risks wrongly withholdin
 their own locked-role Companion, which is the exact harm card `509176c8`'s own ruling was written to
 avoid. This residual is accepted as the documented cost of (a)'s scope ("closes the hole at the one place
 the collision can arise" — a NEW agent-stamped collision, not every historical one).
+
+## The corrupt-map residual (card 35099271, round 1: documented; round 2: narrowed by salvage)
+
+`readProvenanceMap` (`skills/store.ts`) renames a corrupt provenance-map file aside. For an ORDINARY user
+skill, every name then reading unknown provenance is correctly fail-closed (a caller deciding trust treats
+null as agent-written). But for a bundled-name collision specifically, the locked-role filter's
+`isBundledSkill(n) && skillProvenance(n) !== "agent"` branch reads `null !== "agent"` as true — so losing
+the record of an existing, UNRESOLVED agent-stamped collision admits it. Fail-OPEN, not fail-closed, for
+this one case.
+
+**The corruption EVENT is transient — the STAMP LOSS it causes is not.** `readProvenanceMap` self-heals on
+the SAME call that detects it (the corrupt file is renamed aside and gone before the function returns), so
+the very next call sees an ordinary missing-file, not a corrupt one. But the `.corrupt-<ms>` backup it
+renamed the old content TO is never read back by anything — round 1's framing ("fail-open … until a human
+re-saves") wrongly implied the exposure was bounded to a short "while corrupt" window that "mostly doesn't
+exist." It is not bounded: once the corruption event has passed, the map is simply missing whatever agent
+stamps it held, for as long as nothing re-stamps that specific name — which, for a name nobody happens to
+revisit, can be indefinitely. The round-1 rejection argument (below, "Evaluated and rejected") was built on
+that wrong framing and is corrected by round 2's salvage instead of standing as written.
+
+**Round 2 fix:** `salvageAgentStampsFromCorruptBackup` (`skills/store.ts`) best-effort-recovers "agent"
+entries out of the renamed-aside backup via a narrow regex scan (never a second JSON parse — the file
+already failed one), re-validates each name against `isValidSkillName`, and `readProvenanceMap` persists
+the recovered entries into the fresh map immediately. Deliberately "agent" ONLY — never "human": a
+falsely-recovered "human" entry would wrongly VOUCH for unreviewed content (fail-open, unsafe), so "human"
+entries are never salvaged — their loss was already fail-closed-safe before this fix and stays that way.
+**A falsely-recovered "agent" entry is NOT always merely a withholding, corrected in round 3 below** — for
+a BUNDLED name it can make the next boot's `renameAsideAgentCollision` displace a human's real copy; round
+3 added the ambiguous-name skip that keeps that from happening. This closes the gap for any backup the
+regex scan can actually read a `"<name>": "agent"` pair out of — assumed, not measured, to typically be a
+single malformed entry or truncation elsewhere in the file rather than a byte-for-byte scramble of every
+pair — it does not close it for a backup so thoroughly destroyed that no recognizable `"agent"` entries
+survive, nor (round 2 as originally shipped) for one whose rename-aside itself failed (EPERM) and was never
+written to `backupPath` at all — **that second gap is closed by round 3 below.**
+
+**Re-argued rejection (round 2):** given the salvage above, withholding every non-"human" bundled name
+while the map reads corrupt remains rejected, now against the NARROWER residual that survives the salvage.
+That residual's probability (a corrupt write destroying not just the file but every recognizable "agent"
+entry inside it, which requires more than an ordinary truncation/single-entry corruption) is smaller than
+round 1's already-small estimate, while the cost of building the broader withholding mitigation is
+unchanged from round 1: it would withhold nearly every bundled skill — including every locked role's OWN
+role-doctrine skill, none of which carry a "human" stamp in the ordinary (shipped/seeded, never UI-edited)
+case — from every locked-role session until a human manually re-saves each one individually; there is no
+single action that "re-saves the whole map." A smaller residual against an unchanged, large mitigation
+cost is a WEAKER case for building it than round 1's, not a stronger one. Accepted at the same
+proportionality the legacy-unstamped residual above is accepted at.
+
+**Round 3 (card `35099271` round 3):** two corrections.
+- **The "only ever withholds" claim above was wrong.** A falsely-recovered "agent" entry can arise from a
+  genuinely ambiguous corrupt byte sequence — a duplicate key from one malformed write, or two write
+  "generations" glued together by the corruption — leaving the SAME name matching both `"<name>":"agent"`
+  and `"<name>":"human"` somewhere in the bytes. For an ORDINARY user skill, recovering "agent" there is
+  still only a withholding. But for a BUNDLED name, it makes the next boot's `renameAsideAgentCollision`
+  believe the store still holds unreviewed agent content and move the directory ASIDE to reseed pristine
+  content in its place — if what's actually there is a human's own reset/adopted/edited copy, that is a
+  real content DISPLACEMENT, not a withholding. Fixed: `salvageAgentStampsFromCorruptBackup` now also scans
+  for `"<name>":"human"` matches and skips (never salvages) any name that matches both — a name is only
+  ever recovered when its bytes carry NO conflicting match. Tested with both a duplicate-key fixture and a
+  concatenated-generations fixture (`packages/daemon/test/skills-provenance-integrity.mjs`, section 2c).
+- **The EPERM gap above is closed.** `salvageAgentStampsFromCorruptBackup` now takes the raw corrupt `text`
+  `readProvenanceMap` already holds in memory, rather than re-reading `backupPath` — so when the
+  rename-aside itself fails (no file is ever written to `backupPath`), the corrupt bytes are still scanned
+  and unambiguous "agent" entries are still recovered for this call. `writeProvenanceMap`'s own
+  still-corrupt-on-disk refusal (unchanged) is what keeps that recovery from being persisted over live
+  corrupt evidence in that case — the fix only widens what gets recovered IN MEMORY, not what gets written.
 
 ## Crash-safety ordering
 
@@ -144,7 +212,11 @@ Tested end to end, including fault injection on item 3's stamp clear and a posit
 - Do not re-add `isTrustedBundledContent` (round 2 of card `509176c8`'s content-equality trust check) to `inject.ts`'s locked-role filter — see that card's own record for why it was reverted. This is a different thing from the round-2 PROVENANCE-ONLY guard added here (item 1 above) — that guard fires on the stamp alone, never on how far `mine` diverges from `shipped`, so it does not reintroduce those regressions.
 - Do not let a write path that lands bundled content under a name skip `clearSkillProvenance` — any future such path needs the same call, or a stale `"agent"` stamp silently withholds it from every locked role (round 2, item 2).
 - Do not let `renameAsideAgentCollision`'s final stamp-clear failure be silently ignored by its caller — `seedGlobalSkills()` must skip fresh-seeding that name THIS boot (round 2, item 3), never seed over a dangling stamp.
+- Do not widen `salvageAgentStampsFromCorruptBackup` to recover `"human"` entries, or to trust the backup via a second JSON parse instead of the narrow regex scan — see "The corrupt-map residual" (card `35099271` round 2) for why only `"agent"` is safe to recover from untrusted corrupt bytes.
+- Do not read the round-1 "Evaluated and rejected" framing on this residual as still accurate on its own — it treated the exposure as bounded to a transient "while corrupt" window; card `35099271` round 2 corrected that (the stamp LOSS is permanent, not the corruption) and re-argued the rejection against the narrower residual the salvage above leaves. Read the round-2 paragraphs, not just the round-1 ones.
+- Do not let `salvageAgentStampsFromCorruptBackup` recover a name whose corrupt bytes also match `"<name>":"human"` anywhere — that ambiguity (a duplicate key, or two write generations glued together by the corruption) is exactly what card `35099271` round 3 added the skip for; recovering it anyway risks `renameAsideAgentCollision` displacing a human's real copy at the next boot, not merely withholding a skill.
+- Do not re-read `salvageAgentStampsFromCorruptBackup`'s backup file directly — card `35099271` round 3 switched it to the in-memory `text` `readProvenanceMap` already holds specifically so recovery still works when the rename-aside itself failed (EPERM) and no backup file was ever written.
 
 ## Source
 
-`packages/daemon/src/skills/store.ts` (`renameAsideAgentCollision`, `pickRenameAsideName`, `renameFrontmatterName`, `clearSkillProvenance`, `resetSkillToBundled`, `adoptSkillUpdate`), `packages/daemon/src/skills/seed.ts` (`seedGlobalSkills`'s per-entry loop — calls `renameAsideAgentCollision` before the existing seed-if-absent check, and skips the seed on `stampCleared:false`), `packages/daemon/src/skills/inject.ts` (the locked-role filter's provenance-only guard), `packages/daemon/src/mcp/skillTools.ts` (`skillWriteData`'s bundled-asset path), `packages/daemon/test/skills-bundled-name-collision-repro.mjs`.
+`packages/daemon/src/skills/store.ts` (`renameAsideAgentCollision`, `pickRenameAsideName`, `renameFrontmatterName`, `clearSkillProvenance`, `resetSkillToBundled`, `adoptSkillUpdate`, `salvageAgentStampsFromCorruptBackup`, `readProvenanceMap`), `packages/daemon/src/skills/seed.ts` (`seedGlobalSkills`'s per-entry loop — calls `renameAsideAgentCollision` before the existing seed-if-absent check, and skips the seed on `stampCleared:false`), `packages/daemon/src/skills/inject.ts` (the locked-role filter's provenance-only guard, `isTrustedForLockedRole`), `packages/daemon/src/mcp/skillTools.ts` (`skillWriteData`'s bundled-asset path), `packages/daemon/test/skills-bundled-name-collision-repro.mjs`.
