@@ -437,6 +437,63 @@ try {
 
   const reqNoAuth = GATEWAY_LOG_SERIALIZERS.req({ method: "GET", url: "/api/version", headers: { host: "example.com" } });
   check("(9) GATEWAY_LOG_SERIALIZERS.req is a no-op when no sensitive header is present", reqNoAuth.headers.authorization === undefined && reqNoAuth.headers["sec-websocket-protocol"] === undefined);
+
+  // card e4459829 (M8): the DEPRECATED loopback `?token=` ws fallback (gateway/server.ts's loopback
+  // write-guard) still rides the request url verbatim — redact it in the url too, not just the headers
+  // above, regardless of whether this particular request actually used the fallback.
+  const reqWithQueryToken = GATEWAY_LOG_SERIALIZERS.req({
+    method: "GET", url: "/ws/term/sess1?token=super-secret-value", headers: { host: "example.com" },
+  });
+  check("(9) GATEWAY_LOG_SERIALIZERS.req never leaks the real ?token= value in the logged url",
+    !String(reqWithQueryToken.url).includes("super-secret-value"));
+  check("(9) GATEWAY_LOG_SERIALIZERS.req keeps the path + redacts token= in place",
+    reqWithQueryToken.url === "/ws/term/sess1?token=[redacted]");
+
+  const reqWithQueryTokenAndMore = GATEWAY_LOG_SERIALIZERS.req({
+    method: "GET", url: "/ws/companion/sess1?foo=bar&token=another-secret&baz=qux", headers: {},
+  });
+  check("(9) GATEWAY_LOG_SERIALIZERS.req redacts token= among sibling query params, leaving them untouched",
+    reqWithQueryTokenAndMore.url === "/ws/companion/sess1?foo=bar&token=[redacted]&baz=qux");
+
+  const reqNoQueryToken = GATEWAY_LOG_SERIALIZERS.req({ method: "GET", url: "/api/version?foo=bar", headers: {} });
+  check("(9) GATEWAY_LOG_SERIALIZERS.req leaves a url with no token param untouched",
+    reqNoQueryToken.url === "/api/version?foo=bar");
+
+  // Card e4459829 round 2 item 4: `?%74oken=` percent-encodes the `t` (0x74) in "token" — it still decodes
+  // to `token` and the server's own query parser (which decodes before matching) still accepts it as the
+  // credential, so a literal-text-only match leaves it fully exposed in the log. This is the concrete
+  // proof the OLD regex (`/([?&]token=)[^&]*/gi`) missed it: swapping back to that exact pattern against
+  // the SAME fixture reproduces the leak, which is what makes this a real regression test rather than a
+  // vacuous one.
+  const reqPercentEncodedToken = GATEWAY_LOG_SERIALIZERS.req({
+    method: "GET", url: "/ws/term/sess1?%74oken=super-secret-value", headers: {},
+  });
+  check("(9) GATEWAY_LOG_SERIALIZERS.req redacts a PERCENT-ENCODED token= key (?%74oken=), which the old literal-text regex missed",
+    !String(reqPercentEncodedToken.url).includes("super-secret-value"));
+  check("(9) old literal regex would NOT have caught ?%74oken= (negative control proving this is a real regression test)",
+    "/ws/term/sess1?%74oken=super-secret-value".replace(/([?&]token=)[^&]*/gi, "$1[redacted]").includes("super-secret-value"));
+
+  // Also cover `gwtoken=` (the gateway token's own page-load capture param, gatewayCredential.ts's
+  // `captureGatewayTokenFromUrl`) — a GET page-load url carrying it can reach this serializer before the
+  // client-side JS ever strips it.
+  const reqWithGwtoken = GATEWAY_LOG_SERIALIZERS.req({
+    method: "GET", url: "/board?gwtoken=GW-SECRET-VALUE&x=1", headers: {},
+  });
+  check("(9) GATEWAY_LOG_SERIALIZERS.req redacts gwtoken= too, leaving sibling params untouched",
+    reqWithGwtoken.url === "/board?gwtoken=[redacted]&x=1");
+
+  const reqWithPercentEncodedGwtoken = GATEWAY_LOG_SERIALIZERS.req({
+    method: "GET", url: "/board?gwto%6ben=GW-SECRET-VALUE", headers: {},
+  });
+  check("(9) GATEWAY_LOG_SERIALIZERS.req redacts a percent-encoded gwtoken= key too",
+    !String(reqWithPercentEncodedGwtoken.url).includes("GW-SECRET-VALUE"));
+
+  // A lone trailing "%" is an invalid percent-escape sequence — URLSearchParams tolerates it (leaves it
+  // un-decoded) rather than throwing, so this exercises the lenient-decode path, not the catch fallback;
+  // it must still redact (never throw) rather than leak the value untouched.
+  const reqLoneTrailingPercent = GATEWAY_LOG_SERIALIZERS.req({ method: "GET", url: "/x?token=%", headers: {} });
+  check("(9) GATEWAY_LOG_SERIALIZERS.req redacts even with a malformed trailing percent-escape in the value, without throwing",
+    reqLoneTrailingPercent.url === "/x?token=[redacted]");
 }
 
 // ===================== (10) card 23496950 — wildcard bind: allowedHosts, Host allowlist, peer-scoped Origin ===

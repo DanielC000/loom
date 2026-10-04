@@ -327,17 +327,53 @@ export function sanitizeCompanionName(raw: string): string {
  * 80e2093f, item 3) — a cheap STANDING guard, not currently wired to anything live. Every `Fastify(...)`
  * call below constructs with `logger: false`, so nothing is logged today and this seam is satisfied only
  * vacuously. If the logger is EVER turned on, pass this as `logger: { serializers: GATEWAY_LOG_SERIALIZERS
- * }` so the `Authorization` header and the echoed `Sec-WebSocket-Protocol` subprotocol (which carries the
- * gateway token as its `loom.bearer.<token>` entry on a WS upgrade — see trust-tier.ts's `WS_BEARER_PREFIX`)
- * can never land in a log line in cleartext. Pure + exported so a hermetic test can assert the redaction
- * directly without booting a real pino logger.
+ * }` so the `Authorization` header, the echoed `Sec-WebSocket-Protocol` subprotocol (which carries the
+ * gateway token as its `loom.bearer.<token>` entry on a WS upgrade — see trust-tier.ts's `WS_BEARER_PREFIX`),
+ * and a `?token=`/`?gwtoken=` query value (the DEPRECATED loopback fallback and the gateway token's own
+ * page-load capture param — see the loopback write-guard's own doc comment below and gatewayCredential.ts's
+ * `captureGatewayTokenFromUrl`) can never land in a log line in cleartext. The url is redacted
+ * unconditionally, whether or not a request actually used the fallback — a logger can't tell "sent but
+ * unused" apart from "absent" without parsing it anyway, so there is no cheaper correct check. Pure +
+ * exported so a hermetic test can assert the redaction directly without booting a real pino logger.
  */
+const REDACTED_QUERY_KEYS = new Set(["token", "gwtoken"]);
+
+function redactTokenFromLoggedUrl(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined;
+  const qIndex = url.indexOf("?");
+  if (qIndex === -1) return url;
+  try {
+    // Card e4459829 round 2 item 4: `?%74oken=secret` decodes to `?token=secret` — which the server's own
+    // query parser accepts as the credential just as readily as the literal form — so matching on the
+    // literal text alone leaves a percent-encoded key fully exposed. Decode each segment's KEY (via
+    // URLSearchParams, which also folds `+` to space like the server's own parser) before comparing; the
+    // matched segment's VALUE is replaced outright (it's being redacted anyway, so its own encoding
+    // doesn't matter), and every non-matching segment is passed through BYTE-IDENTICAL — never
+    // reassembled through a re-encoding round-trip that could alter it.
+    const hashIndex = url.indexOf("#", qIndex);
+    const query = hashIndex === -1 ? url.slice(qIndex + 1) : url.slice(qIndex + 1, hashIndex);
+    const tail = hashIndex === -1 ? "" : url.slice(hashIndex);
+    const segments = query.split("&").map((seg) => {
+      if (seg === "") return seg;
+      const decodedKey = [...new URLSearchParams(seg).keys()][0] ?? "";
+      if (!REDACTED_QUERY_KEYS.has(decodedKey.toLowerCase())) return seg;
+      const eq = seg.indexOf("=");
+      const rawKey = eq === -1 ? seg : seg.slice(0, eq);
+      return `${rawKey}=[redacted]`;
+    });
+    return `${url.slice(0, qIndex)}?${segments.join("&")}${tail}`;
+  } catch {
+    // Fastify's `req.url` is the raw request-line target, not guaranteed parseable — a malformed/partial
+    // url must still redact SOMETHING rather than throw. Literal-text fallback, case-insensitive.
+    return url.replace(/([?&](?:token|gwtoken)=)[^&]*/gi, "$1[redacted]");
+  }
+}
 export const GATEWAY_LOG_SERIALIZERS = {
   req(request: { method?: string; url?: string; headers?: Record<string, unknown> }) {
     const headers = { ...(request.headers ?? {}) };
     if (headers.authorization !== undefined) headers.authorization = "[redacted]";
     if (headers["sec-websocket-protocol"] !== undefined) headers["sec-websocket-protocol"] = "[redacted]";
-    return { method: request.method, url: request.url, headers };
+    return { method: request.method, url: redactTokenFromLoggedUrl(request.url), headers };
   },
 };
 
@@ -706,8 +742,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   //     the same read surface, so gating adds no material barrier at real cost to the UI/CLI/health probes.
   //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` and the two `/internal/*`
   //     routes (constant-time compared); for the WS upgrades, the same secret via the remote tier's own
-  //     `Sec-WebSocket-Protocol: loom.v1, loom.bearer.<secret>` mechanism (or a `?token=` fallback) —
-  //     reused verbatim, not reinvented. Optional dep — ABSENT ⇒ no-op (partial-stub tests stay
+  //     `Sec-WebSocket-Protocol: loom.v1, loom.bearer.<secret>` mechanism — reused verbatim, not
+  //     reinvented; the web client sends only this now (gatewayCredential.ts's `socketAuth`). A `?token=`
+  //     query-param fallback is still accepted below but DEPRECATED (it rode the secret in the URL — would
+  //     be logged verbatim by GATEWAY_LOG_SERIALIZERS if the request logger were ever enabled; the real
+  //     exposure is devtools/browser history and any proxy/tunnel access log the request passed through)
+  //     — kept for one release so a browser tab still running
+  //     removal is tracked by a follow-up card. Optional dep — ABSENT ⇒ no-op (partial-stub tests stay
   //     byte-identical); `index.ts` (the only real boot path) always supplies it.
   //   - TEST NOTE: the socket peer address (via `requestClass`) is what this hook (and the trust-tier wall above) key
   //     loopback-vs-remote off — Fastify's `injectWS` helper does NOT default it the way `.inject()`
@@ -757,6 +798,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // outright, never fall back to `?token=`, mirroring the remote tier's own reasoning exactly.
           return reply.code(401).send({ error: "unauthorized — see `loom open` for how to obtain the local access credential" });
         }
+        // DEPRECATED fallback (see the hook's own doc comment above): the web client no longer sends
+        // `?token=` for a well-formed offer either, but a stale pre-upgrade browser bundle still might.
         const q = req.query as { token?: unknown };
         presented = resolved.outcome === "token" ? resolved.token : (typeof q?.token === "string" ? q.token : undefined);
       } else {
@@ -4058,12 +4101,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Profiles (platform-level rig: role + allow/skills/model/icon + a UI-only description; the
-  // injected prompt always comes from the agent). HUMAN-managed
-  // ONLY (REST + later web UI) — profiles confer role + permission allowlists (= privilege), so they
-  // are deliberately kept OFF the agent-writable MCP surface. Writes are schema-validated (strict,
+  // injected prompt always comes from the agent). THIS REST surface (+ the web UI) accepts the FULL,
+  // unrestricted payload. There ARE agent-facing profile-writing MCP tools too (the Setup Assistant's
+  // and Platform Lead's own `profile_create`/`profile_update`), but they reject the CAPABILITY-GRANTING
+  // fields in `AGENT_FORBIDDEN_PROFILE_KEYS` (`profiles/validate.ts`) — role is restricted SEPARATELY,
+  // per surface (e.g. the Setup Assistant's own `profile_create` rejects `platform`/`auditor` roles) —
+  // only THIS human-only path can set those forbidden fields. Writes are schema-validated (strict,
   // typo-guarded) by validateProfile, mirroring the project-config validator. ---
   // Each profile carries computed customization state (bundled + customized/updateAvailable for
   // bundled-by-name rows; never persisted) — the profiles analog of listSkills's SkillSummary state.
+  //
+  // @decision 8c27ae8e — never let `allowDelta` (permission-allowlist delta), `browserTesting`,
+  // `documentConversion`, `harness`, `connections`, or `capabilities` be settable via an agent-facing
+  // profile-writing MCP tool; they are human-only everywhere.
+  //
+  // @decision be8be211 — same prohibition, for `vaultWrite`.
   app.get("/api/profiles", async () =>
     deps.db.listProfiles().map((p) => ({ ...p, ...profileCustomizationState(deps.db, p.id) })));
   app.get("/api/profiles/:id", async (req, reply) => {

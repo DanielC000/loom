@@ -235,12 +235,6 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     // behind a restarting daemon would otherwise paint a wall of identical notices.
     let noticeWritten = false;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    // Card 9ccedbee (v2, Code Review Critical): /ws/term now requires the loopback guard secret — it
-    // carries `{type:"stdin"}` writes into the pty, the exact "human authority" surface the review found
-    // still open. A WebSocket handshake can't carry a custom header, so this uses the SAME `?token=`
-    // fallback the remote-access tier already established (gateway/trust-tier.ts) rather than a new
-    // mechanism. No token captured yet (guard inert, or the user hasn't visited a tokenized URL) → the
-    // bare URL, unchanged from before — the server-side guard is itself optional-dep-gated the same way.
     /**
      * Shell mode: fit the grid to the pane, then tell the daemon to resize the pty to match so the
      * shell wraps to the visible width. No-op until the ws is open and the element has a size.
@@ -380,13 +374,15 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       if (disposed) return;
       // Card 9ccedbee (v2, Code Review Critical): /ws/term now requires the loopback guard secret — it
       // carries `{type:"stdin"}` writes into the pty, the exact "human authority" surface the review found
-      // still open. A WebSocket handshake can't carry a custom header, so this uses the SAME `?token=`
-      // fallback the remote-access tier already established (gateway/trust-tier.ts) rather than a new
-      // mechanism. No token captured yet (guard inert, or the user hasn't visited a tokenized URL) → the
-      // bare URL, unchanged from before — the server-side guard is itself optional-dep-gated the same way.
+      // still open. A WebSocket handshake can't carry a custom header, so this presents it via the SAME
+      // double-subprotocol mechanism the remote-access tier already established (gateway/trust-tier.ts),
+      // never a `?token=` query value — see gatewayCredential.ts's `socketAuth` doc for why a URL-carried
+      // secret was the thing being closed here. No token captured yet (guard inert, or the user hasn't
+      // visited a tokenized URL) → the bare URL with no protocols, unchanged from before — the server-side
+      // guard is itself optional-dep-gated the same way.
       //
       // Card 4cbbc343: behind a trusted reverse proxy the credential is the GATEWAY token, carried in the
-      // double-subprotocol (never the URL); on loopback this is byte-identical (`?token=` + no protocols).
+      // same double-subprotocol; on loopback this is now byte-identical in shape, just a different token.
       const auth = socketAuth("term", getLoopbackToken());
       const wsUrl = `${proto}//${location.host}/ws/term/${sessionId}${auth.query}`;
       const next = auth.protocols ? new WebSocket(wsUrl, auth.protocols) : new WebSocket(wsUrl);

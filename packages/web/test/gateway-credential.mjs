@@ -124,11 +124,12 @@ check("withGatewayAuth: UNCHANGED on a loopback origin (byte-identical) and when
   assert.equal(G.withGatewayAuth(init, true), init, "no token held ⇒ nothing to add");
 });
 
-check("socketAuth: loopback is byte-identical to before (term/companion carry ?token= of the loopback secret; fleet nothing)", () => {
-  assert.deepEqual(G.socketAuth("term", "sec", false, "gw"), { query: "?token=sec" });
-  assert.deepEqual(G.socketAuth("companion", "s e/c", false, "gw"), { query: "?token=s%20e%2Fc" });
+check("socketAuth: loopback (card e4459829) now carries term/companion's loopback secret in the SAME double-subprotocol remote uses, never in the url; fleet still gets nothing", () => {
+  assert.deepEqual(G.socketAuth("term", "sec", false, "gw"), { query: "", protocols: ["loom.v1", "loom.bearer.sec"] });
+  assert.deepEqual(G.socketAuth("companion", "token.sub-proto_2~ok", false, "gw"), { query: "", protocols: ["loom.v1", "loom.bearer.token.sub-proto_2~ok"] });
+  assert.equal(JSON.stringify(G.socketAuth("term", "sec", false, "gw")).includes("?token="), false, "the secret must never ride the url");
   assert.deepEqual(G.socketAuth("term", null, false, "gw"), { query: "" });
-  assert.deepEqual(G.socketAuth("fleet", "sec", false, "gw"), { query: "" }, "the loopback fleet feed is ungated: no token in its URL");
+  assert.deepEqual(G.socketAuth("fleet", "sec", false, "gw"), { query: "" }, "the loopback fleet feed is ungated: no token in its URL or protocols");
 });
 
 check("socketAuth: a REMOTE origin sends the gateway token in the double-subprotocol, NEVER in the URL, and never the loopback secret", () => {
@@ -138,6 +139,27 @@ check("socketAuth: a REMOTE origin sends the gateway token in the double-subprot
     assert.equal(JSON.stringify(a).includes("loopback-secret"), false);
   }
   assert.deepEqual(G.socketAuth("term", "loopback-secret", true, null), { query: "" }, "no gateway token ⇒ nothing presented (and still never the loopback secret)");
+});
+
+// Card e4459829 round 2, item 1 (Code Review regression): a WebSocket subprotocol element must be composed
+// ENTIRELY of RFC 7230 `token` chars, or a REAL browser's `new WebSocket(url, protocols)` throws
+// SYNCHRONOUSLY — before any network attempt — and the pane dies with no retry (the old `?token=` query
+// path instead got a 401 the existing banner/paste recovery already handles). The OLD "s e/c" fixture
+// above (replaced in this same change) contained a space and a slash — both invalid — and it still passed,
+// because nothing checked the value's shape; that is exactly the bug this test proves fixed. Values below
+// are the concrete character classes a stored secret can actually come back mangled with: a raw space (a
+// copy/paste that kept word-wrap), a comma (a CSV-pasted list), a double quote (an escaped-JSON paste), and
+// a non-ASCII letter (an autocorrect mangle) — none are valid RFC 7230 tokens.
+check("socketAuth: a non-token-safe stored secret is treated as ABSENT — never built into a `protocols` array a real WebSocket() would reject — for both the loopback and the gateway token", () => {
+  for (const bad of ["s e/c", "a,b", 'with"quote', "héllo"]) {
+    assert.deepEqual(G.socketAuth("term", bad, false, "gw"), { query: "" }, `loopback bad=${JSON.stringify(bad)}`);
+    assert.deepEqual(G.socketAuth("companion", bad, false, "gw"), { query: "" }, `loopback(companion) bad=${JSON.stringify(bad)}`);
+    assert.deepEqual(G.socketAuth("term", "loopback-secret", true, bad), { query: "" }, `remote bad=${JSON.stringify(bad)}`);
+  }
+  // A token-safe secret (every RFC 7230 tchar class represented) still works, on both paths.
+  const safe = "abc.DEF-123_~!#$%&'*+^`|";
+  assert.deepEqual(G.socketAuth("term", safe, false, "gw"), { query: "", protocols: ["loom.v1", `loom.bearer.${safe}`] });
+  assert.deepEqual(G.socketAuth("term", "loopback-secret", true, safe), { query: "", protocols: ["loom.v1", `loom.bearer.${safe}`] });
 });
 
 check("the gateway lock: its own state + subscription, independent of the loopback lock", () => {

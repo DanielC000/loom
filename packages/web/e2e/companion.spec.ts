@@ -68,7 +68,9 @@ test("card 351e89af: the Chat WS still connects through the loopback guard, and 
   // secret /ws/term already required (card 9ccedbee); the daemon here boots via the real index.js path
   // (loopbackSecret always wired, exactly like production) and the fixture's addInitScript seeds
   // localStorage BEFORE navigation, so this exercises the actual client code path (CompanionChat.tsx's
-  // getLoopbackToken() → `?token=` query param), not a synthetic WS client. A WS rejection here is
+  // getLoopbackToken() → socketAuth()'s `loom.v1`/`loom.bearer.<secret>` double-subprotocol, not a
+  // `?token=` query param since the gateway/server.ts ws-subprotocol fix), not a synthetic WS client. A
+  // WS rejection here is
   // SILENT to the naive eye (no thrown error banner) — the observable proof is the "connected" status
   // pill (ChatHeader renders it only once `ws.onopen` fires) AND that Send actually appends a bubble
   // (CompanionChat.tsx's send() no-ops unless `ws.readyState === ws.OPEN`, so a rejected/never-opened

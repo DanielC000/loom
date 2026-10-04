@@ -167,11 +167,11 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       // Card 351e89af: /ws/companion now requires the SAME loopback guard secret as /ws/term
       // (Terminal.tsx's own fix, card 9ccedbee) — a WebSocket handshake can't carry a custom header, so
-      // this reuses the identical `?token=` query-param fallback via the SAME getLoopbackToken() helper.
-      // No token captured yet (guard inert, or a pre-tokenized-URL page) → the param is simply omitted,
-      // matching Terminal.tsx's fallback exactly.
+      // this presents it via the SAME double-subprotocol `socketAuth` builds for Terminal.tsx, via the
+      // SAME getLoopbackToken() helper. No token captured yet (guard inert, or a pre-tokenized-URL page)
+      // → no protocols at all, matching Terminal.tsx's fallback exactly.
       const loopbackToken = getLoopbackToken();
-      // Card 4cbbc343: the gateway token (double-subprotocol) on a proxied origin; byte-identical on loopback.
+      // Card 4cbbc343: the gateway token (double-subprotocol) on a proxied origin; same shape on loopback.
       const auth = socketAuth("companion", loopbackToken);
       const wsUrl = `${proto}//${location.host}/ws/companion/${sessionId}${auth.query}`;
       const ws = auth.protocols ? new WebSocket(wsUrl, auth.protocols) : new WebSocket(wsUrl);

@@ -1837,12 +1837,13 @@ const PROFILE_SPAWNABLE_ROLES: ReadonlySet<SessionRole> = new Set<SessionRole>([
  * resolveAgentSpawn-driven session (manager/worker/platform/auditor/workspace-auditor/setup/plain —
  * all roles EXCEPT the run-only Agent Run, which never goes through resolveAgentSpawn) mounts the
  * `loom-tasks` MCP, and acceptEdits does NOT auto-approve MCP tools (the §9 lesson), so without
- * `mcp__loom-tasks` allowlisted the session HANGS on its first tasks_* call. The default config allow
- * already carries it (config.ts), but a per-project `permission.allow` override REPLACES that array
- * wholesale (resolveConfig: `override.permission?.allow ?? d.permission.allow`), so a custom allow that
- * forgets the baseline silently strips a worker's ability to report/coordinate. We UNION it back so a
- * custom allow can ADD to but never REMOVE the baseline. Server-level `mcp__loom-tasks` covers every
- * tasks_* tool (matches the config default's single entry).
+ * `mcp__loom-tasks` allowlisted the session HANGS on its first tasks_* call. `resolveConfig` (config.ts)
+ * already UNIONs a per-project `permission.allow` override onto the default allow (`[...new
+ * Set([...d.permission.allow, ...(override.permission?.allow ?? [])])]`), so the baseline survives
+ * that merge too. This is a second, defense-in-depth union for any `PermissionPolicy` this file builds
+ * or layers on top (e.g. a profile's `allowDelta`, below) without going back through `resolveConfig` —
+ * so a custom allow can ADD to but never REMOVE the baseline on either path. Server-level
+ * `mcp__loom-tasks` covers every tasks_* tool (matches the config default's single entry).
  */
 const BASELINE_SESSION_ALLOW: readonly string[] = ["mcp__loom-tasks"];
 

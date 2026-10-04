@@ -102,14 +102,38 @@ export function isGatewayTokenRequired(status: number, body: unknown): boolean {
   return (status === 401 || status === 429) && typeof body === "object" && body !== null && (body as { code?: unknown }).code === GATEWAY_TOKEN_REQUIRED_CODE;
 }
 
-/** What a WebSocket needs to present the right credential for this origin. Loopback: byte-identical to before
- *  (`?token=` carrying the LOOPBACK secret for the guarded term/companion sockets, nothing for the ungated fleet
- *  feed). Remote origin: the gateway token in the double-subprotocol the daemon's tier wall reads
- *  (`[loom.v1, loom.bearer.<token>]`) — never in the URL. */
+/** RFC 7230 §3.2.6 `token` chars — a WebSocket subprotocol list element must be composed ENTIRELY of
+ *  these, or the browser's own `new WebSocket(url, protocols)` throws SYNCHRONOUSLY, before any network
+ *  attempt is even made. A stored secret can fail this (hand-edited, mangled by a copy/paste, captured
+ *  from a malformed link) — `socketAuth` below treats a non-token-safe value as ABSENT rather than let
+ *  that throw kill the socket outright: with no protocols offered, the daemon 401s as it always did for a
+ *  missing credential, and the existing banner/paste recovery runs instead of the pane simply dying with
+ *  no retry (card e4459829 round 2). */
+const SUBPROTOCOL_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/** `token` if it's safe to embed whole in a `Sec-WebSocket-Protocol` list entry, else `null`. */
+function asSubprotocolSafe(token: string | null): string | null {
+  return token !== null && SUBPROTOCOL_TOKEN_RE.test(token) ? token : null;
+}
+
+/** What a WebSocket needs to present the right credential for this origin. Both loopback and remote now
+ *  present their secret the SAME way — the double-subprotocol the daemon's tier wall / loopback
+ *  write-guard read (`[loom.v1, loom.bearer.<token>]`) — never in the URL, closing the loopback secret's
+ *  old `?token=` exposure (it used to ride the query string — would be logged verbatim by
+ *  GATEWAY_LOG_SERIALIZERS if the gateway's request logger were ever enabled; the real exposure today is
+ *  devtools/browser history and any proxy/tunnel access log the request passed through). The daemon still
+ *  ALSO accepts a loopback `?token=` fallback (deprecated, kept for stale-bundle back-compat — see
+ *  gateway/server.ts), but this client never sends one anymore. Remote presents the gateway token for
+ *  EVERY kind including `fleet` (the remote tier gates reads too, unlike loopback); loopback presents
+ *  nothing for `fleet` (that feed is ungated there — matches before). */
 export function socketAuth(kind: "term" | "companion" | "fleet", loopbackToken: string | null, remote: boolean = isRemoteOrigin(), gatewayToken: string | null = getGatewayToken()): { query: string; protocols?: string[] } {
-  if (remote) return gatewayToken ? { query: "", protocols: ["loom.v1", `loom.bearer.${gatewayToken}`] } : { query: "" };
+  if (remote) {
+    const token = asSubprotocolSafe(gatewayToken);
+    return token ? { query: "", protocols: ["loom.v1", `loom.bearer.${token}`] } : { query: "" };
+  }
   if (kind === "fleet") return { query: "" };
-  return { query: loopbackToken ? `?token=${encodeURIComponent(loopbackToken)}` : "" };
+  const token = asSubprotocolSafe(loopbackToken);
+  return token ? { query: "", protocols: ["loom.v1", `loom.bearer.${token}`] } : { query: "" };
 }
 
 // ---- the gateway lock: its OWN state + subscription (never the loopback lock) -----------------------------------------
