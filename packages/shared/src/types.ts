@@ -1131,6 +1131,26 @@ export type OrchestrationEventKind =
   // is inside an active merge-danger window) never appends this event at all — see
   // `redirectManagerForEmergencyRecycle`'s own doc for the retry-next-tick policy that follows from that.
   | "context_emergency_interrupt"
+  // Card c00231e2: a MANAGER/platform-lead session's own submit GIVE-UP RECOVERY (pty/host.ts's
+  // `fireEnterAndVerify` — an Enter write that never confirmed after `SUBMIT_MAX_ATTEMPTS`) fired
+  // `count` times within a rolling `windowMs` window — a chronic, contention-driven pattern that used to
+  // show up ONLY as console log lines, so the owner learned of a multi-hour episode only once the fleet
+  // went visibly quiet. WORKERS ARE EXCLUDED (their owning manager already sees `composerDirtyLen`); this
+  // is the manager/platform-lead's own give-up, which has no manager above it to notice — the same
+  // "nobody left to tell but the human" shape as `context_escalated`/`idle_escalated`, so like those two
+  // this is filed with NO nudge enqueued — attention.ts/alert-webhook.ts derive the human-facing alert
+  // from the event alone. Filed under the session itself (managerSessionId = that session's own id, since
+  // it has no parent); `detail` carries { count, windowMs } — counts and a duration only, never message
+  // text, so the `redactedExcerpt`/log-message-content-gate census is untouched. Emitted AT MOST ONCE per
+  // EPISODE: PtyHost tracks a rolling in-memory timestamp list per session (`Live.giveUpRecoveryFiredAt`)
+  // and an `Live.giveUpRecoveryAlarmed` latch; a quiet gap >= `windowMs` with zero fires prunes the list
+  // back to empty, which is what resets the latch and lets a fresh episode re-arm (mirrors
+  // `worker_stuck`'s own "re-arms when the worker makes progress" episode shape, just keyed on a quiet gap
+  // instead of forward progress). PtyHost has no DB access (same layering boundary as
+  // `onKickoffGiveUpExhausted`/`onCodexSubmitUnconfirmed`), so the counting/windowing lives in
+  // `PtyHostEvents.onGiveUpRecoveryAlarm` and this event is appended by the implementer
+  // (`SessionService.handleGiveUpRecoveryAlarm`, wired in index.ts).
+  | "give_up_recovery_escalated"
   // Busy-worker long-turn advisory (BusyWorkerWatcher): a LIVE worker has been `busy` in a single
   // uninterrupted turn past the `stuckWorkerMinutes` window. Filed under the OWNING MANAGER
   // (managerSessionId) with workerSessionId/taskId set; `detail` carries minutesBusy + reason. A SOFT,
@@ -1822,7 +1842,8 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   build_gate_single_file_retry: true, build_gate_single_file_retry_attempt: true, schedule_fire_failed: true, schedule_fire_deferred: true,
   schedule_fire_missed: true,
   worker_report_rejected: true, wake_scheduled: true, wake_fired: true, wake_dropped: true,
-  idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, context_emergency_interrupt: true, worker_stuck: true,
+  idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, context_emergency_interrupt: true,
+  give_up_recovery_escalated: true, worker_stuck: true,
   worktree_vanished: true,
   manager_manage: true, session_message: true, session_steer_dropped: true, platform_escalate: true, escalation_triaged: true,
   cross_project_message: true, audit_finding: true, workspace_audit_suggestion: true,

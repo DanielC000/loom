@@ -218,6 +218,15 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     if (e.kind === "context_escalated") latestContext.set(e.managerSessionId, e);
   }
 
+  // Give-up-recovery alarm (card c00231e2, PtyHost's own per-session episode counter): a manager/
+  // platform-lead's submit GIVE-UP RECOVERY fired repeatedly inside a rolling window. Same shape as
+  // context_escalated immediately above — no "cleared" event exists, so the latest one per LIVE manager
+  // simply surfaces until that session exits or a later episode's event replaces it.
+  const latestGiveUpRecovery = new Map<string, OrchestrationEvent>();
+  for (const e of sortedEvents) {
+    if (e.kind === "give_up_recovery_escalated") latestGiveUpRecovery.set(e.managerSessionId, e);
+  }
+
   // Quiet-board cause (card 275ac184, IdleWatcher's `nothingElseActionable` skip): a manager/Lead
   // suppressed because every non-terminal card is non-actionable (held/deferred/excluded-lane/
   // platform-parked/pending-request) reads identically whether it's genuinely converged or starved on
@@ -316,6 +325,14 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     items.push({
       key: `ce-${e.id}`, tone: "red", kind: "CONTEXT OVERFLOW", sessionId: e.managerSessionId,
       text: `manager ${e.managerSessionId.slice(0, 8)} — ignored ${detail.unanswered ?? "?"} recycle nudges at ~${detail.pct ?? "?"}% context; will overflow without a handoff`,
+    });
+  }
+  for (const e of latestGiveUpRecovery.values()) {
+    const detail = (e.detail ?? {}) as { count?: number; windowMs?: number };
+    const windowMin = detail.windowMs ? Math.round(detail.windowMs / 60_000) : null;
+    items.push({
+      key: `gr-${e.id}`, tone: "red", kind: "GIVE-UP RECOVERY", sessionId: e.managerSessionId,
+      text: `manager ${e.managerSessionId.slice(0, 8)} — submit give-up recovery fired ${detail.count ?? "?"}x${windowMin ? ` in ~${windowMin}m` : ""}; its composer submissions may be unreliable`,
     });
   }
   for (const e of latestQuiet.values()) {

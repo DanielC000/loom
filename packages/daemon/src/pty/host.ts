@@ -621,6 +621,19 @@ export const SUBMIT_MAX_ATTEMPTS = Number(process.env.LOOM_SUBMIT_MAX_ATTEMPTS) 
  */
 export const GIVE_UP_REQUEUE_LIMIT = Number(process.env.LOOM_GIVE_UP_REQUEUE_LIMIT) || 1;
 
+/**
+ * Card c00231e2: how many GIVE-UP RECOVERY fires (see `fireEnterAndVerify`'s give-up branch) a MANAGER/
+ * platform-lead session needs inside `GIVE_UP_RECOVERY_ALARM_WINDOW_MS` before the owner is alarmed —
+ * see `Live.giveUpRecoveryFiredAt`'s own doc for the rolling-window/episode mechanics. Workers never reach
+ * this counter at all (gated at the one call site on `live.role === "manager" || live.role === "platform"`
+ * — their owning manager already sees `composerDirtyLen`).
+ */
+export const GIVE_UP_RECOVERY_ALARM_THRESHOLD = Number(process.env.LOOM_GIVE_UP_RECOVERY_ALARM_THRESHOLD) || 3;
+/** Card c00231e2: the rolling window `GIVE_UP_RECOVERY_ALARM_THRESHOLD` is counted over — see
+ *  `Live.giveUpRecoveryFiredAt`'s own doc. A quiet gap of at least this long with zero fires is also what
+ *  resets the episode latch, so a SECOND, later burst can alarm again. */
+export const GIVE_UP_RECOVERY_ALARM_WINDOW_MS = Number(process.env.LOOM_GIVE_UP_RECOVERY_ALARM_WINDOW_MS) || 10 * 60 * 1000;
+
 /** @decision b64b3726 — sized from a MEASURED bimodal latency distribution (n=10), not guessed; do not
  *  just widen/halve on a future re-measurement — re-derive the bound from the fresh distribution, the
  *  same way this one was sized. */
@@ -2902,6 +2915,21 @@ interface Live {
   // PROVEN engine confirmation may ever consult it, never `hasAmbiguousMatch`'s guess. Bounded by count,
   // never time — never archive the count-eviction path (a memory-safety backstop, not a supersede event).
   retiredGiveUpSignatures: Map<string, Array<{ len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string } }>>;
+  // Card c00231e2: rolling in-memory record of every GIVE-UP RECOVERY fire for THIS session — ONLY ever
+  // pushed to for a manager/platform-lead session (gated at the one call site, `maybeFireGiveUpRecoveryAlarm`);
+  // a worker's entry stays permanently empty. Pruned to entries within `GIVE_UP_RECOVERY_ALARM_WINDOW_MS`
+  // of "now" on every fire BEFORE the new timestamp is pushed — if that pruning leaves the array empty
+  // (a quiet gap of at least the window with zero fires), `giveUpRecoveryAlarmed` below is reset first,
+  // which is what lets a later burst alarm again as a fresh episode. Once pruned+pushed, a count at or
+  // past `GIVE_UP_RECOVERY_ALARM_THRESHOLD` fires `PtyHostEvents.onGiveUpRecoveryAlarm` IF
+  // `giveUpRecoveryAlarmed` is still false for this episode.
+  giveUpRecoveryFiredAt: number[];
+  // Card c00231e2: true once this EPISODE (the current unbroken run of fires inside the rolling window —
+  // see `giveUpRecoveryFiredAt`'s own doc) has already fired `onGiveUpRecoveryAlarm` once — the ONE-alarm-
+  // per-episode latch. Reset to false only by a quiet gap >= the window with zero fires, never by the
+  // alarm's own delivery outcome (an undeliverable alarm must not re-arm immediately and spam the same
+  // episode again).
+  giveUpRecoveryAlarmed: boolean;
   // Card 1bd1f045: monotonic per-session sequence number for the `[pty-write]` byte/call-sequence log —
   // bumped by `ptyWrite()` on every REAL `live.pty.write()` call (see that method's doc). THE load-bearing
   // field: it is what makes a duplicated or replayed emission visible AS SUCH (two records sharing a
@@ -3533,6 +3561,18 @@ export interface PtyHostEvents {
    *  @decision 00bd3b4a — msgId/rootMsgId let a LATE confirming hook find a "parked" record to retract.
    *  @decision 7772176d — kickoffText gives it the same cross-turn re-mint an ordinary message gets. */
   onKickoffGiveUpExhausted?(sessionId: string, msgId: string, rootMsgId: string, kickoffText: string): void;
+  /**
+   * Card c00231e2: a MANAGER/platform-lead session's own GIVE-UP RECOVERY (see `Live.giveUpRecoveryFiredAt`'s
+   * own doc for the counting/episode mechanics) crossed `GIVE_UP_RECOVERY_ALARM_THRESHOLD` fires inside
+   * `GIVE_UP_RECOVERY_ALARM_WINDOW_MS` — PtyHost has no DB access (same layering boundary as
+   * `onKickoffGiveUpExhausted`/`onCodexSubmitUnconfirmed` above), so the implementer (sessions/service.ts,
+   * via index.ts) decides how to record this durably for the human (`detail:{count,windowMs}` — counts
+   * and a duration only, never message text). `count`/`windowMs` are the resolved values AT THE MOMENT
+   * this fired (not necessarily today's constants, in case an env override changes mid-run). OPTIONAL,
+   * same rationale as its siblings: every existing `PtyHostEvents` test double is unaffected until it
+   * opts in. Never fired for a worker — gated at the one call site on `live.role`.
+   */
+  onGiveUpRecoveryAlarm?(sessionId: string, info: { count: number; windowMs: number }): void;
   /**
    * §19c: the turn ended in a usage-limit StopFailure. `until` is the ISO resume instant; the
    * pty is left ALIVE (a cap doesn't kill it). Wired to persist the park + record global awareness.
@@ -5010,6 +5050,8 @@ export class PtyHost {
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
       retiredGiveUpSignatures: new Map(),
+      giveUpRecoveryFiredAt: [],
+      giveUpRecoveryAlarmed: false,
       activeTurnRoute: null,
       lastPromptRoute: null,
       activeTurnOwnerText: null,
@@ -5304,6 +5346,8 @@ export class PtyHost {
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
       retiredGiveUpSignatures: new Map(),
+      giveUpRecoveryFiredAt: [],
+      giveUpRecoveryAlarmed: false,
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, lastPromptOwnerTextSeq: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
@@ -6525,6 +6569,8 @@ export class PtyHost {
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
       retiredGiveUpSignatures: new Map(),
+      giveUpRecoveryFiredAt: [],
+      giveUpRecoveryAlarmed: false,
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, lastPromptOwnerTextSeq: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
@@ -10055,6 +10101,35 @@ export class PtyHost {
   }
 
   /**
+   * Card c00231e2: the manager/platform-lead-only GIVE-UP RECOVERY owner-alarm — see
+   * `Live.giveUpRecoveryFiredAt`'s own doc for the rolling-window/episode mechanics and
+   * `PtyHostEvents.onGiveUpRecoveryAlarm`'s own doc for why PtyHost hands this off rather than persisting
+   * it itself. Workers are excluded here, at the source, so their entries never even start accumulating —
+   * their owning manager already sees `composerDirtyLen` for this.
+   */
+  private maybeFireGiveUpRecoveryAlarm(sessionId: string, live: Live): void {
+    if (live.role !== "manager" && live.role !== "platform") return;
+    const now = Date.now();
+    const cutoff = now - GIVE_UP_RECOVERY_ALARM_WINDOW_MS;
+    live.giveUpRecoveryFiredAt = live.giveUpRecoveryFiredAt.filter((t) => t > cutoff);
+    // A quiet gap of at least the window with zero fires just elapsed (the array pruned to empty before
+    // this fire is added) — that's what starts a fresh episode and lets a later burst alarm again.
+    if (live.giveUpRecoveryFiredAt.length === 0) live.giveUpRecoveryAlarmed = false;
+    live.giveUpRecoveryFiredAt.push(now);
+    if (live.giveUpRecoveryFiredAt.length < GIVE_UP_RECOVERY_ALARM_THRESHOLD || live.giveUpRecoveryAlarmed) return;
+    live.giveUpRecoveryAlarmed = true;
+    const info = { count: live.giveUpRecoveryFiredAt.length, windowMs: GIVE_UP_RECOVERY_ALARM_WINDOW_MS };
+    // eslint-disable-next-line no-console
+    console.log(`[submit] ${sessionId} GIVE-UP RECOVERY ALARM: ${info.count} fires within ${info.windowMs}ms — notifying onGiveUpRecoveryAlarm`);
+    try {
+      this.events.onGiveUpRecoveryAlarm?.(sessionId, info);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[submit] ${sessionId} onGiveUpRecoveryAlarm handler threw — swallowed so GIVE-UP RECOVERY itself is never broken, but logged so it can't fail silently:`, err);
+    }
+  }
+
+  /**
    * Resolves any outstanding `worker_flush` attribution marker against the generation that JUST
    * proved it started (`live.submitGeneration`, current at the moment this runs). No-ops instantly
    * when no flush marker is outstanding (`flushMarkerGen === null`) — the overwhelming majority of
@@ -10163,6 +10238,7 @@ export class PtyHost {
           if (!l2?.alive || l2.enterConfirmed || l2.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
           // eslint-disable-next-line no-console
           console.error(`[submit] ${sessionId} GIVE-UP RECOVERY after ${attempt} Enter attempts — no confirming hook observed${outputSeen ? " despite output after the final Enter write (the output discriminator's suppression was never confirmed by an actual hook)" : " since the final Enter write"}; turn never confirmed started; recovering busy so the session doesn't wedge`);
+          this.maybeFireGiveUpRecoveryAlarm(sessionId, l2); // card c00231e2 — see that method's own doc
           // @decision 3ce3fa39 — do NOT clear the composer HERE: no confirming hook arrived, so a
           // backspace burst is least safely interpreted at this point (2 specimens resurfaced,
           // doubled, on a later submit) — mark it additively; the next submit() clears it instead.

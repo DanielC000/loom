@@ -394,6 +394,11 @@ async function main(): Promise<void> {
     // — every REAL exhaustion starts its own chain fresh; only handleKickoffGiveUpExhausted's own re-mint
     // recursion ever calls itself with chainDepth > 0.
     onKickoffGiveUpExhausted: (sessionId, msgId, rootMsgId, kickoffText) => sessions.handleKickoffGiveUpExhausted(sessionId, msgId, rootMsgId, kickoffText),
+    // Card c00231e2: a manager/platform-lead's own GIVE-UP RECOVERY crossed the alarm threshold — `sessions`
+    // (forward reference, same pattern as onBusy/onGiveUpConfirmed above) is the DB-holding implementer
+    // that appends the durable event. See PtyHostEvents.onGiveUpRecoveryAlarm's own doc /
+    // SessionService.handleGiveUpRecoveryAlarm's doc.
+    onGiveUpRecoveryAlarm: (sessionId, info) => sessions.handleGiveUpRecoveryAlarm(sessionId, info),
     // Card b68d1f5b DoD-1/DoD-2: an UNEXPLAINED paste-length-loss candidate — `sessions` (forward
     // reference, same pattern as onBusy/onGiveUpConfirmed above) decides how to fail loud to the
     // recipient AND the sender. See PtyHostEvents.onPasteLengthLoss's own doc / SessionService.

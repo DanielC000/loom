@@ -9789,6 +9789,22 @@ export class SessionService {
   }
 
   /**
+   * Card c00231e2: consumes `PtyHostEvents.onGiveUpRecoveryAlarm` — a MANAGER/platform-lead session's own
+   * submit GIVE-UP RECOVERY fired `info.count` times inside `info.windowMs`. This session IS the top of
+   * its own hierarchy (no parent to notify, unlike `handleRepeatedToolCall`/`handleCodexSubmitUnconfirmed`
+   * above), so — mirroring `context_escalated`/`idle_escalated` (ContextWatcher/IdleWatcher) — this files
+   * ONLY the durable event; no nudge is enqueued. `attention.ts` (web) and `AlertWebhookEmitter` both
+   * derive the human-facing alert from the event alone. `detail` carries counts/a duration only, never
+   * message text.
+   */
+  handleGiveUpRecoveryAlarm(sessionId: string, info: { count: number; windowMs: number }): void {
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sessionId,
+      kind: "give_up_recovery_escalated", detail: { count: info.count, windowMs: info.windowMs },
+    });
+  }
+
+  /**
    * @decision 448f1b4a — deliberately ONE-SHOT: do not add a retry ladder here. A LATE boot-readiness
    * still resolves normally via the onData handler's own composite check.
    */
