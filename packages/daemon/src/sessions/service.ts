@@ -15,7 +15,7 @@ import {
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import { agentAssignableProfileError } from "../profiles/validate.js";
-import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry } from "../db.js";
+import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry, WedgedWorktreeEntry } from "../db.js";
 import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
@@ -25,7 +25,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -1406,10 +1406,15 @@ function gateOpIdEnvOverride(opId: string, batchSize: number, cap: number, base?
   return { ...base, LOOM_GATE_OP_ID: opId, LOOM_GATE_BATCH_SIZE: String(batchSize), LOOM_GATE_CONCURRENT_CAP: String(cap) };
 }
 
+/** @decision a5d9c458 — the sentinel `findLiveSessionClaimingWorktreePath` returns for an
+ *  in-flight-spawn claim (vs. a real session id) — never a value a real `Session.id` could collide with
+ *  (session ids are UUIDs). */
+const IN_FLIGHT_SPAWN_CLAIMANT = "in-flight-spawn-claim";
+
 /** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
  *  alongside `outcome: "nested-repo-blocked"` — see that outcome's doc on gcWorktreeDir. */
 type GcOutcomeResult = {
-  outcome: "removed" | "wedged" | "left-on-disk" | "needs-human-skip" | "nested-repo-blocked" | "dirty-retained" | "path-refused" | "quarantined";
+  outcome: "removed" | "wedged" | "left-on-disk" | "needs-human-skip" | "nested-repo-blocked" | "dirty-retained" | "path-refused" | "quarantined" | "reclaimed-by-live-session" | "wedge-entry-superseded";
   nestedRepoPaths?: string[];
   scanTruncated?: boolean;
   /** Only with `outcome: "dirty-retained"` (card 6796c9ea): the uncommitted paths, or `unverified:true` when the status read failed (fail closed). */
@@ -2577,6 +2582,14 @@ export class SessionService {
    * finally once the row is live (the liveHolder guard then owns exclusion) or on any failure.
    */
   private readonly inFlightSpawnTaskIds = new Set<string>();
+  // @decision a5d9c458 — the worktree-PATH analogue of inFlightSpawnTaskIds: lets the staleKnowledge
+  // live-claim guard see an in-flight spawn before its session row exists. See the decision record for
+  // why a session-row-only check isn't enough and who fills/releases this.
+  private readonly claimedWorktreePaths = new Set<string>();
+  // @decision a5d9c458 — a normalized path sits here for the WHOLE duration of a gcWorktreeDir removal
+  // against it; reclaimWedgedWorktreePathForSpawn MUST refuse a respawn against a path marked here,
+  // never race it — see the decision record for why a single point-in-time check isn't enough.
+  private readonly removingWorktreePaths = new Set<string>();
   /** Card dc13bcf1: pending-op keys whose in-flight op was minted by reviveWorkerTracked (vs a plain spawn). */
   private readonly reviveInFlightKeys = new Set<string>();
   /**
@@ -7942,6 +7955,10 @@ export class SessionService {
       if (remaining > 0) this.inFlightSpawnCountByManager.set(managerSessionId, remaining);
       else this.inFlightSpawnCountByManager.delete(managerSessionId);
     };
+    // @decision a5d9c458 — the release handle reclaimWedgedWorktreePathForSpawn hands back below, called
+    // in this function's own outer `finally` (not right after createWorktree) — the claim must stay live
+    // through the window up to the session row's own insertion, not just through createWorktree.
+    let releaseWorktreePathClaim: (() => void) | undefined;
     try {
       // @decision 503cd822 — a noCommit/read-only rig never runs a build GATE, but that no longer means
       // the monorepo BUILD phase is unconditionally skipped for it — see `runBuild` below.
@@ -7958,6 +7975,8 @@ export class SessionService {
       const runBuild = !noCommit || (reviewForkFrom
         ? await reviewDiffNeedsBuild(reviewForkFrom.repo.path, reviewForkFrom.branch, "HEAD", { timeoutMs: this.gitOpMs })
         : false);
+      // @decision a5d9c458 — clear any stale wedged-worktree tracking for this exact path BEFORE createWorktree can claim it.
+      releaseWorktreePathClaim = this.reclaimWedgedWorktreePathForSpawn(project.id, taskId ?? claimKey, targetRepo.key).release;
       const { worktreePath, branch, reusedDirtyWorktree, discardedOnRecut, staleBase } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild }, targetRepo.key, reviewForkFrom?.branch);
       // Card 088afc94 (P4 wiring): register this worktree with codescape's fleet daemon — fire-and-forget,
       // NEVER blocks the spawn. DELIBERATELY pinned to `project.repoPath` (the primary), NOT
@@ -8184,6 +8203,10 @@ export class SessionService {
       // success path (already released above); the one real release on any failure-before-live path.
       this.inFlightSpawnTaskIds.delete(claimKey);
       releaseCapSlotClaim();
+      // @decision a5d9c458 — release the worktree-path claim here too, now that the row is live or the
+      // spawn has failed outright; a no-op if reclaim never ran (undefined) or already self-released on
+      // throw (release() is idempotent — the unit that minted the claim owns its own lifecycle).
+      releaseWorktreePathClaim?.();
     }
   }
 
@@ -18573,6 +18596,10 @@ export class SessionService {
           console.warn(`[merge-batch] no mainline branch available to pin for ${finalRepoPath} (repoKey ${batchRepoKey}) — canonical HEAD is detached/unreadable; this batch's fast-forward runs WITHOUT a branch-divert check (the sha-only forfeit check still applies)`);
         }
         let batchWorktreePath: string | undefined;
+        // @decision a5d9c458 — the release handle reclaimWedgedWorktreePathForSpawn hands back below,
+        // called in the SAME outer `finally` that removes the batch worktree, since a bare worktree cut
+        // here never gets a session row of its own to hand the release off to.
+        let releaseBatchWorktreePathClaim: (() => void) | undefined;
         // Round 4, Code Review b2ebf41f (ruling 1c): set from `result.quarantined` once `runBatchedMerge`
         // returns — read by the outer `finally` below, which must NOT remove a quarantined batch worktree
         // (leave it for a human to inspect, exactly like the canonical repo itself stays untouched).
@@ -18598,6 +18625,8 @@ export class SessionService {
           // the batch's own `build_gate` audit event alongside the other phases known by the time that event
           // fires (assembly + admission wait + the gate run itself).
           const worktreeCutStartMs = Date.now();
+          // @decision a5d9c458 — same pre-claim clearing as the worker spawn call site.
+          releaseBatchWorktreePathClaim = this.reclaimWedgedWorktreePathForSpawn(finalProjectId, batchTaskId).release;
           const wt = await createWorktree(finalRepoPath, finalProjectId, batchTaskId);
           batchWorktreePath = wt.worktreePath;
           const worktreeCutMs = Date.now() - worktreeCutStartMs;
@@ -19222,6 +19251,9 @@ export class SessionService {
           if (batchWorktreePath && safeToRemoveBatchWorktree(finalRepoPath, batchQuarantined)) {
             await removeWorktree(finalRepoPath, batchWorktreePath, { timeoutMs: this.gitOpMs }).catch(() => {});
           }
+          // @decision a5d9c458 — release the worktree-path claim here too: a batch worktree never gets a
+          // session row to hand the release off to, so this finally is its only release point.
+          releaseBatchWorktreePathClaim?.();
         }
       },
       // @decision f944d4e4 — this async settle nudge fires ONLY for a caller that observed
@@ -21360,6 +21392,12 @@ export class SessionService {
       branch?: string;
       /** Card 6796c9ea: retain (never remove) a worktree holding uncommitted work or whose status is unreadable. Set ONLY by `finalizeMerge`; the boot-Pass-B and wedge-sweep callers never set it. */
       retainIfUncommitted?: boolean;
+      // @decision a5d9c458 — set ONLY by a caller acting on STALE, path-only knowledge (the wedge sweep;
+      // boot Pass B). NEVER set by finalizeMerge — its own just-merged worker is typically still live.
+      staleKnowledge?: boolean;
+      /** @decision a5d9c458 — the WedgedWorktreeEntry snapshot this retry acts on, enabling the
+       *  "gone or superseded since snapshotted" bail. Boot Pass B has none to hand in and omits it. */
+      wedgeSnapshot?: WedgedWorktreeEntry;
     },
   ): Promise<GcOutcomeResult> {
     // QUARANTINE CHECK — the SAME convergence-point discipline `dea6728e`/`b6d41db1` already established
@@ -21383,6 +21421,33 @@ export class SessionService {
       return { outcome: "path-refused" };
     }
     if (this.db.getWedgedWorktree(worktreePath)?.needsHuman) return { outcome: "needs-human-skip" };
+    // @decision a5d9c458 — `opts.staleKnowledge`-only; see that record for why this must never apply to
+    // finalizeMerge. Round 2: checked TWICE (here, and again right before removeWorktree below) — see
+    // the decision record for why one check isn't enough.
+    const staleKnowledgeGuard = (): GcOutcomeResult | null => {
+      if (!opts?.staleKnowledge) return null;
+      const claimant = this.findLiveSessionClaimingWorktreePath(worktreePath);
+      if (claimant) {
+        this.db.clearWedgedWorktree(worktreePath);
+        // eslint-disable-next-line no-console
+        console.warn(`[worktree] ${worktreePath} is now claimed by ${claimant === IN_FLIGHT_SPAWN_CLAIMANT ? "an in-flight spawn" : `live session ${claimant}`} — dropping stale wedge-tracking for this path and NOT touching it.`);
+        return { outcome: "reclaimed-by-live-session" };
+      }
+      // @decision a5d9c458 — bail if the wedge entry this retry acts on is GONE or SUPERSEDED
+      // (a different firstWedgedAt) since it was snapshotted. See opts.wedgeSnapshot's own doc for who
+      // passes one.
+      if (opts.wedgeSnapshot) {
+        const fresh = this.db.getWedgedWorktree(worktreePath);
+        if (!fresh || fresh.firstWedgedAt !== opts.wedgeSnapshot.firstWedgedAt) {
+          // eslint-disable-next-line no-console
+          console.warn(`[worktree] ${worktreePath}'s wedge-tracking entry is gone or was superseded since this retry was scheduled — skipping this attempt without touching the path.`);
+          return { outcome: "wedge-entry-superseded" };
+        }
+      }
+      return null;
+    };
+    const earlyStaleKnowledgeGuard = staleKnowledgeGuard();
+    if (earlyStaleKnowledgeGuard) return earlyStaleKnowledgeGuard;
     if (!opts?.forceRemoveWorktree) {
       const scanFn = this.findNestedGitReposOverride ?? findNestedGitRepos;
       // FAIL SAFE on a scan REJECTION too (a pathologically deep tree, a throwing test seam, …) — this is
@@ -21427,37 +21492,57 @@ export class SessionService {
         return { outcome: "dirty-retained", dirtyWorktree };
       }
     }
-    const { removed, wedged } = await removeWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, removeDir: this.removeDirOverride });
-    if (removed) {
-      this.db.clearWedgedWorktree(worktreePath);
-      // Purge any leftover gate-timeout breaker streak for this branch (see opts.branch's doc) — the
-      // worktree it was tracking is gone, so an abandoned-while-tripped branch can't leak the entry forever.
-      if (opts?.branch) this.gateTimeoutStreak.delete(opts.branch);
-      // Codescape C3: this worktree is GENUINELY gone (never fired for recycleWorker reuse — that path
-      // never calls gcWorktreeDir at all) — deregister it. Fire-and-forget, best-effort.
-      this.fireCodescapeDrop(codescapeCtx);
-      return { outcome: "removed" };
-    }
-    if (wedged) {
-      const entry = this.db.recordWorktreeWedgeAttempt(worktreePath, repoPath, "killable removal was force-killed on timeout (handle still held)");
-      const ageMs = Date.now() - new Date(entry.firstWedgedAt).getTime();
-      if (entry.attempts >= this.wedgeGiveUpAttempts || ageMs >= this.wedgeGiveUpMs) {
-        this.db.markWorktreeNeedsHuman(worktreePath);
-        // eslint-disable-next-line no-console
-        console.warn(`[worktree] ${worktreePath} has been wedged for ${Math.round(ageMs / 86_400_000)} day(s) across ${entry.attempts} attempt(s) — ` +
-          `giving up automatic retry. Needs a human to investigate (reboot to force-release a stuck handle) and delete it manually.`);
-        // This IS the pass that crossed the give-up bound — report it as the give-up outcome directly
-        // (not "wedged") so the caller's aggregate counts it as a give-up on the SAME pass it happened,
-        // rather than under-counting it as one more ordinary retry.
-        return { outcome: "needs-human-skip" };
+    // @decision a5d9c458 — repeat the staleKnowledge guard one LAST time, immediately before the actual
+    // removal: a claim or a wedge-entry supersession can arrive during the scan/reap awaits above, and
+    // this is the last chance to catch it before the dir is actually destroyed.
+    const lateStaleKnowledgeGuard = staleKnowledgeGuard();
+    if (lateStaleKnowledgeGuard) return lateStaleKnowledgeGuard;
+    // @decision a5d9c458 — do not remove this path without marking it REMOVING first (set synchronously
+    // right here, no await before it, cleared in the `finally` below) — a respawn's reclaim must find
+    // this mark and refuse, never race the awaits inside removeWorktree's own retry loop.
+    const normPath = normForCompare(worktreePath);
+    this.removingWorktreePaths.add(normPath);
+    try {
+      const { removed, wedged } = await removeWorktree(repoPath, worktreePath, {
+        timeoutMs: this.gitOpMs,
+        removeDir: this.removeDirOverride,
+        // Belt and braces: removeWorktree's OWN retry loop re-checks this before every attempt, in case a
+        // claim somehow lands despite the REMOVING mark above.
+        abortIfClaimed: () => this.claimedWorktreePaths.has(normPath),
+      });
+      if (removed) {
+        this.db.clearWedgedWorktree(worktreePath);
+        // Purge any leftover gate-timeout breaker streak for this branch (see opts.branch's doc) — the
+        // worktree it was tracking is gone, so an abandoned-while-tripped branch can't leak the entry forever.
+        if (opts?.branch) this.gateTimeoutStreak.delete(opts.branch);
+        // Codescape C3: this worktree is GENUINELY gone (never fired for recycleWorker reuse — that path
+        // never calls gcWorktreeDir at all) — deregister it. Fire-and-forget, best-effort.
+        this.fireCodescapeDrop(codescapeCtx);
+        return { outcome: "removed" };
       }
-      // eslint-disable-next-line no-console
-      console.warn(`[worktree] ${worktreePath} still wedged (attempt ${entry.attempts}) — retrying slowly ` +
-        `(next: a later boot, or the background sweep in ≤${Math.round(this.wedgeSweepIntervalMs / 60_000)}min). Not abandoned.`);
-      this.armWedgeSweep();
-      return { outcome: "wedged" };
+      if (wedged) {
+        const entry = this.db.recordWorktreeWedgeAttempt(worktreePath, repoPath, "killable removal was force-killed on timeout (handle still held)");
+        const ageMs = Date.now() - new Date(entry.firstWedgedAt).getTime();
+        if (entry.attempts >= this.wedgeGiveUpAttempts || ageMs >= this.wedgeGiveUpMs) {
+          this.db.markWorktreeNeedsHuman(worktreePath);
+          // eslint-disable-next-line no-console
+          console.warn(`[worktree] ${worktreePath} has been wedged for ${Math.round(ageMs / 86_400_000)} day(s) across ${entry.attempts} attempt(s) — ` +
+            `giving up automatic retry. Needs a human to investigate (reboot to force-release a stuck handle) and delete it manually.`);
+          // This IS the pass that crossed the give-up bound — report it as the give-up outcome directly
+          // (not "wedged") so the caller's aggregate counts it as a give-up on the SAME pass it happened,
+          // rather than under-counting it as one more ordinary retry.
+          return { outcome: "needs-human-skip" };
+        }
+        // eslint-disable-next-line no-console
+        console.warn(`[worktree] ${worktreePath} still wedged (attempt ${entry.attempts}) — retrying slowly ` +
+          `(next: a later boot, or the background sweep in ≤${Math.round(this.wedgeSweepIntervalMs / 60_000)}min). Not abandoned.`);
+        this.armWedgeSweep();
+        return { outcome: "wedged" };
+      }
+      return { outcome: "left-on-disk" };
+    } finally {
+      this.removingWorktreePaths.delete(normPath);
     }
-    return { outcome: "left-on-disk" };
   }
 
   /** Every registered repo path of every project — live, reserved AND archived (`listAllProjects` alone excludes archived) — so no repo is ever unprotected from a removal (e21cfd5f). */
@@ -21465,6 +21550,77 @@ export class SessionService {
     return [...this.db.listAllProjects(), ...this.db.listArchivedProjects()]
       .flatMap((p) => [p.repoPath, ...p.repos.map((r) => r.path)])
       .filter((p): p is string => !!p);
+  }
+
+  // @decision a5d9c458 — "live" here means processState "live"/"starting", NEVER a bare non-archived
+  // filter: an exited-but-resumable worker's row stays non-archived while resumable, so that filter
+  // would make the sweep treat every wedged path as permanently claimed by its own dead former owner.
+  private findLiveSessionClaimingWorktreePath(worktreePath: string): string | null {
+    const target = normForCompare(worktreePath);
+    // @decision a5d9c458 — ALSO consult the in-memory in-flight claim set: a spawn claims its
+    // target path synchronously before any session row exists (see claimedWorktreePaths' own doc) — a
+    // session-row-only check has a blind window there a concurrent staleKnowledge re-check would miss.
+    if (this.claimedWorktreePaths.has(target)) return IN_FLIGHT_SPAWN_CLAIMANT;
+    for (const s of this.db.listAllSessions()) {
+      if ((s.processState === "live" || s.processState === "starting") && s.worktreePath && normForCompare(s.worktreePath) === target) return s.id;
+    }
+    return null;
+  }
+
+  /**
+   * Card a5d9c458 — called immediately before every `createWorktree(...)` call in this file, with the
+   * SAME (projectId, taskId, repoKey) it's about to pass. `createWorktree` derives its worktree path
+   * deterministically from `taskId` ({@link resolveWorktreePath}, the exact formula it uses internally),
+   * so this can know the target path BEFORE createWorktree ever touches it. If that path is currently
+   * wedge-tracked (`WedgedWorktreeEntry` — a prior removal attempt against it failed), any dir still
+   * sitting there is set aside (never deleted — it may hold uncommitted work from whatever wedged the
+   * original removal) and the stale tracking entry is dropped, so neither this spawn's own
+   * `createWorktree` call nor a later wedge-sweep tick can collide with it. A no-op on the wedge-check
+   * half (a cheap DB read + JSON.parse, not a bare in-memory lookup) when the path isn't wedge-tracked,
+   * which is every ordinary spawn — but the path is ALWAYS claimed into {@link claimedWorktreePaths}
+   * first, and the UNIT itself owns that claim's lifecycle: the caller never touches the Set directly,
+   * it only calls the returned `release()`.
+   *
+   * @returns the resolved worktree path plus an idempotent `release()` that drops the claim — call it
+   * in the caller's own `finally`, whatever the outcome.
+   * @throws if the path is wedge-tracked, a dir still sits there, AND the rename-aside fails (the claim
+   * is self-released before throwing — refuse the spawn rather than silently letting `createWorktree`
+   * reuse/recut a dir whose state is now unknown); or if a removal is currently IN FLIGHT against this
+   * exact path (see {@link removingWorktreePaths}) — retry shortly rather than racing it.
+   */
+  private reclaimWedgedWorktreePathForSpawn(
+    projectId: string, taskId: string, repoKey?: string | null,
+  ): { worktreePath: string; release: () => void } {
+    const worktreePath = resolveWorktreePath(projectId, taskId, repoKey);
+    const normPath = normForCompare(worktreePath);
+    // @decision a5d9c458 — MUTUAL EXCLUSION: a removal currently in flight against this exact path owns
+    // it until it settles; refuse outright rather than claiming over it (the awaits inside removeWorktree's
+    // own retry loop make a single point-in-time check insufficient).
+    if (this.removingWorktreePaths.has(normPath)) {
+      throw new Error(`${worktreePath}: removal in progress for this path, retry shortly`);
+    }
+    this.claimedWorktreePaths.add(normPath);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.claimedWorktreePaths.delete(normPath);
+    };
+    // @decision a5d9c458 — exact-string lookup is safe here: see the decision record for why.
+    if (!this.db.getWedgedWorktree(worktreePath)) return { worktreePath, release };
+    if (fs.existsSync(worktreePath)) {
+      const rename = renameWorktreeDirAside(worktreePath);
+      if (!rename.ok) {
+        // This spawn goes no further, so release its claim right here rather than leaving it for a
+        // caller that will never reach its own release point.
+        release();
+        throw new Error(`${worktreePath} is on the wedged-retry list and still exists on disk, but could not be renamed aside to ${rename.staleAside} (${rename.error!.message}) — refusing to spawn against it`);
+      }
+      // eslint-disable-next-line no-console
+      console.warn(`[worktree] ${worktreePath} was on the wedged-retry list and still exists on disk — renamed aside to ${rename.staleAside} (never deleted) before cutting a fresh worktree at the original path.`);
+    }
+    this.db.clearWedgedWorktree(worktreePath);
+    return { worktreePath, release };
   }
 
   /** Arm the low-frequency background wedge-retry sweep if it isn't already running. Self-disarms (see
@@ -21493,7 +21649,9 @@ export class SessionService {
       // worktreePath only) — the drop hook is skipped for a retry that succeeds via THIS path. Advisory
       // metadata only (never correctness-critical, same as baseRef), so a stale registration lingering a
       // bit longer here is an accepted gap, not a bug.
-      await this.gcWorktreeDir(entry.repoPath, entry.worktreePath);
+      // @decision a5d9c458 — staleKnowledge:true + wedgeSnapshot:entry (round 2): re-validate this entry
+      // isn't now a live claim, and hasn't itself been cleared/superseded, before touching it.
+      await this.gcWorktreeDir(entry.repoPath, entry.worktreePath, undefined, { staleKnowledge: true, wedgeSnapshot: entry });
     }
     const stillPending = this.db.listWedgedWorktrees().some((e) => !e.needsHuman);
     if (!stillPending && this.wedgeSweepTimer) {
@@ -21568,10 +21726,14 @@ export class SessionService {
         // eslint-disable-next-line no-console
         console.warn(`${logPrefix} worktree ${args.worktreePath} RETAINED (nested-repo-blocked) — ` +
           `merge already landed, only the worktree cleanup is deferred.`);
-      } else if (result.outcome !== "removed" && result.outcome !== "dirty-retained") {
+      } else if (result.outcome !== "removed" && result.outcome !== "dirty-retained" && result.outcome !== "reclaimed-by-live-session" && result.outcome !== "wedge-entry-superseded") {
         // Task 035fb673: this used to be console.warn-only (the daemon log), invisible to the merging
         // manager. `worktreeGcOutcome` carries it out to the caller so it can be folded into the
         // `worker_merge_confirm` return's `warning` field — a surface the manager already reads.
+        // "reclaimed-by-live-session"/"wedge-entry-superseded" are excluded above because both are
+        // UNREACHABLE here (card a5d9c458): this call never sets `staleKnowledge`, which is the only
+        // thing gcWorktreeDir ever checks to produce either outcome — see its own decision record for
+        // why finalizeMerge never sets it.
         worktreeGcOutcome = result.outcome;
         // eslint-disable-next-line no-console
         console.warn(`${logPrefix} worktree ${args.worktreePath} not removed (${result.outcome}); ` +
@@ -22497,10 +22659,11 @@ export class SessionService {
         // gcWorktreeDir's nested-repo guard applies here too (card b6d41db1 follow-up) — a partially-
         // deleted worktree (no root `.git` linkage left) can still hold a live nested clone; NO override
         // is ever passed on this automatic path, so a hit is always retained + logged, never destroyed.
+        // @decision a5d9c458 — staleKnowledge:true: re-validate this session row's own PATH isn't been re-claimed since this boot pass started iterating.
         const { outcome } = await this.gcWorktreeDir(repoPath, worktreePath, {
           projectId: project.id,
           worktreeId: codescapeWorktreeId(s.taskId),
-        }, { branch: s.branch ?? undefined }).catch(() => ({ outcome: "left-on-disk" as const }));
+        }, { branch: s.branch ?? undefined, staleKnowledge: true }).catch(() => ({ outcome: "left-on-disk" as const }));
         // Only an ACTUAL removal counts as pruned — "wedged"/"left-on-disk"/"nested-repo-blocked" is a
         // retry-pending (or human-recoverable) attempt, not a completed prune, and double-counting it
         // here overstated the aggregate.
@@ -22527,10 +22690,11 @@ export class SessionService {
       // worse real trigger: a pre-merge crash orphans a worktree whose nested clone is GITIGNORED, so
       // `git status --porcelain`/worktreeHasWork are both blind to it and would otherwise force-remove
       // straight through.
+      // @decision a5d9c458 — staleKnowledge:true: same re-validation as the dead-leftover GC site above.
       const { outcome } = await this.gcWorktreeDir(repoPath, worktreePath, {
         projectId: project.id,
         worktreeId: codescapeWorktreeId(s.taskId),
-      }, { branch: s.branch ?? undefined }).catch(() => ({ outcome: "left-on-disk" as const }));
+      }, { branch: s.branch ?? undefined, staleKnowledge: true }).catch(() => ({ outcome: "left-on-disk" as const }));
       // Only an ACTUAL removal counts as pruned — see the identical comment on the dead-leftover branch above.
       if (outcome === "needs-human-skip") worktreesNeedsHuman++;
       else if (outcome === "removed") worktreesPruned++;

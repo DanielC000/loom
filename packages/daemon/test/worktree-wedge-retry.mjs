@@ -29,7 +29,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { killableRemoveDir } = await import("../dist/git/worktrees.js");
+const { killableRemoveDir, normForCompare } = await import("../dist/git/worktrees.js");
 const { WORKTREES_DIR } = await import("../dist/paths.js");
 
 let failures = 0;
@@ -146,6 +146,184 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   fs.rmSync(W.repo, { recursive: true, force: true });
 }
 
+// --- (reclaim) card a5d9c458 — a wedge entry whose PATH has since been RE-CLAIMED by a LIVE session
+//     must survive a sweep tick untouched, and the stale tracking entry must be dropped. This is the
+//     confirmed incident: createWorktree derives worktree paths deterministically per task, so a
+//     respawn of the same task creates a brand-new LIVE worktree at the exact path an old
+//     WedgedWorktreeEntry still names; without the re-check, the next sweep tick deletes that live
+//     worktree (it happened for real — worker 94a6ce86's worktree, with two real commits, 2026-10-04). ---
+{
+  const db = new Db();
+  const R = { projId: `wwr-r-proj-${sfx}`, agentId: `wwr-r-top-${sfx}`, liveId: `wwr-r-live-${sfx}`, repo: path.join(os.tmpdir(), `loom-wwr-reclaim-${sfx}`) };
+  initRepo(R.repo);
+  R.worktreePath = leftoverDir("reclaim", sfx);
+  // Seed a wedge entry for this exact path — mirroring the earlier orphan that was once wedged here.
+  db.recordWorktreeWedgeAttempt(R.worktreePath, R.repo, "simulated earlier wedge (now superseded by a live respawn)");
+  check("(reclaim setup) path is tracked as wedged before the sweep runs", db.getWedgedWorktree(R.worktreePath) !== undefined);
+  // The SAME path is now claimed by a brand-new LIVE session (the respawn shape: a fresh worktree was
+  // cut at the exact same deterministic path after the old orphan was superseded).
+  db.insertProject({ id: R.projId, name: "WWR-reclaim", repoPath: R.repo, vaultPath: R.repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: R.agentId, projectId: R.projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: R.liveId, projectId: R.projId, agentId: R.agentId, engineSessionId: null, title: null, cwd: R.worktreePath, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", worktreePath: R.worktreePath });
+  fs.writeFileSync(path.join(R.worktreePath, "live-worker-content.txt"), "live worker's real content\n");
+
+  let removeDirCallsForR = 0;
+  const sessionsR = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === R.worktreePath) removeDirCallsForR++; return killableRemoveDir(target, ms); },
+  });
+  await sessionsR.sweepWedgedWorktreesOnce();
+  check("(reclaim) RED-PROOF SHAPE: the sweep NEVER attempted removal against the now-live path", removeDirCallsForR === 0);
+  check("(reclaim) the live worktree's content SURVIVED the sweep tick untouched", fs.existsSync(path.join(R.worktreePath, "live-worker-content.txt")));
+  check("(reclaim) the stale wedge-tracking entry was DROPPED (not left to retry against a live path forever)", db.getWedgedWorktree(R.worktreePath) === undefined);
+
+  db.close();
+  fs.rmSync(R.worktreePath, { recursive: true, force: true });
+  fs.rmSync(R.repo, { recursive: true, force: true });
+}
+
+// --- (reclaim-genuine-orphan) negative control: an UNCLAIMED wedged path (no live session anywhere
+//     claims it) must still be removed exactly as before — proves the new live-claim re-check doesn't
+//     regress ordinary orphan cleanup. (The "(wedge)" block above already proves this implicitly since
+//     sweepWedgedWorktreesOnce now always passes staleKnowledge:true, but this makes it explicit.) ---
+{
+  const db = new Db();
+  const N = { projId: `wwr-n-proj-${sfx}`, agentId: `wwr-n-top-${sfx}`, deadId: `wwr-n-dead-${sfx}`, repo: path.join(os.tmpdir(), `loom-wwr-orphan-${sfx}`) };
+  initRepo(N.repo);
+  N.worktreePath = leftoverDir("orphan", sfx);
+  db.recordWorktreeWedgeAttempt(N.worktreePath, N.repo, "simulated wedge, never reclaimed");
+  // A DEAD session row sharing the path (the ordinary "orphan from an exited worker" shape) — no LIVE
+  // session claims it, so findLiveSessionClaimingWorktreePath must return null for this path.
+  seed(db, N);
+
+  let removeDirCallsForN = 0;
+  const sessionsN = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === N.worktreePath) removeDirCallsForN++; return killableRemoveDir(target, ms); },
+  });
+  await sessionsN.sweepWedgedWorktreesOnce();
+  check("(reclaim-genuine-orphan) an unclaimed orphan IS still removed by the sweep", !fs.existsSync(N.worktreePath));
+  check("(reclaim-genuine-orphan) removeDir was actually invoked (the live-claim re-check did not short-circuit it)", removeDirCallsForN > 0);
+  check("(reclaim-genuine-orphan) removed → dropped from wedged tracking", db.getWedgedWorktree(N.worktreePath) === undefined);
+
+  db.close();
+  fs.rmSync(N.repo, { recursive: true, force: true });
+}
+
+// --- (in-flight-claim) card a5d9c458 ROUND 2 — Code Review ffc2b31b: the staleKnowledge live-claim guard
+//     above (the "(reclaim)" block) can only ever see a SESSION ROW, but spawnWorker/the batch worktree
+//     cut both insert that row only AFTER createWorktree + provisioning return, which can run for a long
+//     time. A path claimed by such an IN-FLIGHT spawn — no session row exists yet — must ALSO survive a
+//     sweep tick. Simulates the claim reclaimWedgedWorktreePathForSpawn adds SYNCHRONOUSLY via the SAME
+//     in-memory set it populates (white-box — TS `private` is erased at runtime; same pattern
+//     worker-spawn-cap-queue.mjs already uses for `inFlightSpawnTaskIds`). The access is GUARDED so
+//     pre-fix code (no such field) reaches a real check() failure instead of a TypeError: pre-fix there
+//     is nothing to claim with, so the live-claim guard legitimately sees no claimant and — the real
+//     round-2 regression — proceeds to scan/remove the path anyway. ---
+{
+  const db = new Db();
+  const F = { repo: path.join(os.tmpdir(), `loom-wwr-inflight-${sfx}`) };
+  initRepo(F.repo);
+  F.worktreePath = leftoverDir("inflight", sfx);
+  db.recordWorktreeWedgeAttempt(F.worktreePath, F.repo, "simulated earlier wedge, now claimed by an in-flight spawn");
+
+  let scanCalls = 0;
+  let removeDirCallsForF = 0;
+  const sessionsF = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === F.worktreePath) removeDirCallsForF++; return killableRemoveDir(target, ms); },
+    findNestedGitRepos: async () => { scanCalls++; return { repos: [], truncated: false }; },
+  });
+  // The claim is already in place BEFORE the sweep runs — the EARLY staleKnowledge check (before any
+  // scan) should catch it, so the scan should never even run.
+  if (sessionsF.claimedWorktreePaths) sessionsF.claimedWorktreePaths.add(normForCompare(F.worktreePath));
+
+  await sessionsF.sweepWedgedWorktreesOnce();
+  check("(in-flight-claim) the EARLY check catches it — the nested-repo scan never even ran", scanCalls === 0);
+  check("(in-flight-claim) removeDir was NEVER invoked against the claimed path", removeDirCallsForF === 0);
+  check("(in-flight-claim) the claimed path's real content SURVIVED the sweep tick untouched", fs.existsSync(path.join(F.worktreePath, "leftover.txt")));
+  check("(in-flight-claim) the stale wedge-tracking entry was DROPPED", db.getWedgedWorktree(F.worktreePath) === undefined);
+
+  db.close();
+  fs.rmSync(F.worktreePath, { recursive: true, force: true });
+  fs.rmSync(F.repo, { recursive: true, force: true });
+}
+
+// --- (entry-superseded) card a5d9c458 ROUND 2 — a wedge entry that gets CLEARED and RE-RECORDED (a
+//     genuinely different wedge situation — a new firstWedgedAt) WHILE a sweep tick is already acting on
+//     the OLD snapshot of it must survive untouched: the sweep must re-check the entry it snapshotted is
+//     still CURRENT, not just whether a live session/in-flight spawn claims the path. ---
+{
+  const db = new Db();
+  const S = { repo: path.join(os.tmpdir(), `loom-wwr-superseded-${sfx}`) };
+  initRepo(S.repo);
+  S.worktreePath = leftoverDir("superseded", sfx);
+  // @decision a5d9c458 (round 3 nit) — seed the OLD entry with an EXPLICITLY older firstWedgedAt via a
+  // direct app_meta write, bypassing recordWorktreeWedgeAttempt's own `now` stamp. Both this entry and
+  // the LATER re-record below (seeded via the ordinary API, which stamps real `now`) would otherwise
+  // both carry a millisecond-resolution ISO timestamp — same-millisecond collision is a real, if rare,
+  // flake risk, and this test exists specifically to prove the supersede check discriminates on
+  // firstWedgedAt, so it must never depend on two Date.now() calls happening to land in different ms.
+  const OLD_FIRST_WEDGED_AT = new Date(Date.now() - 3_600_000).toISOString(); // 1h in the past — can never collide with "now"
+  db.setMeta("worktree_wedged", JSON.stringify([{
+    worktreePath: S.worktreePath, repoPath: S.repo, firstWedgedAt: OLD_FIRST_WEDGED_AT, lastAttemptAt: OLD_FIRST_WEDGED_AT,
+    attempts: 1, reason: "the OLD wedge situation, snapshotted by this sweep tick", needsHuman: false,
+  }]));
+  check("(entry-superseded setup) the OLD entry's firstWedgedAt is the explicit past timestamp, not `now`",
+    db.getWedgedWorktree(S.worktreePath)?.firstWedgedAt === OLD_FIRST_WEDGED_AT);
+
+  let removeDirCallsForS = 0;
+  const sessionsS = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === S.worktreePath) removeDirCallsForS++; return killableRemoveDir(target, ms); },
+    findNestedGitRepos: async () => {
+      // Mid-sweep, BEFORE removal: the path is cleared and re-wedged for a genuinely DIFFERENT reason (a
+      // new firstWedgedAt) — simulating a concurrent reclaim/re-wedge racing this same sweep tick.
+      db.clearWedgedWorktree(S.worktreePath);
+      db.recordWorktreeWedgeAttempt(S.worktreePath, S.repo, "a LATER, different wedge situation at the same path");
+      return { repos: [], truncated: false };
+    },
+  });
+  await sessionsS.sweepWedgedWorktreesOnce();
+  check("(entry-superseded) removeDir was NEVER invoked — the supersession was caught before removal", removeDirCallsForS === 0);
+  check("(entry-superseded) the path's real content SURVIVED the sweep tick untouched", fs.existsSync(path.join(S.worktreePath, "leftover.txt")));
+  const afterS = db.getWedgedWorktree(S.worktreePath);
+  check("(entry-superseded) the NEW (later) wedge entry is still tracked, untouched by the stale sweep tick",
+    afterS !== undefined && afterS.reason === "a LATER, different wedge situation at the same path" && afterS.attempts === 1);
+
+  db.close();
+  fs.rmSync(S.worktreePath, { recursive: true, force: true });
+  fs.rmSync(S.repo, { recursive: true, force: true });
+}
+
+// --- (claim-arrives-mid-scan) card a5d9c458 ROUND 2 — a claim that arrives WHILE the sweep's own
+//     nested-repo scan is in flight (nothing claimed the path yet when the sweep tick started) must
+//     still be caught — by the REPEATED check right before removal, not just the one before the scan. ---
+{
+  const db = new Db();
+  const M = { repo: path.join(os.tmpdir(), `loom-wwr-midscan-${sfx}`) };
+  initRepo(M.repo);
+  M.worktreePath = leftoverDir("midscan", sfx);
+  db.recordWorktreeWedgeAttempt(M.worktreePath, M.repo, "simulated wedge, nothing claims it YET");
+
+  let scanCallsM = 0;
+  let removeDirCallsForM = 0;
+  const sessionsM = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === M.worktreePath) removeDirCallsForM++; return killableRemoveDir(target, ms); },
+    findNestedGitRepos: async () => {
+      scanCallsM++;
+      // The claim arrives DURING the scan await — AFTER the EARLY check already ran clean.
+      if (sessionsM.claimedWorktreePaths) sessionsM.claimedWorktreePaths.add(normForCompare(M.worktreePath));
+      return { repos: [], truncated: false };
+    },
+  });
+  await sessionsM.sweepWedgedWorktreesOnce();
+  check("(claim-arrives-mid-scan) the scan DID run — the early check passed through clean, as expected", scanCallsM === 1);
+  check("(claim-arrives-mid-scan) removeDir was NEVER invoked — the LATE re-check caught the claim", removeDirCallsForM === 0);
+  check("(claim-arrives-mid-scan) the path's real content SURVIVED the sweep tick untouched", fs.existsSync(path.join(M.worktreePath, "leftover.txt")));
+  check("(claim-arrives-mid-scan) the stale wedge-tracking entry was DROPPED", db.getWedgedWorktree(M.worktreePath) === undefined);
+
+  db.close();
+  fs.rmSync(M.worktreePath, { recursive: true, force: true });
+  fs.rmSync(M.repo, { recursive: true, force: true });
+}
+
 // --- (give-up) a worktree wedged past the long give-up bound flips to needsHuman and STOPS being retried ---
 {
   const db = new Db();
@@ -221,6 +399,6 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a genuinely wedged worktree removal is TRACKED and RETRIED on every boot-reconcile pass (never permanently skipped) until it either succeeds (dropped from tracking, self-healing once the handle releases) or crosses a long give-up bound (flipped to needsHuman, then and only then skipped + loudly surfaced); a clean/transient reject is never tracked as wedged at all and is bounded-retried + removed inline."
+  ? "\n✅ ALL PASS — a genuinely wedged worktree removal is TRACKED and RETRIED on every boot-reconcile pass (never permanently skipped) until it either succeeds (dropped from tracking, self-healing once the handle releases) or crosses a long give-up bound (flipped to needsHuman, then and only then skipped + loudly surfaced); a clean/transient reject is never tracked as wedged at all and is bounded-retried + removed inline; (card a5d9c458) a wedged path re-claimed by a live session survives a sweep tick untouched with its stale tracking dropped, while a genuinely unclaimed orphan is still removed exactly as before; and (round 2) a path claimed by an IN-FLIGHT spawn (no session row yet), an entry SUPERSEDED mid-sweep, and a claim ARRIVING during the scan/reap window all survive too — caught by the early AND the repeated late re-check."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

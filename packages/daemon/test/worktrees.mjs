@@ -426,6 +426,52 @@ try {
     check("(l3) an already-absent target resolves removed:true without spawning a child", result.removed === true && result.killed === false && spawnCalls === 0);
   }
 
+  // (l4) card a5d9c458 ROUND 3 — removeWorktree's OWN belt-and-braces `deps.abortIfClaimed` check,
+  //      consulted before EVERY retry attempt (not just once up front). The PRIMARY defense against a
+  //      respawn reclaiming this exact path mid-removal is SessionService's `removingWorktreePaths`
+  //      mutual-exclusion mark (proven against the real sweep in worktree-wedge-retry.mjs) — this proves
+  //      the belt-and-braces half removeWorktree itself owns, independent of that caller-side mark: a
+  //      clean reject on attempt 1 must not be followed by a further attempt once the path is claimed.
+  {
+    const claimedPath = path.join(WORKTREES_DIR, "wt-fixture-proj", "claimed-mid-retry");
+    fs.mkdirSync(claimedPath, { recursive: true });
+    let removeDirCalls = 0;
+    let claimedNow = false;
+    const result = await removeWorktree(repo, claimedPath, {
+      removeDir: async () => {
+        removeDirCalls++;
+        // Simulate a respawn's claim landing during THIS attempt's own async window — exactly the shape
+        // the retry loop's clean-reject delay otherwise leaves open.
+        claimedNow = true;
+        return { removed: false, killed: false }; // a clean reject — would normally trigger the retry delay
+      },
+      abortIfClaimed: () => claimedNow,
+    });
+    check("(l4) removeDir was called exactly ONCE — the abort predicate stopped any further retry", removeDirCalls === 1);
+    check("(l4) removeWorktree reports NOT removed, and NOT wedged (aborted, not a genuine hang)", result.removed === false && result.wedged === false);
+    check("(l4) the claimed-mid-retry dir is left on disk, untouched", fs.existsSync(claimedPath));
+    fs.rmSync(claimedPath, { recursive: true, force: true });
+  }
+
+  // (l4 negative control) abortIfClaimed staying false must NEVER change the pre-existing clean-reject
+  //      retry-then-succeed behavior — proves the predicate only ever SUBTRACTS a retry when it fires,
+  //      never alters the outcome when it doesn't.
+  {
+    const negPath = path.join(WORKTREES_DIR, "wt-fixture-proj", "never-claimed-mid-retry");
+    fs.mkdirSync(negPath, { recursive: true });
+    let removeDirCallsNeg = 0;
+    const resultNeg = await removeWorktree(repo, negPath, {
+      removeDir: async (target, ms) => {
+        removeDirCallsNeg++;
+        if (removeDirCallsNeg < 2) return { removed: false, killed: false }; // clean reject, then succeed
+        return killableRemoveDir(target, ms);
+      },
+      abortIfClaimed: () => false,
+    });
+    check("(l4 negative control) abortIfClaimed:false never aborts — the retry proceeds and succeeds normally",
+      resultNeg.removed === true && resultNeg.wedged === false && removeDirCallsNeg === 2);
+  }
+
   // (m) findLandedSquashCommit — the deterministic trailer detector that REPLACES isBranchMerged under
   //     squash (boot-reconcile Pass A) and the `Merge branch` grep (workerDiff stage 3). Proves: it finds
   //     a genuine landed squash by trailer (branch present + branch gone), ignores an unrelated branch,

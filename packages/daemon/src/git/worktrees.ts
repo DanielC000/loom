@@ -146,6 +146,9 @@ export interface BoundedGitDeps {
    * keep the retry, unaffected.
    */
   allowRetry?: boolean;
+  /** @decision a5d9c458 — do not check this only once before {@link removeWorktree}'s retry loop starts;
+   *  re-consult it before EVERY attempt, or a claim arriving mid-retry goes unnoticed until too late. */
+  abortIfClaimed?: () => boolean;
 }
 
 // @decision 0f965ab7 — catch simple-git's synchronous construct throw once, centrally, via this stub
@@ -270,6 +273,54 @@ function boundedDiffGit(repoPath: string, deps: DiffBranchDeps): { git: Pick<Sim
  */
 export function taskKey(taskId: string): string {
   return createHash("sha256").update(taskId).digest("hex").slice(0, 12);
+}
+
+/**
+ * The deterministic worktree dir path `createWorktree` cuts for a task — same formula it uses
+ * internally (taskKey + {@link WORKTREES_DIR} + projectId + optional repoKey axis, card 49136451).
+ * Exported so a caller can know the path BEFORE calling createWorktree (card a5d9c458 —
+ * pre-checking/clearing stale wedged-worktree tracking for a path about to be claimed, done in
+ * `sessions/service.ts` rather than threading a DB dependency into this module).
+ */
+export function resolveWorktreePath(projectId: string, taskId: string, repoKey?: string | null): string {
+  const key = taskKey(taskId);
+  return repoKey && repoKey !== "primary" ? path.join(WORKTREES_DIR, projectId, repoKey, key) : path.join(WORKTREES_DIR, projectId, key);
+}
+
+type RenameSyncFn = (from: string, to: string) => void;
+let renameDirAsideImpl: RenameSyncFn = fs.renameSync;
+/** Test-only seam (card a5d9c458): `fs`'s ESM namespace import can't be monkeypatched directly —
+ *  see `pty/claude-config.ts`'s identical `__setRenameSyncForTest` for the same constraint — so a
+ *  deterministic rename-FAILURE test for {@link renameWorktreeDirAside} needs this instead of relying on
+ *  a real, platform-specific OS condition. `undefined` restores the real `fs.renameSync`. */
+export function __setRenameDirAsideForTest(fn?: RenameSyncFn): void { renameDirAsideImpl = fn ?? fs.renameSync; }
+
+export interface RenameAsideResult {
+  ok: boolean;
+  /** The computed `<targetPath>.stale-<ts>` destination — present on BOTH outcomes, so a failure message
+   *  can still name where the rename was attempted TO. */
+  staleAside: string;
+  error?: Error;
+}
+
+/**
+ * Rename `targetPath` aside to `<targetPath>.stale-<ts>` — NEVER delete it (it may hold uncommitted work
+ * from whatever wedged/orphaned the original removal attempt that left it there). Shared by
+ * `createWorktree`'s own half-removed-dir detection (below) and
+ * `SessionService.reclaimWedgedWorktreePathForSpawn` (card a5d9c458) — a single rename
+ * implementation so the two can't drift, with each caller deciding its OWN failure policy on a non-`ok`
+ * result: `createWorktree` throws (refusing to reuse/overwrite an orphan it can't even move out of the
+ * way); `reclaimWedgedWorktreePathForSpawn` ALSO throws (refusing the spawn outright) rather than
+ * silently letting a fresh spawn reuse whatever is left sitting there in an unknown state.
+ */
+export function renameWorktreeDirAside(targetPath: string): RenameAsideResult {
+  const staleAside = `${targetPath}.stale-${Date.now()}`;
+  try {
+    renameDirAsideImpl(targetPath, staleAside);
+    return { ok: true, staleAside };
+  } catch (e) {
+    return { ok: false, staleAside, error: e as Error };
+  }
 }
 
 /**
@@ -915,16 +966,24 @@ export async function createWorktree(
   }
   const key = taskKey(taskId);
   const branch = `loom/${key}`;
-  const worktreePath = repoKey && repoKey !== "primary"
-    ? path.join(WORKTREES_DIR, projectId, repoKey, key)
-    : path.join(WORKTREES_DIR, projectId, key);
+  const worktreePath = resolveWorktreePath(projectId, taskId, repoKey);
   // The repo's CURRENT HEAD — the fork point this worktree's branch is (or was) cut off, captured up
   // front so it's correct for every path below (fresh cut, reuse, and reattach all fork off THIS sha).
   // BOUNDED (card c801d688): a hung rev-parse now throws within the bound instead of stalling the spawn
   // forever — this call has no local catch, so the throw propagates to createWorktree's own caller
   // exactly as an unbounded failure already did, just with a ceiling on how long that takes.
   const mainSha = (await withTimeout(headGit.raw(["rev-parse", "HEAD"]), headTimeoutMs, "git rev-parse HEAD")).trim();
-  if (fs.existsSync(worktreePath)) {
+  if (fs.existsSync(worktreePath) && !worktreeHasGitLink(worktreePath)) {
+    // @decision a5d9c458 — never reuse/recut a dir with no `.git` link as if it were a retained
+    // worktree; rename it aside (never delete) and fresh-cut instead.
+    const rename = renameWorktreeDirAside(worktreePath);
+    if (!rename.ok) {
+      throw new Error(`${worktreePath} exists with no .git link (a half-removed orphan) and could not be renamed aside to ${rename.staleAside} (${rename.error!.message}) — refusing to reuse or overwrite it`);
+    }
+    // eslint-disable-next-line no-console
+    console.warn(`[worktree] ${worktreePath} existed with no .git link (half-removed orphan) — renamed aside to ${rename.staleAside} (never deleted) and cutting a fresh worktree at the original path.`);
+    // falls through to the fresh branch-cut path below — worktreePath is now clear.
+  } else if (fs.existsSync(worktreePath)) {
     // Retained worktree → reuse (already provisioned). Re-cut an empty/stale branch onto current main
     // first; a recovery branch (unmerged work) is left exactly as-is. Board card 13cc2300: for a 0-ahead
     // branch this is exactly the DESTRUCTIVE step — recutStaleReusedBranch snapshots what it's about to
@@ -1292,7 +1351,7 @@ const REMOVE_DIR_CLEAN_RETRY_ATTEMPTS = 3;
 const REMOVE_DIR_CLEAN_RETRY_DELAY_MS = 500;
 
 /** Normalize for containment comparison: resolved, no trailing separator, case-folded on win32. */
-function normForCompare(p: string): string {
+export function normForCompare(p: string): string {
   const r = path.resolve(p).replace(/[\\/]+$/, "");
   return process.platform === "win32" ? r.toLowerCase() : r;
 }
@@ -1364,6 +1423,14 @@ export async function removeWorktree(
   let removed = true;
   let wedged = false;
   for (let attempt = 1; attempt <= REMOVE_DIR_CLEAN_RETRY_ATTEMPTS; attempt++) {
+    // @decision a5d9c458 — re-consulted on EVERY iteration (never just once before the loop): a claim
+    // can land during a PRIOR iteration's own removeDir await or retry delay, so only a fresh check right
+    // here catches it before the NEXT attempt actually touches the directory.
+    if (deps.abortIfClaimed?.()) {
+      // eslint-disable-next-line no-console
+      console.warn(`[worktree] aborting removal of ${worktreePath} mid-retry — the path is now claimed. Nothing further was touched.`);
+      removed = false; wedged = false; break;
+    }
     // Only skip a RETRY (attempt > 1) if the dir vanished between attempts (e.g. removed some other way) —
     // the first attempt always calls removeDir unconditionally, mirroring the pre-existing force-remove
     // semantics (a target that's already gone is simply a no-op removal, not specially short-circuited).
