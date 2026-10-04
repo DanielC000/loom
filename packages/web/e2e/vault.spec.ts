@@ -278,6 +278,55 @@ test("Edit is disabled while the selected note's own content is still loading, a
   await expect(editButton(page)).toBeEnabled();
 });
 
+// Card c64f2be3 — the UX half of the same `keepPreviousData` window 4bd4e4a6 closed for writes. The body
+// held over from the previous note is deliberately kept (a blank flash on every switch is worse), so the
+// pane must say that is what it is: dimmed, aria-busy, and a header indicator naming the note being
+// fetched. Reuses `holdVaultFileFetch` above, so the window is opened by a held request and closed by a
+// signal — no fixed waits.
+//
+// Negative control, run both ways before this shipped: with the whole change reverted the BEFORE block
+// already fails (no `vault-body` testid exists), which proves little on its own — so it was also run with
+// ONLY the marking logic defeated (`stalePreviousBody` forced to `false`, testids and wrapper left in
+// place). That run fails inside the DURING block, at `aria-busy` → "true", which is the assertion that
+// actually discriminates this fix from the code it replaces.
+//
+// The opacity reads go through `expect.poll` because the dim rides a 120ms `loom-fade` transition: a
+// single immediate read can legitimately catch an intermediate value and would flake.
+test("a held-over body from the previous note is dimmed, marked busy, and names what it is loading", async ({ page, loomDaemon }) => {
+  const { id, alphaName, bravoName, alphaOnly, bravoOnly } = await seedTwoNotes(loomDaemon.baseURL);
+  await pinActiveProject(page, id);
+  const releaseBravo = await holdVaultFileFetch(page, bravoName);
+  await page.goto(`${loomDaemon.baseURL}/vault`);
+
+  const body = page.getByTestId("vault-body");
+  const indicator = page.getByTestId("vault-loading-indicator");
+  const opacity = () => body.evaluate((el) => getComputedStyle(el).opacity);
+
+  // BEFORE: Alpha is fully loaded. Its body is the selected note's own, so nothing is marked.
+  await treeRow(page, alphaName).click();
+  await expect(page.getByText(alphaOnly)).toBeVisible();
+  await expect(body).toHaveAttribute("aria-busy", "false");
+  await expect(indicator).toHaveCount(0);
+  await expect.poll(opacity).toBe("1");
+
+  // DURING: select Bravo while its content fetch is held. The precondition this whole test rests on is
+  // that ALPHA's body is still on screen under BRAVO's breadcrumb — assert it, then assert it is marked.
+  await treeRow(page, bravoName).click();
+  await expect(page.getByText(alphaOnly)).toBeVisible();
+  await expect(body).toHaveAttribute("aria-busy", "true");
+  await expect(indicator).toHaveText(`Loading ${bravoName}…`);
+  await expect.poll(opacity).toBe("0.5");
+
+  // AFTER: release the fetch. Bravo's own body lands and every stale marker clears — the exercised
+  // before/after state change, not a render check.
+  releaseBravo();
+  await expect(page.getByText(bravoOnly)).toBeVisible();
+  await expect(page.getByText(alphaOnly)).toHaveCount(0);
+  await expect(indicator).toHaveCount(0);
+  await expect(body).toHaveAttribute("aria-busy", "false");
+  await expect.poll(opacity).toBe("1");
+});
+
 test("a note deleted out from under the viewer shows a read error with a working Retry, not an endless placeholder", async ({ page, loomDaemon }) => {
   const { id, vaultDir, alphaName, bravoName, alphaOnly, bravoOnly } = await seedTwoNotes(loomDaemon.baseURL);
   await pinActiveProject(page, id);

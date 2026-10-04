@@ -33,6 +33,8 @@ function extOf(path: string): string {
   const base = (path.split("/").pop() ?? path).toLowerCase();
   return base.includes(".") ? (base.split(".").pop() ?? "") : "";
 }
+
+const baseName = (path: string): string => path.split("/").pop() || path;
 function classify(path: string): Kind {
   const ext = extOf(path);
   const base = (path.split("/").pop() ?? path).toLowerCase();
@@ -148,6 +150,14 @@ export default function Vault() {
       ? "This note could not be read."
       : `Loading ${file}…`;
 
+  // The same two-check derivation as `loaded`, inverted and narrowed to the one case where the pane has
+  // a body on screen that is NOT proven to be `file`'s: `keepPreviousData` is holding the PREVIOUSLY
+  // selected note's text under the NEW breadcrumb. We keep that (a blank flash on every switch is worse)
+  // but must not present it as this note's content — so the body dims and the header says what it is
+  // actually waiting for. The two excluded cases render their own thing and are not stale bodies: no data
+  // at all is the "…" first-load placeholder, and a failed read is `ReadError`.
+  const stalePreviousBody = isTextual && !content.isError && content.data !== undefined && !loaded;
+
   const nodes = useMemo(() => buildTree(entries), [entries]);
   const fileList = useMemo(() => entries.filter((e) => e.type === "file").map((e) => e.path), [entries]);
 
@@ -218,6 +228,16 @@ export default function Vault() {
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
                   <Breadcrumb path={file} onDir={(d) => expandDirs([...ancestorDirs(d), d])} />
+                  {stalePreviousBody && (
+                    // Sits beside the breadcrumb because it qualifies exactly that claim: the crumb
+                    // already names the new note, the body below it does not belong to it yet.
+                    // `role="status"` makes the state audible — `aria-busy` on the body only suppresses
+                    // announcements, it never announces anything itself.
+                    <span role="status" data-testid="vault-loading-indicator"
+                      style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12, minWidth: 0 }}>
+                      Loading {baseName(file)}…
+                    </span>
+                  )}
                   <span style={{ flex: 1 }} />
                   {isTextual && !editing && (
                     <Button onClick={() => setEditing(true)} disabled={!loaded} title={editDisabledReason}>Edit</Button>
@@ -238,7 +258,7 @@ export default function Vault() {
                   ) : (
                     <CollapseContext.Provider value={collapseRegistry}>
                       {kind === "md" && <DocFind containerRef={docContainerRef} registry={collapseRegistry} docKey={file} />}
-                      <ContentView projectId={projectId} path={file} kind={kind!} content={content.data?.content} loading={content.isLoading} files={fileList} onOpen={openFile} />
+                      <ContentView projectId={projectId} path={file} kind={kind!} content={content.data?.content} loading={content.isLoading} stale={stalePreviousBody} files={fileList} onOpen={openFile} />
                     </CollapseContext.Provider>
                   )}
                 </div>
@@ -351,9 +371,9 @@ function Breadcrumb({ path, onDir }: { path: string; onDir: (dir: string) => voi
 }
 
 // ── Content viewers ─────────────────────────────────────────────────────────────
-function ContentView({ projectId, path, kind, content, loading, files, onOpen }: {
+function ContentView({ projectId, path, kind, content, loading, stale, files, onOpen }: {
   projectId: string; path: string; kind: Kind; content: string | undefined; loading: boolean;
-  files: string[]; onOpen: (p: string) => void;
+  stale: boolean; files: string[]; onOpen: (p: string) => void;
 }) {
   // MEMOISED on projectId, not inlined: `AssetImage` is a COMPONENT TYPE, so a fresh arrow each render
   // would be a new type each render — React unmounts and remounts every inline markdown image, and on a
@@ -381,8 +401,13 @@ function ContentView({ projectId, path, kind, content, loading, files, onOpen }:
   // md / text
   if (loading && content === undefined) return <p style={{ color: color.textMuted }}>…</p>;
   if (content === undefined) return <p style={{ color: color.textMuted }}>…</p>;
-  if (kind === "md") {
-    return (
+  // `stale` means this body belongs to the PREVIOUSLY selected note (see Vault's `stalePreviousBody`) —
+  // dim it so it reads as held-over context rather than as this note's text, and mark the region busy so
+  // a screen reader doesn't narrate it as the answer. The dim is the opacity the board's own skeleton
+  // placeholder already rests at; `loom-fade` is the shared 120ms opacity transition, which exists as a
+  // class precisely so prefers-reduced-motion can null it (an inline transition can't be).
+  const body = kind === "md"
+    ? (
       <Markdown
         source={content}
         files={files}
@@ -390,9 +415,13 @@ function ContentView({ projectId, path, kind, content, loading, files, onOpen }:
         onOpen={onOpen}
         AssetImage={AssetImage}
       />
-    );
-  }
-  return <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 13, color: color.text }}>{content}</pre>;
+    )
+    : <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 13, color: color.text }}>{content}</pre>;
+  return (
+    <div className="loom-fade" aria-busy={stale} data-testid="vault-body" style={stale ? { opacity: 0.5 } : undefined}>
+      {body}
+    </div>
+  );
 }
 
 // A PDF embed. `<object>` defers to the browser's native viewer, which needs a URL up front — so on a
