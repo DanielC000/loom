@@ -5,16 +5,23 @@
 // within its configured window, preserving the requested exit code, even though nothing on the main
 // thread ever runs again. argv[2]=hardExitMs, argv[3]=intendedExitCode.
 //
+// argv[4] (optional, round 5 card 0dc09fab): a module path/URL to import armHardShutdownWatchdog from
+// INSTEAD of the real dist/graceful-teardown.js — lets a caller test against a PATCHED COPY (e.g. a
+// stand-in win32 PowerShell script) without mutating the shared installed dist file, which would
+// otherwise race any OTHER concurrently-running process/test importing from it. Every existing caller
+// omits this arg and gets byte-identical behavior.
+//
 // @decision 347b3584 — round 3: this fixture's watchdog WILL fire (by design) and write the real record
 // file, which resolves from LOOM_HOME — call requireHermeticEnv() before arming, so a bare `node
 // <this file>.mjs` run with no LOOM_HOME set refuses instead of writing into the real ~/.loom.
 import { requireHermeticEnv } from "../_guard.mjs";
-import { armHardShutdownWatchdog } from "../../dist/graceful-teardown.js";
 
 requireHermeticEnv();
 
 const hardExitMs = Number(process.argv[2]);
 const intendedExitCode = Number(process.argv[3]);
+const moduleOverride = process.argv[4];
+const { armHardShutdownWatchdog } = await import(moduleOverride || "../../dist/graceful-teardown.js");
 
 console.log(`[fixture] pid=${process.pid} arming watchdog hardExitMs=${hardExitMs} intendedExitCode=${intendedExitCode}`);
 const watchdog = armHardShutdownWatchdog({ hardExitMs, intendedExitCode, label: "test-sync-hang" });

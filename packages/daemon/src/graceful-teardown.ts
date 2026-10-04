@@ -159,18 +159,24 @@ export interface HardShutdownWatchdogRecord {
 /**
  * Builds a per-firing aside path for a consumed/corrupt record file, stamped with `firedAt` (sanitized —
  * `:`/`.` are invalid in a Windows filename) or, when that's unavailable (a corrupt record, or a missing
- * field), the current epoch ms.
+ * field), the current epoch ms — PLUS an in-process monotonic sequence number.
  *
  * A single fixed `.handled` suffix used to force an `unlinkSync` of any PRIOR aside file before a later
  * `renameSync` could reuse the same name — deleting an OLDER firing's forensic record.
  *
  * @decision 347b3584 — never go back to one fixed aside name; a distinct, timestamped name per firing
  * needs no unlink, so no firing's record is ever destroyed to make room for a later one.
+ *
+ * @decision 347b3584 — round 5: a bare timestamp is not PROVABLY unique — `fs.renameSync` on Windows
+ * silently OVERWRITES an existing destination rather than erroring, so a collided `firedAt` would clobber
+ * an older firing's record with no sign. See the decision record for the measured mechanism.
  */
+let asidePathSequence = 0;
 function timestampedAsidePath(firedAtIso: string | null): string {
   const parsed = firedAtIso && !Number.isNaN(Date.parse(firedAtIso)) ? firedAtIso : null;
   const stamp = (parsed ?? new Date().toISOString()).replace(/[:.]/g, "-");
-  return `${HARD_SHUTDOWN_WATCHDOG_RECORD_PATH}.handled-${stamp}`;
+  const seq = asidePathSequence++;
+  return `${HARD_SHUTDOWN_WATCHDOG_RECORD_PATH}.handled-${stamp}-${seq}`;
 }
 
 /**
@@ -374,6 +380,7 @@ if (waitForDeadlineOrDisarm() === "fired") {
   } catch {}
 
   const pid = process.pid; // the worker shares the real OS process id with the main thread
+  let winCustomExitConfirmed = false;
   if (process.platform === "win32") {
     try {
       const ps =
@@ -382,17 +389,23 @@ if (waitForDeadlineOrDisarm() === "fired") {
         "[DllImport(\\"kernel32.dll\\", SetLastError=true)] public static extern bool TerminateProcess(IntPtr hProcess, uint exitCode);\\n" +
         "'@\\n" +
         "$h = [LoomShutdownWatchdog.NativeMethods]::OpenProcess(0x0001, $false, " + pid + ")\\n" +
-        "if ($h -ne [IntPtr]::Zero) { [void][LoomShutdownWatchdog.NativeMethods]::TerminateProcess($h, " + intendedExitCode + ") }\\n";
+        "if ($h -eq [IntPtr]::Zero) { exit 1 }\\n" +
+        "$ok = [LoomShutdownWatchdog.NativeMethods]::TerminateProcess($h, " + intendedExitCode + ")\\n" +
+        "if (-not $ok) { exit 1 }\\n";
       execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeout: 10000, stdio: "ignore" });
-    } catch { /* fall through to the signal-based backstop below regardless */ }
+      // execFileSync did not throw ⇒ the PS script exited 0 ⇒ OpenProcess returned a non-null handle AND
+      // TerminateProcess itself returned true ⇒ the custom-exit-code kill is CONFIRMED already in flight.
+      winCustomExitConfirmed = true;
+    } catch { /* null OpenProcess handle, TerminateProcess returning false, or execFileSync itself failing/
+                 timing out — none of these confirm the custom-code kill, so the raw fallback below still runs */ }
   }
-  // Round 2 (card 347b3584 finding 3): PowerShell exiting 0 does NOT prove TerminateProcess actually ran
-  // — OpenProcess can silently return a null handle (access denied, already-exiting process, ...) and the
-  // script still exits cleanly with nothing terminated. ALWAYS fall through to a direct SIGKILL as a
-  // backstop, regardless of whether the PowerShell attempt above appeared to succeed. Harmless if the
-  // process is already dead by this point (ESRCH, caught below) — this loses the custom exit code on
-  // POSIX (no "kill with a chosen code" syscall exists there) but guarantees termination either way.
-  try { process.kill(pid, "SIGKILL"); } catch {}
+  // Round 5 (card 0dc09fab): ONLY fall through to the raw SIGKILL fallback when the custom-code kill was
+  // NOT confirmed — see the decision record for why an unconditional second TerminateProcess call can lose
+  // the intended exit code under load. Unaffected on POSIX (winCustomExitConfirmed stays false there), so
+  // the fallback still always runs there exactly as before.
+  if (!winCustomExitConfirmed) {
+    try { process.kill(pid, "SIGKILL"); } catch {}
+  }
 }
 `;
 }

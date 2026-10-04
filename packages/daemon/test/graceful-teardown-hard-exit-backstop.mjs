@@ -48,7 +48,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { useOwnLoomHome, finishAndExit } from "./_tmp-fixture.mjs";
 import { pollUntil } from "./_timing-guard.mjs";
 
@@ -243,7 +243,30 @@ function listAsideFiles(recordPath) {
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir).filter((f) => f.startsWith(`${base}.handled-`));
 }
-let asideFilesSeenSoFar = [];
+// Card 0dc09fab round 2 item 7: seed from a REAL directory read rather than assuming `useOwnLoomHome`
+// always hands this file a fresh, empty LOOM_HOME. A reused home (see the follow-up card discovered from
+// this one, 8378984b) can already carry aside files from an earlier run against the SAME home — starting
+// from `[]` would then misreport every "a NEW aside file was created" check as having created one MORE
+// file than it actually did, and "every PRIOR aside file is still present" would spuriously pass on a
+// prior-run file it never actually observed. Seeding from disk makes this file correct under either case.
+let asideFilesSeenSoFar = listAsideFiles(HARD_SHUTDOWN_WATCHDOG_RECORD_PATH);
+
+// Card 0dc09fab round 5: under a loaded host, a bare synchronous `listAsideFiles()` call right after
+// `reportAndConsumeHardShutdownWatchdogRecord()`'s own `fs.renameSync` sometimes didn't yet see the just-
+// created aside file (gen 397's run C: the "a NEW timestamped aside file was created" check failed with no
+// other check in that iteration failing, so the rename itself had genuinely landed — the readdir just
+// hadn't caught up to it yet on a heavily-loaded filesystem). This is an EVENTUAL-consistency tolerance,
+// never a weakening of what's proven: the production rename is synchronous and best-effort, so a real miss
+// (the file never appears at all) still fails this exactly as before — it just no longer penalizes a
+// transient delay that settles within a couple of seconds. Bounded well under the per-iteration budget.
+async function pollForAsideFileCount(recordPath, expectedCount) {
+  let files = listAsideFiles(recordPath);
+  await pollUntil(() => {
+    files = listAsideFiles(recordPath);
+    return files.length >= expectedCount;
+  }, { timeoutMs: 3000, intervalMs: 25 });
+  return files;
+}
 
 // (A) A genuinely synchronously-blocked main thread (Atomics.wait, no timeout) still gets force-exited
 // within the window, platform-correctly (round 2 finding 5): on win32 the EXACT requested code must
@@ -291,7 +314,9 @@ for (const intendedExitCode of [0, 75]) {
   // Round 3 finding 4: a NEW, timestamped aside file must appear (never a fixed `.handled` name), and
   // every PREVIOUSLY-created aside file (from an earlier iteration of this same loop) must STILL exist —
   // proving the rename-aside never unlinks an older firing's forensic record to make room for a new one.
-  const asideFilesNow = recordPath != null ? listAsideFiles(recordPath) : [];
+  // Round 5 (card 0dc09fab): poll briefly for eventual consistency on a loaded filesystem — see
+  // pollForAsideFileCount's own doc comment.
+  const asideFilesNow = recordPath != null ? await pollForAsideFileCount(recordPath, asideFilesSeenSoFar.length + 1) : [];
   check(`[watchdog record, intendedExitCode=${intendedExitCode}] a NEW timestamped aside file was created (kept for forensics, not deleted)`, asideFilesNow.length === asideFilesSeenSoFar.length + 1);
   check(`[watchdog record, intendedExitCode=${intendedExitCode}] every PRIOR aside file is still present (nothing was unlinked)`, asideFilesSeenSoFar.every((f) => asideFilesNow.includes(f)));
   asideFilesSeenSoFar = asideFilesNow;
@@ -309,7 +334,8 @@ for (const intendedExitCode of [0, 75]) {
   const result = reportAndConsumeHardShutdownWatchdogRecord();
   check("[corrupt record] reportAndConsumeHardShutdownWatchdogRecord() returns null for an unparseable record", result === null);
   check("[corrupt record] the corrupt file is gone from its original path", !fs.existsSync(recordPath));
-  const asideFilesAfter = listAsideFiles(recordPath);
+  // Round 5 (card 0dc09fab): same eventual-consistency poll as the main loop above.
+  const asideFilesAfter = await pollForAsideFileCount(recordPath, asideFilesBefore.length + 1);
   check("[corrupt record] it was renamed ASIDE (a new timestamped aside file appeared), not deleted outright", asideFilesAfter.length === asideFilesBefore.length + 1);
   check("[corrupt record] every PRIOR aside file is still present (nothing was unlinked)", asideFilesBefore.every((f) => asideFilesAfter.includes(f)));
   check("[corrupt record] a second consume on the same (now-renamed) path finds nothing left to report", reportAndConsumeHardShutdownWatchdogRecord() === null);
@@ -388,39 +414,314 @@ for (const intendedExitCode of [0, 75]) {
 // GREEN-path upper bound of 9700ms with ~5.3s of separation below the RED (missing-notify) death point
 // near `longBudgetMs` — re-proved RED the same way (deleting the compiled generation-bump/notify call and
 // re-running this file; EXACTLY this check failed, restoring the build made it pass again).
+//
+// @decision 347b3584 — round 5: never go back to a hand-picked absolute slack for this bound — a razor-
+// thin margin (57ms) is always going to flake again the moment host load shifts a little further. Express
+// the upper bound as a FRACTION of the gap between the GREEN floor and the RED (longBudgetMs) ceiling
+// instead, so raising `longBudgetMs` alone widens both margins together. See the decision record for the
+// full numbers.
 {
   const defaultHardExitMs = 1200;
-  const longBudgetMs = 15_000; // wide separation from the tightened upper bound below (see the decision note)
+  const longBudgetMs = 30_000; // wide absolute headroom — the upper bound below is a FRACTION of this, so raising it alone widens both margins at once
   const surviveBlockMs = 2500; // > defaultHardExitMs, < longBudgetMs
-  const tightUpperSlackMs = 6000; // generous for win32 PowerShell kill overhead under a loaded gate + CI/host scheduling slop
+  const promptDeathFloorMs = surviveBlockMs + defaultHardExitMs; // expected GREEN-path death time
+  const PROMPT_UPPER_BOUND_GAP_FRACTION = 0.5; // upper bound sits halfway between the GREEN floor and the RED (longBudgetMs) ceiling
+  const promptUpperBoundMs = promptDeathFloorMs + (longBudgetMs - promptDeathFloorMs) * PROMPT_UPPER_BOUND_GAP_FRACTION;
   const r = await runChild(PER_STEP_BUDGET, [String(defaultHardExitMs), String(longBudgetMs), String(surviveBlockMs)], surviveBlockMs + longBudgetMs + 15_000);
   check("[per-step budget] the long-budget step was NOT killed during its own override window, past the short default", r.out.includes("long-step survived past the short default"));
   check("[per-step budget] the process still eventually died (the short-budget step's hang was caught)", r.timedOut === false);
   check(
     "[per-step budget] death happened AFTER surviveBlockMs + the short default (not killed early, during the long-budget step)",
-    r.elapsedMs >= surviveBlockMs + defaultHardExitMs - 500,
+    r.elapsedMs >= promptDeathFloorMs - 500,
   );
   check(
     "[per-step budget] death happened PROMPTLY on the short-budget step's own default, not after sleeping through " +
-    "to the stale long deadline (this is the check that catches a missing step()-side wake-up — see the decision note above)",
-    r.elapsedMs < surviveBlockMs + defaultHardExitMs + tightUpperSlackMs,
+    "to the stale long deadline (this is the check that catches a missing step()-side wake-up — see the decision note above; " +
+    "the bound is the midpoint between the GREEN floor and the RED ceiling, not a hand-picked absolute slack)",
+    r.elapsedMs < promptUpperBoundMs,
   );
-  console.log(`  (elapsedMs=${Math.round(r.elapsedMs)}, defaultHardExitMs=${defaultHardExitMs}, longBudgetMs=${longBudgetMs}, surviveBlockMs=${surviveBlockMs})`);
+  console.log(`  (elapsedMs=${Math.round(r.elapsedMs)}, defaultHardExitMs=${defaultHardExitMs}, longBudgetMs=${longBudgetMs}, surviveBlockMs=${surviveBlockMs}, promptUpperBoundMs=${Math.round(promptUpperBoundMs)})`);
 }
 
 // ---------------------------------------------------------------------------------------------------
-// (3) STRUCTURAL: round 2 finding 3 — the win32 kill path must ALWAYS fall through to a direct SIGKILL,
-// never short-circuit it behind a "PowerShell appeared to succeed" flag (PowerShell exiting 0 does NOT
-// prove TerminateProcess actually ran — OpenProcess can silently return a null handle).
+// (E) round 5 (card 0dc09fab) — WIN32 EXIT-CODE RACE: the raw SIGKILL fallback must fire ONLY when the
+// custom-exit-code TerminateProcess attempt was NOT confirmed to have succeeded. `TerminateProcess` is
+// asynchronous (MSDN: it initiates termination and returns immediately, without waiting for the target to
+// finish tearing down) — calling it a SECOND time (the raw fallback, which on win32 always re-invokes
+// TerminateProcess via libuv's `uv_kill`, regardless of the signal name passed) while the FIRST call's
+// termination is still in flight can overwrite the already-set exit code before it is "locked in". This
+// is what let exit 75 sometimes become something else under a loaded host (gen 397, 2026-10-04) — a real
+// bug, since `daemon_restart`'s supervisor relaunch keys on the literal numeric 75.
 //
-// Positive control: the OLD (pre-round-2) source genuinely contained this identifier — confirmed via
-// `git show HEAD:packages/daemon/src/graceful-teardown.ts` at the time this test was written — so its
-// absence here is a real, discriminating signal, not a pattern that could never have matched anything.
+// Patches the COMPILED dist/graceful-teardown.js's `const ps = ...; execFileSync("powershell.exe", ...)`
+// sequence with an inline stand-in that reports a KNOWN, controlled outcome (confirmed or unconfirmed)
+// without ever invoking powershell.exe or the real Win32 API — this makes both paths deterministic to
+// test, independent of real TerminateProcess timing. win32-only: the gating logic this proves exists only
+// in the win32 branch of the worker source.
+//
+// @decision 347b3584 — never race the "confirmed success" check below against a single external timeout,
+// and never let its patch shell out to a real process (even a trivial stand-in script) — both reintroduce
+// load-sensitive timing this test exists to remove, and the "hung" result either one produces is
+// indistinguishable from "the watchdog never fired at all." See the decision record for the full
+// RED/GREEN numbers and why.
+// ---------------------------------------------------------------------------------------------------
+if (process.platform === "win32") {
+  const distDir = path.join(__dirname, "..", "dist");
+
+  // Card 0dc09fab round 2 item 4: a stale `graceful-teardown.winrace-<pid>-*.js` sibling can survive a
+  // prior run that crashed/was killed before its own `finally` cleanup ran (and a packed npm tarball would
+  // never have one in the first place, so this only ever prunes test-run debris) — sweep anything whose
+  // pid is no longer alive before this run creates its own. Never removes a LIVE sibling's file: another
+  // concurrently-running copy of this same test file (the load-robustness proof) has its own pid baked
+  // into its own filename and stays untouched.
+  function isPidAlive(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      // `EPERM` means the pid EXISTS but this process lacks permission to signal it (a different user's
+      // process, or a privilege gap) — that's still ALIVE, never grounds to delete its file. `ESRCH` (no
+      // such process) is the one outcome that actually means dead, which is what the bare `false` below
+      // still covers.
+      return err?.code === "EPERM";
+    }
+  }
+  function sweepStaleWinraceSiblings() {
+    let names = [];
+    try { names = fs.readdirSync(distDir); } catch { return 0; }
+    let removed = 0;
+    for (const name of names) {
+      const m = /^graceful-teardown\.winrace-(\d+)-[a-z0-9]+\.js$/.exec(name);
+      if (!m) continue;
+      const pid = Number(m[1]);
+      if (pid === process.pid || isPidAlive(pid)) continue;
+      try { fs.unlinkSync(path.join(distDir, name)); removed++; } catch { /* best-effort */ }
+    }
+    return removed;
+  }
+  const sweptCount = sweepStaleWinraceSiblings();
+  if (sweptCount > 0) console.log(`  (swept ${sweptCount} stale graceful-teardown.winrace-*.js sibling(s) with no live owner)`);
+
+  // Card 0dc09fab round 2 item 1: the decision-point signal is a DURABLE FILE WRITE (the same
+  // fs.writeSync-on-an-explicitly-opened-fd technique the REAL production record uses, never a
+  // console.log/process.stdout.write) — confirmed directly that it has to be: a FIRST version of this
+  // patch wrote the marker via process.stdout.write() from inside the watchdog WORKER thread, and it was
+  // NEVER observed by this test, even on the "confirmed" path where the child survives for the whole grace
+  // window — because `process.stdout` in a worker thread is proxied back to the MAIN thread over an
+  // internal message channel, and the main thread here is synchronously blocked on `Atomics.wait` with NO
+  // event-loop ticks at all, so that proxied write can never actually flush. A real synchronous fs write
+  // from the worker's own OS thread has no such dependency — it's exactly why the REAL watchdog record
+  // itself (HARD_SHUTDOWN_WATCHDOG_RECORD_PATH) is written the same way, and exactly why this patch reuses
+  // that already-in-scope `recordPath`/`fsMod` pair rather than inventing a second mechanism.
+  const WIN32_DECISION_MARKER_PATH = `${HARD_SHUTDOWN_WATCHDOG_RECORD_PATH}.win32-decision-marker`;
+
+  // Round 5 (card 0dc09fab): write the patched worker source to a UNIQUE SIBLING FILE under dist/, never
+  // mutate the shared installed graceful-teardown.js in place — that file is imported by OTHER
+  // concurrently-running test files/fixtures (e.g. daemon-restart-hard-exit-watchdog.mjs, and THIS SAME
+  // test file running concurrently with itself under the load-robustness proof below), so an in-place
+  // mutation would race them. The sibling file lives in the SAME directory so its own relative imports
+  // (./paths.js, ./vault/versioner.js, ./git/merge-danger-window.js) still resolve to the real, unmutated
+  // siblings. The fixture takes an OPTIONAL 4th argv — a module path/URL to import armHardShutdownWatchdog
+  // from instead of the real dist path — so every EXISTING caller (which never passes a 4th arg) is
+  // byte-identical.
+  //
+  // Round 2 item 1: `mode` is `"confirmed"` or `"unconfirmed"` — the WHOLE `const ps = ...; execFileSync(
+  // "powershell.exe", ...)` sequence is replaced (never just the `ps` script text, as the round-5 version
+  // did), so NEITHER mode ever spawns a real powershell.exe process at all. `"confirmed"` writes the
+  // decision marker and falls through to the unchanged `winCustomExitConfirmed = true;` line right after
+  // the matched region; `"unconfirmed"` writes the marker then throws synchronously, landing in the
+  // existing enclosing `catch {}` exactly as a real null-handle/false-TerminateProcess/execFileSync-throw
+  // outcome would.
+  const realDistPath = path.join(distDir, "graceful-teardown.js");
+  const WIN32_PS_ANCHOR = /const ps =[\s\S]*?execFileSync\("powershell\.exe", \["-NoProfile", "-NonInteractive", "-Command", ps\], \{ timeout: 10000, stdio: "ignore" \}\);/;
+  async function withPatchedWin32PsScript(mode, fn) {
+    const original = fs.readFileSync(realDistPath, "utf8");
+    if (!WIN32_PS_ANCHOR.test(original)) {
+      throw new Error(
+        "withPatchedWin32PsScript: the expected win32 'const ps = ...; execFileSync(\"powershell.exe\", ...)' " +
+        "anchor was not found in dist/graceful-teardown.js — the patch is a no-op, refusing to silently test nothing",
+      );
+    }
+    // `recordPath` and `fsMod` are both ALREADY in scope at this point in the real worker source (see the
+    // decision note above for why this must be a durable fs write, never console/stdout output).
+    const markerWrite =
+      `try { const __mfd = fsMod.openSync(recordPath + ".win32-decision-marker", "w"); ` +
+      `try { fsMod.writeSync(__mfd, "x"); } finally { fsMod.closeSync(__mfd); } } catch {}`;
+    const replacement = mode === "confirmed"
+      ? `${markerWrite} /* test-patch (card 0dc09fab): simulated CONFIRMED success — no real powershell.exe spawn */`
+      : `${markerWrite} throw new Error("test-patch (card 0dc09fab): simulated unconfirmed");`;
+    const patched = original.replace(WIN32_PS_ANCHOR, replacement);
+    const patchedPath = path.join(distDir, `graceful-teardown.winrace-${process.pid}-${Math.random().toString(36).slice(2, 8)}.js`);
+    fs.writeFileSync(patchedPath, patched);
+    try {
+      return await fn(pathToFileURL(patchedPath).href);
+    } finally {
+      try { fs.unlinkSync(patchedPath); } catch { /* best-effort cleanup of this test's own scratch file */ }
+    }
+  }
+
+  // Spawns the sync-hang fixture against the patched module, waits (bounded) for the decision-point
+  // marker FILE to appear, then watches for a BOUNDED grace window whether the child exits — never racing
+  // a single external timeout against the whole sequence. Always cleans up: a "confirmed" child hangs
+  // forever by design (that's the fix), so it's reaped here rather than left running.
+  async function runPatchedAndObserveExit(mode, hardExitMs, graceMs) {
+    try { fs.unlinkSync(WIN32_DECISION_MARKER_PATH); } catch { /* fine if it doesn't exist yet */ }
+    return withPatchedWin32PsScript(mode, async (modulePath) => {
+      const t0 = performance.now();
+      const child = spawn(process.execPath, [SYNC_HANG, String(hardExitMs), "0", modulePath], { stdio: "pipe" });
+      let out = "";
+      let exited = false;
+      let exitInfo = null;
+      child.stdout.on("data", (d) => { out += d; });
+      child.stderr.on("data", (d) => { out += d; });
+      child.on("exit", (code, signal) => { exited = true; exitInfo = { code, signal }; });
+
+      const sawMarker = await pollUntil(() => fs.existsSync(WIN32_DECISION_MARKER_PATH), { timeoutMs: hardExitMs + 10_000, intervalMs: 20 });
+      const exitedWithinGrace = sawMarker ? await pollUntil(() => exited, { timeoutMs: graceMs, intervalMs: 20 }) : exited;
+
+      if (!exited) {
+        try { child.kill("SIGKILL"); } catch { /* best-effort cleanup of this test's own child */ }
+        await pollUntil(() => exited, { timeoutMs: 5000, intervalMs: 20 });
+      }
+      return { sawMarker, exitedWithinGrace, exitInfo, out, elapsedMs: performance.now() - t0 };
+    });
+  }
+
+  {
+    // CONFIRMED SUCCESS: the decision point is simulated as confirmed WITHOUT ever calling TerminateProcess
+    // for real — if the fallback is correctly SKIPPED once confirmed, the process must stay alive through
+    // the whole grace window after the marker appears.
+    const hardExitMs = 500;
+    const graceMs = 1000;
+    const r = await runPatchedAndObserveExit("confirmed", hardExitMs, graceMs);
+    check(
+      "[win32 exit-code race, confirmed success] the watchdog genuinely reached the win32 decision point " +
+      "(never a vacuous pass from the watchdog not firing at all)",
+      r.sawMarker,
+    );
+    check(
+      "[win32 exit-code race, confirmed success] the raw SIGKILL fallback is SKIPPED once the custom-code " +
+      "terminate is confirmed — the process stays alive through the grace window after the decision point, " +
+      "proving no second TerminateProcess call was ever issued to race the first",
+      r.sawMarker && !r.exitedWithinGrace,
+    );
+    console.log(`  (elapsedMs=${Math.round(r.elapsedMs)}, sawMarker=${r.sawMarker}, exitedWithinGrace=${r.exitedWithinGrace} — expected false)`);
+  }
+
+  {
+    // CONFIRMED FAILURE: the decision point is simulated as unconfirmed — the raw fallback must still fire,
+    // within the grace window. This path is UNCHANGED by the fix: it's the safety net round 2 added, still
+    // needed when the custom-code attempt genuinely didn't work.
+    const hardExitMs = 500;
+    const graceMs = 3000;
+    const r = await runPatchedAndObserveExit("unconfirmed", hardExitMs, graceMs);
+    check(
+      "[win32 exit-code race, confirmed failure] the watchdog genuinely reached the win32 decision point",
+      r.sawMarker,
+    );
+    check(
+      "[win32 exit-code race, confirmed failure] the raw SIGKILL fallback STILL fires within the grace window " +
+      "when the custom-code terminate was not confirmed — the process is force-killed as before",
+      r.sawMarker && r.exitedWithinGrace,
+    );
+    console.log(`  (elapsedMs=${Math.round(r.elapsedMs)}, sawMarker=${r.sawMarker}, exitedWithinGrace=${r.exitedWithinGrace} — expected true)`);
+  }
+} else {
+  console.log("  (skipping [win32 exit-code race] checks — win32-only)");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// round 5 (card 0dc09fab), 2b — ASIDE-PATH COLLISION-PROOFING: timestampedAsidePath derives its destination
+// from `firedAt`'s ISO-millisecond timestamp alone. `fs.renameSync` on Windows SILENTLY OVERWRITES an
+// existing destination (MoveFileEx with MOVEFILE_REPLACE_EXISTING) rather than erroring — so two firings
+// whose `firedAt` happens to collide to the millisecond would otherwise clobber each other's forensic
+// record with no error and no visible sign, contradicting this whole mechanism's "never deletes/loses a
+// firing" guarantee. Forces the exact collision (two records sharing the IDENTICAL firedAt) directly,
+// rather than hoping to catch a real clock collision, and asserts both survive as distinct files.
+// ---------------------------------------------------------------------------------------------------
+{
+  const recordPath = HARD_SHUTDOWN_WATCHDOG_RECORD_PATH;
+  const sameFiredAt = new Date().toISOString();
+  const asideFilesBefore = listAsideFiles(recordPath);
+
+  fs.mkdirSync(path.dirname(recordPath), { recursive: true });
+  fs.writeFileSync(recordPath, JSON.stringify({ firedAt: sameFiredAt, step: "collision-test-1", intendedExitCode: 0, label: "test-collision" }));
+  reportAndConsumeHardShutdownWatchdogRecord();
+  const asideFilesAfterFirst = await pollForAsideFileCount(recordPath, asideFilesBefore.length + 1);
+  // Card 0dc09fab round 2 item 3: the FIRST firing's own aside FILENAME, captured now — before the second
+  // rename happens — so the content check below re-reads this exact file after the collision, never a
+  // freshly-listed one that might happen to match by coincidence.
+  const firstAsideFileName = asideFilesAfterFirst.find((f) => !asideFilesBefore.includes(f)) ?? null;
+
+  fs.writeFileSync(recordPath, JSON.stringify({ firedAt: sameFiredAt, step: "collision-test-2", intendedExitCode: 0, label: "test-collision" }));
+  reportAndConsumeHardShutdownWatchdogRecord();
+  const asideFilesAfterSecond = await pollForAsideFileCount(recordPath, asideFilesAfterFirst.length + 1);
+
+  check(
+    "[aside-path collision] two firings sharing the IDENTICAL firedAt still produce TWO DISTINCT aside files " +
+    "(never one silently overwriting the other)",
+    asideFilesAfterSecond.length === asideFilesAfterFirst.length + 1,
+  );
+  // Card 0dc09fab round 2 item 3: the PRE-EXISTING check just below (filename still present in the
+  // directory listing) can NEVER fail by construction — `fs.renameSync`'s silent-overwrite bug this
+  // section exists to catch clobbers a destination's CONTENT while leaving its NAME (and thus its presence
+  // in a `readdirSync` listing) completely unchanged; a regression that dropped `timestampedAsidePath`'s
+  // sequence suffix (reintroducing the exact collision) would make BOTH firings' aside names IDENTICAL,
+  // so a name-presence check would still see "the name is still there" — it was never looking at the
+  // thing that actually gets clobbered. Read the FIRST file's own CONTENT back off disk, after the SECOND
+  // rename has happened, and assert it still reads its own step ("collision-test-1") — a regressed,
+  // non-unique destination would instead have overwritten it with the second firing's "collision-test-2".
+  const firstAsideContent = firstAsideFileName
+    ? (() => { try { return JSON.parse(fs.readFileSync(path.join(path.dirname(recordPath), firstAsideFileName), "utf8")); } catch { return null; } })()
+    : null;
+  check(
+    "[aside-path collision] the first firing's aside file CONTENT still reads its own step after the second " +
+    "firing (name-presence alone can't catch this — see the note above: a regressed, non-unique destination " +
+    "keeps the SAME filename while clobbering its content)",
+    firstAsideContent?.step === "collision-test-1",
+  );
+  check(
+    "[aside-path collision] the first firing's aside file was NOT clobbered by the second",
+    asideFilesAfterFirst.every((f) => asideFilesAfterSecond.includes(f)),
+  );
+  asideFilesSeenSoFar = asideFilesAfterSecond;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// (3) STRUCTURAL: card 0dc09fab round 2 item 2 — this check used to assert round 2's OWN contract
+// ("the win32 kill path must ALWAYS fall through to a direct SIGKILL, never short-circuit it behind a
+// 'PowerShell appeared to succeed' flag") — which round 5 deliberately REVERSED: round 5's whole point is
+// that the fallback now DOES skip, correctly, once the custom-code kill is genuinely CONFIRMED (never on
+// a bare "didn't throw"). The old check stayed green only by grepping for the superseded
+// `killedWithCustomCode` identifier's absence — a name nobody would reintroduce regardless of whether
+// round 5's real gate (`winCustomExitConfirmed`, and the PS script's own two `exit 1` branches that make
+// "didn't throw" a meaningful signal in the first place) is still present. Rewritten to assert round 5's
+// ACTUAL contract directly.
+//
+// Positive control (unchanged check only): the OLD (pre-round-2) source genuinely contained
+// `killedWithCustomCode` — confirmed via `git show HEAD:packages/daemon/src/graceful-teardown.ts` at the
+// time this test was written — so its absence here is a real, discriminating signal, not a pattern that
+// could never have matched anything.
 // ---------------------------------------------------------------------------------------------------
 {
   const distSource = fs.readFileSync(path.join(__dirname, "..", "dist", "graceful-teardown.js"), "utf8");
   check(
-    "[structural] the compiled watchdog no longer gates the SIGKILL fallback behind a 'killedWithCustomCode' short-circuit",
+    "[structural] the PS script exits 1 on a null OpenProcess handle (round 5 contract — what makes " +
+    "execFileSync 'didn't throw' a meaningful confirmation signal in the first place)",
+    distSource.includes("if ($h -eq [IntPtr]::Zero) { exit 1 }"),
+  );
+  check(
+    "[structural] the PS script exits 1 on a false TerminateProcess return (round 5 contract, same reason)",
+    distSource.includes("if (-not $ok) { exit 1 }"),
+  );
+  check(
+    "[structural] the compiled watchdog gates the raw SIGKILL fallback on winCustomExitConfirmed (round 5's " +
+    "real contract), never unconditionally",
+    /if \(!winCustomExitConfirmed\)/.test(distSource),
+  );
+  check(
+    "[structural] the old round-2 'killedWithCustomCode' short-circuit identifier is gone (superseded by " +
+    "winCustomExitConfirmed)",
     !distSource.includes("killedWithCustomCode"),
   );
 }

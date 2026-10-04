@@ -155,6 +155,130 @@ margin than round 3's, not a narrower one, despite the larger absolute numbers. 
 as round 3 (deleting the compiled generation-bump/notify call and re-running the file; restoring the build
 made it pass again).
 
+## Round 5 (card 0dc09fab, 2026-10-04)
+
+A real 6-worker-plus-builds host flaked round 4's own "promptly" per-step-budget bound (elapsedMs=9757
+against a 9700ms bound — 57ms over), and surfaced two genuinely new defects in the same gen-397 run:
+
+**The win32 exit-code race (a real product bug).** `TerminateProcess` on Windows is asynchronous — per
+MSDN it initiates termination and returns immediately, without waiting for the target to actually finish
+tearing down. Round 2 made the raw `process.kill(pid, "SIGKILL")` fallback run UNCONDITIONALLY after the
+PowerShell custom-exit-code attempt, specifically because PowerShell exiting 0 didn't prove `OpenProcess`
+got a valid handle. But that fallback, on win32, always re-invokes `TerminateProcess` itself (via libuv's
+`uv_kill`, hardcoded to `TerminateProcess(handle, 1)` regardless of signal name) — so under light load the
+first call's teardown finishes fast enough that the second call lands on an already-fully-dead process and
+has no effect (exit 75 survives); under heavier load that teardown window widens enough for the second call
+to land while the process is still mid-teardown, overwriting the already-set exit code before it's "locked
+in" (gen 397 measured this losing exit 75). This matters because `daemon_restart`'s supervisor relaunch
+keys on the literal numeric 75.
+
+Fix: the PowerShell script now reports a genuine, checkable result via its OWN exit code — `exit 1` if
+`OpenProcess` returns a null handle, or if `TerminateProcess` itself returns `false`; otherwise it falls
+off the end (PowerShell's implicit exit 0). Node treats `execFileSync` NOT throwing as confirmation the
+custom-exit-code kill is already in flight (`winCustomExitConfirmed = true`) and, in that case ONLY, SKIPS
+the raw SIGKILL fallback entirely — removing the race by construction, since there is nothing left to race
+against. The fallback still runs, exactly as round 2 intended, whenever the custom-code attempt is NOT
+confirmed (null handle, `TerminateProcess` returning false, or `execFileSync` itself throwing/timing out).
+POSIX is unaffected (`winCustomExitConfirmed` never gets set there, so the fallback still always runs).
+
+**Named residual (round 2, card 0dc09fab, not closed by this fix):** the fix removes the race for every
+case this PS script can itself REPORT, but one path through `execFileSync` still slips past it —
+`TerminateProcess` returns `true` (the kill is genuinely in flight) and the PowerShell process then falls
+off the end to report success, but `execFileSync` ITSELF throws for an unrelated reason before Node ever
+observes that exit code (e.g. the 10s timeout). Node sees a throw, not a clean exit-0 observation, so
+`winCustomExitConfirmed` stays `false` and the raw SIGKILL fallback still runs — reopening the exact same
+race this round exists to close, against a kill that genuinely was already confirmed, just not confirmed
+THROUGH THIS SIGNAL. This is narrower than the original bug (it needs `execFileSync` to fail AFTER the
+real API call already succeeded, not merely under ordinary load) and has not been measured to occur in
+practice; it is recorded here as a known gap in the fix's coverage, not a reason to distrust it.
+
+Proven with a patch-based test: the compiled `dist/graceful-teardown.js`'s `const ps = ...;
+execFileSync("powershell.exe", ...)` sequence is replaced wholesale with an inline stand-in that reports a
+KNOWN, controlled outcome (confirmed or unconfirmed) without ever invoking powershell.exe or the real
+Win32 API at all, making both paths deterministic. The patched text is written to a UNIQUE SIBLING FILE
+under `dist/` (never the installed `graceful-teardown.js` in place) — mutating the shared file would race
+any OTHER concurrently-running process/test importing from it (including this same test file running
+concurrently with itself under the load-robustness proof below), and the sibling lives in the same
+directory so its own relative imports still resolve to the real, unmutated siblings. The
+`_graceful-teardown-sync-hang.mjs` fixture takes an optional 4th argv (a module path/URL) to import
+`armHardShutdownWatchdog` from this sibling instead of the real dist path; every existing caller omits it
+and is byte-identical.
+
+**Round 2 revision (card 0dc09fab, 2026-10-04): the FIRST version of this patch still shelled out to a
+real `powershell.exe` for its trivial stand-in script, and that version's "confirmed success" check went
+3 FAIL / 2 PASS on PRE-FIX gating under load — where it must always FAIL.** Two compounding causes: (1)
+under host load, the whole sequence (node startup + the watchdog's own `hardExitMs` + a COLD
+`powershell.exe` spawn) could exceed the test's OWN external safety-kill window, making the process look
+"hung" (the expected-PASS signal) even on buggy pre-fix code, for a reason unrelated to the fix; (2) with
+no independent signal that the watchdog had fired AT ALL, that same "hung" result was also
+indistinguishable from "the watchdog never fired," a different and more serious bug. Fixed by removing
+the real `powershell.exe` spawn from the patch entirely — neither the "confirmed" nor "unconfirmed"
+stand-in ever calls `execFileSync` again — and having the patched worker report its own decision-point
+marker at the exact point the real code would have inspected `execFileSync`'s outcome. Each check now
+asserts the marker was actually seen (ruling out "never fired") and THEN separately asserts what happens
+in a short, bounded grace window after it, rather than racing one external timeout against the whole
+sequence.
+
+The marker itself is a DURABLE FILE WRITE (`fs.writeSync` on an explicitly-opened fd, a sibling of the
+real watchdog record path), never `console.log`/`process.stdout.write` — confirmed directly that it has
+to be: an interim version of this patch wrote the marker via `process.stdout.write()` from inside the
+watchdog WORKER thread, and it was never observed, even on the "confirmed" path where the child survives
+the whole grace window, because `process.stdout` in a worker thread is proxied back to the MAIN thread
+over an internal message channel, and the main thread here is synchronously blocked on `Atomics.wait`
+with no event-loop ticks at all — the proxied write can never flush. Re-verified RED/GREEN the same way
+as the original fix: 5/5 FAIL against the pre-fix (unconditional-fallback) code, 12/12 PASS against the
+real fix under a 12-way-concurrent run with 4 CPU-burner processes.
+
+Also round 2: the structural check asserting this round's own gating contract used to assert the
+SUPERSEDED round-2 contract (the OLD `killedWithCustomCode` short-circuit's absence) instead of this
+round's real one — it stayed green only because nobody would reintroduce that exact dead name, never
+because it verified `winCustomExitConfirmed`'s actual gating or the PS script's own `exit 1` branches.
+Rewritten to assert both directly.
+
+**Aside-path collision-proofing.** `timestampedAsidePath` derived its destination from `firedAt`'s
+ISO-millisecond timestamp alone. `fs.renameSync` on Windows silently OVERWRITES an existing destination
+(`MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`) rather than erroring, so two firings whose `firedAt`
+happens to collide to the millisecond would clobber each other's forensic record with no error and no
+visible sign — directly contradicting this mechanism's "never deletes/loses a firing" guarantee. (gen
+397's run C failure is a SEPARATE, already-explained effect — ordinary filesystem-listing lag under heavy
+I/O, which the TEST side now tolerates with a brief poll — not evidence this collision itself fired that
+day; no log or artifact from that run actually attributes it to a `firedAt` collision, so this record no
+longer claims one did.) Fixed: `timestampedAsidePath` appends an in-process monotonic sequence number,
+making every call's destination path provably distinct regardless of clock resolution WITHIN one process's
+lifetime — **the sequence resets to 0 on every fresh boot (it's a plain module-scope `let`, not persisted
+anywhere)**, so uniqueness here is an in-process guarantee, not a durable, cross-restart one: two firings
+that collide on `firedAt` AND land on the same in-process sequence value ACROSS a restart (one right before
+a crash/exit, the next right after reboot, both producing sequence `0`) are not provably distinct by this
+mechanism alone. Narrower than the original bug (it needs a restart between the two firings, not just
+rapid succession within one process) and not separately mitigated here. Proven directly: two records
+written with the IDENTICAL `firedAt` and consumed back to back, within the SAME process, now produce two
+distinct aside files (verified RED against the pre-fix code — the second call silently overwrote the
+first, so the aside-file count never grew past 1; GREEN after the fix) — **this is a single observation
+(n=1) of the overwrite mechanism firing, not a statistically-sampled rate; it demonstrates the mechanism
+exists, not how often it would otherwise bite in practice.**
+
+**Round 2 addition (card 0dc09fab, 2026-10-04): the "first firing survived" check above used to compare
+aside-file NAMES, which this exact overwrite bug can never flip** — a collided destination (the round-3
+shape this section exists to catch) keeps the SAME filename across both renames; only its CONTENT gets
+clobbered. A regression that dropped the sequence suffix would still pass a name-presence check, because
+the name never changes either way. Fixed: the check now re-reads the FIRST firing's own aside file
+CONTENT, after the SECOND rename has happened, and asserts its `step` field still reads `"collision-test-
+1"` (not the second firing's `"collision-test-2"`, which an overwrite would leave it holding). Verified
+RED/GREEN directly: reverting `timestampedAsidePath` to the round-3 shape (dropping the sequence suffix,
+so both firings' destinations collide to the same name) and running the file 5 times gave 5/5 FAIL on the
+new content check; restoring the real fix and re-running 5 times gave 5/5 PASS.
+
+Also round 5 (test-only, no production change): the per-step-budget "promptly" upper bound is now the
+MIDPOINT between the expected-GREEN floor (`surviveBlockMs + defaultHardExitMs`) and the RED (missing-
+notify) ceiling (`longBudgetMs`, raised 15000 → 30000) — a single named fraction
+(`PROMPT_UPPER_BOUND_GAP_FRACTION = 0.5`) derived from the test's own constants, so raising `longBudgetMs`
+alone widens the GREEN-side margin and the RED-side separation together, instead of needing two
+independently-tuned absolute numbers to stay in proportion by hand (round 4's own hand-picked slack had
+already rotted once, at only 57ms of margin). And the aside-file-count assertions now poll briefly (up to
+3s) rather than checking instantaneously, tolerating a `fs.readdirSync()` not yet reflecting an
+immediately-prior `fs.renameSync()` under heavy filesystem I/O — a genuine miss (the file never appears)
+still fails exactly as before.
+
 ## Do not
 
 - Do not assume the try/catch around `teardown()` in `runGracefulTeardown` protects against a hang — it
@@ -198,9 +322,27 @@ made it pass again).
 - Do not apply one flat budget to every step (round 2) — a healthy `flushVaultsAndStopCodescape` flush can
   legitimately run minutes past the 60s default; give it its own derived budget via
   `computeFlushVaultsStepBudgetMs`, never a copied number.
-- Do not gate the win32 SIGKILL fallback behind "did the PowerShell attempt appear to succeed" (round 2) —
-  a null `OpenProcess` handle lets the script exit 0 without actually terminating anything; always fall
-  through to `process.kill(pid, "SIGKILL")` afterward regardless.
+- Do not gate the win32 SIGKILL fallback behind the OLD, unreliable "did the PowerShell attempt appear to
+  succeed" signal (round 2) — the script used to exit 0 unconditionally even when `OpenProcess` returned a
+  null handle, so "appeared to succeed" proved nothing. THAT signal is still gated against: the fallback
+  stays unconditional on anything UNCONFIRMED (round 5's PS script now `exit 1`s on a null handle or a
+  `false` `TerminateProcess` return, and any `execFileSync` throw/timeout also counts as unconfirmed).
+  ⛔ But (round 5) do NOT make the fallback unconditional on a GENUINE confirmation either — `TerminateProcess`
+  is asynchronous (initiates termination, returns immediately, does not wait for the target to finish
+  tearing down), so unconditionally re-invoking it via the raw SIGKILL fallback (which on win32 always
+  calls `TerminateProcess(handle, 1)` through libuv's `uv_kill`) can land a SECOND call while the first
+  confirmed one is still mid-teardown, overwriting the already-set exit code before it's "locked in" —
+  measured losing exit 75 under a loaded host. Skip the fallback ONLY when the custom-code kill is
+  CONFIRMED (PS script exits 0, meaning a non-null `OpenProcess` handle AND a `true` `TerminateProcess`
+  return) — never on a mere "didn't throw" that doesn't actually verify both.
+  ⛔ And do not read "didn't throw" as meaningful on its own, independent of the PS script's own text — it
+  is `execFileSync` NOT throwing that Node treats as confirmation, but that signal is only trustworthy
+  BECAUSE the PS script's own two `exit 1` branches (the null-handle check and the false-`TerminateProcess`
+  check) turn every unconfirmed outcome into a non-zero exit, which `execFileSync` turns into a throw. A PS
+  script with no such `exit 1` branches (the round-2 shape, which always fell off the end with an implicit
+  exit 0 regardless of what `OpenProcess`/`TerminateProcess` actually returned) would make "didn't throw"
+  true unconditionally, proving nothing — the gate's safety lives in the PS script's branches, not in the
+  mere act of checking `execFileSync`'s outcome.
 - Do not write the fired-watchdog record to fd 2 (stderr) or skip writing it before the kill (round 2) —
   the stderr line itself may never be observed; the durable file under `LOOM_HOME/logs/` is the only
   guaranteed operator-visible trace of a firing.
@@ -212,6 +354,10 @@ made it pass again).
   separation so narrow that ordinary win32 kill-path overhead under a loaded gate can flake the GREEN
   check; widen BOTH `longBudgetMs` and the slack together (round 4 raised them to 15000/6000) rather than
   tightening the slack to buy back margin, which would shrink headroom on the side that actually flakes.
+  ⛔ Round 4's own hand-picked absolute slack STILL flaked (9757ms against a 9700ms bound — 57ms of margin)
+  on a heavier-loaded host. Do not go back to a hand-picked absolute slack at all (round 5) — express the
+  upper bound as a FRACTION of the gap between the GREEN floor and `longBudgetMs`
+  (`PROMPT_UPPER_BOUND_GAP_FRACTION`), so raising `longBudgetMs` alone widens both margins in lockstep.
 - Do not have the watchdog worker wait on the DONE-flag index for the per-step deadline race (round 3) —
   it only changes once, at disarm, so it can't distinguish "nothing changed" from "step() just moved the
   deadline." Wait on the GENERATION index (`HEADER_GEN_INDEX`) instead, incremented by both `step()` and
@@ -223,6 +369,11 @@ made it pass again).
 - Do not go back to a single fixed `.handled` rename-aside suffix (round 3) — it forces an `unlinkSync` of
   any prior aside file before reuse, destroying an OLDER firing's forensic record. Stamp every aside name
   with its own `firedAt` (or an epoch-ms fallback) so no two firings' aside files ever collide.
+  ⛔ But (round 5) a bare `firedAt` timestamp, even to millisecond resolution, is NOT provably unique on its
+  own — `fs.renameSync` on Windows silently OVERWRITES an existing destination (`MoveFileEx` with
+  `MOVEFILE_REPLACE_EXISTING`) rather than erroring, so a collided timestamp would clobber an older
+  firing's record with no error and no visible sign. Always append the in-process monotonic
+  `asidePathSequence` counter too — never drop it thinking the timestamp alone is "surely" unique.
 - Do not let an unparseable record file fall into the generic catch-all silently (round 3) — it would sit
   on disk forever, with every future boot re-attempting and re-failing the same parse invisibly. Report it
   loudly and rename it aside, same as a genuine firing.
@@ -234,3 +385,38 @@ made it pass again).
   a no-op, making the check unable to catch a broken `disarm()`. The fixture must stay alive PAST
   `hardExitMs` on its own (a plain `setTimeout`, which holds the event loop open) so only a genuinely
   suppressed watchdog lets it reach that point cleanly with no record file written.
+- Do not try to test the win32 confirmed-success/confirmed-failure fallback gating (round 5) against REAL
+  `TerminateProcess` timing — it's inherently racy (that race is the whole bug) and can't deterministically
+  produce either outcome on demand. Patch the COMPILED `dist/graceful-teardown.js`'s embedded PowerShell
+  script text to a trivial controlled stand-in (`"exit 0"` / `"exit 1"`) instead.
+  ⛔ But do NOT write that patch to the installed `dist/graceful-teardown.js` IN PLACE the way the OTHER
+  (manual, one-off, RED/GREEN-proof-then-restore) dist patches in this file's own history did — this patch
+  runs as a PERMANENT part of every ordinary test run, not a one-off manual proof, so an in-place mutation
+  would race any other concurrently-running process/test importing from the SAME shared file (including
+  this test file running concurrently with itself under the load-robustness proof). Write it to a unique
+  sibling file under `dist/` instead, and import it via the sync-hang fixture's optional module-override
+  argv.
+- Do not assert an aside-file count change instantaneously after a rename under load (round 5) — a
+  `fs.readdirSync()` immediately following a prior process's `fs.renameSync()` can lag briefly under heavy
+  filesystem I/O. Poll briefly (bounded, e.g. a few seconds) for the expected count instead of checking
+  once; this doesn't weaken what's proven — a genuine miss (the file never appears at all) still fails.
+- Do not let the win32 confirmed-success/confirmed-failure test (round 2, card 0dc09fab) race a single
+  external timeout against the WHOLE sequence, and do not shell out to a real `powershell.exe` even for a
+  trivial stand-in script — both reintroduce load-sensitive timing this patch exists to remove, and the
+  "hung" result either produces is indistinguishable from "the watchdog never fired at all." Report a
+  decision-point marker from inside the patched worker and assert it was seen BEFORE asserting what
+  happens in a short, bounded grace window afterward.
+- Do not report that decision-point marker (or ANY signal from inside the watchdog worker, while the main
+  thread may be synchronously blocked) via `console.log`/`process.stdout.write`/`process.stderr.write`
+  (round 2, card 0dc09fab) — a worker thread's `process.stdout` is proxied back to the MAIN thread over an
+  internal message channel, which can never flush while that main thread is blocked on `Atomics.wait` with
+  no event-loop ticks running at all. Confirmed directly: a stdout-based marker was never observed, even on
+  the path where the child survives for the whole grace window. Use a durable, synchronous fs write
+  instead (`fs.writeSync` on an explicitly-opened fd) — the same technique the REAL watchdog record already
+  uses, for the identical reason.
+- Do not assert a collision-proofing check (the aside-path "first firing survived" case) by aside-file
+  NAME alone (round 2, card 0dc09fab) — `fs.renameSync`'s silent-overwrite bug clobbers the destination's
+  CONTENT while leaving its NAME (and thus its presence in a `readdirSync` listing) completely unchanged, so
+  a name-presence check can never fail even when a regression reintroduces the exact collision this section
+  exists to catch. Re-read the file's own content after the second rename and assert the field that would
+  actually be overwritten.

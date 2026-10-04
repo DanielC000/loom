@@ -4244,6 +4244,16 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // so a comment-only edit could in principle land a decoy "enterMergeQuarantine(" + "unconfirmedKillReason("
   // pair in prose above a real bypassing call and mask it — belongs here on the same grounds.
   "packages/daemon/test/quarantine-reason-windows-guidance.mjs",
+  // Card 0dc09fab (Code Review c6f36aa7, round 2 item 6): two SEPARATE raw, unstripped reads of the
+  // compiled dist/graceful-teardown.js SOURCE — the win32-exit-code-race patch anchor (section E,
+  // `withPatchedWin32PsScript`'s regex over `const ps = ...; execFileSync("powershell.exe", ...)`) and the
+  // structural check asserting the round-5 gating contract (the PS script's own `exit 1` branches plus the
+  // `if (!winCustomExitConfirmed)` gate, and the absence of the superseded `killedWithCustomCode` name) —
+  // both genuinely new reads with no live production re-derivation to inherit immunity from, same posture
+  // emit-compare-soundness-guard.mjs's own entry above documents. tsc keeps comments, so a comment-only
+  // edit near either anchor could in principle shift what the regex matches or what the structural
+  // substring search finds.
+  "packages/daemon/test/graceful-teardown-hard-exit-backstop.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its
