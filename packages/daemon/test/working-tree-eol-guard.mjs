@@ -42,40 +42,39 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // `git check-attr eol` per path — never a hand-copied list of pinned globs, which would silently drift
 // from `.gitattributes` the moment either changed (card f645b481's shadow-list defect, one level up).
 //
-// THE ONE REMAINING GENUINE ALWAYS-LF FILE (`packages/web/src/pages/Companion.tsx`) — NOT a flip, and
-// NOT hardcoded as an exception here either. It carries a single literal NUL (0x00) byte in its own
-// source (a sentinel map-key — grep `\x00` in the file to see it). A NUL byte anywhere in a blob is
-// exactly the heuristic git's OWN `text=auto` content-sniffing uses to decide a path is BINARY —
-// confirmed empirically on this card by running `git checkout --` against the file directly: its
-// working-tree bytes don't change, in this worktree or a fresh one, regardless of `core.autocrlf`. A
-// binary-by-content file is never subject to LF/CRLF conversion by git at all — commit or checkout — so
-// there is no line-ending policy to enforce on it, and this guard SKIPS any working-tree file containing
-// a raw NUL byte for exactly that reason. This generalises to any FUTURE file with the same shape
-// (nothing here needs updating if another such file is ever added), and it means a real flip can never
-// hide behind this exemption: a genuinely flipped source file (a config, a doc, an ordinary source file)
-// has no reason to carry an embedded NUL, and one that legitimately does is — by construction — a file
-// git itself was never going to touch either.
+// NO KNOWN ALWAYS-LF FILE REMAINS, as of card `eda83035`. `packages/web/src/pages/Companion.tsx` used
+// to be the last one: it carried a single literal NUL (0x00) byte in its own source (a sentinel
+// map-key). A NUL byte anywhere in a blob is exactly the heuristic git's OWN `text=auto` content-
+// sniffing uses to decide a path is BINARY — confirmed empirically (card `4f2c493a`) by running `git
+// checkout --` against the file directly: its working-tree bytes didn't change, in this worktree or a
+// fresh one, regardless of `core.autocrlf`. A binary-by-content file is never subject to LF/CRLF
+// conversion by git at all — commit or checkout — so there was no line-ending policy to enforce on it.
+// Card `eda83035` rewrote that NUL as the `\u0000` escape (an identical runtime string value, per the
+// ECMAScript spec — the map-key's codepoints are unchanged), the same fix card `71231839` had already
+// applied to `packages/daemon/test/resume-mode-detect.mjs`'s own garbage-input fixture earlier. Both
+// files are now ordinary unpinned text=auto files, checked against the same CRLF-on-this-host policy as
+// everything else, like any other file that never carried a NUL.
 //
-// `packages/daemon/test/resume-mode-detect.mjs` used to be a second such file (its own garbage-input
-// test fixture carried a literal NUL). Card 71231839 found that same NUL — sitting inside git's ~8000-
-// byte diff-binary sniff window, unlike Companion.tsx's (past that window) — also silenced `git log
-// --numstat`/diff rendering for the file, and rewrote it as the `\x00` escape (an identical runtime
-// string value, per the ECMAScript spec, so the test's own assertions are unaffected). That took the
-// file out of this guard's NUL-exemption entirely — it is now an ordinary unpinned text=auto file,
-// checked against the same CRLF-on-this-host policy as everything else, like any other file that never
-// carried a NUL.
+// THE `containsNul` SKIP ITSELF STAYS — it is not dead code just because its last real exemplar is
+// fixed. It generalises to any FUTURE file with the same shape (nothing here needs updating if one is
+// ever added), and it means a real flip can never hide behind this exemption: a genuinely flipped source
+// file (a config, a doc, an ordinary source file) has no reason to carry an embedded NUL, and one that
+// legitimately does is — by construction — a file git itself was never going to touch either. With no
+// real-repo exemplar left to exercise it, section (A) below now carries a direct unit-level positive/
+// negative control for `containsNul` instead (DoD-4's real-fixture-repo proof is a separate, earlier
+// concern — the CRLF-flip detection, not this skip).
 //
-// ⚠️ THE DISCLOSED RESIDUAL (card 5df7bcee) AND WHY IT IS NOT FIXED HERE: this guard's own `containsNul`
-// skip, combined with `fixed-wait-witness-guard.mjs`'s binary-diff handling (card 71231839), means a
-// NUL-bearing file under `packages/daemon/test/*.mjs` was silently unscanned by BOTH guards — neither
-// announcing it. Card `223cb2df` already settled that widening THIS guard's NUL-skip population is the
-// wrong fix (false rejections on a harmless state, and it still misses the real thing) — that
-// conclusion is untouched here. Instead, `fixed-wait-witness-guard.mjs` now asserts the precondition
-// never holds at all for that one shared directory: no file matching `packages/daemon/test/*.mjs` may
-// carry a raw NUL byte (see that guard's own header). This guard's `containsNul` skip stays exactly as
-// designed — for anything outside that directory (e.g. `Companion.tsx`, above) a NUL-bearing file
-// remains a legitimate, deliberate exemption with no sibling assertion backing it, because nothing
-// requires one there.
+// ⚠️ THE DISCLOSED RESIDUAL (card 5df7bcee): this guard's own `containsNul` skip, combined with
+// `fixed-wait-witness-guard.mjs`'s binary-diff handling (card 71231839), means a NUL-bearing file under
+// `packages/daemon/test/*.mjs` would be silently unscanned by BOTH guards — neither announcing it. Card
+// `223cb2df` already settled that widening THIS guard's NUL-skip population is the wrong fix (false
+// rejections on a harmless state, and it still misses the real thing) — that conclusion is untouched
+// here. Instead, `fixed-wait-witness-guard.mjs` asserts the precondition never holds at all for that one
+// shared directory: no file matching `packages/daemon/test/*.mjs` may carry a raw NUL byte (see that
+// guard's own header). This guard's `containsNul` skip stays exactly as designed — for anything outside
+// that directory, a NUL-bearing file remains a legitimate, deliberate exemption with no sibling
+// assertion backing it, because nothing requires one there. No tracked file currently exercises this
+// path (see the unit-level control in section (A) instead).
 //
 // CROSS-HOST CORRECTNESS: `core.autocrlf` is read LIVE (`git config --get core.autocrlf`), not assumed
 // true. On this Windows dev host it is `true`, so an unpinned text=auto file is expected to be CRLF on
@@ -352,6 +351,19 @@ function checkAttrsBatch(root, files) {
 }
 
 // =====================================================================================================
+// (A-2) UNIT-LEVEL CONTROL FOR `containsNul` (card `eda83035`) — Companion.tsx's own NUL was the last
+// real-repo exemplar of this skip (see this file's own header); now that it's fixed, nothing in the
+// tracked population exercises `containsNul` returning true any more, so this proves the function itself
+// still works, both polarities, without depending on a real file remaining unfixed.
+// =====================================================================================================
+{
+  const withNul = Buffer.from("line one\n\x00line two\n", "latin1");
+  const withoutNul = Buffer.from("line one\nline two\n", "latin1");
+  check("(unit) containsNul detects a real embedded NUL byte", containsNul(withNul) === true);
+  check("(unit) containsNul negative control: an ordinary buffer with no NUL returns false", containsNul(withoutNul) === false);
+}
+
+// =====================================================================================================
 // (B) THE REAL BACKSTOP — every tracked text file in this repo, scanned live off disk.
 // =====================================================================================================
 {
@@ -398,8 +410,8 @@ function checkAttrsBatch(root, files) {
   check(`sanity: .gitattributes' real eol=crlf pin (install.ps1) resolves to ≥1 tracked file (found ${crlfPinnedCount})`, crlfPinnedCount > 0);
 
   check(
-    `positive control: the one known genuinely-binary-by-content file is exempted via its own embedded NUL byte, not a hardcoded filename (found ${skippedBinary.length} exempt file(s): ${skippedBinary.join(", ") || "none"})`,
-    skippedBinary.includes("packages/web/src/pages/Companion.tsx"),
+    `card eda83035: no tracked text file in the scanned population carries an embedded NUL byte any more (found ${skippedBinary.length} exempt file(s): ${skippedBinary.join(", ") || "none"}) — Companion.tsx's own NUL was escaped under this card; containsNul's own mechanism is unit-tested above instead of against a real exemplar`,
+    skippedBinary.length === 0,
   );
 
   if (violations.length) {

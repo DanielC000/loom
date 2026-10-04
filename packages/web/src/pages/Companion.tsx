@@ -1778,7 +1778,7 @@ function GrantsByProject({ rows, projects }: { rows: CompanionCapabilityGrant[];
     const leverOrder = new Map(COMPANION_LEVERS.map((l, i) => [l.slug as string, i]));
     const groups = new Map<string, { projectId: string | null; name: string; caps: { slug: string; mode: GrantMode; known: boolean }[] }>();
     for (const g of rows) {
-      const key = g.projectId ?? " own"; // null (own project) grouped distinctly from any real id
+      const key = g.projectId ?? "\u0000own"; // null (own project) grouped distinctly from any real id
       const name = g.projectId === null
         ? "This companion's project"
         : (projects.find((p) => p.id === g.projectId)?.name ?? g.projectId.slice(0, 8));
