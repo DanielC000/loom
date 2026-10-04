@@ -723,6 +723,12 @@ export interface Session {
   lastError: string | null;
   // --- phase-2 orchestration lineage + context counters (additive; null/0 on phase-1 sessions) ---
   role?: SessionRole | null;
+  /**
+   * @decision 963462f5 — read ONLY via `effectiveForcePlain` (OR with the interim rule, never `??`,
+   * sticky-TRUE only — `false` and `null` are equivalent). `null` on a pre-migration row or any
+   * non-startNew/forkSession spawn; never "pre-migration" alone.
+   */
+  forcedPlain?: boolean | null;
   // Card af87a9ff: the manager CURRENTLY responsible for this worker — reparented onto a recycle
   // successor for a worker that was still live at the moment its manager recycled (db.ts's
   // `reparentLiveWorkers`/`relinkWorkerToManager`). Live fleet views (Overview/Mission Control/

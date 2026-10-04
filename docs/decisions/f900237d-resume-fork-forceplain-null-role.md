@@ -47,6 +47,16 @@ Exact handling needs a persisted discriminator (a real `forcedPlain` column) —
 `963462f5` ("persist a forced-plain flag so resume keeps a human's plain choice exactly"), which fixes
 both the original-profile and the later-edited/reassigned case.
 
+## Resolved by `963462f5`
+
+Both residuals named above (the original-profile case AND the later-edited/reassigned one) are CLOSED:
+`963462f5` added `Session.forcedPlain` (tri-state, pinned at `startNew`/stamped-resolved at `forkSession`)
+and `effectiveForcePlain(session, agent)` — `session.forcedPlain ?? (role===null &&
+profileConfersSpawnableRole(agent))` — which `resume()`/`forkSession()` now call instead of the inline
+interim-rule expression this record originally introduced. A row's PERSISTED choice now survives any
+later profile edit/reassignment; only a pre-`963462f5` row (whose column is still `null`) falls back to
+the interim rule described above. See `docs/decisions/963462f5-persist-forced-plain-flag.md`.
+
 ## Do not
 
 - Do not call `resolveAgentSpawn(agent, config, row.role ?? undefined)` without ALSO passing
@@ -60,9 +70,11 @@ both the original-profile and the later-edited/reassigned case.
   (the agent's CURRENT profile, re-resolved live — never a persisted guess). The accepted residual this
   still leaves open (a genuine forced-plain start on a null/clamped-role profile) is tracked by `963462f5`,
   not by this record.
-- Do not extend this to `harnessDrainStatus()` — it shares the same `s.role ?? undefined` pattern but only
-  reads `.harness` off the result, never `.permission`, so it is not a permission issue; any analogous
-  question there is tracked separately, not by this record.
+- Do not extend THIS RECORD's own fix to `harnessDrainStatus()` — it shared the same `s.role ?? undefined`
+  pattern but only read `.harness` off the result, never `.permission`, so it was never a permission issue
+  for THIS record to fix. (It was, however, a real correctness bug of its own — a forced-plain row
+  mis-resolved its wanted harness and sat in `pending` forever — closed by `963462f5`'s
+  `effectiveForcePlain`, not by anything here.)
 
 ## Source
 

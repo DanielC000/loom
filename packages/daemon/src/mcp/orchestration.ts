@@ -2892,7 +2892,9 @@ export class OrchestrationMcpRouter {
     // so this file's compiled output can't collide with `agent-runs-keys.mjs`'s G3 endpoint-flip scan.
     // @decision 08c81809 — reachedReadyAt is ALSO excluded: purely internal boot-reconcile machinery
     // (the durable settle-reconcile discriminator), never a field an agent-facing view should carry.
-    const SESSION_ROW_FIELDS: Record<Exclude<keyof Session, "pendingMerge" | "reachedReadyAt">, 1> = {
+    // @decision 963462f5 — forcedPlain is excluded too, same posture: purely internal spawn machinery,
+    // never a field an agent-facing view should carry.
+    const SESSION_ROW_FIELDS: Record<Exclude<keyof Session, "pendingMerge" | "reachedReadyAt" | "forcedPlain">, 1> = {
       id: 1, projectId: 1, agentId: 1, engineSessionId: 1, title: 1, cwd: 1, processState: 1,
       resumability: 1, busy: 1, createdAt: 1, lastActivity: 1, lastError: 1, role: 1,
       parentSessionId: 1, taskId: 1, worktreePath: 1, branch: 1, reviewBaseSha: 1, repoKey: 1,

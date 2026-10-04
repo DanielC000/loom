@@ -2783,6 +2783,13 @@ export class SessionService {
     return this.profileSpawnRole(resolved.role) != null;
   }
 
+  // @decision 963462f5 — the ONE place that reads the forced-plain discriminator; never re-derive the
+  // interim rule inline at a call site. `forcedPlain` is STICKY-TRUE ONLY (OR, never `??`) — see the
+  // decision record's Round 2 for why a definite `false` must never suppress the interim rule's own check.
+  private effectiveForcePlain(session: Pick<Session, "role" | "forcedPlain">, agent: Agent): boolean {
+    return session.forcedPlain === true || (session.role === null && this.profileConfersSpawnableRole(agent));
+  }
+
   // @decision 547d5fc4 — profile-driven spawn resolution is fully additive: profileId===null is
   // byte-identical to before; an explicit caller role ALWAYS wins over the profile's role. Never
   // re-resolve the profile's skills subset on resume/fork/recycle — read the PINNED value off the row.
@@ -2990,7 +2997,10 @@ export class SessionService {
       if (!agent || !project) continue;
       const current = s.harness ?? "claude";
       const config = resolveConfig(project.config);
-      const spawn = this.resolveAgentSpawn(agent, config, s.role ?? undefined);
+      // @decision 963462f5 — a forced-plain row must resolve its wanted harness the SAME way its real
+      // spawn would (role undefined, profile lookup dropped), or it drifts into `pending` forever (the
+      // residual that card closed: this call used to omit forcePlain entirely).
+      const spawn = this.resolveAgentSpawn(agent, config, s.role ?? undefined, this.effectiveForcePlain(s, agent));
       const wanted = spawn.harness ?? "claude";
       if (current === wanted) continue;
       // A manager/platform-lead lands via RECYCLE, which is row-aware (`recycleHarness`) — ask the same helper.
@@ -3164,6 +3174,9 @@ export class SessionService {
       connections, // profile-conferred authenticated-egress allowlist, pinned ([] ⇒ no access — today's behavior)
       vaultWrite, // profile-conferred confined vault-write grant, pinned (false ⇒ no access — today's behavior)
       harness, // multi-harness epic df1f94b0 P1: profile-conferred vendor CLI, pinned (undefined ⇒ "claude")
+      // @decision 963462f5 — real human intent is known directly here; never leave this undefined/null
+      // on a fresh row (only a pre-migration row stays null).
+      forcedPlain: opts.forcePlain ?? false,
     };
     this.db.insertSession(session);
     // Card 961da6c6: a human "+New" on a worker-role agent also takes the default harness and is guarded, so it files the same
@@ -3890,12 +3903,12 @@ export class SessionService {
     // withRolePermissionModeCyclesPin(config.permission, session.role), keyed off the row's PINNED role
     // (not the deleted agent's profile) — never fall back to bare config.permission alone.
     //
-    // @decision f900237d — forcePlain a role-null row ONLY when its profile would itself confer a
-    // spawnable role (profileConfersSpawnableRole); a role-null row can also be a legitimate
-    // profile-less/clamped-role start, which must keep its allowDelta on resume.
+    // @decision 963462f5 — read the PINNED forced-plain discriminator (falls back to f900237d's interim
+    // rule whenever forcedPlain !== true — sticky-TRUE only, so false and null defer identically); never
+    // re-derive inline.
     const agent = this.db.getAgent(session.agentId);
     const resolvedSpawn = agent
-      ? this.resolveAgentSpawn(agent, config, session.role ?? undefined, session.role === null && this.profileConfersSpawnableRole(agent))
+      ? this.resolveAgentSpawn(agent, config, session.role ?? undefined, this.effectiveForcePlain(session, agent))
       : undefined;
     if (forcedRoleFreshStart) {
       return this.resumeForcedRoleAsFreshClaude(session, project, config, agent, resolvedSpawn);
@@ -7006,6 +7019,11 @@ export class SessionService {
     // id — capturing it would be wrong. Assigning the id ourselves makes the fork's transcript known.
     const forkEngineId = randomUUID();
     const now = new Date().toISOString();
+    // @decision 963462f5 — resolved HERE so the fork's row gets a definite value. Sticky-TRUE only: a
+    // stamped `true` is the only value that ever matters downstream (`false`/`null` are equivalent); the
+    // agent-missing branch below falls back to a raw copy since there is nothing to resolve.
+    const forkAgent = this.db.getAgent(src.agentId);
+    const forkForcedPlain = forkAgent ? this.effectiveForcePlain(src, forkAgent) : (src.forcedPlain ?? null);
     const session: Session = {
       id: randomUUID(),
       projectId: src.projectId,
@@ -7029,6 +7047,8 @@ export class SessionService {
       connections: src.connections ?? [], // a fork inherits the source's authenticated-egress allowlist
       vaultWrite: src.vaultWrite ?? false, // a fork inherits the source's confined vault-write grant
       harness: src.harness ?? undefined, // a fork inherits the source's pinned vendor CLI (undefined ⇒ "claude")
+      // @decision 963462f5 — the resolved value computed above, pinned onto the fork's own row.
+      forcedPlain: forkForcedPlain,
       // Multi-repo epic (49136451) phase 2, Code Review Minor 4: `taskId`/`worktreePath`/`branch` are
       // deliberately NOT carried (a fork is a conversation branch, not a worker — see this method's own
       // doc), but `cwd` IS carried, and for a worker `cwd` === its worktree. `repoKey` alone (with no
@@ -7047,11 +7067,12 @@ export class SessionService {
     // is the source row's role (carried onto the fork below). Model is DELIBERATELY omitted — like
     // resume, --fork-session inherits the source transcript's model. Agent-missing (deleted) ⇒ fall back
     // to bare config.permission so the fork still works.
-    // @decision f900237d — forcePlain a role-null source row ONLY when its profile would itself confer
-    // a spawnable role (profileConfersSpawnableRole); see resume()'s identical reasoning above.
-    const agent = this.db.getAgent(session.agentId);
-    const forkPermission = agent
-      ? this.resolveAgentSpawn(agent, config, src.role ?? undefined, src.role === null && this.profileConfersSpawnableRole(agent)).permission
+    // @decision 963462f5 — reuse the SAME forkAgent/forkForcedPlain resolved above the row build, rather
+    // than re-deriving (and potentially diverging from what was just persisted onto the row).
+    const forkPermission = forkAgent
+      // forkForcedPlain is only ever null in the OTHER (agent-missing) branch of its own ternary above,
+      // so it is always a definite boolean here; `?? false` is a type-level narrowing only, never reached.
+      ? this.resolveAgentSpawn(forkAgent, config, src.role ?? undefined, forkForcedPlain ?? false).permission
       : config.permission;
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
@@ -7103,7 +7124,7 @@ export class SessionService {
     // compares against what this fork spawn just showed it, exactly as recycleWorker/spawnWorker already
     // do for their fresh spawns. null (no notes match) ⇒ no enqueue, byte-identical to today.
     const forkBoundTask = src.taskId ? this.db.getTask(src.taskId) : undefined;
-    const forkKickoffText = forkBoundTask ? `${forkBoundTask.title}\n${forkBoundTask.body}` : (agent?.startupPrompt ?? "");
+    const forkKickoffText = forkBoundTask ? `${forkBoundTask.title}\n${forkBoundTask.body}` : (forkAgent?.startupPrompt ?? "");
     const forkProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, forkKickoffText);
     if (forkProjectMemoryFramed) this.pty.enqueueStdin(session.id, forkProjectMemoryFramed, "system");
     // Card e1864a31: stamped from the pinned POOL, not forkProjectMemoryFramed.

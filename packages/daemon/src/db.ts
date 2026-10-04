@@ -1810,6 +1810,10 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   pending_owner_msg_excerpt: "TEXT",
   pending_owner_msg_at: "TEXT",
   pending_owner_msg_count: "INTEGER NOT NULL DEFAULT 0",
+  // @decision 963462f5 — tri-state human-forced-plain discriminator, pinned at startNew/fork. Nullable,
+  // no DEFAULT: every legacy row backfills to NULL = "unknown, fall back to the interim rule" (see
+  // Session.forcedPlain's own doc + SessionService.effectiveForcePlain). No index references this column.
+  forced_plain: "INTEGER",
 };
 
 /** Columns added to `projects` after phase-1; applied to existing DBs by migrateProjects(). */
@@ -5835,18 +5839,21 @@ export class Db {
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
          role,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,skills,connections,capabilities,harness,parent_session_id,task_id,worktree_path,branch,review_base_sha,repo_key,gen,recycled_from,
-         ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline,scheduled_spawn)
+         ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline,scheduled_spawn,forced_plain)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
          @role,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@harness,@parentSessionId,@taskId,@worktreePath,@branch,@reviewBaseSha,@repoKey,@gen,@recycledFrom,
-         @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline,@scheduledSpawn)`,
+         @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline,@scheduledSpawn,@forcedPlain)`,
     ).run({
       ...s,
       busy: s.busy ? 1 : 0,
       // Orchestration fields are optional on Session; coerce absent ones (undefined) to NULL/0
       // so plain phase-1 session literals insert unchanged.
       role: s.role ?? null,
+      // @decision 963462f5 — genuine TRI-STATE bind: undefined (every pre-existing literal) AND an
+      // explicit null both bind as NULL; only a real true/false bind as 1/0.
+      forcedPlain: s.forcedPlain == null ? null : (s.forcedPlain ? 1 : 0),
       harness: s.harness ?? null, // NULL = "claude" (absent ⇒ today's only harness) on every plain session literal
       browserTesting: s.browserTesting ? 1 : 0, // off (0) on every plain session literal
       documentConversion: s.documentConversion ? 1 : 0, // off (0) on every plain session literal
@@ -9573,6 +9580,9 @@ function toSession(r0: unknown): Session {
     rateLimitedUntil: (r.rate_limited_until as string) ?? null,
     rateLimitDeadline: (r.rate_limit_deadline as string) ?? null,
     archivedAt: (r.archived_at as string) ?? null,
+    // @decision 963462f5 — genuine TRI-STATE: NULL must stay null (legacy/unknown), never collapse to
+    // false like the NOT-NULL boolean columns above.
+    forcedPlain: r.forced_plain == null ? null : (r.forced_plain as number) === 1,
   };
 }
 function toOrchestrationEvent(r0: unknown): OrchestrationEvent {
