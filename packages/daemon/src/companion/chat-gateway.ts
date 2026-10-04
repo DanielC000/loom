@@ -650,15 +650,21 @@ export class ChatGateway {
     const handler = parsed ? commandHandler(parsed.name) : undefined;
     if (parsed && handler) {
       const route = voicePrefRoute(binding, msg.sender);
-      const { ack } = await handler(parsed.args, route, this.voicePrefs, {
+      const result = await handler(parsed.args, route, this.voicePrefs, {
         resetConversation: (sid) => this.resetConversation(sid),
         exportConversation: (sid) => this.exportConversation(sid),
         refreshPersona: (sid) => this.refreshPersona(sid),
         closeTrustWindow: (sid) => this.closeTrustWindow?.(sid),
       });
-      // Every command ack is transport chrome EXCEPT "/new"/"/reset" — that ack IS the intentional
-      // conversation-boundary marker (resetConversation's doc), so it alone is persisted, on EVERY channel.
-      const isConversationBoundary = parsed.name === "new" || parsed.name === "reset";
+      const { ack } = result;
+      // Every command ack is transport chrome EXCEPT a genuine "/new"/"/reset" SUCCESS — that ack IS the
+      // intentional conversation-boundary marker (resetConversation's doc), so it alone is persisted, on
+      // EVERY channel. Read from the HANDLER's own `result.boundary` (card 5307c09f round 2) — NEVER
+      // inferred from `parsed.name` as before: a GROUP-route refusal returns the SAME command name
+      // ("new"/"reset") without ever calling resetConversation, so matching on the name alone let a
+      // non-owner group member's refused "/new" still get recorded as a fake boundary row and pushed live
+      // to an attached viewer — the same history-spam griefing class the refusal itself exists to stop.
+      const isConversationBoundary = result.boundary === true;
       const acked = await this.tryAck(binding, ack, { record: isConversationBoundary });
       // Card dc5df70e: a send that actually DELIVERED but whose response arrived after ackSendTimeoutMs
       // also comes back acked:false here, so the boundary marker goes unrecorded below — an accepted edge

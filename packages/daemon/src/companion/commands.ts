@@ -62,6 +62,15 @@ export function parseCommand(body: string): ParsedCommand | null {
 /** The result of dispatching a recognized command — `ack` is sent back to the chat via `tryAck`. */
 export interface CommandResult {
   ack: string;
+  /** True ONLY for the genuine conversation-boundary event (card 5307c09f round 2) — set by
+   *  `startFreshConversation`'s SUCCESS branch alone, never on its group-route refusal (same ack-producing
+   *  command name, different outcome). `chat-gateway.ts`'s dispatch reads THIS field to decide whether to
+   *  persist the ack as the intentional "/new"/"/reset" history marker, instead of inferring it from the
+   *  parsed command name — inferring from the name let a GROUP refusal (rejected before `resetConversation`
+   *  ever runs) still get recorded as a fake boundary row and pushed live to an attached viewer, the same
+   *  griefing class the refusal itself exists to stop. Optional — every other handler omits it (⇒ falsy),
+   *  so its ack stays ordinary transport chrome. */
+  boundary?: boolean;
 }
 
 /**
@@ -120,6 +129,13 @@ function formatConversationExport(messages: CompanionMessage[]): string {
     .join("\n\n");
 }
 
+/** Shared suffix for every "owner-only, no DM-invite" group-route refusal (card 5307c09f, mirrors
+ *  /export's own refusal wording from card 5f9b0580) — one constant so /export's, /new's/`reset`'s, and
+ *  /lock's refusal wording can never drift apart from each other. Deliberately never invites a DM retry:
+ *  a non-owner group member's own DM to the companion isn't an authorized route either (auth.ts), so
+ *  suggesting one would promise an action that can never actually happen for them. */
+const GROUP_ROUTE_REFUSAL_SUFFIX = "only works in a private chat with me — it isn't available in group chats.";
+
 function normalizeLangCode(code: string): string {
   const dash = code.indexOf("-");
   if (dash === -1) return code.toLowerCase();
@@ -135,10 +151,23 @@ interface CommandDef {
 /** `/new` — start a fresh conversation (forgets prior context + clears the chat history). `/reset` is a
  *  literal ALIAS (Hermes collapses the two; Loom has no archive-split to distinguish them either — see
  *  the design note) — both COMMANDS entries below point at this SAME function object, so COMMAND_MENU
- *  advertises both with zero risk of the two drifting apart. */
+ *  advertises both with zero risk of the two drifting apart.
+ *  DM-only (card 5307c09f): `resetConversation` (chat-gateway.ts) injects `/clear` into the ONE underlying
+ *  agent process (not per-channel), clears the session's WHOLE cross-channel history
+ *  (`CompanionHistoryReset.clear` takes only a sessionId, no channel), and revokes the trust window for
+ *  EVERY route/sender (`closeCompanionTrustWindow` — "across every route/sender") — none of those three
+ *  primitives has a channel/chatId dimension to scope a "reset just this group" variant against. Same
+ *  group-authorizes-every-allowlisted-member exposure as `/export` (card 5f9b0580): any group member could
+ *  otherwise wipe the owner's entire companion memory as a griefing/DoS vector. Because `/new` and `/reset`
+ *  share this ONE handler object, the handler itself can't tell which alias was typed — the refusal wording
+ *  below deliberately names the ACTION, not either literal command name, so it fits both aliases without
+ *  needing to thread the invoked name through `CommandHandler`'s fixed signature. */
 const startFreshConversation: CommandHandler = async (_args, route, _prefs, deps) => {
+  if (route.senderId !== null) {
+    return { ack: `🆕 Starting a fresh conversation ${GROUP_ROUTE_REFUSAL_SUFFIX}` };
+  }
   await deps.resetConversation(route.sessionId);
-  return { ack: "🆕 Started a fresh conversation." };
+  return { ack: "🆕 Started a fresh conversation.", boundary: true };
 };
 
 /**
@@ -179,11 +208,11 @@ const COMMANDS: Record<string, CommandDef> = {
     },
   },
   new: {
-    description: "Start a fresh conversation — forgets everything said so far",
+    description: "Start a fresh conversation — forgets everything said so far (DM only)",
     handler: startFreshConversation,
   },
   reset: {
-    description: "Alias of /new — start a fresh conversation",
+    description: "Alias of /new — start a fresh conversation (DM only)",
     handler: startFreshConversation,
   },
   status: {
@@ -205,7 +234,7 @@ const COMMANDS: Record<string, CommandDef> = {
     },
   },
   lock: {
-    description: "Revoke my standing confirmation — the next sensitive action needs your OK again",
+    description: "Revoke my standing confirmation — the next sensitive action needs your OK again (DM only)",
     // Companion Trust Window (Framework Card 0): the owner's explicit "step down" — closes every warm
     // window this session holds, across every route/sender, so a subsequent Tier-A act (decision_resolve/
     // board_create/board_update) falls back to a fresh propose/confirm round-trip. Never destructive to
@@ -214,17 +243,31 @@ const COMMANDS: Record<string, CommandDef> = {
     // (a), a separate, chat-granted thing from the capability grants above) alongside the trust window, so
     // "/lock" is a real step-down for that too: a subsequent board_create/board_update needs either a
     // fresh grant or a verbatim quote again, not just a fresh confirm.
+    // DM-only (card 5307c09f): `closeCompanionTrustWindow` revokes "every route/sender" — session-wide,
+    // with no channel/chatId dimension to scope a "lock just this group" variant against (same primitive
+    // `/new`/`/reset` use above). Same group-authorizes-every-allowlisted-member exposure as `/export`/
+    // `/new`/`/reset`; lower severity (fail-safe direction — forces an earlier re-confirm) but refused for
+    // consistency, since no scoped variant exists regardless.
     handler(_args, route, _prefs, deps) {
+      if (route.senderId !== null) {
+        return { ack: `🔒 /lock ${GROUP_ROUTE_REFUSAL_SUFFIX}` };
+      }
       deps.closeTrustWindow?.(route.sessionId);
       return { ack: "🔒 Locked — I'll need your confirmation again before I take any action." };
     },
   },
   refresh: {
-    description: "Reload my instructions and memory — keeps our conversation",
+    description: "Reload my instructions and memory — keeps our conversation (DM only)",
     // Live, NON-destructive upgrade: recomposes+re-enqueues the persona/memory prompt with no "/clear" and
     // no history reset, so an agent-definition edit (persona brief, given name, memory) lands mid-
     // conversation. Cannot pick up an MCP-server/tool-allowlist change — those are fixed at process spawn.
+    // DM-only (card 5307c09f round 2, lead ruling): `refreshPersona` re-enqueues a live prompt into the
+    // ONE shared agent process — a group member could otherwise burn the owner's companion turns/tokens on
+    // demand. Same idiom as `/export`/`/new`/`/reset`/`/lock` above.
     handler(_args, route, _prefs, deps) {
+      if (route.senderId !== null) {
+        return { ack: `🔄 /refresh ${GROUP_ROUTE_REFUSAL_SUFFIX}` };
+      }
       const ok = deps.refreshPersona(route.sessionId);
       return ok
         ? { ack: "🔄 Reloaded my instructions and memory — our conversation continues." }
@@ -232,7 +275,7 @@ const COMMANDS: Record<string, CommandDef> = {
     },
   },
   export: {
-    description: "Export the current conversation as an in-chat markdown dump",
+    description: "Export the current conversation as an in-chat markdown dump (DM only)",
     // Replies IN-CHAT to the SAME authenticated route only — never writes to disk, never sends via a
     // separate document/file mechanism, never leaves this route. `deps.exportConversation` reads exactly
     // the CURRENT (open) conversation (respects a prior "/new" boundary), so this can never leak an
@@ -248,7 +291,7 @@ const COMMANDS: Record<string, CommandDef> = {
     // would promise an export that can never actually happen for them.
     handler(_args, route, _prefs, deps) {
       if (route.senderId !== null) {
-        return { ack: "📤 /export only works in a private chat with me — it isn't available in group chats." };
+        return { ack: `📤 /export ${GROUP_ROUTE_REFUSAL_SUFFIX}` };
       }
       const messages = deps.exportConversation(route.sessionId);
       if (messages.length === 0) {

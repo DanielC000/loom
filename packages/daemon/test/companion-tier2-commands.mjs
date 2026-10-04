@@ -22,6 +22,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      (empty ⇒ a friendly "nothing to export" ack, not an error); end-to-end it dumps exactly the
 //      session's CURRENT conversation and is never itself recorded as a history row (which would corrupt
 //      the next export).
+//   9. "/new", "/reset", "/lock" and "/refresh" (card 5307c09f) all refuse on a GROUP route — mirroring
+//      "/export"'s own card-5f9b0580 refusal — since resetConversation/closeTrustWindow/refreshPersona are
+//      session-wide primitives with no channel dimension to scope a group-only variant against; a DM route
+//      is unaffected by every refusal, each proven with its own independent call counter.
+//  10. COMMAND_MENU + "/help" flag all five DM-only commands ("/export" too) as "(DM only)" so a group
+//      member sees the restriction before even trying the command.
+//  11. Round 2 MAJOR fix: "/new"/"/reset" set `CommandResult.boundary` on their SUCCESS branch ONLY — the
+//      gateway reads THIS, never the parsed command name, to decide whether to record the ack as the
+//      conversation-boundary marker. Proven through a REAL ChatGateway.handleInbound call on a GROUP
+//      binding with a real db-backed recorder: a group "/new"/"/reset" refusal records ZERO history rows
+//      and triggers ZERO live pushes, while the DM success path still records + pushes exactly one.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-tier2-commands.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -48,6 +59,8 @@ const { Db } = await import("../dist/db.js");
 const { InAppChannel, IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
 const { CompanionController } = await import("../dist/companion/controller.js");
 const { commandHandler, registeredCommandNames, COMMAND_MENU } = await import("../dist/companion/commands.js");
+const { ChatGateway } = await import("../dist/companion/chat-gateway.js");
+const { createDbCompanionAuth } = await import("../dist/companion/auth.js");
 const { inMemoryVoicePrefs } = await import("../dist/companion/voice-prefs.js");
 
 const dbFile = path.join(tmpHome, "loom.db");
@@ -254,6 +267,178 @@ try {
     const dmRoute = { sessionId: "s", channel: "in-app", chatId: "s", senderId: null };
     const dmResult = commandHandler("export")(undefined, dmRoute, inMemoryVoicePrefs(), spyDeps);
     check("/export (DM): unaffected by the group-scope fix — exporter called and the real dump is returned", calls === 1 && dmResult.ack.includes("leaked secret"));
+  }
+
+  // ============ 9c — '/new'/'/reset' refuse on a GROUP route (card 5307c09f): any allowlisted group
+  //                   member could otherwise wipe the owner's entire cross-channel companion memory as a
+  //                   griefing/DoS vector — resetConversation/closeTrustWindow are both session-wide with
+  //                   no channel dimension to scope a "reset just this group" variant against ============
+  {
+    const groupRoute = { sessionId: "s", channel: "telegram", chatId: "chat-10", senderId: "user-1" }; // group: senderId set
+    // A FRESH, group-call-only counter — independent of the DM regression check's own counter below (round
+    // 2 NIT), so neither check's pass/fail can ever be masked by the other's call count.
+    let groupResetCalls = 0;
+    const groupSpyDeps = { resetConversation: async () => { groupResetCalls++; } };
+
+    const newGroupResult = await commandHandler("new")(undefined, groupRoute, inMemoryVoicePrefs(), groupSpyDeps);
+    check("/new (group): resetConversation is never called", groupResetCalls === 0);
+    check(
+      "/new (group): refuses with the shared group-route refusal wording (no DM-retry invitation)",
+      newGroupResult.ack === "🆕 Starting a fresh conversation only works in a private chat with me — it isn't available in group chats.",
+    );
+    check("/new (group): the refusal carries NO boundary flag (round 2 — would otherwise record a fake boundary row)", !newGroupResult.boundary);
+
+    const resetGroupResult = await commandHandler("reset")(undefined, groupRoute, inMemoryVoicePrefs(), groupSpyDeps);
+    check("/reset (group): resetConversation is never called (same handler object as /new)", groupResetCalls === 0);
+    check("/reset (group): refuses with the SAME wording as /new (the shared handler can't tell the aliases apart, by design)", resetGroupResult.ack === newGroupResult.ack);
+    check("/reset (group): the refusal carries NO boundary flag either", !resetGroupResult.boundary);
+
+    // DM route is a REGRESSION GUARD: completely unaffected by the group check — still calls
+    // resetConversation and returns the real ack. Its OWN independent counter (round 2 NIT).
+    let dmResetCalls = 0;
+    const dmSpyDeps = { resetConversation: async () => { dmResetCalls++; } };
+    const dmRoute = { sessionId: "s", channel: "in-app", chatId: "s", senderId: null };
+    const dmResult = await commandHandler("new")(undefined, dmRoute, inMemoryVoicePrefs(), dmSpyDeps);
+    check("/new (DM): unaffected by the group-scope fix — resetConversation called and the real ack returned", dmResetCalls === 1 && dmResult.ack === "🆕 Started a fresh conversation.");
+    check("/new (DM): the SUCCESS result sets boundary:true (round 2 — the ONLY signal the gateway now reads)", dmResult.boundary === true);
+  }
+
+  // ============ 9d — '/lock' refuses on a GROUP route (card 5307c09f): closeCompanionTrustWindow revokes
+  //                   EVERY route/sender's trust window + any live grant, session-wide — no channel
+  //                   dimension to scope a "lock just this group" variant against ============
+  {
+    const groupRoute = { sessionId: "s", channel: "telegram", chatId: "chat-11", senderId: "user-1" };
+    // Independent of the DM regression check's own counter below (round 2 NIT — same reasoning as 9c).
+    let groupCloseCalls = 0;
+    const groupSpyDeps = { closeTrustWindow: () => { groupCloseCalls++; } };
+
+    const groupResult = commandHandler("lock")(undefined, groupRoute, inMemoryVoicePrefs(), groupSpyDeps);
+    check("/lock (group): closeTrustWindow is never called", groupCloseCalls === 0);
+    check(
+      "/lock (group): refuses with the shared group-route refusal wording (no DM-retry invitation)",
+      groupResult.ack === "🔒 /lock only works in a private chat with me — it isn't available in group chats.",
+    );
+
+    // DM route is a REGRESSION GUARD: completely unaffected by the group check — still calls
+    // closeTrustWindow and returns the real "Locked" ack. Its OWN independent counter (round 2 NIT).
+    let dmCloseCalls = 0;
+    const dmSpyDeps = { closeTrustWindow: () => { dmCloseCalls++; } };
+    const dmRoute = { sessionId: "s", channel: "in-app", chatId: "s", senderId: null };
+    const dmResult = commandHandler("lock")(undefined, dmRoute, inMemoryVoicePrefs(), dmSpyDeps);
+    check("/lock (DM): unaffected by the group-scope fix — closeTrustWindow called and the real ack returned", dmCloseCalls === 1 && dmResult.ack === "🔒 Locked — I'll need your confirmation again before I take any action.");
+  }
+
+  // ============ 9e — '/refresh' refuses on a GROUP route too (card 5307c09f round 2, lead ruling): same
+  //                   idiom — a group member could otherwise burn the owner's companion turns on demand ============
+  {
+    const groupRoute = { sessionId: "s", channel: "telegram", chatId: "chat-12", senderId: "user-1" };
+    let groupRefreshCalls = 0;
+    const groupSpyDeps = { refreshPersona: () => { groupRefreshCalls++; return true; } };
+
+    const groupResult = commandHandler("refresh")(undefined, groupRoute, inMemoryVoicePrefs(), groupSpyDeps);
+    check("/refresh (group): refreshPersona is never called", groupRefreshCalls === 0);
+    check(
+      "/refresh (group): refuses with the shared group-route refusal wording (no DM-retry invitation)",
+      groupResult.ack === "🔄 /refresh only works in a private chat with me — it isn't available in group chats.",
+    );
+
+    // DM route is a REGRESSION GUARD: completely unaffected by the group check — still calls
+    // refreshPersona and returns the real ack. Its OWN independent counter.
+    let dmRefreshCalls = 0;
+    const dmSpyDeps = { refreshPersona: () => { dmRefreshCalls++; return true; } };
+    const dmRoute = { sessionId: "s", channel: "in-app", chatId: "s", senderId: null };
+    const dmResult = commandHandler("refresh")(undefined, dmRoute, inMemoryVoicePrefs(), dmSpyDeps);
+    check("/refresh (DM): unaffected by the group-scope fix — refreshPersona called and the real ack returned", dmRefreshCalls === 1 && dmResult.ack === "🔄 Reloaded my instructions and memory — our conversation continues.");
+  }
+
+  // ============ 9f — '/help' and the Telegram COMMAND_MENU flag EVERY DM-only command (card 5307c09f
+  //                   round 2 Minor 3): a group member sees the restriction before even trying it ============
+  {
+    const dmOnlyNames = ["new", "reset", "lock", "export", "refresh"];
+    const helpAck = commandHandler("help")(undefined, {}, {}).ack;
+    for (const name of dmOnlyNames) {
+      const entry = COMMAND_MENU.find((c) => c.command === name);
+      check(`COMMAND_MENU: '/${name}' description flags it as DM only`, !!entry && /DM only/i.test(entry.description));
+      // Independent of COMMAND_MENU's own description text — a dedicated per-LINE check (anchored with "m")
+      // so this can't pass merely because /help and COMMAND_MENU derive from the same (possibly-wrong)
+      // source; it would fail if /help's rendering ever dropped the "(DM only)" suffix on its own.
+      check(`/help: '/${name}' line is marked (DM only)`, new RegExp(`^/${name} .*\\(DM only\\)$`, "m").test(helpAck));
+    }
+  }
+
+  // ============ 9g — handleInbound on a GROUP binding, REAL db-backed recorder (card 5307c09f round 2
+  //                   MAJOR): a group "/new"/"/reset" refusal must NEVER be recorded as the conversation-
+  //                   boundary marker — that would let a non-owner group member spam fake boundary rows
+  //                   into the owner's history and push them live to an attached viewer, the SAME griefing
+  //                   class the refusal itself exists to stop. The gateway must read `result.boundary` from
+  //                   the handler, never infer it from the parsed command name. ============
+  {
+    const groupSessionId = randomUUID();
+    db.insertSession({
+      id: groupSessionId, projectId: projId, agentId, engineSessionId: `eng-${groupSessionId}`, title: null, cwd: projId,
+      processState: "live", resumability: "resumable", busy: false, createdAt: now0, lastActivity: now0, lastError: null, role: "assistant",
+    });
+    const groupChatId = "grp-9g";
+    db.addAllowedSender({ sessionId: groupSessionId, channel: "telegram", senderId: "member-1" });
+
+    let pushCalls = 0;
+    const realRecorder = {
+      // The SAME shape (and the SAME db.insertCompanionMessage call) as the production recorder in
+      // companion/factory.ts — a real db-backed recorder, not a spy/mock, per round 2's explicit DoD.
+      record(sid, channel, chatId, author, text, viaVoice, id, proactive) {
+        if (channel === IN_APP_CHANNEL) return;
+        db.insertCompanionMessage({ id: id ?? randomUUID(), sessionId: sid, channel, chatId, author, text, createdAt: new Date().toISOString(), viaVoice, proactive });
+      },
+    };
+    const livePush = { push() { pushCalls++; } };
+    const sent = [];
+    const fakeTelegramAdapter = {
+      name: "telegram",
+      maxMessageLength: undefined,
+      start() {},
+      async stop() {},
+      async send(chatId, text) { sent.push({ chatId, text }); },
+    };
+
+    const gw = new ChatGateway(
+      () => ({ delivered: false }), // submitTurn — never reached: every command here is intercepted pre-submit
+      [{ sessionId: groupSessionId, channel: "telegram", chatId: groupChatId, scope: "group" }],
+      createDbCompanionAuth(db),
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      realRecorder,
+      undefined,
+      livePush,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined,
+      groupSessionId,
+    );
+    gw.registerAdapter(fakeTelegramAdapter);
+
+    const r1 = await gw.handleInbound({ channel: "telegram", chatId: groupChatId, sender: { id: "member-1" }, body: "/new", chatIsDirect: false });
+    check("/new (group, via handleInbound): never becomes a turn", r1.accepted === false && r1.reason === "command" && r1.command === "new");
+    check("/new (group, via handleInbound): acked with the refusal, not the success ack", sent.length === 1 && sent[0].text.includes("only works in a private chat"));
+    check("/new (group, via handleInbound): ZERO history rows recorded (no fake boundary row)", db.listAllCompanionMessages(groupSessionId).length === 0);
+    check("/new (group, via handleInbound): ZERO live pushes", pushCalls === 0);
+
+    const r2 = await gw.handleInbound({ channel: "telegram", chatId: groupChatId, sender: { id: "member-1" }, body: "/reset", chatIsDirect: false });
+    check("/reset (group, via handleInbound): never becomes a turn either", r2.accepted === false && r2.reason === "command" && r2.command === "reset");
+    check("/reset (group, via handleInbound): ZERO history rows recorded either", db.listAllCompanionMessages(groupSessionId).length === 0);
+    check("/reset (group, via handleInbound): ZERO live pushes either", pushCalls === 0);
+
+    // DM success path is a REGRESSION GUARD: re-bind the SAME session to a DM route — the real boundary
+    // marker must still be recorded + pushed, completely unaffected by this fix.
+    gw.unbind(groupSessionId, "telegram");
+    gw.bind({ sessionId: groupSessionId, channel: "telegram", chatId: "dm-9g", scope: "dm" });
+    const r3 = await gw.handleInbound({ channel: "telegram", chatId: "dm-9g", body: "/new", chatIsDirect: true });
+    check("/new (DM, via handleInbound): never becomes a turn", r3.accepted === false && r3.reason === "command" && r3.command === "new");
+    check("/new (DM, via handleInbound): acked with the real success ack", sent.some((s) => s.text === "🆕 Started a fresh conversation."));
+    // EXACT count, not .some() — a double-write would pass a .some() check; this matches the decision
+    // record's own "exactly one" claim for the DM regression leg.
+    check(
+      "/new (DM, via handleInbound): the boundary marker IS recorded EXACTLY ONCE this time",
+      db.listAllCompanionMessages(groupSessionId).filter((m) => m.text === "🆕 Started a fresh conversation.").length === 1,
+    );
+    check("/new (DM, via handleInbound): the boundary marker IS pushed live", pushCalls === 1);
   }
 
   // ============ 10 — end-to-end via CompanionController.handleInAppInbound: '/export'/'/whoami' swallowed ============
