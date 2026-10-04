@@ -651,6 +651,13 @@ async function main(): Promise<void> {
     // for merging into a spawn's env — read LIVE per-spawn (like every callback above), never boot-bound,
     // so a freshly-answered credential reaches the very next spawn/resume with no daemon restart.
     resolveCredentialSessionEnv: (projectId: string) => resolveCredentialSessionEnv(db, projectId),
+    // @decision 9d73e537 — keyed on CURRENT processState (live/starting), never resumability: the
+    // resumability-keyed version under-pruned the common exited-but-resumable case, and DB process_state
+    // (not PtyHost's own live/liveCodex maps) is the reliable source for a sibling mid-spawn.
+    isSessionLive: (sessionId: string) => {
+      const row = db.getSession(sessionId);
+      return row != null && (row.processState === "live" || row.processState === "starting");
+    },
   });
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design

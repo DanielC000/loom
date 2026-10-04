@@ -4899,6 +4899,16 @@ export class PtyHost {
    * every existing hermetic test — behaves byte-identically.
    */
   private readonly resolveCredentialSessionEnv: (projectId: string) => Record<string, string>;
+  /**
+   * Card 9d73e537: read access to whether an OTHER session id is CURRENTLY live or starting, wired in by
+   * index.ts at boot (it holds `db`; PtyHost deliberately does not — mirrors `getOtherProjects`/
+   * `resolveCredentialSessionEnv` above). Threaded into `injectSkills` so it can prune a shared skills
+   * manifest's stale entries (see that function's own doc for why "live", not "resumable" — an
+   * exited-but-resumable row is the common steady state and must still prune). Defaults to `() => true`
+   * — "every session is still live" — so a PtyHost built without this opt (every existing hermetic test)
+   * prunes NOTHING, byte-identical to before this field existed.
+   */
+  private readonly isSessionLive: (sessionId: string) => boolean;
   constructor(
     private events: PtyHostEvents,
     opts?: {
@@ -4911,6 +4921,7 @@ export class PtyHost {
       getPlatformHomePaths?: () => { repoPaths: string[]; vaultPath: string | null };
       decorateStartupPrompt?: (o: { projectId: string; role?: SessionRole; prompt: string }) => string;
       resolveCredentialSessionEnv?: (projectId: string) => Record<string, string>;
+      isSessionLive?: (sessionId: string) => boolean;
     },
   ) {
     this.busyStaleMs = opts?.busyStaleMs ?? BUSY_STALE_MS;
@@ -4923,6 +4934,7 @@ export class PtyHost {
     this.getPlatformHomePaths = opts?.getPlatformHomePaths ?? (() => ({ repoPaths: [], vaultPath: null }));
     this.decorateStartupPrompt = opts?.decorateStartupPrompt ?? null;
     this.resolveCredentialSessionEnv = opts?.resolveCredentialSessionEnv ?? (() => ({}));
+    this.isSessionLive = opts?.isSessionLive ?? (() => true);
   }
 
   spawn(opts: SpawnOpts): void {
@@ -6761,7 +6773,7 @@ export class PtyHost {
     // signal rides opts.sessionEnv (set by obsidianSessionEnv ONLY when obsidian.autoStart is on) — the
     // local `env` isn't built yet here, so derive it from opts.sessionEnv. Off ⇒ byte-identical injection.
     const obsidianEnabled = opts.sessionEnv?.LOOM_OBSIDIAN_AUTOSTART === "1";
-    try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role, obsidianEnabled); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
+    try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role, obsidianEnabled, this.isSessionLive); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
     // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
     // get the full coordination tools, workers get only worker_report + the read-only my_context
     // (resolved server-side). A

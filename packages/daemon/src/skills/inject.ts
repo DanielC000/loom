@@ -236,8 +236,31 @@ function appendObsidianFragment(skillDir: string, fragment: string): void {
  * injected file is byte-identical to the store base (the additive-when-off invariant, mirroring
  * browserTesting/documentConversion). Only loom-pickup + loom-session-end are affected; all other skills are
  * byte-identical regardless.
+ *
+ * `isSessionLive` (card 9d73e537): an OPTIONAL predicate, INJECTED by the caller — this module must not
+ * import the DB directly — answering "is this OTHER session id CURRENTLY live or starting?" for every key
+ * the shared manifest holds besides our own (we are live by definition, right now, so we never ask about
+ * ourselves). A manifest key this predicate says is NOT currently live/starting is PRUNED from the
+ * manifest before `otherClaimed` is computed from it. Deliberately NOT "resumable" (an earlier version of
+ * this fix used `resumability !== "dead"`, which code review caught as under-pruning): an exited-but-
+ * resumable row (the common steady state of a stopped worker/plain session — processState exited,
+ * archivedAt set, resumability still "resumable") would keep its claim forever, which is most of the
+ * growth this card exists to stop. Pruning it is SAFE — `injectSkills` runs on EVERY `createPty`
+ * (fresh/resume/fork/recycle), so a session that is later actually resumed RE-CLAIMS its skills the
+ * moment it resumes; nothing is lost by pruning a claim between resumes, only bookkeeping that would
+ * otherwise be regenerated anyway. Without this, a shared-cwd manifest (manager/platform/setup/auditor/
+ * plain sessions sharing `project.repoPath`) grows without bound across every recycle generation, and a
+ * no-longer-live session's claimed names stay in `otherClaimed` forever — permanently defeating the
+ * "never clobber the repo's own pre-existing skill" check below (safety bullet 1) for any name a session
+ * that's since gone idle ever touched. Absent (every legacy caller/test) ⇒ NO pruning at all,
+ * byte-identical to before this param existed — fail-safe: a caller that can't answer the question must
+ * never cause a prune. A predicate that THROWS for one session id is treated the same way for THAT entry
+ * only (keep it) — one bad lookup must never cost the rest of the manifest.
  */
-export function injectSkills(cwd: string, sessionId: string, subset?: string[] | null, role?: SessionRole | null, obsidianEnabled = false): void {
+export function injectSkills(
+  cwd: string, sessionId: string, subset?: string[] | null, role?: SessionRole | null, obsidianEnabled = false,
+  isSessionLive?: (sessionId: string) => boolean,
+): void {
   let storeNames: string[];
   try {
     // Filtered through the SAME `isValidSkillName` predicate the manifest-entry sanitizer uses (card
@@ -296,6 +319,19 @@ export function injectSkills(cwd: string, sessionId: string, subset?: string[] |
 
   const manifestPath = path.join(targetDir, MANIFEST);
   const manifest = readManifest(manifestPath, sessionId);
+  // Prune a manifest key for any OTHER session the caller-injected predicate says is not CURRENTLY
+  // live/starting (card 9d73e537; see this function's own doc comment for why "live", not "resumable").
+  // Never asked about our own key — this call IS that session, live, right now. A throw for one id is
+  // swallowed and that entry is left alone (fail-safe), not treated as grounds to abandon the whole
+  // prune pass.
+  if (isSessionLive) {
+    for (const sid of Object.keys(manifest)) {
+      if (sid === sessionId) continue;
+      let live = true;
+      try { live = isSessionLive(sid); } catch { /* fail-safe: keep this entry on error */ }
+      if (!live) delete manifest[sid];
+    }
+  }
   const myPrev = manifest[sessionId] ?? [];
   // Union of every OTHER session's injected skills sharing this cwd — these must NEVER be stripped here
   // and are NOT the repo's own (the landmine-2 invariant: concurrent sessions share project.repoPath).

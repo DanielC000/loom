@@ -197,7 +197,7 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         harnesses: ["claude"],
         file: "packages/daemon/src/pty/host.ts",
         region: "claude-create-pty",
-        pattern: `injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role, obsidianEnabled)`,
+        pattern: `injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role, obsidianEnabled, this.isSessionLive)`,
         note: "createPty injects the profile-resolved skill subset via injectSkills.",
       },
     ],
