@@ -928,11 +928,16 @@ const remoteAccessOverride = z.object({
 // `integrations` reaches an agent no differently than gateCommand reaches one via the project schema —
 // it simply isn't reachable. Named keys (not a generic record) mirror `obsidian`/`python`/`codescape`
 // above, keeping the `.strict()` typo-guard.
-// codescape is PATH-only: the codescape supervisor (codescape/supervisor.ts `resolveCodescapeBin`) only
-// ever reads a resolved bin path to spawn `ingest`/`serve` — the per-session MCP mount (P4 wiring, card
-// 088afc94) is a streamable-HTTP URL built from the manifest + the supervisor's live port, never a bin path.
+// codescape is PATH-only (plus the memoryCeilingMb tuning knob below): the codescape supervisor
+// (codescape/supervisor.ts `resolveCodescapeBin`) only ever reads a resolved bin path to spawn
+// `ingest`/`serve` — the per-session MCP mount (P4 wiring, card 088afc94) is a streamable-HTTP URL built
+// from the manifest + the supervisor's live port, never a bin path.
+// Card ba22005b: `memoryCeilingMb` floored at CODESCAPE_MEMORY_CEILING_FLOOR_MB (2048) at the resolver
+// layer (resolveCodescapeMemoryCeilingMb) regardless of what passes THIS validator — the int/positive
+// check here just rejects an obviously-malformed value (non-numeric, zero, negative) at write time.
 const codescapeIntegrationOverride = z.object({
   path: z.string().min(1).optional(),
+  memoryCeilingMb: z.number().int().positive().optional(),
 }).strict();
 const integrationsOverride = z.object({
   codescape: codescapeIntegrationOverride.optional(),

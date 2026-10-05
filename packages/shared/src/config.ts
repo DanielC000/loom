@@ -832,6 +832,16 @@ export interface ConnectionsGuardConfig {
  */
 export interface CodescapeIntegrationConfig {
   path?: string;
+  /**
+   * Card ba22005b: daemon-global ceiling (MB) on the supervised `codescape serve` child's own memory —
+   * the supervisor samples it on its existing health cadence and recycles the child once crossed (see
+   * `codescape/supervisor.ts`'s `checkMemoryCeiling`). HUMAN-only, same posture as `path` above (there is
+   * no agent-facing platform-config surface at all — see `mcp/platform.ts`). `undefined` resolves to
+   * {@link DEFAULT_CODESCAPE_MEMORY_CEILING_MB}; any resolved value is floored at
+   * {@link CODESCAPE_MEMORY_CEILING_FLOOR_MB} regardless of what a hand-edited override asks for, so a
+   * fat-fingered tiny value can't flap-kill `serve` every sample tick.
+   */
+  memoryCeilingMb?: number;
 }
 
 /**
@@ -843,6 +853,34 @@ export interface CodescapeIntegrationConfig {
 export function resolveCodescapeIntegrationPath(platformOverride?: unknown): string | undefined {
   const raw = platformOverride as { integrations?: { codescape?: CodescapeIntegrationConfig } } | undefined;
   return raw?.integrations?.codescape?.path;
+}
+
+/** Card ba22005b: default ceiling (MB) on the supervised `codescape serve` child's memory when no human
+ *  override is set — owner-approved default (8 GiB). */
+export const DEFAULT_CODESCAPE_MEMORY_CEILING_MB = 8192;
+
+/** Card ba22005b CR follow-up: the floor {@link resolveCodescapeMemoryCeilingMb} clamps ANY resolved
+ *  value to, regardless of what a hand-edited override asks for — mirrors `MEMORY_CONFIG_MAX`'s own
+ *  "hard ceiling regardless of override" discipline. Raised 512 -> 2048 (owner ruling): a HEALTHY serve
+ *  is observed ~1.2 GB RSS, more in win32 private bytes (the metric this feature actually samples on
+ *  win32 — see codescape/supervisor.ts) — 512 was already below a healthy baseline, which would have made
+ *  the supervisor treat an ordinary healthy process as "over ceiling" rather than refusing the
+ *  pathological value this floor exists to catch. */
+export const CODESCAPE_MEMORY_CEILING_FLOOR_MB = 2048;
+
+/**
+ * DAEMON-ONLY resolver for the daemon-global `integrations.codescape.memoryCeilingMb` override — same
+ * reasoning/posture as `resolveCodescapeIntegrationPath` above. `packages/web` must never import this.
+ * Always floored at {@link CODESCAPE_MEMORY_CEILING_FLOOR_MB}, defaulting to
+ * {@link DEFAULT_CODESCAPE_MEMORY_CEILING_MB} when unset OR non-numeric (card ba22005b CR follow-up — a
+ * hand-edited DB row can carry a value that bypassed the write-time zod validator; `Number("")`/`Number`
+ * of an object/array is `NaN`/not finite, and must fall back rather than propagate a garbage ceiling).
+ */
+export function resolveCodescapeMemoryCeilingMb(platformOverride?: unknown): number {
+  const raw = platformOverride as { integrations?: { codescape?: CodescapeIntegrationConfig } } | undefined;
+  const configured = raw?.integrations?.codescape?.memoryCeilingMb ?? DEFAULT_CODESCAPE_MEMORY_CEILING_MB;
+  const resolved = Number.isFinite(Number(configured)) ? Number(configured) : DEFAULT_CODESCAPE_MEMORY_CEILING_MB;
+  return Math.max(CODESCAPE_MEMORY_CEILING_FLOOR_MB, resolved);
 }
 
 /**

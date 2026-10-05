@@ -964,6 +964,30 @@ export type OrchestrationEventKind =
   // audit-only marker, not a lifecycle signal any of those four track; the worker's own turn already
   // registers as activity via its surrounding events regardless of whether this one is counted.
   | "codex_auto_commit"
+  // Card ba22005b: a daemon-managed, fleet-shared background server child was recycled because its own
+  // OS-sampled memory crossed a human-configured ceiling — a real host-process kill, filed as a
+  // forensic/incident record, same bucket as `codex_auto_commit`. WHICH server and WHY stays documented
+  // daemon-side only (this file ships to every end-user install) — see the daemon's own supervisor doc.
+  // Filed under `managerSessionId: ""` (no owning session — mirrors `vault_index_lock_stale`/
+  // `mainline_moved_outside_loom`'s own sentinel for a daemon-internal event). `detail` carries
+  // {pid, measuredBytes, ceilingBytes, metric} — `metric` names which OS counter was sampled
+  // ("PrivateMemorySize64" on win32, "VmRSS+VmSwap" on POSIX; working-set/RSS alone is NOT used on win32
+  // since Windows trims a leaking process's working set under memory pressure, under-reporting exactly
+  // the condition this exists to catch). Deliberately NOT added to
+  // EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS — same
+  // reasoning as `codex_auto_commit` above: an audit-only marker, not a worker/manager lifecycle signal
+  // any of those four track.
+  | "code_graph_memory_recycled"
+  // Card ba22005b CR follow-up (product ruling): the memory ceiling is a leak BACKSTOP, not a thing that
+  // may itself take the server down — if 3 consecutive respawns are STILL over ceiling at their own
+  // first sample (the respawn achieved nothing: the ceiling is simply below the server's real working
+  // size, a misconfiguration, not a live-growing leak), memory-based recycling STOPS for the rest of this
+  // supervisor lifetime and the over-ceiling child is left running. `detail` carries {pid, measuredBytes,
+  // ceilingBytes, metric, consecutiveUnproductiveRecycles}. A later ceiling change re-arms it (a fresh
+  // `code_graph_memory_recycled`/this pair can fire again). Same `managerSessionId: ""`/privacy posture
+  // as `code_graph_memory_recycled` above, and deliberately excluded from the same four kind-groupings
+  // for the same reason.
+  | "code_graph_memory_recycle_suspended"
   // Manager→worker REDIRECT (orchestration `worker_redirect`): the "land it NOW" escalation — END the
   // worker's CURRENT turn (a single Esc cancel) + flush/SUPERSEDE its queued direction + deliver ONE
   // authoritative instruction as the next turn. Parent-scoped exactly like message_worker/stop_worker.
@@ -1875,7 +1899,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
-  codex_auto_commit: true,
+  codex_auto_commit: true, code_graph_memory_recycled: true, code_graph_memory_recycle_suspended: true,
   credential_revoked: true,
   credential_undeliverable: true,
   worker_retired: true,

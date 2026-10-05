@@ -2,7 +2,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { resolveConfig, resolveCodescapeIntegrationPath } from "@loom/shared";
+import { resolveConfig, resolveCodescapeIntegrationPath, resolveCodescapeMemoryCeilingMb } from "@loom/shared";
 import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, LOOPBACK_SECRET_PATH, isUsagePollerSuppressed } from "./paths.js";
 import { installCrashHandlers, installEpipeTolerantStdio, hadCrashLogAtBoot as computeHadCrashLogAtBoot } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
@@ -665,7 +665,29 @@ async function main(): Promise<void> {
   // (byte-identical-when-disabled: the constructor spawns nothing) so SessionService always has a handle
   // to inject for C2/C3; `.start()` below is the only call that actually does anything, and it no-ops
   // under isCodescapeSupervisorEnabled() === false (the default for every loomctl user).
-  const codescapeSupervisor = new CodescapeSupervisor();
+  // Card ba22005b: `getMemoryCeilingMb` is a closure, not a frozen number — it re-reads the live platform
+  // config on every sample tick, so a human's `PATCH /api/platform/config` takes effect without a daemon
+  // restart. `onMemoryCeilingRecycle` files the durable `code_graph_memory_recycled` audit event (named
+  // without "codescape" — see that kind's own doc in shared/src/types.ts for why) — never throws past
+  // the supervisor (a logging/DB fault must not prevent the kill it's reporting on).
+  const codescapeSupervisor = new CodescapeSupervisor({
+    getMemoryCeilingMb: () => resolveCodescapeMemoryCeilingMb(db.getPlatformConfig()),
+    onMemoryCeilingRecycle: (detail) => {
+      try {
+        db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "code_graph_memory_recycled", detail });
+      } catch (err) {
+        console.error(`[codescape] failed to file code_graph_memory_recycled event — swallowed: ${(err as Error)?.message ?? String(err)}`);
+      }
+    },
+    // Card ba22005b CR follow-up: the paired "backstop tripped" audit event — see that kind's own doc.
+    onMemoryRecycleSuspended: (detail) => {
+      try {
+        db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "code_graph_memory_recycle_suspended", detail });
+      } catch (err) {
+        console.error(`[codescape] failed to file code_graph_memory_recycle_suspended event — swallowed: ${(err as Error)?.message ?? String(err)}`);
+      }
+    },
+  });
   // BOOT-BOUND: thread the resolved git-op / provision timeouts into the bounded-git + provision seams
   // at SessionService's call-sites (worktree create/remove/branch-delete/merge-detect during boot-reconcile).
   const sessions = new SessionService(db, pty, control, { gitOpMs: timeouts.gitOpMs, provisionMs: timeouts.provisionMs, runTimeoutMs: timeouts.runMs, codescape: codescapeSupervisor });

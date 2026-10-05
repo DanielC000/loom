@@ -69,7 +69,15 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
   silently un-pair the two and leave an orphaned stuck row that now reads as never-resolved),
   `codex_unsupported_capability`,
   `harness_default_skipped` (card `961da6c6`: the only durable trace that a safety-scoped agent was kept on
-  claude instead of the fleet's codex default), `companion_zero_reply_detected`.
+  claude instead of the fleet's codex default), `companion_zero_reply_detected`,
+  `code_graph_memory_recycled` (card `ba22005b` — named without "codescape" per the shipped-privacy
+  guard; the only durable trace that the shared, cross-project `codescape serve` child was killed for
+  crossing its memory ceiling; filed `managerSessionId:""` like `vault_index_lock_stale` above since no
+  session owns it, but deliberately carries no `detail.projectId`
+  at all — unlike that kind, this one isn't scoped to any single project; the child is shared daemon-wide),
+  `code_graph_memory_recycle_suspended` (card `ba22005b` CR follow-up — the paired record for the
+  product-ruled backstop: 3 consecutive unproductive respawns stop memory-based recycling for the rest of
+  this supervisor lifetime; same filing posture as its sibling above, same reason).
 - **Owner-interaction records** (ruled durable by the manager, `gen 345`: each is a record of an
   *owner* interaction — a decision asked for, an escalation crossing a board boundary, the owner's own
   brake being released; low volume, provenance is the whole value): `question_asked`,

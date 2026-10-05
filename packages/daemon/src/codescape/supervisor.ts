@@ -2,7 +2,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
-import { resolveCodescapeConfig, type ProjectConfigOverride } from "@loom/shared";
+import { resolveCodescapeConfig, DEFAULT_CODESCAPE_MEMORY_CEILING_MB, type ProjectConfigOverride } from "@loom/shared";
 import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, isLoomDev, resolveCodescapeBin, codescapeBinCandidate } from "../paths.js";
 import { resolveCodescapeProjectId } from "./manifest.js";
 import { probeAdvertisedTools } from "./tools-probe.js";
@@ -141,6 +141,24 @@ const DEFAULT_DRIFT_STABILITY_MS = 15 * 60_000;
  */
 const PROJECT_ID_NEGATIVE_CACHE_TTL_MS = 30_000;
 
+/** Card ba22005b: bound (ms) for one pid-scoped memory sample (POSIX reads `/proc` directly and never
+ *  needs this; win32 spawns `powershell.exe Get-Process`, which does). */
+const DEFAULT_MEMORY_SAMPLE_TIMEOUT_MS = 5_000;
+/**
+ * Card ba22005b: how many health-probe ticks fall between memory samples — NOT every tick. Cost call
+ * from the owner: don't cold-start `powershell.exe` every {@link DEFAULT_HEALTH_PROBE_INTERVAL_MS} (30s)
+ * forever for a signal that doesn't need that cadence. 4 ticks at the default 30s interval ≈ 2 minutes.
+ */
+const DEFAULT_MEMORY_SAMPLE_TICK_INTERVAL = 4;
+/**
+ * Card ba22005b CR follow-up (product ruling): the ceiling is a leak BACKSTOP and must never itself be
+ * able to take `serve` down — if this many CONSECUTIVE fresh respawns are STILL over ceiling at their
+ * own first sample (the respawn achieved nothing), memory-based recycling stops for the rest of this
+ * supervisor lifetime rather than cycling `serve` forever against a ceiling that's simply below its real
+ * working size. A later ceiling change re-arms it. See {@link CodescapeSupervisor.checkMemoryCeiling}.
+ */
+const DEFAULT_MEMORY_RECYCLE_SUSPEND_THRESHOLD = 3;
+
 export interface CodescapeSupervisorOpts {
   /** The shared ingest+serve cwd (the CWD CONTRACT). Default {@link CODESCAPE_HOME_DIR}. Test seam. */
   homeDir?: string;
@@ -201,6 +219,43 @@ export interface CodescapeSupervisorOpts {
    * populates this map itself, via {@link registerProjectWithRetry}.
    */
   seedProjectId?: { repoRoot: string; projectId: string };
+  /**
+   * Card ba22005b: test seam — inject a fake {@link MemorySampler} so a test can report a crafted byte
+   * count for the REAL child pid without that child ever actually consuming that memory. Defaults to the
+   * real cross-platform OS sampler ({@link sampleProcessMemoryBytes}).
+   */
+  memorySampler?: MemorySampler;
+  /** Test seam: shrink/lengthen {@link DEFAULT_MEMORY_SAMPLE_TIMEOUT_MS}. */
+  memorySampleTimeoutMs?: number;
+  /** Test seam: shrink {@link DEFAULT_MEMORY_SAMPLE_TICK_INTERVAL} (e.g. to 1) so a test doesn't need to
+   *  wait out several real health-probe ticks before a sample fires. */
+  memorySampleTickInterval?: number;
+  /**
+   * Card ba22005b: resolves the CURRENT memory ceiling (MB) on every sample tick — a FUNCTION, not a
+   * frozen number, so a human's live `PATCH /api/platform/config` takes effect on the very next sample,
+   * no daemon restart needed (same "live re-answer" posture as `maxConcurrentGates`/`gate_queue.cap`
+   * elsewhere in this project). Defaults to a function returning
+   * `DEFAULT_CODESCAPE_MEMORY_CEILING_MB`; production wires a closure reading the live platform config
+   * through `resolveCodescapeMemoryCeilingMb`.
+   */
+  getMemoryCeilingMb?: () => number;
+  /**
+   * Card ba22005b: best-effort, never-throwing callback fired exactly once per memory-driven recycle,
+   * BEFORE the kill — production wires this to a durable `code_graph_memory_recycled` orchestration
+   * event (named without "codescape" — see that kind's own doc in shared/src/types.ts); tests capture
+   * calls directly instead of reading the DB. Defaults to a no-op.
+   */
+  onMemoryCeilingRecycle?: (detail: { pid: number; measuredBytes: number; ceilingBytes: number; metric: string }) => void;
+  /** Test seam: override {@link DEFAULT_MEMORY_RECYCLE_SUSPEND_THRESHOLD} (default 3, the product
+   *  ruling's own number) so a test doesn't need 3 real respawns to prove the backstop trips. */
+  memoryRecycleSuspendThreshold?: number;
+  /**
+   * Card ba22005b CR follow-up: best-effort, never-throwing callback fired exactly once when the
+   * backstop trips (the Nth consecutive fresh respawn is STILL over ceiling) — production wires this to
+   * a durable `code_graph_memory_recycle_suspended` orchestration event; tests capture calls directly.
+   * Defaults to a no-op.
+   */
+  onMemoryRecycleSuspended?: (detail: { pid: number; measuredBytes: number; ceilingBytes: number; metric: string; consecutiveUnproductiveRecycles: number }) => void;
 }
 
 export interface CodescapeRequestResult {
@@ -224,6 +279,116 @@ export interface CodescapeIngestResult {
   ok: boolean;
   outcome: "ready" | "failed" | "timeout";
   errorTail?: string;
+}
+
+/**
+ * Card ba22005b: result of one pid-scoped memory sample. `ok:false` (never `bytes` substituted with `0`
+ * or any other guess) is the FAIL-SAFE shape for every unreadable case — a gone pid, a sampler spawn
+ * failure, a timeout, unparseable output — so {@link CodescapeSupervisor.checkMemoryCeiling} can never
+ * mistake "couldn't tell" for "under ceiling" OR "over ceiling".
+ */
+export interface MemorySampleResult {
+  ok: boolean;
+  bytes: number | null;
+  reason?: string;
+}
+
+/**
+ * Injectable pid-scoped memory sampler. Production defaults to {@link sampleProcessMemoryBytes} (the
+ * real cross-platform OS read); a test injects its own to report a crafted byte count FOR THE REAL CHILD
+ * PID (never a fabricated one) without that child ever actually consuming that memory — see
+ * {@link CodescapeSupervisorOpts.memorySampler}.
+ */
+export type MemorySampler = (pid: number, timeoutMs: number) => Promise<MemorySampleResult>;
+
+/**
+ * Card ba22005b CR follow-up (T2): pure parser for `/proc/<pid>/status` CONTENT, extracted from
+ * {@link sampleProcessMemoryPosix} so it's unit-testable without a real `/proc` filesystem — this repo's
+ * own dev/CI boxes are win32, where `/proc` doesn't exist at all. Sums `VmRSS` (resident) + `VmSwap`
+ * (swapped out but still owned by the process) rather than RSS alone: a leak that has partially swapped
+ * out is still a real, unreleased allocation the ceiling must catch, and RSS alone would under-report
+ * it. `VmSwap` absent (no swap configured, or kernel too old to report it) is treated as `0`, never a
+ * failure; `VmRSS` absent is the one genuine parse failure. Both lines are kB per the kernel's own
+ * `/proc` contract; converted to bytes. Exported for `test/codescape-memory-ceiling.mjs`'s own
+ * parser-only scenario.
+ */
+export function parseProcStatusMemory(text: string): MemorySampleResult {
+  const rssMatch = /^VmRSS:\s*(\d+)\s*kB/m.exec(text);
+  if (!rssMatch) return { ok: false, bytes: null, reason: "no VmRSS line found" };
+  const swapMatch = /^VmSwap:\s*(\d+)\s*kB/m.exec(text);
+  const rssKb = Number(rssMatch[1]);
+  const swapKb = swapMatch ? Number(swapMatch[1]) : 0;
+  return { ok: true, bytes: (rssKb + swapKb) * 1024 };
+}
+
+/**
+ * Card ba22005b: POSIX memory sample — reads `/proc/<pid>/status` directly (sync `fs.readFileSync`, no
+ * subprocess spawn needed, unlike the win32 path below) and hands the content to the pure
+ * {@link parseProcStatusMemory}. `timeoutMs` is accepted for signature parity with
+ * {@link sampleProcessMemoryWin32} but unused — a local file read needs no bound.
+ */
+async function sampleProcessMemoryPosix(pid: number, _timeoutMs: number): Promise<MemorySampleResult> {
+  let text: string;
+  try {
+    text = fs.readFileSync(`/proc/${pid}/status`, "utf-8");
+  } catch (err) {
+    return { ok: false, bytes: null, reason: `/proc/${pid}/status unreadable: ${(err as Error)?.message ?? String(err)}` };
+  }
+  const parsed = parseProcStatusMemory(text);
+  return parsed.ok ? parsed : { ok: false, bytes: null, reason: `/proc/${pid}/status: ${parsed.reason}` };
+}
+
+/**
+ * Card ba22005b CR follow-up (finding 1, T2): pure parser for the win32
+ * `(Get-Process -Id <pid>).PrivateMemorySize64` STDOUT contract, extracted from
+ * {@link sampleProcessMemoryWin32} so the empty-output case is unit-testable without spawning
+ * `powershell.exe`. Empty/whitespace-only stdout (the shape `-ErrorAction SilentlyContinue` produces for
+ * a pid that no longer exists) is an EXPLICIT `ok:false` — `Number("")` is `0`, not `NaN`, so without this
+ * check a gone process would silently read as "using 0 bytes" rather than "couldn't tell". Exported for
+ * `test/codescape-memory-ceiling.mjs`'s own parser-only scenario.
+ */
+export function parsePrivateMemorySize64Output(stdout: string): MemorySampleResult {
+  const trimmed = stdout.trim();
+  if (trimmed === "") return { ok: false, bytes: null, reason: "Get-Process returned no output (process likely exited)" };
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n < 0) return { ok: false, bytes: null, reason: `Get-Process returned a non-numeric value: "${trimmed}"` };
+  return { ok: true, bytes: n };
+}
+
+/**
+ * Card ba22005b: win32 memory sample — `PrivateMemorySize64` (private commit), deliberately NOT
+ * `WorkingSet64`. Owner ruling: under real memory pressure Windows TRIMS a leaking process's working
+ * set, so working-set alone can read SMALL while commit keeps growing — the production incident this
+ * feature exists for was measured as ~110 GB of PAGED/commit memory while host commit charge sat at
+ * 154.5/156.2 GB; working set would have missed exactly that. `<pid>` is substituted as a validated
+ * integer (never a name/pattern match) via `-Id`, matching "pid-scoped, never by image name".
+ *
+ * Card ba22005b CR follow-up (finding 1): uses {@link runBoundedSplit} (stdout/stderr kept SEPARATE),
+ * never the merged {@link runBounded} — a stray stderr banner must never contaminate the stdout value
+ * this parses, and {@link parsePrivateMemorySize64Output} reads stdout ALONE.
+ */
+async function sampleProcessMemoryWin32(pid: number, timeoutMs: number): Promise<MemorySampleResult> {
+  const r = await runBoundedSplit(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).PrivateMemorySize64`],
+    process.cwd(),
+    timeoutMs,
+  );
+  if (!r.ok) {
+    return { ok: false, bytes: null, reason: r.timedOut ? `Get-Process timed out after ${timeoutMs}ms` : `Get-Process failed (exit ${r.code ?? "null"})${r.stderr ? `: ${r.stderr}` : ""}` };
+  }
+  return parsePrivateMemorySize64Output(r.stdout);
+}
+
+/** Card ba22005b: real cross-platform {@link MemorySampler} — dispatches by `process.platform`. This is
+ *  the production default; a test injects its own via {@link CodescapeSupervisorOpts.memorySampler}. */
+async function sampleProcessMemoryBytes(pid: number, timeoutMs: number): Promise<MemorySampleResult> {
+  return process.platform === "win32" ? sampleProcessMemoryWin32(pid, timeoutMs) : sampleProcessMemoryPosix(pid, timeoutMs);
+}
+
+/** Render a byte count as whole MB for a human-facing log line (card ba22005b). */
+function formatBytesMb(bytes: number): string {
+  return `${Math.round(bytes / (1024 * 1024))}MB`;
 }
 
 /** What {@link runBounded} resolves — mirrors python/venv.ts's RunResult (never rejects). */
@@ -528,6 +693,13 @@ export class CodescapeSupervisor {
   private readonly driftStabilityMs: number;
   private readonly toolsProbeTimeoutMs: number;
   private readonly portReportTimeoutMs: number;
+  private readonly memorySampler: MemorySampler;
+  private readonly memorySampleTimeoutMs: number;
+  private readonly memorySampleTickInterval: number;
+  private readonly getMemoryCeilingMbFn: () => number;
+  private readonly onMemoryCeilingRecycleFn: (detail: { pid: number; measuredBytes: number; ceilingBytes: number; metric: string }) => void;
+  private readonly memoryRecycleSuspendThreshold: number;
+  private readonly onMemoryRecycleSuspendedFn: (detail: { pid: number; measuredBytes: number; ceilingBytes: number; metric: string; consecutiveUnproductiveRecycles: number }) => void;
 
   /**
    * Card b8de5876: the DB-persisted `integrations.codescape.path` override, threaded in by {@link start}
@@ -668,6 +840,58 @@ export class CodescapeSupervisor {
    */
   private lastToolDriftUnclassified: string[] | null = null;
   /**
+   * Card ba22005b: counts health-probe ticks that reached {@link checkMemoryCeiling} — memory is sampled
+   * only every {@link memorySampleTickInterval}th one. Deliberately a SEPARATE counter from
+   * {@link completedProbeTicks} (never reused/retimed to match it) — that field is read by existing
+   * tests expecting its exact increment-at-tick-end timing, and retiming it here would risk changing
+   * that. Reset on {@link stop}/{@link start}, matching every other drift-tracking field.
+   */
+  private healthProbeTickCount = 0;
+  /**
+   * Card ba22005b: true while a memory sample is in flight. Defense-in-depth, independent of
+   * {@link probeInFlight} (which already serializes the whole {@link probeHealth} tick this runs inside
+   * of) — skip, never queue, a sample that would overlap the previous one. Cleared in
+   * {@link checkMemoryCeiling}'s own `finally`, so it self-heals even if `stop()` races an in-flight read.
+   */
+  private memorySampleInFlight = false;
+  /**
+   * Card ba22005b: latches the classified reason a memory sample last failed (e.g. no `powershell.exe`
+   * on PATH, a gone pid), so a sustained sampler failure logs once, not every sample tick forever —
+   * mirrors {@link lastInstalledBuildFailureReason}'s exact discipline. `null` = no failure latched
+   * (either never sampled, or the last sample succeeded). A failed read is NEVER treated as "over
+   * ceiling" — fail-safe, not fail-kill. Reset on {@link stop}/{@link start}.
+   */
+  private lastMemorySampleFailureReason: string | null = null;
+  /** Diagnostic/test seam — the most recent successful sample's byte count, `null` before the first one. */
+  private lastMemorySampleBytes: number | null = null;
+  /**
+   * Card ba22005b CR follow-up: the pid the LAST successful memory sample was taken against, or `null`
+   * before any sample has ever succeeded — used to detect "this sample is the FIRST one of a fresh
+   * child" (pid changed since the previous sample), which is the only case the backstop below ever
+   * counts. Reset on {@link stop}/{@link start}.
+   */
+  private lastMemorySamplePid: number | null = null;
+  /**
+   * Card ba22005b CR follow-up (product ruling): counts CONSECUTIVE fresh children whose own first
+   * sample was STILL over ceiling — i.e. the recycle that produced them achieved nothing. Reset to 0 the
+   * moment a fresh child's first sample reads UNDER ceiling (a healthy respawn), or when the ceiling
+   * itself changes while {@link memoryRecycleSuspended}. Never incremented for a repeat sample of the
+   * SAME still-running child (that's the ordinary, unconditional live-leak path, not this backstop).
+   * Reset on {@link stop}/{@link start}.
+   */
+  private consecutiveUnproductiveRecycles = 0;
+  /**
+   * Card ba22005b CR follow-up: true once {@link consecutiveUnproductiveRecycles} has reached
+   * {@link memoryRecycleSuspendThreshold} — memory-based recycling is DISARMED (the over-ceiling child
+   * is left running) until the ceiling itself changes (see {@link memoryRecycleSuspendedAtCeilingMb}).
+   * Reset on {@link stop}/{@link start}.
+   */
+  private memoryRecycleSuspended = false;
+  /** Card ba22005b CR follow-up: the ceiling (MB) in effect at the moment {@link memoryRecycleSuspended}
+   *  was set — a LATER sample tick whose resolved ceiling differs from this re-arms recycling (a human's
+   *  `PATCH` is the sanctioned way to recover from the backstop). `null` while not suspended. */
+  private memoryRecycleSuspendedAtCeilingMb: number | null = null;
+  /**
    * Test seam: count of {@link probeHealth} invocations that ran to full completion (a tick skipped by the
    * `probeInFlight` guard does NOT count). A REAL subprocess spawn now sits inside every successful probe
    * (`checkBuildDrift` -> `readInstalledBuild`), so the number of probes that complete in any given
@@ -734,6 +958,13 @@ export class CodescapeSupervisor {
     this.driftStabilityMs = opts?.driftStabilityMs ?? DEFAULT_DRIFT_STABILITY_MS;
     this.toolsProbeTimeoutMs = opts?.toolsProbeTimeoutMs ?? DEFAULT_TOOLS_PROBE_TIMEOUT_MS;
     this.portReportTimeoutMs = opts?.portReportTimeoutMs ?? DEFAULT_PORT_REPORT_TIMEOUT_MS;
+    this.memorySampler = opts?.memorySampler ?? sampleProcessMemoryBytes;
+    this.memorySampleTimeoutMs = opts?.memorySampleTimeoutMs ?? DEFAULT_MEMORY_SAMPLE_TIMEOUT_MS;
+    this.memorySampleTickInterval = opts?.memorySampleTickInterval ?? DEFAULT_MEMORY_SAMPLE_TICK_INTERVAL;
+    this.getMemoryCeilingMbFn = opts?.getMemoryCeilingMb ?? (() => DEFAULT_CODESCAPE_MEMORY_CEILING_MB);
+    this.onMemoryCeilingRecycleFn = opts?.onMemoryCeilingRecycle ?? (() => { /* no-op default */ });
+    this.memoryRecycleSuspendThreshold = opts?.memoryRecycleSuspendThreshold ?? DEFAULT_MEMORY_RECYCLE_SUSPEND_THRESHOLD;
+    this.onMemoryRecycleSuspendedFn = opts?.onMemoryRecycleSuspended ?? (() => { /* no-op default */ });
     if (opts?.port != null) {
       // Test-only: exercise the control-plane client against a fake HTTP server with no real spawn.
       this.port = opts.port;
@@ -781,6 +1012,26 @@ export class CodescapeSupervisor {
   /** Test seam — see {@link versionProbeAttempts}. */
   getVersionProbeAttemptCount(): number {
     return this.versionProbeAttempts;
+  }
+
+  /** Diagnostic/test seam — see {@link lastMemorySampleBytes}. `null` before the first successful sample. */
+  getLastMemorySampleBytes(): number | null {
+    return this.lastMemorySampleBytes;
+  }
+
+  /** Test seam — see {@link healthProbeTickCount}. */
+  getHealthProbeTickCount(): number {
+    return this.healthProbeTickCount;
+  }
+
+  /** Test seam — see {@link consecutiveUnproductiveRecycles}. */
+  getConsecutiveUnproductiveRecycles(): number {
+    return this.consecutiveUnproductiveRecycles;
+  }
+
+  /** Test seam — see {@link memoryRecycleSuspended}. */
+  getMemoryRecycleSuspended(): boolean {
+    return this.memoryRecycleSuspended;
   }
 
   /**
@@ -910,6 +1161,13 @@ export class CodescapeSupervisor {
       this.lastMismatchRunningBuild = null;
       this.lastHealthAnsweredErrorStatus = null;
       this.lastToolDriftUnclassified = null;
+      this.healthProbeTickCount = 0;
+      this.lastMemorySampleFailureReason = null;
+      this.lastMemorySampleBytes = null;
+      this.lastMemorySamplePid = null;
+      this.consecutiveUnproductiveRecycles = 0;
+      this.memoryRecycleSuspended = false;
+      this.memoryRecycleSuspendedAtCeilingMb = null;
       this.spawnServe();
       this.startHealthMonitor();
       // Card 4e0df6ce: `this.port` is no longer necessarily known synchronously at this point (a capable
@@ -964,6 +1222,14 @@ export class CodescapeSupervisor {
     this.lastMismatchRunningBuild = null;
     this.lastHealthAnsweredErrorStatus = null;
     this.lastToolDriftUnclassified = null;
+    this.healthProbeTickCount = 0;
+    this.lastMemorySampleFailureReason = null;
+    this.lastMemorySampleBytes = null;
+    this.memorySampleInFlight = false;
+    this.lastMemorySamplePid = null;
+    this.consecutiveUnproductiveRecycles = 0;
+    this.memoryRecycleSuspended = false;
+    this.memoryRecycleSuspendedAtCeilingMb = null;
     if (this.child) {
       try { this.child.kill(); } catch { /* best-effort */ }
       this.child = null;
@@ -1017,6 +1283,12 @@ export class CodescapeSupervisor {
     // A fresh child is presumed responsive — don't let a wedge-count from the PREVIOUS (now-dead) process
     // carry over and trip the threshold after only one or two real probes against the new one.
     this.consecutiveHealthFailures = 0;
+    // Card ba22005b CR follow-up: align the memory-sample phase so THIS fresh child gets its first
+    // sample on the very NEXT health-probe tick, rather than wherever the modulo cycle happens to land —
+    // checkMemoryCeiling's unproductive-recycle backstop reads "the first sample of a fresh child", so a
+    // predictable, prompt first sample (not delayed by up to memorySampleTickInterval-1 ticks) is what
+    // makes that check meaningful immediately after any respawn.
+    this.healthProbeTickCount = this.memorySampleTickInterval - 1;
     const chunks: Buffer[] = [];
     let bytes = 0;
     const capture = (b: Buffer): void => {
@@ -1066,6 +1338,9 @@ export class CodescapeSupervisor {
     this.child = child;
     this.spawnedAt = Date.now();
     this.consecutiveHealthFailures = 0;
+    // Card ba22005b CR follow-up — see spawnServeExplicit's identical comment: give this fresh child a
+    // predictable, immediate first memory sample on the very next health-probe tick.
+    this.healthProbeTickCount = this.memorySampleTickInterval - 1;
 
     const chunks: Buffer[] = [];
     let bytes = 0;
@@ -1262,6 +1537,122 @@ export class CodescapeSupervisor {
   }
 
   /**
+   * Card ba22005b: sample the live child's own OS memory — pid-scoped, never by image name (see the real
+   * {@link MemorySampler} implementations) — and recycle it once a human-configured ceiling is crossed.
+   * Runs on the SAME {@link healthProbeIntervalMs} timer as the rest of {@link probeHealth} (called from
+   * its tick, BEFORE the HTTP `/graph/health` fetch, so a process that's still answering health but
+   * ballooning in memory is still caught), but only actually samples every {@link memorySampleTickInterval}th
+   * tick — owner cost ruling: don't cold-start `powershell.exe` on every single tick forever for a signal
+   * that doesn't need that cadence.
+   *
+   * A read FAILURE is fail-SAFE, never fail-KILL: an inconclusive sample (gone pid, sampler spawn
+   * failure, timeout, unparseable output) must never be treated as "over ceiling" — that would turn a
+   * flaky/missing sampler into a crash-loop trigger. Latched so a sustained failure logs once, not every
+   * sample tick forever — mirrors {@link lastInstalledBuildFailureReason}'s discipline.
+   *
+   * @decision 545ef479 — the kill routes through the EXISTING `child.kill()` -> {@link wireDeathHandling}
+   * -> {@link scheduleRestart} path, never a second restart channel, sharing the same backoff/rate-
+   * ceiling/give-up budget as every other restart cause.
+   *
+   * Card ba22005b CR follow-up (product ruling): the ceiling is a leak BACKSTOP, not a thing that may
+   * itself take `serve` down. If {@link memoryRecycleSuspendThreshold} CONSECUTIVE fresh children (a
+   * respawn's own FIRST sample, never a repeat sample of the same still-running child) are STILL over
+   * ceiling, the respawn achieved nothing — the ceiling is simply below `serve`'s real working size, a
+   * misconfiguration, not a live-growing leak — and memory-based recycling STOPS for the rest of this
+   * supervisor lifetime; the over-ceiling child is left running rather than cycled forever. A LATER
+   * sample tick whose resolved ceiling differs from the one in effect when this tripped re-arms it.
+   *
+   * Returns `true` iff it fired a kill this tick (the caller skips the rest of that tick's probe work —
+   * the child is being torn down).
+   */
+  private async checkMemoryCeiling(): Promise<boolean> {
+    this.healthProbeTickCount++;
+    if (this.healthProbeTickCount % this.memorySampleTickInterval !== 0) return false;
+    if (this.memorySampleInFlight) return false; // previous sample still running — defense-in-depth, see field doc
+    const pid = this.getPid();
+    // Nit (CR follow-up): a real OS pid is always a safe positive integer — validate it rather than
+    // trust it blindly, since `pid` is substituted directly into the win32 sampler's shell command.
+    if (pid == null || !Number.isSafeInteger(pid) || pid <= 0) return false;
+    // Finding 3 (CR follow-up): captured BEFORE the await — `this.child` can change WHILE the sample is
+    // in flight (a concurrent wedge-kill, a build-drift kill, an explicit stop()+start()). A kill below
+    // must target THIS exact child object, never whatever `this.child` has become by the time the
+    // sample resolves — see the `this.child === childAtSampleTime` guard at the kill site.
+    const childAtSampleTime = this.child;
+    this.memorySampleInFlight = true;
+    try {
+      const sample = await this.memorySampler(pid, this.memorySampleTimeoutMs);
+      if (this.stopped) return false; // stop() may have raced this in-flight sample — abandon silently
+      if (!sample.ok || sample.bytes == null) {
+        const reason = sample.reason ?? "unknown reason";
+        if (reason !== this.lastMemorySampleFailureReason) {
+          console.warn(`[codescape] cannot sample serve memory (pid ${pid}) — ${reason}. Will NOT kill on an inconclusive read; won't repeat this warning until the reason changes.`);
+          this.lastMemorySampleFailureReason = reason;
+        }
+        return false;
+      }
+      if (this.lastMemorySampleFailureReason != null) {
+        console.warn(`[codescape] memory sampling recovered (pid ${pid}) — was failing: ${this.lastMemorySampleFailureReason}`);
+        this.lastMemorySampleFailureReason = null;
+      }
+      this.lastMemorySampleBytes = sample.bytes;
+      const ceilingMb = this.getMemoryCeilingMbFn();
+      const ceilingBytes = ceilingMb * 1024 * 1024;
+      // A FRESH child is one whose pid differs from the last SUCCESSFUL sample's pid — `null` (no prior
+      // sample ever succeeded) deliberately never counts as fresh, so the very first detection this
+      // supervisor instance ever makes always proceeds to an unconditional kill, same as before this
+      // backstop existed; only a respawn's OWN first sample is ever checked against it.
+      const isFreshChild = this.lastMemorySamplePid != null && pid !== this.lastMemorySamplePid;
+      this.lastMemorySamplePid = pid;
+
+      if (sample.bytes <= ceilingBytes) {
+        if (isFreshChild) this.consecutiveUnproductiveRecycles = 0; // a healthy fresh generation clears the backstop
+        return false;
+      }
+
+      if (this.memoryRecycleSuspended) {
+        if (ceilingMb !== this.memoryRecycleSuspendedAtCeilingMb) {
+          console.warn(`[codescape] memory ceiling changed (was ${this.memoryRecycleSuspendedAtCeilingMb}MB, now ${ceilingMb}MB) — re-arming memory-based recycling`);
+          this.memoryRecycleSuspended = false;
+          this.memoryRecycleSuspendedAtCeilingMb = null;
+          this.consecutiveUnproductiveRecycles = 0;
+        } else {
+          return false; // suspended at this exact ceiling — serve stays up until the ceiling changes
+        }
+      }
+
+      const metric = process.platform === "win32" ? "PrivateMemorySize64" : "VmRSS+VmSwap";
+
+      if (isFreshChild) {
+        this.consecutiveUnproductiveRecycles++;
+        if (this.consecutiveUnproductiveRecycles >= this.memoryRecycleSuspendThreshold) {
+          this.memoryRecycleSuspended = true;
+          this.memoryRecycleSuspendedAtCeilingMb = ceilingMb;
+          console.error(`[codescape] memory ceiling ${ceilingMb}MB is below serve's working size; raise integrations.codescape.memoryCeilingMb — ${this.consecutiveUnproductiveRecycles} consecutive respawns all came back over ceiling (pid ${pid}, ${formatBytesMb(sample.bytes)}) — stopping memory-based recycling for this supervisor lifetime (serve stays up). A ceiling change via PATCH /api/platform/config re-arms this.`);
+          try {
+            this.onMemoryRecycleSuspendedFn({ pid, measuredBytes: sample.bytes, ceilingBytes, metric, consecutiveUnproductiveRecycles: this.consecutiveUnproductiveRecycles });
+          } catch (err) {
+            console.error(`[codescape] onMemoryRecycleSuspended callback threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+          }
+          return false; // do NOT kill — this is the whole point of the backstop
+        }
+      }
+
+      console.warn(`[codescape] serve memory ${formatBytesMb(sample.bytes)} (${metric}, pid ${pid}) exceeds ceiling ${formatBytesMb(ceilingBytes)} — killing for restart`);
+      try {
+        this.onMemoryCeilingRecycleFn({ pid, measuredBytes: sample.bytes, ceilingBytes, metric });
+      } catch (err) {
+        console.error(`[codescape] onMemoryCeilingRecycle callback threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+      }
+      if (this.child === childAtSampleTime && childAtSampleTime?.pid === pid) {
+        try { childAtSampleTime.kill(); } catch { /* the exit/error handler still drives the restart path if the signal lands */ }
+      }
+      return true;
+    } finally {
+      this.memorySampleInFlight = false;
+    }
+  }
+
+  /**
    * One `/graph/health` check — closes the "alive but wedged" blind spot `child.on("exit")` alone can't
    * see.
    *
@@ -1273,6 +1664,7 @@ export class CodescapeSupervisor {
     if (this.stopped || !this.alive || this.probeInFlight) return;
     this.probeInFlight = true;
     try {
+      if (await this.checkMemoryCeiling()) return; // recycled this tick — child is being torn down, skip the HTTP round-trip
       const res = await this.request("GET", "/graph/health", undefined, this.healthProbeTimeoutMs);
       // stop() may have raced this in-flight probe (its fetch was already underway when stop() ran) —
       // abandon silently rather than act on a dead instance (no stray warn/kill after stop()).
