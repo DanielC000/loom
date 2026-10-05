@@ -1659,8 +1659,16 @@ function parseStaleSinceMs(basename: string): number | null {
   return Number.isFinite(ts) ? ts : null;
 }
 
-/** A planted junction/symlink named to look like a leftover must never be treated as one — a Windows
- *  directory junction reports as a directory at the readdir level, unlike a plain POSIX symlink.
+/** A planted junction/symlink named to look like a leftover must never be treated as one. MEASURED (card
+ *  e3fcd8ea) on Node 22.16/Win11: both `fs.readdirSync(..., {withFileTypes:true})`'s Dirent and
+ *  `fs.lstatSync` report a real directory junction as `isSymbolicLink()===true` / `isDirectory()===false`
+ *  — so the `!entry.isDirectory()`/`!leaf.isDirectory()` skip at every call site below ALREADY excludes a
+ *  junction before this function is ever reached, making it redundant on this Node/libuv version. Kept
+ *  anyway, deliberately, as declared defence-in-depth: junction/Dirent reporting is libuv-/Node-version-
+ *  dependent and may change, this guards a host-path DELETE, and a single name-matched `lstatSync` costs
+ *  nothing. `junction-dirent-shape.mjs` PINS the measured Dirent shape on
+ *  win32 so a future Node upgrade that changes it fails loudly instead of silently reopening the gap this
+ *  function exists to close.
  *  @decision ad34efb5 — single `lstatSync`, called ONLY on a name-matched candidate, never scan-wide. */
 function isLikelyJunctionOrSymlink(p: string): boolean {
   try {
@@ -1827,10 +1835,12 @@ export async function reclaimStaleAsideWorktreeDir(
     protectedRepoPaths?: readonly string[];
     /** Card ad34efb5 round 2 (Major, fix b): INDEPENDENT of the caller's own fresh-listing re-derivation —
      *  refuses `targetPath` outright if it IS a registered repoKey axis dir, never trusting "the listing
-     *  didn't show it to me" as the only guard. See {@link isRegisteredRepoKeyAxisDir}'s own doc. */
-    repoKeysByProject?: ReadonlyMap<string, ReadonlySet<string>>;
+     *  didn't show it to me" as the only guard. See {@link isRegisteredRepoKeyAxisDir}'s own doc.
+     *  @decision e3fcd8ea — never make this optional again: an optional shape let a future TYPED caller
+     *  silently lose this refusal by omitting it, uncaught by the compiler. */
+    repoKeysByProject: ReadonlyMap<string, ReadonlySet<string>>;
     worktreesRoot?: string;
-  } = {},
+  },
 ): Promise<StaleAsideReclaimOutcome> {
   // Narrower than worktreeRemovalRefusal below, and specific to THIS endpoint's purpose: restricts
   // reclaim to ONLY ever deleting a renamed-aside leftover, never a generically-named worktree dir that
@@ -1841,7 +1851,15 @@ export async function reclaimStaleAsideWorktreeDir(
       reason: `${targetPath} is not a renamed-aside stale worktree dir (basename does not match .stale-<ts>)`,
     };
   }
-  if (deps.repoKeysByProject && isRegisteredRepoKeyAxisDir(targetPath, deps.repoKeysByProject, deps.worktreesRoot ?? WORKTREES_DIR)) {
+  // Fail CLOSED, never silently skip the registry-axis refusal below, when a non-typechecked caller
+  // omits repoKeysByProject (`deps?.` also tolerates `deps` itself being omitted).
+  if (!deps?.repoKeysByProject) {
+    const reason = "reclaimStaleAsideWorktreeDir requires deps.repoKeysByProject — the independent registry-axis refusal (isRegisteredRepoKeyAxisDir) is load-bearing and must never be silently skipped. Pass an empty Map() if this call genuinely has no registry context.";
+    // eslint-disable-next-line no-console
+    console.warn(`[worktree] REFUSED to reclaim stale leftover ${targetPath} — ${reason}. Nothing was touched.`);
+    return { path: targetPath, outcome: "refused", bytesReclaimed: null, sizeTruncated: false, reason };
+  }
+  if (isRegisteredRepoKeyAxisDir(targetPath, deps.repoKeysByProject, deps.worktreesRoot ?? WORKTREES_DIR)) {
     const reason = `${targetPath} is a registered repoKey axis dir — refusing even though its basename matches .stale-<ts>`;
     // eslint-disable-next-line no-console
     console.warn(`[worktree] REFUSED to reclaim stale leftover ${targetPath} — ${reason}. Nothing was touched.`);

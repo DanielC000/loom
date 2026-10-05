@@ -2643,7 +2643,9 @@ export class PlatformMcpRouter {
         // registry data + the effective new repoPath/vaultPath, reject the whole call on conflict.
         let repos: RepoRegistryEntry[] | undefined;
         if ((repoPath !== undefined || vaultPath !== undefined) && project.repos.length > 0) {
-          const check = await validateRepoRegistry(project.repos, { repoPath: repoPath ?? project.repoPath, vaultPath: vaultPath ?? project.vaultPath });
+          // existingKeys (card e3fcd8ea): validating project.repos against ITSELF — every one of its own
+          // keys is by definition already stored, so a legacy stale-shaped key must not 400 this rebind.
+          const check = await validateRepoRegistry(project.repos, { repoPath: repoPath ?? project.repoPath, vaultPath: vaultPath ?? project.vaultPath, existingKeys: new Set(project.repos.map((r) => r.key)) });
           if (!check.ok) return ok({ error: `repoPath/vaultPath rebind conflicts with the existing repos registry: ${check.error}` });
           repos = check.value;
         }

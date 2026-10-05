@@ -156,7 +156,7 @@ check("isStaleAsideWorktreeDir rejects a non-numeric suffix", !isStaleAsideWorkt
   const entries = listStaleAsideWorktrees(WORKTREES_DIR);
   check("(18) a stale-named junction/symlink is SKIPPED by enumeration, never listed as a leftover", !entries.find((e) => e.path === junctionPath));
 
-  const outcome = await reclaimStaleAsideWorktreeDir(junctionPath);
+  const outcome = await reclaimStaleAsideWorktreeDir(junctionPath, undefined, { repoKeysByProject: new Map() });
   check("(18) reclaimStaleAsideWorktreeDir REFUSES a stale-named junction/symlink (confinement: its real target resolves outside the worktrees root)", outcome.outcome === "refused");
   check("(18) its REAL target is untouched", fs.existsSync(path.join(outsideTarget, "real-file.txt")));
 
@@ -169,7 +169,7 @@ check("isStaleAsideWorktreeDir rejects a non-numeric suffix", !isStaleAsideWorkt
   const proj = "projSwlE";
   const cleanPath = resolveWorktreePath(proj, "taskE-happy");
   const stalePath = mkStaleAside(cleanPath, 1700000000003);
-  const outcome = await reclaimStaleAsideWorktreeDir(stalePath);
+  const outcome = await reclaimStaleAsideWorktreeDir(stalePath, undefined, { repoKeysByProject: new Map() });
   check("(6) happy path: outcome is removed", outcome.outcome === "removed");
   check("(6) happy path: bytesReclaimed is a measured non-negative number", typeof outcome.bytesReclaimed === "number" && outcome.bytesReclaimed >= 0);
   check("(6) happy path: the dir is actually gone from disk", !fs.existsSync(stalePath));
@@ -181,7 +181,7 @@ check("isStaleAsideWorktreeDir rejects a non-numeric suffix", !isStaleAsideWorkt
   const cleanPath = resolveWorktreePath(proj, "taskF-refuse-basename");
   fs.mkdirSync(cleanPath, { recursive: true });
   fs.writeFileSync(path.join(cleanPath, "do-not-touch.txt"), "live content\n");
-  const outcome = await reclaimStaleAsideWorktreeDir(cleanPath); // the ORIGINAL, un-suffixed path
+  const outcome = await reclaimStaleAsideWorktreeDir(cleanPath, undefined, { repoKeysByProject: new Map() }); // the ORIGINAL, un-suffixed path
   check("(7) REFUSES a path whose basename doesn't match .stale-<ts>", outcome.outcome === "refused");
   check("(7) nothing was touched — the dir still exists", fs.existsSync(cleanPath));
   fs.rmSync(cleanPath, { recursive: true, force: true });
@@ -191,7 +191,7 @@ check("isStaleAsideWorktreeDir rejects a non-numeric suffix", !isStaleAsideWorkt
 {
   const outsidePath = path.join(path.dirname(WORKTREES_DIR), `outside-swl.stale-1700000000004`);
   fs.mkdirSync(outsidePath, { recursive: true });
-  const outcome = await reclaimStaleAsideWorktreeDir(outsidePath);
+  const outcome = await reclaimStaleAsideWorktreeDir(outsidePath, undefined, { repoKeysByProject: new Map() });
   check("(8) REFUSES a stale-shaped basename sitting OUTSIDE WORKTREES_DIR", outcome.outcome === "refused");
   check("(8) nothing was touched", fs.existsSync(outsidePath));
   fs.rmSync(outsidePath, { recursive: true, force: true });
@@ -204,6 +204,7 @@ check("isStaleAsideWorktreeDir rejects a non-numeric suffix", !isStaleAsideWorkt
   const stalePath = mkStaleAside(cleanPath, 1700000000005);
   const outcome = await reclaimStaleAsideWorktreeDir(stalePath, undefined, {
     measureSize: async () => ({ bytes: 42, truncated: true }),
+    repoKeysByProject: new Map(),
   });
   check("(9) a truncated measurement propagates as sizeTruncated:true on the removed outcome", outcome.outcome === "removed" && outcome.sizeTruncated === true && outcome.bytesReclaimed === 42);
 }
@@ -212,8 +213,31 @@ check("isStaleAsideWorktreeDir rejects a non-numeric suffix", !isStaleAsideWorkt
 {
   const proj = "projSwlH";
   const neverCreated = `${resolveWorktreePath(proj, "taskH-missing")}.stale-1700000000006`;
-  const outcome = await reclaimStaleAsideWorktreeDir(neverCreated);
+  const outcome = await reclaimStaleAsideWorktreeDir(neverCreated, undefined, { repoKeysByProject: new Map() });
   check("(10) a stale-shaped path that never existed on disk reports missing", outcome.outcome === "missing");
+}
+
+// --- (19) card e3fcd8ea item 1: repoKeysByProject is REQUIRED — omitting it (or the whole `deps` arg)
+// refuses, never silently skipping the independent registry-axis guard ---
+{
+  const proj = "projSwlRequiredRegistry";
+  const cleanPath = resolveWorktreePath(proj, "taskRequired");
+  const stalePath = mkStaleAside(cleanPath, 1700000000007);
+  const outcome = await reclaimStaleAsideWorktreeDir(stalePath, undefined, {});
+  check("(19) a deps object with repoKeysByProject MISSING REFUSES rather than silently skipping the registry-axis guard", outcome.outcome === "refused");
+  check("(19) reason names the missing repoKeysByProject", /repoKeysByProject/.test(outcome.reason ?? ""));
+  check("(19) nothing was touched", fs.existsSync(stalePath));
+  fs.rmSync(stalePath, { recursive: true, force: true });
+
+  // (19b) the `deps?.` optional-chaining path: `deps` itself omitted entirely (a 2-arg call), never just
+  // an empty object — proves the runtime fail-closed check tolerates a caller passing fewer args than the
+  // signature declares, not only one that passes `{}`.
+  const cleanPath2 = resolveWorktreePath(proj, "taskRequired2");
+  const stalePath2 = mkStaleAside(cleanPath2, 1700000000008);
+  const outcome2 = await reclaimStaleAsideWorktreeDir(stalePath2, undefined);
+  check("(19b) omitting the whole `deps` argument ALSO refuses (the deps?. undefined path)", outcome2.outcome === "refused");
+  check("(19b) nothing was touched", fs.existsSync(stalePath2));
+  fs.rmSync(stalePath2, { recursive: true, force: true });
 }
 
 // ================================================================================================

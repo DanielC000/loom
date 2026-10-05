@@ -4869,7 +4869,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // fired after the write below (card 540a3281).
     let repoRegistryDiff: RepoRegistryDiff | undefined;
     if (b.repos !== undefined) {
-      const check = await validateRepoRegistry(b.repos, { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath });
+      // existingKeys (card e3fcd8ea): the PRE-patch stored keys — exempts a legacy stale-shaped key this
+      // PATCH is merely carrying forward (echoed or kept) from the shape check, never one newly added here.
+      const check = await validateRepoRegistry(b.repos, { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath, existingKeys: new Set(p.repos.map((r) => r.key)) });
       if (!check.ok) return reply.code(400).send({ error: check.error });
       // LIVE-WORKTREE GUARD (CARRIED 3, multi-repo epic 49136451 phase 2): a `repos` edit can repath or
       // remove an entry a LIVE worker's worktree was cut from — stranding it exactly like an unguarded
@@ -4899,7 +4901,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // the effective new repoPath/vaultPath; reject the whole PATCH on conflict. On success, refresh the
       // stored registry to the re-canonicalized result (cheap, and keeps it byte-consistent with a fresh
       // write rather than leaving stale un-canonicalized entries from before this fix).
-      const check = await validateRepoRegistry(p.repos, { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath });
+      // existingKeys (card e3fcd8ea): validating p.repos against ITSELF — every one of its own keys is by
+      // definition already stored, so a legacy stale-shaped key must not 400 a rebind it had no part in.
+      const check = await validateRepoRegistry(p.repos, { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath, existingKeys: new Set(p.repos.map((r) => r.key)) });
       if (!check.ok) return reply.code(400).send({ error: `repoPath/vaultPath rebind conflicts with the existing repos registry: ${check.error}` });
       repos = check.value;
     }

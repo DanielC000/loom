@@ -88,7 +88,7 @@ export type RepoRegistryCheck =
  */
 export async function validateRepoRegistry(
   input: unknown,
-  opts: { repoPath: string; vaultPath: string },
+  opts: { repoPath: string; vaultPath: string; existingKeys?: ReadonlySet<string> },
 ): Promise<RepoRegistryCheck> {
   if (!Array.isArray(input)) return { ok: false, error: "repos must be an array" };
   const repoPathKey = comparisonKey(canonicalizeExistingPath(opts.repoPath));
@@ -126,11 +126,13 @@ export async function validateRepoRegistry(
     }
     // Card ad34efb5 round 2 (Major, fix b): a repoKey matching the renamed-aside leftover basename shape
     // (e.g. "svc.stale-1") made its own axis dir — which holds this repo's LIVE worktrees — indistinguishable
-    // from a stale leftover by basename alone (see STALE_ASIDE_SUFFIX_RE's own doc). Rejected for NEW writes
-    // only; an already-stored key shaped like this (written before this fix) is NOT migrated or revoked by
-    // this check — it stays registered and relies on listStaleAsideWorktrees's registry-first enumeration
-    // order + isRegisteredRepoKeyAxisDir's independent reclaim-time refusal for protection, not on this guard.
-    if (STALE_ASIDE_SUFFIX_RE.test(key)) {
+    // from a stale leftover by basename alone (see STALE_ASIDE_SUFFIX_RE's own doc). Rejected for NEW keys
+    // only — `opts.existingKeys` (card e3fcd8ea) exempts a key ALREADY in the caller's own pre-patch stored
+    // registry from this ONE check (every other check below still applies to it): a project predating this
+    // guard can otherwise never pass re-validation again on any later rebind/echo, even though it already
+    // relies on listStaleAsideWorktrees's registry-first enumeration order + isRegisteredRepoKeyAxisDir's
+    // independent reclaim-time refusal for protection, not on this guard, regardless of when it was written.
+    if (STALE_ASIDE_SUFFIX_RE.test(key) && !opts.existingKeys?.has(key)) {
       return { ok: false, error: `repos entry key "${key}" looks like a renamed-aside stale worktree leftover (matches the .stale-<ts> suffix) — this shape is reserved to avoid colliding with that leftover-detection machinery` };
     }
     if (seenKeys.has(key)) {

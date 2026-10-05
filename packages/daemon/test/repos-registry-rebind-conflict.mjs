@@ -63,6 +63,7 @@ const mkRepo = (tag) => {
 };
 const primary = mkRepo("primary");
 const svcA = mkRepo("svcA");   // registered in the registry throughout
+const svcB = mkRepo("svcB");   // card e3fcd8ea PART E/F: a second repo for a genuinely NEW registry entry
 const newPrimary = mkRepo("newPrimary"); // a genuinely different repo to rebind repoPath to legitimately
 const now = new Date().toISOString();
 
@@ -272,11 +273,92 @@ try {
       db.close();
     }
   }
+
+  // =====================================================================================================
+  // PART E — card e3fcd8ea item 2: a repoPath/vaultPath rebind (or a `repos` echo) no longer 400s when
+  // the STORED registry already carries a legacy key shaped like a renamed-aside stale-worktree leftover
+  // (`.stale-<ts>`, STALE_ASIDE_SUFFIX_RE). CREATE has rejected this shape since `ad34efb5`, so the only
+  // way a project can carry one is data written before that guard existed — seeded here directly via
+  // `Db.insertProject` (bypassing validateRepoRegistry entirely) to simulate that.
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "legacy-stale-key-e.db"));
+    const stub = {};
+    const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, control: stub, usageStatus: stub });
+    try {
+      db.insertProject({
+        id: "pLegacy", name: "LegacyStaleKey", repoPath: primary, vaultPath: vaultDir, config: {},
+        createdAt: now, archivedAt: null, reserved: false,
+        repos: [{ key: "svc.stale-1", path: svcA }],
+      });
+
+      // (E1) repoPath-ONLY rebind (repos omitted) to a non-conflicting repo must now SUCCEED despite the
+      // stored registry carrying the legacy stale-shaped key (previously 400'd: validateRepoRegistry
+      // re-ran the shape check against the UNCHANGED stored registry on every rebind).
+      const e1 = await app.inject({ method: "PATCH", url: "/api/projects/pLegacy", payload: { repoPath: newPrimary } });
+      check("(E1) repoPath-only rebind succeeds despite a stored legacy .stale-<ts>-shaped key", e1.statusCode === 200);
+      check("(E1) repoPath actually rebound", db.getProject("pLegacy")?.repoPath === newPrimary);
+      check("(E1) the legacy key survives, UNCHANGED", db.getProject("pLegacy")?.repos?.[0]?.key === "svc.stale-1");
+
+      // (E2) PATCH explicitly echoing the SAME (unchanged) repos array back also succeeds.
+      const e2 = await app.inject({ method: "PATCH", url: "/api/projects/pLegacy", payload: { repos: [{ key: "svc.stale-1", path: svcA }] } });
+      check("(E2) explicitly echoing the unchanged legacy registry -> 200", e2.statusCode === 200);
+      check("(E2) the legacy key still present", db.getProject("pLegacy")?.repos?.[0]?.key === "svc.stale-1");
+
+      // (E3) CONTROL: adding a brand-new, DIFFERENTLY-named stale-shaped key alongside the legacy one is
+      // still REJECTED — the exemption must never widen to a key that wasn't already in the pre-patch
+      // stored registry.
+      const e3 = await app.inject({
+        method: "PATCH", url: "/api/projects/pLegacy",
+        payload: { repos: [{ key: "svc.stale-1", path: svcA }, { key: "new.stale-2", path: svcB }] },
+      });
+      check("(E3) CONTROL: adding a NEW stale-shaped key alongside the legacy one -> 400 (exemption doesn't widen)", e3.statusCode === 400);
+      check("(E3) error still names the stale-aside rule", /stale-<ts>|renamed-aside/.test(e3.json().error ?? ""));
+      check("(E3) registry UNCHANGED after rejection", db.getProject("pLegacy")?.repos?.length === 1);
+    } finally {
+      db.close();
+    }
+  }
+
+  // =====================================================================================================
+  // PART F — card e3fcd8ea item 2: the SAME exemption on the elevated loom-platform project_update surface.
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "legacy-stale-key-f.db"));
+    db.insertProject({ id: "pHome", name: "Loom Platform", repoPath: primary, vaultPath: primary, config: {}, createdAt: now, archivedAt: null, reserved: true });
+    db.insertProject({
+      id: "pLegacyPlatform", name: "LegacyPlatform", repoPath: primary, vaultPath: primary, config: {},
+      createdAt: now, archivedAt: null, reserved: false,
+      repos: [{ key: "svc.stale-1", path: svcA }],
+    });
+    db.insertAgent({ id: "agentLead", projectId: "pHome", name: "Lead", startupPrompt: "LEAD", position: 0, profileId: null });
+    db.insertSession({ id: "PL2", projectId: "pHome", agentId: "agentLead", engineSessionId: null, title: null, cwd: primary, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "platform", parentSessionId: null });
+
+    class SeamHost extends createSeamHost(PtyHost) {
+      createPty(opts) { return { ...super.createPty(opts), pid: 1 }; }
+      stop() {}
+    }
+    const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
+    const svc = new SessionService(db, host, new OrchestrationControl());
+    const server = new PlatformMcpRouter(db, svc).buildServer("PL2");
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const client = new Client({ name: "legacy-stale-key-platform-test", version: "0" });
+    await client.connect(clientT);
+    const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+    const f1 = await call("project_update", { projectId: "pLegacyPlatform", repoPath: newPrimary });
+    check("(F1) platform project_update repoPath rebind succeeds despite a stored legacy .stale-<ts>-shaped key", !f1.error && f1.repoPath === newPrimary);
+    check("(F1) the legacy key survives, UNCHANGED", db.getProject("pLegacyPlatform")?.repos?.[0]?.key === "svc.stale-1");
+
+    await client.close();
+    db.close();
+  }
 } finally {
-  for (const d of [tmpHome, primary, svcA, newPrimary]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
+  for (const d of [tmpHome, primary, svcA, svcB, newPrimary]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a repoPath/vaultPath rebind that OMITS `repos` still re-validates the EXISTING registry against the new primary on both the human REST PATCH and the elevated platform project_update (rejecting a conflict, leaving a non-conflicting rebind unaffected), every alias/dedup comparison canonicalizes paths first (native realpath + win32 case-fold) so differently-spelled/-cased/trailing-slashed paths to the identical real directory are still caught as the same repo, and (CARRIED item 3, phase 2) a `repos` registry EDIT itself — repathing or removing an entry, not just a repoPath rebind — is refused while ANY live worktree session exists for the project, succeeding again once it exits."
+  ? "\n✅ ALL PASS — a repoPath/vaultPath rebind that OMITS `repos` still re-validates the EXISTING registry against the new primary on both the human REST PATCH and the elevated platform project_update (rejecting a conflict, leaving a non-conflicting rebind unaffected), every alias/dedup comparison canonicalizes paths first (native realpath + win32 case-fold) so differently-spelled/-cased/trailing-slashed paths to the identical real directory are still caught as the same repo, (CARRIED item 3, phase 2) a `repos` registry EDIT itself — repathing or removing an entry, not just a repoPath rebind — is refused while ANY live worktree session exists for the project, succeeding again once it exits, and (card e3fcd8ea item 2) a project carrying a legacy .stale-<ts>-shaped stored key (pre-dating the write-side guard) is no longer permanently blocked from every future rebind/echo on either surface, while a genuinely NEW stale-shaped key is still rejected."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -28,7 +28,10 @@ a registered repoKey whose name happens to ALSO match `.stale-<ts>` (e.g. `svc.s
 validator in `projects/repos.ts` allowed it) made its own axis dir — which holds that repo's LIVE
 worktrees one level below — look exactly like a renamed-aside leftover. The reclaim POST then passed
 every existing guard (the live-claimant check is exact-path, and sessions live one level below the axis
-dir) and deleted the live worktrees underneath. Fixed on both sides, neither alone is sufficient:
+dir) and deleted the live worktrees underneath. Fixed on both sides — defence-in-depth: either guard alone
+protects the POST path (correction, card `e3fcd8ea` item 4 — "neither alone is sufficient" overstated it;
+the two fixes protect different surfaces, but on the reclaim POST path specifically each is independently
+sufficient on its own):
 
 1. **Enumeration now checks the registry FIRST.** An entry whose name is a registered repoKey (active OR
    archived) for that project is NEVER treated as a stale leaf, regardless of whether it also matches the
@@ -40,11 +43,23 @@ dir) and deleted the live worktrees underneath. Fixed on both sides, neither alo
 3. **The write side is closed too.** `validateRepoRegistry` now rejects a NEW repoKey shaped like
    `.stale-<ts>` outright. An already-stored key from before this fix is NOT migrated or revoked — it
    stays registered and relies on (1)/(2) above for protection, forever (fix 1/2 are not conditioned on
-   fix 3 having run).
+   fix 3 having run). **Correction (card `e3fcd8ea` item 2):** this write-side rejection also used to
+   re-fire against such an already-stored key on every later rebind/echo (three RE-validation call sites
+   re-ran the full check against the project's own pre-patch registry) — a project carrying one got a
+   permanent 400 on every future settings edit. `validateRepoRegistry` now accepts `opts.existingKeys`,
+   exempting a key already in the caller's pre-patch registry from the shape check ONLY (every other check
+   still applies); see `docs/decisions/e3fcd8ea-*` for the full fix and tests.
 4. **Enumeration also skips a planted junction/symlink** named to look like a leftover (a cheap, single
-   `lstatSync` on a name-matched candidate only — never a scan-wide stat) — `isDirectory()` alone already
-   excludes a plain POSIX symlink at the Dirent level, but a Windows directory junction reports as a
-   directory there, so this is the one case that needed an explicit check.
+   `lstatSync` on a name-matched candidate only — never a scan-wide stat). **Correction (card `e3fcd8ea`
+   item 3):** the original claim here — "a Windows directory junction reports as a directory at the
+   readdir level" — is FALSE as measured on Node 22.16/Win11 (see `docs/decisions/e3fcd8ea-*`): both
+   `fs.readdirSync(..., {withFileTypes:true})`'s Dirent and `fs.lstatSync` report a real junction as
+   `isSymbolicLink()===true` / `isDirectory()===false`, so the pre-existing `isDirectory()` filter alone
+   already excludes a junction on this Node/libuv version, making this helper measured-redundant today.
+   Kept anyway as declared, inert defence-in-depth (junction/Dirent reporting is libuv-/Node-version-
+   dependent and may change, and this guards a host-path delete) — see `e3fcd8ea`'s own record for the full
+   reasoning and the test that pins the measured behavior so a future Node upgrade that changes it is
+   caught loudly.
 
 **Known, accepted residual (nit, left as-is):** two concurrent `POST /api/worktrees/reclaim-stale-leftover`
 calls on the SAME path can both pass the live-claimant/confinement checks and both report
