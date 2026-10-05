@@ -438,8 +438,104 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   check("(rest-reparent) exactly ONE real gate invocation across the whole retry loop, before AND after the reparent", gateCalls === 1);
 }
 
+// ── (8) card 47a22d40, THE PRODUCTION RACE ITSELF — RED ON MAIN: a dead owner whose op is STILL RUNNING
+//        (not abandoned — a real held-open gate proves it) must be ATTACHED to by a genuinely SEPARATE
+//        top-level call sequence, never evicted-and-reminted. Different shape than (4): (4) stays on ONE
+//        call sequence throughout (skipDeadOwnerRecovery:true after its own first check); this fires a
+//        SECOND, INDEPENDENT confirmWorkerMergeUntilSettled call while the FIRST is still genuinely
+//        running — exactly what worker 2100dbc4's repro (card 19f959ea) hit. Pre-fix, call B's own
+//        dead-owner check evicts call A's op (dead ownership ALONE was sufficient, with no regard for
+//        whether the op is still progressing) and mints a FRESH confirmWorkerMerge that races the
+//        orphaned call A invocation's own union-merge/squash against the SAME worktree. Post-fix (card
+//        47a22d40), eviction additionally requires the op to have outlived
+//        `SessionService.deadOwnerEvictionCeilingMs` — far from true moments after mint — so call B
+//        dedupe-attaches instead.
+//
+//        CARD 47a22d40 ROUND 2, item 1 (BLOCKING — Code Review 8c0d76c6 @ 17d10fbb): this scenario used
+//        to pass an explicit `deadOwnerEvictionCeilingMs` override, which means it NEVER actually ran the
+//        PRODUCTION formula (`gateTimeoutMs * 6` / `DEFAULT_REST_MERGE_CEILING_MS`) — a mutation to that
+//        formula (e.g. "always return 0", i.e. the pre-fix race) would have survived this whole file. NO
+//        OVERRIDE here now: `gateCommandTimeoutMs` is raised to 60_000 (a 360_000ms/6min derived ceiling)
+//        so the REAL formula runs, comfortably larger than any real pre-gate git prep this scenario lets
+//        run for real could plausibly take even under host contention. Scenario (9) below separately pins
+//        the formula's own exact arithmetic (including the DEFAULT fallback) with no real git at all.
+//
+//        ITEM 5 — HONEST DISCRIMINATOR NOTE: this scenario's "exactly ONE gate invocation" / "exactly ONE
+//        squash commit" checks did NOT go RED pre-fix in the RED-on-main proof that shipped with the
+//        original fix — the race is nondeterministic (see project memory
+//        mrt-dead-owner-release-flake-pre-existing), and that one run happened to settle luckily on both
+//        counts even while eviction fired. The checks that DID reliably go RED, and are therefore this
+//        scenario's real discriminators, are: the eviction-warning count, the SAME-opId-after-B's-own-
+//        synchronous-check assertion, and the exactly-ONE-durable-pending_gate_ops-row assertion. The
+//        gate/squash counts are kept as additional evidence on a GREEN run, never relied on alone.
+{
+  const sfx = `attach-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-mrt-attach-${sfx}`);
+  const { db, mgrId, workerId } = await setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs: 60_000, mgrProcessState: "exited" });
+  const repo = path.join(reposDir, "repo");
+  const headBefore = execSync("git rev-parse HEAD", { cwd: repo }).toString().trim();
+  let releaseGate;
+  const gateHold = new Promise((res) => { releaseGate = res; });
+  let gateCalls = 0;
+  // NO deadOwnerEvictionCeilingMs override (Round 2, item 1) — the REAL production formula resolves to
+  // 60_000 * 6 = 360_000ms off this scenario's own gateCommandTimeoutMs above.
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    runGate: async () => { gateCalls++; await gateHold; return { passed: true }; },
+  });
+
+  // Call A: a fresh top-level call sequence — mints the op and reaches the (held-open) real gate.
+  const callA = sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
+  await gateSpawnedAtLeastOnce(() => gateCalls, "(attach) call A's gate spawned");
+  const opIdBeforeB = sessions.pendingOps.peek(`merge:${workerId}`)?.opId;
+  check("(attach) [setup] call A's op is tracked running under the dead manager", sessions.pendingOps.peek(`merge:${workerId}`)?.state === "running" && typeof opIdBeforeB === "string");
+
+  // Call B: a SECOND, genuinely INDEPENDENT top-level call sequence against the SAME dead-owner worker —
+  // never `skipDeadOwnerRecovery` (internal-retry-only; see confirmWorkerMergeUntilSettled's own doc).
+  // `confirmWorkerMergeTracked`'s dead-owner check runs SYNCHRONOUSLY with zero `await` between method
+  // entry and the check (verified at source: its first real await is the verdictIdentity git read,
+  // strictly AFTER the check) — so by the time this line returns control (captures a pending promise, no
+  // await here), the eviction decision has ALREADY been made; no poll is needed to observe it.
+  let evictionWarnings = 0;
+  const origWarn = console.warn;
+  console.warn = (...args) => { if (String(args[0]).includes("had a dead owner")) evictionWarnings++; origWarn(...args); };
+  const callB = sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
+  console.warn = origWarn;
+
+  check("(attach) CRITICAL — call B's dead-owner check did NOT evict call A's still-running op (0 'had a dead owner' warnings)", evictionWarnings === 0);
+  check("(attach) CRITICAL — the SAME opId is still installed under the key right after B's synchronous check — never evicted-and-reminted", sessions.pendingOps.peek(`merge:${workerId}`)?.opId === opIdBeforeB);
+
+  releaseGate("go");
+  const [resultA, resultB] = await Promise.all([callA, callB]);
+  check("(attach) call A settles merged:true", resultA.settled === true && resultA.ok === true && resultA.value?.merged === true);
+  check("(attach) call B settles to the IDENTICAL verdict as call A — same opId, both merged:true",
+    resultB.settled === true && resultB.ok === true && resultB.value?.merged === true && resultB.value.opId === resultA.value.opId);
+  check("(attach) CRITICAL — exactly ONE real gate invocation despite TWO independent top-level call sequences racing a dead owner", gateCalls === 1);
+  check("(attach) CRITICAL — exactly ONE squash commit landed on main (a real double-squash race is the historical symptom)",
+    execSync(`git rev-list --count ${headBefore}..HEAD`, { cwd: repo }).toString().trim() === "1");
+  const attachRows = db.listPendingGateOps().filter((r) => r.key === `merge:${workerId}`);
+  check("(attach) exactly ONE durable pending_gate_ops row — never a second mint's own tombstone", attachRows.length === 1);
+}
+
+// ── (9) card 47a22d40 Round 2, item 1 — FORMULA PIN, no real git: (8) proves the race is fixed using the
+//        real production formula, but (8) alone can't prove the FORMULA ITSELF is right — a mutation that
+//        changes the arithmetic (not just disables it outright) could still pass (8) if the resulting
+//        ceiling happens to still be large enough for that scenario's own timing. This pins the exact
+//        computation `SessionService.deadOwnerEvictionCeilingMs` performs directly: mutation M2 (the
+//        formula collapsing to always-0, i.e. "always stuck") fails this scenario's first check
+//        immediately, with no real git, no gate, no timing dependency at all.
+{
+  const sfx = `formula-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-mrt-formula-${sfx}`);
+  const { db, workerId } = await setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs: 12_345 });
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
+  check("(formula) a RESOLVABLE worker/project: the ceiling is EXACTLY gateCommandTimeoutMs * 6 — the real production formula, not an approximation",
+    sessions.deadOwnerEvictionCeilingMs(workerId) === 12_345 * 6);
+  check("(formula) an UNRESOLVABLE worker (no session at all under this id): falls back to DEFAULT_REST_MERGE_CEILING_MS",
+    sessions.deadOwnerEvictionCeilingMs(`${workerId}-does-not-exist`) === SessionService.DEFAULT_REST_MERGE_CEILING_MS);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the REST merge route's confirmWorkerMergeUntilSettled shares the SAME PendingOpRegistry dedupe + durable pending_gate_ops tombstone as the MCP worker_merge_confirm path, a concurrent REST+MCP confirm on one worker never mints a duplicate op, the bounded wait ceiling never synthesizes a false 'not merged' while the real gate is still running, — Half Four — a dead-owner manager (the REST route's own worker.parentSessionId shape) never re-evicts and re-mints the in-flight op on every internal poll (exactly one real gate invocation runs, matching a live owner's identical shape), and (card 257d534d) a manager that RECYCLED mid-merge, leaving a LIVE successor behind, is never mistaken for a dead owner by a fresh second call against its still-running op either — the same exactly-one-invocation result holds even though the originating manager itself has genuinely exited."
+  ? "\n✅ ALL PASS — the REST merge route's confirmWorkerMergeUntilSettled shares the SAME PendingOpRegistry dedupe + durable pending_gate_ops tombstone as the MCP worker_merge_confirm path, a concurrent REST+MCP confirm on one worker never mints a duplicate op, the bounded wait ceiling never synthesizes a false 'not merged' while the real gate is still running, — Half Four — a dead-owner manager (the REST route's own worker.parentSessionId shape) never re-evicts and re-mints the in-flight op on every internal poll (exactly one real gate invocation runs, matching a live owner's identical shape), (card 257d534d) a manager that RECYCLED mid-merge, leaving a LIVE successor behind, is never mistaken for a dead owner by a fresh second call against its still-running op either — the same exactly-one-invocation result holds even though the originating manager itself has genuinely exited, (card 47a22d40) a genuinely dead owner's op that is STILL RUNNING and has NOT outlived the REAL, UNOVERRIDDEN production eviction ceiling is attached to, never evicted-and-reminted, by a second independent top-level call — and (Round 2) that ceiling's own formula is pinned directly, both the gateCommandTimeoutMs*6 case and the DEFAULT_REST_MERGE_CEILING_MS fallback for an unresolvable worker."
   : `\n❌ ${failures} FAILURE(S).`);
 
 for (const db of dbs) try { db.close(); } catch { /* ignore */ }

@@ -9,10 +9,25 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // registry key), which is heavyweight and non-obvious.
 //
 // THE FIX: (1) confirmWorkerMergeTracked defensively detects an EXISTING running op whose owning manager
-// session is dead (exited/archived/missing) and evicts it BEFORE attach(), so the call starts a
-// genuinely fresh confirm instead of dedup-attaching to something that can never settle for a live
-// caller. (2) reconcileDeadOwnerMergeOps() is a boot-callable sweep that does the same across every
-// outstanding merge op, for any orphaned-owner shape a per-call check alone wouldn't catch.
+// session is dead (exited/archived/missing) AND has outlived the shared eviction ceiling (card 47a22d40
+// — see below) and evicts it BEFORE attach(), so the call starts a genuinely fresh confirm instead of
+// dedup-attaching to something that can never settle for a live caller. (2) reconcileDeadOwnerMergeOps()
+// is a boot-callable sweep that does the same across every outstanding merge op, for any orphaned-owner
+// shape a per-call check alone wouldn't catch.
+//
+// CARD 47a22d40 (2026-10-05): dead OWNERSHIP ALONE is no longer sufficient to evict a RUNNING entry — a
+// `state:"running"` entry is always backed by a currently-executing promise in this process (see
+// PendingOpRegistry's own class doc) and will settle on its own; evicting it only ever lets a second,
+// concurrent invocation race the first against the same worktree (the real production race this card
+// fixed — see docs/decisions/27ea069e-*.md's own appended section). So eviction now ALSO requires the op
+// to have outlived `SessionService.deadOwnerEvictionCeilingMs` (the SAME ceiling
+// `confirmWorkerMergeUntilSettled` already gives up waiting at: `gateCommandTimeoutMs * 6`, else
+// `DEFAULT_REST_MERGE_CEILING_MS`). This file's own zombies (scenarios 2/3 below) are seeded under a
+// SessionService constructed with a tiny `deadOwnerEvictionCeilingMs` override (the same kind of
+// injectable test seam `syncAttachBudgetMs` already is) and the test waits PAST it — via `sleepPast`,
+// an executable assertion, never a blind guessed sleep — before exercising eviction, so these scenarios
+// keep proving "a genuinely stuck op past the ceiling still evicts," not the no-longer-true "any
+// dead-owner op evicts immediately."
 //
 // HERMETIC: a stub pty (mirrors merge-confirm-idempotent.mjs) + REAL git on a temp repo, NO live daemon —
 // drives SessionService directly, seeding a "zombie" PendingOpRegistry entry the same shape a
@@ -21,9 +36,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Proves:
 //   (1) precondition: worker_list's pendingMerge view shows the zombie op with the DEAD manager's id
 //       (mirrors the reported symptom exactly).
-//   (2) confirmWorkerMergeTracked, called by a LIVE manager, evicts the dead-owner zombie and completes a
-//       REAL merge on the SAME call (not stuck "pending" forever) — the branch's commit lands on main.
-//   (3) reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears a dead-owner op directly.
+//   (2) confirmWorkerMergeTracked, called by a LIVE manager, evicts a dead-owner zombie that has outlived
+//       the eviction ceiling and completes a REAL merge on the SAME call (not stuck "pending" forever) —
+//       the branch's commit lands on main.
+//   (3) reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears a dead-owner op past the ceiling
+//       directly.
 //   (4) SURGICAL: a RUNNING op owned by a LIVE manager is left completely untouched by both paths — the
 //       healthy case is byte-identical to before this card.
 //   (5) card 257d534d's fix: a RUNNING op whose owning manager has genuinely EXITED but has a LIVE
@@ -31,13 +48,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the op's managerSessionId) is NOT evicted by either recovery path, matching (4)'s live-owner
 //       result rather than (2)/(3)'s genuinely-dead-owner result — the two polarities together (a
 //       recycled-but-alive lineage survives, a truly ownerless one is still evicted) prove the fix
-//       adopted LINEAGE semantics rather than merely disabling eviction.
+//       adopted LINEAGE semantics rather than merely disabling eviction. (Unaffected by card 47a22d40 —
+//       a live lineage never reaches the elapsed-time check at all.)
+//   (6) card 47a22d40's converse: a dead-owner op that is STILL UNDER the ceiling is left alone by BOTH
+//       paths — the fresh caller dedupe-attaches to the SAME still-running op instead of evicting it.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-confirm-dead-owner-recovery.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, sleepPast } from "./_wait.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mdo-home-${Date.now()}-${process.pid}`);
@@ -65,7 +85,14 @@ const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
 // assertion below wants the SYNCHRONOUS-settle shape, not a host-speed race — so widen it here, test-only;
 // production's own SYNC_ATTACH_BUDGET_MS is untouched (this constant is not the banned "raise the budget").
 const GENEROUS_SYNC_BUDGET_MS = 60_000;
-const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
+// TINY deadOwnerEvictionCeilingMs (card 47a22d40 TEST SEAM): dead ownership alone no longer evicts a
+// RUNNING entry — the op must also have outlived this ceiling (SessionService.deadOwnerEvictionCeilingMs,
+// production default `gateCommandTimeoutMs * 6` / `DEFAULT_REST_MERGE_CEILING_MS`). Overridden tiny here
+// so scenarios (2)/(3) below can prove "stuck past the ceiling ⇒ still evicted" by genuinely waiting past
+// it (via `sleepPast`, never a backdated `startedAt` — PendingOpRegistry stamps that itself at mint and
+// exposes no setter) instead of waiting out a real multi-minute production ceiling.
+const DEAD_OWNER_CEILING_MS = 50;
+const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, deadOwnerEvictionCeilingMs: DEAD_OWNER_CEILING_MS });
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const projId = `mdo-proj-${sfx}`, agentId = `mdo-agent-${sfx}`, taskId = `mdo-task-${sfx}`;
@@ -120,6 +147,11 @@ try {
   db.insertPendingGateOp({ opId: pre.opId, kind: "merge", key, ownerSessionId: deadMgrId, projectId: projId, taskId, branch: null, startedAt: now, state: "pending", surfacedPending: true });
   check("(precondition) the durable pending_gate_ops row for the zombie exists", db.listPendingGateOps().some((r) => r.opId === pre.opId));
 
+  // Card 47a22d40: eviction now ALSO requires the op to have outlived DEAD_OWNER_CEILING_MS — genuinely
+  // wait past it (sleepPast proves the claim mechanically, never a trusted-comment guess) before
+  // exercising eviction below, or this zombie (minted moments ago) would be left alone as "merely slow."
+  await sleepPast(DEAD_OWNER_CEILING_MS + 100, DEAD_OWNER_CEILING_MS, "past the dead-owner eviction ceiling before scenario (2)'s confirm");
+
   // ── (2) a LIVE manager's confirm evicts the dead-owner zombie and completes a REAL merge ────────────
   const headBefore = git(repo, "rev-parse HEAD");
   const result = await sessions.confirmWorkerMergeTracked(liveMgrId, workerId);
@@ -149,6 +181,8 @@ try {
   check("(boot-sweep precondition) a second zombie op is tracked as running", zombie2?.state === "running");
   db.insertPendingGateOp({ opId: zombie2.opId, kind: "merge", key: key2, ownerSessionId: deadMgrId, projectId: projId, taskId, branch: null, startedAt: now, state: "pending", surfacedPending: true });
   check("(boot-sweep precondition) its durable pending_gate_ops row exists too", db.listPendingGateOps().some((r) => r.opId === zombie2.opId));
+  // Card 47a22d40: same ceiling gate as scenario (2) — genuinely wait past it first.
+  await sleepPast(DEAD_OWNER_CEILING_MS + 100, DEAD_OWNER_CEILING_MS, "past the dead-owner eviction ceiling before scenario (3)'s boot sweep");
   const cleared = sessions.reconcileDeadOwnerMergeOps();
   check("(boot-sweep) reports exactly the one dead-owner op it cleared", cleared === 1);
   check("(boot-sweep) the zombie is gone from the registry", sessions.pendingOps.peek(key2) === undefined);
@@ -186,7 +220,7 @@ try {
   db.insertSession({ id: workerId2, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: recycledSuccessorId });
   db.insertSession({ id: workerId2b, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: recycledSuccessorId });
 
-  const sessionsFast = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 100 });
+  const sessionsFast = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 100, deadOwnerEvictionCeilingMs: DEAD_OWNER_CEILING_MS });
   const key4 = `merge:${workerId2}`;
   void sessionsFast.pendingOps.attach(key4, "merge", recycledPredecessorId, 10, () => new Promise(() => {}));
   await waitUntil(() => sessionsFast.pendingOps.peek(key4)?.state === "running", { label: "recycled-owner op (boot-sweep key) observable as running" });
@@ -216,6 +250,45 @@ try {
   check("(recycled-owner) confirmWorkerMergeTracked's OWN per-call check agrees — degrades to settled:false, dedupe-attached to the still-running zombie", fastResult.settled === false);
   check("(recycled-owner) it never logged a 'had a dead owner' eviction — the lineage check found the live successor", deadOwnerWarnings === 0);
   check("(recycled-owner) the op is STILL the SAME opId after this call — dedupe-attach happened, never evict-and-remint", sessionsFast.pendingOps.peek(key5)?.opId === recycledZombie2.opId);
+
+  // ── (6) card 47a22d40 Round 2, item 2 (BLOCKING) — THE CONVERSE: a dead-owner op that is STILL UNDER
+  // the ceiling is left alone by BOTH recovery paths. Mutation M3 (reconcileDeadOwnerMergeOps's own
+  // `if (!this.isDeadOwnerOpStuck(op)) continue;` weakened to `if (false) continue;` — i.e. dropping the
+  // ceiling gate so dead ownership alone evicts again) must go RED here. Reuses the genuinely-dead
+  // deadMgrId (no live successor at all — the discriminator here is purely ELAPSED TIME, not lineage,
+  // unlike (5)'s recycled-but-alive case). Uses sessionsFast (DEAD_OWNER_CEILING_MS override + a small
+  // syncAttachBudgetMs) so "still under the ceiling" is proven by NOT sleeping at all — a freshly-minted
+  // op is, by construction, under any positive ceiling. Separate keys/workers for the boot-sweep vs
+  // per-call arm, same "independently falsifiable under a partial revert" reasoning as (5)'s own split.
+  const workerId6 = `mdo-wkr6-${sfx}`, workerId6b = `mdo-wkr6b-${sfx}`;
+  db.insertSession({ id: workerId6, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: deadMgrId });
+  db.insertSession({ id: workerId6b, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: deadMgrId });
+
+  // Boot-sweep arm — NO sleepPast: freshly minted, so it's under DEAD_OWNER_CEILING_MS by construction.
+  const key6 = `merge:${workerId6}`;
+  void sessionsFast.pendingOps.attach(key6, "merge", deadMgrId, 10, () => new Promise(() => {}));
+  await waitUntil(() => sessionsFast.pendingOps.peek(key6)?.state === "running", { label: "under-ceiling dead-owner op (boot-sweep key) observable as running" });
+  const underCeilingZombie = sessionsFast.pendingOps.peek(key6);
+  check("(under-ceiling, boot-sweep precondition) op is tracked running, owned by the genuinely DEAD manager", underCeilingZombie?.state === "running" && underCeilingZombie?.managerSessionId === deadMgrId);
+  const clearedUnderCeiling = sessionsFast.reconcileDeadOwnerMergeOps();
+  check("(under-ceiling, boot-sweep) THE FIX — does NOT evict a dead-owner op that hasn't outlived the ceiling yet", clearedUnderCeiling === 0);
+  check("(under-ceiling, boot-sweep) the op is STILL tracked as running post-sweep — untouched", sessionsFast.pendingOps.peek(key6)?.state === "running");
+
+  // Per-call arm — its OWN key/worker, same "independently falsifiable" reasoning as (5)'s own split.
+  const key6b = `merge:${workerId6b}`;
+  void sessionsFast.pendingOps.attach(key6b, "merge", deadMgrId, 10, () => new Promise(() => {}));
+  await waitUntil(() => sessionsFast.pendingOps.peek(key6b)?.state === "running", { label: "under-ceiling dead-owner op (per-call-check key) observable as running" });
+  const underCeilingZombie2 = sessionsFast.pendingOps.peek(key6b);
+  check("(under-ceiling, per-call precondition) op is tracked running, owned by the genuinely DEAD manager", underCeilingZombie2?.state === "running" && underCeilingZombie2?.managerSessionId === deadMgrId);
+
+  let deadOwnerWarnings6 = 0;
+  const origWarn6 = console.warn;
+  console.warn = (...args) => { if (String(args[0]).includes("had a dead owner")) deadOwnerWarnings6++; origWarn6(...args); };
+  const underCeilingResult = await sessionsFast.confirmWorkerMergeTracked(deadMgrId, workerId6b);
+  console.warn = origWarn6;
+  check("(under-ceiling, per-call) THE FIX — does NOT evict, dedupe-attaches to the SAME still-running zombie, degrading to settled:false once its small syncAttachBudgetMs elapses", underCeilingResult.settled === false);
+  check("(under-ceiling, per-call) it never logged a 'had a dead owner' eviction — the op hasn't outlived the ceiling yet", deadOwnerWarnings6 === 0);
+  check("(under-ceiling, per-call) the op is STILL the SAME opId after this call — dedupe-attach happened, never evict-and-remint", sessionsFast.pendingOps.peek(key6b)?.opId === underCeilingZombie2.opId);
 } finally {
   db.close();
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -223,6 +296,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a merge op orphaned by a dead owning manager (the daemon-restart-mid-merge shape) is evicted rather than dedup-attached-to forever: confirmWorkerMergeTracked recovers it inline on the next confirm, reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears it directly, a live-owner op is left completely untouched by both paths, (card edc1ec12 CR follow-up, restated by e3e40167) an evicted dead-owner op's durable pending_gate_ops row is marked 'evicted-dead-owner' right along with its registry eviction — NEVER deleted (the table is a permanent tombstone), but correctly excluded from reconcileOrphanedGateOps' boot sweep, so it never leaks a false [loom:merge-failed] at the now-live manager — and (card 257d534d) a manager that RECYCLED mid-op, leaving a LIVE successor behind, is never mistaken for a dead owner by either recovery path, matching a genuinely live owner's untouched result rather than a genuinely dead owner's eviction."
+  ? "\n✅ ALL PASS — a merge op orphaned by a dead owning manager (the daemon-restart-mid-merge shape) is evicted rather than dedup-attached-to forever: confirmWorkerMergeTracked recovers it inline on the next confirm, reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears it directly, a live-owner op is left completely untouched by both paths, (card edc1ec12 CR follow-up, restated by e3e40167) an evicted dead-owner op's durable pending_gate_ops row is marked 'evicted-dead-owner' right along with its registry eviction — NEVER deleted (the table is a permanent tombstone), but correctly excluded from reconcileOrphanedGateOps' boot sweep, so it never leaks a false [loom:merge-failed] at the now-live manager, (card 257d534d) a manager that RECYCLED mid-op, leaving a LIVE successor behind, is never mistaken for a dead owner by either recovery path, matching a genuinely live owner's untouched result rather than a genuinely dead owner's eviction — and (card 47a22d40 Round 2) a genuinely dead owner's op that has NOT yet outlived the eviction ceiling is also left alone by BOTH recovery paths, matching the live-owner/recycled-owner polarity rather than the past-ceiling genuinely-stuck polarity."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -2479,6 +2479,9 @@ export class SessionService {
    *  settle-lineage) no longer has to block on a real ~12-16s wall-clock sleep to cross it — it sets this
    *  small and sleeps just past IT instead, at the same logical outcome. */
   private readonly syncAttachBudgetMs: number;
+  /** @decision 47a22d40 — test-only override for {@link deadOwnerEvictionCeilingMs}'s resolved ceiling;
+   *  `undefined` in production (the real per-project/global ceiling is always resolved fresh). */
+  private readonly deadOwnerEvictionCeilingMsOverride: number | undefined;
   /** Card 289f2607: poll interval for {@link cancelWorkerGateThenSweep}'s bounded wait (bounded overall
    *  by {@link gateCancelVerifyMs}, reused rather than a second duplicate knob) while it waits to see
    *  whether a cancelled gate op actually clears {@link GateSemaphore.snapshot} before deciding whether
@@ -2816,6 +2819,10 @@ export class SessionService {
       /** TEST SEAM (card 289f2607): poll interval for `cancelWorkerGateThenSweep`'s bounded wait — see that field's own doc. */
       stopGateCancelPollMs?: number;
       syncAttachBudgetMs?: number;
+      /** TEST SEAM (card 47a22d40): overrides {@link SessionService.deadOwnerEvictionCeilingMs}'s resolved
+       *  ceiling outright, so a test can exercise "stuck past the ceiling ⇒ evict" without waiting out a
+       *  real `gateCommandTimeoutMs * 6` / `DEFAULT_REST_MERGE_CEILING_MS` window. Unset in production. */
+      deadOwnerEvictionCeilingMs?: number;
       /** TEST SEAM (card 7cd2cb11): polls (x100ms each) of the merge finalize "is the worker's pty dead yet" wait. Default 50 (~5s), unchanged in production. */
       finalizeWorkerDeathPolls?: number;
       spawnOpRetainMs?: number;
@@ -2841,6 +2848,7 @@ export class SessionService {
     this.gateCancelVerifyMs = opts?.gateCancelVerifyMs ?? SessionService.DEFAULT_GATE_CANCEL_VERIFY_MS;
     this.stopGateCancelPollMs = opts?.stopGateCancelPollMs ?? 100;
     this.syncAttachBudgetMs = opts?.syncAttachBudgetMs ?? SYNC_ATTACH_BUDGET_MS;
+    this.deadOwnerEvictionCeilingMsOverride = opts?.deadOwnerEvictionCeilingMs;
     this.finalizeWorkerDeathPolls = opts?.finalizeWorkerDeathPolls ?? 50;
     this.spawnOpRetainMs = opts?.spawnOpRetainMs ?? SPAWN_OP_RETAIN_MS;
     this.batchFfGitFactory = opts?.batchFfGitFactory;
@@ -8735,11 +8743,23 @@ export class SessionService {
    * @decision 27ea069e — boot-time (and generally callable) dead-owner sweep for orphaned MERGE ops;
    *  lineage-corrected (card 257d534d, see isManagerLineageDead's own doc), belt-and-suspenders since
    *  the in-memory registry it reads resets on an actual process restart.
+   *
+   * @decision 47a22d40 — dead ownership alone is no longer sufficient to evict here either; always gate
+   * on isDeadOwnerOpStuck too, or a mutation that drops this sweep's own ceiling check regresses silently.
+   *
+   * Round 2 note (not itself a prohibition): this makes the sweep effectively INERT at a genuine boot —
+   * the registry it reads is always empty on a fresh process, and even the one pathological case this
+   * sweep exists for (a harness keeping the process alive across a simulated "restart") needs the
+   * surviving entry to be ≥5 minutes old before this sweep would touch it
+   * (`deadOwnerEvictionCeilingMs`'s floor, `DEFAULT_REST_MERGE_CEILING_MS`). Full reparent trace and the
+   * accepted "no targeted escape below the ceiling" gap:
+   * docs/decisions/47a22d40-dead-owner-eviction-needs-a-stuck-ceiling.md.
    */
   reconcileDeadOwnerMergeOps(): number {
     let cleared = 0;
     for (const op of this.pendingOps.listAllOfKind("merge")) {
       if (!this.isManagerLineageDead(op.managerSessionId)) continue;
+      if (!this.isDeadOwnerOpStuck(op)) continue;
       if (this.pendingOps.evictDeadOwner(op.key)) {
         cleared++;
         console.warn(`[orchestration] merge op ${op.opId} (${op.key}) had a dead owner (manager ${op.managerSessionId.slice(0, 8)}) — evicted so a fresh worker_merge_confirm can proceed`);
@@ -20514,12 +20534,13 @@ export class SessionService {
     // @decision 164f7915 — do not decide the supersede HERE (Round 3): the two awaits below (resolveGitRef /
     // readMainlineHead) leave a window for `parentSessionId` to change before the real mint. The decision
     // now lives immediately before `pendingOps.attach()`, after those awaits.
-    // @decision 27ea069e — a RUNNING op whose owning manager's whole lineage is dead is evicted here so
-    // this call starts a genuinely fresh confirm; a live (or still-resuming) owner's op is left alone.
+    // @decision 27ea069e — a dead owner ALONE is never grounds to evict a RUNNING op; it may be evicted
+    // only once it has ALSO outlived isDeadOwnerOpStuck's ceiling (card 47a22d40). Below that ceiling,
+    // never evict here — fall through to the ordinary attach() dedupe just below instead.
     //
-    // Without this check, attach() below would dedup-attach THIS fresh call to that zombie op forever
-    // ({status:"pending"} on every retry, no gate ever actually running — the exact incident this card
-    // fixes).
+    // Full reasoning (the surrounding-git race this fixed, and why a stuck-past-ceiling op must still be
+    // evicted or it dedup-attaches every future caller to a zombie forever):
+    // docs/decisions/27ea069e-dead-owner-recovery-the-one-eviction-exception.md
     //
     // @decision 33172f01 — evictDeadOwner only ever removes a RUNNING entry, so it's correctly a no-op
     // for a settled RETAINED view; attach() below still short-circuits to that cached outcome.
@@ -20528,7 +20549,7 @@ export class SessionService {
     // retry storm evicts-and-re-mints a genuinely in-flight op every ~12s (fleet-wide merge-lane DoS).
     if (!opts?.skipDeadOwnerRecovery) {
       const existing = this.pendingOps.peek(key);
-      if (existing && this.isManagerLineageDead(existing.managerSessionId)) {
+      if (existing && this.isManagerLineageDead(existing.managerSessionId) && this.isDeadOwnerOpStuck(existing)) {
         // MINOR A (CR finding, card 33172f01): `evictDeadOwner` only ever removes a RUNNING entry (a no-op
         // for a settled RETAINED view, per the NOTE above) — so only log the "evicting so this confirm can
         // proceed fresh" claim when it's actually TRUE. Logging it unconditionally used to lie for a
@@ -20976,6 +20997,48 @@ export class SessionService {
     const project = this.db.getProject(worker.projectId);
     if (!project) return null;
     return resolveConfig(project.config, this.db.getPlatformConfig()).orchestration.gateCommandTimeoutMs;
+  }
+
+  /**
+   * @decision 47a22d40 — the ONE shared ceiling every dead-owner-eviction call site must resolve through;
+   * never re-derive `gateTimeoutMs * 6` / `DEFAULT_REST_MERGE_CEILING_MS` a second time at a call site, or
+   * the two can silently diverge on "how long is too long."
+   *
+   * A `PendingOpRegistry` entry's `state:"running"` is PROCESS-LOCAL and always backed by a currently-
+   * executing `run()` promise (see that class's own doc) — a dead OWNER alone is never proof the op
+   * itself is stuck, only that nobody is left to be notified when it settles. The one signal that DOES
+   * distinguish "merely slow, still progressing" from "genuinely stuck" is elapsed time against the SAME
+   * generous ceiling {@link confirmWorkerMergeUntilSettled} already uses to decide when IT gives up
+   * waiting — reused here rather than inventing a second number.
+   *
+   * CORRECTED (Round 2, Code Review 8c0d76c6): `Entry.startedAt` is stamped at MINT time inside
+   * `PendingOpRegistry.attach` (before `run()` is ever invoked), which means elapsed-since-mint is
+   * `queueWaitTime + realRunningTime` — a LARGER number than the op's own real running time alone. That
+   * makes this check LEAN TOWARD EVICTING SOONER than a measurement from actual admission would, never
+   * "erring toward never evicting" (the prior wording here claimed the opposite — wrong). An op that sat
+   * queued for a while before its real work even started crosses the ceiling sooner than its own compute
+   * time alone would justify. This is accepted as a known, narrow approximation (measuring from admission
+   * instead is optional future work, not required) because the ceiling itself is large relative to any
+   * ordinary queue wait, so in practice it rarely matters. Full reasoning:
+   * docs/decisions/27ea069e-dead-owner-recovery-the-one-eviction-exception.md.
+   */
+  private deadOwnerEvictionCeilingMs(workerSessionId: string): number {
+    if (this.deadOwnerEvictionCeilingMsOverride != null) return this.deadOwnerEvictionCeilingMsOverride;
+    const gateTimeoutMs = this.resolveMergeGateTimeoutMs(workerSessionId);
+    return gateTimeoutMs != null ? gateTimeoutMs * 6 : SessionService.DEFAULT_REST_MERGE_CEILING_MS;
+  }
+
+  /** @decision 47a22d40 — a RUNNING dead-owner op may be evicted ONLY once it has outlived {@link
+   *  deadOwnerEvictionCeilingMs}; dead ownership alone is never sufficient — see that helper's own doc.
+   *
+   *  `op.key` is always `merge:${workerSessionId}` at both call sites today (the lineage-resolved
+   *  predecessor key included — it is still some worker session's own id, which is all
+   *  {@link resolveMergeGateTimeoutMs} needs to resolve a project); `reconcileDeadOwnerMergeOps` only
+   *  ever sweeps `"merge"`-kind ops, never `"merge-batch"`, so there is no other key shape to handle here. */
+  private isDeadOwnerOpStuck(op: PendingOpView): boolean {
+    const workerSessionId = op.key.slice("merge:".length);
+    const ceilingMs = this.deadOwnerEvictionCeilingMs(workerSessionId);
+    return Date.now() - Date.parse(op.startedAt) > ceilingMs;
   }
 
   /** Fallback wait ceiling for {@link confirmWorkerMergeUntilSettled} when the worker/project can't be
