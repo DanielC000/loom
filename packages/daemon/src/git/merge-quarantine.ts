@@ -37,12 +37,15 @@ export interface MergeQuarantineEntry {
    *  closes (a scalar token let a later raiser's own auto-clear silently lift an earlier raiser's own
    *  still-unconfirmed threat). */
   tokens: string[];
-  /** Boot-time filenames (not full paths) of the CORRUPT/orphan latch(es) that caused this entry —
-   *  `undefined` for an ordinary (non-boot-fail-closed) quarantine. {@link clearMergeQuarantine} deletes an
-   *  orphan named here once no OTHER active entry still references it.
+  /** Boot-time filenames (not full paths) of other latch file(s) this entry still needs swept once
+   *  nothing references them any more. {@link clearMergeQuarantine} deletes a name listed here once no
+   *  OTHER active entry still references/owns it.
    *
    *  @decision 24c0bdba (round 7, M2) — see the decision record for the fail-closed trap this closes (an
-   *  orphan latch that nothing ever deleted re-quarantined every registered repo on every later boot). */
+   *  orphan latch that nothing ever deleted re-quarantined every registered repo on every later boot).
+   *
+   *  @decision a6fa60e2 — see the decision record for why an ORDINARY, non-placeholder entry can also
+   *  carry its own stale-key copy here (a failed migrate write leaves it owning nothing otherwise). */
   orphanLatchFiles?: string[];
   /** The exact `canonicalRepoLockKey(repoPath)` value at the moment this entry was raised (or last
    *  migrated to a fresh key) — `undefined` for a latch written before this field existed. Lets boot-time
@@ -1070,12 +1073,21 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
           // eslint-disable-next-line no-console
           console.warn(`[merge-quarantine] boot-time latch ${f} was filed under a STALE key for ${entry.repoPath} (its canonical key resolution changed) — migrating to ${freshHash}.json so a future clear can find it.`);
           entry = { ...entry, resolvedKey: currentKey };
+          // @decision a6fa60e2 — strip any dangling `f` reference BEFORE the write: on success `f` is
+          // deleted below, so a persisted/armed entry still naming it would falsely "protect" a future,
+          // unrelated file that happens to reuse this name; on failure the catch branch re-adds it.
+          if (entry.orphanLatchFiles?.includes(f)) {
+            entry = { ...entry, orphanLatchFiles: entry.orphanLatchFiles.filter((name) => name !== f) };
+          }
           if (writeMergeQuarantineLatch(entry)) {
             // Uses the shared helper too (this branch is only reachable when `freshHash !== hash`, so `f`
             // can never equal the freshly-written filename here — but sharing the check means that safety
             // no longer depends on remembering to keep this gate in sync with the other two call sites).
             deleteSourceLatchIfSuperseded(f, entry);
           } else {
+            // @decision a6fa60e2 — fold the old filename `f` into orphanLatchFiles here, or a raw
+            // clear-by-id of its stale hash deletes this entry's only durable copy as an "unowned" orphan.
+            entry = { ...entry, orphanLatchFiles: [...new Set([...(entry.orphanLatchFiles ?? []), f])] };
             // eslint-disable-next-line no-console
             console.error(`[merge-quarantine] could not durably persist ${entry.repoPath}'s migrated latch under its new key — the OLD file (${f}) is left in place so nothing is lost; a later boot can retry the migration.`);
           }
