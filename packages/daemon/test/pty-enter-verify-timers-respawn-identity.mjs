@@ -121,7 +121,7 @@ try {
 
   // ---- respawn the SAME sessionId mid-chain, before gen1's own verify-timeout ever fires ----
   host.spawn({
-    sessionId: A, resumeId: "eng-gen2",
+    sessionId: A, cwd: tmpHome, resumeId: "eng-gen2",
     permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
     resumeModeTarget: "acceptEdits",
     geometry: { cols: 120, rows: 40 }, sessionEnv: {},
