@@ -3479,7 +3479,7 @@ export class OrchestrationMcpRouter {
         if (resolvedKickoffPrompt === undefined) return ok({ error: "kickoffPrompt (or kickoff) is required" });
         try {
           const r = await sessions.spawnWorkerTracked(managerSessionId, { taskId, agentId, kickoffPrompt: resolvedKickoffPrompt, reviewOfWorkerSessionId, reviewOfTaskId });
-          if (!r.settled) return ok({ opId: r.op.opId, status: "pending", taskId, note: `still spawning — poll worker_list (a pendingSpawn placeholder row) or re-call worker_spawn with the SAME taskId/agentId/kickoffPrompt within ~${sessions.spawnOpRetainMinutes} min of it becoming ready to fetch the result; after that, read worker_list instead.` });
+          if (!r.settled) return ok({ opId: r.op.opId, status: "pending", taskId, note: `still spawning — no need to poll: if it fails before the worker starts, you'll get a [loom:spawn-failed] push naming this opId; otherwise poll worker_list (a pendingSpawn placeholder row) or re-call worker_spawn with the SAME taskId/agentId/kickoffPrompt within ~${sessions.spawnOpRetainMinutes} min of it becoming ready to fetch the result; after that, read worker_list instead.` });
           if (!r.ok) return ok(asUsageLimitOrMessage(r.error));
           const worker = r.value;
           // Card b1fcb6a7: additive-only — omitted entirely on a genuinely fresh spawn (r.cacheHit is

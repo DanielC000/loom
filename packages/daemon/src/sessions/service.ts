@@ -955,6 +955,10 @@ const MERGE_OP_RETAIN_MS = 5_000;
  *  worker for that task is live. */
 const SPAWN_OP_RETAIN_MS = 10 * 60_000; // 10 minutes
 
+/** Card 69246a6e — bounds the thrown error text embedded in a `[loom:spawn-failed]` completion nudge; a
+ *  thrown Error's `.message` has no size limit of its own. */
+const SPAWN_FAILED_NOTICE_ERROR_MAX_CHARS = 300;
+
 /** @decision 7f96aa09 — `runWorkerGate` routes the worker DoD self-gate through the daemon
  *  `GateSemaphore`/`maxConcurrentGates` cap, so N parallel workers self-gating can't structurally
  *  exceed the shared lane budget; reuses `gateCommand` rather than a second config field.
@@ -8527,7 +8531,28 @@ export class SessionService {
     return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }>(
       key, "spawn", managerSessionId, this.syncAttachBudgetMs,
       () => this.spawnWorker(managerSessionId, opts),
-      undefined,
+      // Card 69246a6e — a worker_spawn that degraded to {status:"pending"} and then FAILS before start
+      // (e.g. a persistent EPERM on the ~/.claude.json trust write, card 37b1ed5f) used to leave the
+      // manager with NO notice at all: the row silently went processState:"exited" with lastError set,
+      // discoverable only by reading worker_list. Mirrors confirmWorkerMergeTracked's own settle-push
+      // shape (resolveSettleNudgeTarget + settleNudgeAttribution + enqueueDurableMessage), deliberately
+      // WITHOUT that path's opStartedAt/autoCancelSettleWakes bookkeeping — no fallback-wake convention
+      // exists for a parked worker_spawn caller, so there is nothing to reap here. On success, no notice
+      // (the worker's own worker_report is the normal success signal). `lastError` is bounded — a thrown
+      // error's message has no size limit of its own.
+      (outcome, opId) => {
+        if (outcome.ok) return;
+        const target = this.resolveSettleNudgeTarget(managerSessionId);
+        const rawError = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+        const lastError = rawError.length > SPAWN_FAILED_NOTICE_ERROR_MAX_CHARS ? `${rawError.slice(0, SPAWN_FAILED_NOTICE_ERROR_MAX_CHARS)}…` : rawError;
+        try {
+          this.enqueueDurableMessage(
+            target,
+            `[loom:spawn-failed] task ${taskRef || "(taskless)"} [op ${opId}]: ${lastError}; re-call worker_spawn` + this.settleNudgeAttribution(target, managerSessionId),
+            { sender: "system", taskId: taskRef || null, kind: "warning" },
+          );
+        } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
+      },
       {
         // Card b1fcb6a7 — see SPAWN_OP_RETAIN_MS's own doc: a re-call landing within this window after
         // settle gets the same settled worker back instead of falling through to a fresh spawnWorker call
