@@ -1070,6 +1070,10 @@ export type OrchestrationEventKind =
   // user automation should fire on) and from `GATE_HISTORY_KINDS` (mirrors `merge_rejected`, which is
   // also excluded there).
   | "merge_cancelled"
+  // @decision 1ac74580 — never emit this any earlier than the one irreversible landing write (solo
+  // squash / batch fast-forward); an earlier emission re-creates the false "may need to be redone"
+  // escalation this kind exists to remove. `detail` must never carry a `branch` field.
+  | "merge_landing_started"
   | "build_gate" | "kill_switch" | "schedule_fired"
   // Merge-gate TRANSIENT-KILL auto-retry (card bcba83a1): `build_gate` failed with a retry-eligible
   // classification (an OOM/SIGKILL, or the daemon's own gateTimeoutMs bound) — `build_gate_retry_attempt`
@@ -1877,7 +1881,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   redirect_worker: true, recycle_begin: true, recycle_complete: true, recycle_failed: true,
   recycle_fleet_recovered: true, recycle_fleet_unresolved: true, recycle_fleet_resolved: true,
   recycle_fleet_stranded_across_restart: true, recycle_successor_retired: true, recycle_ownership_transfer_failed: true, worker_revived: true, merge_request: true,
-  merge_done: true, merge_rejected: true, merge_cancelled: true, build_gate: true,
+  merge_done: true, merge_rejected: true, merge_cancelled: true, merge_landing_started: true, build_gate: true,
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
   build_gate_single_file_retry: true, build_gate_single_file_retry_attempt: true, schedule_fire_failed: true, schedule_fire_deferred: true,
   schedule_fire_missed: true,

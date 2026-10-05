@@ -501,6 +501,7 @@ async function setupRealRetaskOwnLandingAttributable(tag, repo) {
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
   const xLandedSha = git(repo, "rev-parse HEAD");
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // X crashes here — worktree/branch left exactly as a crash before finalize leaves them.
 
   const second = await createWorktree(repo, projId, taskId); // REUSE path → fresh branch off current main (now includes X's landed squash)
@@ -512,11 +513,14 @@ async function setupRealRetaskOwnLandingAttributable(tag, repo) {
   return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip, xLandedSha };
 }
 
-// Fixture N: X files its OWN merge_request (claims a reviewed tip) but NOTHING ever actually lands with
-// that tip — models a worker whose request can never be verified (a crash before the squash even ran, or
+// Fixture N: X files its OWN merge_request (claims a reviewed tip) AND genuinely reaches its own landing
+// write (merge_landing_started — card 1ac74580), but NOTHING ever actually lands with that tip — models a
+// worker whose confirm attempt is real but whose claim can never be verified (the squash itself failed, or
 // a tip that simply never made it onto main). Per manager direction: this must escalate ONCE (a durable
 // nudge naming the worker/task/remedy) rather than being silently left unresolved forever, and must NOT
-// re-escalate on a later boot once already escalated.
+// re-escalate on a later boot once already escalated. (Fixture Y, below, is the SIBLING case this card
+// adds — a merge_request with NO merge_landing_started, i.e. reviewed but never confirmed at all — which
+// must now no-op instead of escalating.)
 async function setupRealRetaskOwnLandingUnresolvable(tag, repo) {
   initRepo(repo);
   const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
@@ -529,6 +533,7 @@ async function setupRealRetaskOwnLandingUnresolvable(tag, repo) {
   const first = await createWorktree(repo, projId, taskId);
   db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: "deadbeef".padEnd(40, "0") } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
 
   const second = await createWorktree(repo, projId, taskId);
   db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
@@ -537,6 +542,43 @@ async function setupRealRetaskOwnLandingUnresolvable(tag, repo) {
   execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-2" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
   return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo };
+}
+
+// Fixture Y: card 1ac74580 — the exact false-positive the card removes (real specimen: worker 3a7b77c6 on
+// card f900237d, reviewed 11:23Z, re-tasked 11:27Z — never confirmed at all). X files its OWN
+// merge_request (a real review happened) but NEVER reaches its own landing write — no
+// merge_landing_started, no squash, nothing. A manager simply looked at the review and re-tasked the
+// worktree before ever calling worker_merge_confirm. Pre-fix, `resolveStaleGenerationOwnLanding` could not
+// tell this apart from fixture N (a genuine crashed confirm attempt) — both read as "merge_request, no
+// terminal event" — and escalated X with a false "[loom:merge-orphaned] … may need to be redone". Post-fix:
+// a bare merge_request with no merge_landing_started after it is review-only — no-op, never attempt
+// attribution, never escalate, never touch git for this row at all.
+async function setupRealRetaskReviewOnlyNeverConfirmed(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  // X's real work exists on its own branch (a manager genuinely reviewed it — worker_merge's own
+  // merge_request) but X is re-tasked before worker_merge_confirm is EVER called. No squash, no
+  // merge_landing_started, nothing else — this IS the review-only shape, not a simplification of it.
+  fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x work, reviewed but never confirmed\n");
+  commitAll(first.worktreePath, "x", GIT_ID);
+  const xTip = git(first.worktreePath, "rev-parse HEAD");
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+
+  const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+  commitAll(second.worktreePath, "y", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-y" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip };
 }
 
 // Fixture P: card 21b53e6a ROUND 3 item 1 — X files its OWN merge_request but a manager reviewed it and
@@ -633,6 +675,7 @@ async function setupRealRetaskOwnLandingBatchAttributable(tag, repo) {
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${preLandSha}\nLoom-Worker-PathSet: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`], GIT_ID);
   const xLandedSha = git(repo, "rev-parse HEAD");
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // X crashes here — worktree/branch left exactly as a crash before finalize leaves them.
 
   const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
@@ -667,6 +710,7 @@ async function setupRealRetaskTwoAttributableLandings(tag, repo) {
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
   const xLandedSha = git(repo, "rev-parse HEAD");
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // X crashes here.
 
   const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch name
@@ -701,6 +745,7 @@ async function setupPassA2StaleGenerationBlindness(tag, repo) {
   const first = await createWorktree(repo, projId, taskId);
   db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: "deadbeef".padEnd(40, "0") } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
 
   const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
   db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
@@ -736,6 +781,7 @@ async function setupMainlineWatermarkScopedScan(tag, repo) {
   execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: repo });
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // X crashes here — its own squash landed, but on the STRAY branch, never on main.
 
   git(repo, "checkout -q main"); // back to main — Y's own re-task and landing must be genuinely clean
@@ -779,6 +825,7 @@ async function setupBatchAttributionSurvivesUnrelatedMainMove(tag, repo) {
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${preLandSha}\nLoom-Worker-PathSet: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`], GIT_ID);
   const xLandedSha = git(repo, "rev-parse HEAD");
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // X crashes here.
 
   const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
@@ -831,6 +878,7 @@ async function setupMainRefDivertedUnionTrap(tag, repo) {
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${unionTip}`], GIT_ID);
   const xLandedSha = git(repo, "rev-parse HEAD");
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // X crashes here.
 
   const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
@@ -867,6 +915,7 @@ async function setupStaleAttributionWatermarkUnreadable(tag, repo) {
   execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: repo });
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // The watermark row is PRESENT but fails to parse as a MainlineWatermark — "unreadable", never "absent".
   db.setMeta(mainlineWatermarkKey(projId, "primary"), "not valid json at all");
   // X crashes here.
@@ -900,6 +949,7 @@ async function setupStaleAttributionWatermarkUnresolvableRef(tag, repo) {
   execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: repo });
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // A well-formed watermark row naming a branch that does not exist as a real ref in this repo.
   db.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "ghost-branch-never-created", sha: git(repo, "rev-parse HEAD") }));
   // X crashes here.
@@ -935,7 +985,8 @@ const R_BATCH_UNRELATED_MAIN_MOVE = path.join(os.tmpdir(), `loom-wrap-u-${sfx}`)
 const R_MAIN_REF_DIVERTED_UNION_TRAP = path.join(os.tmpdir(), `loom-wrap-v-${sfx}`);
 const R_WATERMARK_UNREADABLE = path.join(os.tmpdir(), `loom-wrap-w-${sfx}`);
 const R_WATERMARK_UNRESOLVABLE_REF = path.join(os.tmpdir(), `loom-wrap-x-${sfx}`);
-let A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X;
+const R_REVIEW_ONLY_NEVER_CONFIRMED = path.join(os.tmpdir(), `loom-wrap-y-${sfx}`);
+let A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y;
 
 try {
   A = await setupRecycleChain("a", R_PROTECTED);
@@ -962,6 +1013,7 @@ try {
   V = await setupMainRefDivertedUnionTrap("v", R_MAIN_REF_DIVERTED_UNION_TRAP);
   W = await setupStaleAttributionWatermarkUnreadable("w", R_WATERMARK_UNREADABLE);
   X = await setupStaleAttributionWatermarkUnresolvableRef("x", R_WATERMARK_UNRESOLVABLE_REF);
+  Y = await setupRealRetaskReviewOnlyNeverConfirmed("y", R_REVIEW_ONLY_NEVER_CONFIRMED);
 
   // --- sanity: both fixtures start identical (real worktree registered, branch exists, 0 commits, clean) ---
   check("(pre-A) worktree registered before reconcile", fs.existsSync(A.worktreePath) && isRegisteredWorktree(A.repo, A.worktreePath));
@@ -1042,6 +1094,12 @@ try {
   check("(pre-W) the stored watermark row fails to parse as JSON", (() => { try { JSON.parse(db.getMeta(mainlineWatermarkKey(W.projId, "primary"))); return false; } catch { return true; } })());
   check("(pre-X) X's own landing is trivially attributable IF the watermark's branch resolved", git(X.repo, "log main --format=%B").includes(`Loom-Landed-Tip: ${X.xTip}`));
   check("(pre-X) the stored watermark names a branch that does not exist in this repo", !branchExists(X.repo, JSON.parse(db.getMeta(mainlineWatermarkKey(X.projId, "primary"))).branch));
+  check("(pre-Y) X's stale worktreePath equals Y's real (reused) worktreePath", Y.worktreePath && db.getSession(Y.workerXId).worktreePath === Y.worktreePath);
+  check("(pre-Y) X has its OWN merge_request (a real review happened) but NOTHING after it — no merge_landing_started, no terminal event", (() => {
+    const evs = db.listEventsForWorker(Y.workerXId).filter((ev) => ["merge_request", "merge_landing_started", "merge_done", "merge_rejected", "merge_cancelled"].includes(ev.kind));
+    return evs.length === 1 && evs[0].kind === "merge_request";
+  })());
+  check("(pre-Y) X's own real commit never reached main — a real review, never a real landing attempt", !git(Y.repo, "log main --format=%H").includes(Y.xTip));
 
   // --- THE RECONCILE --- A's successor and C's successor are protected (about to be resumed); B/D/E are
   // not protected at all (abandoned/genuine crash). Session insertion order above is predecessor-then-
@@ -1186,6 +1244,18 @@ try {
   check("(N) exactly ONE undelivered nudge enqueued to the manager (not the app_meta flag — the real durable message)",
     db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === N.mgrId).length === 1);
 
+  // (Y) card 1ac74580 — N's sibling, and the exact false-positive this card removes (real specimen: worker
+  // 3a7b77c6 on card f900237d). X's merge_request has NOTHING after it at all — no merge_landing_started,
+  // unlike N — so this is review-only: no-op. Pre-fix (bare "latest.kind !== merge_request" check, no
+  // merge_landing_started distinction) this escalated X exactly like N — RED-proofed by temporarily
+  // reverting the predicate above and re-running this file before restoring it (see this card's
+  // worker_report for the before/after).
+  check("(Y) worker X gets NO merge_done — never even attempted (no landing write was ever reached)", db.listEventsForWorker(Y.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(Y) worker X is NEVER tracked in the one-shot escalation store — review-only is a no-op, not an escalation", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== Y.workerXId));
+  check("(Y) NO undelivered nudge was enqueued to the manager for X's review-only merge_request — THE discriminating assertion against fixture N immediately above", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === Y.mgrId).length === 0);
+  check("(Y) worker X's own event log is completely untouched — still exactly its one original merge_request, nothing appended by reconcile at all", db.listEventsForWorker(Y.workerXId).length === 1);
+  check("(Y) worker Y (the re-task) is still independently finalized, unaffected", db.listEventsForWorker(Y.workerYId).some((ev) => ev.kind === "merge_done"));
+
   // (Q) card e5458ccd item 2 — the BATCH-landing content-match path (no Loom-Landed-Tip at all).
   check("(Q) worker X GETS a merge_done via the content-match path (Loom-Worker-Base, never the live branch ref)", db.listEventsForWorker(Q.workerXId).some((ev) => ev.kind === "merge_done" && ev.detail?.branch === null && ev.detail?.attributedLandedSha === Q.xLandedSha));
   check("(Q) worker X is never tracked as escalated", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== Q.workerXId));
@@ -1305,7 +1375,10 @@ try {
   // elsewhere in this function); the ONE-SHOT guarantee is scoped to the NUDGE itself, not this count:
   // `attempts` bumps while `escalated` stays true, proving the second pass's own call exited before
   // re-sending (see resolveStaleGenerationOwnLanding's own doc).
-  check("(idem) N's worker X still has exactly one merge_request and no merge_done, forever", db.listEventsForWorker(N.workerXId).length === 1);
+  // Card 1ac74580: N's X now permanently carries its own merge_request PLUS the merge_landing_started
+  // marker added for this fixture (a real confirm genuinely reached its landing write, it just never
+  // verified) — exactly 2 events forever, never a 3rd (no merge_done, never re-filed on retry).
+  check("(idem) N's worker X still has exactly its original merge_request + merge_landing_started and no merge_done, forever", db.listEventsForWorker(N.workerXId).length === 2 && db.listEventsForWorker(N.workerXId).every((ev) => ev.kind !== "merge_done"));
   // Round 3 item 3: the real proof the "no second nudge" claim above is true — count the ACTUAL durable
   // messages across BOTH passes (r and r2 combined), not just the app_meta flag's own attempts counter.
   check("(idem) N still has exactly ONE undelivered nudge after BOTH passes (no second enqueue on the retry)",
@@ -1314,6 +1387,12 @@ try {
     "(idem) N's escalation entry stays one-shot (escalated:true, attempts bumped — the SECOND pass's own retry, no second nudge)",
     db.listStaleGenerationUnresolved().some((e) => e.sessionId === N.workerXId && e.escalated === true && e.attempts === 2),
   );
+  // (idem Y) card 1ac74580: review-only stays a no-op FOREVER — the second pass must not retroactively
+  // escalate it either (no `merge_landing_started` to re-check on retry, since no-op never enters the
+  // one-shot store in the first place).
+  check("(idem) Y's worker X still has exactly one merge_request and nothing else, forever", db.listEventsForWorker(Y.workerXId).length === 1);
+  check("(idem) Y still has NO undelivered nudge after BOTH passes", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === Y.mgrId).length === 0);
+  check("(idem) Y's worker X never enters the one-shot escalation store, even after a second pass", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== Y.workerXId));
   // (idem M/Q/R) card e5458ccd: attribution is ONE-SHOT via the SAME `alreadyFinalized` early-out every
   // legacy no-branch merge_done already used — the second pass must find X already finalized (via the
   // null-branch key) and never re-attempt attribution, never file a second event, never spawn git again.

@@ -17899,6 +17899,10 @@ export class SessionService {
       const noGateLanded = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs });
       if (noGateLanded) expectAlreadyLanded = true;
     }
+    // @decision 1ac74580 — never move this earlier: every refusal above this point (incl. the
+    // landed-content-diverged refusal just below, inside mergeBranch) already logs its own event or
+    // mutates nothing, so firing here keeps a pre-squash crash indistinguishable from review-only.
+    evt("merge_landing_started", {});
     merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded);
     if (mainlineCheckedTip && merge.ok && !merge.noop && merge.sha) await this.advanceMainlineWatermark(project.id, worker.repoKey ?? "primary", repoPath, mainlineCheckedTip, managerSessionId, workerSessionId, taskId); // card 4fa36502: a successful Loom landing is the new "explained" tip — but ONLY when this landing's check completed, so an unverified move stays catchable
     // Card 6f13746c: record the landing HERE — at the squash, still INSIDE the repo guard (`endSquash` / `releaseInertRepoGuard` run in the
@@ -19307,7 +19311,18 @@ export class SessionService {
           //  scoped to end at the squash, not the outer `finally` (finalize never moves main's HEAD).
           let result: Awaited<ReturnType<typeof runBatchedMerge>>;
           try {
-            result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs, expectedBaseBranch, gitFactory: this.batchFfGitFactory });
+            result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs, expectedBaseBranch, gitFactory: this.batchFfGitFactory }, (landed) => {
+              // @decision 1ac74580 — one event per LANDED candidate, fired by runBatchedMerge itself right
+              // before the fast-forward; never stamp `branch` (see that record's own Do-not).
+              for (const c of landed) {
+                try {
+                  this.db.appendEvent({
+                    id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId: c.workerSessionId,
+                    taskId: c.taskId, kind: "merge_landing_started", detail: { opId, batch: true },
+                  });
+                } catch (err) { console.warn(`[merge-batch] appendEvent(merge_landing_started) failed for worker ${c.workerSessionId.slice(0, 8)} (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+              }
+            });
             batchQuarantined = !!result.quarantined; // round 4: read by the outer `finally`'s worktree-removal guard
             // @decision 92eeb319 — see `onSettle`
             if (!batchGateRan && result.landed.length === 0) batchAllDropped = true;
@@ -22756,12 +22771,19 @@ export class SessionService {
     if (!eventPresence?.hasMergeRequest || !s.branch || !s.taskId) return "no-op";
     // @decision 21b53e6a — round 3: never escalate (or attempt to attribute) a merge_request already
     // followed by this row's OWN merge_rejected/merge_cancelled — that is a DECIDED outcome, not a stuck landing.
-    const lifecycle = this.db.listEventsForWorkerKinds(s.id, ["merge_request", "merge_done", "merge_rejected", "merge_cancelled"]);
+    // @decision 1ac74580 — a bare merge_request with no merge_landing_started after it is REVIEW-ONLY
+    // (this confirm never reached its own irreversible landing write) — no-op, never attempt attribution
+    // or escalate; that was the false "may need to be redone" this card removes.
+    const lifecycle = this.db.listEventsForWorkerKinds(s.id, ["merge_request", "merge_landing_started", "merge_done", "merge_rejected", "merge_cancelled"]);
     const latest = lifecycle[lifecycle.length - 1];
-    if (latest && latest.kind !== "merge_request") return "no-op";
+    if (!latest || latest.kind === "merge_request") return "no-op";
+    if (latest.kind !== "merge_landing_started") return "no-op";
     const branch = s.branch;
     const taskId = s.taskId;
-    const reviewedTip = typeof latest?.detail?.tip === "string" ? latest.detail.tip : null;
+    // @decision 1ac74580 — `latest` is now the merge_landing_started marker, not the merge_request itself
+    // (which may sit earlier in `lifecycle`) — re-derive the reviewed tip from the latest merge_request entry.
+    const latestMergeRequest = [...lifecycle].reverse().find((e) => e.kind === "merge_request");
+    const reviewedTip = typeof latestMergeRequest?.detail?.tip === "string" ? latestMergeRequest.detail.tip : null;
 
     const attribution = reviewedTip
       ? await this.attributeStaleGenerationOwnLanding(s, project, branch, reviewedTip, mainlineRefCache, mainlineRefResolvesCache)

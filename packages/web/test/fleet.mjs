@@ -285,6 +285,15 @@ check("buildLatestMergeMap: unsorted input is sorted internally — order of the
   assert.equal(map.get("task-1")?.kind, "merge_request");
 });
 
+check("buildLatestMergeMap: a later merge_landing_started (e.g. a stale re-tasked generation's own crashed landing attempt) never clobbers the CURRENT generation's own live merge_request (card 1ac74580)", () => {
+  const liveRequest = mergeEv({ kind: "merge_request", workerSessionId: "worker-current" });
+  const staleLandingStarted = mergeEv({ kind: "merge_landing_started", workerSessionId: "worker-stale", detail: { opId: "op-1" } });
+  const map = buildLatestMergeMap([liveRequest, staleLandingStarted]);
+  const result = map.get("task-1");
+  assert.equal(result?.kind, "merge_request", "merge_landing_started is not in the allowlist — the live request stays the latest");
+  assert.equal(result?.workerSessionId, "worker-current");
+});
+
 // ── VAULT LOCK pairing (card 227d9f0b round 2) — mirrors the BOOT STUCK pairing tests above, keyed by
 // detail.repoPath instead of a session id, with NO liveness filter (a stale vault lock isn't owned by
 // any live session). ──────────────────────────────────────────────────────────────────────────────────

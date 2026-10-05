@@ -1118,6 +1118,10 @@ export async function runBatchedMerge(
   repoPath: string, batchWorktreePath: string, baseMainSha: string, candidates: BatchCandidate[],
   runGate: (worktreePath: string, baseMainSha: string, landedCount: number, assemblyMs: number) => Promise<BatchGateResult>,
   deps: BatchGitDeps = {},
+  // @decision 1ac74580 — call ONCE, right after `gate.passed`, strictly before `fastForwardCanonicalMain`
+  // — never earlier (a dropped/gate-failed candidate must never see it) or later (it must precede the
+  // write it's named for).
+  onBeforeFastForward?: (landed: BatchLandedBranch[]) => void,
 ): Promise<RunBatchedMergeResult> {
   // QUARANTINE CHECK (round 4, convergence point) — before assembly even starts, so a repo already
   // quarantined by an unrelated op never burns worktree/assembly work, let alone a shared gate slot.
@@ -1154,6 +1158,9 @@ export async function runBatchedMerge(
   } catch (e) {
     return { ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: true, gateDetail: gate, reason: `failed to read batch worktree HEAD after a green gate: ${(e as Error).message}` };
   }
+  // @decision 1ac74580 — fire right here, immediately before the fast-forward: the one irreversible write
+  // for the whole batch. `landed` (never `dropped`) is exactly who could end up with their own landing.
+  onBeforeFastForward?.(landed);
   const ffStartMs = Date.now();
   const ff = await fastForwardCanonicalMain(repoPath, baseMainSha, batchHeadSha, deps);
   const fastForwardMs = Date.now() - ffStartMs;
