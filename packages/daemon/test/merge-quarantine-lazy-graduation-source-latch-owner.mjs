@@ -23,10 +23,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // in `clearMergeQuarantineLatchFile`'s RAW FALLBACK (reached when NOTHING in memory matches the cleared
 // id). SCENARIO 3 covers the dangling-reference flip side (a6fa60e2's own scenario 3, applied to this
 // branch): once `orphanLatchFiles` is folded in on failure, a SUCCESSFUL graduation must strip it again.
-// SCENARIOS 6 and 7 (Code Review eccb3d10, round 2) cover the SAME ownership gap through
+// SCENARIOS 6 and 7 (Code Review eccb3d10, round 2) originally covered the SAME ownership gap through
 // `clearMergeQuarantineLatchFile`'s OTHER branch — the PENDING-MATCH branch's own belt-and-suspenders
 // sweep, reached when the clear-by-id DOES match some OTHER, unrelated pending entry sharing the same
-// hash prefix. SCENARIOS 4 and 5 (Delta Code Review bd812c95, round 3) cover the SAME gap through TWO
+// hash prefix. ⚠️ SCENARIO 6's own premise (two same-repo pending entries, only one of which graduates in
+// one query) was CLOSED by card 188b145f — `activeMergeQuarantineFor` now consumes BOTH in the one
+// graduation query, so there is no longer an independent pending entry left for a raw clear-by-id to
+// separately match: SCENARIO 6 now exercises the RAW FALLBACK branch instead (see that scenario's own
+// updated comment), and `wasQuarantined===false` on its clear-by-id pins that explicitly. SCENARIO 7 (a
+// cross-REPO hash collision, not a same-repo multi-pending one) is unaffected and still exercises the
+// PENDING-MATCH branch (`wasQuarantined===true`). SCENARIO 9 (added for card 188b145f round 2) is SCENARIO
+// 7's `.tmp-`-sourced twin — a TMP variant restoring coverage for the PENDING-MATCH branch's own
+// belt-and-suspenders TMP sweep specifically, which scenario 6 moving away from that branch left unguarded.
+// SCENARIOS 4 and 5 (Delta Code Review bd812c95, round 3) cover the SAME gap through TWO
 // MORE call sites this card's own earlier rounds mistakenly treated as correctly-unconditional "negative
 // controls": `clearMergeQuarantineByKey`'s legitimate-clear tmp sweep, and
 // `writeMergeQuarantineLatch`'s own `sweepOtherTmpsOnSuccess` — both used to delete a same-hash tmp a
@@ -319,14 +328,15 @@ try {
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // SCENARIO 6 (MAJOR, Code Review eccb3d10) — TWO pending entries share the exact same hash (two tmp
-  // residues for ONE repo). `activeMergeQuarantineFor` graduates only ONE of them; its fresh-key write
-  // FAILS, folding its OWN tmp into its orphanLatchFiles. A raw clear-by-id of the shared hash then matches
-  // the OTHER (still-pending) entry — and `clearMergeQuarantineLatchFile`'s own pending-match branch had a
-  // belt-and-suspenders tmp sweep (`deleteMergeQuarantineTmpResidueForHash`) that deleted EVERY tmp residue
-  // for that hash UNCONDITIONALLY, including the graduated entry's own protected copy it never matched or
-  // removed at all. (The reviewer's OTHER finding — that only one of several same-hash pending entries
-  // ever graduates in one query — is real but goes to a separate, already-filed follow-up card; this
-  // scenario deliberately EXPLOITS that existing shape to reach the ownership gap, rather than fixing it.)
+  // residues for ONE repo). ⚠️ UPDATED for card 188b145f: the reviewer's OTHER finding here — that only
+  // ONE of several same-hash pending entries ever graduated in one query, leaving the rest stuck pending
+  // forever — was real and went to a separate, already-filed follow-up card; 188b145f CLOSED it
+  // (`activeMergeQuarantineFor` now graduates EVERY identity-matching pending entry together). So this
+  // scenario's own premise changed: there is no longer an "OTHER, still-pending" entry left behind for a
+  // raw clear-by-id to separately match-and-delete — a failed write now folds BOTH tmps into the ONE
+  // graduated entry's own `orphanLatchFiles`. What this scenario still proves, generalized: a raw
+  // clear-by-id of the shared stale hash must KEEP BOTH tmps, not just whichever single one an
+  // older, single-entry-only ownership fix would have folded in.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const subdir = makeSubdirRepo("s6");
@@ -362,27 +372,25 @@ try {
   const inject = injectGraduationWriteFailure(freshHash);
   let activeAfterGraduation;
   try {
-    activeAfterGraduation = activeMergeQuarantineFor(subdir); // graduates WHICHEVER pending entry is first
+    activeAfterGraduation = activeMergeQuarantineFor(subdir); // graduates BOTH same-repo pending entries together (card 188b145f)
   } finally {
     inject.restore();
   }
   check("(s6 graduation attempt) the fresh-key write was actually attempted (and injected to fail)", inject.counter.interceptCount >= 1);
   check("(s6 graduation attempt) the repo still reads as quarantined in-memory despite the failed write", !!activeAfterGraduation);
 
-  const graduatedSourceFile = activeAfterGraduation?.orphanLatchFiles?.[0];
-  check("(s6 graduation attempt) exactly one tmp was folded in as the graduated entry's own stale source", [tmp1Name, tmp2Name].includes(graduatedSourceFile));
-  const otherTmpPath = graduatedSourceFile === tmp1Name ? tmp2Path : tmp1Path;
-  const graduatedTmpPath = graduatedSourceFile === tmp1Name ? tmp1Path : tmp2Path;
-  check("(s6 graduation attempt) the graduated entry's own tmp is STILL the only durable copy (write failed)", fs.existsSync(graduatedTmpPath));
+  check("(s6 graduation attempt) THE FIX (card 188b145f): BOTH tmps are folded in as the graduated entry's own stale sources", (activeAfterGraduation?.orphanLatchFiles ?? []).includes(tmp1Name) && (activeAfterGraduation?.orphanLatchFiles ?? []).includes(tmp2Name));
+  check("(s6 graduation attempt) both tmps are STILL the only durable copies (write failed, nothing deleted)", fs.existsSync(tmp1Path) && fs.existsSync(tmp2Path));
   check("(s6 graduation attempt) no fresh-hash file was actually written (the write genuinely failed)", !fs.existsSync(freshLatchPath));
 
-  // THE MAJOR BUG: clearing by the SHARED stale hash matches only the OTHER (still-pending) entry, yet
-  // the belt-and-suspenders tmp sweep used to delete EVERY tmp for this hash unconditionally.
+  // THE MAJOR FIX, generalized by card 188b145f: clearing by the shared stale hash must KEEP BOTH tmps —
+  // both are genuinely owned by the ONE surviving (unioned) entry now, not just whichever single tmp an
+  // older, single-entry-only ownership fix would have folded in.
   const clearResult = clearMergeQuarantineLatchFile(staleHash);
   check("(s6 clear-by-id on shared stale hash) call succeeds", clearResult.ok === true);
-  check("(s6 clear-by-id on shared stale hash) the OTHER (matched) pending entry's own tmp is deleted (its own file, correctly)", !fs.existsSync(otherTmpPath));
-  check("(s6 clear-by-id on shared stale hash) THE MAJOR FIX: the graduated entry's own tmp — never matched by this clear — survives", fs.existsSync(graduatedTmpPath));
-  check("(s6 clear-by-id on shared stale hash) THE MAJOR FIX: reports the surviving file as KEPT", clearResult.latchKept === true);
+  check("(s6 clear-by-id on shared stale hash) 188b145f round 2: wasQuarantined===false — this now hits the RAW FALLBACK branch, never the PENDING-MATCH one (nothing is independently pending any more)", clearResult.wasQuarantined === false);
+  check("(s6 clear-by-id on shared stale hash) THE MAJOR FIX: BOTH tmps survive — neither is an independent pending entry left to match-and-delete any more", fs.existsSync(tmp1Path) && fs.existsSync(tmp2Path));
+  check("(s6 clear-by-id on shared stale hash) THE MAJOR FIX: reports the surviving file(s) as KEPT", clearResult.latchKept === true);
 
   const fresh = await freshBootModule();
   const foundAfterRestart = fresh.reenterMergeQuarantinesAtBoot([subdir]);
@@ -449,6 +457,7 @@ try {
   // `${sharedHash}.json` on ownership alone, destroying repoG's only durable copy.
   const clearResult = clearMergeQuarantineLatchFile(sharedHash);
   check("(s7 clear-by-id on shared hash) call succeeds", clearResult.ok === true);
+  check("(s7 clear-by-id on shared hash) wasQuarantined===true — this hits the PENDING-MATCH branch (repoP's own pending entry was actually matched and removed)", clearResult.wasQuarantined === true);
   check("(s7 clear-by-id on shared hash) repoP's own (matched) tmp entry is deleted (its own file, correctly)", !fs.existsSync(sharedTmpPath));
   check("(s7 clear-by-id on shared hash) THE MAJOR FIX: repoG's shared .json file — never matched by this clear — survives", fs.existsSync(sharedJsonPath));
   check("(s7 clear-by-id on shared hash) THE MAJOR FIX: reports the surviving file as KEPT", clearResult.latchKept === true);
@@ -640,6 +649,87 @@ try {
   try { clearMergeQuarantineByToken(repoA, tA2); } catch { /* best-effort cleanup */ }
   try { clearMergeQuarantine(repoB); } catch { /* best-effort cleanup */ }
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO 9 (added for card 188b145f round 2, Code Reviewer 638ee0bc) — SCENARIO 7's `.tmp-`-sourced
+  // twin. Card 188b145f's own fix moved SCENARIO 6 off the PENDING-MATCH branch entirely (see its own
+  // updated comment above), which left the belt-and-suspenders TMP sweep at line ~951
+  // (`sweepTmpResidueForHashIfUnreferenced(id)`, reached from the PENDING-MATCH branch specifically) with
+  // no test that can still go RED against it — reverting that one line to the unconditional
+  // `deleteMergeQuarantineTmpResidueForHash(id)` left all 15 merge-quarantine*.mjs files green. This
+  // scenario restores that coverage: repoG graduates from its OWN `.json.tmp-*` pending source with a
+  // FAILED write (folding that tmp into its own orphanLatchFiles), while repoP — a wholly unrelated repo —
+  // stays genuinely PENDING on its OWN `.json.tmp-*` source sharing the EXACT SAME hash prefix (no real
+  // SHA-256 collision needed — 9cabd143's own point). Clearing by that shared hash matches ONLY repoP's
+  // still-pending entry (never repoG's, which is armed under its own real fresh key) — provably hitting
+  // the PENDING-MATCH branch (`wasQuarantined===true`), never the raw fallback. repoP's own tmp is deleted
+  // (its own file, correctly); repoG's referenced tmp — never matched by this clear at all — must survive
+  // line ~951's own sweep.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const repoG = makeSubdirRepo("s9g");
+  const repoP = makeSubdirRepo("s9p");
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+  const sharedHash = createHash("sha256").update(`s9-shared-hash-${freshSfx()}`).digest("hex").slice(0, 24);
+  const tmpGName = `${sharedHash}.json.tmp-616161`;
+  const tmpPName = `${sharedHash}.json.tmp-626262`;
+  const tmpGPath = path.join(MERGE_QUARANTINE_DIR, tmpGName);
+  const tmpPPath = path.join(MERGE_QUARANTINE_DIR, tmpPName);
+  const freshHashG = quarantineLatchIdFor(repoG);
+  const freshLatchPathG = path.join(MERGE_QUARANTINE_DIR, `${freshHashG}.json`);
+
+  fs.writeFileSync(tmpGPath, JSON.stringify({
+    repoPath: repoG, branch: "s9-g-branch", reason: "s9 repoG's own pending tmp source, filed under the shared hash",
+    enteredAt: Date.now(), tokens: ["s9-g-token"],
+  }, null, 2) + "\n");
+  fs.writeFileSync(tmpPPath, JSON.stringify({
+    repoPath: repoP, branch: "s9-p-branch", reason: "s9 repoP's own pending tmp source — unrelated to repoG, shares only the hash prefix",
+    enteredAt: Date.now(), tokens: ["s9-p-token"],
+  }, null, 2) + "\n");
+
+  const parkedRootG = path.join(os.tmpdir(), `loom-mqlg-parked-s9g-${freshSfx()}`);
+  const parkedRootP = path.join(os.tmpdir(), `loom-mqlg-parked-s9p-${freshSfx()}`);
+  moveRepoRootAway(repoG, parkedRootG);
+  moveRepoRootAway(repoP, parkedRootP);
+  reenterMergeQuarantinesAtBoot([repoG, repoP]);
+
+  moveRepoRootBack(repoG, parkedRootG);
+  // repoP deliberately stays absent — it must remain genuinely PENDING (never graduated) for this
+  // scenario's own premise: the clear-by-id below must match it via the PENDING-MATCH branch.
+
+  const inject = injectGraduationWriteFailure(freshHashG);
+  let activeAfterGraduation;
+  try {
+    activeAfterGraduation = activeMergeQuarantineFor(repoG); // graduates repoG; write FAILS
+  } finally {
+    inject.restore();
+  }
+  check("(s9 graduation) repoG's fresh-key write was actually attempted (and injected to fail)", inject.counter.interceptCount >= 1);
+  check("(s9 graduation) repoG still reads as quarantined in-memory despite the failed write", !!activeAfterGraduation);
+  check("(s9 graduation) repoG's orphanLatchFiles now protects its own tmp under the shared hash", !!activeAfterGraduation?.orphanLatchFiles?.includes(tmpGName));
+  check("(s9 graduation) repoG's own tmp is STILL the only durable copy (write failed, nothing deleted)", fs.existsSync(tmpGPath));
+  check("(s9 graduation) no fresh-hash file was actually written for repoG (the write genuinely failed)", !fs.existsSync(freshLatchPathG));
+  check("(s9 precondition) repoP's own pending tmp still exists, genuinely pending (never graduated)", fs.existsSync(tmpPPath));
+
+  // THE FIX THIS RESTORES COVERAGE FOR: clearing by the shared hash matches ONLY repoP's still-pending
+  // entry (via the PENDING-MATCH branch) — never repoG's, which is armed under its own real fresh key.
+  // That branch's own belt-and-suspenders TMP sweep (line ~951, sweepTmpResidueForHashIfUnreferenced) must
+  // KEEP repoG's referenced tmp; the pre-188b145f-round-2 unconditional sibling would have deleted it too.
+  const clearResult = clearMergeQuarantineLatchFile(sharedHash);
+  check("(s9 clear-by-id on shared hash) call succeeds", clearResult.ok === true);
+  check("(s9 clear-by-id on shared hash) wasQuarantined===true — PROVABLY hits the PENDING-MATCH branch (repoP's own pending entry was actually matched and removed)", clearResult.wasQuarantined === true);
+  check("(s9 clear-by-id on shared hash) repoP's own (matched) tmp is deleted (its own file, correctly)", !fs.existsSync(tmpPPath));
+  check("(s9 clear-by-id on shared hash) THE FIX: repoG's referenced tmp — never matched by this clear — survives the PENDING-MATCH branch's own belt-and-suspenders tmp sweep", fs.existsSync(tmpGPath));
+  check("(s9 clear-by-id on shared hash) THE FIX: reports the surviving file as KEPT", clearResult.latchKept === true);
+
+  const fresh = await freshBootModule();
+  const foundAfterRestart = fresh.reenterMergeQuarantinesAtBoot([repoG]);
+  check("(s9 restart) THE REGRESSION THIS PREVENTS: a fresh boot still finds repoG's quarantine", foundAfterRestart.some((q) => q.repoPath === repoG));
+  check("(s9 restart) THE REGRESSION THIS PREVENTS: repoG's quarantine survives the restart (fails OPEN otherwise)", !!fresh.activeMergeQuarantineFor(repoG));
+
+  try { clearMergeQuarantine(repoG); } catch { /* best-effort cleanup */ }
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -650,9 +740,11 @@ console.log(failures === 0
   ? "\n✅ ALL PASS — a lazily-graduated pending quarantine's stale source file (`.json` final or " +
     "`.json.tmp-<pid>` residue alike) is tracked as owned by its still-active entry when the graduation " +
     "write fails, so a raw clear-by-id of its stale hash keeps it and the quarantine survives a restart " +
-    "via the RAW-FALLBACK branch (scenarios 1-2) and via the PENDING-MATCH branch's own " +
-    "belt-and-suspenders sweep, when the clear-by-id matches a DIFFERENT, unrelated same-hash pending " +
-    "entry instead (scenarios 6-7); a graduation that SUCCEEDS strips a dangling self-reference instead " +
+    "via the RAW-FALLBACK branch (scenarios 1-2, and — since card 188b145f — scenario 6, where every one " +
+    "of a repo's OWN same-hash pending entries now graduates together leaving nothing independently " +
+    "pending) and via the PENDING-MATCH branch's own belt-and-suspenders sweep, whether that match is a " +
+    "cross-repo hash collision on a `.json` final (scenario 7) or its `.tmp-`-sourced twin (scenario 9); " +
+    "a graduation that SUCCEEDS strips a dangling self-reference instead " +
     "of leaving one behind (scenario 3); and a legitimate clear / a successful sweepOtherTmpsOnSuccess " +
     "write both KEEP a tmp residue a DIFFERENT, surviving entry still references, while still sweeping " +
     "the cleared/superseded entry's OWN unreferenced residue (scenarios 4-5, round 3); and a PARTIAL " +

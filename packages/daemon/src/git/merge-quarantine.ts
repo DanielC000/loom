@@ -118,6 +118,17 @@ interface PendingUnresolvedQuarantine {
 }
 let pendingUnresolvedQuarantines: PendingUnresolvedQuarantine[] = [];
 
+/** Every `pendingUnresolvedQuarantines` index satisfying `pred` — never just the first (card 188b145f,
+ *  round 2). Shared by {@link activeMergeQuarantineFor}'s lazy-graduation match cascade and
+ *  {@link enterMergeQuarantine}'s own pending-merge branch: both used to `findIndex` a single match and
+ *  consume only it, silently stranding every OTHER identity-matching pending entry forever (its own
+ *  tokens invisible, its own sourceFile never folded in, the repo permanently duplicate-listed) whenever
+ *  more than one existed for the same repo. Collecting every index here is what lets each caller union
+ *  and consume all of them together in one step instead. */
+function collectPendingIndices(pred: (p: PendingUnresolvedQuarantine) => boolean): number[] {
+  return pendingUnresolvedQuarantines.reduce<number[]>((acc, p, i) => { if (pred(p)) acc.push(i); return acc; }, []);
+}
+
 export const MERGE_QUARANTINE_DIR = path.join(LOOM_HOME, "merge-quarantines");
 
 /** Hash a raw canonical-repo-lock KEY directly (never a repoPath) — the primitive every other
@@ -307,6 +318,57 @@ function deleteSourceLatchIfSuperseded(sourceFile: string, writtenEntry: MergeQu
   try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, sourceFile)); } catch { /* best-effort */ }
 }
 
+/**
+ * THE ONE place `pendingUnresolvedQuarantines` entries at `indices` get consumed into a single armed
+ * entry under `key` — shared by {@link activeMergeQuarantineFor}'s lazy-graduation branch and
+ * {@link enterMergeQuarantine}'s own pending-merge branch (card 188b145f, round 3; Delta Code Review
+ * `f61b7f6e` found the two callers had drifted — `enterMergeQuarantine`'s own inline copy never spliced
+ * or folded on a FAILED write). `extra` is an additional entry to union in last (a fresh raise, for
+ * `enterMergeQuarantine`) — omit it for a bare graduation query, which has nothing else to union.
+ *
+ * Splices every matched index out of `pendingUnresolvedQuarantines` UNCONDITIONALLY, before the durable
+ * write is even attempted — enforcement for THIS process must not wait on disk I/O succeeding, and a
+ * LATER query/raise must never re-discover these as still pending (that re-discovery, via a stale
+ * `findIndex` that only ever consumed the first match, is the whole defect class this helper exists to
+ * close once, for every caller, rather than per call site).
+ *
+ * @decision be79f4d5 — every matched entry's own `sourceFile` is stripped from the unioned
+ * `orphanLatchFiles` BEFORE the write is attempted, or a dangling self-reference falsely "protects" a
+ * file this same write is about to delete on success.
+ *
+ * On success, every matched `sourceFile` is deleted via {@link deleteSourceLatchIfSuperseded} (a safe
+ * per-file no-op, looped). On FAILURE, every matched `sourceFile` (skipping only one that already equals
+ * the fresh write target) is folded into the armed entry's `orphanLatchFiles` instead — so a raw
+ * clear-by-id of ANY of their stale hashes keeps them, never destroying the quarantine's only durable copy.
+ */
+function consumeMatchedPendingsIntoArmedEntry(
+  indices: number[],
+  key: string,
+  extra?: MergeQuarantineEntry,
+): { armed: MergeQuarantineEntry; matched: PendingUnresolvedQuarantine[]; writeSucceeded: boolean } {
+  const matched = indices.map((i) => pendingUnresolvedQuarantines[i] as PendingUnresolvedQuarantine);
+  for (const i of [...indices].sort((a, b) => b - a)) pendingUnresolvedQuarantines.splice(i, 1); // descending so earlier indices stay valid
+  const first = matched[0] as PendingUnresolvedQuarantine;
+  let unioned = matched.slice(1).reduce((acc, p) => unionQuarantineEntries(acc, p.entry), first.entry);
+  if (extra) unioned = unionQuarantineEntries(unioned, extra);
+  const sourceFiles = matched.map((p) => p.sourceFile);
+  const strippedOrphanLatchFiles = unioned.orphanLatchFiles?.filter((f) => !sourceFiles.includes(f));
+  let armed: MergeQuarantineEntry = { ...unioned, resolvedKey: key, armedKeys: [key], orphanLatchFiles: strippedOrphanLatchFiles };
+  activeQuarantines.set(key, armed);
+  const writeSucceeded = writeMergeQuarantineLatch(armed);
+  if (writeSucceeded) {
+    for (const sourceFile of sourceFiles) deleteSourceLatchIfSuperseded(sourceFile, armed);
+  } else {
+    const freshWriteTarget = path.basename(quarantinePathFor(armed.repoPath));
+    const toFold = sourceFiles.filter((f) => f !== freshWriteTarget);
+    if (toFold.length > 0) {
+      armed = { ...armed, orphanLatchFiles: [...new Set([...(armed.orphanLatchFiles ?? []), ...toFold])] };
+      activeQuarantines.set(key, armed);
+    }
+  }
+  return { armed, matched, writeSucceeded };
+}
+
 /** The stable hash-prefixed glob for a bare latch HASH's own tmp residue — `<hash>.json.tmp-<pid>`, any
  *  pid. Best-effort; a missing/unreadable directory is not an error. Never throws. UNCONDITIONAL — never
  *  call this (or {@link deleteMergeQuarantineTmpResidueForKey}/{@link deleteMergeQuarantineTmpResidue})
@@ -425,18 +487,19 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     return token;
   }
   const identityForPendingMatch = directPathIdentity(repoPath);
-  const pendingIdx = pendingUnresolvedQuarantines.findIndex((p) => directPathIdentity(p.entry.repoPath) === identityForPendingMatch);
-  if (pendingIdx !== -1) {
-    const pending = pendingUnresolvedQuarantines[pendingIdx] as PendingUnresolvedQuarantine;
+  // @decision 188b145f (round 2) — collect EVERY identity-matching pending index, never just the first,
+  // same reason and same fix shape as `activeMergeQuarantineFor`'s own lazy-graduation cascade: a second
+  // (or later) same-identity pending entry here was left permanently stranded otherwise.
+  const pendingIndices = collectPendingIndices((p) => directPathIdentity(p.entry.repoPath) === identityForPendingMatch);
+  if (pendingIndices.length > 0) {
     const fresh: MergeQuarantineEntry = { repoPath, branch, reason, opId, enteredAt: Date.now(), tokens: [token] };
-    const merged: MergeQuarantineEntry = { ...unionQuarantineEntries(pending.entry, fresh), resolvedKey: key, armedKeys: [key] };
-    activeQuarantines.set(key, merged);
-    if (writeMergeQuarantineLatch(merged)) {
-      pendingUnresolvedQuarantines.splice(pendingIdx, 1);
-      deleteSourceLatchIfSuperseded(pending.sourceFile, merged);
-    } else {
+    // @decision 188b145f (round 3, Delta Code Review f61b7f6e) — route through the SAME shared helper
+    // `activeMergeQuarantineFor` uses, never a second inline copy: this branch used to splice/fold ONLY
+    // on a SUCCESSFUL write, stranding every matched pending entry and its sourceFile on a FAILED one.
+    const { matched: consumed, writeSucceeded } = consumeMatchedPendingsIntoArmedEntry(pendingIndices, key, fresh);
+    if (!writeSucceeded) {
       // eslint-disable-next-line no-console
-      console.error(`[merge-quarantine] canonical repo ${repoPath} is quarantined IN THIS PROCESS ONLY right now (merged with a pending latch) — the durable latch failed to write, so the pending latch's OWN source file (${pending.sourceFile}) is left in place rather than deleted; a later boot can still recover from it.`);
+      console.error(`[merge-quarantine] canonical repo ${repoPath} is quarantined IN THIS PROCESS ONLY right now (merged with ${consumed.length} pending latch(es)) — the durable latch failed to write, so the pending latch(es)' own source file(s) (${consumed.map((p) => p.sourceFile).join(", ")}) are now tracked as owned by this entry's own orphanLatchFiles rather than deleted; a later boot can still recover from it.`);
     }
     return token;
   }
@@ -754,51 +817,39 @@ export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry
   const direct = activeQuarantines.get(key);
   if (direct || pendingUnresolvedQuarantines.length === 0) return direct;
   const identity = directPathIdentity(repoPath);
-  let idx = pendingUnresolvedQuarantines.findIndex((p) => directPathIdentity(p.entry.repoPath) === identity);
-  if (idx === -1) {
+  // @decision 188b145f — collect EVERY identity-matching index at the winning tier, never just the first
+  // (mirrors `clearMergeQuarantineLatchFile`'s/`clearMergeQuarantineByRecordedPath`'s own `.filter(...)`
+  // pending match loops) — see the decision record for why "first hit" silently orphaned the rest forever.
+  let indices = collectPendingIndices((p) => directPathIdentity(p.entry.repoPath) === identity);
+  if (indices.length === 0) {
     const ancestorIdentity = ancestorAwarePathIdentity(repoPath);
-    idx = pendingUnresolvedQuarantines.findIndex((p) => ancestorAwarePathIdentity(p.entry.repoPath) === ancestorIdentity);
+    indices = collectPendingIndices((p) => ancestorAwarePathIdentity(p.entry.repoPath) === ancestorIdentity);
   }
-  if (idx === -1) {
-    idx = pendingUnresolvedQuarantines.findIndex((p) =>
-      isRepoPathCurrentlyResolvable(p.entry.repoPath) && canonicalRepoLockKey(p.entry.repoPath) === key);
+  if (indices.length === 0) {
+    indices = collectPendingIndices((p) => isRepoPathCurrentlyResolvable(p.entry.repoPath) && canonicalRepoLockKey(p.entry.repoPath) === key);
   }
-  if (idx === -1) return undefined;
-  const pending = pendingUnresolvedQuarantines[idx] as PendingUnresolvedQuarantine; // idx is a verified hit above
-  if (!isRepoPathCurrentlyResolvable(pending.entry.repoPath)) {
-    // STILL can't be verified — report it active for THIS query, but leave it in
-    // `pendingUnresolvedQuarantines` rather than pinning it to a key that may not hold once the path
-    // genuinely resolves. Pinning it here would reopen the exact bug this pending mechanism exists to
+  if (indices.length === 0) return undefined;
+  const matched = indices.map((i) => pendingUnresolvedQuarantines[i] as PendingUnresolvedQuarantine); // indices are verified hits above
+  const first = matched[0] as PendingUnresolvedQuarantine;
+  if (!isRepoPathCurrentlyResolvable(first.entry.repoPath)) {
+    // STILL can't be verified — report it active for THIS query, but leave EVERY matched entry in
+    // `pendingUnresolvedQuarantines` rather than pinning any of them to a key that may not hold once the
+    // path genuinely resolves. Pinning here would reopen the exact bug this pending mechanism exists to
     // close: a LATER remount recomputes a DIFFERENT (real) key, and an already-graduated entry sitting
     // under the degraded key would miss it exactly like the original one-boot fail-open did, just later.
-    return pending.entry;
+    // Every matched entry shares `first`'s identity by construction, so its resolvability speaks for all.
+    return first.entry;
   }
-  // Genuinely resolvable now — graduate it: durably persist under the verified key and stop treating it as
-  // pending (a FUTURE query for the same repo hits `activeQuarantines` directly from here on). This happens
-  // UNCONDITIONALLY, in-memory, regardless of whether the durable write below succeeds — mirroring PASS 1's
-  // own migrate branch, enforcement for THIS process must not wait on disk I/O succeeding.
-  pendingUnresolvedQuarantines.splice(idx, 1);
-  // @decision be79f4d5 — strip a dangling self-reference to `pending.sourceFile` before arming, or a
-  // persisted entry falsely "protects" a file this same write is about to delete on success.
-  const strippedOrphanLatchFiles = pending.entry.orphanLatchFiles?.filter((f) => f !== pending.sourceFile);
-  let armed: MergeQuarantineEntry = {
-    ...pending.entry, resolvedKey: key, armedKeys: [key], orphanLatchFiles: strippedOrphanLatchFiles,
-  };
-  activeQuarantines.set(key, armed);
-  // Delete the pending entry's stale source file only after the new write succeeds, and only if it isn't
-  // the SAME file we just wrote — see deleteSourceLatchIfSuperseded's own doc comment.
-  if (writeMergeQuarantineLatch(armed)) {
-    deleteSourceLatchIfSuperseded(pending.sourceFile, armed);
-  } else {
-    // @decision be79f4d5 — fold the stale sourceFile into orphanLatchFiles (skipping only when it's
-    // already this entry's own fresh write target, mirroring deleteSourceLatchIfSuperseded's equality
-    // guard), or a raw clear-by-id of its hash deletes this entry's only durable copy as an orphan.
-    if (pending.sourceFile !== path.basename(quarantinePathFor(armed.repoPath))) {
-      armed = { ...armed, orphanLatchFiles: [...new Set([...(armed.orphanLatchFiles ?? []), pending.sourceFile])] };
-      activeQuarantines.set(key, armed);
-    }
+  // Genuinely resolvable now — graduate EVERY identity-matching pending entry in ONE step via the shared
+  // {@link consumeMatchedPendingsIntoArmedEntry} helper (card 188b145f, round 3): splicing only the first
+  // used to leave the rest stuck in `pendingUnresolvedQuarantines` forever (a later query for the same
+  // repo always hits `direct` above and never looks at `pendingUnresolvedQuarantines` again). This happens
+  // UNCONDITIONALLY, in-memory, regardless of whether the durable write succeeds — mirroring PASS 1's own
+  // migrate branch, enforcement for THIS process must not wait on disk I/O succeeding.
+  const { armed, matched: consumed, writeSucceeded } = consumeMatchedPendingsIntoArmedEntry(indices, key);
+  if (!writeSucceeded) {
     // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] lazily re-resolved a pending unverifiable quarantine for ${armed.repoPath} but could NOT durably persist it under its now-known key — still enforced in THIS process, but the ORIGINAL file (${pending.sourceFile}) is left in place so a later boot can still recover it.`);
+    console.error(`[merge-quarantine] lazily re-resolved ${consumed.length} pending unverifiable quarantine entr${consumed.length === 1 ? "y" : "ies"} for ${armed.repoPath} but could NOT durably persist it under its now-known key — still enforced in THIS process, but the ORIGINAL file(s) (${consumed.map((p) => p.sourceFile).join(", ")}) are now tracked as owned by this entry's own orphanLatchFiles rather than deleted; a later boot can still recover it.`);
   }
   return armed;
 }
