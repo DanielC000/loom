@@ -97,6 +97,9 @@ the pre-fix source (reverted, rebuilt, re-run) and GREEN again after restoring t
 - `docs/decisions/1069c8e1-additive-only-rotation-guard-protects-all-three-fields.md` — the prior
   precedent for an additive-only merge guard on `mergeConfigOverride`, reused (as a second, independent
   option) rather than re-invented here.
+- `docs/decisions/8db0c289-reject-default-plan-permission-mode-on-agent-config-write.md` — extends this
+  card's `agentPermissionOverride.mode` exclude list and elevated-route raw check to also reject
+  `"default"`/`"plan"`, which reach the real boot flag via this exact same `computeBootMode` fallback.
 
 ## Source
 

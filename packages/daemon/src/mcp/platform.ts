@@ -113,14 +113,23 @@ const permissionOverride = z.object({
   deny: z.array(z.string()).optional(),
   startupModeCycles: z.number().int().min(0).max(20).optional(),
 }).strict();
-// @decision f021e26d — agent-facing `permission.mode` excludes "bypassPermissions": an agent must never
-// set a PROJECT's own stored boot-time permission mode to bypassPermissions, which would spawn EVERY
-// session that project ever boots with no permission gate at all, not just one worker's live mode.
+// @decision f021e26d / 8db0c289 — agent-facing `permission.mode` ALLOWS ONLY "acceptEdits" (an
+// allowlist, not a denylist, so a future enum addition starts FORBIDDEN by construction): every other
+// value is a project-wide boot default that removes the permission gate, or wedges/traps an unattended role.
+const AGENT_PERMISSION_MODE_ALLOWLIST = permissionOverride.shape.mode.unwrap().extract(["acceptEdits"]);
+
+/** Shared rejection text for an agent-write `permission.mode` outside {@link AGENT_PERMISSION_MODE_ALLOWLIST}
+ *  — read by both the agent schema pre-check (`validateAgentProjectConfigOverride`) and the elevated Lead
+ *  `project_configure` raw check below, so the two routes can never phrase the same refusal differently. */
+function agentPermissionModeRejectionMessage(mode: string): string {
+  const allowed = AGENT_PERMISSION_MODE_ALLOWLIST.options.map((m) => `"${m}"`).join(", ");
+  return `permission.mode "${mode}" is human-only; agents may set only ${allowed}`;
+}
 
 // Also omits `startupModeCycles` (see the cc39bbf2 @decision above) — a `.strict()`-rejected unknown key.
 const agentPermissionOverride = z.object({
   // Derived from permissionOverride.shape.mode (never hand-copied) so the two enums can't drift apart.
-  mode: permissionOverride.shape.mode.unwrap().exclude(["bypassPermissions"]).optional(),
+  mode: AGENT_PERMISSION_MODE_ALLOWLIST.optional(),
   allow: z.array(z.string()).optional(),
   deny: z.array(z.string()).optional(),
 }).strict();
@@ -490,7 +499,7 @@ const agentPythonOverride = pythonOverride.omit({ interpreterPath: true }).stric
 // PATH, etc.). Agents have no business setting raw session env; the human/REST path keeps it.
 // `harness` (card 66b1b40d) is HUMAN-only too and dropped here, so `.strict()` REJECTS an agent's `harness`.
 // `permission` is narrowed (not dropped) to `agentPermissionOverride` (see its own doc above) — the
-// top-level key stays agent-settable; only `mode:"bypassPermissions"` is rejected.
+// top-level key stays agent-settable; `mode` is an ALLOWLIST, only `"acceptEdits"` is accepted.
 const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
   .omit({ sessionEnv: true, harness: true, permission: true })
   .extend({
@@ -591,6 +600,13 @@ export function validateProjectConfigOverride(
 export function validateAgentProjectConfigOverride(
   raw: unknown,
 ): { ok: true; value: ProjectConfigOverride } | { ok: false; error: string } {
+  // Pre-check permission.mode against AGENT_PERMISSION_MODE_ALLOWLIST so a forbidden value gets the
+  // clear, human-authored rejection below (shared with the elevated Lead raw check) instead of zod's
+  // generic "Invalid enum value" message.
+  const rawPermissionMode = isPlainObject(raw) && isPlainObject(raw.permission) ? raw.permission.mode : undefined;
+  if (typeof rawPermissionMode === "string" && !(AGENT_PERMISSION_MODE_ALLOWLIST.options as readonly string[]).includes(rawPermissionMode)) {
+    return { ok: false, error: agentPermissionModeRejectionMessage(rawPermissionMode) };
+  }
   const r = agentProjectConfigOverrideSchema.safeParse(raw ?? {});
   if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
   return { ok: true, value: pruneEmptyNestedObjects(r.data as Record<string, unknown>) as ProjectConfigOverride };
@@ -1578,11 +1594,12 @@ export class PlatformMcpRouter {
             return ok({ error: `invalid config: replace:true would drop the stored ${k} — include a non-empty ${k} in the replacement, or use a merge write (${human})` });
           }
         }
-        // @decision f021e26d — permission.mode:"bypassPermissions" is never settable via an agent MCP
-        // tool, even on this elevated route (the full human-equivalent validator below would otherwise
-        // accept it): it disables the acceptEdits+allowlist sandbox for EVERY session the project spawns.
-        if (nestedValue(config, "permission.mode") === "bypassPermissions") {
-          return ok({ error: `invalid config: permission.mode may not be set to "bypassPermissions" via an agent MCP tool — it disables the acceptEdits+allowlist sandbox every session in this project boots into (human-only, via the REST config PATCH / Settings UI)` });
+        // @decision f021e26d / 8db0c289 — permission.mode is allowlisted even on this elevated route:
+        // anything outside AGENT_PERMISSION_MODE_ALLOWLIST is a project-wide boot default that either
+        // removes the permission gate, or wedges/traps an unattended session — never agent-settable.
+        const writtenPermissionMode = nestedValue(config, "permission.mode");
+        if (typeof writtenPermissionMode === "string" && !(AGENT_PERMISSION_MODE_ALLOWLIST.options as readonly string[]).includes(writtenPermissionMode)) {
+          return ok({ error: `invalid config: ${agentPermissionModeRejectionMessage(writtenPermissionMode)} (via the REST config PATCH / Settings UI)` });
         }
         const v = validateProjectConfigOverride(config ?? {});
         // List the valid top-level keys on rejection so a fat-fingered key (e.g. "columns" instead of

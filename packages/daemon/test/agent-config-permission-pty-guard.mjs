@@ -60,7 +60,9 @@ try {
     const agentBypass = validateAgentProjectConfigOverride({ permission: { mode: "bypassPermissions" } });
     check("agent validator REJECTS permission.mode:bypassPermissions", agentBypass.ok === false);
     check("rejection names permission.mode", agentBypass.ok === false && /permission\.mode/.test(agentBypass.error));
-    for (const mode of ["default", "acceptEdits", "plan"]) {
+    // "default"/"plan" are ALSO rejected on the agent path since card 8db0c289 — see
+    // agent-permission-mode-default-plan-guard.mjs for that coverage; only "acceptEdits" stays agent-settable.
+    for (const mode of ["acceptEdits"]) {
       const r = validateAgentProjectConfigOverride({ permission: { mode } });
       check(`agent validator still ACCEPTS permission.mode:${mode}`, r.ok === true && r.value.permission?.mode === mode);
     }
