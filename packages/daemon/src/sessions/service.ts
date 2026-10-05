@@ -89,7 +89,7 @@ import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type Pendi
 import { CapQueueRegistry, CapQueueRejectedError, CAP_QUEUE_TTL_MS, type CapQueuedSpawn, type CapQueueCancelResult } from "../orchestration/cap-queue.js";
 import { readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
 import { deferredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
-import { mergeConfigOverride, validateAgentProjectConfigOverride } from "../mcp/platform.js";
+import { mergeConfigOverride, validateAgentProjectConfigOverride, isHumanSetPermissionMode, humanSetPermissionModeRejectionMessage } from "../mcp/platform.js";
 import { appendTaskBodySection, checkTitleHtmlEntities } from "../mcp/tasks.js";
 import { resolveLivePlatformHome } from "../platform/seed.js";
 import { resolveLiveSetupHome } from "../setup/seed.js";
@@ -14652,6 +14652,13 @@ export class SessionService {
     if (patch.config !== undefined) {
       const v = validateAgentProjectConfigOverride(patch.config);
       if (!v.ok) throw new Error(`invalid config: ${v.error}`);
+      // @decision 8db0c289 (follow-up, card d8f5de04) — a human-set stored permission.mode must never be
+      // silently loosened by this patch, even to the only value the agent validator above can still
+      // produce ("acceptEdits") — refuse outright rather than merge over it.
+      const existingPermissionMode = (fresh.config as { permission?: { mode?: unknown } } | undefined)?.permission?.mode;
+      if (isHumanSetPermissionMode(existingPermissionMode) && (v.value as { permission?: { mode?: unknown } }).permission?.mode !== undefined) {
+        throw new Error(`invalid config: ${humanSetPermissionModeRejectionMessage(existingPermissionMode)}`);
+      }
       // PATCH/MERGE (card 6483ddfa): deep-merge the VALIDATED partial into the project's EXISTING config
       // override instead of replacing it, so patching one key never clobbers the rest (gateCommand,
       // sessionEnv, kanbanColumns, …). The trust boundary is unchanged: a human-only key is a rejected

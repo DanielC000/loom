@@ -35,6 +35,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   5. A human-set stored "plan"/"default" mode SURVIVES an unrelated agent patch (memory.topK) through
 //      all three agent-facing write paths — the merge never silently touches a field the patch didn't
 //      name (round-2 Code Review addition — this previously rested on a single comment, not an assertion).
+//   6. Card d8f5de04 (follow-up): a HUMAN-set stored "plan"/"default"/"bypassPermissions" mode must never
+//      be changed or removed in EITHER direction (tighten or loosen) — not by an agent patch writing
+//      permission.mode:"acceptEdits" over it (manager/setup/elevated Lead, all three write paths), not by
+//      the elevated Lead's unset:["permission.mode"] or an ancestor unset:["permission"], and not by
+//      replace:true omitting it. Every case REFUSES outright (never a silent reshape) naming the stored
+//      mode. Negative/no-over-fire controls (round 2, Code Reviewer bf8988d7's follow-up review — a
+//      mutated, over-firing guard condition had left the round-1 version of this layer fully green):
+//      isHumanSetPermissionMode itself (undefined/"acceptEdits" are NOT human-set); a WRITE of acceptEdits
+//      when the stored mode is ALREADY acceptEdits or absent still SUCCEEDS, on manager project_update AND
+//      BOTH setup tools (project_configure + project_update); the elevated Lead's own
+//      unset:["permission.mode"] and replace:true (omitting the key) BOTH still SUCCEED when the stored
+//      mode is already acceptEdits or absent; and an unset of a sibling leaf (permission.allow, not an
+//      ancestor of mode) still succeeds and leaves a human-set mode untouched.
 //
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE: a real Db + SessionService/routers against a no-op fake pty, no
 // real claude, no daemon, no real ~/.loom (a throwaway temp LOOM_HOME, removed at the end).
@@ -59,7 +72,7 @@ import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv();
 
 const { computeBootMode, disallowedToolsForRole } = await import("../dist/pty/host.js");
-const { validateAgentProjectConfigOverride, validateProjectConfigOverride, PlatformMcpRouter } = await import("../dist/mcp/platform.js");
+const { validateAgentProjectConfigOverride, validateProjectConfigOverride, PlatformMcpRouter, isHumanSetPermissionMode, humanSetPermissionModeRejectionMessage } = await import("../dist/mcp/platform.js");
 const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -332,6 +345,276 @@ try {
       }
     }
   }
+
+  // ── LAYER 6: a HUMAN-set stored mode must never be CHANGED OR REMOVED, either direction (card d8f5de04) ──
+  {
+    // Unit: isHumanSetPermissionMode itself + the shared rejection message.
+    for (const mode of ["default", "plan", "bypassPermissions"]) {
+      check(`isHumanSetPermissionMode("${mode}") is true (human-set)`, isHumanSetPermissionMode(mode) === true);
+    }
+    check('isHumanSetPermissionMode(undefined) is false — negative control (no override is not human-set)',
+      isHumanSetPermissionMode(undefined) === false);
+    check('isHumanSetPermissionMode("acceptEdits") is false — negative control (agent-settable is not human-set)',
+      isHumanSetPermissionMode("acceptEdits") === false);
+    check("humanSetPermissionModeRejectionMessage names the stored mode and the human path",
+      humanSetPermissionModeRejectionMessage("plan")
+        === 'permission.mode is "plan" (human-set); agents may not change or remove it — use the REST config PATCH / Settings UI');
+
+    for (const seedMode of ["plan", "default"]) {
+      // -- manager's project_update: writing acceptEdits over a human-set mode is REFUSED --
+      {
+        const now = new Date().toISOString();
+        const db = new Db();
+        const pid = `pOverwriteMgr-${seedMode}`;
+        db.insertProject({ id: pid, name: pid, repoPath: tmpHome, vaultPath: tmpHome, config: { permission: { mode: seedMode } }, createdAt: now, archivedAt: null, reserved: false });
+        db.insertAgent({ id: `aOverwriteMgr-${seedMode}`, projectId: pid, name: "Mgr", startupPrompt: "do it", position: 0, profileId: null });
+        db.insertSession({
+          id: `mOverwriteMgr-${seedMode}`, projectId: pid, agentId: `aOverwriteMgr-${seedMode}`, engineSessionId: null, title: null, cwd: tmpHome,
+          processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+          lastError: null, role: "manager", parentSessionId: null,
+        });
+        const pty = { enqueueStdin: () => ({ delivered: false }) };
+        const svc = new SessionService(db, pty, new OrchestrationControl());
+        let threw = null;
+        try {
+          await svc.updateProjectStructural(`mOverwriteMgr-${seedMode}`, pid, { config: { permission: { mode: "acceptEdits" } } });
+        } catch (e) { threw = e; }
+        check(`manager project_update: writing acceptEdits over a human-set "${seedMode}" is REFUSED`, threw !== null);
+        check(`manager project_update: the refusal names the stored mode (mode:${seedMode})`,
+          threw !== null && String(threw.message).includes(humanSetPermissionModeRejectionMessage(seedMode)));
+        check(`manager project_update: stored permission.mode is UNCHANGED after the refused overwrite (mode:${seedMode})`,
+          db.getProject(pid).config.permission?.mode === seedMode);
+        db.close();
+      }
+
+      // -- setup's project_configure + project_update: same overwrite REFUSED --
+      {
+        const db = new Db();
+        const pid = `pOverwriteSetup-${seedMode}`;
+        db.insertProject({ id: pid, name: pid, repoPath: tmpHome, vaultPath: tmpHome, config: { permission: { mode: seedMode } }, createdAt: new Date().toISOString(), archivedAt: null, reserved: false });
+        const pty = { enqueueStdin: () => ({ delivered: false }) };
+        const svc = new SessionService(db, pty, new OrchestrationControl());
+        const router = new SetupMcpRouter(db, svc);
+        const server = router.buildServer("SETUP");
+        const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+        await server.connect(serverT);
+        const client = new Client({ name: `apmdp-overwrite-setup-${seedMode}`, version: "0" });
+        await client.connect(clientT);
+        const parse = (res) => JSON.parse(res.content[0].text);
+        const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
+
+        const cfgRes = await call("project_configure", { projectId: pid, config: { permission: { mode: "acceptEdits" } } });
+        check(`setup project_configure: writing acceptEdits over a human-set "${seedMode}" is REFUSED`,
+          typeof cfgRes.error === "string" && cfgRes.error.includes(humanSetPermissionModeRejectionMessage(seedMode)));
+        check(`setup project_configure: stored permission.mode is UNCHANGED after the refused overwrite (mode:${seedMode})`,
+          db.getProject(pid).config.permission?.mode === seedMode);
+
+        const updRes = await call("project_update", { projectId: pid, config: { permission: { mode: "acceptEdits" } } });
+        check(`setup project_update: writing acceptEdits over a human-set "${seedMode}" is REFUSED`,
+          typeof updRes.error === "string" && updRes.error.includes(humanSetPermissionModeRejectionMessage(seedMode)));
+        check(`setup project_update: stored permission.mode is UNCHANGED after the refused overwrite (mode:${seedMode})`,
+          db.getProject(pid).config.permission?.mode === seedMode);
+        db.close();
+      }
+
+      // -- the elevated Platform Lead's project_configure: write / unset / unset-ancestor / replace-omit --
+      {
+        const db = new Db();
+        const pid = `pOverwriteLead-${seedMode}`;
+        db.insertProject({ id: pid, name: pid, repoPath: tmpHome, vaultPath: tmpHome, config: { permission: { mode: seedMode, allow: ["Read"] } }, createdAt: new Date().toISOString(), archivedAt: null, reserved: false });
+        const pty = { enqueueStdin: () => ({ delivered: false }) };
+        const svc = new SessionService(db, pty, new OrchestrationControl());
+        const router = new PlatformMcpRouter(db, svc);
+        const server = router.buildServer();
+        const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+        await server.connect(serverT);
+        const client = new Client({ name: `apmdp-overwrite-lead-${seedMode}`, version: "0" });
+        await client.connect(clientT);
+        const parse = (res) => JSON.parse(res.content[0].text);
+        const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
+
+        const writeRes = await call("project_configure", { projectId: pid, config: { permission: { mode: "acceptEdits" } } });
+        check(`platform project_configure (Lead-elevated): WRITING acceptEdits over a human-set "${seedMode}" is REFUSED`,
+          typeof writeRes.error === "string" && writeRes.error.includes(humanSetPermissionModeRejectionMessage(seedMode)));
+
+        const unsetExactRes = await call("project_configure", { projectId: pid, unset: ["permission.mode"] });
+        check(`platform project_configure (Lead-elevated): UNSET of permission.mode over a human-set "${seedMode}" is REFUSED`,
+          typeof unsetExactRes.error === "string" && unsetExactRes.error.includes(humanSetPermissionModeRejectionMessage(seedMode)));
+
+        const unsetAncestorRes = await call("project_configure", { projectId: pid, unset: ["permission"] });
+        check(`platform project_configure (Lead-elevated): UNSET of the ancestor "permission" over a human-set "${seedMode}" is REFUSED`,
+          typeof unsetAncestorRes.error === "string" && unsetAncestorRes.error.includes(humanSetPermissionModeRejectionMessage(seedMode)));
+
+        const replaceOmitRes = await call("project_configure", { projectId: pid, config: { memory: { topK: 3 } }, replace: true });
+        check(`platform project_configure (Lead-elevated): REPLACE:true omitting permission.mode over a human-set "${seedMode}" is REFUSED`,
+          typeof replaceOmitRes.error === "string" && replaceOmitRes.error.includes(humanSetPermissionModeRejectionMessage(seedMode)));
+
+        check(`platform project_configure (Lead-elevated): stored permission.mode is UNCHANGED after all four refusals (mode:${seedMode})`,
+          db.getProject(pid).config.permission?.mode === seedMode);
+
+        // NEGATIVE CONTROL: unsetting a SIBLING leaf (permission.allow, not an ancestor of mode) is NOT
+        // caught by the guard — proves unsetDropsConfigPath's ancestor/descendant logic, not a blanket
+        // "unset touched permission at all" trip wire.
+        const siblingUnsetRes = await call("project_configure", { projectId: pid, unset: ["permission.allow"] });
+        check(`platform project_configure (Lead-elevated) CONTROL: unset of a SIBLING leaf (permission.allow) SUCCEEDS (mode:${seedMode})`,
+          !siblingUnsetRes.error);
+        check(`platform project_configure (Lead-elevated) CONTROL: permission.mode:${seedMode} SURVIVES the sibling unset`,
+          db.getProject(pid).config.permission?.mode === seedMode);
+        db.close();
+      }
+    }
+
+    // CONTROL (requested by the reviewing manager): writing "acceptEdits" when the stored mode is ALREADY
+    // "acceptEdits" (the no-op case) still SUCCEEDS on every surface — proves the guard discriminates on
+    // the EXISTING value, not on "a write to permission.mode happened at all".
+    {
+      const now = new Date().toISOString();
+      const db = new Db();
+      const pid = "pNoopMgr";
+      db.insertProject({ id: pid, name: pid, repoPath: tmpHome, vaultPath: tmpHome, config: { permission: { mode: "acceptEdits" } }, createdAt: now, archivedAt: null, reserved: false });
+      db.insertAgent({ id: "aNoopMgr", projectId: pid, name: "Mgr", startupPrompt: "do it", position: 0, profileId: null });
+      db.insertSession({
+        id: "mNoopMgr", projectId: pid, agentId: "aNoopMgr", engineSessionId: null, title: null, cwd: tmpHome,
+        processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+        lastError: null, role: "manager", parentSessionId: null,
+      });
+      const pty = { enqueueStdin: () => ({ delivered: false }) };
+      const svc = new SessionService(db, pty, new OrchestrationControl());
+      let threw = null;
+      try {
+        await svc.updateProjectStructural("mNoopMgr", pid, { config: { permission: { mode: "acceptEdits" } } });
+      } catch (e) { threw = e; }
+      check('manager project_update CONTROL: re-writing acceptEdits when ALREADY acceptEdits SUCCEEDS (no-op)', threw === null);
+      check('manager project_update CONTROL: permission.mode stays acceptEdits', db.getProject(pid).config.permission?.mode === "acceptEdits");
+      db.close();
+    }
+    {
+      const db = new Db();
+      const pidSetup = "pNoopSetup";
+      db.insertProject({ id: pidSetup, name: pidSetup, repoPath: tmpHome, vaultPath: tmpHome, config: { permission: { mode: "acceptEdits" } }, createdAt: new Date().toISOString(), archivedAt: null, reserved: false });
+      const pty = { enqueueStdin: () => ({ delivered: false }) };
+      const svc = new SessionService(db, pty, new OrchestrationControl());
+      const router = new SetupMcpRouter(db, svc);
+      const server = router.buildServer("SETUP");
+      const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverT);
+      const client = new Client({ name: "apmdp-noop-setup", version: "0" });
+      await client.connect(clientT);
+      const parse = (res) => JSON.parse(res.content[0].text);
+      const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
+      const res = await call("project_configure", { projectId: pidSetup, config: { permission: { mode: "acceptEdits" } } });
+      check('setup project_configure CONTROL: re-writing acceptEdits when ALREADY acceptEdits SUCCEEDS (no-op)', !res.error);
+      check('setup project_configure CONTROL: permission.mode stays acceptEdits', db.getProject(pidSetup).config.permission?.mode === "acceptEdits");
+      db.close();
+    }
+    {
+      const db = new Db();
+      const pidUnset = "pNoopUnset";
+      db.insertProject({ id: pidUnset, name: pidUnset, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: new Date().toISOString(), archivedAt: null, reserved: false });
+      const pty = { enqueueStdin: () => ({ delivered: false }) };
+      const svc = new SessionService(db, pty, new OrchestrationControl());
+      const router = new SetupMcpRouter(db, svc);
+      const server = router.buildServer("SETUP");
+      const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverT);
+      const client = new Client({ name: "apmdp-noop-unset", version: "0" });
+      await client.connect(clientT);
+      const parse = (res) => JSON.parse(res.content[0].text);
+      const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
+      const res = await call("project_configure", { projectId: pidUnset, config: { permission: { mode: "acceptEdits" } } });
+      check('setup project_configure CONTROL: writing acceptEdits when the mode was previously UNSET (no override) SUCCEEDS', !res.error);
+      check('setup project_configure CONTROL: permission.mode is now acceptEdits', db.getProject(pidUnset).config.permission?.mode === "acceptEdits");
+      db.close();
+    }
+
+    // Same no-op/absent CONTROL for setup's project_update (the sibling tool — not covered above, only
+    // project_configure was; Code Reviewer bf8988d7's follow-up review asked for this gap closed).
+    {
+      const db = new Db();
+      const pidSetupUpdAcc = "pNoopSetupUpdAcc";
+      db.insertProject({ id: pidSetupUpdAcc, name: pidSetupUpdAcc, repoPath: tmpHome, vaultPath: tmpHome, config: { permission: { mode: "acceptEdits" } }, createdAt: new Date().toISOString(), archivedAt: null, reserved: false });
+      const pty = { enqueueStdin: () => ({ delivered: false }) };
+      const svc = new SessionService(db, pty, new OrchestrationControl());
+      const router = new SetupMcpRouter(db, svc);
+      const server = router.buildServer("SETUP");
+      const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverT);
+      const client = new Client({ name: "apmdp-noop-setup-update-acc", version: "0" });
+      await client.connect(clientT);
+      const parse = (res) => JSON.parse(res.content[0].text);
+      const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
+      const res = await call("project_update", { projectId: pidSetupUpdAcc, config: { permission: { mode: "acceptEdits" } } });
+      check('setup project_update CONTROL: re-writing acceptEdits when ALREADY acceptEdits SUCCEEDS (no-op)', !res.error);
+      check('setup project_update CONTROL: permission.mode stays acceptEdits', db.getProject(pidSetupUpdAcc).config.permission?.mode === "acceptEdits");
+      db.close();
+    }
+    {
+      const db = new Db();
+      const pidSetupUpdUnset = "pNoopSetupUpdUnset";
+      db.insertProject({ id: pidSetupUpdUnset, name: pidSetupUpdUnset, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: new Date().toISOString(), archivedAt: null, reserved: false });
+      const pty = { enqueueStdin: () => ({ delivered: false }) };
+      const svc = new SessionService(db, pty, new OrchestrationControl());
+      const router = new SetupMcpRouter(db, svc);
+      const server = router.buildServer("SETUP");
+      const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverT);
+      const client = new Client({ name: "apmdp-noop-setup-update-unset", version: "0" });
+      await client.connect(clientT);
+      const parse = (res) => JSON.parse(res.content[0].text);
+      const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
+      const res = await call("project_update", { projectId: pidSetupUpdUnset, config: { permission: { mode: "acceptEdits" } } });
+      check('setup project_update CONTROL: writing acceptEdits when the mode was previously UNSET (no override) SUCCEEDS', !res.error);
+      check('setup project_update CONTROL: permission.mode is now acceptEdits', db.getProject(pidSetupUpdUnset).config.permission?.mode === "acceptEdits");
+      db.close();
+    }
+
+    // Lead project_configure CONTROLs (Code Reviewer bf8988d7's follow-up review: the earlier test never
+    // exercised unset/replace SUCCEEDING — it showed a mutated, over-firing guard condition still passing
+    // fully green). unset:["permission.mode"] and replace:true (omitting the key) must both SUCCEED when
+    // the stored mode is NOT human-set — already "acceptEdits", or absent entirely — proving the guard is
+    // keyed on the EXISTING stored value, not on "unset/replace touched permission.mode at all".
+    for (const seedConfig of [{ permission: { mode: "acceptEdits" } }, {}]) {
+      const seedLabel = seedConfig.permission ? "acceptEdits" : "absent";
+
+      {
+        const db = new Db();
+        const pid = `pLeadUnsetOk-${seedLabel}`;
+        db.insertProject({ id: pid, name: pid, repoPath: tmpHome, vaultPath: tmpHome, config: seedConfig, createdAt: new Date().toISOString(), archivedAt: null, reserved: false });
+        const pty = { enqueueStdin: () => ({ delivered: false }) };
+        const svc = new SessionService(db, pty, new OrchestrationControl());
+        const router = new PlatformMcpRouter(db, svc);
+        const server = router.buildServer();
+        const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+        await server.connect(serverT);
+        const client = new Client({ name: `apmdp-lead-unset-ok-${seedLabel}`, version: "0" });
+        await client.connect(clientT);
+        const parse = (res) => JSON.parse(res.content[0].text);
+        const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
+        const res = await call("project_configure", { projectId: pid, unset: ["permission.mode"] });
+        check(`platform project_configure (Lead-elevated) CONTROL: unset:["permission.mode"] SUCCEEDS when the stored mode is ${seedLabel} (not human-set)`, !res.error);
+        db.close();
+      }
+
+      {
+        const db = new Db();
+        const pid = `pLeadReplaceOk-${seedLabel}`;
+        db.insertProject({ id: pid, name: pid, repoPath: tmpHome, vaultPath: tmpHome, config: seedConfig, createdAt: new Date().toISOString(), archivedAt: null, reserved: false });
+        const pty = { enqueueStdin: () => ({ delivered: false }) };
+        const svc = new SessionService(db, pty, new OrchestrationControl());
+        const router = new PlatformMcpRouter(db, svc);
+        const server = router.buildServer();
+        const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+        await server.connect(serverT);
+        const client = new Client({ name: `apmdp-lead-replace-ok-${seedLabel}`, version: "0" });
+        await client.connect(clientT);
+        const parse = (res) => JSON.parse(res.content[0].text);
+        const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
+        const res = await call("project_configure", { projectId: pid, config: { memory: { topK: 3 } }, replace: true });
+        check(`platform project_configure (Lead-elevated) CONTROL: replace:true omitting permission.mode SUCCEEDS when the stored mode is ${seedLabel} (not human-set)`, !res.error);
+        db.close();
+      }
+    }
+  }
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
@@ -344,6 +627,11 @@ console.log(failures === 0
     + "project_configure (lead decision, Loom manager gen 401, card 8db0c289 — mirrors f021e26d's "
     + "bypassPermissions stance; no owner Request backs this ruling), while the human/REST validator keeps "
     + "accepting both unchanged, acceptEdits stays agent-settable and still boots unattended, and a "
-    + "human-set stored plan/default mode survives an unrelated agent patch on all three write paths."
+    + "human-set stored plan/default mode survives an unrelated agent patch on all three write paths. "
+    + "(card d8f5de04) A human-set stored mode (incl. bypassPermissions) also can never be CHANGED OR "
+    + "REMOVED in either direction, tighten or loosen, by an agent-facing write (even to the allowed "
+    + "acceptEdits), the elevated Lead's unset (exact or ancestor), or replace:true omitting it — all "
+    + "REFUSE outright naming the stored mode, while an already-acceptEdits/unset mode and a sibling-leaf "
+    + "unset are unaffected on every surface, including the elevated Lead's own unset/replace:true."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

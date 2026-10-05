@@ -5591,7 +5591,11 @@ export class OrchestrationMcpRouter {
           "config is schema-validated on the AGENT path: orchestration.gateCommand (host-RCE), orchestration.mergeGate (turns the merge gate off), orchestration.mergeGateInterval (lets N landings skip it while off) and unknown keys " +
           "are REJECTED (that capability stays human-only); permission.mode:\"bypassPermissions\"/\"default\"/\"plan\" " +
           "are REJECTED too (each would make every future session this project spawns boot into a mode with " +
-          "no permission gate, or with no way for an unattended session to proceed, not just yours). " +
+          "no permission gate, or with no way for an unattended session to proceed, not just yours). If the " +
+          "project's STORED permission.mode is already one only a human could have set (outside this " +
+          "allowlist — including a stored \"bypassPermissions\"), a patch setting permission.mode is " +
+          "REJECTED outright, even to \"acceptEdits\" — you cannot change or remove a human-set mode in " +
+          "either direction, tighten or loosen; use the REST config PATCH / Settings UI. " +
           "permission.deny only ever GROWS through this tool — a patch that narrows or omits an existing entry " +
           "does not remove it: the call still reports success, but the entry is silently RETAINED (merged as an " +
           "additive union); permission.allow has no such floor and is a plain replace. repoPath is not editable here. Omitted top-level " +
