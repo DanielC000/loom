@@ -9954,7 +9954,7 @@ export class PtyHost {
         if (!l2?.alive || l2.killed) return;
         this.ptyWrite(sessionId, l2, BRACKET_PASTE_END, "bracket-end");
         const delay = SUBMIT_ENTER_DELAY_MS + pasteSettleExtraMs(text.length); // scale the first attempt's gap with paste size
-        setTimeout(() => this.sendEnterAndVerify(sessionId, 1, gen), delay);
+        setTimeout(() => this.sendEnterAndVerify(sessionId, 1, gen, live), delay);
       });
     };
     // @decision 3ce3fa39 — the composer clear-prefix is DEFERRED to the next submit(), never attempted at
@@ -9998,7 +9998,7 @@ export class PtyHost {
       console.log(`[submit] ${sessionId} redelivering an already-attempted message (composer possibly dirty, ${live.composerDirtyLen} chars) — retrying the Enter only, not re-pasting the body (card b9b8f8db)`);
       this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
       const reassertWrittenAt = Date.now();
-      this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, 1, gen));
+      this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, 1, gen, live), live);
     } else if (live.composerDirtyLen > 0 && live.composerLen === 0) {
       // Card 4796f999: this branch now ALSO catches a give-up redelivery whose composer trust is broken
       // (isGiveUpRedelivery true but composerBelievedTrustworthy false, above) — `text` here is still this
@@ -10073,19 +10073,24 @@ export class PtyHost {
    * (A Code Reviewer finding on this method's own suppression logic above.) Intermediate retries
    * (attempt 2/3) never consult `lastOutputAt` — only the give-up branch above does — so they skip
    * straight to `fireEnterAndVerify` unchanged; waiting there would tax every retry for no benefit.
+   *
+   * @decision 17339316 — `boundLive` is pinned by identity through this whole chain; never re-fetch `live`
+   * by sessionId inside it — a respawn's fresh `Live` restarts `submitGeneration` at 0, so a re-fetch could
+   * coincidentally match a stale `gen` against the wrong (new) generation.
    */
-  private sendEnterAndVerify(sessionId: string, attempt: number, gen: number): void {
-    const live = this.live.get(sessionId);
-    if (!live?.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
+  private sendEnterAndVerify(sessionId: string, attempt: number, gen: number, boundLive: Live): void {
+    if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
+    const live = boundLive;
+    if (!live.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
     if (attempt > 1) {
       this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
       if (attempt === SUBMIT_MAX_ATTEMPTS) {
         const reassertWrittenAt = Date.now();
-        this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, attempt, gen));
+        this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, attempt, gen, live), live);
         return;
       }
     }
-    this.fireEnterAndVerify(sessionId, attempt, gen);
+    this.fireEnterAndVerify(sessionId, attempt, gen, live);
   }
 
   /**
@@ -10094,12 +10099,15 @@ export class PtyHost {
    * for why this exists and how the bound was sized. Re-checks the SAME bail condition as every other link
    * in this chain (`!alive || enterConfirmed || submitGeneration !== gen`) on every poll — a superseded or
    * already-confirmed turn abandons here rather than proceeding to write a now-meaningless Enter.
+   *
+   * @decision 17339316 — `boundLive` identity-bound, see `sendEnterAndVerify`'s own doc for why.
    */
-  private awaitReassertSettle(sessionId: string, gen: number, reassertWrittenAt: number, polls: number, onDone: () => void): void {
-    const live = this.live.get(sessionId);
-    if (!live?.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
+  private awaitReassertSettle(sessionId: string, gen: number, reassertWrittenAt: number, polls: number, onDone: () => void, boundLive: Live): void {
+    if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
+    const live = boundLive;
+    if (!live.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
     if (live.lastOutputAt > reassertWrittenAt || polls >= REASSERT_SETTLE_MAX_POLLS) { onDone(); return; }
-    setTimeout(() => this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, polls + 1, onDone), REASSERT_SETTLE_POLL_MS);
+    setTimeout(() => this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, polls + 1, onDone, live), REASSERT_SETTLE_POLL_MS);
   }
 
   /**
@@ -10112,13 +10120,16 @@ export class PtyHost {
    * @decision 441499ee — bails silently (no callback) when the generation is stale/dead, mirroring
    * `awaitReassertSettle`'s shape; a separate, independent check on `enterConfirmed`, not a change to
    * the output discriminator's own logic.
+   *
+   * @decision 17339316 — `boundLive` identity-bound, see `sendEnterAndVerify`'s own doc for why.
    */
-  private awaitGiveUpConfirmSettle(sessionId: string, gen: number, polls: number, onSettled: (confirmed: boolean) => void): void {
-    const live = this.live.get(sessionId);
-    if (!live?.alive || live.submitGeneration !== gen) return; // stale/dead — this generation is moot, nothing to confirm or recover
+  private awaitGiveUpConfirmSettle(sessionId: string, gen: number, polls: number, onSettled: (confirmed: boolean) => void, boundLive: Live): void {
+    if (this.live.get(sessionId) !== boundLive) return; // respawned — this generation is moot, nothing to confirm or recover
+    const live = boundLive;
+    if (!live.alive || live.submitGeneration !== gen) return; // stale/dead — this generation is moot, nothing to confirm or recover
     if (live.enterConfirmed) { onSettled(true); return; }
     if (polls >= GIVE_UP_CONFIRM_SETTLE_MAX_POLLS) { onSettled(false); return; }
-    setTimeout(() => this.awaitGiveUpConfirmSettle(sessionId, gen, polls + 1, onSettled), GIVE_UP_CONFIRM_SETTLE_POLL_MS);
+    setTimeout(() => this.awaitGiveUpConfirmSettle(sessionId, gen, polls + 1, onSettled, live), GIVE_UP_CONFIRM_SETTLE_POLL_MS);
   }
 
   /**
@@ -10192,10 +10203,13 @@ export class PtyHost {
   }
 
   /** Write this attempt's Enter and arm its verify-timeout — the second half of `sendEnterAndVerify`,
-   *  split out so the give-up attempt can route through `awaitReassertSettle` first. */
-  private fireEnterAndVerify(sessionId: string, attempt: number, gen: number): void {
-    const live = this.live.get(sessionId);
-    if (!live?.alive || live.enterConfirmed || live.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
+   *  split out so the give-up attempt can route through `awaitReassertSettle` first.
+   *  @decision 17339316 — `boundLive` is pinned by identity through this whole chain; never re-fetch
+   *  `live` by sessionId inside it — see `sendEnterAndVerify`'s own doc for why. */
+  private fireEnterAndVerify(sessionId: string, attempt: number, gen: number, boundLive: Live): void {
+    if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
+    const live = boundLive;
+    if (!live.alive || live.enterConfirmed || live.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
     this.ptyWrite(sessionId, live, ENTER, "enter");
     // Anchor for the give-up branch's liveness check below — captured for THIS attempt's own Enter write,
     // never an earlier one (each attempt gets its own closure). See the give-up branch's comment for why.
@@ -10213,12 +10227,13 @@ export class PtyHost {
     // eslint-disable-next-line no-console
     console.log(`[submit] ${sessionId} Enter attempt ${attempt}/${SUBMIT_MAX_ATTEMPTS} written gen=${gen} — awaiting confirmation`);
     setTimeout(() => {
-      const l = this.live.get(sessionId);
-      if (!l?.alive || l.enterConfirmed || l.submitGeneration !== gen) return; // confirmed / stale generation / dead — nothing more to do
+      if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
+      const l = live;
+      if (!l.alive || l.enterConfirmed || l.submitGeneration !== gen) return; // confirmed / stale generation / dead — nothing more to do
       if (attempt < SUBMIT_MAX_ATTEMPTS) {
         // eslint-disable-next-line no-console
         console.log(`[submit] ${sessionId} Enter attempt ${attempt} NOT confirmed within ${SUBMIT_VERIFY_TIMEOUT_MS}ms — retrying`);
-        this.sendEnterAndVerify(sessionId, attempt + 1, gen);
+        this.sendEnterAndVerify(sessionId, attempt + 1, gen, live);
       } else {
         // @decision 71de1f9c — most give-ups are FALSE NEGATIVES: GIVE-UP SUPPRESSED when the engine
         // produced output after THIS attempt's own final Enter write, never judged against submit()'s
@@ -10247,7 +10262,7 @@ export class PtyHost {
           // never resolves any other way) doesn't double-count the identical text — see that field's doc.
           // ALSO gated on `composerBodyWrittenForGen` (card b9b8f8db) — an Enter-only redelivery generation
           // never wrote a fresh body, so there is nothing new here to mark; see that field's own doc.
-          this.markGiveUpDirty(l, gen);
+          this.markGiveUpDirty(live, gen);
         }
         // Card 441499ee (hardening — card 04de8bbf measured ~86% of give-ups reaching THIS point are
         // followed by a confirming hook, i.e. the OUTPUT discriminator above just missed a turn that
@@ -10266,8 +10281,9 @@ export class PtyHost {
             console.log(`[submit] ${sessionId} GIVE-UP SUPPRESSED after ${attempt} Enter attempts — a confirming hook arrived${outputSeen ? "" : " during the post-give-up settle wait"} (turn actually started${outputSeen ? "" : "; the output discriminator missed it, but the hook proves it"}); leaving busy/composer untouched`);
             return;
           }
-          const l2 = this.live.get(sessionId);
-          if (!l2?.alive || l2.enterConfirmed || l2.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
+          if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
+          const l2 = live;
+          if (!l2.alive || l2.enterConfirmed || l2.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
           // eslint-disable-next-line no-console
           console.error(`[submit] ${sessionId} GIVE-UP RECOVERY after ${attempt} Enter attempts — no confirming hook observed${outputSeen ? " despite output after the final Enter write (the output discriminator's suppression was never confirmed by an actual hook)" : " since the final Enter write"}; turn never confirmed started; recovering busy so the session doesn't wedge`);
           this.maybeFireGiveUpRecoveryAlarm(sessionId, l2); // card c00231e2 — see that method's own doc
@@ -10285,10 +10301,10 @@ export class PtyHost {
           // @decision b9b8f8db — ALSO gated on `composerBodyWrittenForGen`: an Enter-only redelivery
           // never wrote a fresh body, so marking it would inflate composerDirtyLen for bytes never
           // (re)typed this generation.
-          this.markGiveUpDirty(l2, gen);
+          this.markGiveUpDirty(l2, gen); // l2 === live (identity already confirmed above)
           this.setBusy(sessionId, false, "give-up-recovery");
           this.requeueGiveUpOrigin(sessionId, gen); // card 441499ee — see the method doc
-        });
+        }, live);
       }
     }, SUBMIT_VERIFY_TIMEOUT_MS);
   }
@@ -10398,7 +10414,7 @@ export class PtyHost {
     console.log(`[flush-composer] ${sessionId} submit-only flush attempted (card 3e76ecad) — busy=${live.busy} composerDirtyLen=${live.composerDirtyLen} gen=${gen}`);
     const reassertWrittenAt = Date.now();
     this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
-    this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, 1, gen));
+    this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, 1, gen, live), live);
     return new Promise((resolve) => {
       // Card 29b3c396: `confirmed:false` no longer means "still hopelessly stuck" — the give-up ladder
       // this call re-enters (`fireEnterAndVerify`, via `awaitGiveUpConfirmSettle`) now falls through to

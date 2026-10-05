@@ -159,9 +159,12 @@ class SettleObservedTestPtyHost extends createSeamHost(PtyHost) {
     fakes.push(fake);
     return fake;
   }
-  awaitGiveUpConfirmSettle(sessionId, gen, polls, onSettled) {
+  // Card 17339316: `awaitGiveUpConfirmSettle` now takes `boundLive` too — forward it unchanged, or the
+  // real method's own identity check (`this.live.get(sessionId) !== boundLive`) sees `undefined` and bails
+  // before ever entering the settle wait this override exists to observe.
+  awaitGiveUpConfirmSettle(sessionId, gen, polls, onSettled, boundLive) {
     if (polls === 0) confirmSettleEnteredAt[sessionId] = Date.now();
-    return super.awaitGiveUpConfirmSettle(sessionId, gen, polls, onSettled);
+    return super.awaitGiveUpConfirmSettle(sessionId, gen, polls, onSettled, boundLive);
   }
 }
 
