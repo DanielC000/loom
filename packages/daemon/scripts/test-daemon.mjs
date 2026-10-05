@@ -991,6 +991,26 @@ const TEST_TIMEOUT_OVERRIDES = {
   "merge-gate-resume-remaining-steps": 190_000, // card 2403d1bc: n=13, max 74,210ms, 0 fails (0.62x of the 120s ceiling, no prior override). ~2.5x that max (2.56x).
   "merge-composer-integrity-warning": 185_000, // card 2403d1bc: n=13, max 72,692ms, 0 fails (0.61x of the 120s ceiling, no prior override). ~2.5x that max (2.54x).
   "merge-confirm-gate-tip-round-trip": 185_000, // card 2403d1bc: n=13, max 72,132ms, 0 fails (0.60x of the 120s ceiling, no prior override). ~2.5x that max (2.57x).
+  // card ae141763 — two full merge gates on 2026-10-04 killed 41 files (op 99396155) plus 2 batch-op
+  // files (op 54f67e2a) at the 120s ceiling. Every one of the 41 was measured standalone, sequentially,
+  // on an already-contended host (a real merge gate ran the whole time, op 438b8ad1/elapsed ~57min) —
+  // all 41 passed clean (0 fails), confirming host-wide starvation under concurrent gates, not a hang.
+  // Per this card's own DoD, only the two files at or above the a9119abf 0.9x-ceiling (108,000ms) cutoff
+  // get an override; every other file's standalone cost was comfortably below that (28s-103s) and is
+  // recorded as a contention-only casualty in docs/decisions/cc595ca7 instead of papered over here.
+  "merge-gate-retry": 275_000, // card ae141763: standalone 108,800ms on a contended host (0.907x of the 120s ceiling, no prior override, killed op 99396155). ~2.5x that (2.528x).
+  "merge-batch-fallback-owner-recycle": 270_000, // card ae141763: standalone 108,000ms on a contended host (0.900x of the 120s ceiling, no prior override, killed op 99396155). ~2.5x that (2.5x). Round 2 (below) re-measured this file at 83,400ms — well under this override's own margin, so it stands unchanged.
+  // @decision cc595ca7 — never size a new override off a9119abf's 0.9x-of-ceiling figure applied to a
+  // standalone spot-check; that figure is an in-gate-observed cutoff, and a standalone number near it
+  // still crossed the ceiling in-gate. No fixed per-file cutoff eliminates host-wide contention.
+  "batch-guard-release-on-throw": 185_000, // card ae141763 round 2: standalone 73,300ms on a contended host, timed out at the 120s ceiling in quiet-host gate 438b8ad1 (0.611x of the ceiling). ~2.5x that (2.524x).
+  "batch-merge-branch-advanced-during-gate": 210_000, // card ae141763 round 2: standalone 84,900ms on a contended host, timed out at the 120s ceiling in quiet-host gate 438b8ad1 (0.708x of the ceiling). ~2.5x that (2.474x).
+  "batch-merge-retain-hold": 215_000, // card ae141763 round 2: standalone 86,300ms on a contended host, timed out at the 120s ceiling in quiet-host gate 438b8ad1 (0.719x of the ceiling). ~2.5x that (2.491x).
+  "mainline-watch-branch-divert": 175_000, // card ae141763 round 2: standalone 70,500ms on a contended host, timed out at the 120s ceiling in quiet-host gate 438b8ad1 (0.588x of the ceiling — the thinnest margin of the six). ~2.5x that (2.482x).
+  "merge-batch-cancelled-not-red": 210_000, // card ae141763 round 2: standalone 84,800ms on a contended host, timed out at the 120s ceiling in quiet-host gate 438b8ad1 (0.707x of the ceiling). ~2.5x that (2.476x).
+  "batch-merge-watermark-branch-pin": 205_000, // card ae141763 round 2: standalone 82,400ms on a contended host (round 1 had recorded 73,000ms on a different contended pass the same day — see round-2 narrative on cross-run variance), killed op 99396155, above the re-derived 0.60x cutoff. ~2.5x that (2.488x).
+  "batch-merge-merge-commits": 225_000, // card ae141763 round 2: standalone 89,900ms on a contended host (the taskless triage's earlier same-day pass recorded 100,100ms), killed op 99396155, above the re-derived 0.60x cutoff. ~2.5x that (2.503x).
+  "batch-post-gate-throw-outcome": 300_000, // card ae141763 round 2: OBSERVED KILL — SIGTERM'd at the 120s ceiling on this worker's own standalone re-measurement today; an immediate second re-run passed clean at 93,100ms. Sized at the observed-kill tier (matching gate-status/merge-gate-inert-diff/emit-compare-gate above), not the ~2.5x-of-pass convention, since the true cost on the killed run is unknown (censored at >=120,000ms).
 };
 // Card fc53ea74: codex-doctrine-real-spawn's own 300_000 override moved to
 // `_codex-real-spawn-lock.mjs`'s `CODEX_OWN_WORK_BUDGET_MS` (that file's own doc carries card 3791b14e's
