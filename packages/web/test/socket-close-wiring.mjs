@@ -207,6 +207,25 @@ check("(7) unmount stops the loops too, and the disconnected fallback poll delib
     "a terminal close must still start the fallback poll");
 });
 
+check("(7b) card 37b1ed5f: the retry branch DISARMS (never stops) both seed loops before the next attempt", () => {
+  // A seed retry armed by a failure from BEFORE this close must not survive the disconnected gap and fire
+  // against the SAME seeding/buffered state the next connection's own seed() uses — see this card's
+  // FleetSocketProvider.tsx comment on the retry branch for the full race. `disarm()` (never `stop()` —
+  // this is an ordinary disconnect, not terminal) cancels the pending attempt without permanently
+  // refusing a later one; onopen's own disarm() only cancels a timer still pending AT THAT MOMENT, which
+  // is too late if the stale one already fired during the gap.
+  const site = fleet.split(/\bhandleSocketClose\s*\(/)[1];
+  const retryBody = site.split(/retry\s*:\s*\(\)\s*=>\s*\{/)[1]?.split("},")[0] ?? "";
+  assert.ok(retryBody.includes("startFallbackPoll"), "the retry branch body must be readable");
+  assert.ok(/\bseedRetry\.disarm\(\)/.test(retryBody), "the retry branch must disarm the session seed retry");
+  assert.ok(/\bstatusSeedRetry\.disarm\(\)/.test(retryBody), "the retry branch must disarm the status seed retry");
+  // disarm(), never stop() — (6) above already pins that stopSeedRetries() must NOT appear here; this
+  // reconfirms the DISTINCT fact that a bare .stop() on either loop individually is also absent, so a
+  // future edit can't satisfy this check by permanently killing the ladder instead of just disarming it.
+  assert.ok(!/\bseedRetry\.stop\(\)/.test(retryBody) && !/\bstatusSeedRetry\.stop\(\)/.test(retryBody),
+    "the retry branch must not PERMANENTLY stop either loop — only disarm the pending attempt");
+});
+
 // ── card a6d7bf36: the bounded ladder and the re-attach that makes it safe ────────────────────
 // Same division of labour as above: `socket-reconnect.mjs` proves the EPISODE's algebra and
 // `gateway-credential.mjs` proves the probe's three outcomes, both against the real modules. What

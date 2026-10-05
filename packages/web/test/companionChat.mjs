@@ -15,8 +15,8 @@
 import assert from "node:assert/strict";
 import {
   GROUP_GAP_MS, IN_APP_CHANNEL, buildTimeline, companionMessage, crossChannelMessage, formatDayLabel, formatTime,
-  historyMessage, isArmedInApp, mediaMessage, parseCrossChannel, parseInbound, parseMedia, parseTranscript,
-  prepareSend, prepareSendAudio, resetMarker, youMessage,
+  historyMessage, isArmedInApp, mediaMessage, mergeReconnectHistory, parseCrossChannel, parseInbound, parseMedia,
+  parseTranscript, prepareSend, prepareSendAudio, resetMarker, youMessage,
 } from "../src/lib/companionChat.ts";
 
 let pass = 0;
@@ -295,6 +295,68 @@ check("historyMessage: the row's stored createdAt threads onto the bubble's ts; 
 check("resetMarker: a non-bubble '/new' sentinel carrying marker:'reset' (empty text, never a bubble)", () => {
   assert.deepEqual(resetMarker("r1"), { id: "r1", author: "companion", text: "", channel: "in-app", marker: "reset" });
   assert.equal(resetMarker("r2", "2026-07-10T09:00:00.000Z").ts, "2026-07-10T09:00:00.000Z");
+});
+
+// ── mergeReconnectHistory: the reconnect re-seed's merge, not a bare replace (card 37b1ed5f) ───────────
+// A fresh history fetch (the base) reconciled against whatever arrived LIVE while that fetch was in
+// flight — this is the pure logic the component's `onopen` handler calls; see its own doc comment there
+// for the full race. Fixture rows below carry no `ts` (irrelevant to the merge) to keep them terse.
+
+check("mergeReconnectHistory: no live arrivals during the fetch — returns the history as-is", () => {
+  const history = [historyMessage({ id: "h1", author: "companion", text: "hi", channel: "in-app" })];
+  assert.deepEqual(mergeReconnectHistory(history, []), history);
+});
+
+check("mergeReconnectHistory: a live reply NOT in the fetched history survives, appended after it", () => {
+  const history = [historyMessage({ id: "h1", author: "user", text: "ping", channel: "in-app" })];
+  const live = [companionMessage("pong", "1")]; // local counter id — never a server row id
+  assert.deepEqual(mergeReconnectHistory(history, live), [...history, ...live]);
+});
+
+check("mergeReconnectHistory: a cross-channel live push ALREADY in the history (same stable id) is dropped, not duplicated", () => {
+  const history = [
+    historyMessage({ id: "h1", author: "user", text: "ping", channel: "in-app" }),
+    historyMessage({ id: "row-9", author: "companion", text: "from telegram", channel: "telegram" }),
+  ];
+  const live = [crossChannelMessage({ id: "row-9", channel: "telegram", author: "companion", text: "from telegram", viaVoice: false })];
+  assert.deepEqual(mergeReconnectHistory(history, live), history, "the live push's own row already has an entry — no second copy");
+});
+
+check("mergeReconnectHistory: a plain reply ALSO captured by the fetch (no stable id) is deduped by content against the fetch's tail", () => {
+  // The double-capture the record warns about: a proactive reply records to the db BEFORE it is pushed
+  // live, so it can land in BOTH this fetch's response (under its real row id) AND the live push (under
+  // a local counter id with no server id at all) — id-only matching can never catch this.
+  const history = [
+    historyMessage({ id: "h1", author: "user", text: "ping", channel: "in-app" }),
+    historyMessage({ id: "row-9", author: "companion", text: "heartbeat check-in", channel: "in-app" }),
+  ];
+  const live = [companionMessage("heartbeat check-in", "1")];
+  assert.deepEqual(mergeReconnectHistory(history, live), history, "the local-id copy must not duplicate the fetch's own row");
+});
+
+check("mergeReconnectHistory: a DIFFERENT plain reply than the fetch's tail still survives (content dedupe isn't a blanket drop)", () => {
+  const history = [historyMessage({ id: "row-9", author: "companion", text: "an unrelated earlier reply", channel: "in-app" })];
+  const live = [companionMessage("a brand new reply", "1")];
+  assert.deepEqual(mergeReconnectHistory(history, live), [...history, ...live]);
+});
+
+check("mergeReconnectHistory: an outgoing bubble the user sends right after reconnect survives", () => {
+  const history = [historyMessage({ id: "h1", author: "companion", text: "earlier", channel: "in-app" })];
+  const live = [youMessage("sent right after reconnecting", "1")];
+  assert.deepEqual(mergeReconnectHistory(history, live), [...history, ...live]);
+});
+
+check("mergeReconnectHistory: several live arrivals — the tail dedupe check is bounded to exactly that many history rows", () => {
+  const history = [
+    historyMessage({ id: "h1", author: "user", text: "ping", channel: "in-app" }),
+    historyMessage({ id: "h2", author: "companion", text: "an unrelated earlier reply", channel: "in-app" }), // NOT in the tail once there are 2 live arrivals
+    historyMessage({ id: "h3", author: "companion", text: "first", channel: "in-app" }),
+    historyMessage({ id: "h4", author: "companion", text: "second", channel: "in-app" }),
+  ];
+  const live = [companionMessage("first", "1"), companionMessage("second", "2")];
+  // Both live candidates match somewhere in history's last TWO rows (h3/h4) — both are dropped as the
+  // fetch's own tail already carries them, not merely "the first one happened to match".
+  assert.deepEqual(mergeReconnectHistory(history, live), history);
 });
 
 // ── buildTimeline: the anti-"endless wall" structure — day dividers, consecutive-sender grouping, per-group

@@ -304,6 +304,14 @@ export function FleetSocketProvider() {
             if (retriesStopped) { startFallbackPoll(); return; }
             log("disconnected — falling back to polling and reconnecting");
             startFallbackPoll();
+            // Card 37b1ed5f: disarm (never stop — this is an ordinary disconnect, not terminal) any seed
+            // retry still pending from BEFORE this close. `onopen`'s own disarm() only cancels a timer
+            // still pending AT THAT MOMENT; if a stale retry fires first, during the disconnected gap, its
+            // seed() runs against the SAME seeding/buffered state the next connection's own seed() will use
+            // and can wipe the deltas that connection buffers mid-fetch. Nothing is lost by disarming here:
+            // the reconnect re-seeds through these same loops once it opens.
+            seedRetry.disarm();
+            statusSeedRetry.disarm();
             // Card 97dd97e5 — the token-LESS arm must run before the probe is ever asked: with no
             // credential held there is nothing for `refusalEpisode.check` to learn (a token-less probe
             // settles as `"none"`), and asking anyway just re-arms this ladder forever at the 10s cap.

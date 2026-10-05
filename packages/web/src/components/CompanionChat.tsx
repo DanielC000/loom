@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } f
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CompanionConversationSummary } from "@loom/shared";
 import {
-  buildTimeline, companionMessage, crossChannelMessage, historyMessage, mediaMessage, parseCleared,
-  parseCrossChannel, parseInbound, parseMedia, parseTranscript, prepareSend, prepareSendAudio, resetMarker,
-  youMessage,
+  buildTimeline, companionMessage, crossChannelMessage, historyMessage, mediaMessage, mergeReconnectHistory,
+  parseCleared, parseCrossChannel, parseInbound, parseMedia, parseTranscript, prepareSend, prepareSendAudio,
+  resetMarker, youMessage,
   type ChatConnState, type ChatMessage, type InboundMedia, type TimelineItem,
 } from "../lib/companionChat";
 import { channelBadgeLabel } from "../lib/companion";
@@ -131,6 +131,10 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
   const idRef = useRef(0);
   const replyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  // Mirrors `messages` for a synchronous read from inside a WS event handler (state itself is async) — the
+  // reconnect re-seed below snapshots this the instant its history re-fetch starts, so it knows exactly
+  // which later-arriving messages to merge back in once that fetch resolves.
+  const messagesRef = useRef<ChatMessage[]>([]);
   // Scroll bookkeeping the render must NOT re-run on: whether we're pinned to the bottom (mirrors `atBottom`
   // for the message effect to read synchronously), and the last-seen message count (to count only NEW rows).
   const atBottomRef = useRef(true);
@@ -233,10 +237,34 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
 
       ws.onopen = () => {
         if (disposed) return;
+        // Card 37b1ed5f: `everOpened` is still false on the FIRST open (the mount/reattach effect already
+        // ran load-then-connect's own history fetch just before calling connect() the first time) — true
+        // here means this open is a RECONNECT after a drop.
+        const isReconnect = everOpened;
         everOpened = true;
         backoff.reset(); // start the ladder over once a connection actually establishes
         refusalEpisode.reset(); // this run of failures is over; a later one gets its own probe
         setConn("connected");
+        if (isReconnect) {
+          // A reply (or any other turn) may have persisted via another channel, or server-side, while this
+          // socket was down — re-fetch the durable history so it shows without a manual reload, mirroring
+          // load-then-connect's own fetch (0f01f234). Best-effort. Uses `mergeReconnectHistory` rather than
+          // a bare replace: between THIS open firing and the fetch resolving, `onmessage` below can already
+          // append a live frame, or the user can send one, so snapshot how many messages exist right now —
+          // once the fetch lands, only what arrived strictly after this instant is a merge candidate (the
+          // fetch's own `history` already supersedes everything before it).
+          const preFetchCount = messagesRef.current.length;
+          void (async () => {
+            try {
+              const body = await api.companionMessages(sessionId);
+              if (disposed || !Array.isArray(body.messages)) return;
+              const history = body.messages.map(historyMessage);
+              setMessages((current) => mergeReconnectHistory(history, current.slice(preFetchCount)));
+            } catch {
+              // best-effort — a failed re-seed just leaves the pre-reconnect transcript showing
+            }
+          })();
+        }
       };
       ws.onmessage = (e) => {
         if (disposed || typeof e.data !== "string") return;
@@ -395,6 +423,10 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
       }
     };
   }, [sessionId, reattachNonce]);
+
+  // Keep `messagesRef` current for the reconnect re-seed above, which needs a SYNCHRONOUS read at the
+  // instant `onopen` fires (state itself only updates on the next render).
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   // ── Autoscroll + unread bookkeeping on a new message ──────────────────────────────────────────
   // Stick to the bottom while the reader is there; once they've scrolled up to read back, DON'T yank them

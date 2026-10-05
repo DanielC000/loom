@@ -284,6 +284,20 @@ export function historyMessage(row: CompanionHistoryRow): ChatMessage {
   return m;
 }
 
+// @decision 37b1ed5f — do not REPLACE the transcript on a reconnect re-seed; MERGE it, or a live frame
+// that lands while the fetch is in flight silently vanishes until the next reload. A plain chat bubble
+// has no stable id — dedupe it by content against the fetch's own tail, never by id alone.
+export function mergeReconnectHistory(history: ChatMessage[], liveSinceFetch: ChatMessage[]): ChatMessage[] {
+  if (liveSinceFetch.length === 0) return history;
+  const historyIds = new Set(history.map((m) => m.id));
+  const tail = history.slice(-liveSinceFetch.length);
+  const survivors = liveSinceFetch.filter((m) => {
+    if (historyIds.has(m.id)) return false; // a stable-id row (cross-channel) already has its own entry
+    return !tail.some((h) => h.author === m.author && h.channel === m.channel && h.text === m.text);
+  });
+  return [...history, ...survivors];
+}
+
 // A file delivered via `send_media` (the `media-out` lever's in-app fast-follow, card 9ec79b52) — base64
 // bytes + enough metadata for the panel to decide image-inline vs. attachment-card rendering.
 export interface InboundMedia {
