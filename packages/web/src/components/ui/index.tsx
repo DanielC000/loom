@@ -54,31 +54,27 @@ export function Panel({
 }
 
 // ── Button ───────────────────────────────────────────────────────────────────
+// The variant CHROME (background / border-color / color) deliberately lives in global.css as
+// `.loom-btn-<variant>` rules, NOT here as inline style: inline beats class, so setting it here
+// shadowed the matching `.loom-btn-<variant>:hover` rules and hover was inert app-wide.
+// Only geometry/typography stays inline. `cursor` is disabled-aware for the same reason —
+// a flat inline `pointer` shadowed `.loom-btn:disabled { cursor: not-allowed }`.
+// @decision db040811 — keep chrome in the class rules.
 type ButtonVariant = "default" | "primary" | "danger" | "ghost";
-const buttonTone: Record<ButtonVariant, { border: string; color: string }> = {
-  default: { border: color.borderStrong, color: color.text },
-  primary: { border: color.phosphor, color: color.phosphor },
-  danger: { border: color.red, color: color.red },
-  ghost: { border: "transparent", color: color.textDim },
-};
 
 export function Button({
   variant = "default", style, className, ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
-  const t = buttonTone[variant];
   return (
     <button
       {...rest}
       className={`loom-btn loom-btn-${variant}${className ? ` ${className}` : ""}`}
       style={{
-        background: "transparent",
-        color: t.color,
-        border: `1px solid ${t.border}`,
         borderRadius: radius.base,
         padding: "4px 10px",
         fontFamily: font.mono,
         fontSize: 12,
-        cursor: "pointer",
+        cursor: rest.disabled ? "not-allowed" : "pointer",
         ...style,
       }}
     />

@@ -248,6 +248,9 @@ function IconButton({ label, onClick, disabled, danger, children }: {
     <button type="button" aria-label={label} title={label} onClick={onClick} disabled={disabled}
       className={`loom-btn loom-btn-${danger ? "danger" : "ghost"}`}
       style={{ padding: "0 7px", fontFamily: font.mono, fontSize: 13, lineHeight: 1, borderRadius: radius.base,
+        // @decision db040811 — a raw `loom-btn-<variant>` element that wants no visible border must
+        // state it: the variant classes now carry the rest border-color, not just `.loom-btn`.
+        border: "1px solid transparent",
         color: danger ? color.red : color.textDim }}>
       {children}
     </button>

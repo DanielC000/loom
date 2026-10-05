@@ -241,6 +241,28 @@ body {
   cursor: not-allowed;
   opacity: 0.45;
 }
+/* Variant REST chrome. These live here, not inline on the Button component, because inline
+   declarations beat class rules — a variant that set its own background/border-color/color inline
+   shadowed every one of its own :hover rules below, so hover (and its 80ms transition) was
+   visually inert for the whole app. @decision db040811 — do not move these back inline.
+   They also apply to a RAW `loom-btn loom-btn-<variant>` element, which is why a raw caller that
+   wants no border states `border: 1px solid transparent` for itself. */
+.loom-btn-default {
+  border-color: var(--loom-border-strong);
+  color: var(--loom-text);
+}
+.loom-btn-primary {
+  border-color: var(--loom-phosphor);
+  color: var(--loom-phosphor);
+}
+.loom-btn-danger {
+  border-color: var(--loom-red);
+  color: var(--loom-red);
+}
+.loom-btn-ghost {
+  border-color: transparent;
+  color: var(--loom-text-dim);
+}
 .loom-btn-default:not(:disabled):hover {
   border-color: var(--loom-text-dim);
 }
