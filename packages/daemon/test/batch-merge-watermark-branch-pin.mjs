@@ -116,10 +116,17 @@ try {
   check("(ba663984) (W1) REFUSAL TEXT names the human-only mainline-watermark reset route as the remedy", rw1.reason?.includes("POST /api/projects/:id/mainline-watermark/reset"));
   // @decision 2a6a292a round 2 — a corrupted watermark BRANCH no longer self-corrects via an ordinary
   // landing — unchanged by ba663984, since this refusal never reaches advanceMainlineWatermarkForBatch at
-  // all (result.ok is false). Reset it directly here (simulating a human reset) so the rest of this file
-  // tests against a known-sane baseline.
+  // all (result.ok is false).
   check("(2a6a292a) a merely-corrupted watermark branch is NOT silently self-corrected — it stays stuck at the bogus branch until explicitly corrected", watermark()?.branch === bogusBranch && watermark()?.sha === w1CorruptSha);
-  db.setMeta(KEY, JSON.stringify({ branch: MAIN, sha: canonHead() }));
+  // @decision c013e8a5 — exit via the REAL human-only route: `Db.resetMainlineWatermark` only DELETES the
+  // row (787dd2a7) — it does NOT re-seed from the current checkout — so bring the rest of this file back
+  // to a known-sane baseline via a genuine landing, never a second raw `setMeta`.
+  check("(c013e8a5) resetMainlineWatermark (the real exit route) reports reset:true", db.resetMainlineWatermark(P.projId, "primary").reset === true);
+  check("(c013e8a5) the reset DELETED the row — it does not re-seed from the current checkout", watermark() === null);
+  const reseed1 = await addWorker("reseed"), reseed2 = await addWorker("reseed");
+  const reseedResult = await batch([reseed1, reseed2]);
+  check("(c013e8a5) the reseed batch lands normally", reseedResult.ok === true && reseedResult.landed?.length === 2);
+  check("(c013e8a5) the watermark is reseeded at MAIN by a REAL landing, not a raw setMeta", watermark()?.branch === MAIN && watermark()?.sha === canonHead());
 
   // ── (P1) divert BEFORE dispatching the next batch — no divert during the gate this time ────────────────
   // THE CARD THIS FIX CLOSES: the watermark-preferred pin now catches this — a live read at cut time alone

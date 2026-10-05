@@ -82,6 +82,19 @@ export const MAINLINE_LOOM_TIP_CAP_REASON = "loom-tip signal skipped (cap)";
  */
 export const MAINLINE_BOOT_ALERT_PREFIX = "mainline-boot-alerted:";
 export const mainlineBootAlertKey = (projectId: string, repoKey: string): string => `${MAINLINE_BOOT_ALERT_PREFIX}${projectId}:${repoKey}`;
+
+/** @decision c013e8a5 — do not delete this key on anything but `checkMainlineMove` observing the
+ *  watermark's branch agree with the live checkout again; a durable marker surviving is not a valid gate. */
+export const MAINLINE_DIVERT_EPISODE_PREFIX = "mainline-divert-episode:";
+export const mainlineDivertEpisodeKey = (projectId: string, repoKey: string): string => `${MAINLINE_DIVERT_EPISODE_PREFIX}${projectId}:${repoKey}`;
+
+/** @decision c013e8a5 — do not reset this counter on anything but a SETTLED resolver read
+ *  ("resolved"/"no-default"); a "defer" outcome must leave it incrementing. */
+export const MAINLINE_DEFER_STREAK_PREFIX = "mainline-defer-streak:";
+export const mainlineDeferStreakKey = (projectId: string, repoKey: string): string => `${MAINLINE_DEFER_STREAK_PREFIX}${projectId}:${repoKey}`;
+/** @decision c013e8a5 — do not raise this past a small fixed N without re-justifying it; each count is a
+ *  real boot/landing attempt, never a retry-loop tick. */
+export const MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD = 3;
 /** `expectedBranch` (set only on a branch-diverted marker) lets a later delivery render the divert text accurately.
  * @decision 2a6a292a — do not infer `source` from `atBoot` at delivery time: a landing-time divert whose own inline nudge failed must be delivered later with landing wording, never boot's "(found when the daemon started)". */
 export interface MainlineBootAlert { branch: string; from: string; to: string; evidence: string[]; suspectShas: string[]; nudgedAt: string | null; expectedBranch?: string; source?: "boot" | "landing" }
@@ -119,6 +132,13 @@ export function mainlineMovedNudgeText(a: { branch: string; repoKey: string; fro
     return `[loom:mainline-moved] repo "${a.repoKey}" is checked out on "${a.branch}", not the expected mainline branch "${expected}"${a.atBoot ? " (found when the daemon started)" : ""} (evidence: branch-diverted; tip ${a.to.slice(0, 8)}). ` +
       `The likely cause is a checkout away from "${expected}" in the canonical repo — a human REST GitWriter checkout/branch create, the Platform Lead's own git_checkout/git_create_branch, or a stray manual checkout. This is a tripwire, not a block: merges continue, but the NEXT landing would land OFF the expected mainline branch while this persists. ` +
       `ACTION for you (the manager): check out "${expected}" again in the canonical repo to resume normal landings; if "${a.branch}" is actually a deliberate mainline RENAME, ask the owner to reset this project's mainline baseline (POST /api/projects/:id/mainline-watermark/reset, loopback, human-only — the only way to move this baseline onto a new branch name).`;
+  }
+  // @decision c013e8a5 — a repeated transient resolver failure is NOT a mainline move at all (nothing has
+  // moved; the watermark simply never seeded) — own wording, never the generic "bypass" framing below.
+  if (a.evidence.includes("first-sight-resolve-deferred")) {
+    return `[loom:mainline-moved] repo "${a.repoKey}" could not resolve its default mainline branch (refs/remotes/origin/HEAD) several times in a row while first-sight-seeding its mainline watermark on branch "${a.branch}" (evidence: first-sight-resolve-deferred). ` +
+      `The watermark stays unseeded until this resolves; this is a notice about a stuck git read, never a mainline move and never grounds to suspect tampering. ` +
+      `ACTION for you (the manager): check this repo's git health (a corrupt .git, a missing or misconfigured origin remote, or exhausted disk/process resources on the host); run \`git remote set-head origin -a\` in the canonical repo if a stale/misconfigured origin/HEAD is the cause. Once resolution succeeds, the next landing or boot check seeds the watermark normally.`;
   }
   return `[loom:mainline-moved] ${a.branch} in repo "${a.repoKey}" moved ${a.from.slice(0, 8)} -> ${a.to.slice(0, 8)} WITHOUT a Loom landing${a.atBoot ? " (found when the daemon started)" : ""} (evidence: ${a.evidence.join(", ")}; suspect ${suspects}). ` +
     `A worker can write refs/heads/${a.branch} through the shared .git; a human's own raw \`git update-ref\` looks the same. This is a tripwire, not a block: merges continue. ` +

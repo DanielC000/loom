@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { DB_PATH, DAEMON_TEST_DIR } from "./paths.js";
 import type { EmitCompareNotApplicableKind } from "./git/worktrees.js";
+import { parseMainlineWatermark, MAINLINE_DIVERT_EPISODE_PREFIX, MAINLINE_DEFER_STREAK_PREFIX } from "./git/mainline-watch.js";
 // `secretEnvelopeByteLength` (card 82b22817) is the ONE deliberate exception to this file never touching
 // crypto: it derives a SIZE from the ciphertext's own structure, never decrypts, never sees plaintext —
 // see toQuestion's own comment at `credentialByteLength` for why this stays consistent with "this layer
@@ -3343,6 +3344,9 @@ export class Db {
       try { const m = rawMarker ? JSON.parse(rawMarker) as Record<string, unknown> : null; if (m && typeof m.nudgedAt !== "string") unread = m; } catch { /* unparseable marker: nothing to carry */ }
       this.deleteMeta(wKey);
       this.deleteMeta(aKey);
+      // @decision c013e8a5 — the divert-episode/defer-streak keys ride along with W+marker on every exit, never left as orphans.
+      this.deleteMeta(`${MAINLINE_DIVERT_EPISODE_PREFIX}${id}:${repoKey}`);
+      this.deleteMeta(`${MAINLINE_DEFER_STREAK_PREFIX}${id}:${repoKey}`);
       const what = to === undefined ? "repo registry entry removed: mainline baseline reset" : "repo rebound: mainline baseline reset";
       this.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "mainline_moved_outside_loom", detail: {
         projectId: id, repoKey, source: "rebind", severity: unread ? "high" : "low", reset: true, fromPath: from, toPath: to ?? null,
@@ -3362,13 +3366,22 @@ export class Db {
     const rawW = this.getMeta(wKey);
     const rawMarker = this.getMeta(aKey);
     if (rawW === undefined && rawMarker === undefined) return { reset: false };
+    // @decision c013e8a5 — the erased watermark itself is the only trace a reset adopted a stray branch; carry it on the event, mirroring the rebind event's fromPath/toPath.
+    const previousWatermark = parseMainlineWatermark(rawW);
+    // @decision c013e8a5 round 2 — a PRESENT-but-unparseable row (rawW !== undefined, parse failed) still
+    // carries a bounded raw excerpt, so its content isn't erased with no trace left at all.
+    const previousWatermarkRaw = rawW !== undefined && previousWatermark === null ? rawW.slice(0, 200) : undefined;
     let unread: Record<string, unknown> | null = null;
     try { const m = rawMarker ? JSON.parse(rawMarker) as Record<string, unknown> : null; if (m && typeof m.nudgedAt !== "string") unread = m; } catch { /* unparseable marker: nothing to carry */ }
     this.deleteMeta(wKey);
     this.deleteMeta(aKey);
+    this.deleteMeta(`${MAINLINE_DIVERT_EPISODE_PREFIX}${projectId}:${repoKey}`);
+    this.deleteMeta(`${MAINLINE_DEFER_STREAK_PREFIX}${projectId}:${repoKey}`);
     this.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "mainline_moved_outside_loom", detail: {
       projectId, repoKey, source: "human-reset", severity: unread ? "high" : "low", reset: true,
       reason: unread ? "mainline watermark reset by a human; an unread mainline alert was discarded by the reset" : "mainline watermark reset by a human",
+      ...(previousWatermark ? { previousWatermark } : {}),
+      ...(previousWatermarkRaw !== undefined ? { previousWatermarkRaw } : {}),
       ...(unread ? { discardedAlert: { branch: unread.branch, from: unread.from, to: unread.to, evidence: unread.evidence, suspectShas: unread.suspectShas } } : {}),
     } });
     return { reset: true };
@@ -3384,14 +3397,19 @@ export class Db {
    * UNRELATED undelivered alert (`keepPriorMarker`). Scoped to `blockedBy` (the SAME occupant currently
    * blocking the marker) — (from, to) alone recurs across unrelated, already-resolved episodes.
    */
-  hasMainlineDivertEvent(projectId: string, repoKey: string, from: string, to: string, blockedByFrom: string, blockedByTo: string): boolean {
+  // @decision c013e8a5 — do not match on (from,to,blockedBy) alone: `branch` closes a same-commit-divert
+  // collision, and `sinceTs` (the current episode's start, mainlineDivertEpisodeKey) keeps a resolved-then-
+  // repeated move from matching a prior, already-ended episode. Omitted `sinceTs` matches every real `ts`.
+  hasMainlineDivertEvent(projectId: string, repoKey: string, from: string, to: string, branch: string, blockedByFrom: string, blockedByTo: string, sinceTs?: string): boolean {
     const rows = this.db.prepare(
       `SELECT detail_json FROM orchestration_events WHERE kind = 'mainline_moved_outside_loom'
          AND json_extract(detail_json,'$.projectId') = ? AND json_extract(detail_json,'$.repoKey') = ?
          AND json_extract(detail_json,'$.from') = ? AND json_extract(detail_json,'$.to') = ?
+         AND json_extract(detail_json,'$.branch') = ?
          AND json_extract(detail_json,'$.blockedBy.from') = ? AND json_extract(detail_json,'$.blockedBy.to') = ?
+         AND ts >= ?
          ORDER BY seq DESC LIMIT 10`,
-    ).all(projectId, repoKey, from, to, blockedByFrom, blockedByTo) as { detail_json: string }[];
+    ).all(projectId, repoKey, from, to, branch, blockedByFrom, blockedByTo, sinceTs ?? "") as { detail_json: string }[];
     return rows.some((r) => { try { const d = JSON.parse(r.detail_json) as { evidence?: unknown }; return Array.isArray(d.evidence) && d.evidence.includes("branch-diverted"); } catch { return false; } });
   }
   /** Replace a project's config override (Pillar C project_configure / PATCH config). */
@@ -3626,6 +3644,8 @@ export class Db {
       this.db.prepare("DELETE FROM project_merge_gate_state WHERE project_id = ?").run(id); // card 6f13746c
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`mainline-watermark:${id}:%`); // card 4fa36502
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`mainline-boot-alerted:${id}:%`); // card 05e7f246
+      this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${MAINLINE_DIVERT_EPISODE_PREFIX}${id}:%`); // card c013e8a5
+      this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${MAINLINE_DEFER_STREAK_PREFIX}${id}:%`); // card c013e8a5
       // Card af08f7e8: delivered_credentials.project_id is a NOT NULL FK (enforced) with no session/agent
       // tie — deleteSession/deleteAgent never touch it (that's the point), but deleteProject genuinely
       // removes the project itself, so this must be cascaded explicitly or the transaction aborts.

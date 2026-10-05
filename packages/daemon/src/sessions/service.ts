@@ -30,7 +30,7 @@ import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateR
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit, isNotAGitRepositoryError } from "../git/bounded.js";
-import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
+import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, mainlineDivertEpisodeKey, mainlineDeferStreakKey, MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
@@ -19755,10 +19755,20 @@ export class SessionService {
       // advanceMainlineWatermark{,ForBatch}. A BOOT first sight applies firstSightSeedAllowed instead.
       if (watermarkRead.state === "absent") {
         if (!boot) return head.tip;
-        const { outcome, defaultBranch } = await this.firstSightSeedAllowed(a.repoPath, head.branch);
-        if (outcome === "allow") { store(); return head.tip; }
+        const { outcome, defaultBranch } = await this.firstSightSeedAllowed({ repoPath: a.repoPath, branch: head.branch, projectId: a.projectId, repoKey: a.repoKey, source: "boot", managerSessionId: null, workerSessionId: null, taskId: a.taskId });
+        if (outcome === "allow") {
+          // @decision c013e8a5 round 2 — repoPath reconfirmation against a rebind mid-await, mirroring
+          // advanceMainlineWatermark{,ForBatch}'s own guard: `head` was read from THIS `a.repoPath`.
+          const project = this.db.getProject(a.projectId);
+          if (project && resolveRepoByKey(project, a.repoKey).path === a.repoPath) store();
+          return head.tip;
+        }
         // "defer" (a transient resolver failure) skips entirely — no event, no seed, retry at the next first sight.
         if (outcome === "decline") this.recordFirstSightDeclined({ projectId: a.projectId, repoKey: a.repoKey, branch: head.branch, defaultBranch: defaultBranch as string, source: "boot", managerSessionId: null, workerSessionId: null, taskId: a.taskId });
+        // @decision c013e8a5 round 2 — a persistent-defer notice fired inside firstSightSeedAllowed above is
+        // BOOT-sourced and never nudges inline; deliver it now rather than waiting on a manager's own next
+        // onOrchestrationMcpFirstSeen, which may have already fired before this streak crossed its threshold.
+        this.deliverPendingBootAlerts(a.projectId);
         return head.tip;
       }
       // @decision 77b8319b — a present-but-unreadable row is never healed either: skip, fail-open, leaving
@@ -19769,6 +19779,10 @@ export class SessionService {
         return null;
       }
       const w = watermarkRead.watermark;
+      // @decision c013e8a5 — CAS (like `store()`) against a reset/rebind mid-await: skip silently, never
+      // file a divert/alert off a `w` the DB no longer agrees with.
+      if (this.db.getMeta(key) !== rawW) return null;
+      const episodeKey = mainlineDivertEpisodeKey(a.projectId, a.repoKey);
       if (w.branch !== head.branch) {
         // @decision 2a6a292a — a branch change under an EXISTING watermark is never trusted by itself:
         // alert, leave W untouched (dedupe via `sameMove` below), and never return a tip — a divert is
@@ -19785,10 +19799,17 @@ export class SessionService {
         // never clobber it here — this divert still gets its own durable event below and relies on
         // that (not the marker) until the prior alert is delivered and the marker slot frees up.
         const keepPriorMarker = !!(prev && prev.nudgedAt === null && !sameMoveMarker);
+        // @decision c013e8a5 — seed the episode's start BEFORE filing the event below, so `ts >= episodeSince`
+        // can never exclude the very event that opens the episode; cleared on reunification further down.
+        let episodeSince: string | undefined;
+        if (keepPriorMarker) { episodeSince = this.db.getMeta(episodeKey); if (!episodeSince) { episodeSince = new Date().toISOString(); this.db.setMeta(episodeKey, episodeSince); } }
         // @decision 2a6a292a round 3 — when the marker slot is unavailable (keepPriorMarker), dedupe via the
         // durable event log ONLY if it was filed while blocked by THIS SAME occupant (blockedBy): (from, to)
         // alone recurs across unrelated, already-resolved episodes (a same-commit checkout never moves tip).
-        const sameMove = sameMoveMarker || (keepPriorMarker && this.db.hasMainlineDivertEvent(a.projectId, a.repoKey, w.sha, head.tip, prev.from, prev.to));
+        // @decision c013e8a5 — also requires the SAME observed `branch`: a same-commit divert never moves
+        // the tip, so two DIFFERENT stray branches can otherwise share (from, to) and collide; `episodeSince`
+        // bounds the match to the CURRENT episode, never a prior, already-resolved one.
+        const sameMove = sameMoveMarker || (keepPriorMarker && this.db.hasMainlineDivertEvent(a.projectId, a.repoKey, w.sha, head.tip, head.branch, prev.from, prev.to, episodeSince));
         if (!sameMove) {
           this.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: boot ? "" : (a.managerSessionId ?? ""), ...(!boot && a.workerSessionId ? { workerSessionId: a.workerSessionId } : {}), taskId: a.taskId, kind: "mainline_moved_outside_loom", detail: { ...detail, ...alertDetail, ...(keepPriorMarker ? { blockedBy: { from: prev.from, to: prev.to } } : {}) } });
           if (!keepPriorMarker) this.db.setMeta(alertKey, JSON.stringify({ branch: head.branch, from: w.sha, to: head.tip, evidence, suspectShas: [head.tip], expectedBranch: w.branch, source: boot ? "boot" : "landing", nudgedAt: null } satisfies MainlineBootAlert));
@@ -19805,9 +19826,16 @@ export class SessionService {
         }
         return null;
       }
+      // @decision c013e8a5 — every path above returns, so reaching here means the branch agrees with W
+      // again: end the divert episode (never leave it keyed to "a marker exists").
+      this.db.deleteMeta(episodeKey);
       if (w.sha === head.tip) { dropBootAlert(head.tip); return head.tip; } // main is on W: only a marker whose `from` IS the tip (the alerted move was truly UNDONE) or a delivered one goes; a move W absorbed unread stays
       // The inner reader stops at `deadlineAt` itself (keeping what it read); the outer race, a little later, only bounds a reader that never returns.
       const facts = await this.boundedByDeadline(this.mainlineFactsReader(a.repoPath, w.sha, head, ms, deadlineAt), deadlineAt, 100, "facts read");
+      // @decision c013e8a5 round 2 — repeat the CAS after this SECOND await: the first CAS only covers the
+      // head-read await, so a reset/rebind landing during the facts-read await above was still invisible to
+      // it — file/store nothing off a `w` the DB no longer agrees with.
+      if (this.db.getMeta(key) !== rawW) return null;
       const v = classifyMainlineMove(w.sha, facts);
       // @decision 4fa36502 — a loom-tip skip CAUSED BY THE DEADLINE is not "no evidence": that signal alone catches a bypass with a porcelain-looking reflog message. Unless the verdict is already an alert, fail open (W untouched) so the next check re-reads it.
       if (facts.loomTipsDeadline && v.verdict !== "alert") throw new MainlineDeadlineError("loom-tip signal");
@@ -19902,12 +19930,25 @@ export class SessionService {
 
   /** @decision 787dd2a7 — never mint W's FIRST value from a branch that disagrees with a resolvable
    *  default mainline branch; a null default (no origin/HEAD — most local-only repos) seeds unconditionally.
-   *  A TRANSIENT resolver failure is `"defer"`, never `"decline"` — see {@link MainlineDefaultBranchState}. */
-  private async firstSightSeedAllowed(repoPath: string, branch: string): Promise<{ outcome: "allow" | "decline" | "defer"; defaultBranch: string | null }> {
-    const r = await this.resolveMainlineBranchStateReader(repoPath, { timeoutMs: this.mainlineGitMs() });
-    if (r.state === "failed") return { outcome: "defer", defaultBranch: null };
+   *  A TRANSIENT resolver failure is `"defer"`, never `"decline"` — see {@link MainlineDefaultBranchState}.
+   *  @decision c013e8a5 — a REPEATED transient failure is tracked per (project, repoKey) and files ONE
+   *  addressed notice past {@link MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD} consecutive defers; any
+   *  settled read (`"resolved"`/`"no-default"`) resets the streak. */
+  private async firstSightSeedAllowed(a: { repoPath: string; branch: string; projectId: string; repoKey: string; source: "boot" | "landing"; managerSessionId: string | null; workerSessionId: string | null; taskId: string | null }): Promise<{ outcome: "allow" | "decline" | "defer"; defaultBranch: string | null }> {
+    const r = await this.resolveMainlineBranchStateReader(a.repoPath, { timeoutMs: this.mainlineGitMs() });
+    const streakKey = mainlineDeferStreakKey(a.projectId, a.repoKey);
+    if (r.state === "failed") {
+      const streak = (Number(this.db.getMeta(streakKey)) || 0) + 1;
+      this.db.setMeta(streakKey, String(streak));
+      // @decision c013e8a5 round 2 — fire ONCE, exactly at the threshold, never `>=`: when the marker slot is
+      // held by an unrelated undelivered alert, its own dedupe marker never gets written, so `>=` re-fired
+      // this notice (a fresh event) on every attempt past the threshold, not just the first.
+      if (streak === MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD) this.recordFirstSightResolveDeferred({ projectId: a.projectId, repoKey: a.repoKey, branch: a.branch, source: a.source, managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId });
+      return { outcome: "defer", defaultBranch: null };
+    }
+    this.db.deleteMeta(streakKey); // a settled read breaks the streak
     const defaultBranch = r.state === "resolved" ? r.branch : null;
-    return { outcome: defaultBranch === null || defaultBranch === branch ? "allow" : "decline", defaultBranch };
+    return { outcome: defaultBranch === null || defaultBranch === a.branch ? "allow" : "decline", defaultBranch };
   }
 
   /** @decision 787dd2a7 — a declined first-sight seed files ONE low-severity event per distinct
@@ -19967,6 +20008,36 @@ export class SessionService {
     }
   }
 
+  /** @decision c013e8a5 — mirrors {@link recordFirstSightSeededStray}'s REAL addressed notice, never
+   *  {@link recordFirstSightDeclined}'s passive immediately-stamped marker: a persistent resolver failure
+   *  needs a manager to actually receive it, not a durable row nobody is addressed to read. */
+  private recordFirstSightResolveDeferred(a: { projectId: string; repoKey: string; branch: string; source: "boot" | "landing"; managerSessionId: string | null; workerSessionId: string | null; taskId: string | null }): void {
+    const alertKey = mainlineBootAlertKey(a.projectId, a.repoKey);
+    const prev = parseMainlineBootAlert(this.db.getMeta(alertKey));
+    if (prev && prev.evidence.includes("first-sight-resolve-deferred") && prev.branch === a.branch) return;
+    // @decision c013e8a5 round 2 — the trailing `&& !(...)` term is dead: the early return just above already
+    // guarantees it's true by the time we reach here, whenever `prev` itself is truthy.
+    const keepPriorMarker = !!(prev && prev.nudgedAt === null);
+    const evidence = ["first-sight-resolve-deferred"];
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId ?? "", ...(a.workerSessionId ? { workerSessionId: a.workerSessionId } : {}), taskId: a.taskId,
+      kind: "mainline_moved_outside_loom",
+      detail: {
+        projectId: a.projectId, repoKey: a.repoKey, branch: a.branch, severity: "low", evidence, source: a.source,
+        reason: `${MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD} consecutive attempts to resolve this repo's default mainline branch (refs/remotes/origin/HEAD) failed transiently while first-sight-seeding the mainline watermark on branch "${a.branch}" — the watermark stays unseeded until this resolves. Check this repo's git health (a corrupt .git, a missing or misconfigured origin remote, or exhausted disk/process resources on the host); run \`git remote set-head origin -a\` if a stale/misconfigured origin/HEAD is the cause.`,
+      },
+    });
+    if (keepPriorMarker) return; // the event above is the durable record; leave the existing undelivered marker in place
+    const text = mainlineMovedNudgeText({ branch: a.branch, repoKey: a.repoKey, from: "", to: "", evidence, suspectShas: [], atBoot: false });
+    try {
+      if (!a.managerSessionId) throw new Error("no manager to nudge");
+      this.enqueueDurableMessage(a.managerSessionId, text, { sender: "system", taskId: a.taskId, kind: "warning" });
+      this.db.setMeta(alertKey, JSON.stringify({ branch: a.branch, from: "", to: "", evidence, suspectShas: [], source: a.source, nudgedAt: new Date().toISOString() } satisfies MainlineBootAlert));
+    } catch {
+      this.db.setMeta(alertKey, JSON.stringify({ branch: a.branch, from: "", to: "", evidence, suspectShas: [], source: a.source, nudgedAt: null } satisfies MainlineBootAlert));
+    }
+  }
+
   /**
    * Advance the watermark to the canonical branch tip after a successful Loom landing. Fail-open like {@link checkMainlineMove}.
    * Only when the landing sits DIRECTLY on `checkedTip` (the tip the check verified): a move that slipped in between the check and the squash leaves the watermark unchanged, so the next check still sees it.
@@ -19978,7 +20049,8 @@ export class SessionService {
       // @decision 2a6a292a round 2 — a second, independent guard against the SAME bug `checkMainlineMove` already
       // refuses a tip for: never change W's BRANCH away from an existing trusted baseline, even here.
       const key = mainlineWatermarkKey(projectId, repoKey);
-      const watermarkRead = readMainlineWatermarkStrict(this.db.getMeta(key));
+      const rawW = this.db.getMeta(key);
+      const watermarkRead = readMainlineWatermarkStrict(rawW);
       // @decision 77b8319b — an unreadable row must never be overwritten either: skip, leaving the corrupt
       // record visible to the next pin-read refusal, instead of silently healing it via this advance.
       if (watermarkRead.state === "unreadable") return;
@@ -19986,11 +20058,23 @@ export class SessionService {
       // @decision 787dd2a7 round 2 — a verified first landing SEEDS from its own branch even when a
       // resolvable default disagrees (files an addressed notice instead); only a TRANSIENT resolver
       // failure defers (residual: with no resolvable default at all, it seeds unconditionally).
+      let seedStray: (() => void) | undefined;
       if (watermarkRead.state === "absent") {
-        const { outcome, defaultBranch } = await this.firstSightSeedAllowed(repoPath, head.branch);
+        const { outcome, defaultBranch } = await this.firstSightSeedAllowed({ repoPath, branch: head.branch, projectId, repoKey, source: "landing", managerSessionId, workerSessionId, taskId });
         if (outcome === "defer") return;
-        if (outcome === "decline") this.recordFirstSightSeededStray({ projectId, repoKey, branch: head.branch, tip: head.tip, defaultBranch: defaultBranch as string, managerSessionId, workerSessionId, taskId });
+        if (outcome === "decline") seedStray = () => this.recordFirstSightSeededStray({ projectId, repoKey, branch: head.branch, tip: head.tip, defaultBranch: defaultBranch as string, managerSessionId, workerSessionId, taskId });
       }
+      // @decision c013e8a5 — CAS against a concurrent writer (boot's own first-sight seed, a sibling
+      // landing) that set this key during the awaits above: skip silently, never clobber it with a now-
+      // stale decision.
+      if (this.db.getMeta(key) !== rawW) return;
+      // @decision c013e8a5 — repoPath reconfirmation against a rebind mid-flight: our own `head`/`checkedTip`
+      // reads above were taken from THIS `repoPath`, which may no longer be what this key names.
+      const project = this.db.getProject(projectId);
+      if (!project || resolveRepoByKey(project, repoKey).path !== repoPath) return;
+      // @decision c013e8a5 round 2 — the seeded-stray NOTICE fires only AFTER both guards above pass: firing
+      // it before them (the old ordering) told a manager a seed happened on a pass that then skipped it.
+      seedStray?.();
       this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip }));
     } catch (err) {
       console.warn(`[mainline-watch] watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
@@ -20013,16 +20097,24 @@ export class SessionService {
       // existing trusted baseline, even on a verified fast-forward (a batch can "land" onto a stray
       // branch when the whole batch, not just the gate, ran while canonical was already diverted).
       const key = mainlineWatermarkKey(projectId, repoKey);
-      const watermarkRead = readMainlineWatermarkStrict(this.db.getMeta(key));
+      const rawW = this.db.getMeta(key);
+      const watermarkRead = readMainlineWatermarkStrict(rawW);
       // @decision 77b8319b — same as the solo twin: an unreadable row is never overwritten either.
       if (watermarkRead.state === "unreadable") return;
       if (watermarkRead.state === "ok" && watermarkRead.watermark.branch !== head.branch) return;
       // @decision 787dd2a7 round 2 — same first-sight rule as the solo twin; see that method's own comment.
+      let seedStray: (() => void) | undefined;
       if (watermarkRead.state === "absent") {
-        const { outcome, defaultBranch } = await this.firstSightSeedAllowed(repoPath, head.branch);
+        const { outcome, defaultBranch } = await this.firstSightSeedAllowed({ repoPath, branch: head.branch, projectId, repoKey, source: "landing", managerSessionId, workerSessionId: null, taskId: null });
         if (outcome === "defer") return;
-        if (outcome === "decline") this.recordFirstSightSeededStray({ projectId, repoKey, branch: head.branch, tip: batchHeadSha, defaultBranch: defaultBranch as string, managerSessionId, workerSessionId: null, taskId: null });
+        if (outcome === "decline") seedStray = () => this.recordFirstSightSeededStray({ projectId, repoKey, branch: head.branch, tip: batchHeadSha, defaultBranch: defaultBranch as string, managerSessionId, workerSessionId: null, taskId: null });
       }
+      // @decision c013e8a5 — same CAS + repoPath reconfirmation as the solo twin; see that method's own comment.
+      if (this.db.getMeta(key) !== rawW) return;
+      const project = this.db.getProject(projectId);
+      if (!project || resolveRepoByKey(project, repoKey).path !== repoPath) return;
+      // @decision c013e8a5 round 2 — same reorder as the solo twin: notice only after both guards pass.
+      seedStray?.();
       this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: batchHeadSha }));
     } catch (err) {
       console.warn(`[mainline-watch] batch watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);

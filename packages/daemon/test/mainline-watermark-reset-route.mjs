@@ -9,6 +9,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (C) refused (404) for an unknown project id.
 //   (D) refused (404) for an unknown repoKey on a real project.
 //   (E) "primary" always resolves even with no registered repos; a registered repo's own key resolves too.
+//   (F)/(G) round 2 (card c013e8a5): an unparseable row carries a bounded raw excerpt (previousWatermarkRaw,
+//       truncated to 200 chars) instead of previousWatermark, so a corrupt row's content isn't erased with
+//       no trace at all.
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + buildServer via app.inject).
 // Run: 1) build (pnpm build), 2) node test/mainline-watermark-reset-route.mjs
 import fs from "node:fs";
@@ -63,6 +66,8 @@ try {
     const evA = mwEvents();
     check("(A) exactly ONE event, source human-reset, severity high (the undelivered alert was discarded)", evA.length === 1 && evA[0].detail.source === "human-reset" && evA[0].detail.severity === "high" && evA[0].detail.reset === true);
     check("(A) the discarded alert's own evidence is carried on the event", evA[0].detail.discardedAlert?.evidence?.join() === "branch-diverted");
+    // @decision c013e8a5 — the erased watermark itself is the only trace a reset adopted a stray branch.
+    check("(A) the ERASED watermark is carried on the event as previousWatermark", evA[0].detail.previousWatermark?.branch === "renamed-main" && evA[0].detail.previousWatermark?.sha === "a".repeat(40));
 
     // ── (B) nothing to reset ⇒ a clean {reset:false}, no new event ──
     const resB = await app.inject({ method: "POST", url: "/api/projects/pReset/mainline-watermark/reset" });
@@ -80,12 +85,37 @@ try {
     check("(D) the primary watermark is untouched by the refused call", db.getMeta(wKey) !== undefined);
 
     // ── (E) "primary" (default) and a real registered repoKey both resolve ──
+    const countBeforeE1 = mwEvents().length;
     const resE1 = await app.inject({ method: "POST", url: "/api/projects/pReset/mainline-watermark/reset" }); // no body ⇒ repoKey defaults to "primary"
     check("(E1) omitting repoKey resolves to primary and resets it", resE1.statusCode === 200 && resE1.json().reset === true && db.getMeta(wKey) === undefined);
+    const evE1 = mwEvents().slice(countBeforeE1);
+    check("(c013e8a5) (E1) previousWatermark carries the row this reset erased", evE1.length === 1 && evE1[0].detail.previousWatermark?.branch === "main" && evE1[0].detail.previousWatermark?.sha === "b".repeat(40));
     const wKeySvcA = MW.mainlineWatermarkKey("pReset", "svc-a");
     db.setMeta(wKeySvcA, JSON.stringify({ branch: "main", sha: "c".repeat(40) }));
     const resE2 = await app.inject({ method: "POST", url: "/api/projects/pReset/mainline-watermark/reset", payload: { repoKey: "svc-a" } });
     check("(E2) a real registered repo's own key resolves and resets ONLY that key", resE2.statusCode === 200 && resE2.json().reset === true && db.getMeta(wKeySvcA) === undefined);
+
+    // ── (F) the watermark row is present but UNPARSEABLE ⇒ previousWatermark is OMITTED (nothing valid to
+    //     report), but round 2 (card c013e8a5) carries a bounded RAW excerpt instead, so the corrupt
+    //     content isn't erased with no trace at all ──
+    const corruptRaw = "this is not json at all";
+    db.setMeta(wKey, corruptRaw);
+    const countBeforeF = mwEvents().length;
+    const resF = await app.inject({ method: "POST", url: "/api/projects/pReset/mainline-watermark/reset" });
+    check("(c013e8a5) (F) a corrupt row still resets cleanly", resF.statusCode === 200 && resF.json().reset === true && db.getMeta(wKey) === undefined);
+    const evF = mwEvents().slice(countBeforeF);
+    check("(c013e8a5) (F) previousWatermark is OMITTED for an unparseable row — nothing valid to report", evF.length === 1 && !("previousWatermark" in evF[0].detail));
+    check("(c013e8a5 r2) (F) previousWatermarkRaw carries the corrupt row's own raw bytes instead", evF[0].detail.previousWatermarkRaw === corruptRaw);
+
+    // ── (G) an unparseable row LONGER than the 200-char bound ⇒ previousWatermarkRaw is TRUNCATED, never
+    //     carried whole (round 2, card c013e8a5) ──
+    const longCorruptRaw = "x".repeat(250);
+    db.setMeta(wKey, longCorruptRaw);
+    const countBeforeG = mwEvents().length;
+    const resG = await app.inject({ method: "POST", url: "/api/projects/pReset/mainline-watermark/reset" });
+    check("(c013e8a5 r2) (G) a long corrupt row still resets cleanly", resG.statusCode === 200 && resG.json().reset === true);
+    const evG = mwEvents().slice(countBeforeG);
+    check("(c013e8a5 r2) (G) previousWatermarkRaw is truncated to 200 chars, never the whole 250-char row", evG.length === 1 && evG[0].detail.previousWatermarkRaw === longCorruptRaw.slice(0, 200) && evG[0].detail.previousWatermarkRaw.length === 200);
   } finally {
     db.close();
   }
@@ -94,6 +124,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the human-only mainline-watermark reset route clears W + an undelivered marker, audits a human-reset event (HIGH when it discards an unread alert), is a clean no-op when there is nothing to reset, and refuses an unknown project or repoKey."
+  ? "\n✅ ALL PASS — the human-only mainline-watermark reset route clears W + an undelivered marker, audits a human-reset event (HIGH when it discards an unread alert, previousWatermark/previousWatermarkRaw carrying the erased row), is a clean no-op when there is nothing to reset, and refuses an unknown project or repoKey."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

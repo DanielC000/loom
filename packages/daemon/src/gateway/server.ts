@@ -4671,7 +4671,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   // @decision 2a6a292a round 3 — the ONLY way to clear a persistent branch-mismatch alert caused by a
   // deliberate in-place mainline rename. Same trust class as the git writes above: loopback, human-only,
-  // never an MCP tool (checked by the surface-drift tests this card's own test file runs).
+  // never an MCP tool — absent from every MCP router by construction, nothing for a drift test to check.
   app.post("/api/projects/:id/mainline-watermark/reset", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });

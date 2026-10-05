@@ -842,10 +842,10 @@ what you checked. Found none? Treat it as live.
      gate ever ran — never a failure, no verdict was reached), `[loom:gate-orphaned]` / `[loom:merge-orphaned]`
      (a restart-orphaned self-check/merge op whose outcome could never be recovered — like
      `[loom:merge-cancelled]`, this is NOT a failure; no verdict was ever reached, so just re-fire the
-     check rather than treating it as a red), `[loom:mainline-moved]` (the mainline branch moved
-     WITHOUT a landing through the merge path — a tripwire, NOT a refusal: nothing was blocked and the merge
-     you confirmed still went ahead. Read the event's evidence, run `git log`/`git reflog` for the shas it
-     names, and ask the owner whether the move was theirs; a worker writing the branch ref directly is the
+     check rather than treating it as a red), `[loom:mainline-moved]` (a mainline-watch notice — a tripwire,
+     NOT a refusal: nothing was blocked and any merge you confirmed still went ahead. It is not always a
+     move: read its evidence tag first. For a genuine move, run `git log`/`git reflog` for the shas it
+     names and ask the owner whether the move was theirs; a worker writing the branch ref directly is the
      case it exists to surface), `[loom:worker-idle]`
      (a worker went idle — pick up its report / next step), `[loom:already-merged]` (the branch was
      already merged — no action), and `[loom:auto-recovered]` / `[loom:crash-recovered]` — these last two
