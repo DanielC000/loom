@@ -73,6 +73,21 @@ function makeRepo(tag) {
   return repo;
 }
 
+// card 3c109dad, item 1 — read the REAL on-disk latch final for `repoPath` by scanning
+// MERGE_QUARANTINE_DIR and parsing each `.json` file, rather than reconstructing its hash by hand (the
+// hash function is internal to merge-quarantine.ts, not exported). Skips unreadable/corrupt files (e.g.
+// the orphan latch itself) rather than throwing.
+function readLatchFileFor(repoPath) {
+  for (const f of fs.readdirSync(MERGE_QUARANTINE_DIR)) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8"));
+      if (parsed.repoPath === repoPath) return parsed;
+    } catch { /* corrupt/unrelated file — not this repo's final */ }
+  }
+  return undefined;
+}
+
 try {
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // SCENARIO NC2 — a GENUINELY SEPARATE process re-enters from the durable file alone
@@ -163,6 +178,13 @@ try {
     check("(2b) BLOCKER-2 BUG: an unmatched corrupt latch used to be silently skipped — now EVERY registered repo is quarantined", !!activeMergeQuarantineFor(repoX) && !!activeMergeQuarantineFor(repoY));
     check("(2b) the re-entry result reports both registered repos", found.some((q) => q.repoPath === repoX) && found.some((q) => q.repoPath === repoY));
     check("(2b) each fail-closed entry records the orphan's OWN filename (M2)", activeMergeQuarantineFor(repoX)?.orphanLatchFiles?.includes(path.basename(orphanLatchPath)) && activeMergeQuarantineFor(repoY)?.orphanLatchFiles?.includes(path.basename(orphanLatchPath)));
+    // card 3c109dad, item 1 — pin the PASS 2 fresh-entry branch's `placeholder: true` mint on the ON-DISK
+    // final (not just the in-memory object), since GET /internal/merge-quarantine/list reads it from a
+    // fresh parse of that same file, not from this process's live map.
+    check(
+      "(3c109dad) the on-disk final for each fail-closed orphan entry carries placeholder:true",
+      readLatchFileFor(repoX)?.placeholder === true && readLatchFileFor(repoY)?.placeholder === true,
+    );
 
     // Human-clear the FIRST repo only — the orphan is STILL referenced by repoY's own still-active entry,
     // so it must NOT be deleted yet (round 7, M2: "once no fail-closed repo still references an orphan").

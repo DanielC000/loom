@@ -163,6 +163,56 @@ as a clean parse).
 - Do not write a test whose RED-ness (or role assignment) depends on an assumption that two tmp
   filenames' TEXT controls `readdirSync`'s real enumeration order — keep physical filenames fixed and swap
   CONTENT between roles instead (see `docs/decisions/54054c01-*`'s own guard on this).
+- Do not strip a tmp's stale `resolvedKey` from `byRepoKey`'s dual-arm to make PASS 1b single-arm
+  immediately like PASS 1 — see "PASS 1b's one-boot dual-arm vs PASS 1's immediate single-arm" below:
+  it's harmless as-is, and the matching change is more invasive than it looks (deleting an arming slot,
+  not just never adding one).
+
+## PASS 1b's one-boot dual-arm vs PASS 1's immediate single-arm (card `3c109dad`) — deliberately left as-is
+
+Code Review `684b3538` of `cac93b4c` flagged an asymmetry between how PASS 1 and PASS 1b each handle a
+STALE `resolvedKey` once the path is confirmed resolvable. PASS 1b's per-key promote loop
+(`for (const [key, tmps] of tmpsToUnlinkByKey)`, above) writes the final with `resolvedKey: key` (the
+current key), but the SAME step also re-arms the promoted object at every key in its OWN `armedKeys` —
+which, for a tmp that itself carried a stale `resolvedKey`, still includes that stale key (dual-armed
+earlier in the tmp-reading loop's `if (entry.resolvedKey && entry.resolvedKey !== currentKey)` branch).
+So the PROMOTING boot ends dual-armed at `[currentKey, staleKey]`; every boot AFTER it, reading the
+just-written final (whose persisted `resolvedKey` now equals `currentKey`), single-arms at `currentKey`
+only. The in-memory armed set for the identical on-disk state differs between the promoting boot and
+every boot after it.
+
+PASS 1's own resolvable stale-key migrate branch (`if (freshHash !== hash) { if (resolvableNow) { ... } }`)
+re-keys `entry.resolvedKey = currentKey` BEFORE the shared `armQuarantineKey` step runs, so its own
+dual-arm condition (`entry.resolvedKey !== currentKey`) is already false by the time arming happens — it
+single-arms immediately, even within the migrating boot itself. PASS 1b doesn't match that shape.
+
+**Decided: do not change PASS 1b to match PASS 1.** Three reasons:
+
+1. **The asymmetry only ever shrinks what a stale key can still reach, never what it can avoid.**
+   `activeMergeQuarantineFor` and every write path always address an entry by its CURRENT, freshly
+   recomputed key, never a stale one (confirmed by reading that function — its only non-current-key
+   lookups are the separate `pendingUnresolvedQuarantines` identity matches, unrelated to this). The only
+   thing a stale key's continued presence in `armedKeys` ever enabled was a human `/clear-by-path {id}`
+   using an old latch id — a convenience (`quarantineLatchFileIdsFor` can hand out more than one id for
+   the same entry), never an enforcement property. Losing it one boot sooner (PASS 1b) or never having it
+   at all (PASS 1) are both acceptable; nothing is ever LESS enforced either way.
+2. **PASS 1 and PASS 1b are not the same shape, so "re-key before arming" doesn't transplant cleanly.**
+   PASS 1 processes ONE final per repo — re-keying before its single arm call costs nothing. PASS 1b must
+   accumulate a UNION across potentially several sibling tmp files for the SAME key, each of which may
+   carry its OWN distinct stale `resolvedKey` from a different earlier write. The dual-arm during the
+   tmp-reading loop is what lets `armQuarantineKey`'s union logic (see its own doc comment) track every
+   key a later promote might still need to settle under — it is load-bearing scaffolding for the
+   multi-tmp union, not an omittable step PASS 1 happens to skip.
+3. **Matching PASS 1 exactly would mean actively DELETING `byRepoKey` entries at promote time, not just
+   never adding them** — by the time the per-key promote loop runs, the dual-arm from reason 2 has already
+   happened. "Fixing" this symmetrically would need the promote step to strip the stale key's slot, a more
+   invasive change than PASS 1's own "never arm it in the first place" shape, for a benefit (reason 1)
+   that's already best-effort/optional.
+
+Not tested further — this is a documented close, not an implemented fix. If this asymmetry is ever shown
+to matter operationally (e.g. a `/clear-by-path {id}` using a PASS-1b-promoted old id is reported broken
+across a restart when a human expected it to keep working), re-open as its own card rather than
+re-deriving this reasoning from scratch.
 
 ## Source
 
