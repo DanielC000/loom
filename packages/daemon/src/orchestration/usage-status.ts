@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { execSync, execFile } from "node:child_process";
 import type { UsageLimitsStatus, UsageWindow, UsageExtra } from "@loom/shared";
-import { resolveExecutable } from "../pty/resolve-bin.js";
+import { resolveExecutable, winCmdShimSpawnTarget } from "../pty/resolve-bin.js";
 import { claudeCredentialsPath, CLAUDE_BINARY_NAME } from "../pty/claude-doctrine.js";
 import { boundedFetch } from "../connections/boundedFetch.js";
 
@@ -94,18 +94,34 @@ export function getCachedClaudeVersion(): string | null {
  * createPty in the overwhelmingly common case (a `claude --version` child process resolves in well under
  * a second). A cold read before this resolves just means that ONE spawn's session-naming gate sees
  * `null` (⇒ `meetsMinVersion` returns false ⇒ `-n` omitted for that spawn only) — never a hang, never a
- * thrown error. No-op if already cached (idempotent; safe to call more than once). Failures are swallowed
- * — the cache simply stays unset and the next opportunistic caller (this function, or the usage poller's
- * own lazy `claudeVersion()`) can retry.
+ * thrown error. No-op if already cached (idempotent; safe to call more than once). Failures never throw —
+ * the cache simply stays unset and the next opportunistic caller (this function, or the usage poller's
+ * own lazy `claudeVersion()`) can retry — but a failure IS surfaced via `console.warn` rather than
+ * swallowed silently (see the `catch`/`execFile` callback below).
  */
 export function prewarmClaudeVersionAsync(): void {
   if (cachedClaudeVersion) return;
   const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || CLAUDE_BINARY_NAME);
-  execFile(bin, ["--version"], { timeout: 8000, windowsHide: true }, (err, stdout) => {
-    if (err) return;
-    const v = stdout.match(/(\d+\.\d+\.\d+)/)?.[1];
-    if (v) cachedClaudeVersion = v;
-  });
+  try {
+    // Card 12c6f580: an npm-global claude install resolves to a `.cmd` shim on Windows, and plain
+    // `execFile` (unlike `execSync`/node-pty's Windows agent, both of which already go through a
+    // shell/equivalent) refuses to run a `.cmd` directly (CVE-2024-27980 EINVAL) — previously swallowed
+    // silently by this function's own best-effort `if (err) return`. Reuse winCmdShimSpawnTarget (card
+    // 7b2670d8) to parse the shim and spawn node + its real entry script directly — never cmd.exe/
+    // shell:true (decision 8ddd12c6: every spawned child would become cmd.exe itself, orphaning the real
+    // process on kill(), plus reopening the escaping gap the CVE mitigation exists to close).
+    const target = winCmdShimSpawnTarget(bin, ["--version"]);
+    execFile(target.command, target.args, { timeout: 8000, windowsHide: true }, (err, stdout) => {
+      if (err) {
+        console.warn(`[usage-status] claude version prewarm failed (continuing): ${err.message}`);
+        return;
+      }
+      const v = stdout.match(/(\d+\.\d+\.\d+)/)?.[1];
+      if (v) cachedClaudeVersion = v;
+    });
+  } catch (err) {
+    console.warn(`[usage-status] claude version prewarm failed (continuing): ${(err as Error)?.message ?? String(err)}`);
+  }
 }
 
 /** The graceful-degrade state. fetchedAt = when we last *tried* (null if never). */
