@@ -241,6 +241,9 @@ function Muted({ children, tone }: { children: ReactNode; tone?: "red" }) {
   return <span style={{ fontFamily: font.mono, fontSize: 11, color: tone === "red" ? color.red : color.textMuted, padding: "2px 0" }}>{children}</span>;
 }
 
+// @decision 6cefdf25 — do not restate the variant's own `color` inline here, even to the identical
+// token: it looks inert but shadows the variant's `:hover` rule, so these two icons stopped reacting
+// to the pointer. The `loom-btn-danger` / `loom-btn-ghost` classes already set the same rest color.
 function IconButton({ label, onClick, disabled, danger, children }: {
   label: string; onClick: () => void; disabled?: boolean; danger?: boolean; children: ReactNode;
 }) {
@@ -250,8 +253,7 @@ function IconButton({ label, onClick, disabled, danger, children }: {
       style={{ padding: "0 7px", fontFamily: font.mono, fontSize: 13, lineHeight: 1, borderRadius: radius.base,
         // @decision db040811 — a raw `loom-btn-<variant>` element that wants no visible border must
         // state it: the variant classes now carry the rest border-color, not just `.loom-btn`.
-        border: "1px solid transparent",
-        color: danger ? color.red : color.textDim }}>
+        border: "1px solid transparent" }}>
       {children}
     </button>
   );

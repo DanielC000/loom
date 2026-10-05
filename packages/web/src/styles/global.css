@@ -276,6 +276,37 @@ body {
   color: var(--loom-text);
 }
 
+/* Caller-level MODIFIERS (not variants — they tune a variant's rest label/fill, they don't replace it).
+   A call site that wants a dimmer label, an accented "this is open" label, or a filled on-state states
+   one of these as its `className` INSTEAD of an inline `color`/`background`: a caller's inline
+   declaration shadows the variant's own :hover rule exactly as the component's own inline chrome once
+   did app-wide, so the button lands visually inert on hover with nothing to catch it.
+   @decision 6cefdf25 — a call site's chrome belongs in a class, never its inline style.
+   Each rest rule is ONE class, same as a variant's, so it must sit AFTER the variant block above for
+   the tie to resolve here; each carries its own 3-class :not(:disabled):hover so the hover end state is
+   the modifier's, not whichever variant it happens to be composed with. */
+.loom-btn-muted {
+  color: var(--loom-text-muted);
+}
+.loom-btn-muted:not(:disabled):hover {
+  color: var(--loom-text);
+}
+.loom-btn-accent {
+  color: var(--loom-cyan);
+}
+.loom-btn-accent:not(:disabled):hover {
+  background: rgba(91, 200, 255, 0.12);
+  color: var(--loom-cyan);
+}
+.loom-btn-on {
+  background: var(--loom-phosphor-dim);
+  color: var(--loom-phosphor);
+}
+.loom-btn-on:not(:disabled):hover {
+  background: rgba(46, 230, 110, 0.28);
+  color: var(--loom-phosphor);
+}
+
 /* Field: phosphor focus border, no default outline. */
 .loom-field:focus {
   border-color: var(--loom-phosphor);

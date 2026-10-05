@@ -191,17 +191,21 @@ function ExpandButton({ onClick }: { onClick: () => void }) {
 
 // The presets (Spark) trigger — the bottom-right twin of the expand button. Toggles the preset popover
 // over the textarea; phosphor-tinted while open. Ghost, icon-only, zero added height.
+// @decision 6cefdf25 — do not render the OPEN state as an inline `color`/`background`: it shadows the
+// hover rule, so the trigger stops responding to the pointer exactly while the popover is up. The
+// `loom-btn-on` class carries the same phosphor fill and keeps hover alive.
 function PresetsButton({ open, onClick }: { open: boolean; onClick: () => void }) {
   return (
     <Button
       type="button"
       variant="ghost"
+      className={open ? "loom-btn-on" : undefined}
       title="Preset prompts — insert a saved prompt into the box"
       aria-label="Preset prompts"
       aria-haspopup="dialog"
       aria-expanded={open}
       onClick={onClick}
-      style={{ padding: "2px 4px", lineHeight: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", ...(open ? { color: color.phosphor, background: color.phosphorDim } : null) }}
+      style={{ padding: "2px 4px", lineHeight: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
     >
       <SparkIcon />
     </Button>

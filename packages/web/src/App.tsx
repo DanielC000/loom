@@ -265,7 +265,11 @@ function FirstRunWelcome() {
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <Button variant="primary" onClick={() => setWizardOpen(true)} style={{ padding: "6px 14px", fontSize: 13 }}>Start guided setup →</Button>
           <Button onClick={goSetup} style={{ padding: "6px 14px", fontSize: 13 }} title="Hand the reins to the Platform operator instead">Open Platform</Button>
-          <Button variant="ghost" onClick={dismiss} style={{ padding: "6px 12px", fontSize: 13, color: color.textMuted }}>Maybe later</Button>
+          {/*
+            @decision 6cefdf25 — do not dim this label with an inline `color`: it shadows the ghost
+            variant's own hover rule and leaves the button inert. The `loom-btn-muted` class does it.
+          */}
+          <Button variant="ghost" className="loom-btn-muted" onClick={dismiss} style={{ padding: "6px 12px", fontSize: 13 }}>Maybe later</Button>
         </div>
       </div>
     </div>

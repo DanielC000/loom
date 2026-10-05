@@ -354,8 +354,13 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
           type="number" min={0} inputMode="numeric" aria-label="WIP limit" placeholder="WIP" title="Soft WIP limit (advisory; empty = none)"
           style={{ width: 56, flexShrink: 0, textAlign: "right" }} />
 
+        {/*
+          @decision 6cefdf25 — do not carry this toggle's open/closed tone in an inline `color`: it
+          shadows the hover rule, so the control reads as dead. The two modifier classes carry it.
+        */}
         <Button variant="ghost" onClick={onToggleKey} aria-expanded={row.keyOpen}
-          title="Advanced: edit the stable column key" style={{ color: row.keyOpen ? color.cyan : color.textMuted }}>key</Button>
+          className={row.keyOpen ? "loom-btn-accent" : "loom-btn-muted"}
+          title="Advanced: edit the stable column key">key</Button>
 
         {confirming ? (
           <>
