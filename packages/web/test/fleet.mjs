@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
-  activeBootStuckAlerts, activeVaultLockAlerts,
+  activeBootStuckAlerts, activeVaultLockAlerts, buildLatestMergeMap,
 } from "../src/lib/fleet.ts";
 
 let pass = 0;
@@ -235,6 +235,54 @@ check("card 43084723 — GREEN: the fix (one unconditional, kind-filtered fetch)
   const alerts = activeBootStuckAlerts([stuck], (sessionId) => sessionId === "W"); // only W is live; M1 is not
   assert.equal(alerts.length, 1, "GREEN: W's alert surfaces — keyed/checked on W's OWN liveness, never M1's");
   assert.equal(alerts[0].sessionId, "W");
+});
+
+// ── MERGE latest-wins pairing (card e5458ccd round 2, item 2) — extracted out of lib/attention.ts ──────
+const mergeEv = (o = {}) => ({
+  id: `ev-${++evSeq}`,
+  ts: o.ts ?? new Date(evSeq).toISOString(),
+  kind: o.kind ?? "merge_request",
+  workerSessionId: o.workerSessionId ?? "worker-1",
+  managerSessionId: o.managerSessionId ?? "mgr-1",
+  taskId: o.taskId ?? "task-1",
+  detail: o.detail ?? {},
+});
+
+check("buildLatestMergeMap: a lone merge_request surfaces as the latest for its task", () => {
+  const req = mergeEv();
+  const map = buildLatestMergeMap([req]);
+  assert.equal(map.get("task-1")?.id, req.id);
+});
+
+check("buildLatestMergeMap: a LEGITIMATE later merge_done (no staleGenerationAttributed) correctly clears the pending request", () => {
+  const req = mergeEv({ kind: "merge_request" });
+  const done = mergeEv({ kind: "merge_done", detail: {} });
+  const map = buildLatestMergeMap([req, done]);
+  assert.equal(map.get("task-1")?.kind, "merge_done", "the real terminal event wins — this is NOT the bug being guarded against");
+});
+
+check("buildLatestMergeMap: a boot-time stale-generation attribution merge_done never clobbers the CURRENT generation's own live merge_request (card e5458ccd round 2, item 2)", () => {
+  const liveRequest = mergeEv({ kind: "merge_request", workerSessionId: "worker-current" });
+  const staleAttribution = mergeEv({
+    kind: "merge_done", workerSessionId: "worker-stale", detail: { branch: null, staleGenerationAttributed: true, attributedLandedSha: "deadbeef" },
+  });
+  const map = buildLatestMergeMap([liveRequest, staleAttribution]);
+  const result = map.get("task-1");
+  assert.equal(result?.kind, "merge_request", "the stale attribution must be skipped — the live request stays the latest");
+  assert.equal(result?.workerSessionId, "worker-current");
+});
+
+check("buildLatestMergeMap: a stale-generation attribution is the ONLY event for its task — the key is simply absent (no fabricated entry)", () => {
+  const staleAttribution = mergeEv({ kind: "merge_done", detail: { branch: null, staleGenerationAttributed: true } });
+  const map = buildLatestMergeMap([staleAttribution]);
+  assert.equal(map.has("task-1"), false);
+});
+
+check("buildLatestMergeMap: unsorted input is sorted internally — order of the array passed in doesn't matter", () => {
+  const req = mergeEv({ kind: "merge_request" });
+  const staleAttribution = mergeEv({ kind: "merge_done", detail: { staleGenerationAttributed: true } });
+  const map = buildLatestMergeMap([staleAttribution, req]); // stale attribution listed FIRST despite being later by ts
+  assert.equal(map.get("task-1")?.kind, "merge_request");
 });
 
 // ── VAULT LOCK pairing (card 227d9f0b round 2) — mirrors the BOOT STUCK pairing tests above, keyed by

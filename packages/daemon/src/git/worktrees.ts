@@ -5687,6 +5687,72 @@ export async function findIntroducingSquashCommit(
   }
 }
 
+/**
+ * ALL commits on `base` carrying a `Loom-Worker-Branch: <branch>` trailer, newest-first, with parsed trailers — never breaks on the first
+ * match and never applies {@link findLandedSquashCommit}'s re-task guard. READ-ONLY; a caller must still verify each candidate's CONTENT.
+ * @decision e5458ccd — never use for gating/finalize; a trailer match alone does not attribute to any one generation sharing this branch.
+ */
+export async function findAllLandedTrailerCommits(
+  repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
+): Promise<Array<{ sha: string; trailers: LoomTrailers }>> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const out = await withTimeout(
+      git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e"]),
+      timeoutMs, "git log --grep trailer (all-candidates)",
+    );
+    const found: Array<{ sha: string; trailers: LoomTrailers }> = [];
+    for (const record of out.split(MERGED_MAP_RECORD_SEP)) {
+      const sepIdx = record.indexOf("\x1f");
+      if (sepIdx === -1) continue;
+      const parsed = parseLoomTrailerBlock(record.slice(sepIdx + 1));
+      if (parsed?.branch === branch) found.push({ sha: record.slice(0, sepIdx).trim(), trailers: parsed });
+    }
+    return found;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Does `recordedTip`'s own content (vs `recordedBase`, the landing's `Loom-Worker-Base`) match what `candidateSha` actually landed? The
+ * sha-parameterized sibling of {@link branchContentLandedInCommit} — that one diffs the LIVE branch ref, which is wrong once the branch
+ * has been reused by a different generation; this one only reads two fixed, already-resolved shas. For a landing with no
+ * `Loom-Landed-Tip` (batch, or a legacy pre-cc9bce38 solo squash) — {@link verifyReviewedTipChain} cannot apply to either.
+ * @decision e5458ccd — fails closed to `"no-match"` on any ambiguity (error, unreadable base/merge-base, non-empty diff) — never resolve to `"attributed"`.
+ */
+export async function recordedTipContentLanded(
+  repoPath: string, recordedTip: string, candidateSha: string, recordedBase: string, deps: BoundedGitDeps = {},
+): Promise<"attributed" | "zero-delta" | "no-match"> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    // @decision e5458ccd — `recordedBase` can be ahead of X's own fork point if main moved since; diff
+    // from the actual common ancestor, not `recordedBase` itself, or a plain two-dot diff wrongly surfaces
+    // main's own unrelated changes and this check fails closed whenever main moved at all.
+    const mergeBase = (await withTimeout(
+      git.raw(["merge-base", recordedTip, recordedBase]), timeoutMs, "git merge-base (stale-generation content check)",
+    )).trim();
+    // @decision e5458ccd — do not drop this check: a missing merge-base leaves `mergeBase` empty without
+    // throwing (simple-git treats git's empty-stderr exit 1 as success), which would otherwise silently
+    // widen the diff below to bare "HEAD"..recordedTip.
+    if (!mergeBase) return "no-match";
+    const changedFiles = (await withTimeout(
+      git.raw(["diff", "--name-only", `${mergeBase}..${recordedTip}`]), timeoutMs, "git diff --name-only (stale-generation content check)",
+    )).trim();
+    // @decision e5458ccd — Round 3 item 3: a zero-own-delta recorded tip is NEVER attributed — matching
+    // it vacuously would attribute X to whichever candidate happens to be checked, possibly a prior
+    // generation's own landing. The caller escalates this distinctly, with an accurate reason.
+    if (!changedFiles) return "zero-delta";
+    const files = changedFiles.split("\n").filter(Boolean);
+    const diffOutput = (await withTimeout(
+      git.raw(["diff", "--name-only", candidateSha, recordedTip, "--", ...files]), timeoutMs, "git diff --name-only (stale-generation content check, candidate vs recorded tip)",
+    )).trim();
+    return diffOutput === "" ? "attributed" : "no-match"; // no output ⇒ zero difference on any of the recorded tip's own paths ⇒ content matches
+  } catch {
+    return "no-match";
+  }
+}
+
 /** @decision c6a6f405 — the orchestration-view diff for a worker, robust across its WHOLE lifecycle (live
  *  worktree / committed branch / merged+deleted branch) — fixes the "/orchestration diffs are all empty" bug.
  *
@@ -7025,6 +7091,9 @@ export async function diffOwedLanding(repoPath: string, tip: string, owedBase: s
 }
 export async function verifyReviewedTipChain(
   repoPath: string, reviewed: string, live: string, deps: BoundedGitDeps = {}, extraUnionBases: readonly string[] = [],
+  // @decision e5458ccd — do not call this for stale-generation attribution without passing the resolved
+  // mainline watermark ref here; every confirm-path caller omits it (default "HEAD", byte-identical).
+  mainRef = "HEAD",
 ): Promise<{ ok: true; hops: number } | { ok: false; reason: string }> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   // Replace refs are ignored on EVERY call by the shared `canonicalGit` factory (`core.useReplaceRefs=false`), not per call site.
@@ -7036,11 +7105,11 @@ export async function verifyReviewedTipChain(
     let cur = live;
     for (let hops = 0; hops <= REVIEWED_TIP_WALK_MAX_HOPS; hops++) {
       if (cur === reviewed) return { ok: true, hops };
-      if (await reachable(cur, "HEAD") && await reachable(reviewed, cur)) return { ok: true, hops };
+      if (await reachable(cur, mainRef) && await reachable(reviewed, cur)) return { ok: true, hops };
       const parents = (await raw(["rev-list", "--parents", "-n1", cur], "git rev-list --parents (reviewed-tip walk)")).trim().split(/\s+/).slice(1);
       if (parents.length !== 2) return { ok: false, reason: `${short(cur)} is not a merge of main (${parents.length} parent(s)) — a commit made after the review` };
       const [prev, m] = parents as [string, string];
-      if (!(await reachable(m, "HEAD"))) return { ok: false, reason: `${short(cur)} merges ${short(m)}, which is not on main` };
+      if (!(await reachable(m, mainRef))) return { ok: false, reason: `${short(cur)} merges ${short(m)}, which is not on main` };
       const tree = (await raw(["rev-parse", `${cur}^{tree}`], "git rev-parse tree (reviewed-tip walk)")).trim();
       // The daemon's union ran in the WORKTREE, so it used the BRANCH's attributes (e.g. `merge=union`); merge-tree here runs in canonical, so point it at `prev`'s tree.
       // `merge-tree --write-tree` exits 1 on a conflict WITHOUT throwing through simple-git: the conflicted tree oid is the first line and the conflict info follows —

@@ -25,7 +25,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -22673,35 +22673,75 @@ export class SessionService {
 
   /**
    * A STALE generation (its worktreePath has been reused by a re-task; see `currentGenerationIds` in
-   * {@link reconcileOrchestrationOnBoot}) may still have its OWN outstanding `merge_request` — always
-   * escalates once, never attributes, never touches a worktree/branch. Returns `"escalated"` or
-   * `"no-op"` (no merge_request of its own to begin with). Cheap on every later boot: one app_meta
-   * read + write, no git call.
+   * {@link reconcileOrchestrationOnBoot}) may still have its OWN outstanding `merge_request`. First
+   * attempts a content-safe, generation-safe ATTRIBUTION (never keyed on the shared branch — see
+   * `docs/decisions/e5458ccd-*.md`); falls back to the existing one-shot escalation when no candidate
+   * verifies. Returns `"attributed"`, `"escalated"` or `"no-op"` (no merge_request of its own).
    *
    * @decision 21b53e6a — round 2 (Code Review 620da79c) removed round 1's DB-only attribution by
    * matching tip (drifted whenever main moved; see that card's own decision record for the full why).
+   *
+   * @decision e5458ccd — the generation-safe replacement never keys its own attribution on the shared
+   * branch name; a successful attribution is recorded with `detail.branch: null` instead.
    */
-  private resolveStaleGenerationOwnLanding(
+  private async resolveStaleGenerationOwnLanding(
     s: Session, project: Project, eventPresence: WorkerEventPresence | undefined,
-  ): "escalated" | "no-op" {
+    mainlineRefCache: Map<string, ReturnType<SessionService["resolveMainlineWatermarkRef"]>>,
+    mainlineRefResolvesCache: Map<string, boolean>,
+  ): Promise<"attributed" | "escalated" | "no-op"> {
     if (!eventPresence?.hasMergeRequest || !s.branch || !s.taskId) return "no-op";
-    // @decision 21b53e6a — round 3: never escalate a merge_request already followed by this row's OWN
-    // merge_rejected/merge_cancelled — that is a DECIDED outcome, not a stuck landing.
+    // @decision 21b53e6a — round 3: never escalate (or attempt to attribute) a merge_request already
+    // followed by this row's OWN merge_rejected/merge_cancelled — that is a DECIDED outcome, not a stuck landing.
     const lifecycle = this.db.listEventsForWorkerKinds(s.id, ["merge_request", "merge_done", "merge_rejected", "merge_cancelled"]);
     const latest = lifecycle[lifecycle.length - 1];
     if (latest && latest.kind !== "merge_request") return "no-op";
     const branch = s.branch;
     const taskId = s.taskId;
-    const entry = this.db.recordStaleGenerationUnresolved(s.id, { branch, taskId, projectId: project.id },
-      "stale generation has its own unresolved merge_request — the shared branch/worktree now belong to a different generation, so no DB-only attribution is attempted");
+    const reviewedTip = typeof latest?.detail?.tip === "string" ? latest.detail.tip : null;
+
+    const attribution = reviewedTip
+      ? await this.attributeStaleGenerationOwnLanding(s, project, branch, reviewedTip, mainlineRefCache, mainlineRefResolvesCache)
+      : { kind: "no-match" as const };
+    if (attribution.kind === "attributed") {
+      // @decision e5458ccd — `detail.branch` stays OMITTED here, never the shared branch string — every
+      // branch-scoped reader keys on that field matching the real name, so this is excluded by construction.
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id,
+        taskId, kind: "merge_done",
+        detail: { branch: null, repoKey: s.repoKey ?? null, reconciled: true, staleGenerationAttributed: true, attributedLandedSha: attribution.sha },
+      });
+      // eslint-disable-next-line no-console
+      console.info(`[reconcile] worker ${s.id} stale-generation own-landing — ATTRIBUTED to ${attribution.sha.slice(0, 8)} via ${attribution.via} (never touching the shared branch/worktree)`);
+      return "attributed";
+    }
+    // @decision e5458ccd — do not one-shot escalate an unreadable/unresolvable watermark: it is a
+    // transient read failure, not evidence X's landing can never be found. No-op instead, so this row is
+    // retried next boot rather than claiming a scan that never actually ran.
+    if (attribution.kind === "watermark-unresolved") {
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — mainline watermark unreadable/unresolvable this boot; retrying next boot, no escalation`);
+      return "no-op";
+    }
+
+    const zeroDelta = attribution.kind === "zero-delta";
+    const reason = zeroDelta
+      ? "stale generation has its own unresolved merge_request, but its own recorded tip carries no changes of its own relative to its own recorded landing base — there is nothing of its own to attribute to any landing"
+      : "stale generation has its own unresolved merge_request — the shared branch/worktree now belong to a different generation, and no landed commit's content could be verified against this worker's own recorded tip, so no DB-only attribution was made";
+    const entry = this.db.recordStaleGenerationUnresolved(s.id, { branch, taskId, projectId: project.id }, reason);
     if (!entry.escalated) {
       const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
       // @decision 21b53e6a — round 3: never let this nudge's `git log --grep` hint imply the branch is
       // unique to this worker — it is SHARED with the current generation; surface this worker's OWN tip
       // + active window too, or a human cannot tell the two generations' landings apart.
-      const tip = typeof latest?.detail?.tip === "string" ? latest.detail.tip : null;
-      const tipNote = tip ? ` (this worker's own recorded merge_request tip: ${tip.slice(0, 8)})` : " (this worker's own merge_request recorded no tip)";
-      const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path${tipNote}, active from ${s.createdAt} to ${s.lastActivity}. Loom will NOT auto-attribute this — the shared branch/worktree now belong to a different generation, so there is no safe DB-only way to resolve it automatically, and no dedicated action exists to close just this alert. The branch name ${branch} is SHARED with the current generation — \`git log --grep "Loom-Worker-Branch: ${branch}"\` on the project's mainline will also match the CURRENT generation's own, later landing, not just this worker's; use this worker's own recorded tip and its createdAt→lastActivity window above to tell the generations apart. If this worker's own work is found there, this alert is stale and can be ignored (or the task closed by hand if it is otherwise idle); if not, the work may need to be redone.`
+      const tipNote = reviewedTip ? ` (this worker's own recorded merge_request tip: ${reviewedTip.slice(0, 8)})` : " (this worker's own merge_request recorded no tip)";
+      // @decision e5458ccd — Round 3 item 3: an ACCURATE checked-note for the zero-delta case — the
+      // generic "checked every landed commit and found none" wording is false here: nothing of X's own
+      // ever needed checking against any candidate.
+      const checkedNote = zeroDelta
+        ? "Loom found this worker's own recorded tip carries no changes of its own relative to its own recorded landing base, so there is nothing of its own work to attribute to any landed commit"
+        : "Loom checked every landed commit on this branch for a content match against this worker's own recorded tip and found none it could verify";
+      const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path${tipNote}, active from ${s.createdAt} to ${s.lastActivity}. ${checkedNote} — the shared branch/worktree now belong to a different generation, so there is no further safe DB-only way to resolve it automatically, and no dedicated action exists to close just this alert. The branch name ${branch} is SHARED with the current generation — \`git log --grep "Loom-Worker-Branch: ${branch}"\` on the project's mainline will also match the CURRENT generation's own, later landing, not just this worker's; use this worker's own recorded tip and its createdAt→lastActivity window above to tell the generations apart. If this worker's own work is found there, this alert is stale and can be ignored (or the task closed by hand if it is otherwise idle); if not, the work may need to be redone.`
         + this.buildStampSuffix(currentDeployStaleness());
       try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
       this.db.markStaleGenerationEscalated(s.id);
@@ -22709,6 +22749,73 @@ export class SessionService {
       console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — escalated [loom:merge-orphaned] to ${target.slice(0, 8)} (one-shot)`);
     }
     return "escalated";
+  }
+
+  /**
+   * Attempts a content-safe attribution of `reviewedTip` (this stale worker's own `merge_request.detail.tip`)
+   * against every commit on `branch`'s shared name carrying a `Loom-Worker-Branch` trailer, OLDEST first (a
+   * coincidental later match must never win over this worker's own true landing — the branch name may carry
+   * more than one generation's landing). READ-ONLY: never touches the worktree or branch ref, never calls
+   * `finalizeMerge`. `"no-match"` covers an unresolvable repo or any git error (fail closed); `"watermark-
+   * unresolved"` is a transient watermark read failure (retry next boot, no escalation — see the caller);
+   * `"zero-delta"` is a recorded tip with no content of its own to attribute (see the caller).
+   *
+   * @decision e5458ccd — `extraUnionBases` is always `[]` here: a branch HELD at this worker's own confirm
+   * time is a documented, accepted gap that escalates instead of risking a wrong attribution.
+   */
+  private async attributeStaleGenerationOwnLanding(
+    s: Session, project: Project, branch: string, reviewedTip: string,
+    mainlineRefCache: Map<string, ReturnType<SessionService["resolveMainlineWatermarkRef"]>>,
+    mainlineRefResolvesCache: Map<string, boolean>,
+  ): Promise<
+    | { kind: "attributed"; sha: string; via: "union-chain" | "content-match" }
+    | { kind: "zero-delta" }
+    | { kind: "watermark-unresolved" }
+    | { kind: "no-match" }
+  > {
+    let repoPath: string;
+    try { repoPath = resolveRepoByKey(project, s.repoKey).path; } catch { return { kind: "no-match" }; }
+    // @decision e5458ccd — never scan bare "HEAD": resolve the SAME stored mainline watermark ref Pass A
+    // uses, and refuse attribution on an unreadable/unresolvable watermark. A watermark NEVER YET
+    // STAMPED (`ref` undefined, same as Pass A) still falls back to "HEAD" — the one legitimate case.
+    const cacheKey = `${project.id}:${s.repoKey ?? "primary"}`;
+    let mainlineRefResolution = mainlineRefCache.get(cacheKey);
+    if (!mainlineRefResolution) {
+      mainlineRefResolution = this.resolveMainlineWatermarkRef(project.id, s.repoKey);
+      mainlineRefCache.set(cacheKey, mainlineRefResolution);
+    }
+    if (mainlineRefResolution.state === "unreadable") return { kind: "watermark-unresolved" };
+    const expectedMainlineRef = mainlineRefResolution.ref;
+    if (expectedMainlineRef) {
+      let refResolves = mainlineRefResolvesCache.get(cacheKey);
+      if (refResolves === undefined) {
+        refResolves = (await readBaseSha(repoPath, expectedMainlineRef)) !== null;
+        mainlineRefResolvesCache.set(cacheKey, refResolves);
+      }
+      if (!refResolves) return { kind: "watermark-unresolved" };
+    }
+    const base = expectedMainlineRef ?? "HEAD";
+    try {
+      // @decision e5458ccd — verify OLDEST-first: a coincidental later match must never win over this
+      // worker's own true landing.
+      const candidates = [...await findAllLandedTrailerCommits(repoPath, branch, base, { timeoutMs: this.gitOpMs })].reverse();
+      for (const candidate of candidates) {
+        if (candidate.trailers.landedTip) {
+          // @decision e5458ccd — Round 3 item 1: pass the SAME resolved mainline watermark ref the
+          // candidate scan above used, never the function's own bare-"HEAD" default — canonical is a
+          // shared checkout that can be diverted off the real mainline at the instant reconcile runs.
+          const chain = await verifyReviewedTipChain(repoPath, reviewedTip, candidate.trailers.landedTip, { timeoutMs: this.gitOpMs }, [], base);
+          if (chain.ok) return { kind: "attributed", sha: candidate.sha, via: "union-chain" };
+        } else if (candidate.trailers.base) {
+          const contentResult = await recordedTipContentLanded(repoPath, reviewedTip, candidate.sha, candidate.trailers.base, { timeoutMs: this.gitOpMs });
+          if (contentResult === "attributed") return { kind: "attributed", sha: candidate.sha, via: "content-match" };
+          if (contentResult === "zero-delta") return { kind: "zero-delta" };
+        }
+      }
+      return { kind: "no-match" };
+    } catch {
+      return { kind: "no-match" };
+    }
   }
 
   /**
@@ -22933,7 +23040,7 @@ export class SessionService {
         // A stale generation never proceeds past this point (card 21b53e6a) — it may still have its OWN
         // outstanding merge_request, escalated once rather than attributed, never touching the shared path/branch.
         if (staleGeneration) {
-          const outcome = this.resolveStaleGenerationOwnLanding(s, project, eventPresence);
+          const outcome = await this.resolveStaleGenerationOwnLanding(s, project, eventPresence, mainlineRefCache, mainlineRefResolvesCache);
           if (outcome === "escalated") staleGenerationUnresolvedEscalated++;
           continue;
         }
@@ -23268,6 +23375,10 @@ export class SessionService {
     for (const s of all) {
       if (s.role !== "worker" || !s.taskId) continue;
       if (protectedSessionIds.has(s.id)) continue; // about to be resumed — leave its lifecycle intact
+      // @decision e5458ccd — A2 is otherwise generation-blind: a stale row sharing a worktreePath with the
+      // current generation could get `detail.branch: s.branch` (the SHARED branch) filed below. Skip it —
+      // Pass A (already run this boot) has already attributed or escalated its own landing.
+      if (s.worktreePath && !(currentGenerationIds.get(s.worktreePath)?.has(s.id) ?? true)) continue;
       // Row-id check stays here (unlike Pass A above) — A2 never touches a worktree/branch, it only
       // files a missing event, so there's no destructive aliasing hazard for protectedWorktreePaths to guard.
       // Card 1d10aea9: `terminalKey` is checked for `undefined` BEFORE the comparison, not folded into

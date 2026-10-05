@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "./api";
-import { activeBootStuckAlerts, activeVaultLockAlerts, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
+import { activeBootStuckAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -198,12 +198,8 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
 
   // A merge_request is "pending" until a later merge_done/merge_rejected for the same task/worker.
   // Key task-first so a worker recycled between review and confirm still pairs its terminal event.
-  const latestMerge = new Map<string, OrchestrationEvent>();
-  for (const e of sortedEvents) {
-    if (e.kind === "merge_request" || e.kind === "merge_done" || e.kind === "merge_rejected") {
-      latestMerge.set(e.taskId || e.workerSessionId || e.id, e);
-    }
-  }
+  // Extracted to lib/fleet.ts's buildLatestMergeMap (card e5458ccd round 2) — unit-tested there.
+  const latestMerge = buildLatestMergeMap(sortedEvents);
 
   // Card b1da256d round 2 (item 3b): the pairing/sort/liveness-drop logic itself now lives in the pure,
   // unit-tested `activeBootStuckAlerts` (lib/fleet.ts) — see that function's own doc for the

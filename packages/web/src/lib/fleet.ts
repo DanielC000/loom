@@ -164,6 +164,24 @@ export function activeBootStuckAlerts(
   return out;
 }
 
+// ── MERGE latest-wins pairing (card e5458ccd round 2, item 2) ──────────────────────────────────────────
+// Extracted out of lib/attention.ts's useAttention, same reason as activeBootStuckAlerts above: given a
+// combined, unsorted merge_request/merge_done/merge_rejected stream, keeps the LATEST per (taskId ||
+// workerSessionId || id) — EXCEPT a boot-time stale-generation attribution merge_done (`detail.
+// staleGenerationAttributed`), which shares its taskId with the CURRENT generation by construction (a
+// re-task targets the same card) and must never win that key over the current generation's own, still-
+// live merge_request — or the "awaiting review" item built from this map never surfaces again for that task.
+export function buildLatestMergeMap(events: readonly OrchestrationEvent[]): Map<string, OrchestrationEvent> {
+  const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+  const latest = new Map<string, OrchestrationEvent>();
+  for (const e of sorted) {
+    if (e.kind !== "merge_request" && e.kind !== "merge_done" && e.kind !== "merge_rejected") continue;
+    if (e.kind === "merge_done" && (e.detail as { staleGenerationAttributed?: boolean } | null)?.staleGenerationAttributed) continue;
+    latest.set(e.taskId || e.workerSessionId || e.id, e);
+  }
+  return latest;
+}
+
 // ── VAULT LOCK pairing (card 227d9f0b round 2) ──────────────────────────────────────────────────────────
 // Same latest-wins pairing shape as activeBootStuckAlerts above, keyed by detail.repoPath instead of a
 // session id: given a combined, unsorted vault_index_lock_stale/vault_index_lock_cleared event stream,

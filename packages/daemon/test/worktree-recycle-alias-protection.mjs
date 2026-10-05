@@ -41,6 +41,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       for the branch (instead of comparing the landed commit's own time against the latest merge_done's
 //       timestamp) would wrongly skip finalizing the second landing's orphan — this fixture proves it does not.
 // Run: 1) build daemon, 2) node test/worktree-recycle-alias-protection.mjs
+//
+// Card e5458ccd extends M (now resolved, not escalated) and adds Q/R/S: generation-safe attribution of a
+// stale row's own landing (solo-squash union-chain via verifyReviewedTipChain directly, and a BATCH
+// landing via a sha-parameterized content match — neither ever keyed on the shared branch name), and a
+// Pass A2 staleGeneration guard (scope addition #2). See docs/decisions/e5458ccd-*.md for the full design.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -56,6 +61,8 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
+const { deriveAwaitingReview } = await import("../dist/orchestration/report-resolution.js");
+const { mainlineWatermarkKey } = await import("../dist/git/mainline-watch.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -465,11 +472,14 @@ async function setupRealRetaskAbandoned(tag, repo) {
 // Fixture M: X has its OWN genuine, attributable landing — it squashed onto main (real Loom-Worker-Branch +
 // Loom-Landed-Tip trailers, the SAME trailer a real solo squash stamps) and filed its OWN merge_request
 // recording that exact pre-squash tip, but crashed before its own finalize. Re-task Y then reuses the path.
-// ROUND 2 (Code Review 620da79c, Majors #1/#2): round 1's DB-only attribution by matching this trailer is
-// REMOVED — it drifted from the real landing whenever main moved (no trailer at all on a batch landing),
-// and its merge_done leaked the shared branch into generation-blind readers. X now takes the SAME
-// escalate-only path as an unattributable row (fixture N) EVEN THOUGH its landing happens to be
-// genuinely attributable — this fixture is the regression guard proving that.
+// ROUND 2 (Code Review 620da79c, Majors #1/#2) REMOVED round 1's unsafe DB-only attribution by matching
+// this trailer (drifted whenever main moved; its merge_done leaked the shared branch into generation-blind
+// readers). CARD e5458ccd now RESOLVES this fixture again, via a generation-SAFE path: `verifyReviewedTipChain`
+// called DIRECTLY against X's own recorded tip (never `reviewedTipVerdict`, which would pick Y's), and the
+// resulting merge_done is recorded under X's OWN session id with `detail.branch: null` — never the shared
+// branch. X also carries its own `worker_report(done)` here, so this fixture doubles as the "name the
+// resolver" proof (manager concern #2): `deriveAwaitingReview` (report-resolution.ts), reading X's own
+// session-scoped event list, is what sees the null-branch merge_done and clears X's awaitingReview.
 async function setupRealRetaskOwnLandingAttributable(tag, repo) {
   initRepo(repo);
   const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
@@ -481,6 +491,9 @@ async function setupRealRetaskOwnLandingAttributable(tag, repo) {
 
   const first = await createWorktree(repo, projId, taskId);
   db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  // Concern #2 (manager, card e5458ccd): X's own worker_report(done) — the one `deriveAwaitingReview` must
+  // see resolved once X's own attribution lands, below.
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "worker_report", detail: { status: "done", summary: "x work" } });
   fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x work\n");
   commitAll(first.worktreePath, "x", GIT_ID);
   const xTip = git(first.worktreePath, "rev-parse HEAD"); // the tip X's OWN review captured, BEFORE the squash
@@ -593,6 +606,311 @@ async function setupFailedRecyclePathAlias(tag, repo) {
   return { projId, taskId, mgrId, pId, fId, worktreePath, branch, repo };
 }
 
+// Fixture Q: card e5458ccd item 2 — a BATCH landing (no `Loom-Landed-Tip` trailer at all; a batch cherry-
+// picks each branch's own commits individually onto main). `verifyReviewedTipChain` cannot apply (it only
+// walks two-parent merge-of-main commits) — attribution here goes through `recordedTipContentLanded`
+// instead: X's own recorded tip is diffed against the landing's own `Loom-Worker-Base` trailer (the
+// landed base, a real commit sha — `d62dad73`), never the live branch ref (which now belongs to Y).
+async function setupRealRetaskOwnLandingBatchAttributable(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "worker_report", detail: { status: "done", summary: "x work" } });
+  fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x work\n");
+  commitAll(first.worktreePath, "x", GIT_ID);
+  const xTip = git(first.worktreePath, "rev-parse HEAD");
+  const preLandSha = git(repo, "rev-parse HEAD"); // main's tip BEFORE landing X's change — the batch's own "Loom-Worker-Base"
+  // Simulate a BATCH landing: cherry-pick X's own commit individually onto main (never a merge-of-main
+  // commit — no Loom-Landed-Tip trailer), exactly as landBranchCommitsIndividually (batch-merge.ts) does.
+  execSync(`git ${GIT_ID} cherry-pick --no-commit ${xTip}`, { cwd: repo });
+  commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${preLandSha}\nLoom-Worker-PathSet: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`], GIT_ID);
+  const xLandedSha = git(repo, "rev-parse HEAD");
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // X crashes here — worktree/branch left exactly as a crash before finalize leaves them.
+
+  const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+  commitAll(second.worktreePath, "y", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-y" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip, xLandedSha };
+}
+
+// Fixture R: card e5458ccd — the branch name carries TWO distinct generations' trailer commits by the
+// time reconcile runs (X's own older landing, Y's newer one — both REAL solo squashes with their own
+// Loom-Landed-Tip). Proves the all-candidates scan never stops at the first/newest match:
+// verifyReviewedTipChain correctly REJECTS Y's unrelated commit against X's own reviewed tip (not a merge
+// of main from X's perspective) before trying X's own older candidate, which verifies.
+async function setupRealRetaskTwoAttributableLandings(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x work\n");
+  commitAll(first.worktreePath, "x", GIT_ID);
+  const xTip = git(first.worktreePath, "rev-parse HEAD");
+  execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: repo });
+  commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
+  const xLandedSha = git(repo, "rev-parse HEAD");
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // X crashes here.
+
+  const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch name
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+  commitAll(second.worktreePath, "y", GIT_ID);
+  const yTip = git(second.worktreePath, "rev-parse HEAD");
+  // Y ALSO lands a full, realistic solo squash (its own Loom-Landed-Tip) — a SECOND, NEWER trailer commit
+  // on the SAME branch name, unrelated to X's own reviewed tip.
+  execSync(`git ${GIT_ID} merge --squash ${second.branch}`, { cwd: repo });
+  commitAll(repo, [`WRAP-${tag}-y`, `Loom-Worker-Branch: ${second.branch}\nLoom-Landed-Tip: ${yTip}`], GIT_ID);
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch, tip: yTip } });
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip, xLandedSha };
+}
+
+// Fixture S: scope addition #2 (card e5458ccd) — Pass A2 was generation-blind. Stale X has its OWN
+// UNRESOLVABLE merge_request (escalates in Pass A; no merge_done is ever filed for it). The CURRENT
+// generation Y never files a merge_request of its own at all (e.g. a noChanges:true done report + a
+// human moving the card) — yet the task is independently terminal from the start. Pre-fix: A2 would
+// wrongly file a `merge_done` for X keyed on `detail.branch: s.branch` — the branch SHARED with Y —
+// aliasing Y's own branch-scoped bookkeeping exactly as 21b53e6a's own Do-not forbids. Post-fix: A2 skips
+// X outright (staleGeneration), leaving it exactly as Pass A's own escalation left it.
+async function setupPassA2StaleGenerationBlindness(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "done", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: "deadbeef".padEnd(40, "0") } });
+
+  const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  // Y never files a merge_request of its own — the task is already "done" from insertTask above.
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo };
+}
+
+// Fixture T: Round 2 item 1 (Code Review 72b64bc9, BLOCKING) — the stale-generation scan must resolve the
+// SAME stored mainline watermark ref Pass A uses, never bare "HEAD". X's own solo-squash landing (real
+// Loom-Landed-Tip = xTip, a trivial hop-0 chain match) is committed onto a STRAY branch diverted from
+// main, never onto main itself — only Y's own, later, independent landing is genuinely on main. The
+// watermark is stamped to "main". Canonical is left diverted (checked out on the stray branch) at the
+// instant reconcile runs — the exact precondition that makes a bare "HEAD" scan disagree with the
+// resolved mainline ref. A correct, ref-scoped scan must never see the stray commit and must escalate X;
+// the old bare-"HEAD" scan would wrongly attribute X to its own stray commit.
+async function setupMainlineWatermarkScopedScan(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x work\n");
+  commitAll(first.worktreePath, "x", GIT_ID);
+  const xTip = git(first.worktreePath, "rev-parse HEAD");
+  db.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: git(repo, "rev-parse HEAD") }));
+
+  git(repo, "checkout -q -b strayT");
+  execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: repo });
+  commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // X crashes here — its own squash landed, but on the STRAY branch, never on main.
+
+  git(repo, "checkout -q main"); // back to main — Y's own re-task and landing must be genuinely clean
+  const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+  commitAll(second.worktreePath, "y", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-y" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+
+  git(repo, "checkout -q strayT"); // divert canonical AGAIN — the precondition at the instant reconcile runs
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip };
+}
+
+// Fixture U: Round 2 item 3's own "a Q variant where main moves on an unrelated file" — main advances on
+// a file X's own branch never touched, AFTER X's worktree forks but BEFORE X's batch landing runs, so
+// `Loom-Worker-Base` (the landing's own recorded base) is AHEAD of X's true fork point. The two-dot
+// `recordedBase..recordedTip` diff this card originally shipped would surface that unrelated file too and
+// fail closed; the merge-base-scoped diff isolates X's own real delta and must still attribute.
+async function setupBatchAttributionSurvivesUnrelatedMainMove(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId); // forks off main's CURRENT tip (T0)
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+
+  // Main moves on a file X's own branch never touches, AFTER X forked (T0) but BEFORE X's own landing.
+  fs.writeFileSync(path.join(repo, "unrelated.txt"), "main moved\n");
+  commitAll(repo, "main: unrelated change", GIT_ID);
+
+  fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x work\n");
+  commitAll(first.worktreePath, "x", GIT_ID);
+  const xTip = git(first.worktreePath, "rev-parse HEAD");
+  const preLandSha = git(repo, "rev-parse HEAD"); // T1 — main's tip AFTER the unrelated move, X's own Loom-Worker-Base
+  execSync(`git ${GIT_ID} cherry-pick --no-commit ${xTip}`, { cwd: repo });
+  commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${preLandSha}\nLoom-Worker-PathSet: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`], GIT_ID);
+  const xLandedSha = git(repo, "rev-parse HEAD");
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // X crashes here.
+
+  const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+  commitAll(second.worktreePath, "y", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-y" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip, xLandedSha };
+}
+
+// Fixture V: Round 3 item 1 (BLOCKING, Code Review e2f31180) — verifyReviewedTipChain's OWN reachability
+// checks must use the resolved mainline watermark ref, never the function's own bare-"HEAD" default. The
+// candidate SCAN was already ref-scoped in Round 2 (fixture T); this is the WALK *inside*
+// verifyReviewedTipChain, a separate bare-"HEAD" site that scan fix never touched. X's branch unions with
+// a FOREIGN branch (never main) before its own squash lands — the trailer records that UNION commit as
+// Loom-Landed-Tip. Canonical is diverted onto the foreign branch ITSELF at reconcile time: a bare-"HEAD"
+// walk sees the foreign merge partner as trivially "on HEAD" and wrongly certifies the union as clean
+// (accepting unreviewed foreign content as part of X's accounted landing); a watermark-scoped walk
+// correctly finds the foreign commit unreachable from the real "refs/heads/main" and escalates instead.
+async function setupMainRefDivertedUnionTrap(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x work\n");
+  commitAll(first.worktreePath, "x", GIT_ID);
+  const xTip = git(first.worktreePath, "rev-parse HEAD");
+  db.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: git(repo, "rev-parse HEAD") }));
+
+  // A FOREIGN branch, never merged into main. X's worktree unions with IT instead of main — the walk must
+  // reject this regardless of what canonical's bare HEAD happens to be checked out on.
+  git(repo, "checkout -q -b foreignV");
+  fs.writeFileSync(path.join(repo, "foreign.txt"), "foreign content\n");
+  commitAll(repo, "foreign work", GIT_ID);
+  const foreignTip = git(repo, "rev-parse HEAD");
+  git(repo, "checkout -q main");
+  execSync(`git ${GIT_ID} merge -q --no-edit ${foreignTip}`, { cwd: first.worktreePath });
+  const unionTip = git(first.worktreePath, "rev-parse HEAD");
+
+  // X "lands": squash the worktree's current diff onto main; the trailer records the UNION tip (never
+  // xTip) as Loom-Landed-Tip — exactly what a HELD branch's union-before-squash would record.
+  execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: repo });
+  commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${unionTip}`], GIT_ID);
+  const xLandedSha = git(repo, "rev-parse HEAD");
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // X crashes here.
+
+  const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+  commitAll(second.worktreePath, "y", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-y" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+
+  // Divert canonical HEAD onto the foreign branch itself, at the instant reconcile runs — the exact
+  // precondition a bare-"HEAD" walk would accept.
+  git(repo, "checkout -q foreignV");
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip, unionTip, foreignTip, xLandedSha };
+}
+
+// Fixture W: Round 3 item 4/5 — an unreadable mainline watermark (a row IS present but fails to parse)
+// must be a transient no-op, never a one-shot escalation. X carries a genuinely attributable landing
+// (trivial hop-0 Loom-Landed-Tip match, same shape as fixture M) — proving attribution is never even
+// ATTEMPTED while the watermark can't be read, not merely that it fails.
+async function setupStaleAttributionWatermarkUnreadable(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x work\n");
+  commitAll(first.worktreePath, "x", GIT_ID);
+  const xTip = git(first.worktreePath, "rev-parse HEAD");
+  execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: repo });
+  commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // The watermark row is PRESENT but fails to parse as a MainlineWatermark — "unreadable", never "absent".
+  db.setMeta(mainlineWatermarkKey(projId, "primary"), "not valid json at all");
+  // X crashes here.
+
+  const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  // Y has real work of its own (kept by Pass B / not reclaimed by Pass C) but never lands this boot — the
+  // assertions below are scoped to X's own stale-path outcome only.
+  fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+  commitAll(second.worktreePath, "y", GIT_ID);
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip };
+}
+
+// Fixture X: Round 3 item 4/5's second branch — a WELL-FORMED watermark naming a branch that no longer
+// resolves (renamed/deleted) must ALSO be a transient no-op, same as the unreadable case above but via
+// the OTHER early-return in attributeStaleGenerationOwnLanding.
+async function setupStaleAttributionWatermarkUnresolvableRef(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x work\n");
+  commitAll(first.worktreePath, "x", GIT_ID);
+  const xTip = git(first.worktreePath, "rev-parse HEAD");
+  execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: repo });
+  commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // A well-formed watermark row naming a branch that does not exist as a real ref in this repo.
+  db.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "ghost-branch-never-created", sha: git(repo, "rev-parse HEAD") }));
+  // X crashes here.
+
+  const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+  commitAll(second.worktreePath, "y", GIT_ID);
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip };
+}
+
 const R_PROTECTED = path.join(os.tmpdir(), `loom-wrap-a-${sfx}`);
 const R_CONTROL = path.join(os.tmpdir(), `loom-wrap-b-${sfx}`);
 const R_LANDED_PROTECTED = path.join(os.tmpdir(), `loom-wrap-c-${sfx}`);
@@ -609,7 +927,15 @@ const R_REAL_RETASK_OWN_LANDING_OK = path.join(os.tmpdir(), `loom-wrap-m-${sfx}`
 const R_REAL_RETASK_OWN_LANDING_UNRESOLVABLE = path.join(os.tmpdir(), `loom-wrap-n-${sfx}`);
 const R_FAILED_RECYCLE_PATH_ALIAS = path.join(os.tmpdir(), `loom-wrap-o-${sfx}`);
 const R_REAL_RETASK_OWN_LANDING_DECIDED = path.join(os.tmpdir(), `loom-wrap-p-${sfx}`);
-let A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P;
+const R_REAL_RETASK_OWN_LANDING_BATCH_OK = path.join(os.tmpdir(), `loom-wrap-q-${sfx}`);
+const R_REAL_RETASK_TWO_ATTRIBUTABLE = path.join(os.tmpdir(), `loom-wrap-r-${sfx}`);
+const R_PASS_A2_STALE_BLINDNESS = path.join(os.tmpdir(), `loom-wrap-s-${sfx}`);
+const R_MAINLINE_WATERMARK_SCAN = path.join(os.tmpdir(), `loom-wrap-t-${sfx}`);
+const R_BATCH_UNRELATED_MAIN_MOVE = path.join(os.tmpdir(), `loom-wrap-u-${sfx}`);
+const R_MAIN_REF_DIVERTED_UNION_TRAP = path.join(os.tmpdir(), `loom-wrap-v-${sfx}`);
+const R_WATERMARK_UNREADABLE = path.join(os.tmpdir(), `loom-wrap-w-${sfx}`);
+const R_WATERMARK_UNRESOLVABLE_REF = path.join(os.tmpdir(), `loom-wrap-x-${sfx}`);
+let A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X;
 
 try {
   A = await setupRecycleChain("a", R_PROTECTED);
@@ -628,6 +954,14 @@ try {
   N = await setupRealRetaskOwnLandingUnresolvable("n", R_REAL_RETASK_OWN_LANDING_UNRESOLVABLE);
   O = await setupFailedRecyclePathAlias("o", R_FAILED_RECYCLE_PATH_ALIAS);
   P = await setupRealRetaskOwnLandingDecided("p", R_REAL_RETASK_OWN_LANDING_DECIDED);
+  Q = await setupRealRetaskOwnLandingBatchAttributable("q", R_REAL_RETASK_OWN_LANDING_BATCH_OK);
+  R = await setupRealRetaskTwoAttributableLandings("r", R_REAL_RETASK_TWO_ATTRIBUTABLE);
+  S = await setupPassA2StaleGenerationBlindness("s", R_PASS_A2_STALE_BLINDNESS);
+  T = await setupMainlineWatermarkScopedScan("t", R_MAINLINE_WATERMARK_SCAN);
+  U = await setupBatchAttributionSurvivesUnrelatedMainMove("u", R_BATCH_UNRELATED_MAIN_MOVE);
+  V = await setupMainRefDivertedUnionTrap("v", R_MAIN_REF_DIVERTED_UNION_TRAP);
+  W = await setupStaleAttributionWatermarkUnreadable("w", R_WATERMARK_UNREADABLE);
+  X = await setupStaleAttributionWatermarkUnresolvableRef("x", R_WATERMARK_UNRESOLVABLE_REF);
 
   // --- sanity: both fixtures start identical (real worktree registered, branch exists, 0 commits, clean) ---
   check("(pre-A) worktree registered before reconcile", fs.existsSync(A.worktreePath) && isRegisteredWorktree(A.repo, A.worktreePath));
@@ -686,6 +1020,28 @@ try {
     const evs = db.listEventsForWorker(P.workerXId).filter((ev) => ["merge_request", "merge_done", "merge_rejected", "merge_cancelled"].includes(ev.kind));
     return evs.length === 2 && evs[0].kind === "merge_request" && evs[1].kind === "merge_cancelled";
   })());
+  check("(pre-Q) X's own BATCH landing (no Loom-Landed-Tip) carries Loom-Worker-Branch + Loom-Worker-Base", git(Q.repo, `log -1 --format=%B ${Q.xLandedSha}`).includes(`Loom-Worker-Branch: ${Q.branch}`) && !git(Q.repo, `log -1 --format=%B ${Q.xLandedSha}`).includes("Loom-Landed-Tip"));
+  check("(pre-Q) X has its OWN worker_report(done) + merge_request, no merge_done yet", db.listEventsForWorker(Q.workerXId).some((ev) => ev.kind === "worker_report") && db.listEventsForWorker(Q.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(pre-R) the shared branch carries TWO distinct Loom-Worker-Branch trailer commits (X's + Y's)", git(R.repo, `log --format=%H -F --grep=${JSON.stringify(`Loom-Worker-Branch: ${R.branch}`)}`).trim().split("\n").filter(Boolean).length === 2);
+  check("(pre-S) X's own merge_request is unresolvable (bogus tip), no merge_done yet", db.listEventsForWorker(S.workerXId).some((ev) => ev.kind === "merge_request") && db.listEventsForWorker(S.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(pre-S) task is ALREADY terminal, and Y never filed a merge_request of its own", db.getTask(S.taskId).columnKey === "done" && db.listEventsForWorker(S.workerYId).every((ev) => ev.kind !== "merge_request"));
+  check("(pre-T) canonical is diverted to the STRAY branch at the instant reconcile is about to run", git(T.repo, "symbolic-ref --short HEAD") === "strayT");
+  // The branch NAME is shared with Y (the re-task), so main legitimately carries Y's OWN trailer commit
+  // for the same branch string — check the SPECIFIC Loom-Landed-Tip value (X's own xTip), not bare branch presence.
+  check("(pre-T) the stray branch carries the commit whose Loom-Landed-Tip is X's own reviewed tip", git(T.repo, "log strayT --format=%B").includes(`Loom-Landed-Tip: ${T.xTip}`));
+  check("(pre-T) main's own history carries NO such commit", !git(T.repo, "log main --format=%B").includes(`Loom-Landed-Tip: ${T.xTip}`));
+  check("(pre-T) a watermark is stamped pointing at main", (() => { try { return JSON.parse(db.getMeta(mainlineWatermarkKey(T.projId, "primary"))).branch === "main"; } catch { return false; } })());
+  check("(pre-U) main carries the unrelated-file commit made between X's fork and X's own landing", git(U.repo, "log --oneline main").includes("unrelated change"));
+  check("(pre-U) X's own batch landing carries no Loom-Landed-Tip (content-match path)", !git(U.repo, `log -1 --format=%B ${U.xLandedSha}`).includes("Loom-Landed-Tip"));
+  check("(pre-V) canonical is diverted onto the FOREIGN branch at the instant reconcile is about to run", git(V.repo, "symbolic-ref --short HEAD") === "foreignV");
+  check("(pre-V) X's own landed trailer commit records the UNION tip (a merge with the foreign branch, never main)", git(V.repo, `show -s --format=%B ${V.xLandedSha}`).includes(`Loom-Landed-Tip: ${V.unionTip}`));
+  // `^main` would be consumed by cmd.exe's caret-escape on Windows under execSync's shell — use
+  // `merge-base --is-ancestor` (no caret) instead; it exits non-zero when NOT an ancestor.
+  check("(pre-V) the foreign branch's own tip is NOT reachable from real main", (() => { try { git(V.repo, `merge-base --is-ancestor ${V.foreignTip} main`); return false; } catch { return true; } })());
+  check("(pre-W) X's own landing is trivially attributable (hop-0 Loom-Landed-Tip match) IF the watermark could be read", git(W.repo, "log main --format=%B").includes(`Loom-Landed-Tip: ${W.xTip}`));
+  check("(pre-W) the stored watermark row fails to parse as JSON", (() => { try { JSON.parse(db.getMeta(mainlineWatermarkKey(W.projId, "primary"))); return false; } catch { return true; } })());
+  check("(pre-X) X's own landing is trivially attributable IF the watermark's branch resolved", git(X.repo, "log main --format=%B").includes(`Loom-Landed-Tip: ${X.xTip}`));
+  check("(pre-X) the stored watermark names a branch that does not exist in this repo", !branchExists(X.repo, JSON.parse(db.getMeta(mainlineWatermarkKey(X.projId, "primary"))).branch));
 
   // --- THE RECONCILE --- A's successor and C's successor are protected (about to be resumed); B/D/E are
   // not protected at all (abandoned/genuine crash). Session insertion order above is predecessor-then-
@@ -804,17 +1160,21 @@ try {
   check("(L) worker Y now has its OWN merge_done (not misattributed to X)", db.listEventsForWorker(L.workerYId).some((ev) => ev.kind === "merge_done"));
   check("(L) worker X has NO events filed under its id at all — it was never touched", db.listEventsForWorker(L.workerXId).length === 0);
 
-  // (M) card 21b53e6a ROUND 2: even a stale row with a genuinely attributable landing (real squash +
-  // Loom-Landed-Tip trailer matching its OWN reviewed tip) is NOT resolved DB-only anymore — it escalates
-  // ONCE, exactly like an unattributable one (fixture N), and never files a merge_done under its own id.
-  check("(M) worker X gets NO merge_done — DB-only attribution was removed in round 2", db.listEventsForWorker(M.workerXId).every((ev) => ev.kind !== "merge_done"));
-  check("(M) worker X is tracked as escalated in the one-shot store", db.listStaleGenerationUnresolved().some((e) => e.sessionId === M.workerXId && e.escalated === true));
+  // (M) card e5458ccd: round 2 escalated X despite an attributable landing; the generation-safe attribution
+  // path now RESOLVES it instead — verified via verifyReviewedTipChain against X's OWN recorded tip,
+  // recorded under X's OWN session id with `detail.branch: null` (never the shared branch).
+  check("(M) worker X GETS a merge_done — attributed via the generation-safe path", db.listEventsForWorker(M.workerXId).some((ev) => ev.kind === "merge_done" && ev.detail?.branch === null && ev.detail?.staleGenerationAttributed === true));
+  check("(M) that merge_done records X's OWN landed sha, not a guess", db.listEventsForWorker(M.workerXId).find((ev) => ev.kind === "merge_done")?.detail?.attributedLandedSha === M.xLandedSha);
+  check("(M) worker X is NEVER tracked in the one-shot escalation store (attribution succeeded, nothing to escalate)", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== M.workerXId));
+  check("(M) NO undelivered nudge was enqueued for X (attribution succeeded)", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === M.mgrId).length === 0);
   check("(M) worker Y is still independently finalized (current generation, unaffected)", db.listEventsForWorker(M.workerYId).some((ev) => ev.kind === "merge_done"));
-  // Round 3 item 3: the one-shot guarantee checked above is the APP_META flag only — assert the actual
-  // DURABLE nudge too (not just the flag that gates re-sending it): exactly one still-undelivered
-  // session_message_queued addressed to M's manager, after this first pass.
-  check("(M) exactly ONE undelivered nudge enqueued to the manager (not the app_meta flag — the real durable message)",
-    db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === M.mgrId).length === 1);
+  // Manager concern #1 (task-keyed readers): X's shared taskId must never leak into a BRANCH-scoped reader.
+  check("(M) listEventsForBranch(branch, 'merge_done') returns ONLY Y's own event — X's null-branch attribution never aliases branch-scoped readers", db.listEventsForBranch(M.branch, "merge_done").every((ev) => ev.workerSessionId === M.workerYId));
+  check("(M) task board state (mergedSha) reflects Y's OWN landing, not X's older one", db.getTask(M.taskId).mergedSha === git(M.repo, "rev-parse HEAD").slice(0, 7));
+  // Manager concern #2 (name the resolver): deriveAwaitingReview (report-resolution.ts), reading X's OWN
+  // session-scoped event list, is the reader that clears X's worker_report(done) out of awaitingReview
+  // once it finds the null-branch merge_done AFTER it.
+  check("(M) deriveAwaitingReview resolves X's own worker_report(done) via the null-branch merge_done", !deriveAwaitingReview(db.listEventsForWorker(M.workerXId)).awaitingReview);
 
   // (N) card 21b53e6a, manager-directed gap: a stale row with its OWN merge_request that can NEVER be
   // attributed (no commit anywhere carries its claimed tip) escalates ONCE rather than being silently
@@ -825,7 +1185,63 @@ try {
   // Round 3 item 3 (N's twin of M's check above).
   check("(N) exactly ONE undelivered nudge enqueued to the manager (not the app_meta flag — the real durable message)",
     db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === N.mgrId).length === 1);
-  check("(M + N) both counted via staleGenerationUnresolvedEscalated this boot", r.staleGenerationUnresolvedEscalated >= 2);
+
+  // (Q) card e5458ccd item 2 — the BATCH-landing content-match path (no Loom-Landed-Tip at all).
+  check("(Q) worker X GETS a merge_done via the content-match path (Loom-Worker-Base, never the live branch ref)", db.listEventsForWorker(Q.workerXId).some((ev) => ev.kind === "merge_done" && ev.detail?.branch === null && ev.detail?.attributedLandedSha === Q.xLandedSha));
+  check("(Q) worker X is never tracked as escalated", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== Q.workerXId));
+  check("(Q) worker Y is still independently finalized, unaffected", db.listEventsForWorker(Q.workerYId).some((ev) => ev.kind === "merge_done"));
+  check("(Q) deriveAwaitingReview resolves X's own worker_report(done)", !deriveAwaitingReview(db.listEventsForWorker(Q.workerXId)).awaitingReview);
+  check("(Q) listEventsForBranch(branch, 'merge_done') returns ONLY Y's own event", db.listEventsForBranch(Q.branch, "merge_done").every((ev) => ev.workerSessionId === Q.workerYId));
+
+  // (R) card e5458ccd — TWO distinct trailer commits share the branch name; the all-candidates scan must
+  // never stop at the first/newest (Y's, unrelated) match — it must keep trying until X's OWN older
+  // candidate verifies.
+  check("(R) worker X GETS a merge_done attributed to its OWN landed sha, never Y's newer one", db.listEventsForWorker(R.workerXId).some((ev) => ev.kind === "merge_done" && ev.detail?.attributedLandedSha === R.xLandedSha));
+  check("(R) worker X is never tracked as escalated", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== R.workerXId));
+  check("(R) worker Y is independently finalized under its OWN id, unaffected", db.listEventsForWorker(R.workerYId).some((ev) => ev.kind === "merge_done"));
+
+  // (S) scope addition #2 (card e5458ccd) — Pass A2 must skip a stale row outright, never filing a
+  // shared-branch-keyed merge_done for it even when the current generation never filed its own
+  // merge_request at all.
+  check("(S) worker X gets NO merge_done (Pass A's own attribution attempt failed — unresolvable tip)", db.listEventsForWorker(S.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(S) Pass A2 did NOT file a shared-branch-keyed merge_done for stale X", db.listEventsForBranch(S.branch, "merge_done").length === 0);
+  check("(S) worker X has no new events beyond its original merge_request — A2 never touched it", db.listEventsForWorker(S.workerXId).filter((ev) => ev.kind === "merge_request" || ev.kind === "merge_done").length === 1);
+  // Round 2 item 5: name Y's OWN side effects explicitly, not only the aggregate counts below.
+  check("(S) Y's own worktree IS GC'd by Pass B (0 commits of its own, disposable)", !fs.existsSync(S.worktreePath));
+  check("(S) Y's own branch IS reclaimed by Pass C (0 commits ahead ⇒ trivially merged)", !branchExists(S.repo, S.branch));
+
+  // (T) Round 2 item 1 (BLOCKING): the stale-generation scan must scope to the stored mainline watermark
+  // ref, never bare "HEAD" — canonical sits on the stray branch at reconcile time, and the only commit
+  // carrying X's own trailer is on THAT stray branch, invisible to a scan correctly scoped to main.
+  check("(T) worker X gets NO merge_done — the stray commit is invisible to a ref-scoped scan", db.listEventsForWorker(T.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(T) worker X is tracked as escalated (correctly could not verify)", db.listStaleGenerationUnresolved().some((e) => e.sessionId === T.workerXId && e.escalated === true));
+  check("(T) worker Y is still independently finalized on main, unaffected by the divert", db.listEventsForWorker(T.workerYId).some((ev) => ev.kind === "merge_done"));
+  check("(T) main's own ref never advanced past Y's own landing (the stray commit never leaked onto it)", !git(T.repo, "log --oneline main").includes(`WRAP-t-x`));
+
+  // (U) Round 2 item 3: an unrelated main move strictly between X's fork and its own batch landing must
+  // NOT defeat content-match attribution — the merge-base-scoped diff isolates X's own real delta.
+  check("(U) worker X GETS a merge_done via content-match, despite main moving on an unrelated file", db.listEventsForWorker(U.workerXId).some((ev) => ev.kind === "merge_done" && ev.detail?.attributedLandedSha === U.xLandedSha));
+  check("(U) worker X is never tracked as escalated", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== U.workerXId));
+  check("(U) worker Y is still independently finalized, unaffected", db.listEventsForWorker(U.workerYId).some((ev) => ev.kind === "merge_done"));
+
+  // (V) Round 3 item 1 (BLOCKING): verifyReviewedTipChain's OWN reachability walk must use the resolved
+  // mainline watermark ref, never bare "HEAD" — the foreign-branch union must be rejected regardless of
+  // what canonical's current checkout happens to be.
+  check("(V) worker X gets NO merge_done — the foreign-branch union is correctly rejected, not certified", db.listEventsForWorker(V.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(V) worker X is tracked as escalated (correctly could not verify the chain)", db.listStaleGenerationUnresolved().some((e) => e.sessionId === V.workerXId && e.escalated === true));
+  check("(V) worker Y is still independently finalized on main, unaffected", db.listEventsForWorker(V.workerYId).some((ev) => ev.kind === "merge_done"));
+
+  // (W) Round 3 item 4: an unreadable watermark is a transient no-op, never a one-shot escalation — even
+  // though X's own landing would have attributed trivially had the watermark been readable.
+  check("(W) worker X gets NO merge_done (watermark unreadable — attribution never attempted)", db.listEventsForWorker(W.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(W) worker X is NEVER tracked in the one-shot escalation store (a transient read failure retries, it does not escalate)", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== W.workerXId));
+  check("(W) NO undelivered nudge was enqueued for X's unreadable-watermark case", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === W.mgrId).length === 0);
+
+  // (X) Round 3 item 4/5: a well-formed watermark naming an unresolvable ref is the SAME transient no-op,
+  // via the other early-return branch.
+  check("(X) worker X gets NO merge_done (watermark names an unresolvable ref — attribution never attempted)", db.listEventsForWorker(X.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(X) worker X is NEVER tracked in the one-shot escalation store", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== X.workerXId));
+  check("(X) NO undelivered nudge was enqueued for X's unresolvable-ref case", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === X.mgrId).length === 0);
 
   // (P) card 21b53e6a ROUND 3 item 1 — X's OWN merge_request was already DECIDED (a real merge_cancelled
   // on record) before the re-task happened; this must NOT escalate at all — never tracked in the one-shot
@@ -862,11 +1278,16 @@ try {
   check("(B control) worktree IS GC'd (no protection applies)", !fs.existsSync(B.worktreePath));
   check("(B control) branch IS reclaimed (no protection applies)", !branchExists(B.repo, B.branch));
 
-  check("(counts) exactly 2 worktrees pruned (B's Pass B GC + F's Pass A sibling-cleanup — A's aliased pair decided ONCE, not twice)", r.worktreesPruned === 2);
-  check("(counts) exactly 1 branch reclaimed via Pass C's sweep (B only — F's branch was CAS-deleted directly by Pass A, never Pass C)", r.branchesReclaimed === 1);
+  // S's own current-generation row (Y) never commits anything on its re-tasked branch — Pass B's
+  // worktreeHasWork correctly reads it as disposable (0 commits, clean tree) exactly like B's, and Pass
+  // C's `--merged` sweep correctly reclaims its branch too (a branch with zero commits of its own is
+  // trivially identical to, hence merged into, main) — a genuine, expected side effect of S's own setup,
+  // not a Pass A/A2 regression (S's whole point is Pass A2 never touching X; it says nothing about Y).
+  check("(counts) exactly 3 worktrees pruned (B's + S's own Pass B GC + F's Pass A sibling-cleanup — A's aliased pair decided ONCE, not twice)", r.worktreesPruned === 3);
+  check("(counts) exactly 2 branches reclaimed via Pass C's sweep (B + S — F's branch was CAS-deleted directly by Pass A, never Pass C)", r.branchesReclaimed === 2);
   check("(counts) A's protected worktree was NOT counted as a suspected-still-live left-on-disk failure either", r.worktreesLeftOnDiskSuspectedLive === 0);
-  check("(counts) exactly 2 stale merges resolved (G's worker Y + I's worker Y)", r.staleMergesResolved === 2);
-  check("(counts) exactly 2 stale-generation own-landings escalated this boot (M + N — round 2: M no longer resolves DB-only)", r.staleGenerationUnresolvedEscalated === 2);
+  check("(counts) exactly 2 stale merges resolved (G's worker Y + I's worker Y — S's own A2-eligible row is skipped outright by the staleGeneration guard)", r.staleMergesResolved === 2);
+  check("(counts) exactly 4 stale-generation own-landings escalated this boot (N + S's own X + T's own X + V's own X — M/Q/R/U attribute, W/X are transient no-ops, never escalated)", r.staleGenerationUnresolvedEscalated === 4);
 
   // --- idempotent second run: A's and C's protected worktrees still need to survive a SECOND pass with
   // the SAME protectedSessionIds (mirrors a boot that runs reconcile more than once, or a retry) ---
@@ -879,33 +1300,39 @@ try {
   check("(idem) second pass finalizes nothing new (C still correctly deferred, not re-finalized)", r2.mergesFinished === 0);
   check("(idem) J's worktree still survives a second reconcile pass (tip still mismatched)", fs.existsSync(J.worktreePath));
   check("(idem) J's branch still survives a second reconcile pass, still at its moved tip", branchExists(J.repo, J.branch) && git(J.repo, `rev-parse ${J.branch}`) === J.lateTip);
-  // (idem M/N) card 21b53e6a round 2: neither M nor N is ever "resolved" anymore (that outcome was
-  // removed) — both legitimately re-check every boot (the counter reflects "still unresolved this
-  // boot", same philosophy as mergeFailureDetails/wedgedThisBoot elsewhere in this function); the
-  // ONE-SHOT guarantee is scoped to the NUDGE itself, not this count: `attempts` bumps while `escalated`
-  // stays true, proving the second pass's own call exited before re-sending (see
-  // resolveStaleGenerationOwnLanding's own doc).
-  check("(idem) M's worker X still has no merge_done, forever", db.listEventsForWorker(M.workerXId).every((ev) => ev.kind !== "merge_done"));
-  check(
-    "(idem) M's escalation entry stays one-shot (escalated:true, attempts bumped — the SECOND pass's own retry, no second nudge)",
-    db.listStaleGenerationUnresolved().some((e) => e.sessionId === M.workerXId && e.escalated === true && e.attempts === 2),
-  );
+  // (idem N) card 21b53e6a round 2: N is never "resolved" — it legitimately re-checks every boot (the
+  // counter reflects "still unresolved this boot", same philosophy as mergeFailureDetails/wedgedThisBoot
+  // elsewhere in this function); the ONE-SHOT guarantee is scoped to the NUDGE itself, not this count:
+  // `attempts` bumps while `escalated` stays true, proving the second pass's own call exited before
+  // re-sending (see resolveStaleGenerationOwnLanding's own doc).
   check("(idem) N's worker X still has exactly one merge_request and no merge_done, forever", db.listEventsForWorker(N.workerXId).length === 1);
   // Round 3 item 3: the real proof the "no second nudge" claim above is true — count the ACTUAL durable
   // messages across BOTH passes (r and r2 combined), not just the app_meta flag's own attempts counter.
-  check("(idem) M still has exactly ONE undelivered nudge after BOTH passes (no second enqueue on the retry)",
-    db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === M.mgrId).length === 1);
   check("(idem) N still has exactly ONE undelivered nudge after BOTH passes (no second enqueue on the retry)",
     db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === N.mgrId).length === 1);
   check(
     "(idem) N's escalation entry stays one-shot (escalated:true, attempts bumped — the SECOND pass's own retry, no second nudge)",
     db.listStaleGenerationUnresolved().some((e) => e.sessionId === N.workerXId && e.escalated === true && e.attempts === 2),
   );
+  // (idem M/Q/R) card e5458ccd: attribution is ONE-SHOT via the SAME `alreadyFinalized` early-out every
+  // legacy no-branch merge_done already used — the second pass must find X already finalized (via the
+  // null-branch key) and never re-attempt attribution, never file a second event, never spawn git again.
+  check("(idem) M's worker X still has exactly ONE merge_done after a second pass (early-out, no re-attribution)", db.listEventsForWorker(M.workerXId).filter((ev) => ev.kind === "merge_done").length === 1);
+  check("(idem) M's worker X never appears in the escalation store after a second pass either (attributed, not escalated)", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== M.workerXId));
+  check("(idem) M still has NO undelivered nudge after BOTH passes (attribution succeeded, no escalation)", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === M.mgrId).length === 0);
+  check("(idem) Q's worker X still has exactly ONE merge_done after a second pass", db.listEventsForWorker(Q.workerXId).filter((ev) => ev.kind === "merge_done").length === 1);
+  check("(idem) R's worker X still has exactly ONE merge_done after a second pass", db.listEventsForWorker(R.workerXId).filter((ev) => ev.kind === "merge_done").length === 1);
+  check("(idem) S's worker X still has no merge_done, and A2 still never touched it on the second pass either", db.listEventsForWorker(S.workerXId).every((ev) => ev.kind !== "merge_done") && db.listEventsForBranch(S.branch, "merge_done").length === 0);
+  check("(idem) T's worker X still has no merge_done, forever (the stray commit never becomes visible)", db.listEventsForWorker(T.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(idem) U's worker X still has exactly ONE merge_done after a second pass", db.listEventsForWorker(U.workerXId).filter((ev) => ev.kind === "merge_done").length === 1);
+  check("(idem) V's worker X still has no merge_done, forever (the foreign-branch union never becomes valid)", db.listEventsForWorker(V.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(idem) W's worker X still has no merge_done after a second pass (still watermark-unreadable, never escalated)", db.listEventsForWorker(W.workerXId).every((ev) => ev.kind !== "merge_done") && db.listStaleGenerationUnresolved().every((e) => e.sessionId !== W.workerXId));
+  check("(idem) X's worker X still has no merge_done after a second pass (still watermark-unresolvable, never escalated)", db.listEventsForWorker(X.workerXId).every((ev) => ev.kind !== "merge_done") && db.listStaleGenerationUnresolved().every((e) => e.sessionId !== X.workerXId));
   check("(idem) O's worker P stays finalized (no re-finalize), F still untouched", db.listEventsForWorker(O.pId).filter((ev) => ev.kind === "merge_done").length === 1 && db.listEventsForWorker(O.fId).length === 1);
   check("(idem) P's worker X still never escalated, forever (a decided outcome never escalates on retry either)", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== P.workerXId) && db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === P.mgrId).length === 0);
 } finally {
   db.close();
-  for (const p of [A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P]) {
+  for (const p of [A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U]) {
     if (!p) continue;
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }

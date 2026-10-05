@@ -48,6 +48,9 @@ function detailLine(e: AuditEvent): string {
     case "worker_report": return `${s("status")}${s("summary") ? ` — ${s("summary").slice(0, 90)}` : ""}`;
     case "merge_request": return `${s("branch")}${d.filesChanged != null ? ` · ${s("filesChanged")} files` : ""}`;
     case "merge_done":
+      // card e5458ccd: a stale-generation attribution carries no branch (deliberately never the shared
+      // one) — show what it DOES carry instead of a blank line.
+      return s("branch") || (d.staleGenerationAttributed ? `stale-generation own landing → ${s("attributedLandedSha").slice(0, 8)}` : "");
     case "merge_rejected": return s("branch");
     case "idle_report": return `${s("state")}${s("detail") ? ` — ${s("detail").slice(0, 80)}` : ""}`;
     case "idle_escalated": return `${s("unanswered")} unanswered nudges`;
