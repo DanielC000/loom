@@ -55,8 +55,10 @@ export type RepoRegistryCheck =
  * Each entry must be:
  *  (1) a non-empty `key` (TRIMMED before any check/store, so `" api"` and `"api"` are the same key — a
  *      previously-untrimmed key would silently never match a manager typing the trimmed form back),
- *      UNIQUE across the array, and not the reserved `"primary"` (which always means `repoPath` — a
- *      registry entry can never shadow it);
+ *      UNIQUE across the array (case-only-distinct keys are ALSO rejected — card 98039b36 — since the
+ *      win32 worktree axis dir they become a path segment for is case-insensitive; a pair already in
+ *      `opts.existingKeys` is exempt, same posture as the STALE_ASIDE_SUFFIX_RE exemption below), and not
+ *      the reserved `"primary"` (which always means `repoPath` — a registry entry can never shadow it);
  *  (2) an ABSOLUTE, {@link expandTilde}-expanded host `path` — a worker's cwd is a worktree elsewhere on
  *      disk, so a relative path is meaningless to it;
  *  (3) an EXISTING git repository (`isGitRepo`, mirroring the repoPath / referenceRepos guards);
@@ -95,6 +97,13 @@ export async function validateRepoRegistry(
   const vaultPathKey = opts.vaultPath ? comparisonKey(canonicalizeExistingPath(opts.vaultPath)) : "";
   const seenKeys = new Set<string>();
   const seenPathKeys = new Set<string>();
+  // CASE-COLLISION GUARD (card 98039b36): keyed by the FOLDED (lowercased) key, value is the first
+  // original-cased key seen for that fold — lets a later case-only collision name BOTH spellings in its
+  // error. Folded on EVERY platform, not just win32: the worktree axis dir this key becomes a path segment
+  // for is case-insensitive on win32 regardless of the HOST this validator happens to run on (a human
+  // could PATCH a project from a non-Windows machine), so rejecting it everywhere is the only choice that
+  // is actually portable.
+  const seenKeyFolds = new Map<string, string>();
   const out: RepoRegistryEntry[] = [];
   for (const raw of input) {
     if (typeof raw !== "object" || raw === null) {
@@ -137,6 +146,24 @@ export async function validateRepoRegistry(
     }
     if (seenKeys.has(key)) {
       return { ok: false, error: `repos entry key "${key}" is duplicated — keys must be unique` };
+    }
+    // CASE-COLLISION GUARD (card 98039b36, VERIFY-FIRST confirmed real): `seenKeys` above is a plain
+    // case-sensitive Set, so "Svc" and "svc" never collided there — both passed as "unique" even though
+    // the win32 worktree axis dir (`isRegisteredRepoKeyAxisDir`, `createWorktree`'s
+    // `WORKTREES_DIR/<projectId>/<repoKey>/...`) is case-INSENSITIVE, so the two keys would physically
+    // share one dir. Rejected for a NEW case-collision on every platform (portability — a human could PATCH
+    // from a non-Windows host). `existingKeys` exempts a pair ONLY when BOTH colliding spellings are
+    // already in the caller's own pre-patch stored registry (a legacy pair predating this guard) — never a
+    // NEW key that merely case-collides with one half of such a pair, which must still be rejected.
+    const keyFold = key.toLowerCase();
+    const foldPartner = seenKeyFolds.get(keyFold);
+    if (foldPartner !== undefined) {
+      const bothPreexisting = !!opts.existingKeys?.has(key) && !!opts.existingKeys?.has(foldPartner);
+      if (!bothPreexisting) {
+        return { ok: false, error: `repos entry key "${key}" differs only in case from entry key "${foldPartner}" — case-only-distinct keys are rejected (they would collide on a case-insensitive filesystem, e.g. the win32 worktree axis dir)` };
+      }
+    } else {
+      seenKeyFolds.set(keyFold, key);
     }
     if (typeof entry.path !== "string" || !entry.path.trim()) {
       return { ok: false, error: `repos entry "${key}" needs a non-empty string path` };

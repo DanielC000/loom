@@ -354,11 +354,141 @@ try {
     await client.close();
     db.close();
   }
+
+  // =====================================================================================================
+  // PART G — card 98039b36: the SAME `existingKeys` exemption shape, now for a CASE-ONLY-DISTINCT legacy
+  // pair ("Svc"/"svc") — seeded here directly via `Db.insertProject` (bypassing validateRepoRegistry) to
+  // simulate data written before this guard existed, exactly like PART E does for the stale-suffix shape.
+  // Manager-approval point (a): the exemption must cover ONLY a pair where BOTH spellings are already
+  // stored — a brand-new key that merely case-collides with ONE HALF of that legacy pair must still be
+  // rejected, even though the pair itself is grandfathered.
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "legacy-case-key-g.db"));
+    const stub = {};
+    const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, control: stub, usageStatus: stub });
+    try {
+      db.insertProject({
+        id: "pLegacyCase", name: "LegacyCaseKey", repoPath: primary, vaultPath: vaultDir, config: {},
+        createdAt: now, archivedAt: null, reserved: false,
+        repos: [{ key: "Svc", path: svcA }, { key: "svc", path: svcB }],
+      });
+
+      // (G1) repoPath-ONLY rebind (repos omitted) to a non-conflicting repo succeeds despite the stored
+      // registry carrying a legacy case-only-distinct pair.
+      const g1 = await app.inject({ method: "PATCH", url: "/api/projects/pLegacyCase", payload: { repoPath: newPrimary } });
+      check("(G1) repoPath-only rebind succeeds despite a stored legacy case-only-distinct key pair", g1.statusCode === 200);
+      check("(G1) repoPath actually rebound", db.getProject("pLegacyCase")?.repoPath === newPrimary);
+      check("(G1) both legacy keys survive, UNCHANGED", db.getProject("pLegacyCase")?.repos?.length === 2
+        && db.getProject("pLegacyCase")?.repos.some((r) => r.key === "Svc")
+        && db.getProject("pLegacyCase")?.repos.some((r) => r.key === "svc"));
+
+      // (G2) PATCH explicitly echoing the SAME (unchanged) legacy pair back also succeeds.
+      const g2 = await app.inject({ method: "PATCH", url: "/api/projects/pLegacyCase", payload: { repos: [{ key: "Svc", path: svcA }, { key: "svc", path: svcB }] } });
+      check("(G2) explicitly echoing the unchanged legacy case-only-distinct pair -> 200", g2.statusCode === 200);
+      check("(G2) both legacy keys still present", db.getProject("pLegacyCase")?.repos?.length === 2);
+
+      // (G3) CONTROL (manager-approval point a): adding a brand-new key ("SVC", a THIRD casing) that
+      // case-collides with HALF of the legacy pair is still REJECTED — the exemption must never widen to a
+      // key that wasn't already in the pre-patch stored registry, even though its partner IS exempted.
+      const svcC = mkRepo("svcC");
+      const g3 = await app.inject({
+        method: "PATCH", url: "/api/projects/pLegacyCase",
+        payload: { repos: [{ key: "Svc", path: svcA }, { key: "svc", path: svcB }, { key: "SVC", path: svcC }] },
+      });
+      check("(G3) CONTROL: adding a NEW case-colliding key alongside the legacy pair -> 400 (exemption doesn't widen)", g3.statusCode === 400);
+      check("(G3) error names the case-collision rule", /differs only in case/.test(g3.json().error ?? ""));
+      check("(G3) registry UNCHANGED after rejection", db.getProject("pLegacyCase")?.repos?.length === 2);
+
+      // (G4) Code Review b0369501 finding 2a: the SAME rejection must hold regardless of PAYLOAD ORDER —
+      // the new key ("SVC") listed FIRST, ahead of both legacy spellings, must be rejected exactly like
+      // G3 (where it was listed last). Proves the exemption check isn't order-sensitive (e.g. accidentally
+      // keying off "whichever entry happens to be recorded first for a given fold").
+      const g4 = await app.inject({
+        method: "PATCH", url: "/api/projects/pLegacyCase",
+        payload: { repos: [{ key: "SVC", path: svcC }, { key: "Svc", path: svcA }, { key: "svc", path: svcB }] },
+      });
+      check("(G4) CONTROL: the new case-colliding key FIRST in the payload -> 400 (order-independent)", g4.statusCode === 400);
+      check("(G4) error names the case-collision rule", /differs only in case/.test(g4.json().error ?? ""));
+      check("(G4) registry UNCHANGED after rejection", db.getProject("pLegacyCase")?.repos?.length === 2);
+      try { fs.rmSync(svcC, { recursive: true, force: true }); } catch { /* best-effort */ }
+    } finally {
+      db.close();
+    }
+  }
+
+  // =====================================================================================================
+  // PART I — card 98039b36, Code Review b0369501 finding 2b: a SINGLE stored key (no pre-existing pair at
+  // all — "Svc" alone), then a PATCH that ADDS "svc" alongside it, must be REJECTED. Distinct from G3/G4
+  // (which start from an already-EXEMPTED pair): here `existingKeys` has only ONE of the two spellings, so
+  // the pair can never be grandfathered — this is the ordinary "introducing a new collision" case, now
+  // proven specifically for the single-stored-key starting point the manager named.
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "single-key-add-collision-i.db"));
+    const stub = {};
+    const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, control: stub, usageStatus: stub });
+    try {
+      const created = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "SingleKeyAddCollision", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "Svc", path: svcA }] },
+      });
+      const projectId = created.json().id;
+      check("(I1-setup) project created with a single stored key \"Svc\"", created.json().repos?.length === 1);
+
+      const i1add = await app.inject({
+        method: "PATCH", url: `/api/projects/${projectId}`,
+        payload: { repos: [{ key: "Svc", path: svcA }, { key: "svc", path: svcB }] },
+      });
+      check("(I1) PATCH adding \"svc\" alongside a lone stored \"Svc\" -> 400 (no pair to grandfather)", i1add.statusCode === 400);
+      check("(I1) error names the case-collision rule", /differs only in case/.test(i1add.json().error ?? ""));
+      check("(I1) registry UNCHANGED after rejection", db.getProject(projectId)?.repos?.length === 1);
+    } finally {
+      db.close();
+    }
+  }
+
+  // =====================================================================================================
+  // PART H — card 98039b36: the SAME legacy case-collision exemption on the elevated loom-platform
+  // project_update surface (mirrors PART F exactly, for the case-only-distinct shape instead of the
+  // stale-suffix shape).
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "legacy-case-key-h.db"));
+    db.insertProject({ id: "pHome", name: "Loom Platform", repoPath: primary, vaultPath: primary, config: {}, createdAt: now, archivedAt: null, reserved: true });
+    db.insertProject({
+      id: "pLegacyCasePlatform", name: "LegacyCasePlatform", repoPath: primary, vaultPath: primary, config: {},
+      createdAt: now, archivedAt: null, reserved: false,
+      repos: [{ key: "Svc", path: svcA }, { key: "svc", path: svcB }],
+    });
+    db.insertAgent({ id: "agentLead", projectId: "pHome", name: "Lead", startupPrompt: "LEAD", position: 0, profileId: null });
+    db.insertSession({ id: "PL3", projectId: "pHome", agentId: "agentLead", engineSessionId: null, title: null, cwd: primary, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "platform", parentSessionId: null });
+
+    class SeamHost extends createSeamHost(PtyHost) {
+      createPty(opts) { return { ...super.createPty(opts), pid: 1 }; }
+      stop() {}
+    }
+    const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
+    const svc = new SessionService(db, host, new OrchestrationControl());
+    const server = new PlatformMcpRouter(db, svc).buildServer("PL3");
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const client = new Client({ name: "legacy-case-key-platform-test", version: "0" });
+    await client.connect(clientT);
+    const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+    const h1 = await call("project_update", { projectId: "pLegacyCasePlatform", repoPath: newPrimary });
+    check("(H1) platform project_update repoPath rebind succeeds despite a stored legacy case-only-distinct key pair", !h1.error && h1.repoPath === newPrimary);
+    check("(H1) both legacy keys survive, UNCHANGED", db.getProject("pLegacyCasePlatform")?.repos?.length === 2);
+
+    await client.close();
+    db.close();
+  }
 } finally {
   for (const d of [tmpHome, primary, svcA, svcB, newPrimary]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a repoPath/vaultPath rebind that OMITS `repos` still re-validates the EXISTING registry against the new primary on both the human REST PATCH and the elevated platform project_update (rejecting a conflict, leaving a non-conflicting rebind unaffected), every alias/dedup comparison canonicalizes paths first (native realpath + win32 case-fold) so differently-spelled/-cased/trailing-slashed paths to the identical real directory are still caught as the same repo, (CARRIED item 3, phase 2) a `repos` registry EDIT itself — repathing or removing an entry, not just a repoPath rebind — is refused while ANY live worktree session exists for the project, succeeding again once it exits, and (card e3fcd8ea item 2) a project carrying a legacy .stale-<ts>-shaped stored key (pre-dating the write-side guard) is no longer permanently blocked from every future rebind/echo on either surface, while a genuinely NEW stale-shaped key is still rejected."
+  ? "\n✅ ALL PASS — a repoPath/vaultPath rebind that OMITS `repos` still re-validates the EXISTING registry against the new primary on both the human REST PATCH and the elevated platform project_update (rejecting a conflict, leaving a non-conflicting rebind unaffected), every alias/dedup comparison canonicalizes paths first (native realpath + win32 case-fold) so differently-spelled/-cased/trailing-slashed paths to the identical real directory are still caught as the same repo, (CARRIED item 3, phase 2) a `repos` registry EDIT itself — repathing or removing an entry, not just a repoPath rebind — is refused while ANY live worktree session exists for the project, succeeding again once it exits, (card e3fcd8ea item 2) a project carrying a legacy .stale-<ts>-shaped stored key (pre-dating the write-side guard) is no longer permanently blocked from every future rebind/echo on either surface while a genuinely NEW stale-shaped key is still rejected, and (card 98039b36, incl. Code Review b0369501 finding 2) the SAME existingKeys-exemption shape for a legacy CASE-ONLY-DISTINCT key pair — grandfathered on rebind/echo on both surfaces, while a brand-new key that merely case-collides with HALF of that pair is still rejected regardless of PAYLOAD ORDER (the exemption never widens), and the same rejection holds starting from a single stored key with no pre-existing pair to grandfather at all."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

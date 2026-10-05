@@ -242,6 +242,27 @@ try {
       check("(A7) POST with a duplicate registry key -> 400", badDup.statusCode === 400);
       check("(A7) error names the duplicate key", /duplicat/.test(badDup.json().error ?? ""));
 
+      // (A7b) card 98039b36: a CASE-ONLY-DISTINCT key pair is REJECTED at create time — there is no
+      // existingKeys exemption possible here (brand-new project, nothing stored yet). Confirmed by direct
+      // repro against validateRepoRegistry during VERIFY FIRST that this was previously ACCEPTED (the
+      // exact-match-only seenKeys Set never collided "Svc" with "svc").
+      const badCaseDup = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "BadCaseDup", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "Svc", path: svcA }, { key: "svc", path: svcB }] },
+      });
+      check("(A7b) POST with a case-only-distinct registry key pair -> 400", badCaseDup.statusCode === 400);
+      check("(A7b) error names BOTH colliding keys", /"svc"/.test(badCaseDup.json().error ?? "") && /"Svc"/.test(badCaseDup.json().error ?? ""));
+      check("(A7b) no project row was created", !db.listAllProjects().some((p) => p.name === "BadCaseDup"));
+
+      // (A7c) POSITIVE CONTROL: the SAME two entries with genuinely DISTINCT (non-case-colliding) keys are
+      // accepted normally — proves (A7b)'s rejection is scoped to the case collision, not a blanket
+      // regression on two-entry registries.
+      const goodTwoEntries = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "GoodTwoEntries", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "Svc", path: svcA }, { key: "other", path: svcB }] },
+      });
+      check("(A7c, control) two entries with genuinely distinct keys -> 201", goodTwoEntries.statusCode === 201);
+
       // (A8) an entry path ALIASING the project's own repoPath is REJECTED.
       const badAliasRepo = await app.inject({
         method: "POST", url: "/api/projects",

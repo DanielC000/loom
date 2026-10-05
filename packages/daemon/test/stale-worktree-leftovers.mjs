@@ -143,6 +143,81 @@ check("isStaleAsideWorktreeDir rejects a non-numeric suffix", !isStaleAsideWorkt
   check("isRegisteredRepoKeyAxisDir: false for a DIFFERENT project using the same registered key name", !isRegisteredRepoKeyAxisDir(path.join(WORKTREES_DIR, "someOtherProj", "svc.stale-9"), registry, WORKTREES_DIR));
 }
 
+// --- isRegisteredRepoKeyAxisDir case-fold (card 98039b36): a legacy case-only-distinct pair ("Svc"/"svc"),
+//     exempted into the registry by validateRepoRegistry's `existingKeys` mechanism, shares ONE physical
+//     dir on win32's case-insensitive filesystem — the plain exact-match lookup alone is blind to a THIRD
+//     casing the real on-disk dir could be reported under. Folds case ON WIN32 ONLY (mirrors
+//     projects/repos.ts's `comparisonKey` platform-conditional posture).
+{
+  const proj = "projSwlCaseFold";
+  const registry = repoKeysByProjectFromProjects([{ id: proj, repos: [{ key: "Svc" }, { key: "svc" }] }]);
+  const differentCaseTarget = path.join(WORKTREES_DIR, proj, "SVC"); // a THIRD casing, not a stored spelling
+  if (process.platform === "win32") {
+    check("isRegisteredRepoKeyAxisDir (win32): a third casing of a registered key still matches, case-folded", isRegisteredRepoKeyAxisDir(differentCaseTarget, registry, WORKTREES_DIR));
+  } else {
+    check("isRegisteredRepoKeyAxisDir (non-win32): a differently-cased path is correctly NOT folded (a real POSIX filesystem is case-sensitive)", !isRegisteredRepoKeyAxisDir(differentCaseTarget, registry, WORKTREES_DIR));
+  }
+  // NEGATIVE CONTROL: a key with no case-insensitive match to ANY registered spelling is still false —
+  // proves the fold isn't a blanket "always true", on every platform.
+  check("isRegisteredRepoKeyAxisDir: NEGATIVE CONTROL — no case-insensitive match at all is still false", !isRegisteredRepoKeyAxisDir(path.join(WORKTREES_DIR, proj, "totally-different"), registry, WORKTREES_DIR));
+}
+
+// --- (20) card 98039b36, Code Review b0369501 finding 1: a case-only single-key RENAME survives on
+//     win32's case-PRESERVING filesystem — the live axis dir stays on disk under its OLD casing after the
+//     registry is renamed. Before the shared isRegisteredRepoKeyName helper, listStaleAsideWorktrees's own
+//     unfolded exact-match check treated that dir as UNREGISTERED and never descended into it, so a real
+//     .stale-<ts> leftover nested beneath it was never enumerated — permanently invisible, permanently
+//     un-reclaimable. @decision 98039b36 fixes this by routing both call sites through one shared,
+//     case-folded helper.
+{
+  const proj = "projSwlRename";
+  const oldCasedRepoKey = "Svc"; // the ORIGINAL casing a worktree axis dir was physically cut under
+  const renamedRepoKey = "svc";  // the registry's CURRENT (renamed) spelling — same key, case-only rename
+  const liveWorktreePath = resolveWorktreePath(proj, "taskRename-live", oldCasedRepoKey);
+  fs.mkdirSync(liveWorktreePath, { recursive: true });
+  fs.writeFileSync(path.join(liveWorktreePath, "package.json"), "{}\n"); // a real live worktree beneath the axis
+  const axisPath = path.join(WORKTREES_DIR, proj, oldCasedRepoKey);
+  const leftoverPath = mkStaleAside(path.join(axisPath, "orphanedTask"), 1700000000030);
+  // The registry now names ONLY the renamed spelling — simulates a PATCH that renamed "Svc" -> "svc".
+  const registry = repoKeysByProjectFromProjects([{ id: proj, repos: [{ key: renamedRepoKey }] }]);
+
+  if (process.platform === "win32") {
+    const entries = listStaleAsideWorktrees(WORKTREES_DIR, registry);
+    check("(20) win32: a leftover nested under a case-RENAMED axis dir IS still found (shared case-folded helper)", !!entries.find((e) => e.path === leftoverPath));
+    check("(20) win32: the live axis dir itself is still never listed as a leftover", !entries.find((e) => e.path === axisPath));
+    check("(20) win32: the live worktree beneath the axis dir is not listed either", !entries.find((e) => e.path === liveWorktreePath));
+  } else {
+    check("(20) non-win32 control: skipped (a case-only rename collision is a win32-only hazard)", true);
+  }
+  fs.rmSync(axisPath, { recursive: true, force: true });
+}
+
+// --- (21) card 98039b36, Code Review b0369501 finding 1, stale-SUFFIX-SHAPED-key variant: a registered
+//     key itself shaped like a renamed-aside leftover (e.g. "Svc.stale-1", grandfathered via existingKeys)
+//     case-renamed to "svc.stale-1" — the LIVE axis dir survives on disk under the OLD casing. Before the
+//     shared helper, the unfolded registry check missed it and the basename-shape fallback then wrongly
+//     LISTED the live axis dir itself as a reclaimable leftover (the actual reclaim was always refused
+//     independently by isRegisteredRepoKeyAxisDir's own fold — this test is about the LISTING being wrong,
+//     not about data loss).
+{
+  const proj = "projSwlRenameStaleShape";
+  const oldCasedRepoKey = "Svc.stale-1";
+  const renamedRepoKey = "svc.stale-1";
+  const axisPath = path.join(WORKTREES_DIR, proj, oldCasedRepoKey);
+  const liveWorktreePath = resolveWorktreePath(proj, "taskRenameStale-live", oldCasedRepoKey);
+  fs.mkdirSync(liveWorktreePath, { recursive: true });
+  fs.writeFileSync(path.join(liveWorktreePath, "package.json"), "{}\n");
+  const registry = repoKeysByProjectFromProjects([{ id: proj, repos: [{ key: renamedRepoKey }] }]);
+
+  if (process.platform === "win32") {
+    const entries = listStaleAsideWorktrees(WORKTREES_DIR, registry);
+    check("(21) win32: the live axis dir (case-renamed, stale-suffix-shaped key) is NEVER listed as a leftover", !entries.find((e) => e.path === axisPath));
+  } else {
+    check("(21) non-win32 control: skipped (a case-only rename collision is a win32-only hazard)", true);
+  }
+  fs.rmSync(axisPath, { recursive: true, force: true });
+}
+
 // --- (18) a stale-named junction/symlink is skipped by enumeration and refused by confinement (nit 3c) ---
 {
   const proj = "projSwlJunction";

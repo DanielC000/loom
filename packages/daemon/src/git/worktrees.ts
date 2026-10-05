@@ -1692,6 +1692,22 @@ function isLikelyJunctionOrSymlink(p: string): boolean {
  * registered repoKey is NEVER a stale leaf, even if its name also matches the suffix (see
  * STALE_ASIDE_SUFFIX_RE's own doc). Never add byte measurement, and never guess from name shape instead.
  */
+/**
+ * Whether `name` is a registered repoKey in `keys` — exact match first, falling back to a WIN32-ONLY
+ * case-folded scan. The ONE place either call site below compares a repoKey name against the registry.
+ *
+ * @decision 98039b36 — never re-introduce a second, independently-written repoKey-name comparison; route
+ * every such check through this helper instead (see the full record for why the two previously drifted).
+ */
+function isRegisteredRepoKeyName(name: string, keys: ReadonlySet<string> | undefined): boolean {
+  if (!keys) return false;
+  if (keys.has(name)) return true;
+  if (process.platform !== "win32") return false;
+  const folded = name.toLowerCase();
+  for (const k of keys) if (k.toLowerCase() === folded) return true;
+  return false;
+}
+
 export function listStaleAsideWorktrees(
   worktreesRoot: string = WORKTREES_DIR,
   repoKeysByProject?: ReadonlyMap<string, ReadonlySet<string>>,
@@ -1721,7 +1737,8 @@ export function listStaleAsideWorktrees(
       if (!entry.isDirectory()) continue;
       const entryPath = path.join(projectPath, entry.name);
       // Registry FIRST, always — a registered repoKey is never a stale leaf, regardless of its basename.
-      if (repoKeys?.has(entry.name)) {
+      // Via isRegisteredRepoKeyName (not a bare `.has()` — see that helper's own doc).
+      if (isRegisteredRepoKeyName(entry.name, repoKeys)) {
         if (isLikelyJunctionOrSymlink(entryPath)) continue; // never probe through a planted link
         let level3: fs.Dirent[];
         try {
@@ -1780,7 +1797,9 @@ export function staleAsideRepoKeysByProject(
  * <repoKey>` for a repoKey the project (active OR archived) has registered. Independent of {@link
  * listStaleAsideWorktrees}'s own registry-first enumeration order — see that function's own doc and
  * STALE_ASIDE_SUFFIX_RE's own doc for why the listing fix alone is not enough and reclaim must also
- * refuse this on its own (card ad34efb5 round 2, Major).
+ * refuse this on its own (card ad34efb5 round 2, Major). Name comparison is {@link isRegisteredRepoKeyName}.
+ *
+ * @decision 98039b36 — never re-derive this comparison inline here; see that helper's own doc.
  */
 export function isRegisteredRepoKeyAxisDir(
   targetPath: string,
@@ -1792,7 +1811,7 @@ export function isRegisteredRepoKeyAxisDir(
   const parts = rel.split(path.sep);
   if (parts.length !== 2) return false; // only the axis-dir shape itself: worktreesRoot/<projectId>/<repoKey>
   const [projectId, repoKey] = parts as [string, string];
-  return repoKeysByProject.get(projectId)?.has(repoKey) ?? false;
+  return isRegisteredRepoKeyName(repoKey, repoKeysByProject.get(projectId));
 }
 
 /** Ceiling for a renamed-aside stale-leftover removal — same order of magnitude as {@link
