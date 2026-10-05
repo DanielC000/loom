@@ -74,10 +74,7 @@ try {
   const mgrId = `mbd-mgr-${sfx}`;
 
   const db = new Db(); dbs.push(db);
-  // A SLOW-ish (2s) gate command — deliberately not instant — gives the test a reliable window to fire a
-  // second mergeBatchTracked call while the first is genuinely still running (past its own worktree cut
-  // and pending_gate_ops mint, not yet settled).
-  db.insertProject({ id: projId, name: "MBD", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: 'node -e "setTimeout(()=>process.exit(0), 2000)"' } }, createdAt: now, archivedAt: null });
+  db.insertProject({ id: projId, name: "MBD", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: agentId, projectId: projId, name: "dev", startupPrompt: "", position: 0 });
   db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
 
@@ -90,28 +87,50 @@ try {
     db.insertSession({ id: wId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: w.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: w.taskId, worktreePath: w.worktreePath, branch: w.branch });
   }
 
+  // Card 9f341f6f: the OLD precondition fired the real 2s-sleep subprocess above and then polled
+  // `gateSemaphore.snapshot()` within a FIXED 20s window to detect "the first call is genuinely in
+  // flight" — but everything AHEAD of admission (candidate resolution, real git `resolveGitRef` head
+  // reads, the mainline-watermark read) is genuine async git I/O that can legitimately outlast a fixed
+  // window under host contention (a concurrent gate elsewhere), flipping this precondition RED for a
+  // reason that has nothing to do with the dedupe behavior under test (reproduced: shrinking the window
+  // to 1ms reliably reproduces the exact FAIL the gate saw). Replaced with a CONTROLLABLE SEAM instead of
+  // a race: `runGate` is injected as a deferred the test itself holds open, so "the first call's gate
+  // request is genuinely in flight" becomes an observed EVENT (the seam was entered), never a timing
+  // guess — and the first call stays provably in flight for as long as the test wants, independent of
+  // host speed.
+  let releaseGate;
+  const gateHeld = new Promise((resolve) => { releaseGate = resolve; });
+  let gateEnteredResolve;
+  const gateEntered = new Promise((resolve) => { gateEnteredResolve = resolve; });
+  let gateCalls = 0;
+  const controllableGate = async () => {
+    gateCalls++;
+    gateEnteredResolve();
+    await gateHeld;
+    return { passed: true };
+  };
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-  const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: controllableGate });
 
   // Fire the first call — do NOT await yet.
   const p1 = sessions.mergeBatchTracked(mgrId, [wA, wB]);
 
-  // Poll until this project's gate request is genuinely admitted/queued (deterministic — reads live
-  // semaphore state, mirrors the established pattern in batch-merge-gate-history.mjs's CANCELLED block) —
-  // confirms run(opId) has already progressed past the worktree cut and its own pending_gate_ops mint,
-  // so firing p2 now is a genuine "second call while the first is still running" race, not a coin flip.
-  const admitDeadline = Date.now() + 20_000;
-  let admitted;
-  while (Date.now() <= admitDeadline) {
-    admitted = sessions.gateSemaphore.snapshot().entries.find((e) => e.projectId === projId);
-    if (admitted) break;
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  check("precondition: the first call's gate request is genuinely in flight (queued or active)", !!admitted);
+  // Wait for the DETERMINISTIC signal that the first call's gate request was genuinely admitted and is
+  // now running — never a fixed-window race. Bounded generously (60s) so a genuine wedge (attach never
+  // reaching the gate at all) still fails loudly instead of hanging forever.
+  let enteredInTime = true;
+  await Promise.race([
+    gateEntered,
+    new Promise((resolve) => setTimeout(() => { enteredInTime = false; resolve(); }, 60_000)),
+  ]);
+  check("precondition: the first call's gate request is genuinely in flight (admitted into the gate semaphore and running — confirmed via the controllable gate seam, not a timing race)", enteredInTime && gateCalls === 1);
 
   // Fire the SECOND call — SAME workerSessionIds, so the SAME resolved candidate set, so the SAME
-  // dedupe/attach key — while the first is still running.
+  // dedupe/attach key — while the first is PROVABLY still running (held open by the test, never raced).
   const p2 = sessions.mergeBatchTracked(mgrId, [wA, wB]);
+
+  // Now let both calls actually settle.
+  releaseGate();
 
   // Card 58f80a64: under host contention either call can legitimately degrade to `{settled:false}` (the real-git
   // batch outruns SYNC_ATTACH_BUDGET_MS). Re-calling with the SAME ids re-attaches to the same in-flight op via the

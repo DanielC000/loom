@@ -107,8 +107,18 @@ const repo = path.join(os.tmpdir(), `loom-mrinp-repo-${Date.now()}-${process.pid
 let calls = 0;
 const fakeGate = async () => { calls++; return { passed: true }; };
 
+// Card 9f341f6f: `confirmWorkerMergeTracked` below is a ONE-SHOT `attach()` call (no internal re-poll
+// loop in this test, unlike e.g. merge-batch-dedupe.mjs's `settleBatch`), so it relied on the PRODUCTION
+// SYNC_ATTACH_BUDGET_MS default (12s) alone to beat the real git prep + squash-merge work back to a
+// synchronous settle. `fakeGate` is instant, but that surrounding real git I/O can legitimately outlast
+// 12s on a loaded host (a concurrent gate elsewhere), degrading the confirm to `{settled:false}` and
+// flipping every downstream `confirm: ...` assertion (reproduced: forcing the budget low on just this
+// call reliably reproduces the exact FAILs the gate saw). Pinned HIGH here so BOTH the self-check and the
+// confirm always take the sync path regardless of host speed, matching
+// batch-merge-branch-advanced-during-gate.mjs's own "pinned-high budget took the sync path" seam.
+const PINNED_SYNC_BUDGET_MS = 600_000;
 const host = new TestPtyHost(events);
-sessions = new SessionService(db, host, new OrchestrationControl(), { runGate: fakeGate });
+sessions = new SessionService(db, host, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: PINNED_SYNC_BUDGET_MS });
 
 function spawnReady(sessionId) {
   host.spawn({

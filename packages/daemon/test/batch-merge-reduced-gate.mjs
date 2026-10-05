@@ -68,6 +68,17 @@ const { createWorktree, buildReducedGateCommand } = await import("../dist/git/wo
 // Get-CimInstance enumeration (pty/host.ts enumerateProcessesWin32, ~1-2s under load) per worktree removal —
 // pure fixed cost here since no worker-rooted process exists — so inject the SessionService seam.
 const noReap = async () => ({ killedPids: [] });
+
+// Card 9f341f6f: every scenario's `mergeBatchTracked` call used to rely on the PRODUCTION
+// SYNC_ATTACH_BUDGET_MS default (12s) to beat `fakeGate` back to a synchronous settle. `fakeGate` itself
+// is instant, but the real worktree-cut/assembly/computeEmitCompareGate work ahead of it is genuine async
+// git I/O — on a loaded host (a full gate run elsewhere) that work alone can outlast 12s, degrading EVERY
+// scenario to `{settled:false}` and starving `syncReturnsObserved` to 0 (RED: "at least one scenario
+// observed a real SYNC settle"). Pinning the budget HIGH here (mirrors
+// batch-merge-branch-advanced-during-gate.mjs's own "pinned-high budget took the sync path" seam) makes
+// the sync path the outcome regardless of host speed — the call simply waits as long as it genuinely
+// takes, never racing a fixed ceiling.
+const PINNED_SYNC_BUDGET_MS = 600_000;
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
@@ -127,7 +138,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate, syncAttachBudgetMs: PINNED_SYNC_BUDGET_MS });
     seedBatchProject(db, P);
 
     const wA = await createWorktree(P.repo, P.projId, `${P.taskId}-a`);
@@ -192,7 +203,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate, syncAttachBudgetMs: PINNED_SYNC_BUDGET_MS });
     seedBatchProject(db, N);
 
     const wTest = await createWorktree(N.repo, N.projId, `${N.taskId}-test`);
@@ -239,7 +250,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate, syncAttachBudgetMs: PINNED_SYNC_BUDGET_MS });
     seedBatchProject(db, A);
 
     const wAsset = await createWorktree(A.repo, A.projId, `${A.taskId}-asset`);
@@ -288,7 +299,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate, syncAttachBudgetMs: PINNED_SYNC_BUDGET_MS });
     seedBatchProject(db, T);
 
     const wTs = await createWorktree(T.repo, T.projId, `${T.taskId}-ts`);
@@ -343,7 +354,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate, syncAttachBudgetMs: PINNED_SYNC_BUDGET_MS });
     seedBatchProject(db, SC);
 
     const wScript = await createWorktree(SC.repo, SC.projId, `${SC.taskId}-script`);
@@ -406,7 +417,7 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
     const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate, syncAttachBudgetMs: PINNED_SYNC_BUDGET_MS });
     seedBatchProject(db, NA);
 
     const wTest = await createWorktree(NA.repo, NA.projId, `${NA.taskId}-test`);

@@ -178,9 +178,24 @@ try {
       // meant to "fetch the result" would land in after a cancel. Same instance as r1 — sees the SAME
       // retention cache r1's settle just wrote into, so this genuinely exercises `isRetainedResultUsable`.
       const p2 = sessions.runWorkerGate(workerX);
+      // Card 9f341f6f: this used to race `freshGateEnteredSignal` against a FIXED 2000ms sleep — but the
+      // real work between firing p2 and `sharedGate` actually being entered (semaphore admission, real
+      // DB/attach bookkeeping) is genuine async work, not a mocked delay, so it can legitimately exceed a
+      // tight 2s window under host contention (reproduced: adding a 3s artificial admission delay flips
+      // this exact assertion red). Widened to a generous, host-independent bound — the signal itself is
+      // still the discriminator (a broken cache-hit never fires it at all, so a cache-hit regression
+      // still correctly times out and fails this check, just slower to detect).
+      const FRESH_GATE_ENTRY_TIMEOUT_MS = 30_000;
       const entered = await Promise.race([
         freshGateEnteredSignal.then(() => true),
-        sleep(2000).then(() => false),
+        // TIMING-GUARD-FALSE-MATCH: keyword-in-methodology-aside — the check label's own claim is
+        // POSITIVE-polarity ("the re-call... triggers a genuinely FRESH gate invocation"); NEG_KEYWORDS'
+        // bare "not" fires on the trailing parenthetical explaining WHAT that proves ("not a cache hit"),
+        // not the assertion's own polarity — same shape as worker-unconfirmed-delivery-signal.mjs's
+        // "...proves it's elapsed time, not a static marker" specimen. Separately: this races a REAL
+        // signal (freshGateEnteredSignal) against the timeout, so the timeout branch only ever produces a
+        // correct FAIL (a cache-hit regression never fires the signal at all) — it can never mask a bug.
+        sleep(FRESH_GATE_ENTRY_TIMEOUT_MS).then(() => false),
       ]);
       check("(D) THE FIX: the re-call after a cancel triggers a genuinely FRESH gate invocation (not a cache hit)", entered && freshGateCalls === 1);
       const r2 = await p2;

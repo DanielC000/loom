@@ -119,8 +119,20 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   const reposDir = path.join(os.tmpdir(), `loom-mrt-dedupe-${sfx}`);
   const { db, mgrId, workerId } = await setupWorkerProject(sfx, reposDir);
   let gateCalls = 0;
+  // Card 9f341f6f: `pMcp` below is a raw ONE-SHOT `confirmWorkerMergeTracked` call (unlike `pRest`, which
+  // is wrapped by `confirmWorkerMergeUntilSettled`'s own internal re-poll loop and so tolerates a slow
+  // settle on its own) — it relied on the PRODUCTION SYNC_ATTACH_BUDGET_MS default (12s) alone to beat
+  // the real git merge/squash work back to a synchronous settle. The gate itself is a fast 30ms stub, but
+  // the surrounding real git prep can legitimately outlast 12s on a loaded host (a concurrent gate
+  // elsewhere), degrading `pMcp` to `{settled:false}` and flipping the two `(dedupe) ... MCP-style ...`/
+  // `SAME opId` assertions below (log-confirmed: gate op 438b8ad1 failed exactly these two, with every
+  // other assertion in this scenario passing). Pinned HIGH so this one-shot call always takes the sync
+  // path regardless of host speed, matching batch-merge-branch-advanced-during-gate.mjs's own
+  // "pinned-high budget took the sync path" seam.
+  const PINNED_SYNC_BUDGET_MS = 600_000;
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
     runGate: async () => { gateCalls++; await sleep(30); return { passed: true }; },
+    syncAttachBudgetMs: PINNED_SYNC_BUDGET_MS,
   });
 
   // Fired back-to-back with NO await between them — both calls race PendingOpRegistry.attach's own
