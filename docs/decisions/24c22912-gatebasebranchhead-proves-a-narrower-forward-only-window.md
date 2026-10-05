@@ -15,6 +15,10 @@ What this capture actually proves is narrower and forward-only: an UNCHANGED bra
 
 A reader of `gateBaseBranchHead`'s own doc gets the precise window the stability proof covers, rather than a claim broad enough to imply an atomic check that was never actually made.
 
+## Known gap (card `7e6461e5`; fix carded separately as `afa80698`)
+
+The Do-Not line above — "the eventual squash can only no-op or hit a genuine, loud conflict, never silently land unverified content" — is FALSE on the dirty-preLanded path when main REVERTS the already-landed squash during the gate. Sequence: `preLanded` set on a dirty worktree (service.ts:16164, 16234-16240) skips the clean ALREADY_MERGED shortcut; `gateBaseMainHead`/`gateBaseBranchHead` captured once, pre-gate (service.ts:16219/16229); the preLanded producer is never re-verified before squash (service.ts:16902, gated `!preLanded`); a human/Platform-Lead reverts the landed commit on main mid-gate; inside the lock the branch tip is unchanged so `branchStableSinceGateBase` is true (worktrees.ts:7034-7035) and `requireCanonicalHead` is SKIPPED (worktrees.ts:7037-7050); `git merge --squash` against the now-reverted HEAD is a clean three-way merge (merge-base unaffected, main's tree now matches it) that reproduces the reverted content exactly — landing as a brand-new commit (worktrees.ts:7361-7514), never a no-op, never a conflict.
+
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`gateBaseBranchHead`'s declaration doc, the "This is sound, but only as far as it's actually proven" paragraph), as of this tranche's HEAD before this extraction. Wrapped source lines joined into a flowing paragraph, `//` comment markers stripped, no wording changed. Companion record: [[eda70da6-gate-base-re-verification-and-the-toctou-closed-squash-target]] (the broader `gateBaseMainHead`/`gateBaseBranchHead` mechanism, card `b0ab78d6`) — this record narrows one specific claim within that mechanism, cited under its own distinct card id.

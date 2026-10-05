@@ -26,6 +26,10 @@ A companion fix (card `7efc2bff`) resolves the branch's squash target to a froze
 - Do not enforce `requireCanonicalHead` unconditionally on the preLanded path — reproduced regression: it turns a routine idempotent success into a routine refusal whenever main moves during an 8-14min gate.
 - Do not treat a failed fresh read of the branch's tip as "assume unchanged" — it must fall through to ordinary enforcement, same as a provably-moved branch.
 
+## Known gap
+
+FALSE - see `24c22912`, `afa80698`
+
 ## Consequences
 
 A merge can no longer land content the gate never validated against main's current state, and a routine preLanded re-confirm no longer spuriously refuses because main moved during its own gate.
