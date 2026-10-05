@@ -447,6 +447,16 @@ function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault, b
   // Undefined on create (nothing is seeded yet by definition).
   bindingsSeeded?: boolean;
 }) {
+  // card 5b6f30c1: chatScope's ONLY consumer is the one-shot first-binding seed (companion/factory.ts,
+  // gated on !cfg.bindingsSeeded), so the old unconditional "boot-seed default" was false once seeded.
+  // Unlike allowedChatId it has NO second live job to disclose: live per-sender authz reads the BINDING's
+  // own scope (companion/auth.ts), never the config's, so once seeded the field really is inert — hence
+  // the seeded copy says so plainly and points at Access, where a rebind upserts the real scope.
+  const chatScopeSub = mode === "create"
+    ? "dm = private · group = allowlisted senders"
+    : bindingsSeeded
+      ? "already seeded · no effect now · scope lives in Access"
+      : "seeds the first binding's scope · no effect once seeded";
   return (
     <>
       <Field label="Name" sub="optional · applies on the companion's next spawn, not a bare resume">
@@ -469,7 +479,7 @@ function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault, b
         <Field label="Channel">
           <Input value={form.channel} onChange={(e) => set("channel", e.target.value)} placeholder="telegram" spellCheck={false} />
         </Field>
-        <Field label="Chat scope" sub={mode === "create" ? "dm = private · group = allowlisted senders" : "boot-seed default · routing lives in Access"}>
+        <Field label={mode === "create" ? "Chat scope" : "Initial chat scope"} sub={chatScopeSub}>
           <Select value={form.chatScope} onChange={(e) => set("chatScope", e.target.value as "dm" | "group")}>
             <option value="dm">dm</option>
             <option value="group">group</option>
@@ -706,7 +716,7 @@ function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onCh
             <Chip label="name" value={cfg.name || "unnamed"} tone={cfg.name ? undefined : "muted"} />
             <Chip label="token" value={maskedToken(cfg)} />
             <Chip label="channel" value={cfg.channel} tone="cyan" />
-            <Chip label="scope" value={cfg.chatScope} />
+            <Chip label="initial scope" value={cfg.chatScope} />
             <Chip label="initial chat" value={cfg.allowedChatId} />
             <Chip label="heartbeat" value={cfg.heartbeatIntervalMinutes ? `${cfg.heartbeatIntervalMinutes}m` : "off"} tone={cfg.heartbeatIntervalMinutes ? "phosphor" : "muted"} />
             <Chip label="home" value={cfg.home ? `${cfg.home.channel}:${cfg.home.chatId}`
