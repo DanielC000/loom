@@ -15,6 +15,17 @@ import { color, font, radius } from "../theme";
 const PRESETS_KEY = ["presetPrompts"] as const;
 const SUGGESTIONS_KEY = ["presetPromptSuggestions"] as const;
 
+// This overlay's surface, shared with the composer's corner icon cluster — which floats ABOVE the
+// overlay (see TRIGGER_CLUSTER_RESERVE below) and wears this same colour as a chip so it reads as the
+// panel's own corner rather than an icon stranded on top of the content. One declaration, two users:
+// a second literal would drift the moment either is retuned.
+export const PRESET_OVERLAY_SURFACE = "rgba(15,18,21,0.985)";
+
+// Bottom padding that keeps this panel's content clear of the composer's corner icon cluster (the Spark
+// trigger + expand button), which paints over the panel so the trigger stays clickable while open. The
+// cluster sits at bottom:4 and is 18px tall, so it ends 22px up; 26px leaves a 4px breathing gap.
+const TRIGGER_CLUSTER_RESERVE = 26;
+
 // The "Spark" overlay: a full-bleed panel over the composer textarea, right-aligned and rising from the
 // bottom-right corner (position:absolute inside the composer's relative left column — left/right/bottom:0,
 // min-height matches the textarea; taller content grows UPWARD over the terminal pane). It NEVER pushes
@@ -38,10 +49,11 @@ export function PresetPromptsPopover({ onInsert }: { onInsert: (prompt: string) 
       className="loom-preset-overlay-in"
       onClick={(e) => e.stopPropagation()}
       style={{ position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 30, minHeight: "100%",
-        maxHeight: 320, overflowY: "auto", background: "rgba(15,18,21,0.985)",
+        maxHeight: 320, overflowY: "auto", background: PRESET_OVERLAY_SURFACE,
         border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
         boxShadow: `inset 0 0 0 1px ${color.phosphorDim}, 0 12px 40px rgba(0,0,0,0.6)`,
-        padding: 8, display: "flex", flexDirection: "column", gap: 6, outline: "none",
+        padding: `8px 8px ${TRIGGER_CLUSTER_RESERVE}px`,
+        display: "flex", flexDirection: "column", gap: 6, outline: "none",
         transformOrigin: "bottom right" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <SectionLabel style={{ margin: 0 }}>Preset prompts</SectionLabel>

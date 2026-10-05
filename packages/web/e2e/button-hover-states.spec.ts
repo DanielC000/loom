@@ -266,33 +266,42 @@ test("the composer's presets trigger and the popover's icon buttons hover (Compo
 
   // Open the popover. `force` bypasses the actionability "stable" check — the corner button sits over the
   // terminal, whose font settle can jitter it a sub-pixel (composer-preset-insert.spec.ts forces for the
-  // same reason). This also parks the pointer on the trigger, keeping the first icon reading below clean.
+  // same reason).
   await trigger.click({ force: true });
   const dialog = page.getByRole("dialog", { name: "Preset prompts" });
   await expect(dialog).toBeVisible();
 
-  // The OPEN trigger now carries `.loom-btn-on` — the same --loom-phosphor label and --loom-phosphor-dim
-  // fill its inline style used, so the open appearance is unchanged. Its hover rule is NOT asserted here:
-  // the popover is `position:absolute; inset 0/0/0; z-index:30` over the same corner, so it covers the
-  // trigger and no real pointer can reach it while open (measured below, so this is a fact about the
-  // layout rather than an untested excuse). The class still matters: it is what keeps the open state out
-  // of the inline style, where it would shadow the hover rule for every future layout too.
-  await expect(trigger).toHaveClass(/\bloom-btn-on\b/);
-  await expect(trigger).toHaveCSS("color", "rgb(46, 230, 110)");
-  await expect(trigger).toHaveCSS("background-color", "rgba(46, 230, 110, 0.15)");
-  expect(await isTopmostAtCentre(trigger), "the open popover is expected to cover its own trigger").toBe(false);
-
-  // ── PresetPrompts' IconButton, both forms. These are RAW `loom-btn loom-btn-<variant>` elements that
-  // used to restate the variant's own `color` inline — identical value, total shadowing. Rest must be
-  // unchanged (--loom-text-dim / --loom-red, i.e. exactly what the variant class already sets).
-  // Park the pointer on inert copy first. The popover rises OVER the corner the pointer was left on by
-  // the opening click, so without this the first icon measured is already in its hover state and its
-  // "rest" reading is a lie. The dialog's top-left is the "Preset prompts" section label — the "+ Add"
-  // button is at the other end of that row.
+  // Park the pointer on inert copy before ANY reading below. The popover rises OVER the corner the
+  // opening click left the pointer on, and since card b6896a96 the trigger stays reachable under it — so
+  // without this park the trigger's open "rest" reading is really its HOVER (measured:
+  // rgba(46, 230, 110, 0.28) against a 0.15 rest), and the first popover icon measured would be hovered
+  // too. The dialog's top-left is the "Preset prompts" section label; the "+ Add" button is at the other
+  // end of that row. ⛔ Never park at a viewport corner — it expands the collapsed primary-nav rail,
+  // which then intercepts pointer events and times out the next hover.
   const dialogBox = await dialog.boundingBox();
   expect(dialogBox, "the popover should have a layout box").toBeTruthy();
   await page.mouse.move(dialogBox!.x + 4, dialogBox!.y + 4);
 
+  // The OPEN trigger now carries `.loom-btn-on` — the same --loom-phosphor label and --loom-phosphor-dim
+  // fill its inline style used, so the open appearance is unchanged. The class is also what keeps the open
+  // state out of the inline style, where it would shadow the hover rule for every future layout too.
+  //
+  // This spec used to pin the opposite of the reachability assertion below: the popover is
+  // `position:absolute; inset 0/0/0; z-index:30` over this same corner, so it COVERED its own trigger and
+  // no real pointer could reach it while open — which was measured here and then carded as the bug it is
+  // (b6896a96: an `aria-expanded` control you cannot activate to collapse). The corner cluster now paints
+  // above the popover, so the trigger stays reachable and `.loom-btn-on`'s own hover rule is live. The
+  // toggle-close behaviour itself is covered by composer-presets-toggle-close.spec.ts.
+  await expect(trigger).toHaveClass(/\bloom-btn-on\b/);
+  await expect(trigger).toHaveCSS("color", "rgb(46, 230, 110)");
+  await expect(trigger).toHaveCSS("background-color", "rgba(46, 230, 110, 0.15)");
+  expect(await isTopmostAtCentre(trigger), "the open popover must not cover its own trigger").toBe(true);
+
+  // ── PresetPrompts' IconButton, both forms. These are RAW `loom-btn loom-btn-<variant>` elements that
+  // used to restate the variant's own `color` inline — identical value, total shadowing. Rest must be
+  // unchanged (--loom-text-dim / --loom-red, i.e. exactly what the variant class already sets).
+  // The pointer is already parked on the dialog's inert top-left copy — hoisted above the open-trigger
+  // readings, which need it just as much since b6896a96 — so this first icon's rest reading is clean.
   const editIcon = dialog.getByRole("button", { name: `Edit ${LABEL}` });
   await expect(editIcon).toBeVisible();
   await expect(editIcon).toHaveCSS("color", "rgb(138, 146, 155)");

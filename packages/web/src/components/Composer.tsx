@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Button, Select, StatusPill, Panel, SectionLabel, Chip } from "./ui";
-import { color, font } from "../theme";
+import { color, font, radius } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang, voiceLangOptions } from "../lib/useVoiceLang";
 import { getDraft, setDraft, clearDraft } from "../lib/composerDrafts";
 import { useDismissable } from "../lib/useDismissable";
-import { PresetPromptsPopover } from "./PresetPrompts";
+import { PresetPromptsPopover, PRESET_OVERLAY_SURFACE } from "./PresetPrompts";
 
 // Reliable "send a turn" box: posts through the daemon's busy-gated enqueue (auto-Enter, queues
 // if a turn is in flight) so a human send and the programmatic worker_report enqueue can't collide.
@@ -135,13 +135,26 @@ export function Composer({ sessionId }: { sessionId: string }) {
             style={{ flex: 1, resize: "none", minHeight: 44, boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: "6px 52px 6px 8px", fontFamily: font.mono, fontSize: 13 }}
           />
           {/* Two-icon cluster in the bottom-right corner: the presets (Spark) trigger + the expand
-              button, both ghost, absolutely positioned so they add ZERO height to the composer. */}
-          <div style={{ position: "absolute", bottom: 4, right: 4, display: "flex", alignItems: "center", gap: 2 }}>
+              button, both ghost, absolutely positioned so they add ZERO height to the composer.
+
+              @decision b6896a96 — do not drop this cluster's zIndex back below the Spark popover's: the
+              popover is a full-bleed overlay of this same box, so a lower cluster makes its own trigger
+              and the expand button beside it unclickable for as long as the popover is open. */}
+          <div style={{ position: "absolute", bottom: 4, right: 4, display: "flex", alignItems: "center", gap: 2,
+            zIndex: 31,
+            // While the popover is up the cluster floats over its content, so it wears the popover's own
+            // surface as a small corner chip — scrolled rows pass cleanly behind it instead of showing
+            // through the glyphs. The negative margin bleeds the chip 2px into the corner WITHOUT moving
+            // either button, so the trigger's hit box is identical open or closed.
+            ...(presetsOpen
+              ? { background: PRESET_OVERLAY_SURFACE, borderRadius: radius.base, padding: 2, margin: -2 }
+              : null) }}>
             <PresetsButton open={presetsOpen} onClick={() => setPresetsOpen((o) => !o)} />
             <ExpandButton onClick={() => { setPresetsOpen(false); setExpanded(true); }} />
           </div>
           {/* Spark popover — a full-bleed overlay of the textarea, rising from the bottom-right corner.
-              Absolute ⇒ never pushes layout; the composer footprint stays fixed. */}
+              Absolute ⇒ never pushes layout; the composer footprint stays fixed. It reserves bottom
+              padding for the corner cluster above, which paints over it (see the cluster's own note). */}
           {presetsOpen && <PresetPromptsPopover onInsert={insertPreset} />}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 4, justifyContent: "flex-end", width: 176 }}>
