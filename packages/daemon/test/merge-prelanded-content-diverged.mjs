@@ -48,7 +48,10 @@ function headSha(repo) {
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo }).toString().trim();
 }
 function statusPorcelain(repo) {
-  return execFileSync("git", ["status", "--porcelain"], { cwd: repo }).toString().trim();
+  // trimEnd only (never trim): a plain `.trim()` would eat a genuine leading status-column space on the
+  // FIRST porcelain line (e.g. " M README.md", unstaged-only) — indistinguishable afterward from that
+  // column being absent, which defeats any column-anchored (`^`) check against it.
+  return execFileSync("git", ["status", "--porcelain"], { cwd: repo }).toString().trimEnd();
 }
 function revert(repo, sha) {
   execFileSync("git", [...ID_ARGS, "revert", "--no-edit", sha], { cwd: repo });
@@ -245,12 +248,17 @@ async function makeWorktree(repo, projId, taskId) {
   check("(5) THE BUG THIS CLOSES: the refusal's own reason names the residue, never claims the repo was restored", /residue/i.test(result.reason) && !/restored to its pre-merge state/.test(result.reason));
   // Reproduces the Code Reviewer's own observation: the reverted branch content (feature.txt) sits
   // ADDED next to the pre-existing dirt (README.md), simultaneously — BOTH survive this refusal
-  // uncommitted (measured: `git merge --squash` itself re-stages a pre-existing unstaged modification
-  // to an unrelated tracked file as part of resolving the merge, so README.md shows as staged-modified
-  // here too, not unstaged as a naive before-the-squash mental model would predict — `hadUnstagedDirtAtEntry`
-  // is captured ONCE at entry, before the squash ever runs, so the skip decision is unaffected either way).
+  // uncommitted. MEASURED (not the naive mental model this comment previously asserted): `git merge
+  // --squash` only stages the paths the BRANCH itself changed (feature.txt, a clean STAGED add — index
+  // and worktree agree, "A  feature.txt"); it never touches README.md at all, so the pre-existing dirt
+  // there is left exactly as `resetOrSkip` found it — UNSTAGED, " M README.md" (index column clean,
+  // worktree column modified). The pattern below anchors the INDEX (first porcelain) column to pin that
+  // precisely — `git status --porcelain` is `XY<space>path`: a staged-only mod reads "M  README.md" (M
+  // at column 0), an unstaged-only one reads " M README.md" (M at column 1) — an unanchored
+  // `/M\s+README\.md/` matches both equally and proves nothing about which column actually fired; it's
+  // what let this comment's own prior (wrong) "staged" claim go unnoticed.
   const status = statusPorcelain(repo);
-  check("(5) reproduces the Code Reviewer's observation: feature.txt added + README.md modified, BOTH present at once (uncommitted)", /A\s+feature\.txt/.test(status) && /M\s+README\.md/.test(status));
+  check("(5) reproduces the Code Reviewer's observation: feature.txt added + README.md modified, BOTH present at once (uncommitted)", /^A\s+feature\.txt$/m.test(status) && /^ M\sREADME\.md$/m.test(status));
 }
 
 console.log(failures === 0

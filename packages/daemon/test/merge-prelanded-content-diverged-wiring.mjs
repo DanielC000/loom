@@ -21,6 +21,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       shape, on a project with NO gateCommand configured at all (the `if (gate)` block that normally
 //       derives `expectAlreadyLanded` never runs). Asserts the no-gate-call-site derivation still catches
 //       it — `confirm.landedContentDiverged === true`, content stays absent, zero gate calls.
+//   (D) RESIDUE-POSSIBLE DETAILTEXT — card fc7827e7 item 1: `merge-prelanded-content-diverged.mjs`'s own
+//       scenario (5) pins `mergeBranch`'s raw `reason` for a pre-existing-canonical-dirt residue, but
+//       nothing drove that same shape through the real confirm wiring to pin `confirmWorkerMerge`'s own
+//       `detailText` (service.ts's `merge.residuePossible ?` ternary) — flipping that ternary stayed
+//       green with no confirm-level test touching it. Asserts `confirm.detailText` names the
+//       `git diff --cached` remedy and never claims the canonical repo is "untouched".
 //
 // MANUAL MUTATION PROOFS (not re-run automatically here — a single-assignment source mutation isn't
 // expressible as a test case in this same file, same posture as emit-compare-gate-scope-reclassify.mjs's
@@ -31,6 +37,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   - removing `"landed-content-diverged"` from `NEVER_CACHED_OUTCOMES` (pending-ops.ts) turns scenario
 //     (B) RED (op 2 comes back with a `cacheHit`, and the fake gate's call count does not increment).
 //   - commenting out the `if (!gate && !owedBase) { ... }` derivation (service.ts) turns scenario (C) RED.
+//   - flipping `merge.residuePossible ?` (service.ts, the `landedContentDiverged` branch's own
+//     `detailText` ternary) turns scenario (D) RED — `detailText` then claims "canonical repo untouched"
+//     on exactly the run where the pre-existing canonical dirt left it anything but. RED/GREEN proof:
+//     `pnpm --filter @loom/daemon negative-control --file packages/daemon/src/sessions/service.ts --test
+//     packages/daemon/test/merge-prelanded-content-diverged-wiring.mjs`.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-prelanded-content-diverged-wiring.mjs
 import fs from "node:fs";
@@ -231,8 +242,53 @@ try {
     check("(C) worktree retained for a retry", fs.existsSync(worktreePath) === true);
   }
 
+  // ── (D) RESIDUE-POSSIBLE DETAILTEXT — card fc7827e7 item 1. Same dirty-preLanded-then-reverted shape
+  //        as (A), PLUS pre-existing UNSTAGED dirt in the CANONICAL repo (not the worktree) on a path
+  //        unrelated to the branch — mirrors merge-prelanded-content-diverged.mjs's own scenario (5), now
+  //        driven through the REAL confirmWorkerMerge wiring instead of calling mergeBranch directly, so
+  //        it exercises `detailText` (service.ts), not just `reason` (worktrees.ts). ──────────────────────
+  {
+    console.log("\n— (D) confirm-level detailText: pre-existing canonical unstaged dirt sets residuePossible —");
+    const P = mk("d");
+    const repo = makeRepo("d");
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const { worktreePath, branch } = await createWorktree(repo, P.projId, P.taskId);
+    worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "feature-d.txt"), "work for D\n");
+    commitAll(worktreePath, "feature work", GIT_ID);
+
+    const land = await mergeBranch(repo, branch, "feature D landed");
+    check("(D) precondition: landed cleanly", land.ok === true);
+    const X = headSha(repo);
+
+    revert(repo, X); // lands BEFORE the re-confirm
+    check("(D) precondition: the revert landed, feature-d.txt is gone again", !fs.existsSync(path.join(repo, "feature-d.txt")));
+
+    // Pre-existing UNSTAGED dirt in the CANONICAL repo (not the worktree), on a path totally unrelated to
+    // the branch — makes `hadUnstagedDirtAtEntry` true, so `resetOrSkip` SKIPS the cleanup and
+    // `residuePossible` is set on the raw `mergeBranch` result this confirm wraps.
+    fs.appendFileSync(path.join(repo, "README.md"), "a human's own in-progress edit\n");
+
+    let gateCalls = 0;
+    const fakeGate = async () => { gateCalls++; return { passed: true }; };
+    const db = new Db(); dbs.push(db);
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    seed(db, P, repo, worktreePath, branch, "pnpm gate");
+
+    // Dirty at the preLanded clean-shortcut's own stamp, clean again before the gate's own before-spawn
+    // dirty check (see (A)'s own comment) — the CANONICAL dirt above is independent of this worktree race.
+    stageDirtClearedBeforeGateSpawns(sessions, branch, worktreePath);
+
+    const confirm = await sessions.confirmWorkerMerge(P.mgrId, P.workerId);
+    check("(D) refused via confirmWorkerMerge, not silently re-landed", confirm.merged === false && confirm.landedContentDiverged === true);
+    check("(D) THE ASSERTION THIS CARD ADDS: detailText names the git diff --cached remedy", /git diff --cached/.test(confirm.detailText ?? ""));
+    check("(D) THE ASSERTION THIS CARD ADDS: detailText does NOT claim the canonical repo is untouched", !/untouched/i.test(confirm.detailText ?? ""));
+    check("(D) the pre-existing README.md edit survives (resetOrSkip correctly declined to discard it)", fs.readFileSync(path.join(repo, "README.md"), "utf8").includes("a human's own in-progress edit"));
+    check("(D) worktree retained for a retry", fs.existsSync(worktreePath) === true);
+  }
+
   console.log(failures === 0
-    ? "\n✅ ALL PASS — a real SessionService.confirmWorkerMerge call on a dirty-preLanded, reverted-before-the-gate branch refuses via landedContentDiverged (A); a re-confirm on the same op genuinely re-derives rather than replaying a cached verdict (B); and the same protection reaches a project with NO gateCommand configured at all (C)."
+    ? "\n✅ ALL PASS — a real SessionService.confirmWorkerMerge call on a dirty-preLanded, reverted-before-the-gate branch refuses via landedContentDiverged (A); a re-confirm on the same op genuinely re-derives rather than replaying a cached verdict (B); the same protection reaches a project with NO gateCommand configured at all (C); and when the canonical repo's own pre-existing dirt blocks the cleanup, confirmWorkerMerge's own detailText names the residue and never claims the repo is untouched (D)."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
   for (const db of dbs) { try { db.close(); } catch { /* ignore */ } }

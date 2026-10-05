@@ -148,9 +148,12 @@ assertExactHits("(1) positive control", "CLAUDE.md", {
 // back a worktree's own copy to prove branch-vs-main content diverged correctly. merge-prelanded-
 // content-diverged.mjs (card afa80698 round 2, hand-verified 2026-10-05) reads back its OWN throwaway
 // `makeRepo()` fixture's README.md to prove a human's pre-existing unstaged edit to it survives a
-// `landedContentDiverged` refusal untouched. None assert anything about THIS repo's real root README.md.
+// `landedContentDiverged` refusal untouched. merge-prelanded-content-diverged-wiring.mjs (card fc7827e7,
+// hand-verified 2026-10-05) reads back the SAME shape through the real confirmWorkerMerge wiring instead
+// (its own scenario (D)). None assert anything about THIS repo's real root README.md.
 assertExactHits("(2)", "README.md", {
   "merge-gate.mjs": 1,
+  "merge-prelanded-content-diverged-wiring.mjs": 1,
   "merge-prelanded-content-diverged.mjs": 1,
   "merge-union-gate.mjs": 1,
   "worker-prompt.mjs": 3,
