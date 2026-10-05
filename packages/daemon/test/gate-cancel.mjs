@@ -58,9 +58,9 @@ const GENEROUS_SYNC_BUDGET_MS = 600_000;
 // emit-compare-gate-scope-reclassify.mjs for the fault-injection proof this is a genuine-but-slow
 // condition, never an error). 16s keeps ~2x margin over the one measured overshoot while still failing a
 // genuinely wedged op in well under this file's per-test budget.
-async function waitUntil(predicate, { intervalMs = 15, timeoutMs = 16000 } = {}) {
+async function waitUntil(predicate, { intervalMs = 15, timeoutMs = 16000, label = "gate-cancel: condition" } = {}) {
   try {
-    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label: "gate-cancel: condition" });
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label });
   } catch {
     return predicate(); // one last try, then give up honestly
   }
@@ -586,7 +586,24 @@ function makeRepo(repo) {
     // this card. Fired without an immediate `await` — its own merge gate queues behind workerHolder, and
     // we don't need that to settle before checking the self-check's own outcome below.
     const pOwnerConfirm = sessions.confirmWorkerMergeTracked(mgrB, workerB);
-    const selfCheckSettled = await pSelfCheck;
+
+    // Card 08cdba65: a plain `await pSelfCheck` here hangs the whole file at an external timeout
+    // (opaque, no named FAIL) if `supersedeQueuedSelfCheck` ever regresses to a no-op — workerB's
+    // self-check then just sits queued behind workerHolder, who is only released in this block's own
+    // `finally`, AFTER this await would need to have already returned. Poll a flag `pSelfCheck` itself
+    // sets on settlement, bounded by the shared waitUntil helper, so a regression here reports a named
+    // FAIL fast instead of wedging the file; the `.then` handlers below are attached unconditionally
+    // and settle `selfCheckOutcome` whenever `pSelfCheck` actually resolves, even if that happens after
+    // this wait gives up (e.g. once `finally` below releases the holder and frees the queue slot).
+    let selfCheckDone = false;
+    let selfCheckOutcome;
+    pSelfCheck.then(
+      (v) => { selfCheckOutcome = v; selfCheckDone = true; },
+      (e) => { selfCheckOutcome = { ok: false, error: e }; selfCheckDone = true; },
+    );
+    await waitUntil(() => selfCheckDone, { label: "(wording) workerB's self-check settles (superseded by its owner's confirm, or a supersedeQueuedSelfCheck regression)" });
+    check("(wording) workerB's own self-check settled instead of hanging (a FAIL here means supersedeQueuedSelfCheck likely regressed to a no-op)", selfCheckDone === true);
+    const selfCheckSettled = selfCheckOutcome ?? {};
     check("(wording) workerB's queued self-check WAS superseded by its real owner's confirm",
       selfCheckSettled.ok === true && selfCheckSettled.value?.cancelled === true && selfCheckSettled.value?.cancelKind === "superseded-by-merge");
     const reasonText = String(selfCheckSettled.value?.reason ?? "");
