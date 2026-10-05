@@ -742,9 +742,13 @@ function TaskDrawerError({ onClose, onRetry }: { onClose: () => void; onRetry: (
   return (
     <TaskDrawerPlaceholder onClose={onClose}>
       <span style={{ color: color.red, fontFamily: font.mono, fontSize: 12 }}>couldn’t load this task</span>
+      {/* Kit Buttons, not bare <button>s (card 95eabed1): there is no `color-scheme: dark`, so an
+          unstyled button renders the UA's light bevel — two white chips on the Panel. `primary` is the
+          recovery action, `default` the dismissal, matching every other action/dismiss pair in the app.
+          Both carry the kit's own font.mono/12, so no inline type overrides remain. */}
       <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={onRetry} style={{ fontFamily: font.mono, fontSize: 12 }}>retry</button>
-        <button onClick={onClose} style={{ fontFamily: font.mono, fontSize: 12 }}>close</button>
+        <Button variant="primary" onClick={onRetry}>retry</Button>
+        <Button onClick={onClose}>close</Button>
       </div>
     </TaskDrawerPlaceholder>
   );
