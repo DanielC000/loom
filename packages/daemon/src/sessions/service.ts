@@ -15,7 +15,7 @@ import {
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import { agentAssignableProfileError } from "../profiles/validate.js";
-import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry, WedgedWorktreeEntry } from "../db.js";
+import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry, WorkerEventPresence, WedgedWorktreeEntry } from "../db.js";
 import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
@@ -22365,6 +22365,46 @@ export class SessionService {
   }
 
   /**
+   * A STALE generation (its worktreePath has been reused by a re-task; see `currentGenerationIds` in
+   * {@link reconcileOrchestrationOnBoot}) may still have its OWN outstanding `merge_request` — always
+   * escalates once, never attributes, never touches a worktree/branch. Returns `"escalated"` or
+   * `"no-op"` (no merge_request of its own to begin with). Cheap on every later boot: one app_meta
+   * read + write, no git call.
+   *
+   * @decision 21b53e6a — round 2 (Code Review 620da79c) removed round 1's DB-only attribution by
+   * matching tip (drifted whenever main moved; see that card's own decision record for the full why).
+   */
+  private resolveStaleGenerationOwnLanding(
+    s: Session, project: Project, eventPresence: WorkerEventPresence | undefined,
+  ): "escalated" | "no-op" {
+    if (!eventPresence?.hasMergeRequest || !s.branch || !s.taskId) return "no-op";
+    // @decision 21b53e6a — round 3: never escalate a merge_request already followed by this row's OWN
+    // merge_rejected/merge_cancelled — that is a DECIDED outcome, not a stuck landing.
+    const lifecycle = this.db.listEventsForWorkerKinds(s.id, ["merge_request", "merge_done", "merge_rejected", "merge_cancelled"]);
+    const latest = lifecycle[lifecycle.length - 1];
+    if (latest && latest.kind !== "merge_request") return "no-op";
+    const branch = s.branch;
+    const taskId = s.taskId;
+    const entry = this.db.recordStaleGenerationUnresolved(s.id, { branch, taskId, projectId: project.id },
+      "stale generation has its own unresolved merge_request — the shared branch/worktree now belong to a different generation, so no DB-only attribution is attempted");
+    if (!entry.escalated) {
+      const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
+      // @decision 21b53e6a — round 3: never let this nudge's `git log --grep` hint imply the branch is
+      // unique to this worker — it is SHARED with the current generation; surface this worker's OWN tip
+      // + active window too, or a human cannot tell the two generations' landings apart.
+      const tip = typeof latest?.detail?.tip === "string" ? latest.detail.tip : null;
+      const tipNote = tip ? ` (this worker's own recorded merge_request tip: ${tip.slice(0, 8)})` : " (this worker's own merge_request recorded no tip)";
+      const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path${tipNote}, active from ${s.createdAt} to ${s.lastActivity}. Loom will NOT auto-attribute this — the shared branch/worktree now belong to a different generation, so there is no safe DB-only way to resolve it automatically, and no dedicated action exists to close just this alert. The branch name ${branch} is SHARED with the current generation — \`git log --grep "Loom-Worker-Branch: ${branch}"\` on the project's mainline will also match the CURRENT generation's own, later landing, not just this worker's; use this worker's own recorded tip and its createdAt→lastActivity window above to tell the generations apart. If this worker's own work is found there, this alert is stale and can be ignored (or the task closed by hand if it is otherwise idle); if not, the work may need to be redone.`
+        + this.buildStampSuffix(currentDeployStaleness());
+      try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
+      this.db.markStaleGenerationEscalated(s.id);
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — escalated [loom:merge-orphaned] to ${target.slice(0, 8)} (one-shot)`);
+    }
+    return "escalated";
+  }
+
+  /**
    * Boot-time orchestration reconcile (#22 run-2 + audit M4). Run once at daemon boot, AFTER
    * recoverStaleSessions has marked prior-run ptys exited (so nothing live holds a worktree).
    * Three surgical, idempotent passes:
@@ -22404,7 +22444,7 @@ export class SessionService {
   // `gitDeps` (card 6ee48e4d): test-only seam for Pass A's git ops, defaulting to {} so every production
   // call site (index.ts's boot call) is unaffected — a test can inject a counting/stubbed `gitFactory` to
   // prove Pass A's early-out never spawns git for an already-finalized worker.
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesHeld: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesPathRefused: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesHeld: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesPathRefused: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number; staleGenerationUnresolvedEscalated: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     // @decision dd494a9b — precompute both maps for Pass A (per-session calls were 96% of a ~7-min boot
@@ -22444,6 +22484,48 @@ export class SessionService {
       const isLive = s.processState !== "exited" && s.resumability !== "dead";
       if (protectedSessionIds.has(s.id) || isLive) protectedWorktreePaths.add(s.worktreePath);
     }
+    // @decision 21b53e6a — never key a worktree/branch-destroying decision, or a squash lookup by the
+    // shared BRANCH NAME, on fs.existsSync(worktreePath) alone: a re-task reuses a PRIOR worker's exact
+    // path/branch with no recycle relationship, so that check reads a NEWER generation's state as its own.
+    const currentGenerationIds = new Map<string, Set<string>>();
+    {
+      const byPath = new Map<string, Session[]>();
+      for (const s of all) {
+        if (s.role !== "worker" || !s.worktreePath) continue;
+        const arr = byPath.get(s.worktreePath);
+        if (arr) arr.push(s); else byPath.set(s.worktreePath, [s]);
+      }
+      // @decision 21b53e6a — round 2: a failed recycle's dead successor is otherwise indistinguishable
+      // from a fresh re-task generation and would win the tiebreak below on its newer createdAt.
+      // Exclude every id this names BEFORE grouping heads; see that card's own decision record.
+      const failedRecycleSuccessorIds = this.db.listFailedRecycleSuccessorIds();
+      for (const [wp, allRows] of byPath) {
+        const rows = allRows.filter((r) => !failedRecycleSuccessorIds.has(r.id));
+        if (rows.length === 0) continue; // every row at this path was a failed recycle attempt — defensive; a failed attempt always has a real predecessor sharing the path
+        if (rows.length === 1) { currentGenerationIds.set(wp, new Set([rows[0]!.id])); continue; }
+        const byId = new Map(rows.map((r) => [r.id, r]));
+        // A "head" is a row no OTHER row in this group recycled FROM — the newest member of its own
+        // lineage. Multiple heads here means multiple DISTINCT generations share this path (the re-task
+        // case); exactly one head means a single recycle chain (every member is current, no stale leg).
+        // TIEBREAK: on an exact `createdAt` tie between two distinct heads, `reduce` keeps whichever
+        // appears FIRST in `rows` (iteration order from `listAllSessionsIncludingArchived`'s own `ORDER
+        // BY last_activity DESC`, not a meaningful chronology) — an arbitrary but deterministic pick.
+        // Real generations are always strictly chronologically ordered (a re-task/recycle happens
+        // strictly after its predecessor), so this tie is theoretical at today's millisecond resolution,
+        // never observed in practice.
+        const predecessorIds = new Set(rows.map((r) => r.recycledFrom).filter((id): id is string => !!id));
+        const heads = rows.filter((r) => !predecessorIds.has(r.id));
+        const headWinner = heads.reduce((best, r) => (!best || r.createdAt > best.createdAt ? r : best), undefined as Session | undefined) ?? rows[0]!;
+        const lineage = new Set<string>([headWinner.id]);
+        let cur: Session | undefined = headWinner;
+        while (cur?.recycledFrom && byId.has(cur.recycledFrom)) {
+          lineage.add(cur.recycledFrom);
+          cur = byId.get(cur.recycledFrom);
+        }
+        currentGenerationIds.set(wp, lineage);
+      }
+    }
+    let staleGenerationUnresolvedEscalated = 0; // card 21b53e6a: a stale generation's OWN unresolved merge_request — escalated once via [loom:merge-orphaned], never attributed (round 2)
     let mergesFinished = 0;
     let mergesHeld = 0; // card a5be590f: Pass A candidates skipped because their branch is HELD (a merge retained it) — surfaced in the result, not only a console.warn
     let mergesFailed = 0;
@@ -22517,7 +22599,11 @@ export class SessionService {
       const project = projectMap.get(s.projectId);
       if (!project) continue;
       try {
-        const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
+        // @decision 21b53e6a — a STALE generation (this row is NOT the current-generation owner of
+        // its own worktreePath, nor its recycle-lineage ancestor) never gets to treat that path's
+        // on-disk state as its OWN — a re-task's newer generation may have put a live worktree there.
+        const staleGeneration = !!s.worktreePath && !(currentGenerationIds.get(s.worktreePath)?.has(s.id) ?? true);
+        const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath) && !staleGeneration;
         // "Already reconciled" is an EVENT signal (a recorded merge_done), not the task's CURRENT column —
         // a human can freely move a merged card OFF the terminal column afterward (e.g. into a review lane)
         // without that meaning "the merge needs re-finishing." Keying this off columnKey used to make
@@ -22536,6 +22622,13 @@ export class SessionService {
         if (alreadyFinalized && !worktreeOnDisk) {
           this.db.clearMergeReconcileWedge(s.id); // no longer wedged, whatever its repoKey now says
           continue; // already fully reconciled — nothing to finish
+        }
+        // A stale generation never proceeds past this point (card 21b53e6a) — it may still have its OWN
+        // outstanding merge_request, escalated once rather than attributed, never touching the shared path/branch.
+        if (staleGeneration) {
+          const outcome = this.resolveStaleGenerationOwnLanding(s, project, eventPresence);
+          if (outcome === "escalated") staleGenerationUnresolvedEscalated++;
+          continue;
         }
         // Card 6f73da1a: a worker that NEVER requested a merge at all (no `merge_request` event on
         // record — e.g. a declared no-commit `noChanges:true` done report, auto-retired without ever
@@ -23208,7 +23301,7 @@ export class SessionService {
       // eslint-disable-next-line no-console
       console.warn(`[reconcile] ${staleAsideLeftovers.length} renamed-aside stale worktree dir(s) found under WORKTREES_DIR — never auto-deleted; see GET /api/worktrees/stale-leftovers to review and reclaim.`);
     }
-    return { mergesFinished, mergesHeld, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesPathRefused, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero };
+    return { mergesFinished, mergesHeld, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesPathRefused, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero, staleGenerationUnresolvedEscalated };
   }
 
   /**

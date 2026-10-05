@@ -46,6 +46,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { simpleGit } from "simple-git";
 import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wrap-home-${Date.now()}-${process.pid}`);
@@ -66,8 +67,39 @@ const branchExists = (cwd, branch) => git(cwd, `branch --list ${branch}`) !== ""
 const isRegisteredWorktree = (repo, worktreePath) => git(repo, "worktree list").replace(/\\/g, "/").includes(worktreePath.replace(/\\/g, "/"));
 const now = new Date().toISOString();
 
+// Card 21b53e6a MINOR #4 (Code Review 620da79c): fixture K's own checks (below) assert only END STATE
+// (worktree/branch gone, task done, Y has its own merge_done, X's event count unchanged) — and that end
+// state is IDENTICAL whether X is correctly skipped outright, or (pre-fix) X incorrectly runs the
+// sibling-cleanup-only path against Y's real, live artifacts first (X already has its own merge_done, so
+// that wrong-identity action files no NEW event either — it is silent). A `gitFactory` spy/seam (same
+// shape as pass-a-stuck-worktree-no-replay.mjs's round-5 delete-attempt spy) is the only way to actually
+// discriminate: X and Y share the EXACT same branch name (a real re-task reuse), so the delete call
+// itself is textually identical either way — only the CALL COUNT tells the two worlds apart. Delegates
+// every op to the real git, so this is safe to share as the ONE gitFactory for the whole combined
+// reconcile call below (every other fixture's git ops pass through untouched).
+const branchDeleteAttempts = [];
+const branchDeleteSpyFactory = (repoPath, blockTimeoutMs) => {
+  const real = simpleGit(repoPath, { timeout: { block: blockTimeoutMs } });
+  return {
+    raw: async (args) => {
+      if (Array.isArray(args) && (
+        (args[0] === "branch" && args[1] === "-D") ||
+        (args[0] === "update-ref" && args[1] === "-d")
+      )) branchDeleteAttempts.push({ repoPath, args });
+      return real.raw(args);
+    },
+  };
+};
+
 const db = new Db();
-const sessions = new SessionService(db, {}, new OrchestrationControl());
+// Round 3 item 3: a bare `{}` pty stub made every `enqueueDurableMessage` call inside the escalate paths
+// (resolveStaleGenerationOwnLanding / escalateWedgedMergeReconcile) THROW on `this.pty.enqueueStdin` —
+// silently swallowed by their own best-effort try/catch, so no `session_message_queued` row was EVER
+// persisted for ANY fixture in this file. A minimal `enqueueStdin` stub returning `delivered:false` (the
+// "held" shape `EnqueueResult` uses) lets that durable record actually get written, which is what the new
+// undelivered-nudge-count checks below (M/N/P) need to be able to discriminate at all.
+const pty = { enqueueStdin: () => ({ delivered: false, deliveryState: "queued" }) };
+const sessions = new SessionService(db, pty, new OrchestrationControl());
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -353,6 +385,214 @@ async function setupSiblingCleanupTipMoved(tag, repo) {
   return { projId, taskId, mgrId, predId, succId, worktreePath, branch, repo, tipAtSquash, lateTip };
 }
 
+// Card 21b53e6a. Fixtures K-N below exercise the REAL re-task shape — createWorktree() called a SECOND
+// time for the SAME taskId (not fixture E's manual sidestep to a different path) — which is the exact
+// path/branch-reuse defect this card fixes. `listAllSessionsIncludingArchived` orders by
+// `last_activity DESC`, so X's `lastActivity` is stamped LATEST so Pass A visits X first (the card's own
+// stated repro precondition); `createdAt` is stamped with X EARLIER than Y (a real re-task's generations
+// are always chronologically ordered this way) since that is what currentGenerationIds compares across
+// lineage groups.
+const xLastActivityFor = (baseNow) => new Date(Date.parse(baseNow) + 20_000).toISOString();
+const yCreatedAtFor = (baseNow) => new Date(Date.parse(baseNow) + 10_000).toISOString();
+
+// Fixture K: X genuinely landed+finalized itself (own merge_done already recorded), THEN its exact
+// worktreePath/branch is reused by re-task Y via a REAL second createWorktree() call. Y lands and
+// crash-orphans (own merge_request, no merge_done). Pre-fix: X's cheap early-out never fires (worktreeOnDisk
+// reads Y's live dir), X incorrectly runs the cleanup-only path on Y's real artifacts under X's identity.
+// Post-fix: X is recognized as stale and skipped outright; Y's own row (the current generation) finalizes
+// normally, under its OWN id.
+async function setupRealRetaskFinalized(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  fs.writeFileSync(path.join(first.worktreePath, "a.txt"), "first\n");
+  commitAll(first.worktreePath, "a", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${first.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-1" -m "Loom-Worker-Branch: ${first.branch}"`, { cwd: repo });
+  fs.rmSync(first.worktreePath, { recursive: true, force: true });
+  execSync(`git worktree prune`, { cwd: repo });
+  git(repo, `branch -D ${first.branch}`);
+  db.updateTask(taskId, { columnKey: "done" });
+  db.appendEvent({ id: randomUUID(), ts: new Date(Date.now() - 60_000).toISOString(), managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_done", detail: { branch: first.branch } });
+
+  db.updateTask(taskId, { columnKey: "in_progress" });
+  const second = await createWorktree(repo, projId, taskId); // REAL reuse: SAME path/branch as X's (gone) worktree
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "b.txt"), "second\n");
+  commitAll(second.worktreePath, "b", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-2" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo };
+}
+
+// Fixture L: X is genuinely ABANDONED — crashed before ever calling worker_merge (no merge_request, no
+// merge_done at all). Re-task Y reuses X's exact path (a real createWorktree() REUSE/recut, since the dir
+// is still on disk) and lands, crash-orphaning before its own finalize. Pre-fix (this is the SEVERE,
+// PERMANENT variant, reproduced end-to-end at source before this card's fix): X's early-out fails to fire,
+// X falls through to a GENUINE finalizeMerge call under its own wrong identity (alreadyFinalized(X) and
+// finalizedElsewhere(X) both false), misattributing Y's landing's merge_done to X and permanently stranding
+// Y's own merge_request (X's fresh merge_done outranks it by seq on every later boot). Post-fix: X is
+// skipped outright (stale, no merge_request of its own — nothing to resolve or escalate); Y finalizes under
+// its OWN id.
+async function setupRealRetaskAbandoned(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  // No commit, no merge_request, no merge_done — genuinely abandoned mid-work.
+
+  const second = await createWorktree(repo, projId, taskId); // REUSE path (dir still present) → recut branch
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "b.txt"), "second\n");
+  commitAll(second.worktreePath, "b", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-2" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo };
+}
+
+// Fixture M: X has its OWN genuine, attributable landing — it squashed onto main (real Loom-Worker-Branch +
+// Loom-Landed-Tip trailers, the SAME trailer a real solo squash stamps) and filed its OWN merge_request
+// recording that exact pre-squash tip, but crashed before its own finalize. Re-task Y then reuses the path.
+// ROUND 2 (Code Review 620da79c, Majors #1/#2): round 1's DB-only attribution by matching this trailer is
+// REMOVED — it drifted from the real landing whenever main moved (no trailer at all on a batch landing),
+// and its merge_done leaked the shared branch into generation-blind readers. X now takes the SAME
+// escalate-only path as an unattributable row (fixture N) EVEN THOUGH its landing happens to be
+// genuinely attributable — this fixture is the regression guard proving that.
+async function setupRealRetaskOwnLandingAttributable(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x work\n");
+  commitAll(first.worktreePath, "x", GIT_ID);
+  const xTip = git(first.worktreePath, "rev-parse HEAD"); // the tip X's OWN review captured, BEFORE the squash
+  execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: repo });
+  commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
+  const xLandedSha = git(repo, "rev-parse HEAD");
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // X crashes here — worktree/branch left exactly as a crash before finalize leaves them.
+
+  const second = await createWorktree(repo, projId, taskId); // REUSE path → fresh branch off current main (now includes X's landed squash)
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+  commitAll(second.worktreePath, "y", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-y" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip, xLandedSha };
+}
+
+// Fixture N: X files its OWN merge_request (claims a reviewed tip) but NOTHING ever actually lands with
+// that tip — models a worker whose request can never be verified (a crash before the squash even ran, or
+// a tip that simply never made it onto main). Per manager direction: this must escalate ONCE (a durable
+// nudge naming the worker/task/remedy) rather than being silently left unresolved forever, and must NOT
+// re-escalate on a later boot once already escalated.
+async function setupRealRetaskOwnLandingUnresolvable(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: "deadbeef".padEnd(40, "0") } });
+
+  const second = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "b.txt"), "second\n");
+  commitAll(second.worktreePath, "b", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-2" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo };
+}
+
+// Fixture P: card 21b53e6a ROUND 3 item 1 — X files its OWN merge_request but a manager reviewed it and
+// CANCELLED it (a real merge_cancelled event, chronologically AFTER the merge_request) before the re-task
+// ever happened — a DECIDED outcome, not a stuck landing. Pre-fix, `resolveStaleGenerationOwnLanding`
+// read only `eventPresence.hasMergeRequest` and escalated X anyway, even though the merge_request was
+// already resolved. Post-fix: the latest lifecycle event for X is its OWN merge_cancelled, so X is a
+// silent no-op — never tracked in the one-shot store, never enqueues a nudge.
+async function setupRealRetaskOwnLandingDecided(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: "deadbeef".padEnd(40, "0") } });
+  // A real review decision — the manager cancelled X's own merge_request BEFORE the re-task happened.
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_cancelled", detail: { branch: first.branch, cancelled: true } });
+
+  const second = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "b.txt"), "second\n");
+  commitAll(second.worktreePath, "b", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-2" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo };
+}
+
+// Fixture O: card 21b53e6a ROUND 2, MAJOR #3 — a worker P lands its own squash and files its own
+// merge_request, then crash-orphans before its own finalize. A manager's `worker_recycle` on P carries
+// the SAME worktreePath/branch forward to a fresh successor row (the recycle contract — unlike a
+// re-task, NO second createWorktree call: a recycle reuses P's exact path) — but the successor's spawn
+// FAILS, and the failure path (any of recycleWorker/recycleManager/recyclePlatformLead/
+// reconcileNeverStartedRecycleSuccessor's own catch) NULLS the dead successor F's `recycledFrom` and
+// files a `recycle_failed` event naming F as `detail.failedSuccessorId` — the one durable fact that
+// survives the nulling. F's `createdAt` is LATER than P's (a real recycle always happens after its
+// predecessor). Pre-fix: F's nulled `recycledFrom` makes it indistinguishable from a genuinely fresh
+// generation sharing P's path, and its newer `createdAt` wins the head-selection tiebreak over P — P
+// gets wrongly treated as the STALE generation (escalated instead of finalized) while F, which never
+// did any work of its own, wrongly inherits P's real landing under its own id. Post-fix: F is excluded
+// from `currentGenerationIds` outright via `listFailedRecycleSuccessorIds`, so P is the sole current
+// generation and finalizes normally under its OWN id; F (no merge_request of its own) is never touched.
+async function setupFailedRecyclePathAlias(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, pId = `wrap-${tag}-p-${sfx}`, fId = `wrap-${tag}-f-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+  fs.writeFileSync(path.join(worktreePath, "p.txt"), "p work\n");
+  commitAll(worktreePath, "p", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}" -m "Loom-Worker-Branch: ${branch}"`, { cwd: repo });
+  db.insertSession({ id: pId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: pId, taskId, kind: "merge_request", detail: { branch, filesChanged: 1, tip: branch, repoKey: null } });
+  // P crashes here, before its own finalize — exactly as a crash-before-finalize leaves the worktree/branch.
+
+  const fCreatedAt = new Date(Date.parse(now) + 10_000).toISOString();
+  db.insertSession({ id: fId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: fCreatedAt, lastActivity: fCreatedAt, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch, recycledFrom: null });
+  db.appendEvent({ id: randomUUID(), ts: fCreatedAt, managerSessionId: mgrId, workerSessionId: fId, taskId, kind: "recycle_failed", detail: { recycledFrom: pId, failedSuccessorId: fId, error: "simulated spawn failure" } });
+  return { projId, taskId, mgrId, pId, fId, worktreePath, branch, repo };
+}
+
 const R_PROTECTED = path.join(os.tmpdir(), `loom-wrap-a-${sfx}`);
 const R_CONTROL = path.join(os.tmpdir(), `loom-wrap-b-${sfx}`);
 const R_LANDED_PROTECTED = path.join(os.tmpdir(), `loom-wrap-c-${sfx}`);
@@ -363,7 +603,13 @@ const R_RETASK_STALE_ALERT = path.join(os.tmpdir(), `loom-wrap-g-${sfx}`);
 const R_REPO_SCOPED_FULL_FINALIZE = path.join(os.tmpdir(), `loom-wrap-h-${sfx}`);
 const R_REPO_SCOPED_STALE_ALERT = path.join(os.tmpdir(), `loom-wrap-i-${sfx}`);
 const R_SIBLING_CLEANUP_TIP_MOVED = path.join(os.tmpdir(), `loom-wrap-j-${sfx}`);
-let A, B, C, D, E, F, G, H, I, J;
+const R_REAL_RETASK_FINALIZED = path.join(os.tmpdir(), `loom-wrap-k-${sfx}`);
+const R_REAL_RETASK_ABANDONED = path.join(os.tmpdir(), `loom-wrap-l-${sfx}`);
+const R_REAL_RETASK_OWN_LANDING_OK = path.join(os.tmpdir(), `loom-wrap-m-${sfx}`);
+const R_REAL_RETASK_OWN_LANDING_UNRESOLVABLE = path.join(os.tmpdir(), `loom-wrap-n-${sfx}`);
+const R_FAILED_RECYCLE_PATH_ALIAS = path.join(os.tmpdir(), `loom-wrap-o-${sfx}`);
+const R_REAL_RETASK_OWN_LANDING_DECIDED = path.join(os.tmpdir(), `loom-wrap-p-${sfx}`);
+let A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P;
 
 try {
   A = await setupRecycleChain("a", R_PROTECTED);
@@ -376,6 +622,12 @@ try {
   H = await setupRepoScopedFullFinalize("h", R_REPO_SCOPED_FULL_FINALIZE);
   I = setupRepoScopedStaleAlert("i", R_REPO_SCOPED_STALE_ALERT);
   J = await setupSiblingCleanupTipMoved("j", R_SIBLING_CLEANUP_TIP_MOVED);
+  K = await setupRealRetaskFinalized("k", R_REAL_RETASK_FINALIZED);
+  L = await setupRealRetaskAbandoned("l", R_REAL_RETASK_ABANDONED);
+  M = await setupRealRetaskOwnLandingAttributable("m", R_REAL_RETASK_OWN_LANDING_OK);
+  N = await setupRealRetaskOwnLandingUnresolvable("n", R_REAL_RETASK_OWN_LANDING_UNRESOLVABLE);
+  O = await setupFailedRecyclePathAlias("o", R_FAILED_RECYCLE_PATH_ALIAS);
+  P = await setupRealRetaskOwnLandingDecided("p", R_REAL_RETASK_OWN_LANDING_DECIDED);
 
   // --- sanity: both fixtures start identical (real worktree registered, branch exists, 0 commits, clean) ---
   check("(pre-A) worktree registered before reconcile", fs.existsSync(A.worktreePath) && isRegisteredWorktree(A.repo, A.worktreePath));
@@ -411,12 +663,37 @@ try {
   check("(pre-J) successor already has its OWN merge_done (simulated prior finalize)", db.listEventsForWorker(J.succId).some((ev) => ev.kind === "merge_done"));
   check("(pre-J) predecessor has NO merge_done of its own", db.listEventsForWorker(J.predId).every((ev) => ev.kind !== "merge_done"));
 
+  // --- pre-K/L/M/N sanity: the REAL re-task shape (a second createWorktree() call) lands Y on the EXACT
+  // same stale path/branch X's own DB row still names, via a real git reuse/recut, not a sidestep. ---
+  check("(pre-K) X's stale worktreePath equals Y's real (reused) worktreePath", K.worktreePath && db.getSession(K.workerXId).worktreePath === K.worktreePath);
+  check("(pre-K) X's stale branch equals Y's real (reused) branch", K.branch && db.getSession(K.workerXId).branch === K.branch);
+  check("(pre-K) X already has its OWN merge_done (a real prior finalize)", db.listEventsForWorker(K.workerXId).some((ev) => ev.kind === "merge_done"));
+  check("(pre-K) Y has its OWN merge_request but no terminal event yet", db.listEventsForWorker(K.workerYId).some((ev) => ev.kind === "merge_request") && db.listEventsForWorker(K.workerYId).every((ev) => ev.kind !== "merge_done"));
+  check("(pre-K) Y's worktree/branch are the live ones on disk", fs.existsSync(K.worktreePath) && branchExists(K.repo, K.branch));
+  check("(pre-L) X's stale worktreePath equals Y's real (reused) worktreePath", L.worktreePath && db.getSession(L.workerXId).worktreePath === L.worktreePath);
+  check("(pre-L) X has NO merge activity of its own at all (genuinely abandoned)", db.listEventsForWorker(L.workerXId).length === 0);
+  check("(pre-L) Y has its OWN merge_request but no terminal event yet", db.listEventsForWorker(L.workerYId).some((ev) => ev.kind === "merge_request") && db.listEventsForWorker(L.workerYId).every((ev) => ev.kind !== "merge_done"));
+  check("(pre-M) X's stale worktreePath equals Y's real (reused) worktreePath", M.worktreePath && db.getSession(M.workerXId).worktreePath === M.worktreePath);
+  check("(pre-M) X's own landing (on main) carries the Loom-Landed-Tip trailer matching its OWN reviewed tip", git(M.repo, `log -1 --format=%B ${M.xLandedSha}`).includes(`Loom-Landed-Tip: ${M.xTip}`));
+  check("(pre-M) X has its OWN merge_request (with its reviewed tip) but no merge_done yet", db.listEventsForWorker(M.workerXId).some((ev) => ev.kind === "merge_request" && ev.detail?.tip === M.xTip) && db.listEventsForWorker(M.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(pre-N) X has its OWN unverifiable merge_request but no merge_done yet", db.listEventsForWorker(N.workerXId).some((ev) => ev.kind === "merge_request") && db.listEventsForWorker(N.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(pre-O) P's worktree/branch present before reconcile", fs.existsSync(O.worktreePath) && branchExists(O.repo, O.branch));
+  check("(pre-O) P has its OWN merge_request but no merge_done yet", db.listEventsForWorker(O.pId).some((ev) => ev.kind === "merge_request") && db.listEventsForWorker(O.pId).every((ev) => ev.kind !== "merge_done"));
+  check("(pre-O) F is named as the failed successor on a recycle_failed event, and has NO merge activity of its own", db.listEventsForWorker(O.fId).some((ev) => ev.kind === "recycle_failed" && ev.detail?.failedSuccessorId === O.fId) && db.listEventsForWorker(O.fId).every((ev) => ev.kind !== "merge_request" && ev.kind !== "merge_done"));
+  check("(pre-O) F's own recycledFrom is NULLED (the failed-recycle shape)", db.getSession(O.fId).recycledFrom == null);
+  check("(pre-P) X's stale worktreePath equals Y's real (reused) worktreePath", P.worktreePath && db.getSession(P.workerXId).worktreePath === P.worktreePath);
+  check("(pre-P) X's own merge_request is followed by its OWN merge_cancelled — the latest lifecycle event is NOT the merge_request", (() => {
+    const evs = db.listEventsForWorker(P.workerXId).filter((ev) => ["merge_request", "merge_done", "merge_rejected", "merge_cancelled"].includes(ev.kind));
+    return evs.length === 2 && evs[0].kind === "merge_request" && evs[1].kind === "merge_cancelled";
+  })());
+
   // --- THE RECONCILE --- A's successor and C's successor are protected (about to be resumed); B/D/E are
   // not protected at all (abandoned/genuine crash). Session insertion order above is predecessor-then-
   // successor for both recycle chains — the fix must hold regardless of which aliased row a pass happens
   // to visit first, which is exactly why the protection set is built ONCE, up front, from ALL rows, rather
-  // than decided per-row during iteration.
-  const r = await sessions.reconcileOrchestrationOnBoot(new Set([A.succId, C.succId]));
+  // than decided per-row during iteration. `branchDeleteSpyFactory` (card 21b53e6a MINOR #4) is shared
+  // across every fixture here — see its own header comment above.
+  const r = await sessions.reconcileOrchestrationOnBoot(new Set([A.succId, C.succId]), { gitFactory: branchDeleteSpyFactory });
 
   // (C) Pass A must defer to the protected successor's path and NOT finalize via the dangling predecessor.
   check("(C) worktree SURVIVES (Pass A deferred to the protected successor's path)", fs.existsSync(C.worktreePath));
@@ -491,6 +768,86 @@ try {
   check("(J) a merge_branch_retained notice (source: solo) was filed for the moved branch", db.listEventsForBranch(J.branch, "merge_branch_retained").some((ev) => ev.detail?.source === "solo"));
   check("(J) predecessor still has no own merge_done (no full finalize ran either)", db.listEventsForWorker(J.predId).every((ev) => ev.kind !== "merge_done"));
 
+  // (K) card 21b53e6a, Tier A — a REAL re-task reused X's exact path/branch via a second createWorktree()
+  // call. X is a stale generation (already finalized itself, long ago) and must be skipped outright; Y
+  // (the current generation) finalizes normally, under its OWN id.
+  check("(K) worktree IS finalized/removed, under Y's own processing", !fs.existsSync(K.worktreePath));
+  check("(K) branch IS deleted, under Y's own processing", !branchExists(K.repo, K.branch));
+  check("(K) task moved off in_progress (Y's own finalize ran)", db.getTask(K.taskId).columnKey !== "in_progress");
+  check("(K) worker Y now has its OWN merge_done", db.listEventsForWorker(K.workerYId).some((ev) => ev.kind === "merge_done"));
+  check("(K) worker X's events are UNTOUCHED — still exactly its one original merge_done, nothing new filed under its id", db.listEventsForWorker(K.workerXId).length === 1 && db.listEventsForWorker(K.workerXId)[0].kind === "merge_done");
+  // MINOR #4 (Code Review 620da79c): the END-STATE checks above stay green even if X had wrongly run
+  // the sibling-cleanup-only path first (it would be silent — X already has its own merge_done, so no
+  // NEW event is filed either way, and the worktree/branch end up gone either way). The delete-attempt
+  // COUNT is the only thing that discriminates: Y's own GENUINE finalize goes through `finalizeMerge`,
+  // which never threads `gitFactory` at all (invisible to this spy either way) — but X's WRONGFUL
+  // cleanup-only action (alreadyFinalized:true for X's own row, pre-fix) takes the SAME sibling
+  // cleanup-only path fixture F exercises, which DOES thread `gitFactory`. So a correctly-skipped X
+  // leaves ZERO recorded attempts for K's branch; RED-proofed against the pre-round-1 parent (service.ts
+  // before card 21b53e6a's `currentGenerationIds`/staleGeneration existed at all): this check read 1,
+  // not 0 (`git show 967be1e5~1:packages/daemon/src/sessions/service.ts`, rebuilt, this test re-run).
+  check("(K) ZERO branch-delete attempts recorded for K's branch (X never ran the wrong-identity cleanup-only delete)",
+    branchDeleteAttempts.filter((a) => a.args.some((x) => typeof x === "string" && x.includes(K.branch))).length === 0);
+  // Round 3 item 4: a positive control for the check above — fixture F's own branch (a REAL sibling
+  // cleanup-only delete, see (F) below) must record >=1 attempt on this SAME spy, proving the spy can
+  // actually see a real delete rather than being a dead probe that would read 0 either way.
+  check("(K positive control) fixture F's branch recorded >=1 delete attempt on the SAME spy — K's zero above is a true negative, not a dead probe",
+    branchDeleteAttempts.filter((a) => a.args.some((x) => typeof x === "string" && x.includes(F.branch))).length >= 1);
+
+  // (L) card 21b53e6a, Tier B — X is genuinely abandoned (no merge activity of its own at all). RED-proofed
+  // against pre-fix code: X's early-out failed to fire (worktreeOnDisk read Y's live dir), X fell through
+  // to a GENUINE finalizeMerge call under its own identity, misattributing Y's landing to X and PERMANENTLY
+  // stranding Y's own merge_request (X's fresh merge_done outranked it by seq on every later boot).
+  check("(L) worktree IS finalized/removed, under Y's own processing", !fs.existsSync(L.worktreePath));
+  check("(L) branch IS deleted, under Y's own processing", !branchExists(L.repo, L.branch));
+  check("(L) task moved off in_progress (Y's own finalize ran)", db.getTask(L.taskId).columnKey !== "in_progress");
+  check("(L) worker Y now has its OWN merge_done (not misattributed to X)", db.listEventsForWorker(L.workerYId).some((ev) => ev.kind === "merge_done"));
+  check("(L) worker X has NO events filed under its id at all — it was never touched", db.listEventsForWorker(L.workerXId).length === 0);
+
+  // (M) card 21b53e6a ROUND 2: even a stale row with a genuinely attributable landing (real squash +
+  // Loom-Landed-Tip trailer matching its OWN reviewed tip) is NOT resolved DB-only anymore — it escalates
+  // ONCE, exactly like an unattributable one (fixture N), and never files a merge_done under its own id.
+  check("(M) worker X gets NO merge_done — DB-only attribution was removed in round 2", db.listEventsForWorker(M.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(M) worker X is tracked as escalated in the one-shot store", db.listStaleGenerationUnresolved().some((e) => e.sessionId === M.workerXId && e.escalated === true));
+  check("(M) worker Y is still independently finalized (current generation, unaffected)", db.listEventsForWorker(M.workerYId).some((ev) => ev.kind === "merge_done"));
+  // Round 3 item 3: the one-shot guarantee checked above is the APP_META flag only — assert the actual
+  // DURABLE nudge too (not just the flag that gates re-sending it): exactly one still-undelivered
+  // session_message_queued addressed to M's manager, after this first pass.
+  check("(M) exactly ONE undelivered nudge enqueued to the manager (not the app_meta flag — the real durable message)",
+    db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === M.mgrId).length === 1);
+
+  // (N) card 21b53e6a, manager-directed gap: a stale row with its OWN merge_request that can NEVER be
+  // attributed (no commit anywhere carries its claimed tip) escalates ONCE rather than being silently
+  // left unresolved forever — never a guess, never a fabricated merge_done.
+  check("(N) worker X gets NO merge_done (unattributable — never guessed)", db.listEventsForWorker(N.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(N) tracked as escalated in the one-shot store", db.listStaleGenerationUnresolved().some((e) => e.sessionId === N.workerXId && e.escalated === true));
+  check("(N) worker Y is unaffected by X's unresolved alert", db.listEventsForWorker(N.workerYId).some((ev) => ev.kind === "merge_done"));
+  // Round 3 item 3 (N's twin of M's check above).
+  check("(N) exactly ONE undelivered nudge enqueued to the manager (not the app_meta flag — the real durable message)",
+    db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === N.mgrId).length === 1);
+  check("(M + N) both counted via staleGenerationUnresolvedEscalated this boot", r.staleGenerationUnresolvedEscalated >= 2);
+
+  // (P) card 21b53e6a ROUND 3 item 1 — X's OWN merge_request was already DECIDED (a real merge_cancelled
+  // on record) before the re-task happened; this must NOT escalate at all — never tracked in the one-shot
+  // store, never enqueues a nudge, and never files a merge_done. Pre-fix (bare `hasMergeRequest` check,
+  // no lifecycle-order check) this fixture escalated X anyway — RED-proofed (see worker_report) by
+  // temporarily reverting the lifecycle-order guard and re-running this file before restoring it.
+  check("(P) worker X gets NO merge_done", db.listEventsForWorker(P.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(P) worker X is NEVER tracked in the one-shot escalation store (a decided outcome never escalates)", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== P.workerXId));
+  check("(P) NO undelivered nudge was enqueued to the manager for X's decided merge_request", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === P.mgrId).length === 0);
+  check("(P) worker Y is still independently finalized (current generation, unaffected)", db.listEventsForWorker(P.workerYId).some((ev) => ev.kind === "merge_done"));
+
+  // (O) card 21b53e6a ROUND 2, MAJOR #3 — P (crash-orphaned before its own finalize) is the sole current
+  // generation once F (a failed recycle successor sharing P's exact worktreePath/branch) is excluded
+  // from currentGenerationIds; P finalizes NORMALLY under its own id. F never did any work of its own
+  // (no merge_request), so it is a pure no-op — never touched, never escalated.
+  check("(O) P's worktree IS finalized/removed under its OWN processing", !fs.existsSync(O.worktreePath));
+  check("(O) P's branch IS deleted under its OWN processing", !branchExists(O.repo, O.branch));
+  check("(O) task moved off in_progress (P's own finalize ran)", db.getTask(O.taskId).columnKey !== "in_progress");
+  check("(O) P now has its OWN merge_done", db.listEventsForWorker(O.pId).some((ev) => ev.kind === "merge_done"));
+  check("(O) F has no merge_done filed under its id — it was never processed as a landing at all", db.listEventsForWorker(O.fId).every((ev) => ev.kind !== "merge_done"));
+  check("(O) F's own events are UNTOUCHED — still exactly its one recycle_failed event, nothing new filed under its id", db.listEventsForWorker(O.fId).length === 1);
+
   // (A leg 1) Pass B must NOT destroy the worktree the live/protected successor needs.
   check("(A leg 1) worktree directory SURVIVES intact", fs.existsSync(A.worktreePath));
   check("(A leg 1) worktree stays REGISTERED in git (not deregistered)", isRegisteredWorktree(A.repo, A.worktreePath));
@@ -509,6 +866,7 @@ try {
   check("(counts) exactly 1 branch reclaimed via Pass C's sweep (B only — F's branch was CAS-deleted directly by Pass A, never Pass C)", r.branchesReclaimed === 1);
   check("(counts) A's protected worktree was NOT counted as a suspected-still-live left-on-disk failure either", r.worktreesLeftOnDiskSuspectedLive === 0);
   check("(counts) exactly 2 stale merges resolved (G's worker Y + I's worker Y)", r.staleMergesResolved === 2);
+  check("(counts) exactly 2 stale-generation own-landings escalated this boot (M + N — round 2: M no longer resolves DB-only)", r.staleGenerationUnresolvedEscalated === 2);
 
   // --- idempotent second run: A's and C's protected worktrees still need to survive a SECOND pass with
   // the SAME protectedSessionIds (mirrors a boot that runs reconcile more than once, or a retry) ---
@@ -521,9 +879,33 @@ try {
   check("(idem) second pass finalizes nothing new (C still correctly deferred, not re-finalized)", r2.mergesFinished === 0);
   check("(idem) J's worktree still survives a second reconcile pass (tip still mismatched)", fs.existsSync(J.worktreePath));
   check("(idem) J's branch still survives a second reconcile pass, still at its moved tip", branchExists(J.repo, J.branch) && git(J.repo, `rev-parse ${J.branch}`) === J.lateTip);
+  // (idem M/N) card 21b53e6a round 2: neither M nor N is ever "resolved" anymore (that outcome was
+  // removed) — both legitimately re-check every boot (the counter reflects "still unresolved this
+  // boot", same philosophy as mergeFailureDetails/wedgedThisBoot elsewhere in this function); the
+  // ONE-SHOT guarantee is scoped to the NUDGE itself, not this count: `attempts` bumps while `escalated`
+  // stays true, proving the second pass's own call exited before re-sending (see
+  // resolveStaleGenerationOwnLanding's own doc).
+  check("(idem) M's worker X still has no merge_done, forever", db.listEventsForWorker(M.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check(
+    "(idem) M's escalation entry stays one-shot (escalated:true, attempts bumped — the SECOND pass's own retry, no second nudge)",
+    db.listStaleGenerationUnresolved().some((e) => e.sessionId === M.workerXId && e.escalated === true && e.attempts === 2),
+  );
+  check("(idem) N's worker X still has exactly one merge_request and no merge_done, forever", db.listEventsForWorker(N.workerXId).length === 1);
+  // Round 3 item 3: the real proof the "no second nudge" claim above is true — count the ACTUAL durable
+  // messages across BOTH passes (r and r2 combined), not just the app_meta flag's own attempts counter.
+  check("(idem) M still has exactly ONE undelivered nudge after BOTH passes (no second enqueue on the retry)",
+    db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === M.mgrId).length === 1);
+  check("(idem) N still has exactly ONE undelivered nudge after BOTH passes (no second enqueue on the retry)",
+    db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === N.mgrId).length === 1);
+  check(
+    "(idem) N's escalation entry stays one-shot (escalated:true, attempts bumped — the SECOND pass's own retry, no second nudge)",
+    db.listStaleGenerationUnresolved().some((e) => e.sessionId === N.workerXId && e.escalated === true && e.attempts === 2),
+  );
+  check("(idem) O's worker P stays finalized (no re-finalize), F still untouched", db.listEventsForWorker(O.pId).filter((ev) => ev.kind === "merge_done").length === 1 && db.listEventsForWorker(O.fId).length === 1);
+  check("(idem) P's worker X still never escalated, forever (a decided outcome never escalates on retry either)", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== P.workerXId) && db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === P.mgrId).length === 0);
 } finally {
   db.close();
-  for (const p of [A, B, C, D, E, F, G, H, I, J]) {
+  for (const p of [A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P]) {
     if (!p) continue;
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }

@@ -1687,6 +1687,17 @@ export interface WedgedWorktreeEntry {
 const MERGE_RECONCILE_WEDGED_KEY = "merge_reconcile_wedged";
 
 /**
+ * app_meta key (card 21b53e6a) — same single-JSON-array pattern as {@link MERGE_RECONCILE_WEDGED_KEY},
+ * kept as its OWN key rather than folded into that one: this tracks a DIFFERENT, non-repoKey condition
+ * (a stale-generation worker's own merge_request could not be unambiguously attributed to a landed
+ * commit by its recorded reviewed tip, after a re-task reused its worktree path) and a future reader
+ * must not assume every entry here is a repoKey problem. Unlike the repoKey wedge, this condition does
+ * not heal by retrying (the git history it reads from does not change), so the caller escalates on
+ * FIRST detection, not after a grace period — this tracker exists purely to make that one-shot.
+ */
+const STALE_GENERATION_UNRESOLVED_KEY = "stale_generation_merge_unresolved";
+
+/**
  * Project-memory eviction candidate order (card cf8d773f) — shared VERBATIM between
  * {@link Db.evictProjectMemoryOverCap} (which deletes from the front of this order) and
  * {@link Db.projectMemoryEvictionRank} (which reports a note's position in it) via this one constant, so
@@ -1722,6 +1733,25 @@ export interface MergeReconcileWedgeEntry {
   reason: string;
   /** Flips true once a `[loom:merge-orphaned]` escalation nudge has fired for this entry — idempotent
    *  gate so the nudge is sent exactly once, not re-fired on every subsequent boot past the threshold. */
+  escalated: boolean;
+}
+
+/**
+ * One stale-generation worker (card 21b53e6a) whose own `merge_request` could not be unambiguously
+ * attributed to a landed commit by its recorded reviewed tip, after a re-task reused its worktree
+ * path. Keyed on `sessionId`. Unlike {@link MergeReconcileWedgeEntry}, there is no attempts/age
+ * threshold — the caller escalates on first detection (see {@link STALE_GENERATION_UNRESOLVED_KEY}'s
+ * own doc for why), so `escalated` is the only thing this entry's reader needs to check.
+ */
+export interface StaleGenerationUnresolvedEntry {
+  sessionId: string;
+  branch: string | null;
+  taskId: string | null;
+  projectId: string;
+  reason: string;
+  firstDetectedAt: string;
+  lastAttemptAt: string;
+  attempts: number;
   escalated: boolean;
 }
 
@@ -4343,6 +4373,57 @@ export class Db {
     const after = before.filter((e) => e.sessionId !== sessionId);
     if (after.length === before.length) return; // wasn't tracked ⇒ nothing to clear
     this.setMeta(MERGE_RECONCILE_WEDGED_KEY, JSON.stringify(after));
+  }
+
+  // --- stale-generation own-landing-unresolved tracking (card 21b53e6a; app_meta JSON array, mirrors
+  // the merge-reconcile-wedge block above in SHAPE only — see STALE_GENERATION_UNRESOLVED_KEY's own doc
+  // for why this is a separate key rather than folded into that one) ---
+  /** Every currently-tracked stale-generation-unresolved session. Corrupt/missing blob → empty (never throws). */
+  listStaleGenerationUnresolved(): StaleGenerationUnresolvedEntry[] {
+    const raw = this.getMeta(STALE_GENERATION_UNRESOLVED_KEY);
+    if (!raw) return [];
+    try {
+      const v: unknown = JSON.parse(raw);
+      if (Array.isArray(v)) {
+        return v.filter(
+          (e): e is StaleGenerationUnresolvedEntry =>
+            !!e && typeof e.sessionId === "string" && typeof e.projectId === "string" &&
+            typeof e.firstDetectedAt === "string" && typeof e.lastAttemptAt === "string" &&
+            typeof e.attempts === "number" && typeof e.reason === "string" && typeof e.escalated === "boolean",
+        );
+      }
+    } catch { /* corrupt blob ⇒ empty (like listMergeReconcileWedges) */ }
+    return [];
+  }
+  /**
+   * Record ONE more boot's sighting of `sessionId`'s own unresolved merge_request — upsert: a first
+   * sighting creates the entry (`attempts:1`, `escalated:false`); a repeat bumps `attempts`/
+   * `lastAttemptAt` while keeping the original `firstDetectedAt`. Pure bookkeeping — this method never
+   * decides escalation; unlike {@link recordMergeReconcileWedgeAttempt}'s caller, the caller here
+   * escalates on `!entry.escalated` alone, with no attempts/age grace period (see this key's own doc).
+   * Round 2 (card 21b53e6a): there is no more git-based attribution attempt to fail here — a stale
+   * generation with its own `merge_request` always escalates, so `reason` now explains WHY no DB-only
+   * resolution is attempted at all, never a specific lookup failure.
+   */
+  recordStaleGenerationUnresolved(
+    sessionId: string, ctx: { branch: string | null; taskId: string | null; projectId: string }, reason: string,
+  ): StaleGenerationUnresolvedEntry {
+    const now = new Date().toISOString();
+    const list = this.listStaleGenerationUnresolved();
+    const existing = list.find((e) => e.sessionId === sessionId);
+    const updated: StaleGenerationUnresolvedEntry = existing
+      ? { ...existing, ...ctx, lastAttemptAt: now, attempts: existing.attempts + 1, reason }
+      : { sessionId, ...ctx, firstDetectedAt: now, lastAttemptAt: now, attempts: 1, reason, escalated: false };
+    this.setMeta(STALE_GENERATION_UNRESOLVED_KEY, JSON.stringify([...list.filter((e) => e.sessionId !== sessionId), updated]));
+    return updated;
+  }
+  /** Flip `sessionId` to `escalated:true` (a nudge was fired) — a no-op if it isn't currently tracked
+   *  or is already escalated (keeps the nudge one-shot). */
+  markStaleGenerationEscalated(sessionId: string): void {
+    const list = this.listStaleGenerationUnresolved();
+    const entry = list.find((e) => e.sessionId === sessionId);
+    if (!entry || entry.escalated) return;
+    this.setMeta(STALE_GENERATION_UNRESOLVED_KEY, JSON.stringify([...list.filter((e) => e.sessionId !== sessionId), { ...entry, escalated: true }]));
   }
 
   // --- companion RUN config (Companion epic Phase 3): the "how to RUN this companion" layer, keyed by
@@ -7093,6 +7174,24 @@ export class Db {
       else if (r.kind === "merge_rejected") entry.hasMergeRejected = true;
     }
     return map;
+  }
+  /**
+   * Every session id ever named as `detail.failedSuccessorId` on a `recycle_failed` event — the
+   * durable fact a failed recycle's nulled `recycledFrom` column can no longer carry.
+   *
+   * @decision 21b53e6a — a row named here must never win a `currentGenerationIds` head-selection
+   * tiebreak, however new its `createdAt` looks; see that card's own decision record.
+   *
+   * Bulk query (one read for the whole boot), mirroring {@link buildWorkerEventPresenceMap}'s own
+   * "precompute once, never per-session" posture.
+   */
+  listFailedRecycleSuccessorIds(): Set<string> {
+    const rows = this.db.prepare(
+      `SELECT DISTINCT json_extract(detail_json, '$.failedSuccessorId') AS id
+         FROM orchestration_events
+        WHERE kind = 'recycle_failed' AND json_extract(detail_json, '$.failedSuccessorId') IS NOT NULL`,
+    ).all() as { id: string }[];
+    return new Set(rows.map((r) => r.id));
   }
   /**
    * @decision c1161989 — never filter this, not even archived/reserved: `getProject(id)` (the
