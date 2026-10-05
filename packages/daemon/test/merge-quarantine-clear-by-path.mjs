@@ -1162,7 +1162,300 @@ function hashKey(key) {
   check("(X cleanup) outer is cleared for real afterward", assertRepoNotQuarantined(outerX).ok === true);
 }
 
+// ===================== (Y) sweepOrphanLatchFileIfUnreferenced — never delete a filename a SURVIVING entry has since legitimately reclaimed as its own physical latch (card 9cabd143) =====================
+// A corrupt/unparsable orphan at boot is fanned into every OTHER registered repo's orphanLatchFiles — but
+// that filename is just `<hash-of-some-repo's-own-key>.json`. If that repo gets registered LATER and
+// raises a real quarantine in-process, its durable write legitimately lands at that SAME deterministic
+// filename, overwriting the stale debris with live, real data. The old sweep only checked whether some
+// OTHER entry's own orphanLatchFiles still referenced the filename — never whether the filename IS itself
+// a surviving entry's own current physical latch — so clearing the repo that still remembers it as an
+// orphan deleted the file out from under the repo that now genuinely owns it. No real SHA-256 collision
+// is needed: the "orphan" and the "live owner" are the SAME repo's own deterministic filename, at two
+// different points in time.
+{
+  const repoY_B = freshDir("repoY-B"); // the repo whose own deterministic filename becomes the "orphan"
+  const hashY_B = quarantineLatchIdFor(repoY_B); // computed BEFORE anything is ever written for it
+  const latchPathY_B = path.join(MERGE_QUARANTINE_DIR, `${hashY_B}.json`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(latchPathY_B, "{not valid json — pre-registration debris for Y}");
+  check("(Y precondition) corrupt debris exists under repoY_B's own deterministic hash", fs.existsSync(latchPathY_B));
+
+  const repoY_A = freshDir("repoY-A"); // registered at THIS boot — the debris fans into its own entry
+  reenterMergeQuarantinesAtBoot([repoY_A]); // repoY_B deliberately excluded — "not registered yet"
+  const entryY_A = activeMergeQuarantineFor(repoY_A);
+  check("(Y precondition) repoY_A is quarantined fail-closed after boot", !!entryY_A);
+  check("(Y precondition) repoY_A's entry carries repoY_B's own filename as an orphan reference", (entryY_A?.orphanLatchFiles ?? []).includes(`${hashY_B}.json`));
+  check("(Y precondition) the file on disk is STILL the corrupt debris — PASS 2 never overwrites an orphan it merely references", fs.readFileSync(latchPathY_B, "utf8").startsWith("{not valid json"));
+
+  // repoY_B gets registered "after boot" and raises a REAL quarantine — its own legitimate write lands at
+  // the SAME deterministic filename, overwriting the debris with real, live data.
+  enterMergeQuarantine(repoY_B, "real-branch-y-b", "raised AFTER boot, post-registration (Y)");
+  check("(Y precondition) repoY_B's own file now holds REAL, valid JSON", JSON.parse(fs.readFileSync(latchPathY_B, "utf8")).repoPath === repoY_B);
+  check("(Y precondition) repoY_B is genuinely quarantined in-process right now", !!activeMergeQuarantineFor(repoY_B));
+
+  // THE KEY CHECK (step 4): clearing repoY_A sweeps its own orphanLatchFiles, including repoY_B's
+  // filename. This is the exact assertion the manager asked to see go RED on unfixed code — see the
+  // negative-control proof reported alongside this card's `done` report (packages/daemon/src/git/
+  // merge-quarantine.ts reverted to HEAD, this file run, confirmed FAIL on this line; restored, confirmed
+  // PASS) rather than re-deriving a revert cycle from inside this file.
+  clearMergeQuarantine(repoY_A);
+  check("(Y) repoY_A is cleared", !activeMergeQuarantineFor(repoY_A));
+  check("(Y) THE FIX (step 4): repoY_B's own live latch file SURVIVES — it is NOT deleted as a stale orphan", fs.existsSync(latchPathY_B));
+  check("(Y) and repoY_B's in-memory quarantine is untouched by clearing the unrelated repoY_A", !!activeMergeQuarantineFor(repoY_B));
+
+  // Prove the CONSEQUENCE, not just the file-survival proxy: a GENUINELY fresh boot (separate child
+  // process — same technique as (P)'s own GOTCHA note above explains why this can't be simulated
+  // in-process) must still find repoY_B quarantined. On pre-fix code this is exactly where "fails open"
+  // shows up: the file is gone, so a real restart silently drops the quarantine.
+  const childScriptY = `
+    const { reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor } = await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([${JSON.stringify(repoY_A)}, ${JSON.stringify(repoY_B)}]);
+    const entry = activeMergeQuarantineFor(${JSON.stringify(repoY_B)});
+    process.stdout.write(JSON.stringify({ stillQuarantined: !!entry, reason: entry?.reason ?? null }));
+  `;
+  const childOutY = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptY], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  }).toString();
+  const resultY = JSON.parse(childOutY.trim().split("\n").pop());
+  check("(Y) THE CONSEQUENCE, PROVEN ACROSS A REAL RESTART: a genuinely fresh boot still finds repoY_B quarantined — the fix closes the fail-open window", resultY.stillQuarantined === true);
+  check("(Y) and it's the REAL raise that survived, not a fail-closed placeholder standing in for lost data", resultY.reason === "raised AFTER boot, post-registration (Y)");
+
+  clearMergeQuarantine(repoY_B);
+  check("(Y cleanup) repoY_B is cleared for real", !activeMergeQuarantineFor(repoY_B));
+}
+
+// ===================== (Z1) clearMergeQuarantineLatchFile's RAW-FALLBACK branch no longer bypasses the orphan-reference check (card 9cabd143, triage note) =====================
+// Found during review of 6237bef6 round 2 (d449dff8): the raw-fallback branch (reached when NO in-memory
+// entry anywhere matches `id`) unlinked `<id>.json` directly, bypassing sweepOrphanLatchFileIfUnreferenced
+// entirely — including its PRE-EXISTING orphanLatchFiles check, not just card 9cabd143's new one. Two
+// SEPARATE registered repos both reference the same corrupt orphan; clearing it BY ID must not delete it
+// while either one still references it, and must report `latchKept` rather than a bare `ok:true`.
+{
+  const repoZ1_C1 = freshDir("repoZ1-C1");
+  const repoZ1_C2 = freshDir("repoZ1-C2");
+  const repoZ1_Ghost = freshDir("repoZ1-Ghost"); // never registered, never raised — just donates its own hash
+  const hashZ1_Ghost = quarantineLatchIdFor(repoZ1_Ghost);
+  const latchPathZ1_Ghost = path.join(MERGE_QUARANTINE_DIR, `${hashZ1_Ghost}.json`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(latchPathZ1_Ghost, "{not valid json — Z1 ghost debris");
+  check("(Z1 precondition) the ghost's corrupt debris exists", fs.existsSync(latchPathZ1_Ghost));
+
+  reenterMergeQuarantinesAtBoot([repoZ1_C1, repoZ1_C2]); // ghost excluded — fans into BOTH registered repos
+  check("(Z1 precondition) BOTH registered repos reference the ghost's filename", (activeMergeQuarantineFor(repoZ1_C1)?.orphanLatchFiles ?? []).includes(`${hashZ1_Ghost}.json`)
+    && (activeMergeQuarantineFor(repoZ1_C2)?.orphanLatchFiles ?? []).includes(`${hashZ1_Ghost}.json`));
+  check("(Z1 precondition) clearing by the ghost's id hits the RAW-FALLBACK branch — nothing in-memory matches repoZ1_Ghost itself", !listActiveMergeQuarantines().some((e) => e.repoPath === repoZ1_Ghost));
+
+  const clearZ1 = clearMergeQuarantineLatchFile(hashZ1_Ghost);
+  check("(Z1) clearing by id reports ok:true", clearZ1.ok === true);
+  check("(Z1) THE FIX: the file is KEPT (not silently deleted) while repoZ1_C1/C2 still reference it", clearZ1.ok === true && clearZ1.latchKept === true);
+  check("(Z1) the result names BOTH referencing repoPaths", clearZ1.ok === true && clearZ1.referencingRepoPaths?.includes(repoZ1_C1) && clearZ1.referencingRepoPaths?.includes(repoZ1_C2));
+  check("(Z1) the file genuinely SURVIVES on disk", fs.existsSync(latchPathZ1_Ghost));
+
+  // Positive control: this is NOT "never delete" — once nothing references it, it's swept for real.
+  clearMergeQuarantine(repoZ1_C1);
+  check("(Z1) still survives with ONE referencing repo left", fs.existsSync(latchPathZ1_Ghost));
+  clearMergeQuarantine(repoZ1_C2);
+  check("(Z1) POSITIVE CONTROL: once BOTH referencing repos are cleared, the file is finally swept for real", !fs.existsSync(latchPathZ1_Ghost));
+}
+
+// ===================== (Z1-route) POST /internal/merge-quarantine/clear-by-path {id} forwards latchKept/referencingRepoPaths over REAL HTTP (card 9cabd143, Round 2 item 5) =====================
+// (Z1) proves the underlying function; this proves the gateway route actually forwards the new fields on
+// its JSON response, not just that the function itself carries them.
+{
+  const repoZ1R_C1 = freshDir("repoZ1R-C1");
+  const repoZ1R_Ghost = freshDir("repoZ1R-Ghost"); // never registered, never raised — donates its own hash
+  const hashZ1R_Ghost = quarantineLatchIdFor(repoZ1R_Ghost);
+  const latchPathZ1R_Ghost = path.join(MERGE_QUARANTINE_DIR, `${hashZ1R_Ghost}.json`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(latchPathZ1R_Ghost, "{not valid json — Z1-route ghost debris");
+
+  reenterMergeQuarantinesAtBoot([repoZ1R_C1]);
+  check("(Z1-route precondition) repoZ1R_C1 references the ghost's filename", (activeMergeQuarantineFor(repoZ1R_C1)?.orphanLatchFiles ?? []).includes(`${hashZ1R_Ghost}.json`));
+
+  const TMPZ1R = mkdtempManaged("loom-mqcbp-gw-z1r-");
+  const PORTZ1R = 47100 + (process.pid % 400);
+  const HZ1R = { host: `127.0.0.1:${PORTZ1R}`, origin: `http://127.0.0.1:${PORTZ1R}`, "content-type": "application/json" };
+  const dbZ1R = new Db(path.join(TMPZ1R, "loom.db"));
+  const stubZ1R = {};
+  const appZ1R = await buildServer({
+    db: dbZ1R, pty: stubZ1R, sessions: stubZ1R, mcp: stubZ1R, orchMcp: stubZ1R, platformMcp: stubZ1R, auditMcp: stubZ1R,
+    userAuditMcp: stubZ1R, setupMcp: stubZ1R, runMcp: stubZ1R, control: stubZ1R, usageStatus: stubZ1R,
+  });
+  try {
+    const clearZ1R = await appZ1R.inject({ method: "POST", url: "/internal/merge-quarantine/clear-by-path", headers: HZ1R, payload: { id: hashZ1R_Ghost } });
+    check("(Z1-route) POST /clear-by-path {id} (still-referenced ghost) → 200", clearZ1R.statusCode === 200);
+    const bodyZ1R = clearZ1R.json();
+    check("(Z1-route) ok:true", bodyZ1R.ok === true);
+    check("(Z1-route) THE FIX (item 5): the route forwards latchKept:true", bodyZ1R.latchKept === true);
+    check("(Z1-route) the route forwards referencingRepoPaths naming repoZ1R_C1", Array.isArray(bodyZ1R.referencingRepoPaths) && bodyZ1R.referencingRepoPaths.includes(repoZ1R_C1));
+    check("(Z1-route) the file genuinely survives on disk", fs.existsSync(latchPathZ1R_Ghost));
+
+    // Negative control on the SAME route: once nothing references it, latchKept is OMITTED, not false.
+    clearMergeQuarantine(repoZ1R_C1);
+    const corruptIdZ1R = "fade0000fade0000fade0000"; // 24 hex — never derived from any real entry
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${corruptIdZ1R}.json`), "{not valid json — unreferenced");
+    const clearZ1R_unreferenced = await appZ1R.inject({ method: "POST", url: "/internal/merge-quarantine/clear-by-path", headers: HZ1R, payload: { id: corruptIdZ1R } });
+    check("(Z1-route) NEGATIVE CONTROL: clearing a genuinely unreferenced corrupt latch → 200", clearZ1R_unreferenced.statusCode === 200);
+    const bodyZ1R_unreferenced = clearZ1R_unreferenced.json();
+    check("(Z1-route) NEGATIVE CONTROL: latchKept is OMITTED (not present, not false) when the file is genuinely gone", !("latchKept" in bodyZ1R_unreferenced));
+    check("(Z1-route) NEGATIVE CONTROL: the file is actually deleted", !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${corruptIdZ1R}.json`)));
+  } finally {
+    await appZ1R.close();
+    dbZ1R.close();
+  }
+}
+
+// ===================== (Z2) clearMergeQuarantineLatchFile's PENDING-MATCH branch deletes a CLEARED entry's own file even when an unrelated SURVIVING entry's orphanLatchFiles still lists it (card 9cabd143, Round 2 item 1 — BLOCKING, Code Review d37fd1aa of 627293b7) =====================
+// RE-POINTED from its original form (round 1 — see this card's own decision record for the full
+// correction): clearing a PENDING entry by id must delete its OWN file regardless of whether some OTHER
+// entry's orphanLatchFiles merely LISTS that filename (check 1) — only another SURVIVING entry's genuine
+// physical OWNERSHIP of that exact filename (check 2) may keep it. The entry being cleared OWNS this
+// file; a stale cross-reference from an unrelated entry is never a reason to keep it, or the cleared
+// quarantine RE-ARMS on restart while /clear and /clear-by-path {repoPath} (unconditional for an entry's
+// own sourceFile) genuinely clear it — all three address forms must agree. Hand-written fixtures (same
+// technique as sections (Q)/(S)/(T)/(U) above), fully in-process for the clear itself, then a GENUINELY
+// separate child-process boot (same rigor as (Y)) proving the clear actually STICKS.
+{
+  const hashZ2_H = "cccc11112222333344445555"; // made-up 24-hex id — never derived from a real repoPath
+  const repoZ2_H = path.join(os.tmpdir(), `loom-mqcbp-pendingZ2H-${sfx}`); // deliberately never created
+  const latchPathZ2_H = path.join(MERGE_QUARANTINE_DIR, `${hashZ2_H}.json`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(latchPathZ2_H, JSON.stringify({
+    repoPath: repoZ2_H, branch: "(unknown — boot could not resolve which repo/branch this protects)",
+    reason: "Z2 pending fixture — never resolvable", enteredAt: Date.now(), tokens: ["t-z2-h"],
+  }, null, 2) + "\n");
+
+  const repoZ2_C3 = freshDir("repoZ2-C3"); // its own ACTIVE latch, hand-written with a STALE cross-reference
+  const keyZ2_C3 = canonicalRepoLockKey(repoZ2_C3);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(keyZ2_C3)}.json`), JSON.stringify({
+    repoPath: repoZ2_C3, branch: "z2-c3-branch", reason: "Z2 — active side merely REFERENCING the pending id's own file",
+    enteredAt: Date.now(), tokens: ["t-z2-c3"], resolvedKey: keyZ2_C3,
+    orphanLatchFiles: [`${hashZ2_H}.json`], // check (1) only — repoZ2_C3 does NOT own this filename (check 2)
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([repoZ2_C3]);
+  check("(Z2 precondition) repoZ2_H loaded as a PENDING entry", listActiveMergeQuarantines().some((e) => e.repoPath === repoZ2_H));
+  check("(Z2 precondition) repoZ2_C3 loaded ACTIVE, referencing (not owning) the pending entry's own filename", (activeMergeQuarantineFor(repoZ2_C3)?.orphanLatchFiles ?? []).includes(`${hashZ2_H}.json`));
+  check("(Z2 precondition) repoZ2_C3's OWN physical latch is a DIFFERENT file — it does not own hashZ2_H's filename", `${hashKey(keyZ2_C3)}.json` !== `${hashZ2_H}.json`);
+
+  const clearZ2 = clearMergeQuarantineLatchFile(hashZ2_H);
+  check("(Z2) clearing by id reports ok:true, wasQuarantined:true (the pending entry matched)", clearZ2.ok === true && clearZ2.wasQuarantined === true);
+  check("(Z2) THE FIX (item 1): NOT kept — a mere orphanLatchFiles reference from repoZ2_C3 never blocks deleting the cleared entry's OWN file", clearZ2.ok === true && clearZ2.latchKept === undefined);
+  check("(Z2) the pending entry itself is gone", !listActiveMergeQuarantines().some((e) => e.repoPath === repoZ2_H));
+  check("(Z2) the file is genuinely DELETED from disk", !fs.existsSync(latchPathZ2_H));
+  check("(Z2) repoZ2_C3's own, unrelated active entry is UNTOUCHED by clearing hashZ2_H", !!activeMergeQuarantineFor(repoZ2_C3));
+
+  // THE CONSEQUENCE, PROVEN ACROSS A REAL RESTART: a genuinely fresh boot must NOT re-arm repoZ2_H as
+  // pending (its own source file is gone — nothing left to re-parse), while repoZ2_C3's real, independent
+  // quarantine survives untouched (its own stale orphanLatchFiles reference is harmless bookkeeping, never
+  // re-resurrects anything).
+  const childScriptZ2 = `
+    const { reenterMergeQuarantinesAtBoot, listActiveMergeQuarantines, activeMergeQuarantineFor } = await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([${JSON.stringify(repoZ2_C3)}]);
+    process.stdout.write(JSON.stringify({
+      repoZ2_H_stillPresent: listActiveMergeQuarantines().some((e) => e.repoPath === ${JSON.stringify(repoZ2_H)}),
+      repoZ2_C3_stillActive: !!activeMergeQuarantineFor(${JSON.stringify(repoZ2_C3)}),
+    }));
+  `;
+  const childOutZ2 = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptZ2], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  }).toString();
+  const resultZ2 = JSON.parse(childOutZ2.trim().split("\n").pop());
+  check("(Z2) THE CONSEQUENCE: a genuinely fresh boot does NOT re-arm repoZ2_H — the clear by id genuinely stuck", resultZ2.repoZ2_H_stillPresent === false);
+  check("(Z2) and repoZ2_C3's own, unrelated real quarantine is unaffected by the restart too", resultZ2.repoZ2_C3_stillActive === true);
+
+  clearMergeQuarantine(repoZ2_C3);
+  check("(Z2 cleanup) repoZ2_C3 is cleared for real", !activeMergeQuarantineFor(repoZ2_C3));
+}
+
+// ===================== (AA) physicalOwnerRepoPaths's PENDING half — a reachable scenario, not just a defensive arm (card 9cabd143, Round 2 item 4) =====================
+// Unlike check (2)'s pending half inside clearMergeQuarantineLatchFile's OWN pending-match branch (where
+// it is PROVABLY unreachable — see the decision record), sweepOrphanLatchFileIfUnreferenced's ordinary
+// callers (clearMergeQuarantineByKey / clearMergeQuarantineByRecordedPath, clearing an entry's OWN
+// orphanLatchFiles REFERENCES) genuinely reach it: a pending entry P's own sourceFile protects it when a
+// SEPARATE, surviving entry references that exact filename and THAT entry (not P) is the one cleared.
+{
+  const hashAA_P = "dddd11112222333344445555"; // made-up 24-hex filename — P's own sourceFile lives here
+  const repoAA_P = path.join(os.tmpdir(), `loom-mqcbp-pendingAA-${sfx}`); // deliberately never created
+  const latchPathAA_P = path.join(MERGE_QUARANTINE_DIR, `${hashAA_P}.json`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(latchPathAA_P, JSON.stringify({
+    repoPath: repoAA_P, branch: "(unknown — boot could not resolve which repo/branch this protects)",
+    reason: "AA — pending entry P, genuinely owns hashAA_P's own filename", enteredAt: Date.now(), tokens: ["t-aa-p"],
+  }, null, 2) + "\n");
+
+  const repoAA_Q = freshDir("repoAA-Q"); // a SEPARATE active entry that merely REFERENCES P's own filename
+  const keyAA_Q = canonicalRepoLockKey(repoAA_Q);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(keyAA_Q)}.json`), JSON.stringify({
+    repoPath: repoAA_Q, branch: "aa-q-branch", reason: "AA — references P's own filename as an orphan",
+    enteredAt: Date.now(), tokens: ["t-aa-q"], resolvedKey: keyAA_Q,
+    orphanLatchFiles: [`${hashAA_P}.json`],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([repoAA_Q]);
+  check("(AA precondition) repoAA_P loaded as a PENDING entry", listActiveMergeQuarantines().some((e) => e.repoPath === repoAA_P));
+  check("(AA precondition) repoAA_Q loaded ACTIVE, referencing P's own filename", (activeMergeQuarantineFor(repoAA_Q)?.orphanLatchFiles ?? []).includes(`${hashAA_P}.json`));
+
+  // Clear repoAA_Q (NOT P) — its own orphanLatchFiles sweep reaches sweepOrphanLatchFileIfUnreferenced,
+  // which must find P's own sourceFile match (check 2's pending half) and keep the file.
+  clearMergeQuarantine(repoAA_Q);
+  check("(AA) repoAA_Q is cleared", !activeMergeQuarantineFor(repoAA_Q));
+  check("(AA) THE FIX (item 4): P's own file SURVIVES — check (2)'s pending half protects it from a mere orphanLatchFiles reference elsewhere", fs.existsSync(latchPathAA_P));
+  check("(AA) P's own pending entry is still intact", listActiveMergeQuarantines().some((e) => e.repoPath === repoAA_P));
+
+  // Positive control: clearing P itself (its OWN file, via /clear-by-path {repoPath}) still works normally.
+  clearMergeQuarantineByRecordedPath(repoAA_P);
+  check("(AA) POSITIVE CONTROL: clearing P itself still deletes its own file normally", !fs.existsSync(latchPathAA_P));
+}
+
+// ===================== (AB) physicalOwnerRepoPaths's active-entry half ALSO covers the TRUE current write target, not only armedKeys (card 9cabd143, Round 2 item 3) =====================
+// An entry's armedKeys can go STALE relative to its current key after a drift (card abccee85) — e.g. a
+// repo raised BEFORE an enclosing .git existed, keyed to itself, then an enclosing .git appears nearby
+// and canonicalRepoLockKey(repoPath) now resolves differently, WITHOUT anything re-arming the already-live
+// entry under the new key. writeMergeQuarantineLatch always targets the FRESH key, never a stale armed
+// one, so checking only armedKeys can miss the filename a NEXT write to this entry would actually land on.
+{
+  const parentAB = freshDir("repoAB-parent");
+  const repoAB_E = path.join(parentAB, "repo");
+  fs.mkdirSync(repoAB_E, { recursive: true });
+  enterMergeQuarantine(repoAB_E, "branch-ab-e", "AB — E raised BEFORE the enclosing git exists");
+  const keyE1 = canonicalRepoLockKey(repoAB_E);
+  const latchPathE1 = path.join(MERGE_QUARANTINE_DIR, `${hashKey(keyE1)}.json`);
+  check("(AB precondition) E's own latch exists under its pre-drift key", fs.existsSync(latchPathE1));
+
+  fs.mkdirSync(path.join(parentAB, ".git"), { recursive: true }); // the drift — parentAB becomes E's new toplevel
+  const keyE2 = canonicalRepoLockKey(repoAB_E);
+  check("(AB precondition) E's key actually changed after the drift", keyE2 !== keyE1);
+
+  // Remove E's own (now-stale-key) file so the reboot below (which scans the WHOLE shared quarantine dir)
+  // never rediscovers and auto-migrates it — that would re-arm E under keyE2 too, defeating this test's
+  // whole premise (E staying armed ONLY under its stale key keyE1).
+  fs.rmSync(latchPathE1, { force: true });
+  const latchPathE2 = path.join(MERGE_QUARANTINE_DIR, `${hashKey(keyE2)}.json`); // E's TRUE current write target
+  fs.writeFileSync(latchPathE2, "{not valid json — AB marker, simulating content sitting at E's fresh write target");
+  check("(AB precondition) a marker sits at E's fresh write target — a filename NONE of E's own armedKeys hash to", fs.existsSync(latchPathE2));
+
+  const repoAB_F = freshDir("repoAB-F");
+  reenterMergeQuarantinesAtBoot([repoAB_F]); // repoAB_E deliberately excluded — the marker fans into F as an orphan
+  const eEntryAB = listActiveMergeQuarantines().find((e) => e.repoPath === repoAB_E);
+  check("(AB precondition) E survived the reboot UNMIGRATED (its own file was gone, nothing to re-scan)", !!eEntryAB);
+  check("(AB precondition) E is armed ONLY under its stale key — keyE2 is NOT among its own armedKeys", !(eEntryAB?.armedKeys ?? []).includes(keyE2));
+  check("(AB precondition) F is fail-closed, referencing the marker's filename as an orphan", (activeMergeQuarantineFor(repoAB_F)?.orphanLatchFiles ?? []).includes(`${hashKey(keyE2)}.json`));
+
+  // THE KEY CHECK: clearing F sweeps its own orphanLatchFiles, including the marker's filename — which is
+  // NOT any of E's own armedKeys, but IS E's TRUE current write target.
+  clearMergeQuarantine(repoAB_F);
+  check("(AB) F is cleared", !listActiveMergeQuarantines().some((e) => e.repoPath === repoAB_F));
+  check("(AB) THE FIX (item 3): the marker SURVIVES — recognized as E's own CURRENT write target, not just its stale armedKeys", fs.existsSync(latchPathE2));
+  check("(AB) E's own in-memory entry (still armed only under its stale key) is untouched", listActiveMergeQuarantines().some((e) => e.repoPath === repoAB_E));
+
+  // Cleanup: E was never cleared through the normal path (its own armedKeys are stale) — remove its
+  // marker + in-memory presence directly rather than leaving residue for later sections.
+  fs.rmSync(latchPathE2, { force: true });
+  clearMergeQuarantineByRecordedPath(repoAB_E);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — /internal/merge-quarantine/clear-by-path (repoPath AND id addressing, exactly-one-of validation, path-traversal id rejection), GET /internal/merge-quarantine/list (id/registered projection, incl. a dual-armed entry's own id/ids BEFORE it's cleared), the shared clearMergeQuarantineReporting helper (no drift between /clear and /clear-by-path), partitionQuarantinesByRegistration / db.listAllRegisteredRepoPaths (live + multi-repo + archived registration, never swallowing a registered+quarantined repo into the orphan bucket, and a registered-path spelling variant), clearMergeQuarantineLatchFile's round-2/3 fixes, quarantineLatchFileIdsFor's round-3 real-file-first ordering, clearMergeQuarantineByRecordedPath's round-4/5 stored-repoPath-addressed clear (the `{repoPath}` form's own immunity to key drift, clearing every matching active entry, and the pending-fallback drift) and legacyQuarantineHashFor's byte-identical behavior, PLUS round 6's governing-rule fixes — pending entries are matched by stored directPathIdentity, never a freshly re-walked canonicalRepoLockKey, at every site: (T) enterMergeQuarantine's pending-merge no longer adopts an unrelated pending entry's identity for a fresh raise, (U) clearMergeQuarantineByRecordedPath's pending branch drops EVERY identity-matching pending entry, (V) assertRepoNotQuarantined names the BLOCKING entry's own repoPath/latch id and points at /clear-by-path, and (W) partitionQuarantinesByRegistration no longer mis-registers a pending entry via an enclosing repo's key — all behave as designed (cards c0be9bf9, abccee85). Round 7: (X) clearMergeQuarantineByRecordedPath's own last-resort fallback no longer recomputes a fresh key from a never-quarantined (typo'd) given path — it reports not-found instead of collaterally lifting an unrelated enclosing repo's real quarantine. Card 6237bef6: (P)/(P2)/(P-SHARED) turn card abccee85's traced-not-fixed gap into hard, two-way checks — a pending entry's own orphanLatchFiles are now actually swept on clear, at all three pending-removal sites (clearMergeQuarantineByKey, clearMergeQuarantineLatchFile, and clearMergeQuarantineByRecordedPath, the third abccee85 never named), and an orphan file still referenced by a SURVIVING entry (active or pending) is never deleted out from under it."
+  ? "\n✅ ALL PASS — /internal/merge-quarantine/clear-by-path (repoPath AND id addressing, exactly-one-of validation, path-traversal id rejection), GET /internal/merge-quarantine/list (id/registered projection, incl. a dual-armed entry's own id/ids BEFORE it's cleared), the shared clearMergeQuarantineReporting helper (no drift between /clear and /clear-by-path), partitionQuarantinesByRegistration / db.listAllRegisteredRepoPaths (live + multi-repo + archived registration, never swallowing a registered+quarantined repo into the orphan bucket, and a registered-path spelling variant), clearMergeQuarantineLatchFile's round-2/3 fixes, quarantineLatchFileIdsFor's round-3 real-file-first ordering, clearMergeQuarantineByRecordedPath's round-4/5 stored-repoPath-addressed clear (the `{repoPath}` form's own immunity to key drift, clearing every matching active entry, and the pending-fallback drift) and legacyQuarantineHashFor's byte-identical behavior, PLUS round 6's governing-rule fixes — pending entries are matched by stored directPathIdentity, never a freshly re-walked canonicalRepoLockKey, at every site: (T) enterMergeQuarantine's pending-merge no longer adopts an unrelated pending entry's identity for a fresh raise, (U) clearMergeQuarantineByRecordedPath's pending branch drops EVERY identity-matching pending entry, (V) assertRepoNotQuarantined names the BLOCKING entry's own repoPath/latch id and points at /clear-by-path, and (W) partitionQuarantinesByRegistration no longer mis-registers a pending entry via an enclosing repo's key — all behave as designed (cards c0be9bf9, abccee85). Round 7: (X) clearMergeQuarantineByRecordedPath's own last-resort fallback no longer recomputes a fresh key from a never-quarantined (typo'd) given path — it reports not-found instead of collaterally lifting an unrelated enclosing repo's real quarantine. Card 6237bef6: (P)/(P2)/(P-SHARED) turn card abccee85's traced-not-fixed gap into hard, two-way checks — a pending entry's own orphanLatchFiles are now actually swept on clear, at all three pending-removal sites (clearMergeQuarantineByKey, clearMergeQuarantineLatchFile, and clearMergeQuarantineByRecordedPath, the third abccee85 never named), and an orphan file still referenced by a SURVIVING entry (active or pending) is never deleted out from under it. Card 9cabd143: (Y) the sweep never deletes a filename a SURVIVING entry has since legitimately reclaimed as its own live physical latch (proven across a real restart, in a separate child process), (Z1)/(Z1-route) close the SAME gap at clearMergeQuarantineLatchFile's raw-fallback bypass site (over both the function and the real HTTP route), now reporting `latchKept`/`referencingRepoPaths` instead of a bare `ok:true` when a file survives. Round 2 (Code Review d37fd1aa): (Z2) is RE-POINTED — clearing a PENDING entry by id deletes its OWN file even when an unrelated entry's `orphanLatchFiles` merely lists it (check 1 alone must never protect an entry's own file; only genuine ownership, check 2, may), proven to stick across a real child-process restart and to agree with `/clear`/`/clear-by-path {repoPath}`; (AA) proves check (2)'s PENDING-ownership half is genuinely reachable (not just defensive) via the ordinary orphan-reference sweep; (AB) proves check (2)'s ACTIVE-ownership half also covers an entry's TRUE current write target (`quarantinePathFor`), not only its own (possibly stale, post-drift) `armedKeys`."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

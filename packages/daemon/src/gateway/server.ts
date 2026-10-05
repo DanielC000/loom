@@ -3265,7 +3265,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     const result = clearMergeQuarantineLatchFile(body.id as string);
     if (!result.ok) return reply.code(400).send({ error: result.reason });
-    return { ok: true, wasQuarantined: result.wasQuarantined, id: body.id };
+    return {
+      ok: true, wasQuarantined: result.wasQuarantined, id: body.id,
+      ...(result.latchKept ? { latchKept: true, referencingRepoPaths: result.referencingRepoPaths } : {}),
+    };
   });
 
   // --- Merge-quarantine read-only list (card c0be9bf9) — loopback-only, deliberately NOT covered by the
