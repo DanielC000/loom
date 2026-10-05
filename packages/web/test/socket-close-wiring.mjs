@@ -320,10 +320,12 @@ const consequentBlock = (src, callRe, name) => {
 };
 
 check("(12) the token-LESS branch never re-arms AND ends the close path — it is terminal, not a ladder", () => {
-  // FleetSocketProvider is deliberately absent: it has no token-less branch at all (it asks the episode
-  // unconditionally, and a token-less probe returns "none"). Its own token-less ladder is therefore
-  // still unbounded — a KNOWN, separate gap, not something this check silently covers.
-  assert.deepEqual(NO_TOKEN_CLIENTS, ["components/CompanionChat.tsx", "components/Terminal.tsx"],
+  // Card 97dd97e5: FleetSocketProvider joined this list by DERIVATION — it used to ask the episode
+  // unconditionally (a token-less probe just settles as "none"), leaving its own token-less ladder
+  // unbounded on a remote origin holding no gateway token at all. It now carries the same
+  // noteRemoteSocketRefusal arm as CompanionChat/Terminal and must satisfy the same terminality below.
+  assert.deepEqual(NO_TOKEN_CLIENTS,
+    ["components/CompanionChat.tsx", "components/FleetSocketProvider.tsx", "components/Terminal.tsx"],
     `the noteRemoteSocketRefusal scan found ${JSON.stringify(NO_TOKEN_CLIENTS)}. A client GAINING this branch `
     + "must satisfy the terminality assertions below; a client LOSING it means the branch (or the regex) went away.");
   for (const name of NO_TOKEN_CLIENTS) {

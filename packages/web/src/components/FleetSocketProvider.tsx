@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { ServerFleetMessage, SessionListItem } from "@loom/shared";
 import { api, orchStatusQuery } from "../lib/api";
 import { applyFleetDelta } from "../lib/fleetSocket";
-import { socketAuth } from "../lib/gatewayCredential";
+import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { createReconnectBackoff, createRefusalEpisode, createRetryLoop, handleSocketClose } from "../lib/socketReconnect";
 import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
 
@@ -84,6 +84,10 @@ export function FleetSocketProvider() {
     // guaranteed 401 forever at the 10s cap, spending the trusted proxy's shared failed-auth budget.
     const refusalEpisode = createRefusalEpisode();
     let retriesStopped = false;
+    // Card 97dd97e5 — scoped to the whole effect, not one `connect()`: once any attempt has opened, a
+    // later close is an ordinary disconnect, never a missing credential. Mirrors CompanionChat's own
+    // `everOpened` (card 093981dd/d56b12d8).
+    let everOpened = false;
     // While a seed fetch is in flight, inbound deltas are buffered (in wire order) instead of patching the
     // cache directly, then replayed onto the seed once it lands — see the seed() comment below.
     let seeding = false;
@@ -201,6 +205,7 @@ export function FleetSocketProvider() {
 
       socket.onopen = () => {
         if (disposed) return;
+        everOpened = true;
         backoff.reset();
         refusalEpisode.reset(); // this run of failures is over; a later one gets its own probe
         stopFallbackPoll();
@@ -275,11 +280,34 @@ export function FleetSocketProvider() {
           log("the gateway token this browser holds was refused — not reconnecting; see the gateway banner");
           startFallbackPoll();
         };
+        /**
+         * Card 97dd97e5 — a REMOTE origin holding NO gateway token at all. `noteRemoteSocketRefusal`
+         * has just raised the lock, and there is nothing to probe: with no credential the upgrade can
+         * only ever 401, so this is terminal on the first never-opened close rather than after an
+         * episode's worth of asking (mirrors CompanionChat's `stopForNoToken`, card d56b12d8).
+         *
+         * Safe to stop for the same reason `stopForRefusal` is: the gateway lock it just raised puts the
+         * banner's paste field on screen, and that lock's CLEARING bumps `reattachNonce` in this
+         * provider's deps and rebuilds the whole lifecycle.
+         */
+        const stopForNoToken = () => {
+          if (disposed || retriesStopped) return;
+          retriesStopped = true;
+          clearTimeout(reconnectTimer);
+          reconnectTimer = undefined;
+          stopSeedRetries();
+          log("no gateway token held by this browser — not reconnecting; see the gateway banner");
+          startFallbackPoll();
+        };
         handleSocketClose(e, {
           retry: () => {
             if (retriesStopped) { startFallbackPoll(); return; }
             log("disconnected — falling back to polling and reconnecting");
             startFallbackPoll();
+            // Card 97dd97e5 — the token-LESS arm must run before the probe is ever asked: with no
+            // credential held there is nothing for `refusalEpisode.check` to learn (a token-less probe
+            // settles as `"none"`), and asking anyway just re-arms this ladder forever at the 10s cap.
+            if (noteRemoteSocketRefusal(everOpened)) { stopForNoToken(); return; }
             refusalEpisode.check(stopForRefusal);
             reconnectTimer = setTimeout(connect, backoff.next());
           },
