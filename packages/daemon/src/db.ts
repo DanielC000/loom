@@ -6934,12 +6934,15 @@ export class Db {
     const byGateType: Record<string, number> = {};
     const byOutcome: Record<string, number> = {};
     for (const r of rows) {
-      const gateType = gateTypeForKind(r.kind);
-      byGateType[gateType] = (byGateType[gateType] ?? 0) + 1;
       let detail: Record<string, unknown> = {};
       if (r.detailJson) {
         try { detail = JSON.parse(r.detailJson) as Record<string, unknown>; } catch { /* tolerate a bad blob */ }
       }
+      // Card bd9a483b: a landing-check row (`worker_gate` kind) must never inflate the `"worker"` tally
+      // alongside a real worker self-check — tallied under its OWN bucket instead, so a reader can tell
+      // "how many real gates ran" from "how many safety-net checks ran" without re-deriving it by hand.
+      const gateType = detail.landingCheckOnly === true ? "landingCheck" : gateTypeForKind(r.kind);
+      byGateType[gateType] = (byGateType[gateType] ?? 0) + 1;
       const outcome = gateOutcomeFromDetail(detail);
       byOutcome[outcome] = (byOutcome[outcome] ?? 0) + 1;
     }
@@ -10098,6 +10101,9 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     batchBranches,
     batchForfeited,
     fallbackOfBatchOpId,
+    // Card bd9a483b: `runUngatedLandingCheck` stamps this directly onto its OWN `worker_gate` event (never
+    // shared with the landing's own merge opId) — see GateHistoryRow.landingCheckOnly's doc.
+    landingCheckOnly: detail.landingCheckOnly === true,
   };
 }
 

@@ -124,6 +124,15 @@ export interface GateDescriptor {
    *  `gate_status`/`gate_queue` sees, e.g., `phase:"running", attempt:2, priorAttemptMs:1129000`.
    *  Purely informational: never consulted by admission/queueing/squash logic itself. */
   priorAttemptMs?: number;
+  /**
+   * Card bd9a483b: set ONLY by the `ungatedLandingCheckCommand` safety-net check — see that field's own
+   * canonical doc (`OrchestrationConfig.ungatedLandingCheckCommand`, shared/config.ts) for the full
+   * contract. `gateType` is `"worker"` for this run (never `"merge"`); this flag is the discriminator
+   * that additionally keeps it from ever being read as a real gate by anything deriving "last gated
+   * pass", a reduced-gate fact, `gateOwed`, or the interval counter. `undefined`/`false` on every other
+   * gate — unchanged.
+   */
+  landingCheckOnly?: boolean;
 }
 
 /** The callback shape {@link GateSemaphore.runExclusive} runs once admitted — one per chain link. */
@@ -196,6 +205,10 @@ export interface GateSnapshotEntry {
    *  queued cause (the per-repo guard, now merge-or-worker); never read a queued merge/worker with a
    *  free cap slot as a bug without checking this field first — distinct from cap or worktree contention. */
   repoContended: boolean;
+  /** Echoed from {@link GateDescriptor.landingCheckOnly} — see its own doc. `false` on every ordinary
+   *  merge/worker/deploy/batch gate; `true` only for the ungated-landing safety-net check (card bd9a483b).
+   *  A reader deriving a real gate pass/fail fact from `gate_queue` must check this first. */
+  landingCheckOnly: boolean;
 }
 
 /** The whole live picture: the counter/queue depth plus a detail entry per in-flight run. */
@@ -1063,7 +1076,20 @@ export class GateSemaphore {
    *  already authorized by the time it runs; it must enforce its own scope. */
   cancelQueuedForSession(sessionId: string, gateType: GateType, projectId: string, kind: GateCancelKind, detail: string): { cancelled: boolean; opId?: string } {
     for (const e of this.registry.values()) {
-      if (e.startedAt == null && e.descriptor.sessionId === sessionId && e.descriptor.gateType === gateType && e.descriptor.projectId === projectId) {
+      // Card bd9a483b (CR round 3/4): never match a `landingCheckOnly` entry here. This primitive's own
+      // match key (sessionId+gateType+projectId) is too coarse to tell a worker's real run_gate
+      // self-check apart from its OWN in-flight landing-check — both share the identical "worker"
+      // gateType under the same session/project. Its FIRST caller, `supersedeQueuedSelfCheck`, fires to
+      // reclaim a QUEUED real self-check a merge decision made moot; it must never instead catch and
+      // cancel the landing-check that same merge decision is itself still waiting on. Its OTHER caller,
+      // `cancelWorkerGateThenSweep` (a worker stopping itself), never actually exercises this exclusion in
+      // practice: it only calls here for an entry `isWorkerSelfCheckGate` already approved, and that
+      // predicate's own `!entry.landingCheckOnly` conjunct already excludes a landing-check before this
+      // method ever runs — harmless, not merely unreached by coincidence. A MANUAL gate_cancel of a QUEUED
+      // landing-check still works via a different, exact-id primitive (`cancelQueued`, resolved through
+      // `findByOpId` — see `cancelGateOp`'s own queued-phase branch), which this exclusion never touches:
+      // "a manager's gate_cancel stays allowed" either way.
+      if (e.startedAt == null && e.descriptor.sessionId === sessionId && e.descriptor.gateType === gateType && e.descriptor.projectId === projectId && !e.descriptor.landingCheckOnly) {
         if (this.cancelQueued(e.id, kind, detail)) return { cancelled: true, opId: e.descriptor.opId };
       }
     }
@@ -1109,6 +1135,7 @@ export class GateSemaphore {
       fallbackOfBatchOpId: e.descriptor.fallbackOfBatchOpId ?? null,
       attempt: e.descriptor.attempt ?? null,
       priorAttemptMs: e.descriptor.priorAttemptMs ?? null,
+      landingCheckOnly: e.descriptor.landingCheckOnly ?? false,
       attemptStartedAt: phase === "running" ? e.attemptStartedAt : null,
       phase,
       since: phase === "running" ? e.startedAt! : e.enqueuedAt,

@@ -168,6 +168,12 @@ export interface GateQueueEntry {
    *  for anything that isn't a `merge`-kind gate. Present for EVERY entry regardless of project — same
    *  cross-project visibility as `idleMs`/`extended` above, since it reveals nothing beyond a boolean. */
   repoContended: boolean;
+  /** Card bd9a483b: echoed from {@link GateDescriptor.landingCheckOnly} — see its own doc. `true` ONLY for
+   *  the per-project `orchestration.ungatedLandingCheckCommand` safety-net check running on an interval-
+   *  skipped landing; `false` for every ordinary merge/worker/deploy/batch gate. Unconditional, same
+   *  cross-project visibility tier as `repoContended`/`extended` — it reveals nothing beyond a boolean
+   *  classification. A reader deriving a real merge-gate fact from this snapshot must check this first. */
+  landingCheckOnly: boolean;
   taskId?: string | null;
   branch?: string | null;
   workerLabel?: string | null;
@@ -390,16 +396,20 @@ interface RetainedWorktreeRecord {
 export type GateCancelScope = { kind: "project" } | { kind: "own"; sessionId: string };
 
 /**
- * True when `entry` is gateType `"worker"` — i.e. a worker's own `run_gate` self-check, NEVER a
- * merge/deploy entry, even one stamped with that same `sessionId` (a solo merge confirm's descriptor
- * carries `sessionId: workerSessionId` too). Shared by `cancelGateOp`'s `{kind:"own"}` worker-scope
- * refusal and `cancelWorkerGateThenSweep`'s own-entries filter, so the two can never drift on what
- * counts as "this worker's own gate op".
+ * True when `entry` is gateType `"worker"` AND NOT the `ungatedLandingCheckCommand` safety-net check —
+ * i.e. a worker's own `run_gate` self-check, NEVER a merge/deploy entry (even one stamped with that same
+ * `sessionId` — a solo merge confirm's descriptor carries `sessionId: workerSessionId` too) and NEVER a
+ * landing-check (card bd9a483b, CR round 3): that run is semantically part of a MANAGER's own
+ * worker_merge_confirm call, admitted as `gateType:"worker"` only for its queueing/priority shape, so a
+ * worker stopping itself (`cancelWorkerGateThenSweep`) or self-cancelling its OWN run_gate
+ * (`cancelGateOp`'s `{kind:"own"}` scope) must never be able to touch it — mirrors "a merge-confirm's
+ * gate is never cancelled by a stop". A MANAGER's `gate_cancel` is UNAFFECTED by this predicate (neither
+ * call site below consults it for the manager/`{kind:"project"}` scope) and may still cancel it.
  *
  * @decision 289f2607 — gateType, not just sessionId, decides what a worker's stop may ever touch.
  */
 function isWorkerSelfCheckGate(entry: GateSnapshotEntry): boolean {
-  return entry.gateType === "worker";
+  return entry.gateType === "worker" && !entry.landingCheckOnly;
 }
 
 /** One entry in {@link SessionService.getRetainedWorktrees}'s result — a worktree Pass B of
@@ -791,6 +801,13 @@ type ConfirmMergeResult = {
   /** Card 6f13746c: an UNGATED (gate-off / gate-interval) landing was refused in-lock because a gate became owed after its decision — nothing squashed,
    *  never cached (classified `"gate-owed"`). Deliberately NOT `gateBaseInvalidated`: that is a verdict about canonical main. */
   gateOwedRefusal?: boolean;
+  /** Card bd9a483b: the per-project `orchestration.ungatedLandingCheckCommand` safety-net check failed on
+   *  an interval-skipped landing — nothing squashed, classified `"ungated-landing-check-failed"`
+   *  (`NEVER_CACHED_OUTCOMES`). Distinct from `gateOwedRefusal`/`gateBaseInvalidated`: this is a real,
+   *  resolved verdict about the LANDING's own tree at this instant, which the next re-confirm (after a
+   *  fix) must re-attempt for real rather than replay. Never counted toward the merge-gate interval
+   *  counter or `gateOwed` either way. */
+  ungatedLandingCheckFailed?: boolean;
   /** Card bbccf470: refused BEFORE any gate/union/squash because the branch tip moved after the manager's last worker_merge review (classified `"reviewed-tip-moved"`, never cached — a re-review changes the answer). */
   reviewedTipMoved?: boolean;
   /** Card 7e5b23e7: set on a union-merge (pre-gate) rejection caused by `mergeMainIntoWorktree` raising —
@@ -4794,6 +4811,7 @@ export class SessionService {
         batched: e.batchBranches != null,
         branchCount: e.batchLandedCount,
         batchBranches: e.batchBranches,
+        landingCheckOnly: e.landingCheckOnly,
         // Card fd9edb87: this run's OWN project's resolved gate timeout, so a cross-project reader can
         // scale a long-run cue per ROW instead of against one page-level constant. Resolved through the
         // SAME resolveConfig(project.config, platformConfig) path the merge/worker gates themselves use
@@ -4835,6 +4853,11 @@ export class SessionService {
   gateStatus(opId: string, scopeSessionId?: string, scopeProjectId?: string, redactCrossProject?: { readonly callerProjectId: string | undefined }): {
     state: "queued" | "running" | "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart" | "never_existed" | "unknown" | "ambiguous";
     gateType: GateType | null;
+    /** Card bd9a483b: echoes {@link GateDescriptor.landingCheckOnly} while LIVE, or — once settled —
+     *  derived from the tombstone's own `key` prefix (`landing-check:<workerSessionId>`, the only kind of
+     *  "gate" row this applies to). `undefined` for every row this doesn't apply to (never a fabricated
+     *  `false`) — present (`true`/`false`) only for a `"gate"`-kind op. */
+    landingCheckOnly?: boolean;
     /** @decision d5e67146 — for tombstone state:"pending", elapsedMs re-bases to time-since-MINT, a
      *  third origin on top of the live queued/running phases, never an exemption from reading `state`
      *  first */
@@ -5051,6 +5074,7 @@ export class SessionService {
         state: entry.phase, gateType: entry.gateType, elapsedMs: Date.now() - entry.since,
         idleMs: entry.lastOutputAt != null ? Date.now() - entry.lastOutputAt : null,
         extended: entry.extended,
+        landingCheckOnly: entry.landingCheckOnly,
         // Card 99a1cf6f: see GateQueueEntry.attempt's own doc — same fields, same reason, now also
         // reachable by a caller polling ONE op via gate_status(opId) rather than scanning gate_queue.
         attempt: entry.attempt ?? null, priorAttemptMs: entry.priorAttemptMs ?? null,
@@ -5084,7 +5108,7 @@ export class SessionService {
        * — an unclassified field must fail to compile, never silently default to visible
        */
       type GateVerdictDerivedKey = "passed" | "cancelled" | "retryWarning" | "transientRetryWarning";
-      type GateOuterFieldKey = "state" | "gateType" | "elapsedMs" | "idleMs" | "admittedAt" | "ownerSessionAlive" | "outcome";
+      type GateOuterFieldKey = "state" | "gateType" | "elapsedMs" | "idleMs" | "admittedAt" | "ownerSessionAlive" | "outcome" | "landingCheckOnly";
       type GateVerdictFieldKey = keyof PendingGateOpVerdict | GateVerdictDerivedKey | GateOuterFieldKey;
       const GATE_VERDICT_FIELD_CLASSIFICATION: Record<GateVerdictFieldKey, "sensitive" | "structural"> = {
         // Content-bearing — another tenant's paths, test names, error text, or landed work.
@@ -5153,6 +5177,9 @@ export class SessionService {
         admittedAt: "structural",
         ownerSessionAlive: "structural",
         outcome: "structural",
+        // Card bd9a483b: a plain boolean fleet classification (is this gate op the landing-check safety
+        // net, or a real gate), same bucket as gateType/extended — no foreign path/test/error content.
+        landingCheckOnly: "structural",
       };
       const settleTimingFields = {
         ...(payload?.settledAt !== undefined ? { settledAt: payload.settledAt } : {}),
@@ -5279,11 +5306,18 @@ export class SessionService {
       // `GateVerdictFieldKey`'s own doc, above, for why that runtime safety net alone is NOT the same
       // compile-time forcing function `verdictFields` gets from `keyof PendingGateOpVerdict`, and why the
       // assertion immediately below is what actually closes that gap.
+      // Card bd9a483b: derived from the tombstone's own `key` prefix, never a new column — a landing-check
+      // op always mints its key as `landing-check:<workerSessionId>` (runUngatedLandingCheck). Scoped to
+      // `kind:"gate"` rows only (the ONLY kind this field is ever meaningful for), so a "merge"/"deploy"
+      // tombstone whose unrelated `key` happened to start the same way (never in practice — merge/deploy
+      // keys have their own fixed shapes) can never be misread as a landing check.
+      const landingCheckOnly = t.record.kind === "gate" && t.record.key.startsWith("landing-check:") ? true : undefined;
       const rawOuterFields = {
         state: t.record.state, gateType, elapsedMs: pendingElapsedMs, idleMs: null,
         admittedAt: t.record.startedAt,
         ...(ownerSessionAlive !== undefined ? { ownerSessionAlive } : {}),
         ...(t.record.verdict != null ? { outcome: t.record.verdict } : {}),
+        ...(landingCheckOnly !== undefined ? { landingCheckOnly } : {}),
       };
       // Card 753b9699 (manager review): `GateOuterFieldKey` is a hand-written literal union, not derived
       // from an interface — so adding an 8th field to `rawOuterFields` above WITHOUT also adding it to that
@@ -5361,6 +5395,7 @@ export class SessionService {
         extended: e.extended,
         queuePosition: e.queuePosition,
         repoContended: e.repoContended,
+        landingCheckOnly: e.landingCheckOnly,
         // Card 99a1cf6f: unconditional, same tier as idleMs/extended/repoContended above — a retry
         // attempt number and its prior attempt's duration carry no more task/branch identity than the
         // elapsed-time fields already visible cross-project, so there's no reason to gate them behind
@@ -5658,7 +5693,13 @@ export class SessionService {
     // part of this check, not just sessionId).
     if (restrictToOwnerSessionId) {
       if (!isWorkerSelfCheckGate(entry)) {
-        return { outcome: "refused", reason: "this op is a merge/deploy gate, not your own run_gate self-check — workers may only cancel their own gate op", opId: entry.opId ?? opId };
+        // Card bd9a483b (CR round 4): `isWorkerSelfCheckGate` is false for TWO different shapes — a real
+        // merge/deploy gate, and this worker's own in-flight landing-check (same gateType "worker", but
+        // `landingCheckOnly:true`) — so the refusal must not call the latter "a merge/deploy gate".
+        const reason = entry.landingCheckOnly
+          ? "this op is the manager's own ungated-landing-check (part of its worker_merge_confirm call), not your own run_gate self-check — workers may only cancel their own gate op"
+          : "this op is a merge/deploy gate, not your own run_gate self-check — workers may only cancel their own gate op";
+        return { outcome: "refused", reason, opId: entry.opId ?? opId };
       }
       if (entry.sessionId !== restrictToOwnerSessionId) {
         return { outcome: "refused", reason: "this op belongs to a different session — you may only cancel your own gate op", opId: entry.opId ?? opId };
@@ -15841,6 +15882,13 @@ export class SessionService {
     let skipCoveredTip: string | undefined;
     // @decision 35cfcbe0 — WHICH no-gate decision set `skipCoveredTip` (the refusal names the actual skip from this, never by elimination).
     let skipKind: "reuse" | "inert" | "gate-interval" | "gate-disabled" | undefined;
+    // Card bd9a483b (CR round 2): the ungated-landing-check safety net runs BEFORE the repo guard is ever
+    // taken (no repo lock held while it queues/runs) — `landingCheckRan`/`landingCheckPreHead`/
+    // `landingCheckOpId` carry its own basis forward to the IN-LOCK re-verification at the existing
+    // held-stamp pin point, and to the squash-point refusal paths.
+    let landingCheckRan = false;
+    let landingCheckPreHead: string | undefined;
+    let landingCheckOpId: string | undefined;
     // @decision 975c774b — set at the reuse decision when the tree is dirty/unreadable; refused only if a gate will actually spawn.
     let confirmTimeDirty: string | undefined;
     // @decision 975c774b — the distinct, never-cached refusal for a verdict that describes no commit (see `gateWorktreeDirty`);
@@ -15854,6 +15902,18 @@ export class SessionService {
       // `reuseRefusalReasons` (2e52bf99) rides here too: a dirty tree never reaches a `build_gate` row, so this is its only record.
       evt("merge_rejected", { reason: "gate_worktree_dirty", sha, phase, detail, ...(reuseRefusalReasons && reuseRefusalReasons.length > 0 ? { reuseRefusalReasons } : {}), ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateWorktreeDirty: { phase, detail } };
+    };
+    // Card 6f13746c / bd9a483b (CR round 2): shared by BOTH gate_owed in-lock checks (the pre-existing one
+    // at the squash point, and the NEW one right after the ungated-landing-check's own stale-tip
+    // verification) — a single refusal shape, called from two points, rather than two copies that could
+    // drift. `undefined` means nothing is owed (or this isn't a gate-disabled/inert-skip landing at all).
+    const refuseIfGateOwed = async (): Promise<ConfirmMergeResult | undefined> => {
+      if (!(gate && gateDisabled && inertSkip && this.db.getMergeGateState(project.id, worker.repoKey ?? "primary").gateOwed)) return undefined;
+      const why = "a gate is now owed for this project's merge-gate interval (a periodic gate failed, or a human asked for one) after this landing was decided ungated — nothing was squashed; re-run worker_merge_confirm and it will run the gate";
+      const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. This refusal is never cached.`;
+      const { suppressed, sha } = await rejectNotify("gate_owed", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "gate_owed", sha, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: false, gateOwedRefusal: true };
     };
     // @decision 975c774b — a PASS is a fact about the tip the gate spawned on; a branch that moved since would squash a commit
     // the gate never ran. Refused (never cached, a re-call re-gates the new tip) rather than squashing the gated tip, which
@@ -16487,6 +16547,37 @@ export class SessionService {
         inertSkip = gateDisabled ? true : await isInertMergeDiff(repoPath, gateBaseMainHead!, preWaitBranchHead, { timeoutMs: this.gitOpMs });
         if (inertSkip) {
           gateRan = false;
+          // Card bd9a483b — the per-repo `ungatedLandingCheckCommand` safety-net check runs HERE, strictly
+          // before `acquireRepoGuardOnly` below, admitted through the semaphore like an ordinary worker
+          // self-check. Full mechanics (why it never holds a repo lock, the branch ∪ main-at-confirm tree
+          // it actually runs against — this `if (gate)` block's own union-merge above already ran, so main
+          // IS unioned in by this point — and the staleness re-check below) are canonical in
+          // `OrchestrationConfig.ungatedLandingCheckCommand`'s own doc; read it there, not restated here.
+          if (gateDisabled && mergeSkipReason === "gate-interval" && targetRepo.ungatedLandingCheckCommand) {
+            const preStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+            if (preStamp.dirty || preStamp.head === null) {
+              return refuseWorktreeDirty("before-gate", preStamp.dirty ? "the worktree is dirty before the ungated landing check could run" : "worktree stamp unreadable before the ungated landing check could run");
+            }
+            const landingCheck = await this.runUngatedLandingCheck({
+              managerSessionId, projectId: project.id, worktreePath, branch, taskId, repoPath,
+              workerSessionId, command: targetRepo.ungatedLandingCheckCommand,
+              timeoutMs: orchestration.ungatedLandingCheckTimeoutMs, cap: orchestration.maxConcurrentGates,
+            });
+            if (landingCheck.outcome === "cancelled") {
+              evt("merge_cancelled", { cancelled: true, cancelKind: landingCheck.cancelKind, cancelDetail: landingCheck.cancelDetail, landingCheckOnly: true });
+              return { merged: false, cancelled: true, cancelKind: landingCheck.cancelKind, reason: landingCheck.cancelDetail, opId: thisOpId };
+            }
+            landingCheckRan = true;
+            landingCheckPreHead = preStamp.head;
+            landingCheckOpId = landingCheck.opId;
+            if (!landingCheck.passed) {
+              const why = `ungated landing check failed: ${landingCheck.failedStep ?? "an unidentified step"} — this is this repo's own \`ungatedLandingCheckCommand\` safety net, not its real gateCommand; nothing was squashed, and this landing's turn in the merge-gate interval is NOT consumed (fix it, then re-run worker_merge_confirm)`;
+              const detailText = `${why}. The repo guard was never taken; nothing is held. This refusal is never cached.${landingCheck.outputTail ? ` Output: ${landingCheck.outputTail}` : ""}`;
+              const { suppressed, sha } = await rejectNotify("ungated_landing_check_failed", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+              evt("merge_rejected", { reason: "ungated_landing_check_failed", sha, landingCheckOnly: true, ungatedLandingCheckOpId: landingCheck.opId, ...(suppressed ? { suppressed: true } : {}) });
+              return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: false, ungatedLandingCheckFailed: true };
+            }
+          }
           try {
             releaseInertRepoGuard = await this.gateSemaphore.acquireRepoGuardOnly({
               repoPath, projectId: project.id, sessionId: workerSessionId, taskId, branch, opId: thisOpId,
@@ -16657,6 +16748,26 @@ export class SessionService {
             }
             skipCoveredTip = skipBranchTip;
             skipKind = mergeSkipReason;
+            // @decision bd9a483b — never raw-compare `landingCheckPreHead`/`heldStamp.head` (livelocks a
+            // busy main); always pass the branch's owed-base as an extra union base, or a HELD branch's
+            // own re-union of main falsely reads as stale too.
+            if (landingCheckRan && landingCheckPreHead !== heldStamp.head) {
+              const chain = await verifyReviewedTipChain(repoPath, landingCheckPreHead!, heldStamp.head, { timeoutMs: this.gitOpMs }, this.extraUnionBasesForOwedBase(owedBase));
+              if (!chain.ok) {
+                const why = `the worktree changed with a new commit while the ungated landing check was running (or while it queued/waited for the repo guard) — ${chain.reason} — its verdict no longer covers the tree that would be squashed; nothing was squashed; re-run worker_merge_confirm to re-check against the current tree`;
+                const detailText = `${why}. This refusal is never cached.`;
+                const { suppressed, sha } = await rejectNotify("ungated_landing_check_stale", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+                evt("merge_rejected", { reason: "ungated_landing_check_stale", sha, landingCheckOnly: true, ungatedLandingCheckOpId: landingCheckOpId, ...(suppressed ? { suppressed: true } : {}) });
+                return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: false, ungatedLandingCheckFailed: true };
+              }
+            }
+            // CR Minor (card bd9a483b, round 2): re-check gate_owed again, in-lock, immediately AFTER the
+            // landing-check's own re-verification above — real time passed (the check's run + the guard
+            // wait), during which a periodic gate failure elsewhere could have made one newly owed; the
+            // pre-existing check at the squash point (below) covers the rest of this op's own remaining
+            // span, so the two together bound the whole window rather than leaving a gap between them.
+            const owedAfterCheck = await refuseIfGateOwed();
+            if (owedAfterCheck) return owedAfterCheck;
           }
         }
       }
@@ -17708,14 +17819,11 @@ export class SessionService {
     if (gateRan) this.gateSemaphore.beginSquash(repoPath, thisOpId);
     // Card 6f13746c: a skip decision must not outlive a newly OWED gate. Checked HERE, at the squash point INSIDE the repo guard (the
     // `finally` below releases it), so a red or a human gate-next recorded after this op decided "ungated" refuses it in-lock: nothing is
-    // squashed, the reservation is released by the caller, and the class is never cached (the re-call decides GATED).
-    if (gate && gateDisabled && inertSkip && this.db.getMergeGateState(project.id, worker.repoKey ?? "primary").gateOwed) {
-      const why = "a gate is now owed for this project's merge-gate interval (a periodic gate failed, or a human asked for one) after this landing was decided ungated — nothing was squashed; re-run worker_merge_confirm and it will run the gate";
-      const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. This refusal is never cached.`;
-      const { suppressed, sha } = await rejectNotify("gate_owed", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-      evt("merge_rejected", { reason: "gate_owed", sha, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan: false, gateOwedRefusal: true };
-    }
+    // squashed, the reservation is released by the caller, and the class is never cached (the re-call decides GATED). Card bd9a483b round 2:
+    // this is the SECOND of the two refuseIfGateOwed() calls — the first ran right after the ungated-landing-check's own re-verification,
+    // closing the window between the check settling and the guard being granted; this one closes the rest of the span up to the squash.
+    const owedAtSquash = await refuseIfGateOwed();
+    if (owedAtSquash) return owedAtSquash;
     // Card bbccf470: the SAME reviewed-tip check, against the tip the squash is pinned to (every landing kind: gated, reuse, inert, gate-interval/gate-disabled; a
     // no-gate-configured landing has no pin, so it is checked — and then pinned — at the tip read here, which the squash then freezes).
     const squashTip = expectedTipForLanding(landingPin) ?? (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined;
@@ -18162,6 +18270,14 @@ export class SessionService {
     return { kind: "range", base, tip };
   }
   /**
+   * Card bd9a483b (CR round 4) — THE ONE place that turns an owed-base into {@link verifyReviewedTipChain}'s `extraUnionBases`, so the in-lock
+   * landing-check stale re-check (`confirmWorkerMerge`) and {@link reviewedTipVerdict} derive the same extra bases from the same owed-base source
+   * and cannot drift apart — the round-4 fix for the asymmetry where the former passed none while the latter already passed `[owed.base]`.
+   */
+  private extraUnionBasesForOwedBase(owedBase: string | undefined): string[] {
+    return owedBase ? [owedBase] : [];
+  }
+  /**
    * Card bbccf470 — THE ONE reader of "is this branch's tip still the one the manager reviewed?" (the solo confirm at BOTH its check points and the batch assembly all
    * call it; nothing else compares against a review). The reviewed tip is the tip on the LATEST `merge_request` event for this branch AND repoKey (a recycled successor
    * shares the branch, so the predecessor's review binds; a re-review replaces it; a stale review from an earlier incarnation simply fails the walk-back below — a
@@ -18179,9 +18295,11 @@ export class SessionService {
     const recorded = typeof last.detail?.tip === "string" && last.detail.tip ? last.detail.tip : null;
     let why = recorded === null ? "the reviewed tip could not be read at review time" : live === null ? "the branch tip could not be read" : "";
     if (recorded !== null && live !== null) {
-      // Card 13fc5227: a held branch's union of main is built over its owed base (see mergeMainIntoWorktree's `owedBase`), so the walk must accept that base too.
+      // Card 13fc5227 / bd9a483b (round 4): a held branch's union of main is built over its owed base (see
+      // mergeMainIntoWorktree's `owedBase`), so the walk must accept that base too — derived through the
+      // SAME helper the landing-check stale re-check uses, so the two cannot drift apart.
       const owed = await this.resolveOwedRange(branch, repoPath, repoKey);
-      const chain = await verifyReviewedTipChain(repoPath, recorded, live, { timeoutMs: this.gitOpMs }, owed.kind === "range" ? [owed.base] : []);
+      const chain = await verifyReviewedTipChain(repoPath, recorded, live, { timeoutMs: this.gitOpMs }, this.extraUnionBasesForOwedBase(owed.kind === "range" ? owed.base : undefined));
       if (chain.ok) return { state: "unmoved", tip: live };
       why = chain.reason;
     }
@@ -20138,6 +20256,129 @@ export class SessionService {
     return { checked };
   }
 
+  /**
+   * Card bd9a483b (CR round 2): run a repo's `ungatedLandingCheckCommand` safety-net check — see that
+   * field's own canonical doc (`OrchestrationConfig.ungatedLandingCheckCommand`, shared/config.ts) for the
+   * full contract; not restated here. Implementation notes specific to THIS method: mints a durable
+   * `pending_gate_ops` tombstone at start and settles it at the end (bypassing `PendingOpRegistry`
+   * entirely — there is exactly one caller, so no dedup/attach is needed), so `gate_status(opId)`
+   * resolves this op both while live and after it settles. Never calls `applyGatePass`/`applyGateFail`/
+   * `recordMergeGateFailure` — the caller decides what the landing itself records.
+   */
+  private async runUngatedLandingCheck(args: {
+    managerSessionId: string; projectId: string; worktreePath: string; branch: string; repoPath: string;
+    taskId: string | null; workerSessionId: string; command: string; timeoutMs: number; cap: number;
+  }): Promise<
+    | { outcome: "cancelled"; cancelKind: GateCancelKind; cancelDetail: string; opId: string }
+    | { outcome: "settled"; passed: boolean; failedStep?: string; outputTail?: string; durationMs: number; opId: string }
+  > {
+    const opId = randomUUID();
+    this.db.insertPendingGateOp({
+      opId, kind: "gate", key: `landing-check:${args.workerSessionId}`, ownerSessionId: args.managerSessionId,
+      projectId: args.projectId, taskId: args.taskId, branch: args.branch, startedAt: new Date().toISOString(),
+      state: "pending", surfacedPending: false,
+    });
+    const descriptor: GateDescriptor = {
+      gateType: "worker", projectId: args.projectId, sessionId: args.workerSessionId, taskId: args.taskId,
+      branch: args.branch, worktreePath: args.worktreePath, repoPath: args.repoPath, opId, landingCheckOnly: true,
+    };
+    const runGateSeq = this.runGate ?? runGateSequential;
+    let durationMs = 0;
+    // Card bd9a483b (CR round 3, ruling 5): settle the durable tombstone on ANY exit from here down —
+    // a settle/cancel return below flips this first; an unexpected throw (never caught by either `catch`
+    // below) must still leave `gate_status(opId)` resolvable as `"error"`, never stuck `"pending"` forever.
+    let tombstoneSettled = false;
+    // ABORT-REASON THREADING (card bd9a483b, CR round 4 nit): mirrors the real-gate path's identical
+    // `cancelSignalRef` capture (see that call site's own "ABORT-REASON THREADING" doc) — a manager's
+    // `gate_cancel` intent/reason must reach this check's own running-cancel outcome too, not just the
+    // hardcoded fallback sentence.
+    let cancelSignalRef: AbortSignal | undefined;
+    // Round 5 nit: the finally-backstop below has no access to the thrown error (a bare `finally` never
+    // does) — capture just its first line here, cheaply, into the existing `reason` field, so the
+    // tombstone can carry SOMETHING beyond the bare "error" kind without turning this into a full
+    // diagnostic (still never the full stack/message).
+    let unexpectedErrorFirstLine: string | undefined;
+    try {
+      let result: GateSequentialResult;
+      try {
+        result = await this.gateSemaphore.runExclusive(args.cap, descriptor, async (startedAt, cancelSignal, hooks) => {
+          cancelSignalRef = cancelSignal;
+          const r = await runGateSeq(args.command, args.worktreePath, args.timeoutMs, undefined, gateOpIdEnvOverride(opId, 0, args.cap, WORKER_GATE_ENV_OVERRIDE), true, cancelSignal, hooks, gateSpillPath(opId));
+          durationMs = Date.now() - startedAt;
+          return r;
+        }, "low");
+      } catch (err) {
+        // QUEUED cancel (withdrawn before ever admitted) — mirrors the real gate's own identical catch.
+        if (err instanceof GateCancelledError) {
+          tombstoneSettled = true;
+          this.db.settlePendingGateOp(opId, { kind: "cancelled" });
+          this.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
+            taskId: args.taskId, kind: "worker_gate", detail: { opId, landingCheckOnly: true, cancelled: true, cancelKind: err.kind, cancelDetail: err.detail },
+          });
+          return { outcome: "cancelled", cancelKind: err.kind, cancelDetail: err.detail, opId };
+        }
+        throw err;
+      }
+      // RUNNING cancel (CR round 3, ruling 3): a manager's `gate_cancel` aborted an ALREADY-ADMITTED run —
+      // `runGateStep`/`runGateSequential` resolve `cancelled:true` rather than throwing in this case (only
+      // a QUEUED withdrawal throws `GateCancelledError`). Map it to the SAME clean `"cancelled"` outcome —
+      // never a red: a cancelled run reached no real verdict, so reading `passed:false` here would
+      // misreport an operator's own deliberate cancel as the check genuinely failing. `cancelRunning` (the
+      // only way to reach this branch) carries no `kind` of its own — unlike the QUEUED path, so "manual"
+      // is the only honest value (a manager's gate_cancel is the sole caller that can ever abort a RUNNING
+      // worker-gateType entry; see isWorkerSelfCheckGate's own doc for why a worker's own gate_cancel/stop
+      // can never reach this branch at all).
+      if (result.cancelled) {
+        tombstoneSettled = true;
+        // Mirrors the real-gate path's identical fallback: a generic sentence only when nothing informative
+        // was captured (e.g. a test double that never wires cancelSignalRef).
+        const runningCancelReason = typeof cancelSignalRef?.reason === "string" && cancelSignalRef.reason.length > 0
+          ? cancelSignalRef.reason
+          : "cancelled while running";
+        this.db.settlePendingGateOp(opId, { kind: "cancelled" });
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
+          taskId: args.taskId, kind: "worker_gate", detail: { opId, landingCheckOnly: true, cancelled: true, cancelKind: "manual", cancelDetail: runningCancelReason },
+        });
+        return { outcome: "cancelled", cancelKind: "manual", cancelDetail: runningCancelReason, opId };
+      }
+      tombstoneSettled = true;
+      this.db.settlePendingGateOp(opId, {
+        kind: result.passed ? "pass" : "fail",
+        payload: {
+          durationMs, outputTail: result.outputTail, steps: result.steps,
+          ...(result.passed ? {} : { gateDetail: { failedStep: result.failedStep, exitCode: result.failedStatus ?? null, signal: result.failedSignal ?? null, timedOut: result.failedTimedOut ?? false, stderrTail: result.outputTail } }),
+        },
+      });
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: args.managerSessionId,
+        workerSessionId: args.workerSessionId, taskId: args.taskId, kind: "worker_gate",
+        detail: {
+          opId, landingCheckOnly: true, passed: result.passed, gateSpawned: true, durationMs,
+          ...(result.failedStep ? { failedStep: result.failedStep } : {}),
+          ...(result.outputTail ? { outputTail: result.outputTail } : {}),
+          ...(result.failingTest ? { failingTest: result.failingTest } : {}),
+          ...(result.failedTimedOut ? { timedOut: true } : {}),
+          ...(result.failedSignal ? { signal: result.failedSignal } : {}),
+        },
+      });
+      return { outcome: "settled", passed: result.passed, failedStep: result.failedStep, outputTail: result.outputTail, durationMs, opId };
+    } catch (err) {
+      unexpectedErrorFirstLine = err instanceof Error ? err.message.split("\n", 1)[0]?.slice(0, 200) : undefined;
+      throw err;
+    } finally {
+      if (!tombstoneSettled) {
+        try {
+          // `reason` is the SAME field gateStatus's "error" branch already reads back out (line ~5256) —
+          // reuse it rather than inventing a new one, so this backstop settle gets the identical read path
+          // every other "reason" write already goes through (including cross-project redaction).
+          this.db.settlePendingGateOp(opId, { kind: "error", ...(unexpectedErrorFirstLine ? { payload: { reason: unexpectedErrorFirstLine } } : {}) });
+        } catch { /* best-effort: never let a tombstone-write failure mask the real throw */ }
+      }
+    }
+  }
+
   /** THE outcome recorder (ungated landing / passing gate). A solo landing records right after its squash (inside the repo guard); a passing batch records ONCE, right after its fast-forward. */
   recordMergeGateOutcome(projectId: string, ev: { kind: "ungated"; landed: number } | { kind: "pass"; sha: string | null; opId: string | null; periodic: boolean; candidates?: number }, repoKey = "primary"): void {
     const st = this.db.getMergeGateState(projectId, repoKey);
@@ -20655,10 +20896,13 @@ export class SessionService {
         // @decision 8c3d6c04 — `unionMergeTransient` classifies distinctly too, checked before the
         // fallback: a transient git-child condition clearing must see a fresh re-attempt, never a stale
         // cached rejection from before it cleared.
+        // Card bd9a483b — `ungatedLandingCheckFailed` classifies distinctly too, checked before the
+        // plain merged-else-rejected fallback: a human fixing the check's own failure must see a fresh
+        // re-confirm, never a stale cached refusal from before the fix.
         // @decision 9f5ae011 — `soloMergeTransient` classifies distinctly too, same reasoning one layer
         // later: `resetOrSkip`'s own confirmed-kill cleanup clearing must see a fresh re-attempt, never a
         // stale cached rejection from before it cleared.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

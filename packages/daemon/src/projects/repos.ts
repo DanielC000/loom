@@ -178,12 +178,25 @@ export async function validateRepoRegistry(
       }
       noGateByDesign = entry.noGateByDesign;
     }
+    // Card bd9a483b: mirrors `gateCommand`'s own validation immediately above EXACTLY (same non-empty-
+    // string + splitGateSteps checks) — same trust posture, same HUMAN-REST-only surface.
+    let ungatedLandingCheckCommand: string | undefined;
+    if (entry.ungatedLandingCheckCommand !== undefined) {
+      if (typeof entry.ungatedLandingCheckCommand !== "string" || !entry.ungatedLandingCheckCommand.trim()) {
+        return { ok: false, error: `repos entry "${key}" ungatedLandingCheckCommand must be a non-empty string when given` };
+      }
+      if (splitGateSteps(entry.ungatedLandingCheckCommand).length === 0) {
+        return { ok: false, error: `repos entry "${key}" ungatedLandingCheckCommand must split into at least one non-empty step (via top-level "&&" joins) — a whitespace-only or "&&"-only command is not a valid check` };
+      }
+      ungatedLandingCheckCommand = entry.ungatedLandingCheckCommand;
+    }
     seenKeys.add(key);
     seenPathKeys.add(pathKey);
     out.push({
       key, path: canonicalPath,
       ...(gateCommand === undefined ? {} : { gateCommand }),
       ...(noGateByDesign === undefined ? {} : { noGateByDesign }),
+      ...(ungatedLandingCheckCommand === undefined ? {} : { ungatedLandingCheckCommand }),
     });
   }
   return { ok: true, value: out };
@@ -242,7 +255,7 @@ export function composeRepoRegistryChangeNote(diff: RepoRegistryDiff, opts: { pr
   const parts: string[] = [];
   if (diff.added.length) parts.push(`added: ${fmt(diff.added)}`);
   if (diff.removed.length) parts.push(`removed: ${fmt(diff.removed)}`);
-  if (diff.updated.length) parts.push(`reconfigured (path/gateCommand/noGateByDesign changed): ${fmt(diff.updated)}`);
+  if (diff.updated.length) parts.push(`reconfigured (path/gateCommand/noGateByDesign/ungatedLandingCheckCommand changed): ${fmt(diff.updated)}`);
   const changeSummary = parts.length ? parts.join("; ") : "its entries were updated";
   const scope = opts.projectName ? `Project "${opts.projectName}"'s` : "This project's";
   return `[loom:repo-registry-changed] ${scope} repo registry changed (${changeSummary}). Cards are routed to a repo at CREATION time via \`repoKey\` (tasks_create/tasks_update); a card with no repoKey targets \`primary\`. A removed key can no longer be targeted — a card still carrying one will 400 at write time, so re-route or hold anything you were about to file at a removed key. A reconfigured key's new path/gate/gateless-declaration applies to any card routed there going forward.`;

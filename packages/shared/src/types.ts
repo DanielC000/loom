@@ -29,6 +29,14 @@ export interface RepoRegistryEntry {
   path: string;
   gateCommand?: string;
   noGateByDesign?: boolean;
+  /**
+   * Card bd9a483b: this repo's OWN `ungatedLandingCheckCommand` safety-net check — mirrors `gateCommand`
+   * immediately above EXACTLY: not inherited from the project-level `orchestration.ungatedLandingCheckCommand`
+   * (that project-level value applies ONLY to the primary repo, via `resolveRepoByKey`'s own `"primary"`
+   * branch); a repo with no value of its own here runs no check at all, same "deliberately NOT falling
+   * back" posture `gateCommand`'s own doc states. Omitted surfaces as `undefined` via {@link ResolvedRepo}.
+   */
+  ungatedLandingCheckCommand?: string;
 }
 
 /** A project's two bindings + its config override blob. */
@@ -2030,6 +2038,11 @@ export interface GateRun {
   batched: boolean;
   branchCount: number | null;
   batchBranches: string[] | null;
+  /** Card bd9a483b: echoed from `GateSnapshotEntry.landingCheckOnly` — `true` ONLY for the
+   *  `ungatedLandingCheckCommand` safety-net check (`gateType:"worker"` underneath, but never a real
+   *  worker self-check); the Gates page's active lane must label it distinctly. `false` on every other
+   *  run. */
+  landingCheckOnly: boolean;
   /** The RESOLVED per-project `orchestration.gateCommandTimeoutMs` (ms), read server-side so a
    *  per-project override is reflected. `null` means genuinely UNKNOWN — ⛔ not a measured zero, never
    *  substitute a default. ⚠️ This is the RAW configured value, not the ~2× effective ceiling a first
@@ -2201,6 +2214,15 @@ export interface GateHistoryRow {
    *  Card 0d372516 (round 2): same "never writes a row here" shape for a `merge_batch` whose assembly ABORTED EARLY
    *  on a candidate's own unverified rollback — `gate_status` settles `skipReason:"assembly-aborted-rollback-unverified"`. */
   skipReason: string | null;
+  /** Card bd9a483b: `true` ONLY for the `ungatedLandingCheckCommand` safety-net check — see that field's
+   *  own canonical doc (`OrchestrationConfig.ungatedLandingCheckCommand`, shared/config.ts) for the full
+   *  contract; not restated here. Its OWN distinct `worker_gate`-kind row (`gateType:"worker"`, own
+   *  `opId`, never sharing the landing's own merge opId) — `skipReason` is always `null` on this row (it
+   *  names why a MERGE's gate was skipped; this isn't a merge row). `outcome`/`passed`/`durationMs`/
+   *  `failingTest`/`outputTail` describe the check itself, exactly like an ordinary gate row describes a
+   *  real gate. `countGateEvents` tallies a `landingCheckOnly:true` row under its own `"landingCheck"`
+   *  bucket, separate from both `"worker"` and `"merge"`. `false` on every ordinary row, never `null`. */
+  landingCheckOnly: boolean;
   /** @decision 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; VACUOUS ON ONE
    *  OF TWO ARMS — never read alone, always alongside `emitCompareTestFiles` (below).
    *

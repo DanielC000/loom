@@ -526,23 +526,25 @@ function RepoRegistryEditor({ project }: { project: Project }) {
   const saved = project.repos ?? [];
   const [repos, setRepos] = useState<RepoRegistryEntry[]>(saved);
   const [error, setError] = useState<string | null>(null);
-  // The persisted candidate: trimmed, fully-blank rows dropped, and a blank gateCommand OMITTED rather
-  // than sent as "" (the validator rejects an empty-string gateCommand, and "no gate" is a real, distinct
-  // state — see the hint below). Dirty and the payload both key off this, so a stray blank row neither
-  // enables Save nor reaches the validator. `noGateByDesign` (card 22629cb2) is carried through VERBATIM
-  // from each source entry — this editor has no control for it (REST-only for now, like gateCommand
-  // started), but a PATCH here WHOLE-REPLACES the registry (validateRepoRegistry's shared REST/PATCH
-  // path), so reconstructing the entry without it would silently CLEAR a flag a human set out-of-band on
-  // every Save, and `dirty` would mis-report a flagged-but-otherwise-unedited project as already dirty.
+  // The persisted candidate: trimmed, fully-blank rows dropped, and a blank gateCommand/
+  // ungatedLandingCheckCommand OMITTED rather than sent as "" (the validator rejects an empty-string
+  // gateCommand, and "no gate"/"no check" is a real, distinct state — see the hint below).
+  //
+  // Card bd9a483b (CR round 3, ruling 2): SPREAD `r` rather than hand-copy named fields into a fresh
+  // object — the hand-copy silently dropped every field it didn't name (it dropped
+  // `ungatedLandingCheckCommand` outright the day that field shipped) AND rebuilt each entry's key order
+  // from scratch, which could differ from `saved[i]`'s own server-serialized order and read `dirty:true`
+  // on mount before any edit. Spreading `r` (whose own order traces back to `saved`, since `repos` seeds
+  // from `saved`) fixes both at once. `noGateByDesign` (card 22629cb2) rides the spread too.
   const clean: RepoRegistryEntry[] = repos
-    .map((r) => ({ ...r, key: r.key.trim(), path: r.path.trim(), gateCommand: r.gateCommand?.trim() || undefined }))
-    .filter((r) => r.key || r.path)
-    .map((r) => {
-      const out: RepoRegistryEntry = { key: r.key, path: r.path };
-      if (r.gateCommand !== undefined) out.gateCommand = r.gateCommand;
-      if (r.noGateByDesign !== undefined) out.noGateByDesign = r.noGateByDesign;
-      return out;
-    });
+    .map((r) => ({
+      ...r,
+      key: r.key.trim(),
+      path: r.path.trim(),
+      gateCommand: r.gateCommand?.trim() || undefined,
+      ungatedLandingCheckCommand: r.ungatedLandingCheckCommand?.trim() || undefined,
+    }))
+    .filter((r) => r.key || r.path);
   const dirty = JSON.stringify(clean) !== JSON.stringify(saved);
 
   const save = useMutation({
@@ -578,15 +580,27 @@ function RepoRegistryEditor({ project }: { project: Project }) {
         <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>No registered repos.</span>
       ) : (
         repos.map((r, i) => (
-          <div key={i} style={{ display: "flex", gap: 6, alignItems: "flex-start", flexWrap: "wrap" }}>
-            <Input placeholder="key" value={r.key} onChange={(e) => edit(i, { key: e.target.value })}
-              aria-label={`Repo ${i + 1} key`} style={{ flex: "0 1 120px", minWidth: 0 }} />
-            <Input placeholder="/absolute/path/to/repo" value={r.path} onChange={(e) => edit(i, { path: e.target.value })}
-              aria-label={`Repo ${i + 1} path`} style={{ flex: "2 1 200px", minWidth: 0 }} />
-            <Input placeholder="gate command (optional)" value={r.gateCommand ?? ""} onChange={(e) => edit(i, { gateCommand: e.target.value })}
-              aria-label={`Repo ${i + 1} gate command`} style={{ flex: "2 1 200px", minWidth: 0 }} />
-            <Button variant="ghost" title="Remove this repo" aria-label={`Remove repo ${i + 1}`}
-              onClick={() => remove(i)} style={{ padding: "4px 9px" }}>✕</Button>
+          <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ display: "flex", gap: 6, alignItems: "flex-start", flexWrap: "wrap" }}>
+              <Input placeholder="key" value={r.key} onChange={(e) => edit(i, { key: e.target.value })}
+                aria-label={`Repo ${i + 1} key`} style={{ flex: "0 1 120px", minWidth: 0 }} />
+              <Input placeholder="/absolute/path/to/repo" value={r.path} onChange={(e) => edit(i, { path: e.target.value })}
+                aria-label={`Repo ${i + 1} path`} style={{ flex: "2 1 200px", minWidth: 0 }} />
+              <Input placeholder="gate command (optional)" value={r.gateCommand ?? ""} onChange={(e) => edit(i, { gateCommand: e.target.value })}
+                aria-label={`Repo ${i + 1} gate command`} style={{ flex: "2 1 200px", minWidth: 0 }} />
+              <Button variant="ghost" title="Remove this repo" aria-label={`Remove repo ${i + 1}`}
+                onClick={() => remove(i)} style={{ padding: "4px 9px" }}>✕</Button>
+            </div>
+            <div style={{ display: "flex", gap: 6, alignItems: "flex-start", flexWrap: "wrap", paddingLeft: 126 }}>
+              <Input placeholder="ungated landing check command (optional)" value={r.ungatedLandingCheckCommand ?? ""}
+                onChange={(e) => edit(i, { ungatedLandingCheckCommand: e.target.value })}
+                aria-label={`Repo ${i + 1} ungated landing check command`} style={{ flex: "2 1 200px", minWidth: 0 }} />
+            </div>
+            {!!r.ungatedLandingCheckCommand?.trim() && !r.gateCommand?.trim() && (
+              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, lineHeight: 1.5, paddingLeft: 126 }}>
+                no gate command set on this repo — the check is nested inside the same gate-skip logic, so it will never run without one.
+              </span>
+            )}
           </div>
         ))
       )}

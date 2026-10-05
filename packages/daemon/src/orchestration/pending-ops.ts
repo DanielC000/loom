@@ -39,8 +39,11 @@ export type PendingOpOutcome = string;
  *  content — a branch-keyed cache key can't see the host condition clear. Never cache or replay it.
  *  @decision 9f5ae011 — "solo-merge-transient": the squash/commit step's own cleanup (`resetOrSkip`) was
  *  itself confirmed-kill-timed-out, even after its one retry — same reasoning as "union-merge-transient",
- *  one layer later. A branch-keyed cache key can't see the host condition clear. Never cache or replay it. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient"]);
+ *  one layer later. A branch-keyed cache key can't see the host condition clear. Never cache or replay it.
+ *
+ *  Card bd9a483b — "ungated-landing-check-failed": the safety-net check failed on an interval-skipped
+ *  landing. A re-call after the human fixes it (or the command) must genuinely re-run, never replay. */
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "ungated-landing-check-failed"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

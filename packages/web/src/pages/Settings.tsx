@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -256,6 +256,8 @@ function RepoPathEditor({ project }: { project: Project }) {
 interface ProjectConfigFields {
   allowText: string;
   gateCommand: string;
+  ungatedLandingCheckCommand: string;
+  ungatedLandingCheckTimeout: string;
   cadence: CadenceDraft;
   maxWorkers: string;
   maxManagers: string;
@@ -290,6 +292,8 @@ function projectConfigFieldsOf(ov: ProjectConfigOverride): ProjectConfigFields {
   return {
     allowText: ov.permission?.allow ? ov.permission.allow.join("\n") : "",
     gateCommand: orch?.gateCommand ?? "",
+    ungatedLandingCheckCommand: orch?.ungatedLandingCheckCommand ?? "",
+    ungatedLandingCheckTimeout: msStr(orch?.ungatedLandingCheckTimeoutMs, "s"),
     cadence: cadenceDraftFrom(orch),
     maxWorkers: numStr(orch?.maxConcurrentWorkers),
     maxManagers: numStr(orch?.maxConcurrentManagers),
@@ -345,6 +349,8 @@ const PROJECT_CONFIG_COMPARERS: FieldComparers<ProjectConfigFields> = {
   alertWebhookEventsText: linesEq,
   alertWebhookUrl: trimmedEq,
   gateCommand: trimmedEq,
+  ungatedLandingCheckCommand: trimmedEq,
+  ungatedLandingCheckTimeout: trimmedEq,
   deployCommand: trimmedEq,
   pythonInterpreter: trimmedEq,
   rotationHeading: trimmedEq,
@@ -365,6 +371,8 @@ const PROJECT_CONFIG_COMPARERS: FieldComparers<ProjectConfigFields> = {
 const PROJECT_CONFIG_FIELD_LABELS: Record<keyof ProjectConfigFields, string> = {
   allowText: "Permission allowlist",
   gateCommand: "Gate command",
+  ungatedLandingCheckCommand: "Ungated landing check command",
+  ungatedLandingCheckTimeout: "Ungated landing check timeout (s)",
   cadence: "Merge gate",
   maxWorkers: "Max workers / manager",
   maxManagers: "Max managers",
@@ -415,6 +423,10 @@ function ConfigEditor({ project }: { project: Project }) {
   // counts toward this form's own dirty state.
   const [allowText, setAllowText] = useState(mounted.allowText);
   const [gateCommand, setGateCommand] = useState(mounted.gateCommand);
+  // Card bd9a483b: the interval-skip safety-net check, same human-only/host-RCE trust class as
+  // gateCommand (paired timeout below) — meaningful only on a skipReason:"gate-interval" landing.
+  const [ungatedLandingCheckCommand, setUngatedLandingCheckCommand] = useState(mounted.ungatedLandingCheckCommand);
+  const [ungatedLandingCheckTimeout, setUngatedLandingCheckTimeout] = useState(mounted.ungatedLandingCheckTimeout);
   // Human-only merge-gate CADENCE (card e8df2659's on/off, widened to three values by card 00664e74).
   // The STORED shape stays `mergeGate: "on" | "off"` + an optional `mergeGateInterval`; the CONTROL is
   // three-valued, because "off with an interval 5" runs the gate regularly and calling that "off" would be
@@ -480,14 +492,16 @@ function ConfigEditor({ project }: { project: Project }) {
 
   // The live field values, as ONE record — what gets diffed, reconciled and narrowed into a payload below.
   const values: ProjectConfigFields = {
-    allowText, gateCommand, cadence, maxWorkers, maxManagers, recycle, emergencyRecycle, idleNudge,
+    allowText, gateCommand, ungatedLandingCheckCommand, ungatedLandingCheckTimeout, cadence, maxWorkers, maxManagers, recycle, emergencyRecycle, idleNudge,
     stuckWorker, blindTurn, maxUnanswered, idleSnooze, docLint, pythonInterpreter, gateTimeout,
     webhookTimeout, deployCommand, deployTimeout, alertWebhookUrl, alertWebhookEventsText,
     memoryBudgetTokens, memoryTopK, memoryMaxNotes, rotationMarkers, rotationHeading, rotationFloor,
     harnessDefault, harnessScope,
   };
   const applyFields = (v: ProjectConfigFields) => {
-    setAllowText(v.allowText); setGateCommand(v.gateCommand); setCadence(v.cadence);
+    setAllowText(v.allowText); setGateCommand(v.gateCommand);
+    setUngatedLandingCheckCommand(v.ungatedLandingCheckCommand); setUngatedLandingCheckTimeout(v.ungatedLandingCheckTimeout);
+    setCadence(v.cadence);
     setMaxWorkers(v.maxWorkers); setMaxManagers(v.maxManagers); setRecycle(v.recycle);
     setEmergencyRecycle(v.emergencyRecycle); setIdleNudge(v.idleNudge); setStuckWorker(v.stuckWorker);
     setBlindTurn(v.blindTurn); setMaxUnanswered(v.maxUnanswered); setIdleSnooze(v.idleSnooze);
@@ -546,6 +560,11 @@ function ConfigEditor({ project }: { project: Project }) {
       if (gateCommand.trim()) orch.gateCommand = gateCommand.trim();
       else unset.push("orchestration.gateCommand");
     }
+    if (include("ungatedLandingCheckCommand")) {
+      if (ungatedLandingCheckCommand.trim()) orch.ungatedLandingCheckCommand = ungatedLandingCheckCommand.trim();
+      else unset.push("orchestration.ungatedLandingCheckCommand");
+    }
+    if (include("ungatedLandingCheckTimeout")) applyMs(orch, "ungatedLandingCheckTimeoutMs", ungatedLandingCheckTimeout, "s", unset);
     // Cadence → the two stored keys. `every` CLEARS both (inheriting the default) rather than writing
     // mergeGate:"on", matching how the old checkbox behaved; `never` clears only the interval.
     if (include("cadence")) {
@@ -808,6 +827,7 @@ function ConfigEditor({ project }: { project: Project }) {
   // own inline message; this list is what names the offending field next to the Save button.
   const timeoutRangeErrors = msRangeErrors([
     ["Gate command timeout", gateTimeout, "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs],
+    ["Ungated landing check timeout", ungatedLandingCheckTimeout, "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.ungatedLandingCheckTimeoutMs],
     ["Deploy command timeout", deployTimeout, "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.deployCommandTimeoutMs],
     ["Alert webhook timeout", webhookTimeout, "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.alertWebhookTimeoutMs],
   ]);
@@ -913,6 +933,17 @@ function ConfigEditor({ project }: { project: Project }) {
         <div style={{ marginTop: 12 }}>
           <SectionLabel style={{ margin: "0 0 8px" }}>Merge gate</SectionLabel>
           <MergeGateCadencePanel projectId={project.id} draft={cadence} onChange={setCadence} />
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 8 }}>
+            <span style={fieldLabel}>Ungated landing check command</span>
+            <Input value={ungatedLandingCheckCommand} onChange={(e) => setUngatedLandingCheckCommand(e.target.value)} placeholder="e.g. pnpm build (blank = no check)" />
+            <Hint>runs INSTEAD of the real gate, right before an interval-SKIPPED landing's squash — a red refuses the landing without counting as a gated pass or touching the interval counter · {effHint(resolved.orchestration.ungatedLandingCheckCommand || "none")}</Hint>
+            {ungatedLandingCheckCommand.trim() && !gateCommand.trim() && (
+              <Hint style={{ color: color.amber }}>no gate command is configured for this project — this check is nested inside the same gate-skip logic, so with no gate command there is no interval to skip and it will never run</Hint>
+            )}
+          </label>
+          <div style={{ marginTop: 8, maxWidth: 420 }}>
+            <MsField label="Ungated landing check timeout (s)" value={ungatedLandingCheckTimeout} set={setUngatedLandingCheckTimeout} effectiveMs={resolved.orchestration.ungatedLandingCheckTimeoutMs} defMs={defaults.orchestration.ungatedLandingCheckTimeoutMs} unit="s" bounds={ORCHESTRATION_TIMEOUT_MS_BOUNDS.ungatedLandingCheckTimeoutMs} />
+          </div>
         </div>
         <div style={{ marginTop: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420 }}>
@@ -3520,8 +3551,8 @@ function Field({ children, hint }: { children: ReactNode; hint?: string }) {
     </div>
   );
 }
-function Hint({ children }: { children: ReactNode }) {
-  return <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>{children}</span>;
+function Hint({ children, style }: { children: ReactNode; style?: CSSProperties }) {
+  return <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, ...style }}>{children}</span>;
 }
 function effHint(v: unknown): string {
   return `effective: ${String(v)}`;

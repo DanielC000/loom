@@ -46,6 +46,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     when the method started, and the self-check genuinely clears before the sweep decision): the sweep
 //     must still be SKIPPED, and the merge entry left completely untouched.
 //
+// Round 4 (card bd9a483b, round 3 CR) — a RUNNING `ungatedLandingCheckCommand` safety-net check (gateType
+// "worker", like an ordinary self-check, but carrying `landingCheckOnly:true`) must be treated like (E)'s
+// merge gate, never like an ordinary self-check, even though its gateType is the same "worker" value:
+// (J) a RUNNING landing-check for the worker's own sessionId: stopWorker must leave it COMPLETELY
+//     untouched (never abort its cancelSignal), skip the sweep IMMEDIATELY, and leave the entry still
+//     live in the registry afterward — mirrors (E) exactly, but for `isWorkerSelfCheckGate`'s newer
+//     `landingCheckOnly` exclusion rather than its `gateType !== "worker"` one.
+//
 // RED-ON-MAIN proof (recorded in this card's worker_report, not re-run automatically by this file): before
 // the production fix, (B)'s "sweep never called while the gate is still live" assertion is FALSE —
 // stopWorker called sweepWorktreeStrays directly with no cancel/wait/skip logic at all, so the sweep fired
@@ -537,6 +545,49 @@ try {
     void pRun; void pMerge;
     db.setProcessState(workerId, "exited");
   }
+
+  // ── (J) RUNNING ungated-landing-check (card bd9a483b, round 3) for the worker's OWN sessionId: must be
+  // left COMPLETELY untouched, exactly like (E)'s merge gate — "a merge-confirm's gate is never cancelled
+  // by a stop" extends to this safety-net check too, since `isWorkerSelfCheckGate` now excludes any entry
+  // carrying `landingCheckOnly:true` even though its own `gateType` is "worker" (the SAME gateType an
+  // ordinary self-check uses) — a bare gateType check alone would wrongly treat it as cancellable.
+  {
+    const sfx = `j-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const reposDir = path.join(os.tmpdir(), `loom-swgc-j-${sfx}`);
+    registerForCleanup(reposDir);
+    const { db, projId, mgrId, workerId, worktreePath } = await setupProjectAndWorker(sfx, reposDir);
+    const sweepCalls = [];
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      // Large on purpose, same reasoning as (E): if this entry were wrongly treated as cancellable,
+      // stopWorker would wait out this FULL bound before giving up.
+      gateCancelVerifyMs: 2000, stopGateCancelPollMs: 20,
+      reapWorktreeProcesses: async (wtPath) => { sweepCalls.push(wtPath); return { killedPids: [] }; },
+    });
+
+    let checkAborted = false;
+    const landingCheckDescriptor = { gateType: "worker", projectId: projId, sessionId: workerId, taskId: null, branch: "loom/j", opId: `ulc-${sfx}`, landingCheckOnly: true };
+    const pCheck = sessions.gateSemaphore.runExclusive(5, landingCheckDescriptor, (_startedAt, cancelSignal) => new Promise(() => {
+      if (cancelSignal.aborted) { checkAborted = true; return; }
+      cancelSignal.addEventListener("abort", () => { checkAborted = true; });
+    })).catch(() => {});
+    const checkRunning = await waitUntil(() => sessions.gateSemaphore.snapshot().entries.find((e) => e.sessionId === workerId && e.gateType === "worker" && e.phase === "running"),
+      { label: "(J pre) the landing-check admits and starts running" });
+    check("(J pre) a landingCheckOnly worker-gate is genuinely RUNNING for the worker's own sessionId before stop", !!checkRunning && checkRunning.landingCheckOnly === true);
+
+    const t0 = Date.now();
+    const stopResult = await sessions.stopWorker(mgrId, workerId, "hard");
+    const elapsedMs = Date.now() - t0;
+    check("(J) stopWorker itself still reports success", stopResult.stopped === true);
+    check("(J) the landing-check's cancelSignal was NEVER aborted — a stop must never touch it", checkAborted === false);
+    check("(J) the worktree sweep was SKIPPED (a live landing-check for this worktree must never be reaped around)", sweepCalls.length === 0);
+    check(`(J) the skip was IMMEDIATE (${elapsedMs}ms) — stopWorker never waits out the bounded cancel-verify window for an entry it must never try to cancel`,
+      elapsedMs < 1000);
+    check("(J) the landing-check entry is STILL live in the registry afterward — completely untouched by the stop",
+      sessions.gateSemaphore.snapshot().entries.some((e) => e.sessionId === workerId && e.landingCheckOnly === true && e.phase === "running"));
+
+    void pCheck;
+    db.setProcessState(workerId, "exited");
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -544,7 +595,7 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — stopWorker/killAllWorkers now cancel (and bounded-wait on) any WORKER-gateType gate op live for the stopped worker's own sessionId BEFORE sweeping its worktree for strays: a RUNNING self-check that responds settles cancelled:true and the sweep fires only once it has genuinely cleared; one that never verifies within the bound leaves the sweep SKIPPED entirely rather than reaping a worktree a gate might still hold; a QUEUED self-check cancels at zero process risk and the sweep proceeds; and with no live gate at all the sweep still fires exactly as before this card. A MERGE/DEPLOY gate entry for that same sessionId is NEVER touched (running or queued) — the sweep skips immediately instead, and that non-self-check check is re-run again right before the sweep too, so an entry enqueued only DURING the bounded wait still blocks it. killAllWorkers latches its global pause synchronously, before any await, so a concurrent cap-queue drain never races it — and waits on multiple held workers' cancel-waits in parallel, not serially."
+  ? "\n✅ ALL PASS — stopWorker/killAllWorkers now cancel (and bounded-wait on) any WORKER-gateType gate op live for the stopped worker's own sessionId BEFORE sweeping its worktree for strays: a RUNNING self-check that responds settles cancelled:true and the sweep fires only once it has genuinely cleared; one that never verifies within the bound leaves the sweep SKIPPED entirely rather than reaping a worktree a gate might still hold; a QUEUED self-check cancels at zero process risk and the sweep proceeds; and with no live gate at all the sweep still fires exactly as before this card. A MERGE/DEPLOY gate entry for that same sessionId is NEVER touched (running or queued) — the sweep skips immediately instead, and that non-self-check check is re-run again right before the sweep too, so an entry enqueued only DURING the bounded wait still blocks it. A RUNNING ungated-landing-check (card bd9a483b) is treated the same way despite sharing the \"worker\" gateType with an ordinary self-check — isWorkerSelfCheckGate's landingCheckOnly exclusion keeps it just as untouchable as a merge gate. killAllWorkers latches its global pause synchronously, before any await, so a concurrent cap-queue drain never races it — and waits on multiple held workers' cancel-waits in parallel, not serially."
   : `\n❌ ${failures} FAILURE(S).`);
 
 process.exit(failures === 0 ? 0 : 1);

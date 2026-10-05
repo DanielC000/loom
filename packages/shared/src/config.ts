@@ -253,6 +253,9 @@ export const ORCHESTRATION_TIMEOUT_MS_BOUNDS = {
   gateCommandTimeoutMs: { min: 1000, max: 7_200_000 },
   deployCommandTimeoutMs: { min: 1000, max: 1_800_000 },
   alertWebhookTimeoutMs: { min: 500, max: 60_000 },
+  // Card bd9a483b: per-step timeout for the `ungatedLandingCheckCommand` safety-net check — same bound
+  // shape as deployCommandTimeoutMs (a bounded, cap-admitted run, not the long-running full gate).
+  ungatedLandingCheckTimeoutMs: { min: 1000, max: 1_800_000 },
 } as const;
 
 /** One field's accepted canonical-MS range — the shape of an `ORCHESTRATION_TIMEOUT_MS_BOUNDS` entry. */
@@ -414,6 +417,62 @@ export interface OrchestrationConfig {
    * `mergeGate` — the agent-facing config validator and the Lead's elevated `project_configure` REJECT it.
    */
   mergeGateInterval?: number;
+  /**
+   * THE CANONICAL DOC for this field (card bd9a483b) — every other mention (mcp/platform.ts's schema,
+   * the `worker_merge_confirm`/`merge_batch` tool descriptions, `sessions/service.ts`'s
+   * `runUngatedLandingCheck`) points HERE rather than restating the mechanics; update this comment, not
+   * those.
+   *
+   * A safety-net check, meaningful only on a genuinely interval-SKIPPED landing (`skipReason:
+   * "gate-interval"` — never `"gate-disabled"`, and never when `mergeGate` is "on"): a command run
+   * INSTEAD of the full `gateCommand`, right before that landing's squash. It runs on the SAME worktree
+   * tree `confirmWorkerMerge` always builds whenever a repo has a `gateCommand` at all (decision c0aeb5b2
+   * in `sessions/service.ts`): branch ∪ main-at-confirm, union-merged in BEFORE the interval-skip
+   * decision is even made — so main IS merged in by the time this check runs, exactly as it would be for
+   * a real gated landing. Runs BEFORE the repo lock is ever taken (admitted through the semaphore like an
+   * ordinary worker self-check, so no repo lock is held while it queues/runs); its own basis (a worktree
+   * stamp) is then RE-VERIFIED in-lock right before the squash via `verifyReviewedTipChain` (card
+   * bbccf470) — the same reviewed-tip walk `worker_merge_confirm` already uses, which accepts a
+   * fast-forward or a clean merge-of-main between the check's read and the held stamp (Loom's own re-union
+   * of a busier main moving on is NOT staleness) and rejects anything else (a genuine new commit — e.g.
+   * the worker's own — IS staleness). A RED, or a genuinely stale worktree, refuses the landing (never
+   * cached: `ungated_landing_check_failed`/`ungated_landing_check_stale`) WITHOUT counting as a gated
+   * pass — the merge-gate interval counter and `gateOwed` are completely untouched by this field either
+   * way; it is a bolt-on safety net on top of the interval, never a substitute gate, and its verdict is
+   * accepted as covering a landing onto a newer main by policy (an ungated landing is never gated against
+   * main's content either way). A queued OR a running cancel (`gate_cancel`) settles as `cancelled`, also
+   * never cached and never a red — see `isWorkerSelfCheckGate`'s own doc for why neither a worker's own
+   * `gate_cancel` nor `worker_stop` can ever reach a running check this way. Empty string (default) = no
+   * check, byte-identical to today. Setting this on a repo with NO `gateCommand` configured is accepted
+   * but inert — the check is nested inside the same `if (gate)` block the union-merge runs in, so with no
+   * `gateCommand` there is no interval to skip and this never executes; the validator does not refuse
+   * this combination (the field is valid on its own) — only the web UI (Settings.tsx, Projects.tsx) warns
+   * about it, as a non-blocking hint.
+   *
+   * PER-REPO RESOLUTION mirrors `gateCommand` EXACTLY (`resolveRepoByKey`/`ResolvedRepo`,
+   * `projects/resolve-repo.ts`): this project-level field applies ONLY to the PRIMARY repo; a registered
+   * repo (`RepoRegistryEntry.ungatedLandingCheckCommand`) carries its OWN optional field and never falls
+   * back to this one — a secondary repo with no value of its own runs no check at all.
+   *
+   * Same split-steps grammar as `gateCommand` (top-level `&&` joins); same trust class — HUMAN-only,
+   * host-RCE, omitted from the agent-facing config validator exactly like `gateCommand`/`deployCommand`
+   * (see `agentOrchestrationOverride` in mcp/platform.ts), and non-clearable by the elevated Platform
+   * Lead (`NON_CLEARABLE_NESTED_PROJECT_CONFIG_KEYS`) exactly like `gateCommand` — but, UNLIKE
+   * `mergeGate`/`mergeGateInterval`, this field does NOT change cadence/counter semantics, so the Lead
+   * MAY set it (not on `HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS`).
+   *
+   * Runs admitted through the SAME `GateSemaphore`/`maxConcurrentGates` budget a real gate uses, tagged
+   * `GateDescriptor.landingCheckOnly:true` (`gateType:"worker"`, never `"merge"`) so it is never mistaken
+   * for a real merge-gate pass/fail by `gate_queue`/`gate_history`/`countGateEvents`/the Gates page.
+   * Generic and project-agnostic by design — Loom's OWN configured value lives in Loom's own project
+   * config + `CLAUDE.md`, never in a shipped skill or doc.
+   */
+  ungatedLandingCheckCommand: string;
+  /**
+   * Per-project, HUMAN-only timeout (ms) for an `ungatedLandingCheckCommand` run — pairs with it, same
+   * trust/omission posture. Default 600000 (10 minutes); bounds in `ORCHESTRATION_TIMEOUT_MS_BOUNDS`.
+   */
+  ungatedLandingCheckTimeoutMs: number;
   /**
    * Per-project, HUMAN-only timeout (ms) for a `gateCommand` run — pairs with `gateCommand`. Caps how
    * long the build/DoD gate may run before it's killed. Default 600000 (raised from 120000 by card
@@ -1477,7 +1536,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
+  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -2022,6 +2081,10 @@ export function resolveConfig(
       ...((override.orchestration?.mergeGateInterval ?? d.orchestration.mergeGateInterval) === undefined ? {} : { mergeGateInterval: (override.orchestration?.mergeGateInterval ?? d.orchestration.mergeGateInterval) as number }),
       // Per-project timeout pairing gateCommand (no env layer). `??` so an explicit value survives.
       gateCommandTimeoutMs: override.orchestration?.gateCommandTimeoutMs ?? d.orchestration.gateCommandTimeoutMs,
+      // Card bd9a483b: the interval-skip safety-net check + its paired timeout — same resolution shape as
+      // gateCommand/gateCommandTimeoutMs, no env layer, no cadence-changing semantics of its own.
+      ungatedLandingCheckCommand: override.orchestration?.ungatedLandingCheckCommand ?? d.orchestration.ungatedLandingCheckCommand,
+      ungatedLandingCheckTimeoutMs: override.orchestration?.ungatedLandingCheckTimeoutMs ?? d.orchestration.ungatedLandingCheckTimeoutMs,
       // Scoped per-project deploy (mirrors gateCommand's resolution exactly).
       deployCommand: override.orchestration?.deployCommand ?? d.orchestration.deployCommand,
       // Per-project timeout pairing deployCommand (no env layer). `??` so an explicit value survives.

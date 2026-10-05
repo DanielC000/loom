@@ -211,6 +211,15 @@ const orchestrationOverride = z.object({
   // ORCHESTRATION_TIMEOUT_MS_BOUNDS (@loom/shared) — the SAME table the Settings UI reads to state the
   // range in the field's own unit, so the schema and the UI's message can never drift (card 48365fda).
   gateCommandTimeoutMs: msBounded(ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs),
+  // Card bd9a483b: the interval-skip safety-net check — mirrors gateCommand's trust tier exactly (host-
+  // exec, omitted from the agent path below, non-clearable by the Lead per NON_CLEARABLE_NESTED_PROJECT_
+  // CONFIG_KEYS), but UNLIKE mergeGate/mergeGateInterval it does not change cadence/counter semantics, so
+  // it is NOT on HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS either — the elevated Platform Lead's
+  // project_configure (which shares this full human shape) may SET it, just never clear it. See this
+  // field's own doc on OrchestrationConfig (shared/config.ts) for the full contract — not restated here.
+  ungatedLandingCheckCommand: gateCommandSchema,
+  // Pairs with ungatedLandingCheckCommand; omitted from the agent path alongside it.
+  ungatedLandingCheckTimeoutMs: msBounded(ORCHESTRATION_TIMEOUT_MS_BOUNDS.ungatedLandingCheckTimeoutMs),
   // Scoped per-project DEPLOY command (design [[Scoped Per-Project Deploy — Design]] 13235b62) — a
   // manager's own-project outward-exec primitive, mirroring gateCommand exactly (host-RCE by design;
   // see the trust-boundary note on `confirmWorkerMerge`'s gate run and `deployOwnProject`). HUMAN-only:
@@ -332,11 +341,13 @@ export const HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = ["orches
  *  checks above stay split (raw-payload shape differs by depth); both resolve through the same dot-path
  *  helpers once a key is stored, so one combined list covers unset/replace regardless of depth. */
 const HUMAN_ONLY_PROJECT_CONFIG_PATHS: readonly string[] = [...HUMAN_ONLY_PROJECT_CONFIG_KEYS, ...HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS];
-/** Nested keys the Lead may CHANGE but never BLANK or DROP (card fa777608). This blocks only the LABELLED
- *  gateless path — a blank/removed `orchestration.gateCommand` ⇒ "no gateCommand configured" (unverified).
- *  It does NOT stop the gate being neutered: the Lead can still change the command to a no-op such as
- *  `exit 0`, which records a PASS. A human can still clear it (REST PATCH / Settings UI). */
-export const NON_CLEARABLE_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = ["orchestration.gateCommand"];
+/** Nested keys the Lead may CHANGE but never BLANK or DROP (card fa777608; `ungatedLandingCheckCommand`
+ *  added by card bd9a483b, same trust tier as `gateCommand`). This blocks only the LABELLED gateless path
+ *  — a blank/removed `orchestration.gateCommand` ⇒ "no gateCommand configured" (unverified), and likewise
+ *  for the landing-check command. It does NOT stop either command being neutered: the Lead can still
+ *  change either to a no-op such as `exit 0`, which records a PASS. A human can still clear either (REST
+ *  PATCH / Settings UI). */
+export const NON_CLEARABLE_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = ["orchestration.gateCommand", "orchestration.ungatedLandingCheckCommand"];
 function nestedValue(obj: unknown, dotPath: string): unknown {
   let cur: unknown = obj;
   for (const seg of dotPath.split(".")) {
@@ -446,15 +457,19 @@ const projectConfigOverrideSchema = z.object({
 }).strict();
 
 /**
- * Agent-facing config schema omits 6 orchestration keys — gateCommand/deployCommand (host-RCE via
- * spawnSync; see confirmWorkerMerge/deployOwnProject in sessions/service.ts) and alertWebhook (a
- * data-exfiltration vector), plus their 3 paired timeouts — so `.strict()` REJECTS an agent setting any
- * of them (config left unchanged); the human REST PATCH path keeps the full schema, so all six stay
- * human-settable there. DRY: only `orchestration` is narrowed, the rest reuses the same base shapes.
+ * Agent-facing config schema omits several orchestration keys — never restate the count here, it has
+ * already gone stale once (card bd9a483b added two more); read the `.omit({...})` call immediately below
+ * for the live, exact set. The omitted keys fall into three host-RCE/exfil-trust-class families:
+ * gateCommand/deployCommand/ungatedLandingCheckCommand (host-RCE via spawnSync; see
+ * confirmWorkerMerge/deployOwnProject/runUngatedLandingCheck in sessions/service.ts), alertWebhook (a
+ * data-exfiltration vector), and each one's own paired timeout — so `.strict()` REJECTS an agent setting
+ * any of them (config left unchanged); the human REST PATCH path keeps the full schema, so all of them
+ * stay human-settable there. DRY: only `orchestration` is narrowed, the rest reuses the same base shapes.
  */
 const agentOrchestrationOverride = orchestrationOverride
   .omit({
     gateCommand: true, gateCommandTimeoutMs: true, mergeGate: true, mergeGateInterval: true,
+    ungatedLandingCheckCommand: true, ungatedLandingCheckTimeoutMs: true,
     deployCommand: true, deployCommandTimeoutMs: true,
     alertWebhook: true, alertWebhookTimeoutMs: true,
   })

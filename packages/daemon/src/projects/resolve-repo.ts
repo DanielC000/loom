@@ -13,6 +13,13 @@ export interface ResolvedRepo {
   path: string;
   gateCommand: string | undefined;
   /**
+   * Card bd9a483b: this repo's OWN `ungatedLandingCheckCommand` — resolved EXACTLY like `gateCommand`
+   * above (primary reads the project-level `orchestration.ungatedLandingCheckCommand`; a registry entry
+   * reads its OWN field verbatim, never falling back to the project-level value). `undefined` means this
+   * repo runs no safety-net check on an interval-skipped landing.
+   */
+  ungatedLandingCheckCommand: string | undefined;
+  /**
    * Per-entry no-build-gate declaration (card 22629cb2), resolved from the registry entry's own
    * `RepoRegistryEntry.noGateByDesign` — see that field's doc for the two-flag (project vs. entry)
    * independence. Always `false` for the primary repo: the primary is governed ONLY by
@@ -66,16 +73,18 @@ export class UnknownRepoKeyError extends Error {
  */
 export function resolveRepoByKey(project: Project, repoKey: string | null | undefined): ResolvedRepo {
   if (repoKey === undefined || repoKey === null || repoKey === "primary") {
+    const resolvedOrch = resolveConfig(project.config).orchestration;
     return {
       key: "primary",
       path: project.repoPath,
-      gateCommand: resolveConfig(project.config).orchestration.gateCommand || undefined,
+      gateCommand: resolvedOrch.gateCommand || undefined,
+      ungatedLandingCheckCommand: resolvedOrch.ungatedLandingCheckCommand || undefined,
       noGateByDesign: false,
     };
   }
   const entry = project.repos.find((r) => r.key === repoKey);
   if (!entry) throw new UnknownRepoKeyError(repoKey, project.id);
-  return { key: entry.key, path: entry.path, gateCommand: entry.gateCommand, noGateByDesign: !!entry.noGateByDesign };
+  return { key: entry.key, path: entry.path, gateCommand: entry.gateCommand, ungatedLandingCheckCommand: entry.ungatedLandingCheckCommand, noGateByDesign: !!entry.noGateByDesign };
 }
 
 /**

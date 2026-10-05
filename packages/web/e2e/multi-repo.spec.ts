@@ -39,6 +39,13 @@ async function repoPathOf(baseURL: string, projectId: string): Promise<string> {
   return p!.repoPath;
 }
 
+// There is no GET /api/projects/:id — only the LIST route exists, so a single project's current
+// `repos[]` is read the same way `repoPathOf` reads `repoPath`: off the list, filtered by id.
+async function reposOf(baseURL: string, projectId: string): Promise<{ key: string; gateCommand?: string; ungatedLandingCheckCommand?: string }[]> {
+  const list = await (await fetch(`${baseURL}/api/projects`)).json() as { id: string; repos?: { key: string; gateCommand?: string; ungatedLandingCheckCommand?: string }[] }[];
+  return list.find((x) => x.id === projectId)?.repos ?? [];
+}
+
 test.describe("multi-repo registry + card routing (card ebb50819)", () => {
   test("register a repo via the UI → bad entry errors inline → route a card at it → board shows the badge", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`multirepo-${Date.now()}`);
@@ -204,6 +211,53 @@ test.describe("multi-repo registry + card routing (card ebb50819)", () => {
     await expect(picker).toBeVisible();
     await expect(picker).toHaveValue("legacy"); // NOT "" — the control must not claim `primary`
     await expect(page.getByRole("dialog")).toContainText("no longer registered");
+  });
+
+  // Card bd9a483b (CR round 3, ruling 2): the registry editor's Save used to silently DROP any field it
+  // didn't hand-copy into its save payload — `ungatedLandingCheckCommand` was dropped outright the day it
+  // shipped. This proves a Save round-trips BOTH the gate command and the ungated-landing-check command
+  // together, and that re-opening the editor after a reload still shows both — the regression this guards
+  // against would pass a save that silently reverted the second field to blank.
+  test("saving a registered repo preserves its ungatedLandingCheckCommand alongside gateCommand", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`multirepo-ulc-${Date.now()}`);
+    const donor = await loomDaemon.createProject(`multirepo-ulc-donor-${Date.now()}`);
+    const secondRepoPath = await repoPathOf(loomDaemon.baseURL, donor.id);
+
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await openManage(page);
+
+    await page.getByRole("button", { name: /Register repo/ }).click();
+    await page.getByRole("textbox", { name: /Repo 1 key/ }).fill("api");
+    await page.getByRole("textbox", { name: /Repo 1 path/ }).fill(secondRepoPath);
+    await page.getByRole("textbox", { name: /Repo 1 gate command/ }).fill("pnpm build");
+    await page.getByRole("textbox", { name: /Repo 1 ungated landing check command/ }).fill("pnpm guards");
+
+    const saveBtn = page.getByRole("button", { name: /Save registered repos/ });
+    await saveBtn.click();
+    await expect(saveBtn).toBeDisabled();
+
+    // Server-side: the field actually persisted, not just the client's own optimistic state.
+    const entry = (await reposOf(loomDaemon.baseURL, project.id)).find((r) => r.key === "api");
+    expect(entry?.gateCommand).toBe("pnpm build");
+    expect(entry?.ungatedLandingCheckCommand).toBe("pnpm guards");
+
+    // Reload fresh and confirm BOTH fields round-trip into the editor, not just gateCommand.
+    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await openManage(page);
+    await expect(page.getByRole("textbox", { name: /Repo 1 gate command/ })).toHaveValue("pnpm build");
+    await expect(page.getByRole("textbox", { name: /Repo 1 ungated landing check command/ })).toHaveValue("pnpm guards");
+
+    // An unrelated edit (renaming the key — never touching gateCommand/ungatedLandingCheckCommand at all)
+    // must NOT silently drop either already-saved field on its next Save — the exact shape of the
+    // regression (re-filling the SAME value into an already-saved field never dirties the form at all,
+    // so the edit here has to be a genuine change for Save to even become clickable).
+    await page.getByRole("textbox", { name: /Repo 1 key/ }).fill("api2");
+    await saveBtn.click();
+    await expect(saveBtn).toBeDisabled();
+    const entryAgain = (await reposOf(loomDaemon.baseURL, project.id)).find((r) => r.key === "api2");
+    expect(entryAgain?.gateCommand).toBe("pnpm build");
+    expect(entryAgain?.ungatedLandingCheckCommand).toBe("pnpm guards");
   });
 
   test("a single-repo project renders NO repo picker and NO badge — zero UI tax", async ({ page, loomDaemon }) => {

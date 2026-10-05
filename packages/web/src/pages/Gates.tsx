@@ -685,10 +685,12 @@ function QueueCard({ gate, position, now, isHol }: { gate: GateRun; position: nu
 }
 
 function KindTag({ gate }: { gate: GateRun }) {
-  const c = KIND_COLOR[gate.gateType];
+  // Card bd9a483b: same no-confusion-with-a-real-gate labeling as HistoryRow below — see its comment.
+  const label = gate.landingCheckOnly ? "landing check" : KIND_LABEL[gate.gateType];
+  const c = gate.landingCheckOnly ? color.cyan : KIND_COLOR[gate.gateType];
   return (
     <span style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", padding: "2px 8px", borderRadius: radius.sm, border: `1px solid ${c}`, color: c, flex: "none" }}>
-      {KIND_LABEL[gate.gateType]}
+      {label}
     </span>
   );
 }
@@ -762,7 +764,11 @@ function HistoryTable({
 }
 
 function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: number; projectName: (id: string) => string }) {
-  const kindC = KIND_COLOR[row.gateType];
+  // Card bd9a483b: a landing-check row is gateType:"worker" underneath (it shares that admission lane),
+  // but must never render as an ordinary worker self-check — the whole point of `landingCheckOnly` is
+  // that a reader can tell it apart from a real gate at a glance, not just in the underlying data.
+  const kindLabel = row.landingCheckOnly ? "landing check" : KIND_LABEL[row.gateType];
+  const kindC = row.landingCheckOnly ? color.cyan : KIND_COLOR[row.gateType];
   const outC = OUTCOME_COLOR[row.outcome];
   const killed = row.outcome === "kill" || row.outcome === "timeout";
   return (
@@ -776,7 +782,7 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
           {row.batchForfeited && <ForfeitTag />}
         </span>
       </td>
-      <td style={tdStyle}><span style={{ fontSize: 10, letterSpacing: "0.07em", textTransform: "uppercase", color: kindC }}>{KIND_LABEL[row.gateType]}</span></td>
+      <td style={tdStyle}><span style={{ fontSize: 10, letterSpacing: "0.07em", textTransform: "uppercase", color: kindC }}>{kindLabel}</span></td>
       <td style={tdStyle}>{row.projectName ?? (row.projectId ? projectName(row.projectId) : "—")}</td>
       {row.batched
         ? <BatchBranchCell row={row} />

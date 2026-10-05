@@ -1285,6 +1285,76 @@ function makeRepo(repo) {
   }
 }
 
+// ── (g) card bd9a483b (CR round 4): a worker's `{kind:"own"}` gate_cancel refused against its OWN
+//    in-flight landing-check must NOT call it "a merge/deploy gate" — `isWorkerSelfCheckGate` is false for
+//    BOTH a real merge/deploy gate AND a landingCheckOnly entry (same gateType:"worker", different reason),
+//    so the refusal text must discriminate instead of reusing (e-2)'s wording for a shape that isn't one. ──
+{
+  const sfx = `landingcheck-own-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-gc-lc-${sfx}`);
+  registerForCleanup(reposDir);
+  const db = new Db();
+  dbs.push(db);
+  db.setPlatformConfig({ maxConcurrentGates: 1 }); // saturate so the landing-check entry below genuinely queues
+
+  const projId = `gc-lc-p-${sfx}`, mgrId = `gc-lc-mgr-${sfx}`;
+  const taskId = `gc-lc-t-${sfx}`, workerId = `gc-lc-w-${sfx}`;
+  const taskHolderId = `gc-lc-th-${sfx}`, workerHolderId = `gc-lc-wh-${sfx}`;
+  const repo = path.join(reposDir, "worker");
+  makeRepo(repo);
+  db.insertProject({ id: projId, name: "LC", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `agent-lc-m-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: mgrId, projectId: projId, agentId: `agent-lc-m-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  db.insertAgent({ id: `agent-lc-w-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: "LC-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  const wt = await createWorktree(repo, projId, taskId);
+  worktrees.push(wt.worktreePath);
+  db.insertSession({ id: workerId, projectId: projId, agentId: `agent-lc-w-${sfx}`, engineSessionId: null, title: null, cwd: wt.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: wt.worktreePath, branch: wt.branch });
+
+  db.insertAgent({ id: `agent-lc-h-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskHolderId, projectId: projId, title: "LC-HTASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  const wtHolder = await createWorktree(repo, projId, taskHolderId);
+  worktrees.push(wtHolder.worktreePath);
+  db.insertSession({ id: workerHolderId, projectId: projId, agentId: `agent-lc-h-${sfx}`, engineSessionId: null, title: null, cwd: wtHolder.worktreePath, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: taskHolderId, worktreePath: wtHolder.worktreePath, branch: wtHolder.branch });
+
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
+  let releaseHolder;
+  const holderHold = new Promise((res) => { releaseHolder = res; });
+  const pHolder = sessions.gateSemaphore.runExclusive(1, { gateType: "worker", projectId: projId, sessionId: workerHolderId, worktreePath: wtHolder.worktreePath }, async () => { await holderHold; return "holder"; });
+  await waitUntil(() => sessions.gateSemaphore.snapshot().active === 1);
+
+  // Synthesize the worker's OWN landing-check entry directly (same technique block (e) uses for its
+  // merge-op synthesis) — landingCheckOnly:true, gateType:"worker", sessionId:workerId (mirrors
+  // runUngatedLandingCheck's real descriptor shape in sessions/service.ts).
+  const LANDING_OP_ID = `gc-lc-landing-op-${sfx}`;
+  const pLanding = sessions.gateSemaphore.runExclusive(
+    1, { gateType: "worker", projectId: projId, sessionId: workerId, taskId, opId: LANDING_OP_ID, worktreePath: wt.worktreePath, landingCheckOnly: true },
+    async () => ({ passed: true }), "low",
+  );
+  pLanding.catch(() => {});
+  const landingEntry = await waitUntil(() => sessions.gateQueueForManager(projId).queued.find((e) => e.opId === LANDING_OP_ID));
+  check("(g) the worker's own landing-check entry is queued, carrying landingCheckOnly:true (setup sanity)", !!landingEntry && landingEntry.landingCheckOnly === true);
+
+  if (landingEntry) {
+    const ownAttempt = await sessions.cancelGateOp(workerId, landingEntry.opId, { scope: { kind: "own", sessionId: workerId } });
+    check("(g) the worker is REFUSED cancelling its own in-flight landing-check via {kind:\"own\"}", ownAttempt.outcome === "refused");
+    check("(g) the refusal does NOT call it \"a merge/deploy gate\" (it is neither)", !/merge\/deploy gate/i.test(ownAttempt.reason ?? ""));
+    check("(g) the refusal instead names it as the manager's own ungated-landing-check / worker_merge_confirm call",
+      /ungated-landing-check/i.test(ownAttempt.reason ?? "") && /worker_merge_confirm/i.test(ownAttempt.reason ?? ""));
+    check("(g) the landing-check entry is STILL queued — the refused attempt never touched the semaphore",
+      sessions.gateQueueForManager(projId).queued.some((e) => e.opId === landingEntry.opId));
+  } else {
+    console.log("SKIP  (g) cancel assertions — setup sanity check above already failed");
+  }
+
+  releaseHolder("go");
+  await pHolder.catch(() => {});
+  const landingResult = await pLanding;
+  check("(g) the landing-check, left uncancelled by the refused attempt, still completes normally", landingResult?.passed === true);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — GateSemaphore serializes same-worktree gate ops regardless of cap/tier (never grouping worktree-less ops together), a manager's merge decision auto-supersedes a worker's queued self-check for free, gate_cancel is project-scoped + never frees a slot over an unverified kill, and — card b9e07a4a — the SAME tool now reaches a repo-guard-only wait: a QUEUED one cancels cleanly through confirmWorkerMerge's own merge_cancelled path, a foreign project's is refused, and a HOLDING one is refused for the same staged-residue reason a RUNNING merge gate is. Card a0d912f5: a WORKER can cancel only its OWN run_gate self-check — never another worker's, and never a merge gate that happens to share its own sessionId — and intent/reason land verbatim in the settled op's own reason text, for BOTH a QUEUED cancel (GateCancelledError.detail) AND a VERIFIED RUNNING cancel (cancelSignalRef), the latter negative-controlled against a bare cancel that carries neither string."
   : `\n❌ ${failures} FAILURE(S).`);
