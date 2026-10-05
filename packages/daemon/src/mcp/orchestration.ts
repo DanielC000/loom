@@ -5589,7 +5589,11 @@ export class OrchestrationMcpRouter {
           "Update a project's structural fields (name / vaultPath) and/or its config override — YOUR project " +
           "only (a projectId outside your own is REJECTED; platform_escalate is your one cross-project write). " +
           "config is schema-validated on the AGENT path: orchestration.gateCommand (host-RCE), orchestration.mergeGate (turns the merge gate off), orchestration.mergeGateInterval (lets N landings skip it while off) and unknown keys " +
-          "are REJECTED (that capability stays human-only). repoPath is not editable here. Omitted top-level " +
+          "are REJECTED (that capability stays human-only); permission.mode:\"bypassPermissions\" is REJECTED too " +
+          "(it would boot every future session this project spawns with no permission gate, not just yours). " +
+          "permission.deny only ever GROWS through this tool — a patch that narrows or omits an existing entry " +
+          "does not remove it: the call still reports success, but the entry is silently RETAINED (merged as an " +
+          "additive union); permission.allow has no such floor and is a plain replace. repoPath is not editable here. Omitted top-level " +
           "fields (name / vaultPath / config) are left as-is — but config ITSELF is a deep MERGE onto the " +
           "project's existing override, not a replace: a key you omit inside config (including a human-only " +
           "one like gateCommand you cannot even name) is PRESERVED, not dropped.",

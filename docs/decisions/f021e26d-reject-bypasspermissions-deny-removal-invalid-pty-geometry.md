@@ -25,11 +25,18 @@ Card `f021e26d` (full review lane 4, discovered from `486d4238`): a reviewer rep
    spawn. The live-resize path already had an equivalent bound
    (`gateway/server.ts`'s `isValidTerminalDimension`, card `37d4325d`) but the config-write path never did.
 
-The runtime effect of a stored `bypassPermissions` mode was suspected but not re-derived here (the
-`--permission-mode` boot flag computed by `pty/host.ts`'s `computeBootMode` likely wins over the
-settings-file default in most cases) — the fix closes the escalation at the config-write boundary
-regardless of which mechanism would ultimately win at spawn time, since a config value an agent should
-never have been able to set in the first place is a defect on its own terms.
+The runtime effect of a stored `bypassPermissions` mode was CONFIRMED, not merely suspected, for every
+role except worker/assistant. `pty/host.ts`'s `computeBootMode` (~1345) boots directly at the session's
+resolved mode TARGET only when that target is itself one of `DIRECT_BOOT_MODES` (`acceptEdits`/`plan`/
+`auto`); otherwise it falls back to `toCliPermissionMode(permission.mode)` — the STORED mode, verbatim,
+as the `--permission-mode` boot flag. `sessions/service.ts`'s `withRolePermissionModeCyclesPin` (~2322)
+pins a target of `auto` ONLY for `worker`/`assistant` roles, independent of the shared
+`permission.startupModeCycles` knob; every other role (manager/platform/setup/auditor/plain) has no such
+pin, so a fresh spawn with no `resumeModeTarget` and no project-level `startupModeCycles` set resolves no
+target at all, and `computeBootMode` falls straight through to the stored mode. So a stored
+`bypassPermissions` reached the real `--permission-mode` boot flag directly, pre-fix, for exactly those
+roles — the fix closes the escalation at the config-write boundary regardless, since a config value an
+agent should never have been able to set in the first place is a defect on its own terms.
 
 ## Fix
 
@@ -97,4 +104,5 @@ the pre-fix source (reverted, rebuilt, re-run) and GREEN again after restoring t
 `applyAdditiveOnlyPermissionDenyGuard`, `mergeConfigOverride`, the elevated `project_configure` route's
 raw-payload `bypassPermissions` check), `packages/daemon/src/mcp/setup.ts` and
 `packages/daemon/src/sessions/service.ts` (the `additiveOnlyPermissionDenyGuard: true` call sites), as of
-commit `727dd094`.
+commit `24172e55` (the landed squash-merge on main; `727dd094` was a pre-squash worker commit that
+predated this file's own addition to the branch and never reached main under that sha).
