@@ -16,7 +16,10 @@
 // permanently, for the life of the document.
 // Run: node --experimental-strip-types packages/web/test/credential-reattach-edge.mjs
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { register } from "node:module";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 // The module under test imports React. `anyLockCleared` is pure and touches none of it, but the import is
 // evaluated regardless, and the extensionless relative imports its siblings use need the same loader hook
@@ -93,6 +96,30 @@ check("a SWAP — one lock clearing as the other is raised — is still an edge"
   assert.equal(anyLockCleared(S(false, true), S(true, false)), true);
   assert.equal(anyLockCleared(S(true, false), S(false, true)), true);
   assert.equal(orCollapsed(S(false, true), S(true, false)), false, "the old rule missed this one too");
+});
+
+check("the hook's own effect deps pin EACH lock separately — never collapsed into one OR'd dependency", () => {
+  // THE GAP THIS CLOSES. Every check above pins the ALGEBRA of `anyLockCleared` against the inputs it's
+  // given — none of them can see whether `useCredentialReattachNonce`'s effect actually feeds it a
+  // per-lock edge at RUNTIME, because `packages/web` has no React test harness to render the hook. A
+  // worker could revert the deps array to the pre-fix `[locks.loopback || locks.gateway]` and every check
+  // above would still pass — the effect would just never RE-RUN on the edge the algebra correctly
+  // classifies, since a single OR-ed dependency doesn't change value across the case the file's own
+  // header calls load-bearing (@decision d56b12d8). This is a source-text assertion for exactly that half.
+  const srcPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "useCredentialReattach.ts");
+  const raw = readFileSync(srcPath, "utf8");
+  const stripped = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+  const match = stripped.match(/\}, \[([^\]]*)\]\);/);
+  assert.ok(match, "could not find the hook's effect dependency array in useCredentialReattach.ts");
+  const deps = match[1].replace(/\s+/g, "");
+  // NEGATIVE CONTROL: reverting the deps array to `[locks.loopback || locks.gateway]` must fail this
+  // exact assertion. Measured — `deps` for that revert is "locks.loopback||locks.gateway", which does not
+  // equal the pinned string below, so the assertion goes RED under it (checked by temporarily applying
+  // that revert and re-running this file; restored before committing).
+  assert.equal(deps, "locks.loopback,locks.gateway",
+    "the effect must depend on EACH lock separately (`[locks.loopback, locks.gateway]`) — a collapsed "
+    + "`locks.loopback || locks.gateway` dependency cannot see one lock's clearing edge while the other "
+    + `stays up, which is the exact regression this file exists to catch. Saw deps: ${JSON.stringify(match[1])}`);
 });
 
 console.log(`\n${pass} checks passed`);

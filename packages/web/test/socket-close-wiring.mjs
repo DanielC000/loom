@@ -29,14 +29,16 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+// Comments mention the old shapes by name (this file's own header does too), so a raw scan would match
+// prose as happily as code. Shared so a utility like `consequentBlock` below can re-apply it defensively
+// to whatever `src` it's handed, rather than trusting every caller to have stripped first.
+const stripComments = (text) => text
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .replace(/^[ \t]*\/\/.*$/gm, "")
+  .replace(/([^:])\/\/[^\n]*$/gm, "$1");
 const read = (rel) => {
   const text = readFileSync(join(root, rel), "utf8");
-  // Comments mention the old shapes by name (this file's own header does too), so a raw scan would
-  // match prose as happily as code. Strip comments first — the checks below are about CODE.
-  const stripped = text
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^[ \t]*\/\/.*$/gm, "")
-    .replace(/([^:])\/\/[^\n]*$/gm, "$1");
+  const stripped = stripComments(text);
   assert.ok(stripped.length > 0, `${rel}: nothing left after comment-stripping — the stripper is broken`);
   return stripped;
 };
@@ -299,7 +301,12 @@ const NO_TOKEN_CLIENTS = Object.entries(CLIENTS)
  * unbounded guaranteed-401 ladder the card removed. A brace-matched block plus its `after` text is what
  * makes "this branch ENDS the close path" checkable at all.
  */
-const consequentBlock = (src, callRe, name) => {
+const consequentBlock = (rawSrc, callRe, name) => {
+  // Defensive re-strip: every current caller already hands this `CLIENTS[name]` text (stripped once by
+  // `read()`), but the risk the card called out — `callRe` or a stray `return` matching inside a comment
+  // — is about this UTILITY being safe on its own, not about today's one caller. Idempotent when the
+  // input is already clean.
+  const src = stripComments(rawSrc);
   const start = src.search(callRe);
   assert.ok(start >= 0, `${name}: could not find ${callRe}`);
   const open = src.indexOf("{", start);
@@ -317,6 +324,29 @@ const consequentBlock = (src, callRe, name) => {
   }
   assert.ok(close > open, `${name}: unbalanced braces after ${callRe}`);
   return { branch: src.slice(start, close + 1), after: src.slice(close + 1).trimStart() };
+};
+
+/**
+ * Is there a `return` in `branch`'s OWN body — depth 1 relative to the block's opening brace — rather
+ * than inside some NESTED closure the branch happens to contain (a callback, a nested arrow, an inner
+ * `if`)? A bare `/\breturn\b/.test(branch)` can't tell the two apart: a `return` belonging to a nested
+ * function ends THAT function, not the outer close handler, so it would satisfy this check while leaving
+ * the real re-arm after the chain perfectly reachable.
+ */
+const hasTopLevelReturn = (branch) => {
+  const open = branch.indexOf("{");
+  assert.ok(open >= 0, "hasTopLevelReturn: no opening brace in branch");
+  const re = /\breturn\b/g;
+  let m;
+  while ((m = re.exec(branch))) {
+    let depth = 0;
+    for (let i = open; i < m.index; i += 1) {
+      if (branch[i] === "{") depth += 1;
+      else if (branch[i] === "}") depth -= 1;
+    }
+    if (depth === 1) return true;
+  }
+  return false;
 };
 
 check("(12) the token-LESS branch never re-arms AND ends the close path — it is terminal, not a ladder", () => {
@@ -348,12 +378,13 @@ check("(12) the token-LESS branch never re-arms AND ends the close path — it i
     // accepted: an early `return` out of the close handler, or the next arm being reached only via `else`
     // (an if/else-if chain, where fall-through is impossible by construction). Anything else — a bare
     // block whose successor is a fresh `if` — is the defect.
-    const returns = /\breturn\b/.test(branch);
+    const returns = hasTopLevelReturn(branch);
     const chained = after.startsWith("else");
     assert.ok(returns || chained,
-      `${name}: the token-less branch must END the close path — add a \`return\`, or make the next arm an `
-      + `\`else\`. Without one, control falls through to the re-arm after the chain and the ladder runs `
-      + `anyway, which is invisible to every assertion above. Saw: ${JSON.stringify(after.slice(0, 60))}`);
+      `${name}: the token-less branch must END the close path — add a top-level \`return\`, or make the `
+      + `next arm an \`else\`. A \`return\` inside a nested closure doesn't count: it ends that closure, `
+      + `not the handler. Without one, control falls through to the re-arm after the chain and the ladder `
+      + `runs anyway, which is invisible to every assertion above. Saw: ${JSON.stringify(after.slice(0, 60))}`);
   }
 });
 

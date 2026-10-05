@@ -13,8 +13,10 @@
 // stuck loopback lock the OR never clears, so a VALID paste produced no bump at all: the companion stayed
 // dead until a full reload, which is exactly the "self-healing becomes silently dead" outcome
 // `a6d7bf36`'s own @decision forbids. Both halves are fixed (the Terminal reorder, and a nonce that bumps
-// on EACH lock's own clearing edge); this spec is the end-to-end proof, and it is red on either half alone
-// being absent from the Terminal side.
+// on EACH lock's own clearing edge); this spec is the end-to-end proof, and it is red without the reorder.
+// The nonce half is pinned only by the unit test (`test/credential-reattach-edge.mjs`) — with the reorder
+// in place the loopback lock is never raised on a remote origin at all, so this spec stays green even if
+// the OR-collapse were restored in `useCredentialReattach.ts` (see that file's own header).
 //
 // WHAT EACH TEST PROVES — and read the whole header before adding a third, because the ORDER is load-bearing:
 //  1. `no gateway token` (card d56b12d8 §1, the runtime half of `test/socket-close-wiring.mjs` check (12)):
@@ -157,11 +159,16 @@ test("a companion attach carrying NO gateway token is terminal on its own pill, 
   expect(await page.evaluate(compCloseCodes)).toContain(1006);
 
   // ...AND IT IS TERMINAL. CONTROL for this absence claim, stated because the claim is worthless without
-  // one: deleting the `return` after `stopForNoToken()` in `CompanionChat.tsx` reddens exactly these two
-  // assertions (the pill becomes `reconnecting` and the count rises) — which is the defect
-  // `test/socket-close-wiring.mjs` check (12) could not see before this round, since the re-arm it must
-  // reject sat outside the slice the check was reading. The counter's own positive control is above: it
-  // rose for the healthy attach and again for the remount, on this same instrument in this same page.
+  // one — but MEASURED to redden somewhere EARLIER than these two assertions, not these two themselves:
+  // deleting the `return` after `stopForNoToken()` in `CompanionChat.tsx` lets the fallthrough's own
+  // `setConn("reconnecting")` land in the SAME close-handler tick as `stopForNoToken`'s `setConn("no-
+  // token")`, and React batches them — only `reconnecting` ever paints, so the pill never shows `no
+  // gateway token` at all and the `toBeVisible` assertion above (line ~154) times out first. That is the
+  // defect `test/socket-close-wiring.mjs` check (12) could not see before this round, since the re-arm it
+  // must reject sat outside the slice the check was reading — this mutation just doesn't reach the two
+  // assertions below on its own, so they have NO independent control under it. The counter's own positive
+  // control is above: it rose for the healthy attach and again for the remount, on this same instrument
+  // in this same page.
   await page.waitForTimeout(14_000);
   expect(await page.evaluate(compOpens),
     "a credential-less upgrade can only ever 401 — it must not keep spending the shared failed-auth budget").toBe(settled);
