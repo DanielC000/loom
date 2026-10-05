@@ -55,6 +55,12 @@ function isTopmostAtCentre(el: Locator): Promise<boolean> {
  *
  * Pass `{ force: true }` only for a control positioned over a live terminal, whose font settle jitters it
  * a sub-pixel forever so the stability check never resolves — and only after `isTopmostAtCentre`.
+ *
+ * ⚠️ The returned `hover` is the FIRST reading that differs from rest, which on a class-driven hover is an
+ * INTERPOLATED frame of the 80ms `.loom-btn` transition, not the settled end state. Use it for
+ * `expect(hover).not.toBe(rest)` only. To name an exact hover value, hover and then assert with
+ * `toHaveCSS`, which retries until it settles (card aac0de44 measured `rgb(102, 110, 119)` out of this
+ * helper where the settled value was `rgb(138, 146, 155)`).
  */
 async function restThenHover(page: Page, el: Locator, opts?: { force?: boolean }): Promise<{ rest: Chrome; hover: Chrome }> {
   const rest = await readChrome(el);
@@ -215,9 +221,10 @@ test("the composer's presets trigger and the popover's icon buttons hover (Compo
   // renders its per-row Edit/Delete icon buttons) plus the reserved Platform operator session as a
   // CANNED pty — no real claude is ever spawned.
   const LABEL = "E2E · hover the icon buttons";
+  const PROMPT = "E2E-HOVER-PRESET: nothing is ever sent from this spec.";
   const created = await (await fetch(`${loomDaemon.baseURL}/api/preset-prompts`, {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ label: LABEL, prompt: "E2E-HOVER-PRESET: nothing is ever sent from this spec." }),
+    body: JSON.stringify({ label: LABEL, prompt: PROMPT }),
   })).json();
   expect(created.id, "the preset should be created").toBeTruthy();
 
@@ -302,4 +309,37 @@ test("the composer's presets trigger and the popover's icon buttons hover (Compo
   // The danger icon keeps its red label and its own transparent border — the hover rule only tints.
   expect(del.hover.color).toBe(del.rest.color);
   await expect(deleteIcon).toHaveCSS("border-top-color", "rgba(0, 0, 0, 0)");
+
+  // ── Card aac0de44, site 1: the preset ROW button, the residual `6cefdf25` measured and left open.
+  // It is a RAW `loom-btn loom-btn-default` that stated `color: --loom-text` (the variant's own rest
+  // token, verbatim) AND `border: 1px solid --loom-border-strong` as a SHORTHAND. The shorthand is the
+  // live defect: it expands to `border-color`, so it shadowed `.loom-btn-default:not(:disabled):hover`'s
+  // `border-color: --loom-text-dim` and the row was measurably inert — rest and hover both
+  // `{ bg rgba(0,0,0,0), bc rgb(42,50,58), color rgb(230,234,237) }`. (A `borderStyle` LONGHAND does
+  // NOT shadow it; "+ Add column" above is that control.) Both declarations are gone; the variant class
+  // supplies the identical rest chrome, asserted below BEFORE the hover.
+  //
+  // Its rest reading is clean without re-parking: the pointer is sitting on the DELETE ICON, a flex
+  // SIBLING of this button rather than an ancestor or a child of it, so nothing hovers the row itself.
+  // (That adjacency is the trap `hover-measurement-needs-pointer-parking` records — check it, don't
+  // assume it, and never read two states off the same element back to back.)
+  const row = dialog.locator(`button.loom-btn-default[title="${PROMPT}"]`);
+  await expect(row).toHaveCount(1);
+  // --loom-text #e6eaed and --loom-border-strong #2a323a: byte-identical to the deleted inline values.
+  await expect(row).toHaveCSS("color", "rgb(230, 234, 237)");
+  await expect(row).toHaveCSS("border-top-color", "rgb(42, 50, 58)");
+  await expect(row).toHaveCSS("border-top-width", "1px");
+  await expect(row).toHaveCSS("border-top-style", "solid");
+  expect(await isTopmostAtCentre(row), "the preset row should be pointer-reachable").toBe(true);
+
+  // Deliberately NOT via `restThenHover`: that helper polls only until the value CHANGES and then reads
+  // once, so what it hands back is an INTERPOLATED frame of the 80ms `.loom-btn` transition — fine for
+  // the `.not.toBe(rest)` comparisons above, useless for naming an exact end state. Measured here:
+  // it returned `rgb(102, 110, 119)`, partway between the rest border and the real hover value.
+  // `toHaveCSS` retries, so it settles.
+  await row.hover({ force: true });
+  // --loom-text-dim #8a929b = rgb(138, 146, 155). The border is the ONLY thing that moves.
+  await expect(row).toHaveCSS("border-top-color", "rgb(138, 146, 155)");
+  await expect(row).toHaveCSS("color", "rgb(230, 234, 237)");
+  await expect(row).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
 });

@@ -158,9 +158,15 @@ export function VaultDownloadLink({ projectId, path, children, style }: {
       .finally(() => { inFlight.current = false; setBusy(false); });
   };
 
+  // Geometry and typography only. The phosphor label and 1px phosphor border come from
+  // `.loom-btn-primary` in global.css, which states exactly these tokens — and `background` is left to
+  // `.loom-btn`'s transparent base rather than restated here, because the variant's ONLY hover rule
+  // targets `background` and an inline one shadowed it outright on the <button> branch below (the <a>,
+  // which never set one, hovered correctly all along).
+  // @decision 6cefdf25 — a call site's chrome lives in a class, never its inline style.
   const shared: CSSProperties = {
-    display: "inline-block", textDecoration: "none", color: color.phosphor,
-    border: `1px solid ${color.phosphor}`, borderRadius: radius.base, padding: "6px 14px",
+    display: "inline-block", textDecoration: "none",
+    borderRadius: radius.base, padding: "6px 14px",
     fontFamily: font.mono, fontSize: 12, ...style,
   };
 
@@ -168,7 +174,7 @@ export function VaultDownloadLink({ projectId, path, children, style }: {
     <>
       {needsFetch ? (
         <button type="button" onClick={save} disabled={busy} aria-busy={busy} className="loom-btn loom-btn-primary"
-          style={{ ...shared, background: "transparent", cursor: busy ? "progress" : "pointer" }}>
+          style={{ ...shared, cursor: busy ? "progress" : "pointer" }}>
           {busy ? "Preparing…" : children}
         </button>
       ) : (

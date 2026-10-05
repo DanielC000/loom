@@ -158,10 +158,13 @@ function PresetRow({ preset, onInsert, onEdit }: {
     <div style={{ display: "flex", alignItems: "stretch", gap: 4 }}>
       {/* Click INSERTS the prompt into the composer for review — it does NOT send. Label on line 1, a
           dim prompt preview on line 2 (the "Spark" signature — the prompt is visible before you insert). */}
+      {/* No `color`/`border` of its own: `.loom-btn-default` already states both (--loom-text on a
+          --loom-border-strong 1px border), and an inline `border` SHORTHAND here shadowed that variant's
+          own border-color hover rule outright. @decision 6cefdf25 — a call site's chrome lives in a class. */}
       <button type="button" onClick={onInsert} disabled={del.isPending} title={preset.prompt}
         className="loom-btn loom-btn-default"
-        style={{ flex: 1, minWidth: 0, textAlign: "left", color: color.text, fontFamily: font.mono,
-          fontSize: 12, padding: "5px 8px", border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
+        style={{ flex: 1, minWidth: 0, textAlign: "left", fontFamily: font.mono,
+          fontSize: 12, padding: "5px 8px", borderRadius: radius.base,
           overflow: "hidden", display: "flex", flexDirection: "column", gap: 2 }}>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{preset.label}</span>
         <span style={{ color: color.textMuted, fontSize: 11, lineHeight: 1.35, overflow: "hidden",

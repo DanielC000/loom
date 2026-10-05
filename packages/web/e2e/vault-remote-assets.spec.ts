@@ -402,6 +402,38 @@ test.describe("vault raw assets on a remote (proxied) origin", () => {
     expect(rawGets.length, `expected a single authenticated fetch, saw ${rawGets.length}`).toBe(1);
   });
 
+  // ── Card aac0de44, site 2: the download control's own hover ────────────────────────────────────────
+  // `VaultDownloadLink` built both of its branches from one `shared` inline style that restated
+  // `.loom-btn-primary`'s own rest chrome (`color`/`border`, the --loom-phosphor tokens, verbatim), and
+  // the <button> branch added `background: "transparent"` on top. That last one is the live defect:
+  // `.loom-btn-primary:not(:disabled):hover { background: var(--loom-phosphor-dim) }` is the variant's
+  // ONLY hover rule, so an inline `background` shadowed it completely and the remote download button was
+  // visually inert on hover. The <a> branch set no background and hovered correctly all along — which is
+  // why this needs the REMOTE origin to measure at all, and why the loopback control below is its pair.
+  // Every inline chrome declaration is gone; the rest appearance is pinned first, then a real hover.
+  test("the remote download BUTTON hovers (its inline background no longer shadows the variant rule)", async ({ page }) => {
+    await openRemoteVault(page);
+    await treeRow(page, "opaque.bin").click();
+
+    const button = page.getByRole("button", { name: "Download file" });
+    await expect(button).toBeVisible();
+    // REST, byte-identical to the deleted inline values: --loom-phosphor #2ee66e on a 1px phosphor
+    // border, and `.loom-btn`'s transparent base where the inline `background: "transparent"` was.
+    await expect(button).toHaveCSS("color", "rgb(46, 230, 110)");
+    await expect(button).toHaveCSS("border-top-color", "rgb(46, 230, 110)");
+    await expect(button).toHaveCSS("border-top-width", "1px");
+    await expect(button).toHaveCSS("border-top-style", "solid");
+    await expect(button).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+
+    // HOVER. `toHaveCSS` retries, so it reads the settled end state past the 80ms `.loom-btn`
+    // transition rather than an interpolated frame mid-flight.
+    await button.hover();
+    await expect(button).toHaveCSS("background-color", "rgba(46, 230, 110, 0.15)");
+    // The fill is the whole rule — the label and border must not move with it.
+    await expect(button).toHaveCSS("color", "rgb(46, 230, 110)");
+    await expect(button).toHaveCSS("border-top-color", "rgb(46, 230, 110)");
+  });
+
   test("CONTROL: on the SAME daemon's loopback origin the consumers still use the plain raw URL", async ({ page }) => {
     // Loopback reads are ungated, so the direct URL is kept there deliberately — the browser streams it,
     // range-requests a big PDF for the native viewer, and writes a download straight to disk. This control
@@ -428,8 +460,20 @@ test.describe("vault raw assets on a remote (proxied) origin", () => {
     await treeRow(page, "opaque.bin").click();
     // Still a real LINK here, with the bare href — the <button> is the remote branch only. This is the
     // contrast that stops the fix becoming "everything is a fetch-and-save button everywhere".
-    await expect(page.getByRole("link", { name: "Download file" })).toHaveAttribute("href", /\/vault\/raw\?path=/);
+    const link = page.getByRole("link", { name: "Download file" });
+    await expect(link).toHaveAttribute("href", /\/vault\/raw\?path=/);
     await expect(page.getByRole("button", { name: "Download file" })).toHaveCount(0);
     await expect(page.getByText(BIN_SIZE_LABEL)).toBeVisible();
+
+    // The <a> half of card aac0de44: it shares the same `shared` style object as the remote <button>,
+    // so its rest appearance must be identical AND unchanged — and because it never set a `background`
+    // of its own, its hover worked before the fix too. Asserting it here is what shows the fix did not
+    // disturb the branch that was already correct. (`:not(:disabled)` matches an <a>: `:disabled` only
+    // ever matches a form control, so the variant's hover rule reaches this element.)
+    await expect(link).toHaveCSS("color", "rgb(46, 230, 110)");
+    await expect(link).toHaveCSS("border-top-color", "rgb(46, 230, 110)");
+    await expect(link).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await link.hover();
+    await expect(link).toHaveCSS("background-color", "rgba(46, 230, 110, 0.15)");
   });
 });
