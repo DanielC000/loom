@@ -35,6 +35,7 @@ comparison alone cannot tell the two `Live` objects apart.
 - Do not drop the `live.submitGeneration !== gen` checks in favor of the identity check alone — they catch
   a DIFFERENT staleness (same `Live`, later generation), which the identity check does not cover.
 - Do not thread a freshly re-fetched `live` (e.g. `writeNewTurn`'s own liveness re-checks inside `submit()`)
-  into these functions instead of the chain's originating `live` — `writeNewTurn`'s own re-fetches are a
-  separate, pre-existing, out-of-scope issue (not fixed by this card) guarding only its own paste-bracket
-  writes, not the Enter-verify chain's generation binding.
+  into these functions instead of the chain's originating `live` — `writeNewTurn`'s own re-fetches (plus the
+  same defect in `writeChunked`'s internal chunk-burst `step()`) were a separate paste-bracket-writer issue,
+  now fixed by card `c228b237` (see `docs/decisions/c228b237-writenewturn-and-writechunked-pinned-to-live-identity.md`)
+  — still a distinct fix from this chain's own generation binding, not a reason to merge them.

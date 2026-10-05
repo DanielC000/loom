@@ -6,7 +6,7 @@ Card `1bd1f045`: a byte/call-sequence log for the ACTUAL `pty.write()` call, cal
 
 ## The discriminator
 
-This log discriminates the two surviving hypotheses for `3ce3fa39`'s mid-token splice: if the daemon itself double-emits (e.g. `writeChunked`'s `done` callback firing more than once, unguarded by `submitGeneration` — see `9ed20572`, which documents `writeChunked`'s own "`done` must fire on every exit path" invariant at its own site, not this discriminator), TWO `[pty-write]` records on `tag=chunk` share the same content signature (`len`, `hash`) at distinct `seq` WITHIN THE SAME `gen`. If the daemon writes exactly once and corruption still appears at the receiving end, this log shows a single clean record and the fault is BELOW the daemon (ConPTY/node-pty/Windows). Either outcome is a real result.
+This log discriminates the two surviving hypotheses for `3ce3fa39`'s mid-token splice: if the daemon itself double-emits (e.g. `writeChunked`'s `done` callback firing more than once, unguarded by `submitGeneration` — see `9ed20572`, which documents `writeChunked`'s own invariant that `done` fires on every exit path of the SAME Live (death/kill/empty) but never across a respawn (card `c228b237`) at its own site, not this discriminator), TWO `[pty-write]` records on `tag=chunk` share the same content signature (`len`, `hash`) at distinct `seq` WITHIN THE SAME `gen`. If the daemon writes exactly once and corruption still appears at the receiving end, this log shows a single clean record and the fault is BELOW the daemon (ConPTY/node-pty/Windows). Either outcome is a real result.
 
 ## Correction, 2026-07-23 (manager measurement, 583 live records)
 

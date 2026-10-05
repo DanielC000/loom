@@ -9937,6 +9937,8 @@ export class PtyHost {
     live.currentGenFirstWrittenAt = null;
     // Chunk the text — a long turn (e.g. a worker report) sent as one pty.write is truncated by
     // ConPTY. Close the paste + send Enter only AFTER the last chunk lands, else it submits a partial.
+    // @decision c228b237 — `writeNewTurn` stays bound to the `live` it closed over at submit() entry; never
+    // re-fetch `live` by sessionId in its entry check or its deferred writeChunked `done` callback.
     const writeNewTurn = (): void => {
       // Card 3ce3fa39: re-check aliveness here — unlike the original inline shape this was factored out
       // of (where this write was always the FIRST synchronous thing submit() did, covered by submit()'s
@@ -9946,13 +9948,13 @@ export class PtyHost {
       // no aliveness check (every caller is expected to), so skipping this guard would write to a dead pty.
       // Card bb3d9005 (S1): `killed` too — `alive` alone stays true through the kill()→'exit' window
       // (see Live.killed's own doc), which this async callback can land inside just as easily.
-      const l = this.live.get(sessionId);
-      if (!l?.alive || l.killed) return;
-      this.ptyWrite(sessionId, l, BRACKET_PASTE_START, "bracket-start");
+      if (this.live.get(sessionId) !== live) return; // respawned — never act on a stale generation's chain
+      if (!live.alive || live.killed) return;
+      this.ptyWrite(sessionId, live, BRACKET_PASTE_START, "bracket-start");
       this.writeChunked(sessionId, text, () => {
-        const l2 = this.live.get(sessionId);
-        if (!l2?.alive || l2.killed) return;
-        this.ptyWrite(sessionId, l2, BRACKET_PASTE_END, "bracket-end");
+        if (this.live.get(sessionId) !== live) return; // respawned — never act on a stale generation's chain
+        if (!live.alive || live.killed) return;
+        this.ptyWrite(sessionId, live, BRACKET_PASTE_END, "bracket-end");
         const delay = SUBMIT_ENTER_DELAY_MS + pasteSettleExtraMs(text.length); // scale the first attempt's gap with paste size
         setTimeout(() => this.sendEnterAndVerify(sessionId, 1, gen, live), delay);
       });
@@ -11905,29 +11907,34 @@ export class PtyHost {
    * after the last chunk (submit() uses it to send Enter only once the whole turn has landed).
    */
   private writeChunked(sessionId: string, text: string, done?: () => void): void {
-    const live = this.live.get(sessionId);
-    // Card 9ed20572: `done` must fire on EVERY exit path, including this not-alive one — a caller
-    // (healIfStuck's give-up clear) threads `setBusy(false)` through it, and a skipped `done` here
-    // would leave `busy` stuck forever if the session was already dead when the burst was scheduled.
+    const pinned = this.live.get(sessionId);
+    // Card 9ed20572: `done` must fire on every exit path of the SAME Live (death/kill/empty) — a
+    // skipped `done` here would leave the caller's own busy/cleanup bookkeeping stuck forever if the
+    // session was already dead when the burst was scheduled. A respawn deliberately does NOT fire
+    // `done` (see step()'s own identity check below, card c228b237) — that's a DIFFERENT Live, not this
+    // one dying in place.
     // Card bb3d9005 (S1): also treat `killed` as an exit path — `alive` alone stays true through the
     // kill()→'exit' window (see Live.killed's own doc), and this is writeStdin's single choke point
     // (a real human's raw keystrokes, deliberately ungated on busy/stopping), so it's directly reachable
     // in that window.
-    if (!live?.alive || live.killed) { done?.(); return; }
+    if (!pinned?.alive || pinned.killed) { done?.(); return; }
     if (text.length === 0) { done?.(); return; }
     let i = 0;
     // Card 5b4ddca5: mark the burst in flight for repaint()'s skip; released on EVERY exit path below.
-    live.chunkedWritesInFlight = (live.chunkedWritesInFlight ?? 0) + 1;
+    pinned.chunkedWritesInFlight = (pinned.chunkedWritesInFlight ?? 0) + 1;
     const finish = (): void => {
-      live.chunkedWritesInFlight = Math.max(0, (live.chunkedWritesInFlight ?? 1) - 1);
+      pinned.chunkedWritesInFlight = Math.max(0, (pinned.chunkedWritesInFlight ?? 1) - 1);
       done?.();
     };
+    /**
+     * @decision c228b237 — `pinned` is bound by identity through the whole burst; never re-fetch `live` by
+     * sessionId inside `step()`, and never fire `done` on a respawn (only on the SAME Live dying in place).
+     */
     const step = (): void => {
-      const l = this.live.get(sessionId);
-      // Same guarantee as above: the session died (or was killed) mid-burst — still fire `done` once.
-      if (!l?.alive || l.killed) { finish(); return; }
+      if (this.live.get(sessionId) !== pinned) return; // respawned — stale chunks never reach the new pty
+      if (!pinned.alive || pinned.killed) { finish(); return; }
       const end = surrogateSafeChunkEnd(text, i, PTY_WRITE_CHUNK_UNITS);
-      this.ptyWrite(sessionId, l, text.slice(i, end), "chunk");
+      this.ptyWrite(sessionId, pinned, text.slice(i, end), "chunk");
       i = end;
       if (i >= text.length) { finish(); return; }
       setTimeout(step, PTY_WRITE_CHUNK_DELAY_MS);
