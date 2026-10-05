@@ -273,6 +273,28 @@ check("stop() cancels the PENDING attempt and refuses every later one — perman
   assert.equal(attempts, 0, "and never runs the attempt");
 });
 
+check("disarm() cancels the pending attempt WITHOUT permanently refusing later ones", () => {
+  // @decision 04314fbc round 2 — FleetSocketProvider's onopen re-seeds directly. Without this, a retry
+  // armed by a seed failure from BEFORE the drop fires later and runs a SECOND, concurrent seed under the
+  // fresh one onopen just started — the exact defect disarm() exists to close.
+  const t = fakeTimers();
+  const loop = S.createRetryLoop(t.deps);
+  let attempts = 0;
+  loop.schedule(() => { attempts++; });
+  assert.equal(t.armed.size, 1, "armed");
+
+  loop.disarm();
+  assert.equal(t.armed.size, 0, "the pending attempt is cleared");
+  assert.equal(loop.pendingDelay(), null);
+  assert.equal(loop.stopped(), false, "disarm must NOT be permanent — stop() is the permanent one");
+
+  // The loop must still be genuinely usable afterwards: a LATER failure can re-arm and run it.
+  loop.schedule(() => { attempts++; });
+  assert.equal(t.armed.size, 1, "schedule() after disarm() still arms a timer");
+  t.fire(t.only());
+  assert.equal(attempts, 1, "and the later attempt actually runs — disarm() didn't silently kill it");
+});
+
 check("an un-stopped loop DOES keep retrying — the positive control for the check above", () => {
   // Without this, "nothing was armed" would pass just as happily for a loop that never arms anything.
   const t = fakeTimers();

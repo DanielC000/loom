@@ -92,8 +92,9 @@ test("an UNRECOGNISED 1008 reason reads as refused, never as a revoked token", a
   await expect(chat.getByText("refused", { exact: true })).toBeVisible();
   await expect(chat.getByText("connected", { exact: true })).toHaveCount(0);
   await expect(chat.getByText("token revoked", { exact: true })).toHaveCount(0);
-  // ...and it is TERMINAL, not a transient gap: no "reconnecting" pill, now or after a full ladder's worth
-  // of time (1+2+4+8s would all have fired inside this window had the retry branch been taken).
+  // ...and it is TERMINAL, not a transient gap: no "reconnecting" pill. `toHaveCount(0)` resolves the
+  // instant the count IS 0 — it does not wait out a ladder — so this proves the pill is absent right now,
+  // not that it stays absent across a full 1+2+4+8s retry window.
   await expect(chat.getByText("reconnecting", { exact: true })).toHaveCount(0);
 
   // Send is off, because the state is terminal — `canSend` gates on "connected".

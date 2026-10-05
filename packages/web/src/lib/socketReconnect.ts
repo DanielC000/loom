@@ -138,6 +138,12 @@ export interface RetryLoop {
   schedule: (attempt: () => void) => void;
   /** An attempt succeeded — the ladder restarts from the minimum. */
   reset: () => void;
+  /**
+   * Cancel the pending attempt WITHOUT refusing future ones — unlike `stop()`, this is not permanent.
+   * @decision 04314fbc round 2 — `onopen` re-seeds directly; without disarming first, a retry armed by a
+   * failure from BEFORE the drop fires later and runs a second, concurrent seed. See socketReconnect.mjs.
+   */
+  disarm: () => void;
   /** Cancel the pending attempt and refuse every future one. Permanent, by design. */
   stop: () => void;
   /** True once `stop()` has been called. */
@@ -182,6 +188,7 @@ export function createRetryLoop(deps: {
       handle = setTimer(() => { handle = null; armedDelay = null; attempt(); }, delay);
     },
     reset: () => { backoff.reset(); },
+    disarm,
     stop: () => { dead = true; disarm(); },
     stopped: () => dead,
     pendingDelay: () => armedDelay,

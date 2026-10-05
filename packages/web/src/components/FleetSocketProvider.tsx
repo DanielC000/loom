@@ -204,6 +204,11 @@ export function FleetSocketProvider() {
         backoff.reset();
         refusalEpisode.reset(); // this run of failures is over; a later one gets its own probe
         stopFallbackPoll();
+        // @decision 04314fbc round 2 — disarm, never stop: a retry armed by a failure from BEFORE this
+        // drop (the seed fetch, independent of the socket) must not fire later and run a second,
+        // concurrent seed under the fresh one below. The loop still has to work on a LATER failure.
+        seedRetry.disarm();
+        statusSeedRetry.disarm();
         log("connected");
         seed();
         seedStatus(reconnecting);
@@ -244,9 +249,12 @@ export function FleetSocketProvider() {
         // the same trade — the fallback is one bounded request per 10s per feed, where the seed loops
         // together ran at ~120/min and drained the trusted-proxy listener's ONE shared failed-auth
         // bucket (PROXY_FAILED_AUTH_PER_MIN), 429ing unrelated remote callers.
-        const terminal = (what: string) => {
+        // `banner` is false for a per-socket policy refusal (today unreachable on /ws/fleet, but the
+        // `refused` branch must still be supplied — see handleSocketClose's contract): that close is not
+        // a credential change, so there is no gateway banner to point at.
+        const terminal = (what: string, banner: boolean) => {
           stopSeedRetries();
-          log(`disconnected by policy (${what}) — not reconnecting, seed retries stopped; see the gateway banner`);
+          log(`disconnected by policy (${what}) — not reconnecting, seed retries stopped` + (banner ? "; see the gateway banner" : ""));
           startFallbackPoll();
         };
         /**
@@ -275,8 +283,8 @@ export function FleetSocketProvider() {
             refusalEpisode.check(stopForRefusal);
             reconnectTimer = setTimeout(connect, backoff.next());
           },
-          tokenDead: (change) => terminal(`gateway token ${change}`),
-          refused: (reason) => terminal(reason || "close 1008"),
+          tokenDead: (change) => terminal(`gateway token ${change}`, true),
+          refused: (reason) => terminal(reason || "close 1008", false),
         });
       };
       // onerror is followed by onclose; let onclose own the fallback/reconnect so we don't double-schedule.

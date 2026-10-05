@@ -9,10 +9,16 @@
 // cannot be rendered and their `onclose` handlers cannot be invoked here. This file covers that half,
 // and ONLY that half: the wiring, read off the real source text.
 //
-// RED on the pre-fix code for real reasons, not merely because the symbols are new:
+// RED on checks (1)-(7) against the genuine pre-fix clients — but by SYMBOL ABSENCE (handleSocketClose,
+// createRetryLoop and stopSeedRetries did not exist yet), not because each check independently exercises
+// the defect it guards going forward. Measured: check (4) never reaches its own collapse assertion
+// pre-fix — `companion.split(/handleSocketClose\(/)[1]` is undefined (no such call site exists), so it
+// fails on "tokenDead must set a conn state" before ever comparing the two states. This file GUARDS the
+// new wiring against regressing; it is not independent proof the pre-fix defects below behaved exactly
+// as described — that evidence is `git show` on the pre-fix commit itself:
 //  - CompanionChat.tsx:263 was `if (!onSocketClose(e).retry) { setConn("revoked"); return; }` — one
 //    terminal branch for BOTH 1008 kinds, so an unrecognised/policy refusal claimed the token was
-//    revoked (check 3 below).
+//    revoked (check (4) below).
 //  - FleetSocketProvider.tsx's 1008 branch returned without touching seedRetryTimer /
 //    statusSeedRetryTimer, and both were armed by a bare `setTimeout(seed, SOCKET_RECONNECT_MIN_MS)`
 //    (checks 5-7 below).
