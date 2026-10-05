@@ -260,8 +260,20 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   // and re-mint a SECOND real invocation for reasons unrelated to the bug under test. Waiting for the
   // real op to settle first isolates what this assertion is actually about: once the in-flight op is done,
   // a later re-attach must dedupe against its RETAINED result, never mint a new one.
+  //
+  // Card 19f959ea: proceeding into the re-call on a FALSE return here (meaning the real squash/finalize
+  // genuinely outlasted the wait) is exactly what triggers the dead-owner eviction race against a still-
+  // RUNNING (not abandoned) op — the fresh mint it produces then races the orphaned original's own git
+  // work on the SAME worktree, which is what actually produced the historical "worktree stamp unreadable
+  // at confirm time" flake (reproduced deterministically; see project memory
+  // mrt-dead-owner-release-flake-pre-existing). That production race is now tracked separately as card
+  // 47a22d40 ("fix(orchestration): attach to a running merge op instead of evicting it"); this budget is
+  // widened to 30_000ms (matching every sibling waitBriefly call in this file) and its return value is
+  // now asserted by name instead of ignored, so a genuine timeout here fails loudly as itself rather than
+  // silently walking into that race and failing with an unrelated-looking "stamp unreadable" message.
   releaseGate("go");
-  await sessions.pendingOps.waitBriefly(`merge:${workerId}`, 8000);
+  const settledBeforeReattach = await sessions.pendingOps.waitBriefly(`merge:${workerId}`, 30_000);
+  check("(dead-owner) the real op genuinely settled before the re-attach (not a timeout racing the dead-owner eviction — card 47a22d40)", settledBeforeReattach === true);
   const finalResult = await sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
   check("(dead-owner) once released, the SAME in-flight op settles for real and merges", finalResult.settled === true && finalResult.ok === true && finalResult.value?.merged === true);
   check("(dead-owner) still exactly ONE real gate invocation total — the later re-attach dedupes against the RETAINED result, never mints a second", gateCalls === 1);
