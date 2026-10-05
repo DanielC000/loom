@@ -135,6 +135,50 @@ check("(shim) winCmdShimSpawnTarget is a byte-identical passthrough for a non-.c
   check("(refuse) the thrown error names the actual path", !!threw?.message.includes(bogusShim));
 }
 
+// ===================== item 4 (card adeb453f): supervisor-level refusal end to end =====================
+// ingest() surfaces the same refusal through its own async, never-throws contract: ok:false, with "not a
+// recognisable npm cmd-shim" in the captured output tail (runBounded's catch around winCmdShimSpawnTarget
+// — see supervisor.ts's own card 8ddd12c6 comment there).
+{
+  const badIngestSup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "bad-ingest-home"), ingestTimeoutMs: 15_000 });
+  await badIngestSup.start([], path.join(tmpHome, "bogus.cmd"));
+  badIngestSup.stop(); // start() with no repoPaths still spawns `serve` — stop it immediately, out of scope here.
+  const r = await badIngestSup.ingest(path.join(tmpHome, "some-other-repo"));
+  check("(item4, ingest) a non-npm .cmd surfaces ok:false through ingest()", r.ok === false);
+  check('(item4, ingest) the output tail names "not a recognisable npm cmd-shim"', !!r.errorTail?.includes("not a recognisable npm cmd-shim"));
+}
+
+// trySpawnChild (the `serve` path): warns on each failed attempt and gives up after a BOUNDED number of
+// restarts — never an infinite retry loop. A tiny test-seam backoff schedule (restartBackoffMs) keeps
+// this fast instead of waiting out the real multi-minute default schedule.
+{
+  const warnings = [];
+  const errors = [];
+  const origWarn = console.warn;
+  const origError = console.error;
+  console.warn = (...args) => { warnings.push(args.join(" ")); origWarn(...args); };
+  console.error = (...args) => { errors.push(args.join(" ")); origError(...args); };
+  let sup2 = null;
+  try {
+    sup2 = new CodescapeSupervisor({
+      homeDir: path.join(tmpHome, "bad-serve-home"),
+      restartBackoffMs: [5, 5],
+      restartWindowMs: 60_000,
+      maxRestartsPerWindow: 50,
+    });
+    await sup2.start([], path.join(tmpHome, "bogus.cmd"));
+    await waitUntil(() => errors.some((m) => m.includes("gave up")), { timeoutMs: 5_000, label: "trySpawnChild gives up after exhausting its bounded backoff" });
+    check("(item4, serve) trySpawnChild warns on the failed spawn attempt", warnings.some((m) => m.includes("[codescape] serve spawn failed") && m.includes("not a recognisable npm cmd-shim")));
+    check("(item4, serve) the restart loop is BOUNDED — it gives up rather than retrying forever", errors.some((m) => m.includes("gave up")));
+    check("(item4, serve) no real child ever came up across any attempt", sup2.getSpawnCount() === 0);
+    check("(item4, serve) getPort() reflects the given-up state — broken stays visibly down", sup2.getPort() === null);
+  } finally {
+    console.warn = origWarn;
+    console.error = origError;
+    sup2?.stop();
+  }
+}
+
 // ===================== gate sanity: the shim resolves + the supervisor is enabled =====================
 check("(gate) isCodescapeSupervisorEnabled() is TRUE (LOOM_DEV=1 + the shim resolves on disk)", isCodescapeSupervisorEnabled() === true);
 

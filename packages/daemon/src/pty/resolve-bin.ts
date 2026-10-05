@@ -63,11 +63,40 @@ export interface ParsedNpmCmdShim {
  *  cheap membership check before trusting the file enough to extract an entry path from it. */
 const NPM_CMD_SHIM_DP0_MARKER = /:find_dp0[\s\S]*?SET dp0=%~dp0/i;
 
-/** Matches the shim's one real invocation line — e.g. `"%_prog%"  "%dp0%\node_modules\@openai\codex\bin\
- *  codex.js" %*` (verified against this host's real npm-installed `codex.cmd`/`corepack.cmd`/`pnpm.cmd`,
- *  all byte-identical in shape). `cmd-shim` always emits exactly this trailing ` %*` forwarding every
- *  argument verbatim — captures the relative entry path after `%dp0%\`. */
-const NPM_CMD_SHIM_ENTRY_RE = /"%_prog%"\s+"%dp0%\\([^"]+\.(?:m?js|cjs))"\s+%\*/i;
+/**
+ * Matches the ENTIRE canonical node-interpreter dispatch block a real npm `cmd-shim` emits for a
+ * node-shebanged package, end to end in one contiguous pattern (verified byte-identical, modulo the
+ * entry path, against this host's real `codex.cmd`/`corepack.cmd`/`pnpm.cmd`, all genuine
+ * `npm install -g` outputs):
+ * ```
+ * IF EXIST "%dp0%\node.exe" (
+ *   SET "_prog=%dp0%\node.exe"
+ * ) ELSE (
+ *   SET "_prog=node"
+ *   SET PATHEXT=%PATHEXT:;.JS;=;%
+ * )
+ *
+ * endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\<entry>.js" %*
+ * ```
+ * Matching the whole block in one pattern (rather than the dp0-lookup and the invocation line
+ * independently, the shape this replaced) means interpreter identity and entry extraction come from the
+ * SAME match, so a decoy invocation-shaped line elsewhere in the file (behind a `REM`, or a second copy)
+ * can never be mistaken for the real one — {@link parseNpmCmdShim} additionally requires this to match
+ * EXACTLY ONCE. Both `_prog` markers are pinned to the literal `node`/`node.exe`: `cmd-shim` derives
+ * `_prog` from the target script's OWN shebang interpreter (any word — `deno`, `bun`, `python3`, ...),
+ * not always `node`, so a package whose shebang names a different interpreter produces a real cmd-shim
+ * that legitimately sets `_prog` to that interpreter instead, and this module only knows how to safely
+ * launch the entry under node. `"%_prog%" +"` requires NOTHING but spaces between the interpreter and
+ * the entry's opening quote — a shebang carrying extra interpreter args (`#!/usr/bin/env node --harmony`)
+ * inserts that text in exactly this gap, so such a shim fails to match rather than silently dropping or
+ * misparsing the flags.
+ *
+ * @decision adeb453f — do not loosen this to lenient-match a shim missing these exact node markers, and
+ * do not drop the exactly-one-match requirement in {@link parseNpmCmdShim} — either reopens the decoy
+ * and wrong-interpreter defects this was written to close.
+ */
+const NPM_CMD_SHIM_NODE_BLOCK_RE =
+  /IF EXIST "%dp0%\\node\.exe" \(\r?\n\s*SET "_prog=%dp0%\\node\.exe"\r?\n\) ELSE \(\r?\n\s*SET "_prog=node"\r?\n\s*SET PATHEXT=%PATHEXT:;\.JS;=;%\r?\n\)\r?\n\r?\nendLocal & goto #_undefined_# 2>NUL \|\| title %COMSPEC% & "%_prog%" +"%dp0%\\([^"]+\.(?:m?js|cjs))" %\*/gi;
 
 /**
  * Parse an npm `cmd-shim`-generated `.cmd` file (the shape a global `npm install -g <pkg>` produces on
@@ -77,24 +106,55 @@ const NPM_CMD_SHIM_ENTRY_RE = /"%_prog%"\s+"%dp0%\\([^"]+\.(?:m?js|cjs))"\s+%\*/
  * quoting/caret-escaping layer exists to get wrong) and `kill()` terminates the actual process instead of
  * a `cmd.exe` wrapper, orphaning the real child.
  *
- * Throws a plain `Error` (never a sentinel) naming `cmdPath` when the file isn't a recognisable npm
- * cmd-shim — e.g. a hand-authored `.cmd`/`.bat` with arbitrary shell logic, which this deliberately never
- * attempts to interpret; falling back to a shell for that case would reopen the exact escaping gap this
- * whole module exists to close. Every caller wraps its spawn attempt in a try/catch that already surfaces
- * a synchronous spawn failure into its own diagnostic output, so throwing here is swallowed the same way.
+ * What this ACTUALLY enforces (positive form — a file can contain other shell logic outside the matched
+ * block and this never inspects it, which is safe only because of how the parsed result is used): accepts
+ * a file if and only if it carries the dp0 lookup AND {@link NPM_CMD_SHIM_NODE_BLOCK_RE}'s dispatch block
+ * matches it EXACTLY ONCE, with a captured entry that resolves to a path inside the shim's own directory
+ * tree (`path.resolve` containment — a relative entry can't `..` its way out). That's safe because
+ * content OUTSIDE the matched block never runs: Loom never executes the `.cmd` itself (never
+ * `shell:true`, never `cmd.exe` — {@link winCmdShimSpawnTarget}), it spawns the resolved node binary
+ * directly against the resolved entry script, so any other line in the file — real or decoy — is dead
+ * text from this module's point of view.
+ *
+ * Deliberately refuses (rather than attempts to also parse) a pnpm-global-install shim (`pnpm add -g`)
+ * or an npm ≤6 `cmd-shim` shim: both use a materially different, less deterministic template — no
+ * `dp0`/`_prog` indirection at all, and TWO independent literal invocation lines (one per `IF
+ * EXIST`/`ELSE` branch) that would need cross-validating against each other to trust, plus — for the
+ * pnpm shape — an entry path that embeds a mutable global-store generation index. The resulting clear,
+ * named refusal error (never the old silent "exit null") is the intended user-facing signal for this
+ * case.
+ *
+ * @decision adeb453f — do not special-case the pnpm-global/npm≤6 template to also accept it; its dual
+ * invocation sites and mutable store-index entry path make it unsafe to anchor on the same way.
+ *
+ * Throws a plain `Error` (never a sentinel) naming `cmdPath`. Every caller wraps its spawn attempt in a
+ * try/catch that already surfaces a synchronous spawn failure into its own diagnostic output, so throwing
+ * here is swallowed the same way.
  */
 export function parseNpmCmdShim(cmdPath: string): ParsedNpmCmdShim {
   const text = fs.readFileSync(cmdPath, "utf8");
   if (!NPM_CMD_SHIM_DP0_MARKER.test(text)) {
     throw new Error(`"${cmdPath}" is not a recognisable npm cmd-shim (missing its dp0 lookup) — refusing to spawn it through a shell`);
   }
-  const entryMatch = NPM_CMD_SHIM_ENTRY_RE.exec(text);
-  const relativeEntry = entryMatch?.[1];
-  if (!relativeEntry) {
-    throw new Error(`"${cmdPath}" is not a recognisable npm cmd-shim (no "%dp0%\\...<entry>.js" %* invocation line found) — refusing to spawn it through a shell`);
+  const blockMatches = [...text.matchAll(NPM_CMD_SHIM_NODE_BLOCK_RE)];
+  if (blockMatches.length !== 1) {
+    throw new Error(
+      `"${cmdPath}" is not a recognisable npm cmd-shim (expected exactly one node-interpreter dispatch block — "%_prog%" set to "%dp0%\\node.exe"/"node" with nothing but the entry between it and "%*" — found ${blockMatches.length}) — refusing to spawn it through a shell`,
+    );
   }
-  const dp0 = path.dirname(cmdPath);
-  const entry = path.join(dp0, relativeEntry);
+  // The captured entry is always a Windows-style (backslash) relative path — the shim file is a Windows
+  // batch script by construction regardless of which OS is doing the parsing (e.g. a hermetic test on
+  // POSIX CI) — normalize to "/" first so path.join/path.resolve's ".." handling, and the containment
+  // check below, are correct on every host, not just win32.
+  const match = blockMatches[0];
+  const capturedEntry = match?.[1];
+  if (!capturedEntry) throw new Error(`"${cmdPath}" cmd-shim parse failed unexpectedly after matching exactly once`);
+  const relativeEntry = capturedEntry.split("\\").join("/");
+  const dp0 = path.resolve(path.dirname(cmdPath));
+  const entry = path.resolve(path.join(dp0, relativeEntry));
+  if (entry !== dp0 && !entry.startsWith(dp0 + path.sep)) {
+    throw new Error(`"${cmdPath}" cmd-shim entry resolves outside the shim's own directory (${dp0}) — refusing to spawn it through a shell`);
+  }
   const siblingNode = path.join(dp0, "node.exe");
   const nodeBin = fs.existsSync(siblingNode) ? siblingNode : process.execPath;
   return { entry, nodeBin };

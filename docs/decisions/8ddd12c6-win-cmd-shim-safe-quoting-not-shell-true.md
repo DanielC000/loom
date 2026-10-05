@@ -45,14 +45,20 @@ If the `.cmd`/`.bat` file doesn't match that recognisable shape (a hand-authored
 logic), `parseNpmCmdShim` throws naming the path, and every call site's existing try/catch surfaces that
 as a spawn failure — never falls back to a shell.
 
+**Round 3** (`docs/decisions/adeb453f`) tightened this further: the entry-extraction regex is now
+anchored to the ENTIRE node-interpreter dispatch block (renamed `NPM_CMD_SHIM_NODE_BLOCK_RE`, replacing
+the old standalone `NPM_CMD_SHIM_ENTRY_RE`), required to match exactly once, with the interpreter pinned
+to node and the resolved entry required to stay inside the shim's own directory. See that record for why,
+and for the pnpm-global/npm≤6 shim shapes this still deliberately refuses rather than also parsing.
+
 ## Do not
 
 - Do not reintroduce `cmd.exe` (`shell:true`, or a hand-built quoted command line) to work around a
   parse failure "just this once" — a shell layer either reopens the CVE-2024-27980 escaping gap, or, even
   perfectly escaped, orphans the real child on `kill()` by making every spawned process `cmd.exe` itself
   (round 1's defect 3, reproduced).
-- Do not widen `NPM_CMD_SHIM_DP0_MARKER`/`NPM_CMD_SHIM_ENTRY_RE` to "lenient-match" a `.cmd`/`.bat` that
-  isn't a real npm cmd-shim — refuse and surface the error instead; guessing at an unrecognised shape is
-  how the injection and quoting defects above got in to begin with.
+- Do not widen `NPM_CMD_SHIM_DP0_MARKER`/`NPM_CMD_SHIM_NODE_BLOCK_RE` to "lenient-match" a `.cmd`/`.bat`
+  that isn't a real npm cmd-shim — refuse and surface the error instead; guessing at an unrecognised
+  shape is how the injection and quoting defects above got in to begin with.
 - Do not add a dependency on `cross-spawn` (or any equivalent shell-escaping package) — round 1 already
   rejected that, and round 2 removes the need for shell escaping entirely rather than doing it better.
