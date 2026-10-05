@@ -983,7 +983,9 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
       continue;
     }
     const armedForWrite: MergeQuarantineEntry = { ...unionEntry, resolvedKey: key };
-    byRepoKey.set(key, armedForWrite);
+    // @decision 54054c01 — set the promoted object at EVERY key it is armed under, not just `key`, or a
+    // dual-armed (stale-resolvedKey) tmp's other slot double-reports via the identity-keyed de-dupe below.
+    for (const k of armedForWrite.armedKeys?.length ? armedForWrite.armedKeys : [key]) byRepoKey.set(k, armedForWrite);
     // SELF-HEALING: the content was durable (fsync'd) before any crash — promote the union to its proper
     // final name, then drop every contributing tmp — but ONLY once that promote actually succeeds (Code
     // Review of eae23ebe): unlinking unconditionally could delete the only durable copy while leaving NO
@@ -1036,9 +1038,9 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
         continue;
       }
       const entry: MergeQuarantineEntry = {
-        repoPath, branch: "(unknown — boot could not resolve which repo/branch this protects)",
+        repoPath, branch: PLACEHOLDER_BRANCH_UNRESOLVED,
         reason, enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [...orphanFilenames],
-        armedKeys: [key],
+        armedKeys: [key], placeholder: true,
       };
       byRepoKey.set(key, entry);
       if (!writeMergeQuarantineLatch(entry)) {

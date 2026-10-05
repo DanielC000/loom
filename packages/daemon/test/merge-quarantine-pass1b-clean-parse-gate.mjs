@@ -32,9 +32,21 @@ requireHermeticEnv();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
+const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href;
 const {
   enterMergeQuarantine, clearMergeQuarantine, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot, MERGE_QUARANTINE_DIR,
-} = await import(pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href);
+  PLACEHOLDER_BRANCH_CORRUPT, quarantineLatchIdFor,
+} = await import(mergeQuarantineModuleHref);
+
+// A genuinely fresh ESM module instance (its OWN empty `activeQuarantines` map, a real module-scope
+// reset) for a "second boot" check that must not lean on anything this file's single top-level import
+// already populated — Node's loader keys its module cache on the full URL including the query string, so
+// each call here gets its own instance, same file, never reused (card cac93b4c item 3).
+let bootReimportCounter = 0;
+async function freshBootModule() {
+  bootReimportCounter++;
+  return await import(`${mergeQuarantineModuleHref}?b=${bootReimportCounter}`);
+}
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -129,6 +141,83 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO R1 (card cac93b4c, item 3) — boot 1 self-heals a corrupt final OK (PASS 1's own placeholder
+  // write succeeds) but the UNION PROMOTE of the recovered real tmp (PASS 1b's per-key write, later in
+  // the SAME boot) fails (EMFILE). `writeMergeQuarantineLatch`'s failure path never touches the final
+  // path at all (open/write/fsync all happen against a NEW tmp, before the rename that would replace the
+  // final) — so the ON-DISK final after boot 1 is still whatever the self-heal wrote: the PRE-EXISTING
+  // placeholder, not the recovered real identity (which stays active in-memory only for this boot, per
+  // the promote loop's own comment). This pins `placeholder: true` on disk — deleting the field
+  // elsewhere must fail this check. Boot 2 (a genuinely fresh module instance, EMFILE no longer
+  // injected) then recovers and actually promotes the real entry.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const repo = makeRepo("r1");
+    enterMergeQuarantine(repo, "real-branch", "the REAL r1 reason — must survive", "real-r1-op-id");
+    const latchPath = fs.readdirSync(MERGE_QUARANTINE_DIR)
+      .map((f) => path.join(MERGE_QUARANTINE_DIR, f))
+      .find((p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")).repoPath === repo; } catch { return false; } });
+    const hash = path.basename(latchPath, ".json");
+
+    // Same manufacture technique as CFRT: park the real content, clear in-memory state, then reintroduce
+    // the real content as a TMP beside a freshly-corrupted final.
+    const parkedPath = path.join(os.tmpdir(), `loom-mqp1b-r1-parked-${sfx}.json`);
+    fs.renameSync(latchPath, parkedPath);
+    clearMergeQuarantine(repo);
+    const tmpPath = `${latchPath}.tmp-888888`; // an arbitrary foreign pid
+    fs.renameSync(parkedPath, tmpPath);
+    fs.writeFileSync(latchPath, "{"); // the corrupt final — unparsable JSON
+    check("(R1) precondition: a corrupt final + a real-content tmp both exist, in-memory clean",
+      fs.readFileSync(latchPath, "utf8") === "{" && fs.existsSync(tmpPath) && !activeMergeQuarantineFor(repo));
+
+    // Let the FIRST matching new-tmp write (PASS 1's own self-heal of the corrupt final) succeed; fail
+    // the SECOND (PASS 1b's later union-promote write for the SAME key) with an EMFILE-shaped error.
+    const realOpenSync = fs.openSync;
+    let interceptCount = 0;
+    let emfileFired = false;
+    fs.openSync = (p, ...rest) => {
+      if (typeof p === "string" && p.includes(hash) && p.includes(".tmp-") && p !== tmpPath) {
+        interceptCount++;
+        if (interceptCount === 2) { emfileFired = true; throw Object.assign(new Error("EMFILE: too many open files"), { code: "EMFILE" }); }
+      }
+      return realOpenSync(p, ...rest);
+    };
+    let found;
+    try {
+      found = reenterMergeQuarantinesAtBoot([repo]);
+    } finally {
+      fs.openSync = realOpenSync;
+    }
+
+    // Positive control: the injection must actually have fired on the promote write, not merely have been
+    // armed — otherwise every assertion below could pass vacuously off an un-exercised code path.
+    check("(R1) positive control: the self-heal write ran first, then the EMFILE injection fired on the promote write", interceptCount === 2 && emfileFired === true);
+    check("(R1) boot 1 still recovers this repo", found.some((q) => q.repoPath === repo));
+    check("(R1) boot 1 recovers the REAL entry IN-MEMORY despite the failed promote", activeMergeQuarantineFor(repo)?.reason === "the REAL r1 reason — must survive");
+    check("(R1) the real tmp survives untouched (the promote failed, nothing was unlinked)", fs.existsSync(tmpPath));
+    // THE PIN (item 3's actual target): the final's OWN ON-DISK content after the failed promote is still
+    // the PRE-EXISTING self-heal PLACEHOLDER — never the recovered identity, which the failed promote
+    // never reached the final path to write. Deleting `placeholder` everywhere must flip this RED.
+    const onDiskAfterBoot1 = (() => { try { return JSON.parse(fs.readFileSync(latchPath, "utf8")); } catch { return null; } })();
+    check("(R1) THE PIN: the on-disk final after the failed promote still carries placeholder:true (the pre-existing self-heal write, not the recovered identity)",
+      onDiskAfterBoot1?.placeholder === true && onDiskAfterBoot1?.branch === PLACEHOLDER_BRANCH_CORRUPT);
+    check("(R1) the on-disk final is NOT the recovered real reason (the promote never reached it)", onDiskAfterBoot1?.reason !== "the REAL r1 reason — must survive");
+
+    // Boot 2: a genuinely fresh module instance, EMFILE no longer injected — the real entry should now
+    // actually promote to disk, lifting the placeholder and sweeping the tmp.
+    const bootMod2 = await freshBootModule();
+    const found2 = bootMod2.reenterMergeQuarantinesAtBoot([repo]);
+    check("(R1) boot 2 (fresh module instance) recovers and PROMOTES the real entry to disk",
+      found2.some((q) => q.repoPath === repo) && bootMod2.activeMergeQuarantineFor(repo)?.reason === "the REAL r1 reason — must survive");
+    const onDiskAfterBoot2 = (() => { try { return JSON.parse(fs.readFileSync(latchPath, "utf8")); } catch { return null; } })();
+    check("(R1) boot 2's on-disk final now carries the real identity, no longer the placeholder",
+      onDiskAfterBoot2?.reason === "the REAL r1 reason — must survive" && onDiskAfterBoot2?.branch === "real-branch" && !onDiskAfterBoot2?.placeholder);
+    check("(R1) boot 2 sweeps the now-superseded real tmp", !fs.existsSync(tmpPath));
+
+    clearMergeQuarantine(repo);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // SCENARIO STALE-TMP-STILL-SWEPT (regression guard) — a GENUINELY stale tmp beside an already-CLEAN
   // final must still be swept as harmless residue; the fix must not regress this into a permanent leak.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -200,9 +289,13 @@ try {
     check(`(MTU-${order}) the real tmp is unlinked once the union write durably succeeds`, !fs.existsSync(realTmpPath));
     check(`(MTU-${order}) the corrupt sibling tmp is ALSO swept once that same write succeeds (never left as permanent residue)`, !fs.existsSync(corruptTmpPath));
 
-    const found2 = reenterMergeQuarantinesAtBoot([repo]); // a further boot must stay stable, never duplicate
+    // A genuinely fresh module instance — never this file's shared top-level import — so this check
+    // proves the on-disk state alone is stable across a real restart, not merely that the FIRST boot's
+    // own `activeQuarantines` entry is still sitting there unchanged.
+    const bootMod2 = await freshBootModule();
+    const found2 = bootMod2.reenterMergeQuarantinesAtBoot([repo]); // a further boot must stay stable, never duplicate
     check(`(MTU-${order}) a second boot is stable (reports once, same real content)`,
-      found2.filter((q) => q.repoPath === repo).length === 1 && activeMergeQuarantineFor(repo)?.reason === "the REAL mtu reason");
+      found2.filter((q) => q.repoPath === repo).length === 1 && bootMod2.activeMergeQuarantineFor(repo)?.reason === "the REAL mtu reason");
 
     clearMergeQuarantine(repo);
   }
@@ -243,9 +336,48 @@ try {
     check("(MTUWF) THE REGRESSION: a FAILED union write must ALSO leave the corrupt sibling in place (never swept speculatively)", fs.existsSync(corruptTmpPath));
     check("(MTUWF) no final latch was created (the write genuinely failed)", !fs.existsSync(finalPath));
 
-    const found2 = reenterMergeQuarantinesAtBoot([repo]); // write unblocked now
+    const bootMod2 = await freshBootModule(); // genuinely fresh module instance, write unblocked now
+    const found2 = bootMod2.reenterMergeQuarantinesAtBoot([repo]);
     check("(MTUWF) the NEXT boot recovers from the surviving tmps, writes the final, and sweeps both",
       found2.some((q) => q.repoPath === repo) && fs.existsSync(finalPath) && !fs.existsSync(realTmpPath) && !fs.existsSync(corruptTmpPath));
+    clearMergeQuarantine(repo);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO DUAL-ARM-STALE-RESOLVEDKEY (card cac93b4c, item 1) — a recovered TMP that carries a STALE
+  // `resolvedKey` (differing from its repo's actual current key) gets dual-armed in-memory under BOTH
+  // keys, as designed. But the LATER per-key union-promote write (`byRepoKey.set(key, armedForWrite)`)
+  // must write the SAME promoted object to EVERY key the entry is armed under — never just the one key
+  // the tmp happened to be grouped by in `tmpsToUnlinkByKey` — or the two keys end up pointing at two
+  // DIFFERENT objects for the same logical quarantine. `reenterMergeQuarantinesAtBoot`'s own de-dupe
+  // (`new Set(byRepoKey.values())`, keyed by object IDENTITY, never content) then reports it TWICE — the
+  // exact "2 entries vs 1" the reviewer reproduced, surfacing as a duplicate `[boot] canonical repo … is
+  // QUARANTINED` boot warning (index.ts).
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const repo = makeRepo("dual-arm");
+    // This repo's OWN current-key hash, with no `enterMergeQuarantine` call needed first (never persists
+    // anything) — see quarantineLatchIdFor's own doc comment: it's exactly quarantineHashFor(repoPath).
+    const hash = quarantineLatchIdFor(repo);
+    const finalPath = path.join(MERGE_QUARANTINE_DIR, `${hash}.json`);
+    const staleKey = "stale-dual-arm-key-for-cac93b4c-test"; // deliberately NOT this repo's real current key
+    const tmpPath = `${finalPath}.tmp-444444`;
+    fs.writeFileSync(tmpPath, JSON.stringify({
+      repoPath: repo, branch: "dual-arm-branch", reason: "the REAL dual-arm reason", enteredAt: Date.now(),
+      tokens: ["dual-arm-token"], resolvedKey: staleKey,
+    }));
+    check("(DUAL-ARM) precondition: no final latch exists, only the stale-resolvedKey tmp, in-memory clean",
+      !fs.existsSync(finalPath) && fs.existsSync(tmpPath) && !activeMergeQuarantineFor(repo));
+
+    const found = reenterMergeQuarantinesAtBoot([repo]);
+    check("(DUAL-ARM) THE BUG: a dual-armed tmp with a stale resolvedKey must report ONCE, not twice",
+      found.filter((q) => q.repoPath === repo).length === 1);
+    check("(DUAL-ARM) the recovered in-memory entry carries the real content", activeMergeQuarantineFor(repo)?.reason === "the REAL dual-arm reason");
+    check("(DUAL-ARM) the on-disk final's own content also carries the real reason (the promote succeeded)",
+      (() => {
+        try { return JSON.parse(fs.readFileSync(finalPath, "utf8")).reason === "the REAL dual-arm reason"; } catch { return false; }
+      })());
+
     clearMergeQuarantine(repo);
   }
 
@@ -292,9 +424,10 @@ try {
         try { return JSON.parse(fs.readFileSync(finalPath, "utf8")).reason === "the REAL legacy reason — must survive"; } catch { return false; }
       })());
 
-    const found2 = reenterMergeQuarantinesAtBoot([repo]); // a further boot must stay stable
+    const bootMod2 = await freshBootModule(); // genuinely fresh module instance
+    const found2 = bootMod2.reenterMergeQuarantinesAtBoot([repo]); // a further boot must stay stable
     check("(LEGACY-PH) a second boot remains stable on the now-real final",
-      found2.some((q) => q.repoPath === repo) && activeMergeQuarantineFor(repo)?.reason === "the REAL legacy reason — must survive");
+      found2.some((q) => q.repoPath === repo) && bootMod2.activeMergeQuarantineFor(repo)?.reason === "the REAL legacy reason — must survive");
 
     clearMergeQuarantine(repo);
   }

@@ -18,10 +18,11 @@ lost permanently (not fail-open — the repo stays quarantined — but the ident
 **Fix:** a new `cleanlyParsedKeys: Set<string>`, populated ONLY in PASS 1's successful-parse path (never
 the catch/corrupt branch). PASS 1b's gate now checks `cleanlyParsedKeys`, not `byRepoKey`. When the final
 was NOT cleanly parsed, PASS 1b falls through to its existing tmp-parse-and-recover logic, which `armQuarantineKey`-unions
-the recovered entry with whatever placeholder PASS 1 left — `unionQuarantineEntries` keeps the OLDER
-`enteredAt` identity, and a real tmp's `enteredAt` (set when the quarantine was first raised) is always
-older than the placeholder's `Date.now()` (stamped during this same boot), so the union recovers the real
-identity with no further change needed there. Test: `test/merge-quarantine-pass1b-clean-parse-gate.mjs`
+the recovered entry with whatever placeholder PASS 1 left — `unionQuarantineEntries` picks its winning
+identity by placeholder-ness FIRST (the non-placeholder side always wins outright when they differ,
+round 2), falling back to the OLDER `enteredAt` only when both sides agree on placeholder-ness; a real
+tmp's non-placeholder content therefore wins over PASS 1's placeholder explicitly, never merely because
+its `enteredAt` happens to be older. Test: `test/merge-quarantine-pass1b-clean-parse-gate.mjs`
 (SCENARIO CFRT), with a STALE-TMP-STILL-SWEPT regression guard confirming a genuinely stale tmp beside an
 already-clean final is still swept as before.
 
