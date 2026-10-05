@@ -174,19 +174,32 @@ function's own return value (section (Z1-route)).
   pick whichever matches what the filename IS (see the next item), never a bare unlink. This includes a
   PER-ENTRY unlink inside a loop, not just an obviously-named "sweep" call.
 - Do not gate the deletion of an entry's OWN latch file (the file belonging to the entry you are
-  currently removing — a pending entry's own `sourceFile`, or `<id>.json` for the id being cleared) on
-  check (1) (another entry's `orphanLatchFiles` merely listing it) — use
-  `sweepOwnLatchFileUnlessOwnedElsewhere` (check 2 ONLY) for that file. Use the full
-  `sweepOrphanLatchFileIfUnreferenced` (checks 1 AND 2) only for a filename that is NOT the entry being
-  cleared's own file (an `orphanLatchFiles` entry it references, or the raw-fallback branch where nothing
-  in memory claims ownership of `id` at all). Conflating the two is exactly round 2 item 1's regression —
-  a cleared quarantine's own file kept alive by someone else's stale reference re-arms on the next boot.
+  currently removing — a pending entry's own `sourceFile`, or `<id>.json` when it IS a matched entry's
+  own `sourceFile`, never merely "`<id>.json` for the id being cleared" in the loose sense — a
+  pending-match call can match some OTHER entry while `<id>.json` itself belongs to nobody being cleared
+  at all; see card `be79f4d5`, round 2, for the real repro this distinction closes) on check (1) (another
+  entry's `orphanLatchFiles` merely listing it) — use `sweepOwnLatchFileUnlessOwnedElsewhere` (check 2
+  ONLY) for that file. Use the full `sweepOrphanLatchFileIfUnreferenced` (checks 1 AND 2) for every OTHER
+  case — a filename that is NOT one of the entries actually matched/removed in this call (an
+  `orphanLatchFiles` entry it references, a DIFFERENT surviving entry's own cross-reference sharing only
+  the hash prefix, or the raw-fallback branch where nothing in memory claims ownership of `id` at all).
+  Conflating the two is exactly round 2 item 1's regression (this file) and `be79f4d5`'s round-2 MAJOR
+  finding (the same conflation, reached via a pending-match that matches a DIFFERENT entry than the one
+  `<id>.json` belongs to) — a cleared quarantine's own file (or a surviving entry's cross-reference) kept
+  alive by someone else's stale reference, or wrongly treated as unowned, re-arms or fails open on the
+  next boot.
 - Do not assume a `.tmp-`-shaped filename is never referenced in anyone's `orphanLatchFiles` — PASS 1b's
   own catch branch pushes an unmatched/unparsable tmp's filename into the SAME `orphanFilenames` list a
-  corrupt `.json` final uses (round 2 item 2). Unconditional tmp deletion remains correct only because a
-  tmp can NEVER be check (2)'s "a surviving entry's own current physical latch" (a live entry's enduring
-  anchor is always a renamed `.json` final) — state that reasoning explicitly if you touch this again,
-  never assume the old (false) "never referenced" claim.
+  corrupt `.json` final uses (round 2 item 2). ⚠️ SUPERSEDED: this bullet used to go on to claim
+  "unconditional tmp deletion remains correct only because a tmp can NEVER be check (2)'s 'a surviving
+  entry's own current physical latch'" — that narrow technical point is still TRUE, but it is no longer
+  why any call site may delete a tmp unconditionally: card `be79f4d5` rounds 3-4 found and fixed FOUR real
+  call sites (`clearMergeQuarantineLatchFile`'s two sweeps, `deleteMergeQuarantineLatchByKey`,
+  `writeMergeQuarantineLatch`'s `sweepOtherTmpsOnSuccess`, and `clearMergeQuarantineByToken`'s
+  partial-clear branch) that needed exactly a check-1-style (referenced-by-`orphanLatchFiles`) gate this
+  reasoning never addressed — none of them deletes a tmp unconditionally any more. Read
+  docs/decisions/be79f4d5-lazy-graduation-source-latch-ownership.md rounds 3-4 for the real rule; do not
+  re-derive or restate the retracted justification here.
 - Do not check only an active entry's `armedKeys` when deciding whether it OWNS a filename — also check
   `path.basename(quarantinePathFor(e.repoPath))`, its TRUE current write target recomputed fresh. A key
   can drift after an entry was last armed (`abccee85`), and a write always targets the fresh key.

@@ -76,14 +76,10 @@ DANGLING-ORPHAN-STRIPPED-ON-SUCCESSFUL-MIGRATE scenario in the same test file.
   fresh; `f` is neither, by construction (that's the entire reason PASS 1 is migrating away from it), so
   it can never be made to pass check (2) without breaking that check's own contract for every other caller
   (see `physicalOwnerRepoPaths`'s own doc comment).
-- Do not extend this same fix to PASS 1b's torn-write tmp-residue promote failure (the sibling
-  `writeMergeQuarantineLatch(armedForWrite)` call later in the same function) without first confirming
-  whether a raw clear-by-id can actually reach a `.tmp-<pid>` residue file the same way — today's
-  `clearMergeQuarantineLatchFile` only ever constructs a bare `<id>.json` target for its orphan-sweep
-  fallback, but `deleteMergeQuarantineTmpResidueForHash` (called unconditionally alongside it) sweeps ANY
-  tmp residue matching that hash with no ownership check at all. That is a different, pre-existing gap —
-  out of scope for this card (`a6fa60e2`), which is deliberately narrowed to PASS 1's own `.json`-final
-  failed-migrate branch. File it as its own follow-up if it turns out to be real.
+- The PASS 1b `.json.tmp-<pid>` tmp-residue analogue of this gap (and the SEPARATE lazy-graduation code
+  path in `activeMergeQuarantineFor`, which this card never touched at all) was confirmed real and fixed
+  by card `be79f4d5` — see docs/decisions/be79f4d5-lazy-graduation-source-latch-ownership.md. Do not
+  re-derive that analysis from scratch; read it there.
 - Do not write a test for this that calls the real `enterMergeQuarantine(` to manufacture the stale-key
   latch — the stale-key shape only exists for a pre-upgrade/legacy-keyed file, which must be manufactured
   by hand (see `merge-quarantine-key-migration.mjs`'s own technique) the same way this card's own test

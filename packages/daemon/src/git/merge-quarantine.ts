@@ -275,7 +275,10 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, sweepOtherTmpsOn
     // @decision 92c645cc (item 2) — only AFTER this write's own rename has durably superseded whatever was
     // there before (bde5d1fe's rule: sweep/unlink only follows a successful superseding write) — and only
     // when the CALLER has asserted the superset property holds for this entry.
-    if (sweepOtherTmpsOnSuccess) deleteMergeQuarantineTmpResidue(entry.repoPath);
+    //
+    // @decision be79f4d5 (round 3) — "proven superset" is a claim about THIS entry's own history, never
+    // about who else references a same-hash tmp — sweep reference-aware, never unconditional-by-hash.
+    if (sweepOtherTmpsOnSuccess) sweepTmpResidueForHashIfUnreferenced(quarantineHashFor(entry.repoPath));
     return true;
   } catch (e) {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already broken; nothing more to close */ } }
@@ -305,9 +308,17 @@ function deleteSourceLatchIfSuperseded(sourceFile: string, writtenEntry: MergeQu
 }
 
 /** The stable hash-prefixed glob for a bare latch HASH's own tmp residue — `<hash>.json.tmp-<pid>`, any
- *  pid. Best-effort; a missing/unreadable directory is not an error. Never throws. Factored out of
- *  {@link deleteMergeQuarantineTmpResidueForKey} so {@link clearMergeQuarantineLatchFile} (card c0be9bf9),
- *  which only ever holds a bare hash — never a repoPath/key it could trust — can sweep tmp residue too. */
+ *  pid. Best-effort; a missing/unreadable directory is not an error. Never throws. UNCONDITIONAL — never
+ *  call this (or {@link deleteMergeQuarantineTmpResidueForKey}/{@link deleteMergeQuarantineTmpResidue})
+ *  at a site that must spare a DIFFERENT, surviving entry's own cross-referenced residue; reach for
+ *  {@link sweepTmpResidueForHashIfUnreferenced} there instead (card be79f4d5). As of round 4, EVERY
+ *  production caller of this chain has been migrated to that reference-aware sweep instead
+ *  (`clearMergeQuarantineLatchFile`'s two sweeps, `deleteMergeQuarantineLatchByKey`,
+ *  `writeMergeQuarantineLatch`'s `sweepOtherTmpsOnSuccess`, and `clearMergeQuarantineByToken`'s
+ *  partial-clear branch) — this function, {@link deleteMergeQuarantineTmpResidueForKey}, and
+ *  {@link deleteMergeQuarantineTmpResidue} now have NO remaining caller at all (left in place rather
+ *  than deleted, like the pre-existing dead {@link deleteMergeQuarantineLatch}; see
+ *  docs/decisions/be79f4d5-lazy-graduation-source-latch-ownership.md). */
 function deleteMergeQuarantineTmpResidueForHash(hash: string): void {
   const prefix = `${hash}.json.tmp-`;
   let files: string[];
@@ -338,7 +349,10 @@ function deleteMergeQuarantineTmpResidue(repoPath: string): void {
  * armed under, not just the one `canonicalRepoLockKey(repoPath)` recomputes fresh right now. */
 function deleteMergeQuarantineLatchByKey(key: string): void {
   try { fs.unlinkSync(quarantinePathForKey(key)); } catch { /* ENOENT is the common case */ }
-  deleteMergeQuarantineTmpResidueForKey(key);
+  // @decision be79f4d5 (round 3) — reference-aware, never the unconditional-by-hash sibling: a same-hash
+  // tmp a DIFFERENT, surviving entry's own `orphanLatchFiles` still lists must not be destroyed just
+  // because THIS key's own entry is being legitimately cleared.
+  sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(key));
 }
 
 function deleteMergeQuarantineLatch(repoPath: string): void {
@@ -470,7 +484,9 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
   // pass `writeMergeQuarantineLatch`'s own `sweepOtherTmpsOnSuccess` (not a superset write); the sweep
   // below is this call's OWN pre-existing, separate step, unaffected by that flag.
   if (writeMergeQuarantineLatch(updated)) {
-    deleteMergeQuarantineTmpResidue(repoPath);
+    // @decision be79f4d5 (round 4) — reference-aware, same reason as the other two sites: a DIFFERENT,
+    // surviving entry's own same-hash tmp must survive a partial clear here too.
+    sweepTmpResidueForHashIfUnreferenced(quarantineHashFor(repoPath));
   } else {
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] could not durably persist the reduced token set for ${repoPath} after a partial clear — the PRE-EXISTING durable state (this repo's own latch file, final or tmp) is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
@@ -544,6 +560,49 @@ function sweepOrphanLatchFileIfUnreferenced(filename: string): { kept: boolean; 
   if (referencingRepoPaths.size > 0) return { kept: true, referencingRepoPaths: [...referencingRepoPaths] };
   unlinkLatchFile(filename);
   return { kept: false, referencingRepoPaths: [] };
+}
+
+/**
+ * The `.json.tmp-<pid>` twin of {@link sweepOrphanLatchFileIfUnreferenced}'s check (1) — deletes every tmp
+ * residue file for `hash` EXCEPT one whose EXACT filename a surviving entry's own `orphanLatchFiles` still
+ * lists, keeping (and reporting) that one instead. The ownership scan is NOT entry-scoped: it checks
+ * `activeQuarantines` as a whole, so the ENTRY whose own key `hash` is — the one actually being
+ * written/cleared/superseded at THIS call — gets NO special EXCLUSION from it either (round 4, Code
+ * Review `18485645`, correcting an earlier false claim that it was always exempt). If that entry's OWN
+ * `orphanLatchFiles` self-references a same-hash tmp (e.g. a stale source folded in by an EARLIER failed
+ * graduation), this call sees it as "owned" by that still-armed entry and KEEPS it — a BENIGN keep: the
+ * same file is swept once that entry is later FULLY cleared (`clearMergeQuarantineByKey` folds
+ * `orphanLatchFiles` into its own sweep once nothing is left to re-arm it), never resurrected, never
+ * mistakenly kept forever. Only a filename NEITHER a different surviving entry's cross-reference NOR this
+ * same entry's own self-reference names is genuinely swept at THIS call.
+ *
+ * Used by every call site a same-hash tmp residue can be swept from: `clearMergeQuarantineLatchFile`'s raw
+ * "no entry matches this id" fallback (card c0be9bf9/9cabd143), `deleteMergeQuarantineLatchByKey`'s own
+ * legitimate-clear sweep, `writeMergeQuarantineLatch`'s `sweepOtherTmpsOnSuccess` path, and
+ * `clearMergeQuarantineByToken`'s own partial-clear branch (round 4) — the chain in
+ * {@link deleteMergeQuarantineTmpResidueForHash}'s own doc now has NO remaining production caller.
+ *
+ * @decision be79f4d5 (round 3) — do NOT fold this into `deleteMergeQuarantineTmpResidueForHash` itself;
+ * call THIS at each site instead. RETRACTED: an earlier "leaves residue behind forever" rationale was
+ * never true (a kept file sweeps once its owner clears).
+ */
+function sweepTmpResidueForHashIfUnreferenced(hash: string): { kept: boolean; referencingRepoPaths: string[] } {
+  const prefix = `${hash}.json.tmp-`;
+  let files: string[];
+  try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return { kept: false, referencingRepoPaths: [] }; }
+  const referencingRepoPaths = new Set<string>();
+  for (const f of files) {
+    if (!f.startsWith(prefix)) continue;
+    const owners = new Set<string>();
+    for (const e of activeQuarantines.values()) if (e.orphanLatchFiles?.includes(f)) owners.add(e.repoPath);
+    for (const p of pendingUnresolvedQuarantines) if (p.entry.orphanLatchFiles?.includes(f)) owners.add(p.entry.repoPath);
+    if (owners.size > 0) {
+      for (const o of owners) referencingRepoPaths.add(o);
+    } else {
+      try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, f)); } catch { /* best-effort */ }
+    }
+  }
+  return { kept: referencingRepoPaths.size > 0, referencingRepoPaths: [...referencingRepoPaths] };
 }
 
 /**
@@ -719,13 +778,25 @@ export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry
   // UNCONDITIONALLY, in-memory, regardless of whether the durable write below succeeds — mirroring PASS 1's
   // own migrate branch, enforcement for THIS process must not wait on disk I/O succeeding.
   pendingUnresolvedQuarantines.splice(idx, 1);
-  const armed: MergeQuarantineEntry = { ...pending.entry, resolvedKey: key, armedKeys: [key] };
+  // @decision be79f4d5 — strip a dangling self-reference to `pending.sourceFile` before arming, or a
+  // persisted entry falsely "protects" a file this same write is about to delete on success.
+  const strippedOrphanLatchFiles = pending.entry.orphanLatchFiles?.filter((f) => f !== pending.sourceFile);
+  let armed: MergeQuarantineEntry = {
+    ...pending.entry, resolvedKey: key, armedKeys: [key], orphanLatchFiles: strippedOrphanLatchFiles,
+  };
   activeQuarantines.set(key, armed);
   // Delete the pending entry's stale source file only after the new write succeeds, and only if it isn't
   // the SAME file we just wrote — see deleteSourceLatchIfSuperseded's own doc comment.
   if (writeMergeQuarantineLatch(armed)) {
     deleteSourceLatchIfSuperseded(pending.sourceFile, armed);
   } else {
+    // @decision be79f4d5 — fold the stale sourceFile into orphanLatchFiles (skipping only when it's
+    // already this entry's own fresh write target, mirroring deleteSourceLatchIfSuperseded's equality
+    // guard), or a raw clear-by-id of its hash deletes this entry's only durable copy as an orphan.
+    if (pending.sourceFile !== path.basename(quarantinePathFor(armed.repoPath))) {
+      armed = { ...armed, orphanLatchFiles: [...new Set([...(armed.orphanLatchFiles ?? []), pending.sourceFile])] };
+      activeQuarantines.set(key, armed);
+    }
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] lazily re-resolved a pending unverifiable quarantine for ${armed.repoPath} but could NOT durably persist it under its now-known key — still enforced in THIS process, but the ORIGINAL file (${pending.sourceFile}) is left in place so a later boot can still recover it.`);
   }
@@ -804,12 +875,12 @@ const QUARANTINE_LATCH_ID_PATTERN = /^[0-9a-f]{24}$/;
  * clearMergeQuarantineByKey — never to its `repoPath` via clearMergeQuarantineReporting/
  * clearMergeQuarantine (round 1, superseded in round 3 — see the decision record for why that drifts).
  *
- * Falls back to a raw `<id>.json` (+ tmp residue) unlink ONLY when no entry anywhere matches `id` — a
- * genuinely corrupt/unparsable latch with no repoPath to delegate to.
+ * Falls back to a reference-aware sweep of `<id>.json` (+ tmp residue) ONLY when no entry anywhere
+ * matches `id` — a genuinely corrupt/unparsable latch with no repoPath to delegate to.
  *
- * @decision 9cabd143 — that fallback, and the pending-match branch's own belt-and-suspenders unlink,
- * route `<id>.json` through {@link sweepOrphanLatchFileIfUnreferenced}, never a bare `fs.unlinkSync` —
- * see the decision record. A kept file is reported via `latchKept`/`referencingRepoPaths`, never silent.
+ * @decision 9cabd143 — that fallback, and the pending-match branch's own belt-and-suspenders sweep,
+ * route `<id>.json` through a check-1-AND-2 sweep when it is NOT a matched entry's own sourceFile
+ * (be79f4d5), never a bare `fs.unlinkSync`. A kept file is reported via `latchKept`, never silent.
  */
 export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; latchKept?: true; referencingRepoPaths?: string[] } | { ok: false; reason: string } {
   if (!QUARANTINE_LATCH_ID_PATTERN.test(id)) {
@@ -845,14 +916,23 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       if (ownSweep.kept) for (const rp of ownSweep.referencingRepoPaths) keptRepoPaths.add(rp);
     }
     for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
-    // Belt-and-suspenders, same as the raw-fallback branch below: sweep this id's own final (if any) and
-    // any remaining tmp residue directly, in case something under this exact id sits on disk but was
-    // never captured as an in-memory pending entry (e.g. a sibling tmp this process never parsed). This id
-    // was already fully matched/removed above, so this is STILL this same cleared id's own file — never
-    // gated on check (1) either, same reasoning as the per-pending loop just above.
-    const finalSweep = sweepOwnLatchFileUnlessOwnedElsewhere(`${id}.json`);
+    // Belt-and-suspenders: sweep this id's own final (if any) and any remaining tmp residue directly, in
+    // case something under this exact id sits on disk but was never captured as an in-memory pending
+    // entry (e.g. a sibling tmp this process never parsed).
+    //
+    // @decision be79f4d5 — `${id}.json` is check-2-only (9cabd143 unchanged) ONLY when it's actually one
+    // of the entries matched/removed above; otherwise it may be a DIFFERENT surviving entry's own
+    // orphan reference sharing this hash prefix, so route it through the full check-1-AND-2 sweep.
+    const idJsonIsMatchedSourceFile = matchedPending.some((p) => p.sourceFile === `${id}.json`);
+    const finalSweep = idJsonIsMatchedSourceFile
+      ? sweepOwnLatchFileUnlessOwnedElsewhere(`${id}.json`)
+      : sweepOrphanLatchFileIfUnreferenced(`${id}.json`);
     if (finalSweep.kept) for (const rp of finalSweep.referencingRepoPaths) keptRepoPaths.add(rp);
-    deleteMergeQuarantineTmpResidueForHash(id);
+    // @decision be79f4d5 — ownership-checked (never the unconditional sibling): a DIFFERENT, surviving
+    // pending/active entry can own a `.tmp-<pid>` residue sharing THIS exact hash prefix (e.g. its own
+    // stale graduation source) even though no entry actually matched/removed above claims it.
+    const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id);
+    if (tmpSweep.kept) for (const rp of tmpSweep.referencingRepoPaths) keptRepoPaths.add(rp);
     return {
       ok: true, wasQuarantined: true,
       ...(keptRepoPaths.size > 0 ? { latchKept: true, referencingRepoPaths: [...keptRepoPaths] } : {}),
@@ -863,10 +943,14 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   // function's own doc), never a bare unlink: `<id>.json` can still be a SURVIVING entry's own reference
   // or physical latch even when nothing in-memory matches `id` itself.
   const ownSweep = sweepOrphanLatchFileIfUnreferenced(`${id}.json`);
-  deleteMergeQuarantineTmpResidueForHash(id);
+  // @decision be79f4d5 — the tmp-residue twin of the `.json` sweep just above: ownership-checked, never
+  // the unconditional `deleteMergeQuarantineTmpResidueForHash` (see that function's own doc for why this
+  // one call site must differ from every other caller of it).
+  const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id);
+  const keptRepoPaths = new Set<string>([...ownSweep.referencingRepoPaths, ...tmpSweep.referencingRepoPaths]);
   return {
     ok: true, wasQuarantined: false,
-    ...(ownSweep.kept ? { latchKept: true, referencingRepoPaths: ownSweep.referencingRepoPaths } : {}),
+    ...(keptRepoPaths.size > 0 ? { latchKept: true, referencingRepoPaths: [...keptRepoPaths] } : {}),
   };
 }
 
