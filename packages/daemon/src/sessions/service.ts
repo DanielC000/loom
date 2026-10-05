@@ -25,7 +25,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -35,7 +35,7 @@ import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, isLoomDev } from "../paths.js";
+import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, isLoomDev, WORKTREES_DIR } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import type { RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
 import type { HaltedRecycleEarlyResult } from "./halted-recycle-reconcile.js";
@@ -472,6 +472,18 @@ export interface NodeModulesReclaimRunResult {
     outcome: "removed" | "missing" | "wedged" | "left-on-disk" | "no-longer-eligible";
     bytesReclaimed: number | null;
   }>;
+}
+
+/** One entry in {@link SessionService.listStaleWorktreeLeftovers}'s result (card ad34efb5). Unlike {@link
+ *  StaleAsideWorktreeEntry} (the cheap, byte-free enumeration), this carries a measured `bytes` — the
+ *  REST listing is called deliberately by a human, never polled, so that cost is acceptable here. */
+export interface StaleWorktreeLeftoverEntry {
+  path: string;
+  projectId: string;
+  projectName: string;
+  staleSinceMs: number;
+  bytes: number;
+  bytesTruncated: boolean;
 }
 
 /**
@@ -23094,6 +23106,16 @@ export class SessionService {
     if (branchesReclaimed > 0) {
       console.log(`[reconcile] reclaimed ${branchesReclaimed} merged loom/* branch ref(s)`);
     }
+    // Card ad34efb5 — advisory only, deliberately NOT folded into the counters above: those all describe
+    // actions THIS boot pass took, while a renamed-aside stale leftover is something boot-reconcile
+    // explicitly never touches (createWorktree/reclaimWedgedWorktreePathForSpawn rename a half-removed or
+    // wedged worktree dir aside, never delete it). Count-only (see listStaleAsideWorktrees's own doc) —
+    // byte totals are GET /api/worktrees/stale-leftovers's job, called deliberately, not every boot.
+    const staleAsideLeftovers = listStaleAsideWorktrees(WORKTREES_DIR, staleAsideRepoKeysByProject(this.db));
+    if (staleAsideLeftovers.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] ${staleAsideLeftovers.length} renamed-aside stale worktree dir(s) found under WORKTREES_DIR — never auto-deleted; see GET /api/worktrees/stale-leftovers to review and reclaim.`);
+    }
     return { mergesFinished, mergesHeld, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesPathRefused, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero };
   }
 
@@ -23244,6 +23266,71 @@ export class SessionService {
       }
     }
     return result;
+  }
+
+  /**
+   * Card ad34efb5: the REST listing surface — every renamed-aside stale worktree dir currently on disk,
+   * WITH byte totals (unlike `served_status`'s count-only field — see `listStaleAsideWorktrees`'s own
+   * doc for why that split exists). Called deliberately by a human, never polled, so measuring bytes here
+   * is the correct place for that cost.
+   */
+  async listStaleWorktreeLeftovers(): Promise<{ count: number; totalBytes: number; truncated: boolean; entries: StaleWorktreeLeftoverEntry[] }> {
+    const cheap = listStaleAsideWorktrees(WORKTREES_DIR, staleAsideRepoKeysByProject(this.db));
+    let totalBytes = 0;
+    let truncated = false;
+    const entries: StaleWorktreeLeftoverEntry[] = [];
+    for (const e of cheap) {
+      const { bytes, truncated: t } = await measureDirSize(e.path);
+      if (t) truncated = true;
+      totalBytes += bytes;
+      const project = this.db.getProject(e.projectId);
+      entries.push({
+        path: e.path, projectId: e.projectId, projectName: project?.name ?? "(unknown project)",
+        staleSinceMs: e.staleSinceMs, bytes, bytesTruncated: t,
+      });
+    }
+    return { count: entries.length, totalBytes, truncated, entries };
+  }
+
+  /**
+   * Card ad34efb5: the mutating counterpart — reclaim exactly ONE renamed-aside stale leftover by path.
+   * HUMAN/REST-only (gateway/server.ts), never an MCP tool — same posture as `reclaimNodeModules`.
+   * Guards reuse `gcWorktreeDir`'s own: re-derives eligibility against a FRESH `listStaleAsideWorktrees()`
+   * (TOCTOU-safe, `normForCompare`-matched so win32 case/separator differences still resolve — acts on
+   * the server-derived canonical path from there on, never the raw caller string), a defensive no-live-
+   * claimant check, a process-reap scoped to the exact path, and (inside `reclaimStaleAsideWorktreeDir`)
+   * path confinement plus the basename-shape check. No quarantine check — see that function's own doc.
+   */
+  async reclaimStaleWorktreeLeftover(requestedPath: string): Promise<StaleAsideReclaimOutcome> {
+    const repoKeysByProject = staleAsideRepoKeysByProject(this.db);
+    const fresh = listStaleAsideWorktrees(WORKTREES_DIR, repoKeysByProject);
+    const normTarget = normForCompare(requestedPath);
+    const match = fresh.find((e) => normForCompare(e.path) === normTarget);
+    if (!match) {
+      return { path: requestedPath, outcome: "refused", bytesReclaimed: null, sizeTruncated: false, reason: "not-found: no longer (or never) a renamed-aside stale worktree dir" };
+    }
+    const canonicalPath = match.path;
+    const claimant = this.findLiveSessionClaimingWorktreePath(canonicalPath);
+    if (claimant) {
+      // eslint-disable-next-line no-console
+      console.warn(`[worktree] REFUSED to reclaim stale leftover ${canonicalPath} — claimed by ${claimant === IN_FLIGHT_SPAWN_CLAIMANT ? "an in-flight spawn" : `live session ${claimant}`} (should be structurally impossible for a .stale-<ts> path; refusing defensively).`);
+      return { path: canonicalPath, outcome: "refused", bytesReclaimed: null, sizeTruncated: false, reason: `claimed by ${claimant === IN_FLIGHT_SPAWN_CLAIMANT ? "an in-flight spawn" : `live session ${claimant}`}` };
+    }
+    const reap = this.reapWorktreeProcesses ?? ((p: string) => reapProcessesRootedInWorktree(p));
+    try {
+      await reap(canonicalPath);
+    } catch {
+      // Best-effort, mirrors gcWorktreeDir's identical guard.
+    }
+    // Card ad34efb5 round 2 (Major, fix b): `repoKeysByProject` is passed through so
+    // reclaimStaleAsideWorktreeDir refuses a registered repoKey axis dir on its OWN, independent of the
+    // fresh `listStaleAsideWorktrees()` re-derivation above already having excluded it.
+    return reclaimStaleAsideWorktreeDir(canonicalPath, undefined, {
+      removeDir: this.removeDirOverride,
+      protectedRepoPaths: this.allRegisteredRepoPaths(),
+      repoKeysByProject,
+      worktreesRoot: WORKTREES_DIR,
+    });
   }
 
   /** A simpleGit instance for `repoPath` bound by a kill-the-hung-child block timeout (card 9df3ea71 —

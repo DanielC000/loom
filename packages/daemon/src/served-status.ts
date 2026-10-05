@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Db } from "./db.js";
-import { resolveWebDistDir } from "./paths.js";
+import { resolveWebDistDir, WORKTREES_DIR } from "./paths.js";
 import { loomVersion } from "./version.js";
 import { computeDeployStaleness, readBuildInfo, type DeployStalenessResult } from "./deploy-staleness.js";
 import { skillStoreStaleness, type SkillStoreStaleness } from "./skills/store.js";
@@ -18,6 +18,7 @@ import {
   getBootScratchGcSweepOutcome,
   type ScratchGcSweepOutcome,
 } from "./sessions/scratch-gc.js";
+import { listStaleAsideWorktrees, repoKeysByProjectFromProjects, staleAsideRepoKeysByProject } from "./git/worktrees.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -106,6 +107,15 @@ export interface ServedStatus {
    * fabricated as a completed zero.
    */
   scratchGcSweep: ScratchGcSweepOutcome;
+  /**
+   * Card ad34efb5 — renamed-aside stale worktree dirs (`<path>.stale-<ts>`, see
+   * `renameWorktreeDirAside`) left under `WORKTREES_DIR`: never auto-deleted, and no session row names
+   * them, so nothing else surfaces them. COUNT-ONLY, deliberately — this field is read on every polled
+   * `served_status`/`GET /api/deploy-status` call, so it never measures byte totals (that's
+   * `GET /api/worktrees/stale-leftovers`, called deliberately) — see `listStaleAsideWorktrees`'s own doc.
+   * `oldestStaleSinceMs` is `null` when `count` is 0.
+   */
+  staleWorktreeLeftovers: { count: number; oldestStaleSinceMs: number | null };
 }
 
 /**
@@ -132,6 +142,24 @@ export function buildServedStatus(db: Db): ServedStatus {
   // polled on an interval, so a real recursive disk walk per call is an acceptable, already-established
   // trade here.
   const scratchRootBytes = measureScratchRootBytes();
+  // Card ad34efb5 — cheap, bounded, byte-free readdir (never measureDirSize here; see
+  // listStaleAsideWorktrees's own doc) even though this whole function is called on every polled read.
+  // Degrades to primary-axis-only (never throws) when `db` is a partial test stub missing
+  // listAllProjects/listArchivedProjects — this function's only other `db` read (`listAllSessions` above)
+  // is already the sole method some real callers' stubs implement (e.g. served-status-process-sha.mjs).
+  // Card ad34efb5 round 2 (Minor): narrowed from a blanket catch (which silently swallowed a REAL
+  // production DB error as a silent undercount) to the ONE case that's actually expected here — a
+  // partial stub missing either method. A genuine error from a real Db now warns instead of vanishing.
+  let repoKeysByProject: ReturnType<typeof repoKeysByProjectFromProjects> | undefined;
+  if (typeof db.listAllProjects === "function" && typeof db.listArchivedProjects === "function") {
+    try {
+      repoKeysByProject = staleAsideRepoKeysByProject(db);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[served-status] stale-aside registry read failed — degrading to primary-axis-only this read: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  const staleAside = listStaleAsideWorktrees(WORKTREES_DIR, repoKeysByProject);
   return {
     version: loomVersion(),
     webBundle,
@@ -147,5 +175,9 @@ export function buildServedStatus(db: Db): ServedStatus {
     scratchRootBytes,
     scratchRootOverCeiling: scratchRootBytes > SCRATCH_ROOT_WARN_BYTES,
     scratchGcSweep: getBootScratchGcSweepOutcome(),
+    staleWorktreeLeftovers: {
+      count: staleAside.length,
+      oldestStaleSinceMs: staleAside.length ? Math.min(...staleAside.map((e) => e.staleSinceMs)) : null,
+    },
   };
 }

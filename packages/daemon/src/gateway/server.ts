@@ -1241,6 +1241,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return deps.sessions.reclaimNodeModules(body);
   });
 
+  // --- Renamed-aside stale worktree leftover reclaim (card ad34efb5). HUMAN/REST-ONLY (loopback), NOT an
+  // MCP tool — same trust posture as the node_modules-reclaim pair above and the vault/git writers
+  // (CLAUDE.md's "Vault + git writes" section): these dirs carry no live git-worktree admin registration at
+  // all (see reclaimStaleAsideWorktreeDir's own doc), so an unattended delete here is strictly MORE
+  // destructive than a vault write, never less. GET lists every current candidate WITH measured byte totals
+  // (unlike served_status's count-only field — see listStaleAsideWorktrees's own doc for why) — read-only,
+  // safe to poll. POST reclaims exactly ONE, by `path` — deliberately singular (not the node_modules pair's
+  // optional batch array): the card explicitly defers any bulk/time-based reaper to a later card, after this
+  // human route proves out. Eligibility is RE-DERIVED fresh at call time (SessionService.
+  // reclaimStaleWorktreeLeftover's own doc) — never trusts a path merely because an earlier GET listed it.
+  app.get("/api/worktrees/stale-leftovers", async () => deps.sessions.listStaleWorktreeLeftovers());
+  app.post("/api/worktrees/reclaim-stale-leftover", async (req, reply) => {
+    const body = (req.body ?? {}) as { path?: string };
+    if (!body.path) return reply.code(400).send({ error: "path is required" });
+    return deps.sessions.reclaimStaleWorktreeLeftover(body.path);
+  });
+
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
   // `kinds` (card 43084723): an ALTERNATIVE, cross-session filter — comma-separated event kinds, matched
   // across every session's events in ONE query, instead of one manager's own timeline. Mutually exclusive

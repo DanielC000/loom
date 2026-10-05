@@ -264,6 +264,12 @@ try {
     routeTier("GET", "/api/webhook-endpoints") === 0 && routeTier("POST", "/api/webhook-endpoints") === 0
     && routeTier("DELETE", "/api/webhook-endpoints/:id") === 0 && routeTier("POST", "/api/webhook-endpoints/:id/enabled") === 0);
 
+  // (1g) card ad34efb5 round 2 (Minor 3b): the renamed-aside stale-worktree-leftover listing + reclaim
+  // pair (gateway/server.ts) is human/REST-only, same trust posture as the node_modules-reclaim pair and
+  // the vault/git writers — stays Tier-0 (loopback-only), never promoted.
+  check("(1g) the stale-worktree-leftovers GET/POST pair stays Tier-0 (loopback-only)",
+    routeTier("GET", "/api/worktrees/stale-leftovers") === 0 && routeTier("POST", "/api/worktrees/reclaim-stale-leftover") === 0);
+
   // --- (2) remoteAccess DISABLED (default): the hook never registers. Card 4cbbc343 (M1): a request classed REMOTE with NO
   //     wall registered is now REFUSED (403 {error:'forbidden'}) rather than passed through — it can only be a wiring
   //     inconsistency (a non-loopback peer cannot reach a loopback-only daemon at all, so real traffic is unchanged). ---

@@ -214,6 +214,26 @@ try {
       check("(A6f) control: a repos key using the full allowed charset -> 201", goodCharset.statusCode === 201);
       check("(A6f) control: key round-trips verbatim", goodCharset.json().repos?.[0]?.key === "svc-a.v2_beta");
 
+      // (A6g) card ad34efb5 round 2 (Major, fix b): a key shaped like a renamed-aside stale-worktree
+      // leftover (matches STALE_ASIDE_SUFFIX_RE, e.g. ".stale-1") is REJECTED — its own axis dir would
+      // otherwise be indistinguishable from a real leftover by basename alone (see
+      // STALE_ASIDE_SUFFIX_RE's own doc in git/worktrees.ts). Passes the plain charset check on its own.
+      const badStaleAside = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "BadStaleAside", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "svc.stale-1", path: svcA }] },
+      });
+      check("(A6g) POST with a repos key shaped like a renamed-aside leftover (\"svc.stale-1\") -> 400", badStaleAside.statusCode === 400);
+      check("(A6g) error names the stale-aside rule", /stale-<ts>|renamed-aside/.test(badStaleAside.json().error ?? ""));
+
+      // (A6h) control: a key that merely CONTAINS "stale" with no numeric suffix is unaffected — the
+      // rejection is the exact suffix shape, never a blanket ban on the substring "stale".
+      const goodStaleSubstring = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "GoodStaleSubstring", repoPath: primary, vaultPath: vaultDir, repos: [{ key: "stale-service", path: svcA }] },
+      });
+      check("(A6h) control: a key merely containing \"stale\" with no .stale-<ts> suffix -> 201", goodStaleSubstring.statusCode === 201);
+      check("(A6h) control: key round-trips verbatim", goodStaleSubstring.json().repos?.[0]?.key === "stale-service");
+
       // (A7) a DUPLICATE key across two entries is REJECTED.
       const badDup = await app.inject({
         method: "POST", url: "/api/projects",

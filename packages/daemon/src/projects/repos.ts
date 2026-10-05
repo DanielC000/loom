@@ -4,6 +4,7 @@ import type { RepoRegistryEntry } from "@loom/shared";
 import { isGitRepo } from "../git/reader.js";
 import { expandTilde } from "../paths.js";
 import { splitGateSteps } from "../orchestration/gate-runner.js";
+import { STALE_ASIDE_SUFFIX_RE } from "../git/worktrees.js";
 
 /**
  * Canonicalize a path that is KNOWN (or expected) to exist on disk, for both COMPARISON and STORAGE.
@@ -122,6 +123,15 @@ export async function validateRepoRegistry(
     }
     if (key === "." || key === "..") {
       return { ok: false, error: `repos entry key "${key}" is reserved — a filesystem path segment cannot be "." or ".."` };
+    }
+    // Card ad34efb5 round 2 (Major, fix b): a repoKey matching the renamed-aside leftover basename shape
+    // (e.g. "svc.stale-1") made its own axis dir — which holds this repo's LIVE worktrees — indistinguishable
+    // from a stale leftover by basename alone (see STALE_ASIDE_SUFFIX_RE's own doc). Rejected for NEW writes
+    // only; an already-stored key shaped like this (written before this fix) is NOT migrated or revoked by
+    // this check — it stays registered and relies on listStaleAsideWorktrees's registry-first enumeration
+    // order + isRegisteredRepoKeyAxisDir's independent reclaim-time refusal for protection, not on this guard.
+    if (STALE_ASIDE_SUFFIX_RE.test(key)) {
+      return { ok: false, error: `repos entry key "${key}" looks like a renamed-aside stale worktree leftover (matches the .stale-<ts> suffix) — this shape is reserved to avoid colliding with that leftover-detection machinery` };
     }
     if (seenKeys.has(key)) {
       return { ok: false, error: `repos entry key "${key}" is duplicated — keys must be unique` };

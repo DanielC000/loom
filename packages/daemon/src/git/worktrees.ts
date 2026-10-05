@@ -1624,6 +1624,252 @@ export async function reclaimNodeModulesDir(
   };
 }
 
+/**
+ * Card ad34efb5 — the basename shape {@link renameWorktreeDirAside} always produces.
+ *
+ * @decision ad34efb5 — a basename match alone is NEVER sufficient to conclude "safe to delete": a
+ * registered repoKey can also match this shape. Always cross-check the live registry too.
+ */
+export const STALE_ASIDE_SUFFIX_RE = /\.stale-\d+$/;
+
+/** Whether `p`'s basename matches the renamed-aside leftover naming contract (see {@link STALE_ASIDE_SUFFIX_RE}). */
+export function isStaleAsideWorktreeDir(p: string): boolean {
+  return STALE_ASIDE_SUFFIX_RE.test(path.basename(p));
+}
+
+/** One entry in {@link listStaleAsideWorktrees}'s result. Deliberately carries NO byte size — see that
+ *  function's own doc for why bytes are a separate, opt-in measurement. */
+export interface StaleAsideWorktreeEntry {
+  path: string;
+  projectId: string;
+  /** Parsed straight from the `.stale-<ts>` suffix itself (the rename's own `Date.now()`) — free, no stat call needed. */
+  staleSinceMs: number;
+}
+
+/** Cap on directory entries visited by {@link listStaleAsideWorktrees} — mirrors the other bounded scans
+ *  in this file (e.g. {@link NESTED_REPO_SCAN_MAX_ENTRIES}). Never expected to be hit in practice: this
+ *  function only ever lists DIRECTORY NAMES (project dirs, then one level under each), never descends
+ *  into a candidate's own file content. */
+const STALE_ASIDE_SCAN_MAX_ENTRIES = 20_000;
+
+function parseStaleSinceMs(basename: string): number | null {
+  const m = STALE_ASIDE_SUFFIX_RE.exec(basename);
+  if (!m) return null;
+  const ts = Number(basename.slice(m.index + ".stale-".length));
+  return Number.isFinite(ts) ? ts : null;
+}
+
+/** A planted junction/symlink named to look like a leftover must never be treated as one — a Windows
+ *  directory junction reports as a directory at the readdir level, unlike a plain POSIX symlink.
+ *  @decision ad34efb5 — single `lstatSync`, called ONLY on a name-matched candidate, never scan-wide. */
+function isLikelyJunctionOrSymlink(p: string): boolean {
+  try {
+    return fs.lstatSync(p).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Card ad34efb5: enumerate every renamed-aside stale worktree dir under `worktreesRoot` — a cheap,
+ * bounded, purely synchronous `readdirSync` (no `fs.stat`/`measureDirSize`, no descent into a
+ * candidate's own content, besides the single name-matched-candidate `lstatSync` above). Layout (see
+ * {@link resolveWorktreePath}): `worktreesRoot/<projectId>/<taskKey>` (primary) or
+ * `worktreesRoot/<projectId>/<repoKey>/<taskKey>` (secondary-repo axis, card 49136451) — covered by a
+ * 2-level-deep readdir, since a stale-aside rename only ever suffixes the LEAF basename.
+ * `repoKeysByProject` (see {@link repoKeysByProjectFromProjects}) names which level-2 entries are REAL
+ * registered repoKey dirs worth probing one level deeper; omitted, this degrades to primary-axis-only.
+ *
+ * @decision ad34efb5 — the registry check runs BEFORE the basename-shape check at EVERY level: a
+ * registered repoKey is NEVER a stale leaf, even if its name also matches the suffix (see
+ * STALE_ASIDE_SUFFIX_RE's own doc). Never add byte measurement, and never guess from name shape instead.
+ */
+export function listStaleAsideWorktrees(
+  worktreesRoot: string = WORKTREES_DIR,
+  repoKeysByProject?: ReadonlyMap<string, ReadonlySet<string>>,
+): StaleAsideWorktreeEntry[] {
+  const entries: StaleAsideWorktreeEntry[] = [];
+  let visited = 0;
+  let projectDirs: fs.Dirent[];
+  try {
+    projectDirs = fs.readdirSync(worktreesRoot, { withFileTypes: true });
+  } catch {
+    return entries; // WORKTREES_DIR missing/unreadable — nothing to report, not a scan failure
+  }
+  for (const projectDir of projectDirs) {
+    if (visited >= STALE_ASIDE_SCAN_MAX_ENTRIES) break;
+    visited++;
+    if (!projectDir.isDirectory()) continue;
+    const projectId = projectDir.name;
+    const projectPath = path.join(worktreesRoot, projectId);
+    const repoKeys = repoKeysByProject?.get(projectId);
+    let level2: fs.Dirent[];
+    try {
+      level2 = fs.readdirSync(projectPath, { withFileTypes: true });
+    } catch { continue; }
+    for (const entry of level2) {
+      if (visited >= STALE_ASIDE_SCAN_MAX_ENTRIES) break;
+      visited++;
+      if (!entry.isDirectory()) continue;
+      const entryPath = path.join(projectPath, entry.name);
+      // Registry FIRST, always — a registered repoKey is never a stale leaf, regardless of its basename.
+      if (repoKeys?.has(entry.name)) {
+        if (isLikelyJunctionOrSymlink(entryPath)) continue; // never probe through a planted link
+        let level3: fs.Dirent[];
+        try {
+          level3 = fs.readdirSync(entryPath, { withFileTypes: true });
+        } catch { continue; }
+        for (const leaf of level3) {
+          if (visited >= STALE_ASIDE_SCAN_MAX_ENTRIES) break;
+          visited++;
+          if (!leaf.isDirectory()) continue;
+          const leafPath = path.join(entryPath, leaf.name);
+          const leafStaleSinceMs = parseStaleSinceMs(leaf.name);
+          if (leafStaleSinceMs !== null && !isLikelyJunctionOrSymlink(leafPath)) {
+            entries.push({ path: leafPath, projectId, staleSinceMs: leafStaleSinceMs });
+          }
+        }
+        continue; // a registered repoKey dir is never itself a stale leaf — nothing more to do with it
+      }
+      const staleSinceMs = parseStaleSinceMs(entry.name);
+      if (staleSinceMs !== null && !isLikelyJunctionOrSymlink(entryPath)) {
+        entries.push({ path: entryPath, projectId, staleSinceMs });
+      }
+    }
+  }
+  return entries;
+}
+
+/** Build the `repoKeysByProject` map {@link listStaleAsideWorktrees} wants, from a list of projects
+ *  (structural typing only — never imports `Project` from `shared`, to keep this module DB-type-free).
+ *  Omits a project with no registered secondary repos (nothing to widen detection for). */
+export function repoKeysByProjectFromProjects(
+  projects: readonly { id: string; repos?: readonly { key: string }[] }[],
+): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>();
+  for (const p of projects) {
+    const keys = new Set((p.repos ?? []).map((r) => r.key));
+    if (keys.size > 0) map.set(p.id, keys);
+  }
+  return map;
+}
+
+/** The ONE place that builds {@link listStaleAsideWorktrees}'s `repoKeysByProject` map from a live Db
+ *  handle — `served-status.ts`, boot-reconcile, and both stale-leftover service methods previously each
+ *  hand-wrote this same two-line composition (card ad34efb5 round 2 nit). Structural typing only, same
+ *  posture as {@link repoKeysByProjectFromProjects} itself — never imports `Db` from the daemon root. */
+export function staleAsideRepoKeysByProject(
+  db: {
+    listAllProjects(): readonly { id: string; repos?: readonly { key: string }[] }[];
+    listArchivedProjects(): readonly { id: string; repos?: readonly { key: string }[] }[];
+  },
+): Map<string, Set<string>> {
+  return repoKeysByProjectFromProjects([...db.listAllProjects(), ...db.listArchivedProjects()]);
+}
+
+/**
+ * Whether `targetPath` IS (not merely under) a registered repoKey axis dir — `worktreesRoot/<projectId>/
+ * <repoKey>` for a repoKey the project (active OR archived) has registered. Independent of {@link
+ * listStaleAsideWorktrees}'s own registry-first enumeration order — see that function's own doc and
+ * STALE_ASIDE_SUFFIX_RE's own doc for why the listing fix alone is not enough and reclaim must also
+ * refuse this on its own (card ad34efb5 round 2, Major).
+ */
+export function isRegisteredRepoKeyAxisDir(
+  targetPath: string,
+  repoKeysByProject: ReadonlyMap<string, ReadonlySet<string>>,
+  worktreesRoot: string = WORKTREES_DIR,
+): boolean {
+  const rel = path.relative(path.resolve(worktreesRoot), path.resolve(targetPath));
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+  const parts = rel.split(path.sep);
+  if (parts.length !== 2) return false; // only the axis-dir shape itself: worktreesRoot/<projectId>/<repoKey>
+  const [projectId, repoKey] = parts as [string, string];
+  return repoKeysByProject.get(projectId)?.has(repoKey) ?? false;
+}
+
+/** Ceiling for a renamed-aside stale-leftover removal — same order of magnitude as {@link
+ *  NODE_MODULES_RECLAIM_TIMEOUT_MS}: these dirs are node_modules-shaped (they're half-removed/wedged
+ *  WORKTREE dirs, so they typically still carry a full node_modules), same bulk-filesystem-delete cost
+ *  profile. */
+const STALE_LEFTOVER_RECLAIM_TIMEOUT_MS = 120_000;
+
+/** {@link reclaimStaleAsideWorktreeDir}'s result. `"refused"` covers BOTH the basename-shape check and
+ *  {@link worktreeRemovalRefusal} — `reason` names which. */
+export interface StaleAsideReclaimOutcome {
+  path: string;
+  outcome: "removed" | "missing" | "wedged" | "left-on-disk" | "refused";
+  bytesReclaimed: number | null;
+  sizeTruncated: boolean;
+  reason?: string;
+}
+
+/**
+ * Card ad34efb5 — the mutating, pure-filesystem counterpart to {@link listStaleAsideWorktrees}: reclaim
+ * exactly ONE renamed-aside stale leftover dir. Deliberately does NOT re-derive eligibility or check for a
+ * live claimant itself (both need DB/session state this module doesn't have) — see
+ * `SessionService.reclaimStaleWorktreeLeftover` for those guards; this function is the mechanical tail
+ * every one of its checks must pass through first.
+ *
+ * No quarantine check, unlike `gcWorktreeDir`: a renamed-aside dir carries NO live git-worktree admin
+ * registration pointing at it by construction (`createWorktree` only renames aside a dir with no `.git`
+ * link; `reclaimWedgedWorktreePathForSpawn` only renames aside a dir already on the wedged-retry list,
+ * whose own prior removal attempt already ran `git worktree prune` against the now-vacated original
+ * path) — this is a pure filesystem removal, same shape as {@link reclaimNodeModulesDir}'s own delete
+ * (which also runs no git ops).
+ */
+export async function reclaimStaleAsideWorktreeDir(
+  targetPath: string,
+  timeoutMs: number = STALE_LEFTOVER_RECLAIM_TIMEOUT_MS,
+  deps: {
+    removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
+    measureSize?: (dir: string) => Promise<{ bytes: number; truncated: boolean }>;
+    /** Every registered repo path (all projects, archived included) the removal must never equal or contain (e21cfd5f). */
+    protectedRepoPaths?: readonly string[];
+    /** Card ad34efb5 round 2 (Major, fix b): INDEPENDENT of the caller's own fresh-listing re-derivation —
+     *  refuses `targetPath` outright if it IS a registered repoKey axis dir, never trusting "the listing
+     *  didn't show it to me" as the only guard. See {@link isRegisteredRepoKeyAxisDir}'s own doc. */
+    repoKeysByProject?: ReadonlyMap<string, ReadonlySet<string>>;
+    worktreesRoot?: string;
+  } = {},
+): Promise<StaleAsideReclaimOutcome> {
+  // Narrower than worktreeRemovalRefusal below, and specific to THIS endpoint's purpose: restricts
+  // reclaim to ONLY ever deleting a renamed-aside leftover, never a generically-named worktree dir that
+  // happens to sit under WORKTREES_DIR.
+  if (!isStaleAsideWorktreeDir(targetPath)) {
+    return {
+      path: targetPath, outcome: "refused", bytesReclaimed: null, sizeTruncated: false,
+      reason: `${targetPath} is not a renamed-aside stale worktree dir (basename does not match .stale-<ts>)`,
+    };
+  }
+  if (deps.repoKeysByProject && isRegisteredRepoKeyAxisDir(targetPath, deps.repoKeysByProject, deps.worktreesRoot ?? WORKTREES_DIR)) {
+    const reason = `${targetPath} is a registered repoKey axis dir — refusing even though its basename matches .stale-<ts>`;
+    // eslint-disable-next-line no-console
+    console.warn(`[worktree] REFUSED to reclaim stale leftover ${targetPath} — ${reason}. Nothing was touched.`);
+    return { path: targetPath, outcome: "refused", bytesReclaimed: null, sizeTruncated: false, reason };
+  }
+  const refusal = worktreeRemovalRefusal(targetPath, deps.protectedRepoPaths ?? []);
+  if (refusal) {
+    // eslint-disable-next-line no-console
+    console.warn(`[worktree] REFUSED to reclaim stale leftover ${targetPath} — ${refusal}. Nothing was touched.`);
+    return { path: targetPath, outcome: "refused", bytesReclaimed: null, sizeTruncated: false, reason: refusal };
+  }
+  if (!fs.existsSync(targetPath)) {
+    return { path: targetPath, outcome: "missing", bytesReclaimed: null, sizeTruncated: false };
+  }
+  const measureSize = deps.measureSize ?? measureDirSize;
+  const { bytes, truncated } = await measureSize(targetPath);
+  const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
+  const result = await removeDir(targetPath, timeoutMs);
+  if (result.removed) {
+    return { path: targetPath, outcome: "removed", bytesReclaimed: bytes, sizeTruncated: truncated };
+  }
+  return {
+    path: targetPath,
+    outcome: result.killed ? "wedged" : "left-on-disk",
+    bytesReclaimed: null, sizeTruncated: false,
+  };
+}
+
 /** @decision 9cb0287a — test-only: ZERO production call sites since boot-reconcile Pass A switched to
  *  positive squash-trailer proof (findLandedSquashCommit) instead. Don't remove it as "dead code" until
  *  card 0f965ab7's pending review of the fail-safe siblings that still reference it resolves. */
