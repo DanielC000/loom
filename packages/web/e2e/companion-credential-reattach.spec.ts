@@ -35,13 +35,23 @@ import { randomUUID } from "node:crypto";
 import { expect, test } from "./fixtures/daemon";
 
 const seededConfigSessionIds: string[] = [];
+/** Gateway tokens this spec MINTED, hard-deleted in afterEach. The e2e worker daemon is shared, so a
+ *  left-behind ACTIVE token is a real credential outliving the spec that made it: the Settings token list
+ *  renders it for every later spec, and anything asserting on that list counts it. Same reasoning as the
+ *  `companion_config` cleanup above (card 02f0e8a6) — a row that outlives its session is not inert. */
+const mintedTokenIds: string[] = [];
 
 test.afterEach(async ({ page, loomDaemon }) => {
+  const auth = { authorization: `Bearer ${loomDaemon.loopbackSecret}` };
   for (const sessionId of seededConfigSessionIds.splice(0)) {
-    const res = await page.request.delete(`${loomDaemon.baseURL}/api/companion/config/${sessionId}`, {
-      headers: { authorization: `Bearer ${loomDaemon.loopbackSecret}` },
-    });
+    const res = await page.request.delete(`${loomDaemon.baseURL}/api/companion/config/${sessionId}`, { headers: auth });
     expect(res.ok()).toBe(true);
+  }
+  for (const tokenId of mintedTokenIds.splice(0)) {
+    const res = await page.request.delete(`${loomDaemon.baseURL}/api/gateway-tokens/${tokenId}`, { headers: auth });
+    // ASSERTED, not best-effort: a silent 401/404 here looks exactly like a clean delete, which is how a
+    // cleanup comes to be believed in while never having run.
+    expect(res.ok(), `deleting the minted gateway token failed (${res.status()})`).toBe(true);
   }
 });
 
@@ -130,8 +140,12 @@ test("re-entering a credential re-attaches the companion chat in place — and r
   expect(delivered, "the instrument must have captured the live companion socket").toBe(true);
   await expect(chat.getByText("token revoked", { exact: true })).toBeVisible();
   await expect(chat.getByText("connected", { exact: true })).toHaveCount(0);
-  // ...and it is TERMINAL: no reconnect is pending, now or after a full ladder's worth of time. This is
-  // the half that makes a re-attach path necessary rather than merely nice.
+  // ...and it is TERMINAL. Stated precisely, because the assertions below are IMMEDIATE and an earlier
+  // version of this comment claimed more than they check: the terminal branch runs synchronously inside
+  // the component's own `onclose`, so a ladder armed instead of stopped would ALREADY have painted
+  // "reconnecting" and (at the 1s first rung) would already be on its way to a second socket. These two
+  // assertions therefore catch a re-arm at the decision point; they do NOT observe a full ladder's worth
+  // of time, which is what `gateway-dead-token-bound.spec.ts` does with a real 14s window.
   await expect(chat.getByText("reconnecting", { exact: true })).toHaveCount(0);
   expect(await page.evaluate(companionOpens), "a 1008 must not be retried").toBe(opensBefore);
 
@@ -144,8 +158,11 @@ test("re-entering a credential re-attaches the companion chat in place — and r
     body: JSON.stringify({ name: `a6d7bf36 ${name}` }),
   });
   expect(minted.ok, `mint failed (${minted.status})`).toBe(true);
-  const token = ((await minted.json()) as { plaintext: string }).plaintext;
+  const body = (await minted.json()) as { plaintext: string; token: { id: string } };
+  const token = body.plaintext;
   expect(token, "a minted token must come back with its plaintext ONCE").toBeTruthy();
+  expect(body.token?.id, "the mint response must name the row, or afterEach has nothing to delete").toBeTruthy();
+  mintedTokenIds.push(body.token.id);
 
   await expect(page.getByText("This access token was revoked.")).toBeVisible();
   await page.getByRole("textbox", { name: "Gateway token" }).fill(token);

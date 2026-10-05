@@ -13,6 +13,7 @@
 // and no real `claude` ever starts (re-asserted via assertNoRealClaudeSpawn). The real daemon on 4317 and the
 // real ~/.loom are never touched, and `stop()` kills only the child THIS rig spawned, by its own handle.
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -42,6 +43,19 @@ export interface GatewayProxyRig {
   /** `Authorization` for a loopback WRITE: the daemon mints this guard secret before it listens (card 9ccedbee),
    *  so an unauthenticated non-GET `/api/*` 401s. Read from the rig's OWN home, never a shared one. */
   loopbackAuth: Record<string, string>;
+  /** A HUMAN-shaped write against this rig's own loopback surface, with the guard secret presented. The
+   *  shared `loomDaemon` fixture patches `fetch` to inject that header globally; this rig deliberately
+   *  does not (its specs also drive REMOTE-origin requests, which must NOT carry it), so every loopback
+   *  write goes through here or passes `loopbackAuth` by hand. Throws on a non-2xx — a silent 401 looks
+   *  exactly like a clean write, which is how a seed comes to be believed in while never having run. */
+  loopbackPost: <T>(apiPath: string, body?: unknown) => Promise<T>;
+  /** Seed a COMPANION on this rig — a project (a real `git init`ed dir under the rig's own scratch), an
+   *  agent, the companion's session row and its config — mirroring the shared fixture's own
+   *  `seedCompanion` via the test-only `POST /internal/test/seed`. The proxy rig boots a FRESH home with
+   *  no projects at all, so a spec that needs a companion pane (or a terminal pane on its session) has to
+   *  build one; `name` is required because the Companion page's header label renders the AGENT's name and
+   *  a spec must be able to pin which companion it focused. */
+  seedCompanion: (name: string) => Promise<{ projectId: string; agentId: string; sessionId: string }>;
   /** Everything the daemon logged, for a failure message or an assertNoRealClaudeSpawn re-check. */
   log: () => string;
   stop: () => Promise<void>;
@@ -122,7 +136,36 @@ export async function startGatewayProxyRig(): Promise<GatewayProxyRig> {
     // The guard secret is written before `app.listen()`, so by the time the listening line is logged the file
     // exists. Without it every loopback WRITE below 401s (and a silent 401 looks exactly like a clean no-op).
     const loopbackSecret = readFileSync(path.join(home, "gateway-loopback.key"), "utf8").trim();
-    return { origin, token, loopbackURL, loopbackAuth: { Authorization: `Bearer ${loopbackSecret}` }, log: () => log, stop };
+    const loopbackAuth = { Authorization: `Bearer ${loopbackSecret}` };
+    const base = loopbackURL;
+    const loopbackPost = async <T>(apiPath: string, body?: unknown): Promise<T> => {
+      const res = await fetch(base + apiPath, {
+        method: "POST",
+        headers: { ...loopbackAuth, "content-type": "application/json" },
+        body: JSON.stringify(body ?? {}),
+      });
+      if (!res.ok) throw new Error(`POST ${apiPath} -> ${res.status}: ${await res.text()}`);
+      return (await res.json()) as T;
+    };
+    const seedCompanion = async (name: string) => {
+      // A real repo dir inside the rig's OWN scratch, so `stop()`'s rmSync takes it with everything else
+      // and nothing is written outside this rig's temp home.
+      const dirId = randomUUID();
+      const repoPath = path.join(scratch, `repo-${dirId}`);
+      const vaultPath = path.join(scratch, `vault-${dirId}`);
+      mkdirSync(repoPath, { recursive: true });
+      mkdirSync(vaultPath, { recursive: true });
+      execFileSync("git", ["init", "-q", repoPath]);
+      const project = await loopbackPost<{ id: string }>("/api/projects", { name: `gwproxy-${dirId.slice(0, 8)}`, repoPath, vaultPath });
+      const agent = await loopbackPost<{ id: string }>(`/api/projects/${project.id}/agents`, { name });
+      const sessionId = `e2e-gwproxy-companion-${dirId}`;
+      await loopbackPost("/internal/test/seed", {
+        companionSessions: [{ id: sessionId, projectId: project.id, agentId: agent.id }],
+        companionConfigs: [{ sessionId, enabled: true, name, botToken: "123456:e2e-test-token", allowedChatId: "999" }],
+      });
+      return { projectId: project.id, agentId: agent.id, sessionId };
+    };
+    return { origin, token, loopbackURL, loopbackAuth, loopbackPost, seedCompanion, log: () => log, stop };
   } catch (err) {
     await stop();
     throw err;

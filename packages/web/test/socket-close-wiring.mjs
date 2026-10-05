@@ -36,30 +36,55 @@ const read = (rel) => {
 };
 
 // DISCOVERED, never hand-written. A socket client is a file that CALLS `socketAuth` — the one helper that
-// builds a WebSocket's credential, so nothing in this app can open an authenticated socket without it.
+// builds a WebSocket's credential — OR constructs a `new WebSocket` of its own.
 //
 // Card a6d7bf36 round 2: this used to be a literal array of three paths, and that is exactly how
 // CompanionChat came to be left out of checks (8)-(10) — it was simply not in the list, so its missing
 // re-attach nonce and unbounded ladder read as green. A list a client can be absent from cannot detect an
 // absent client; a derived one fails the moment a new socket client (or one quietly dropped) does not
 // carry the wiring.
+//
+// Card d56b12d8 widened that derivation from `socketAuth(` alone to the UNION with `new WebSocket(`.
+// `socketAuth` was chosen as the discovery key because nothing can open an AUTHENTICATED socket without
+// it — but that is a narrower population than "owns a WebSocket", and the gap is exactly where the next
+// miss would land: a client opening an UNAUTHENTICATED socket (or building its credential some other
+// way) has a close to classify and a ladder to bound like any other, while silently satisfying every
+// check below by never being discovered. Both halves are needed, not either alone — a credential builder
+// that hands the socket to another module would be found only by `socketAuth(`. Comments are stripped
+// before this runs, so a `new WebSocket(` named only in prose (today: the two credential modules' own
+// subprotocol-safety docs) is not a client.
 const walk = (dir) => readdirSync(dir, { withFileTypes: true })
   .flatMap((entry) => (entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)]));
 const CLIENTS = {};
+const BY_AUTH = [];
+const BY_CONSTRUCTION = [];
 for (const abs of walk(root).filter((p) => /\.tsx?$/.test(p))) {
   const rel = relative(root, abs).split("\\").join("/");
   const src = read(rel);
-  if (!/\bsocketAuth\s*\(/.test(src)) continue;
   if (/\bexport function socketAuth\s*\(/.test(src)) continue; // the DEFINITION, not a caller
-  CLIENTS[rel] = src;
+  const authors = /\bsocketAuth\s*\(/.test(src);
+  const constructs = /\bnew WebSocket\s*\(/.test(src);
+  if (authors) BY_AUTH.push(rel);
+  if (constructs) BY_CONSTRUCTION.push(rel);
+  if (authors || constructs) CLIENTS[rel] = src;
 }
 // The discovery is itself an instrument, so pin what it found. Without this a broken walk/regex yields an
 // EMPTY map and every per-client check below passes vacuously — the classic zero-population green.
 const EXPECTED_CLIENTS = ["components/CompanionChat.tsx", "components/FleetSocketProvider.tsx", "components/Terminal.tsx"];
 assert.deepEqual(Object.keys(CLIENTS).sort(), EXPECTED_CLIENTS,
-  `the socketAuth-caller scan found ${JSON.stringify(Object.keys(CLIENTS).sort())}. A NEW socket client here is `
+  `the socket-client scan found ${JSON.stringify(Object.keys(CLIENTS).sort())}. A NEW socket client here is `
   + "not a test bug: add it to EXPECTED_CLIENTS and make it satisfy every check below (that is the point of "
   + "deriving the list). A MISSING one means the walk or the regex broke.");
+// EACH HALF OF THE UNION, SEPARATELY. The two populations coincide today, which is precisely why the
+// union needs this: a broken `new WebSocket(` regex would be invisible behind a working `socketAuth(`
+// one (and vice versa), leaving the widening card d56b12d8 added inert while every check still passed.
+// These are deliberately NOT asserted as equal to each other — they are allowed to diverge, and the day
+// they do, the union above is what keeps the divergent client in scope. What must never happen is either
+// half going EMPTY unnoticed.
+assert.deepEqual(BY_AUTH.sort(), EXPECTED_CLIENTS,
+  `the socketAuth( half of the discovery found ${JSON.stringify(BY_AUTH)} — if that is empty or short, THAT regex broke`);
+assert.deepEqual(BY_CONSTRUCTION.sort(), EXPECTED_CLIENTS,
+  `the new WebSocket( half of the discovery found ${JSON.stringify(BY_CONSTRUCTION)} — if that is empty or short, THAT regex broke`);
 const fleet = CLIENTS["components/FleetSocketProvider.tsx"];
 const companion = CLIENTS["components/CompanionChat.tsx"];
 
@@ -243,6 +268,133 @@ check("(11) the gateway banner recovers by re-attaching, not by reloading the pa
   assert.ok(/clearGatewayLock\(\)/.test(banner), "the successful-paste path must clear the lock");
   assert.ok(!/location\.reload\(\)/.test(banner),
     "the banner must not reload the page to reconnect its sockets");
+});
+
+// ── card d56b12d8: the token-LESS branch is terminal too ──────────────────────────────────────
+// A DIFFERENT case from the bounded ladder above, and it needs no probe. `noteRemoteSocketRefusal` is
+// true only on a remote origin holding NO gateway token, where a never-opened upgrade can do nothing but
+// 401 — there is no credential to ask about, so there is nothing an episode could learn. CompanionChat
+// retried anyway, on the justification that "the next attempt carries a pasted credential"; that stopped
+// being true the moment `reattachNonce` started rebuilding the socket on the lock's clearing edge, which
+// left a guaranteed-401 ladder on the shared failed-auth budget with nothing to gain.
+//
+// DERIVED, then pinned — same posture as the client scan itself: the clients that HAVE this branch are
+// the ones that call the helper, not a list chosen here.
+const NO_TOKEN_CLIENTS = Object.entries(CLIENTS)
+  .filter(([, src]) => /\bnoteRemoteSocketRefusal\s*\(/.test(src)).map(([name]) => name).sort();
+
+/**
+ * The CONSEQUENT BLOCK of `if (<call>) { … }`, brace-matched, plus whatever syntactically follows it.
+ *
+ * Card d56b12d8 round 2, minor 2: check (12) used to slice from the call to the next branch's own call
+ * (`isCredentialSocketFailure`), and that slice COULD NOT FAIL for CompanionChat — the re-arm it has to
+ * reject sits AFTER the whole if/else chain, outside the slice either way. The reviewer measured it:
+ * deleting the `return` after `stopForNoToken()` left the check passing while reintroducing the exact
+ * unbounded guaranteed-401 ladder the card removed. A brace-matched block plus its `after` text is what
+ * makes "this branch ENDS the close path" checkable at all.
+ */
+const consequentBlock = (src, callRe, name) => {
+  const start = src.search(callRe);
+  assert.ok(start >= 0, `${name}: could not find ${callRe}`);
+  const open = src.indexOf("{", start);
+  assert.ok(open > start, `${name}: no block found after ${callRe}`);
+  // A brace-LESS single-statement branch (`if (x) stop();`) would send `indexOf("{")` off into an
+  // unrelated block further down the file and this whole check would read the wrong code while passing.
+  // Refuse that shape loudly instead: it is not one this scan can read.
+  assert.ok(!src.slice(start, open).includes(";"),
+    `${name}: the ${callRe} branch has no braced block of its own — give it one so this check can read it`);
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < src.length; i += 1) {
+    if (src[i] === "{") depth += 1;
+    else if (src[i] === "}") { depth -= 1; if (depth === 0) { close = i; break; } }
+  }
+  assert.ok(close > open, `${name}: unbalanced braces after ${callRe}`);
+  return { branch: src.slice(start, close + 1), after: src.slice(close + 1).trimStart() };
+};
+
+check("(12) the token-LESS branch never re-arms AND ends the close path — it is terminal, not a ladder", () => {
+  // FleetSocketProvider is deliberately absent: it has no token-less branch at all (it asks the episode
+  // unconditionally, and a token-less probe returns "none"). Its own token-less ladder is therefore
+  // still unbounded — a KNOWN, separate gap, not something this check silently covers.
+  assert.deepEqual(NO_TOKEN_CLIENTS, ["components/CompanionChat.tsx", "components/Terminal.tsx"],
+    `the noteRemoteSocketRefusal scan found ${JSON.stringify(NO_TOKEN_CLIENTS)}. A client GAINING this branch `
+    + "must satisfy the terminality assertions below; a client LOSING it means the branch (or the regex) went away.");
+  for (const name of NO_TOKEN_CLIENTS) {
+    const src = CLIENTS[name];
+    const { branch, after } = consequentBlock(src, /\bnoteRemoteSocketRefusal\s*\(/, name);
+    // POSITIVE CONTROL on the slice itself: an absence assertion over an empty or mis-sliced string
+    // passes for free. It must be long enough to hold a body, and must still contain the call.
+    assert.ok(branch.length > 40, `${name}: the sliced branch is suspiciously short (${branch.length} chars)`);
+    assert.match(branch, /noteRemoteSocketRefusal/, `${name}: the slice must contain the call it is about`);
+    for (const rearm of [/setTimeout\(\s*connect\b/, /scheduleReconnect\s*\(/, /reconnectTimer\s*=/]) {
+      assert.ok(!rearm.test(branch),
+        `${name}: the token-less branch must not re-arm the ladder (matched ${rearm})`);
+    }
+    // ...and it must mark the ladder stopped, so a socket already in flight when this lands cannot
+    // re-arm from its own later close — the same guard check (10) pins for the probe-refused stop.
+    assert.match(branch, /retriesStopped\s*=\s*true|stopForNoToken\s*\(\)|setReconnecting\(false\)/,
+      `${name}: the token-less branch must end the ladder, not merely skip one attempt`);
+    // THE HALF THE OLD SLICE COULD NOT SEE. Not re-arming INSIDE the branch means nothing if control then
+    // falls through to a re-arm sitting after the chain. Two shapes end the branch soundly and both are
+    // accepted: an early `return` out of the close handler, or the next arm being reached only via `else`
+    // (an if/else-if chain, where fall-through is impossible by construction). Anything else — a bare
+    // block whose successor is a fresh `if` — is the defect.
+    const returns = /\breturn\b/.test(branch);
+    const chained = after.startsWith("else");
+    assert.ok(returns || chained,
+      `${name}: the token-less branch must END the close path — add a \`return\`, or make the next arm an `
+      + `\`else\`. Without one, control falls through to the re-arm after the chain and the ladder runs `
+      + `anyway, which is invisible to every assertion above. Saw: ${JSON.stringify(after.slice(0, 60))}`);
+  }
+});
+
+// ── card d56b12d8: WHICH credential a never-opened close is about is decided by the ORIGIN ─────
+// MEASURED on the proxy rig, not reasoned: before this ordering, a companion pane on a remote origin
+// whose gateway token had just been revoked painted "reconnecting" and raised the LOOPBACK banner ("this
+// browser has no local access credential"). `socketAuth` presents only the gateway token on a remote
+// origin and never the loopback secret, so `getLoopbackToken()` is trivially null there and
+// `isCredentialSocketFailure` is trivially TRUE — it claimed a missing LOCAL credential for a socket that
+// never presented one, and consumed the arm the gateway probe lives in. So the probe was unreachable on
+// the only kind of origin a gateway token exists on at all.
+//
+// DERIVED, then pinned: the members are the clients that make the origin distinction in their close path.
+const ORIGIN_AWARE_CLIENTS = Object.entries(CLIENTS)
+  .filter(([, src]) => /\bisRemoteOrigin\s*\(/.test(src) && /\bisCredentialSocketFailure\s*\(/.test(src))
+  .map(([name]) => name).sort();
+
+check("(13) a remote-origin never-opened close asks the GATEWAY probe BEFORE the loopback inference", () => {
+  // Terminal.tsx joined this list in card d56b12d8 round 2 — BY DERIVATION, which is the whole point of
+  // scanning for the distinction rather than naming members: the reorder gave it an `isRemoteOrigin(`
+  // call in its close path and it became a member of this check without the check being edited.
+  //
+  // It was out of scope for round 1, and the reason given then — "a copy/attribution defect, not a
+  // traffic one" — was WRONG, which is why this comment now says so. Terminal's own ladder was indeed
+  // already terminal on that path, so it was not burning the shared failed-auth budget. But the arm it
+  // wrongly took RAISES THE LOOPBACK LOCK, and that lock is module state with no clearing path on a
+  // remote origin. Round 1 had just made the companion's "token refused" state terminal with the
+  // re-attach nonce as its only recovery, and that nonce keyed off `loopback !== null || gateway`. So a
+  // terminal pane anywhere in the document permanently disabled the COMPANION's recovery from a valid
+  // paste: a cross-client traffic-and-liveness defect, reachable with no terminal pane of its own.
+  // FleetSocketProvider is still deliberately absent — it has no loopback arm to lose to, so it makes no
+  // origin distinction and never could have had this bug.
+  assert.deepEqual(ORIGIN_AWARE_CLIENTS, ["components/CompanionChat.tsx", "components/Terminal.tsx"],
+    `the origin-aware scan found ${JSON.stringify(ORIGIN_AWARE_CLIENTS)}. A client GAINING the distinction `
+    + "must satisfy the ordering assertion below; either of these LOSING it is the regression this check exists for.");
+  for (const name of ORIGIN_AWARE_CLIENTS) {
+    const src = CLIENTS[name];
+    const remoteArm = src.search(/\bisRemoteOrigin\s*\(/);
+    const loopbackArm = src.search(/\bisCredentialSocketFailure\s*\(/);
+    assert.ok(remoteArm >= 0 && loopbackArm >= 0, `${name}: could not locate both arms`);
+    assert.ok(remoteArm < loopbackArm,
+      `${name}: the isRemoteOrigin arm must come BEFORE isCredentialSocketFailure — otherwise the loopback `
+      + "inference (trivially true on a remote origin) wins and the gateway probe is never asked");
+    // ...and the remote arm must be the one that ASKS the probe, not merely an earlier mention of the
+    // helper: an ordering assertion over two unrelated call sites would pass while proving nothing.
+    const arm = src.slice(remoteArm, loopbackArm);
+    assert.match(arm, /refusalEpisode\.check\(/,
+      `${name}: the remote arm must be the one that asks the held-token probe`);
+  }
 });
 
 if (failures.length) {

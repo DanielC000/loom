@@ -27,19 +27,52 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { credentialLock, subscribeCredentialLock } from "./loopbackCredential";
 import { gatewayLock, subscribeGatewayLock } from "./gatewayCredential";
 
+/** Which of the two locks were up at one observation. PER-LOCK, deliberately — see `anyLockCleared`. */
+export interface CredentialLockState {
+  loopback: boolean;
+  gateway: boolean;
+}
+
+/**
+ * The edge the nonce bumps on: did EITHER lock go from set to clear between two observations?
+ *
+ * PER-LOCK, not an OR of the two. This was `was && !now` over a single collapsed
+ * `loopback !== null || gateway`, and that form cannot see a clearing edge while the OTHER lock is still
+ * up — the OR stays true across it, so no bump is emitted and every client's attach effect keeps its
+ * dead socket. One stuck lock therefore disabled recovery from the OTHER one entirely, for the life of
+ * the document. Both are module state that survives SPA navigation, and the loopback one in particular
+ * has no clearing path at all on a remote origin (`CredentialBanner`'s own unlock needs a loopback
+ * secret such a page never holds), so the collapse made one wrong raise permanent.
+ *
+ * ONE bump when both clear at once: the nonce exists to rebuild each socket once per unlock, and two
+ * simultaneous unlocks still need exactly one rebuild.
+ *
+ * Pure + exported so `test/credential-reattach-edge.mjs` can assert the edge algebra directly — this
+ * file's hook body is unreachable from a unit test (`packages/web` has no React test harness).
+ *
+ * @decision d56b12d8 — never collapse the two locks into one boolean here: a clearing edge hidden behind
+ * the other lock emits no bump, which turns every bounded ladder into a pane that is dead until reload.
+ */
+export function anyLockCleared(was: CredentialLockState, now: CredentialLockState): boolean {
+  return (was.loopback && !now.loopback) || (was.gateway && !now.gateway);
+}
+
 export function useCredentialReattachNonce(): number {
   const loopback = useSyncExternalStore(subscribeCredentialLock, credentialLock, () => null);
   const gateway = useSyncExternalStore(subscribeGatewayLock, gatewayLock, () => false);
-  const locked = loopback !== null || gateway;
+  const locks: CredentialLockState = { loopback: loopback !== null, gateway };
   // Seeded from the FIRST observed value, so a client that mounted while already locked still gets its
   // bump on the unlock — and one that mounted unlocked is never bumped by its own first render.
-  const wasLocked = useRef(locked);
+  const wasLocked = useRef(locks);
   const [nonce, setNonce] = useState(0);
   useEffect(() => {
-    // The clearing edge only. Bumping on the lock being SET would tear a pane down mid-failure for no
+    // The clearing edge only. Bumping on a lock being SET would tear a pane down mid-failure for no
     // benefit, and bumping on every render would re-attach forever.
-    if (wasLocked.current && !locked) setNonce((n) => n + 1);
-    wasLocked.current = locked;
-  }, [locked]);
+    if (anyLockCleared(wasLocked.current, locks)) setNonce((n) => n + 1);
+    wasLocked.current = locks;
+    // Each lock is its OWN dependency. A single OR-ed dep would not re-run the effect at all on the edge
+    // this hook was fixed to see (one lock clearing while the other stays up leaves the OR unchanged),
+    // so splitting the deps is load-bearing, not cosmetic.
+  }, [locks.loopback, locks.gateway]);
   return nonce;
 }

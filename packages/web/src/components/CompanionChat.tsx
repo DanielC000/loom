@@ -9,7 +9,7 @@ import {
 } from "../lib/companionChat";
 import { channelBadgeLabel } from "../lib/companion";
 import { api, getLoopbackToken } from "../lib/api";
-import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
+import { isRemoteOrigin, noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCredential";
 import { createReconnectBackoff, createRefusalEpisode, handleSocketClose } from "../lib/socketReconnect";
 import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
@@ -179,24 +179,42 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
     clearReplyTimer();
 
     /**
-     * Card a6d7bf36 — the held credential was REFUSED (the episode probe's only stopping outcome), so
-     * every further handshake would 401 identically, forever, at the 10s cap. End the ladder: a rejected
-     * WS upgrade spends the trusted proxy's ONE shared failed-auth bucket, so a few mounted panes 429
-     * unrelated remote callers.
+     * End the reconnect ladder for good and paint `state`. Both callers below are cases where every
+     * further handshake would 401 identically, forever, at the 10s cap — and a rejected WS upgrade
+     * spends the trusted proxy's ONE shared failed-auth bucket, so a few mounted panes 429 unrelated
+     * remote callers. The `retriesStopped` flag is what makes a close already in flight bail instead of
+     * re-arming the ladder this just ended.
      *
-     * Its own state, NOT `revoked`: that pill says "token revoked", which is one of the four named
-     * changes only a daemon-authored close reason can establish. A probe's 401 does not say which.
-     *
-     * Safe to stop ONLY because the probe raised the gateway lock on its way here — which puts the
-     * banner's paste field on screen, and whose CLEARING bumps `reattachNonce` and rebuilds this effect.
+     * Safe to stop ONLY because both callers have the gateway lock raised on their way here — which puts
+     * the banner's paste field on screen, and whose CLEARING bumps `reattachNonce` and rebuilds this
+     * effect. That is the pairing, not an incidental detail: see the records on both cards.
      */
-    const stopForRefusal = () => {
+    const stopRetries = (state: ChatConnState) => {
       if (disposed || retriesStopped) return;
       retriesStopped = true;
       clearTimeout(reconnectTimer);
       reconnectTimer = undefined;
-      setConn("token-refused");
+      setConn(state);
     };
+
+    /**
+     * Card a6d7bf36 — the held credential was REFUSED (the episode probe's only stopping outcome).
+     *
+     * Its own state, NOT `revoked`: that pill says "token revoked", which is one of the four named
+     * changes only a daemon-authored close reason can establish. A probe's 401 does not say which.
+     */
+    const stopForRefusal = () => stopRetries("token-refused");
+
+    /**
+     * Card d56b12d8 — a REMOTE origin holding NO gateway token at all. `noteRemoteSocketRefusal` has
+     * just raised the lock, and there is nothing to probe: with no credential the upgrade cannot do
+     * anything but 401, so this is terminal on the first never-opened close rather than after an
+     * episode's worth of asking. `Terminal.tsx` has always treated this case as terminal; this panel
+     * did not, and kept an unbounded guaranteed-401 ladder running on the shared failed-auth budget.
+     *
+     * Its own state again: nothing was revoked and nothing was refused — nothing was ever presented.
+     */
+    const stopForNoToken = () => stopRetries("no-token");
 
     const connect = () => {
       if (disposed) return;
@@ -308,19 +326,24 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
             // A socket already in flight when the probe answered still closes here; it must not re-arm
             // the ladder `stopForRefusal` just ended (card a6d7bf36).
             if (retriesStopped) return;
-            // A handshake that never opened on a token-less browser is the credential lock, not a flaky link.
-            // Still reconnect: if the user pastes a credential into the banner, the next attempt carries it.
-            if (noteRemoteSocketRefusal(everOpened)) { /* the gateway banner owns it */ }
+            // A handshake that never opened on a token-less browser is the credential lock, not a flaky
+            // link — and it is TERMINAL (card d56b12d8). The old justification for retrying anyway ("the
+            // next attempt carries a pasted credential") stopped being true when `reattachNonce` started
+            // rebuilding this socket on the lock's clearing edge: the paste is now what brings the panel
+            // back, so the ladder in between is pure guaranteed-401 noise on a shared budget.
+            if (noteRemoteSocketRefusal(everOpened)) { stopForNoToken(); return; }
+            // Never opened, but we DO hold a credential. Two indistinguishable causes at the close: a
+            // daemon that is down or restarting, or a credential the daemon has since rejected — the
+            // upgrade 401s, so no socket opens and the browser reports a bare 1006 with no reason. Keep
+            // retrying so the restart case heals itself, and ask over HTTP, ONCE per episode, which case
+            // this is (card a6d7bf36). Only a real refusal ends the ladder; `unknown` and `valid` leave
+            // it running.
+            //
+            // @decision d56b12d8 — the REMOTE arm must stay ahead of the loopback inference below: on a
+            // remote origin `isCredentialSocketFailure` is trivially true, so putting it first raises the
+            // wrong banner AND consumes the arm the gateway probe lives in.
+            if (!everOpened && isRemoteOrigin()) refusalEpisode.check(stopForRefusal);
             else if (isCredentialSocketFailure(everOpened, getLoopbackToken())) noteCredentialLock("socket");
-            else if (!everOpened) {
-              // Never opened, but we DO hold a credential. Two indistinguishable causes at the close: a
-              // daemon that is down or restarting, or a credential the daemon has since rejected — the
-              // upgrade 401s, so no socket opens and the browser reports a bare 1006 with no reason. Keep
-              // retrying so the restart case heals itself, and ask over HTTP, ONCE per episode, which case
-              // this is (card a6d7bf36). Only a real refusal ends the ladder; `unknown` and `valid` leave
-              // it running.
-              refusalEpisode.check(stopForRefusal);
-            }
             setConn("reconnecting");
             reconnectTimer = setTimeout(connect, backoff.next());
           },
@@ -613,6 +636,10 @@ function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
     // never says which of revoked/paused/rotated/deleted happened, and `revoked`'s own label would assert
     // the one observation the three-state probe exists to avoid fabricating.
     conn === "token-refused" ? { tone: "red" as const, label: "token refused", glow: false } :
+    // Card d56b12d8: terminal with NO credential presented at all — red and banner-bound like the two
+    // above (the gateway lock is raised, so the paste field is on screen), but worded for an absence:
+    // "refused"/"revoked" would both assert the daemon judged a token it was never shown.
+    conn === "no-token" ? { tone: "red" as const, label: "no gateway token", glow: false } :
     // Card 04314fbc: terminal, but NOT a credential claim — amber (the same "attention, not alarm" tone
     // `connecting` uses) and wording that says this pane was refused, with no token to go re-paste.
     conn === "refused" ? { tone: "amber" as const, label: "refused", glow: false } :

@@ -234,18 +234,21 @@ export function resetMarker(id: string, ts?: string): ChatMessage {
   return m;
 }
 
-// The panel's connection lifecycle — drives the status pill + whether Send is enabled. `reconnecting`
-// is the transient gap between a drop and the next open (auto-reconnect), distinct from a never-yet-open
-// `connecting` so the pill copy can differ ("connecting" vs "reconnecting").
-/** `revoked` (card f8d2684d) is TERMINAL — the daemon closed this socket with 1008 because the browser's
- *  gateway token was revoked/paused/rotated/deleted, so the chat stops retrying and stops offering Send;
- *  the page-wide gateway banner is where the user re-enters a token.
- *
- *  `refused` (card 04314fbc) is the OTHER terminal 1008: a standing per-socket policy refusal, or any
- *  1008 reason the shared classifier does not recognise. Equally terminal, but the credential is FINE
- *  and no banner applies — so it must not borrow `revoked`'s "token revoked" copy, which would send the
- *  user to re-paste a token that was never the problem. Every other state is transient. */
-export type ChatConnState = "connecting" | "connected" | "reconnecting" | "revoked" | "refused" | "token-refused";
+/** The panel's connection lifecycle — drives the status pill + whether Send is enabled. `reconnecting` is
+ *  the transient gap between a drop and the next open (auto-reconnect), distinct from a never-yet-open
+ *  `connecting` so the pill copy can differ ("connecting" vs "reconnecting"). The four TERMINAL states
+ *  below all stop retrying and stop offering Send; they are kept apart by what was OBSERVED, and none of
+ *  the other three may borrow `revoked`'s named-change copy.
+ *  - `revoked` (card f8d2684d): the daemon closed this socket with 1008 because the browser's gateway
+ *    token was revoked/paused/rotated/deleted. Only a daemon-authored close reason establishes WHICH, and
+ *    the page-wide gateway banner is where the user re-enters a token.
+ *  - `refused` (card 04314fbc): the OTHER terminal 1008 — a standing per-socket policy refusal, or any
+ *    1008 reason the shared classifier does not recognise. The credential is FINE and no banner applies,
+ *    so "token revoked" copy here would send the user to re-paste a token that was never the problem.
+ *  - `token-refused` (a6d7bf36) / `no-token` (d56b12d8): a close that NEVER OPENED on a remote origin (a
+ *    bare 1006), split by their EVIDENCE — a HELD token an HTTP probe saw refused, vs. none held at all. */
+export type ChatConnState =
+  | "connecting" | "connected" | "reconnecting" | "revoked" | "refused" | "token-refused" | "no-token";
 
 // ── Chat HISTORY seed (bug 0f01f234 — the "reload loses the whole conversation" fix; UNIFIED
 // CROSS-CHANNEL CHAT, card 7d63e200 — every channel, not just in-app) ──────────────────────────────────

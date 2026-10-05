@@ -3,7 +3,7 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
 import { getLoopbackToken } from "../lib/api";
-import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
+import { isRemoteOrigin, noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { createReconnectBackoff, createRefusalEpisode, handleSocketClose, type SocketCloseVerdict } from "../lib/socketReconnect";
 import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
 import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCredential";
@@ -333,22 +333,36 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
         setReconnecting(false);
         term.write("\r\n\x1b[31m[no gateway token — live terminals are disabled]\x1b[0m\r\n"
           + "\x1b[2m[see the banner at the top of the page]\x1b[0m\r\n");
-      } else if (isCredentialSocketFailure(everOpened, getLoopbackToken())) {
+        return;
+      }
+      // Never opened on a REMOTE origin, holding a token. Two indistinguishable causes at the close: a
+      // daemon that is down or restarting (which a page loaded mid-restart hits), or a credential the
+      // daemon has since rejected — the upgrade 401s, so no socket ever opens and the browser reports a
+      // bare 1006 with no reason to read. Keep retrying so the restart case heals itself rather than
+      // needing a reload, and ask over HTTP, ONCE per episode, which case this actually is (card
+      // a6d7bf36). Only a real refusal ends the ladder; `unknown` and `valid` both leave it running.
+      //
+      // @decision d56b12d8 — the REMOTE arm must stay ahead of the loopback inference below: on a remote
+      // origin `isCredentialSocketFailure` is trivially true, so putting it first raises a LOOPBACK lock
+      // nothing on such an origin can clear AND eats the arm the gateway probe lives in.
+      if (!everOpened && isRemoteOrigin()) {
+        if (!noticeWritten) { term.write("\r\n\x1b[31m[could not connect to this session — retrying]\x1b[0m\r\n"); noticeWritten = true; }
+        refusalEpisode.check(stopForRefusal);
+        scheduleReconnect();
+        return;
+      }
+      if (isCredentialSocketFailure(everOpened, getLoopbackToken())) {
         setReconnecting(false);
         noteCredentialLock("socket");
         term.write("\r\n\x1b[31m[no local access credential — live terminals are disabled]\x1b[0m\r\n"
           + "\x1b[2m[see the banner at the top of the page]\x1b[0m\r\n");
-      } else {
-        // Never opened, but we DO hold a credential. Two indistinguishable causes: a daemon that is down
-        // or restarting (which a page loaded mid-restart hits), or a credential the daemon has since
-        // rejected — the upgrade 401s, so no socket ever opens and the browser reports a bare 1006 with
-        // no reason to read. Keep retrying so the restart case heals itself rather than needing a reload,
-        // and ask over HTTP, ONCE per episode, which case this actually is (card a6d7bf36). Only a real
-        // refusal ends the ladder; `unknown` and `valid` both leave it running.
-        if (!noticeWritten) { term.write("\r\n\x1b[31m[could not connect to this session — retrying]\x1b[0m\r\n"); noticeWritten = true; }
-        refusalEpisode.check(stopForRefusal);
-        scheduleReconnect();
+        return;
       }
+      // Never opened on a LOOPBACK origin, holding the secret: a down/restarting daemon is the only
+      // remaining cause, and there is no gateway token here to probe (`probeHeldGatewayToken` answers
+      // `"none"` off a remote origin), so retry without asking.
+      if (!noticeWritten) { term.write("\r\n\x1b[31m[could not connect to this session — retrying]\x1b[0m\r\n"); noticeWritten = true; }
+      scheduleReconnect();
     };
 
     const handleMessage = (e: MessageEvent) => {

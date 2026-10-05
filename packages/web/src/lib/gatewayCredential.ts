@@ -367,8 +367,25 @@ export type HeldGatewayTokenProbe = "none" | "valid" | "invalid" | "unknown";
  * state names WHICH of revoked/paused/rotated/deleted happened, and a 401 to a probe does not say which.
  * Picking one would fabricate the observation the three-state split protects.
  *
+ * A REPLACED credential makes the whole verdict stale, so it comes back `"unknown"`. A probe is
+ * asynchronous and the token can be swapped while one is in flight — a paste into the banner is exactly
+ * that, and it clears the lock on its way through. `createRefusalEpisode`'s own generation fence does not
+ * cover this: that fence drops a superseded `onDead`, which is the episode's decision to STOP a ladder,
+ * while this side effect fires here, inside the probe, before any result reaches the episode at all.
+ *
+ * `"invalid"` would ALSO be a true statement about the token that was probed — but nothing downstream
+ * wants a verdict on a token nobody holds any more, and reporting one decouples the two halves of the
+ * stop. `"invalid"` is the ONE outcome that both raises the lock and ends a ladder, so returning it while
+ * declining to raise the lock leaves "lock raised" and "ladder stopped" free to disagree: the ladder ends
+ * on a freshly pasted, working credential with no banner up to explain it, and the same split covers the
+ * cross-tab case (another tab's paste) and an A→B→A swap. `"unknown"` keeps the pair coupled and costs
+ * nothing: it is non-stopping, so the episode simply re-asks — now about the token actually held — within
+ * its own bounded `REFUSAL_EPISODE_MAX_UNKNOWN` budget.
+ *
  * @decision a6d7bf36 — never stop a retry ladder on anything but `"invalid"`, and never claim a named
  * token-status change for a probe's 401.
+ * @decision d56b12d8 — never report `"invalid"` for a probe of a token this browser no longer holds, and
+ * never let `"invalid"` and the gateway lock come apart: that pair is one decision, not two.
  */
 export async function probeHeldGatewayToken(
   verify: (token: string) => Promise<CredentialVerifyOutcome> = verifyGatewayTokenAgainstDaemon,
@@ -378,6 +395,8 @@ export async function probeHeldGatewayToken(
   if (!remote || gatewayToken === null) return "none";
   const outcome = await verify(gatewayToken);
   if (outcome !== "invalid") return outcome;
+  // Re-read LIVE, never the captured argument: the whole point is that storage may have changed since.
+  if (getGatewayToken() !== gatewayToken) return "unknown";
   noteGatewayLock();
   return "invalid";
 }

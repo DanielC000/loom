@@ -462,6 +462,75 @@ await acheck("probeHeldGatewayToken: `valid` and `unknown` both pass through and
   }
 });
 
+// Card d56b12d8 — the probe is ASYNCHRONOUS and the credential can be REPLACED while one is in flight.
+// A paste into the banner is exactly that: it stores a verified token and CLEARS the lock. A probe of the
+// OLD token landing afterwards used to raise the lock unconditionally, putting the banner straight back
+// up over a working credential. `createRefusalEpisode`'s generation fence cannot cover this — that fence
+// drops a superseded `onDead` (the episode's decision to stop a ladder), while this side effect fires
+// inside the probe, before any result reaches the episode.
+//
+// ROUND 2 (Code Review f53d7c8d, minor 3) made the OUTCOME move with the side effect. Round 1 declined to
+// raise the lock but still answered `"invalid"`, and `"invalid"` is the one outcome that BOTH raises the
+// lock and ends a ladder — so reporting it while skipping the raise let the two halves disagree: the
+// ladder stopped on a freshly pasted, working credential with no banner up to explain it. `"unknown"` is
+// non-stopping, so the episode re-asks (about the token actually held now) within its own bounded budget.
+await acheck("probeHeldGatewayToken: a token REPLACED mid-flight is `unknown` — a stale verdict, not a refusal", async () => {
+  mem.set("loom.gatewayToken", HELD);
+  const PASTED = "freshly-pasted-gw-token";
+  // The swap happens INSIDE the verify, i.e. strictly between the probe capturing its argument and the
+  // outcome arriving — the exact window a real paste occupies.
+  const outcome = await G.probeHeldGatewayToken(async (t) => {
+    assert.equal(t, HELD, "it must have asked about the token held when it started");
+    mem.set("loom.gatewayToken", PASTED);
+    G.clearGatewayLock(); // what storeVerifiedGatewayToken + the banner do on a successful paste
+    return "invalid";
+  }, true);
+  // `"invalid"` would also be TRUE of the token probed — but nothing downstream wants a verdict about a
+  // token nobody holds, and `createRefusalEpisode` treats `"invalid"` as its stopping outcome.
+  assert.equal(outcome, "unknown", "a verdict about a token this browser no longer holds must not stop a ladder");
+  assert.equal(G.gatewayLock(), false, "a probe of a token this browser no longer holds must not lock the page");
+  assert.equal(G.gatewayTokenRevoked(), null);
+});
+
+await acheck("probeHeldGatewayToken: the fence compares the TOKEN, not merely whether one is held", async () => {
+  // POLARITY CONTROL for the case above — same shape, same timing, the one difference being that the
+  // token is still the probed one. Without this, "the lock stayed down" would pass identically if the
+  // fence had been written to never raise the lock at all.
+  mem.set("loom.gatewayToken", HELD);
+  assert.equal(await G.probeHeldGatewayToken(async () => {
+    mem.set("loom.gatewayToken", HELD); // re-stored, byte-identical — nothing has actually changed
+    return "invalid";
+  }, true), "invalid");
+  assert.equal(G.gatewayLock(), true, "an unchanged held token IS the one just refused — raise the banner");
+});
+
+await acheck("probeHeldGatewayToken: `invalid` and the gateway lock are ONE decision, never two", async () => {
+  // The INVARIANT round 2 restored, asserted as an invariant rather than case by case: across every shape
+  // of mid-flight swap, `"invalid"` is returned IF AND ONLY IF the lock was raised. A per-case assertion
+  // pair can drift apart silently (that is exactly how round 1's gap arrived); this one cannot.
+  //
+  // The A→B→A case is the one worth naming: swapped away and swapped back, the browser once again holds
+  // the very token just refused, so `"invalid"` + a raised lock is the CORRECT answer there — not an
+  // exception to the coupling. Same for a swap to the empty/absent case, which is a different held value.
+  const CASES = [
+    ["unchanged", () => { mem.set("loom.gatewayToken", HELD); }, true],
+    ["replaced by a paste", () => { mem.set("loom.gatewayToken", "other-gw-token"); }, false],
+    ["A→B→A (swapped away and back)", () => { mem.set("loom.gatewayToken", "other-gw-token"); mem.set("loom.gatewayToken", HELD); }, true],
+    ["cleared outright", () => { mem.delete("loom.gatewayToken"); }, false],
+  ];
+  for (const [label, swap, expectInvalid] of CASES) {
+    reset();
+    mem.set("loom.gatewayToken", HELD);
+    const outcome = await G.probeHeldGatewayToken(async () => { swap(); return "invalid"; }, true);
+    assert.equal(outcome === "invalid", expectInvalid, `${label}: wrong outcome (${outcome})`);
+    assert.equal(G.gatewayLock(), outcome === "invalid",
+      `${label}: "invalid" and a raised gateway lock must always agree (outcome ${outcome}, lock ${G.gatewayLock()})`);
+    // ...and the non-stopping answer must be the SPECIFIC one the episode re-asks on, not just "not
+    // invalid": `"valid"`/`"none"` also settle the episode, so either would silence it just as wrongly.
+    if (!expectInvalid) assert.equal(outcome, "unknown", `${label}: must be the re-askable outcome`);
+  }
+});
+
 await acheck("probeHeldGatewayToken: `none` when there is nothing to ask about — and it never calls the probe", async () => {
   let calls = 0;
   const count = async () => { calls += 1; return "invalid"; };
