@@ -29,8 +29,13 @@ export class RepoQuarantinedError extends Error {}
  * leaf isn't). Falls back to `bp`'s own `path.resolve` only when NOTHING along the chain up to the
  * filesystem root resolves at all (a wholly disconnected drive/share) — a last-resort literal, not a
  * verified anchor.
+ *
+ * Exported (card abccee85, round 7) so `merge-quarantine.ts`'s own `ancestorAwarePathIdentity` can reuse
+ * it for a path-identity COMPARISON that normalizes a junction/8.3-short-name-spelled EXISTING ancestor
+ * without walking further to find an enclosing git toplevel (unlike {@link resolveGitToplevelSync}) — see
+ * that function's own doc for why the two must stay distinct.
  */
-function findExistingAncestorRealpath(bp: string): string {
+export function findExistingAncestorRealpath(bp: string): string {
   const resolvedInput = path.resolve(bp);
   const tail: string[] = [];
   let probe = resolvedInput;

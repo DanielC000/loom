@@ -68,8 +68,8 @@ import { checkRepoRebind, checkLiveWorktreeSessions, checkTaskRepoKeyRebind } fr
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import {
-  clearMergeQuarantineReporting, clearMergeQuarantineLatchFile, listActiveMergeQuarantines,
-  partitionQuarantinesByRegistration, quarantineLatchFileIdsFor,
+  clearMergeQuarantineReporting, clearMergeQuarantineByRecordedPath, clearMergeQuarantineLatchFile,
+  listActiveMergeQuarantines, partitionQuarantinesByRegistration, quarantineLatchFileIdsFor,
 } from "../git/merge-quarantine.js";
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
@@ -3257,8 +3257,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(400).send({ error: "provide exactly one of repoPath or id" });
     }
     if (hasRepoPath) {
-      const { wasQuarantined } = clearMergeQuarantineReporting(body.repoPath as string);
-      return { ok: true, wasQuarantined, repoPath: body.repoPath };
+      // Card abccee85: match by the entry's own STORED repoPath first (never a fresh canonicalRepoLockKey
+      // recompute of the given string) — immune to the same key-drift class of bug round 3 already fixed
+      // for the `{id}` form below. See clearMergeQuarantineByRecordedPath's own doc for why.
+      const { wasQuarantined, reason } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
+      return { ok: true, wasQuarantined, repoPath: body.repoPath, ...(reason ? { reason } : {}) };
     }
     const result = clearMergeQuarantineLatchFile(body.id as string);
     if (!result.ok) return reply.code(400).send({ error: result.reason });
@@ -3276,7 +3279,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // by `/clear-by-path`'s `{id}` form.
   //
   // @decision c0be9bf9 — not every id in `ids` is guaranteed to name a file that currently exists on disk;
-  // only `ids[0]`/`id` is (see quarantineLatchFileIdsFor's own doc and the decision record).
+  // `ids[0]`/`id` names one whenever any armed key has one, but not when a failed durable write leaves
+  // none with a file at all (see quarantineLatchFileIdsFor's own doc and the decision record).
   app.get("/internal/merge-quarantine/list", async (req, reply) => {
     if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
     const registeredRepoPaths = deps.db.listAllRegisteredRepoPaths();

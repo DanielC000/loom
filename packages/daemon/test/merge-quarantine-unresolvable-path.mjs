@@ -644,6 +644,108 @@ try {
     check("(UNION-KEYS) a clear via the dual-armed repo ALSO lifts the single-armed one (same underlying union, every armed key cleared)", assertRepoNotQuarantined(dir1).ok && assertRepoNotQuarantined(dir2).ok);
     check("(UNION-KEYS) no latch file survives for either repoPath", countLatchFilesFor(dir1) === 0 && countLatchFilesFor(dir2) === 0);
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // R7-SUB-THEN-QUERY-ROOT (card abccee85, round 7) — identity-only pending matching (round 6's own
+  // governing rule) itself fails OPEN here: a pending latch raised on a NESTED path (`sub`, no `.git` of
+  // its own) that later becomes resolvable must ALSO block a query for the ROOT — even though the root is
+  // never queried via sub's own exact stored path, and even though neither path was EVER queried while sub
+  // was still absent. RED on 2ad0c7ac (identity-only matching never bridges root<->sub; a root query while
+  // sub exists on disk wrongly read ok:true forever, since nothing ever triggers graduation via the root's
+  // own different path string) — GREEN once a walked-key fallback (gated on the pending entry's OWN path
+  // now resolving) closes it.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const repoR7 = makeToplevelRepo("r7root");
+    const subR7 = path.join(repoR7, "sub-r7"); // deliberately never created yet
+    check("(R7 precondition) sub does not exist on disk yet", !fs.existsSync(subR7));
+
+    // Hand-write a PENDING (no resolvedKey) latch for subR7 under an arbitrary filename — PASS 1 processes
+    // every *.json file regardless of its own filename; only a MISMATCHED-hash already-resolvedKey entry
+    // cares about naming. Mirrors the hand-written pending fixtures in merge-quarantine-clear-by-path.mjs's
+    // (S)/(T)/(W) sections.
+    const sourceFileR7 = `pending-r7-sub-${sfx}.json`;
+    const latchPathR7 = path.join(MERGE_QUARANTINE_DIR, sourceFileR7);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(latchPathR7, JSON.stringify({
+      repoPath: subR7, branch: "r7-sub-branch", reason: "round-7 R/sub-then-query-R repro",
+      enteredAt: Date.now(), tokens: ["t-r7"],
+    }, null, 2) + "\n");
+
+    const foundR7 = reenterMergeQuarantinesAtBoot([]);
+    check("(R7 precondition) boot re-entry loads this as PENDING (sub still absent)", foundR7.some((q) => q.repoPath === subR7));
+    check("(R7 precondition) a direct query for sub itself is refused while absent", !assertRepoNotQuarantined(subR7).ok);
+    check("(R7 precondition) a query for the ROOT is NOT yet refused (sub has never resolved, nothing to walk)", assertRepoNotQuarantined(repoR7).ok);
+
+    // Sub now appears on disk — whatever the real-world cause (a further checkout, a branch switch), the
+    // key fact is: it NOW resolves. Query the ROOT FIRST, before ever querying sub directly post-creation
+    // — querying sub directly would graduate the entry via plain identity alone (it already matches,
+    // round-6 behavior, unchanged), which would NOT exercise this round-7 fix at all.
+    fs.mkdirSync(subR7, { recursive: true });
+    check("(R7) sub now resolves on disk", fs.existsSync(subR7));
+
+    const rootCheckR7 = assertRepoNotQuarantined(repoR7);
+    check("(R7) THE ROUND-7 BUG: querying the ROOT — never queried via sub's own exact path — is STILL refused once sub resolves", !rootCheckR7.ok);
+    check("(R7) the refusal still names the real (manufactured) reason", /round-7 R\/sub-then-query-R repro/i.test(rootCheckR7.reason ?? ""));
+
+    // The root query above graduates the entry (armed under the key the ROOT's own canonicalRepoLockKey
+    // resolves to — the same physical repo) — a direct query for sub must now ALSO hit it immediately.
+    check("(R7) a direct query for sub itself is, naturally, also still refused after the root's own graduation", !assertRepoNotQuarantined(subR7).ok);
+    check("(R7) exactly ONE entry remains for this repo (genuinely graduated, not duplicated as a leftover pending copy)", listActiveMergeQuarantines().filter((q) => q.repoPath === subR7).length === 1);
+
+    clearMergeQuarantine(repoR7);
+    check("(R7 cleanup) cleared via either path", assertRepoNotQuarantined(repoR7).ok && assertRepoNotQuarantined(subR7).ok);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // R7-ANCESTOR-SPELLING (card abccee85, round 7) — a junction/symlink-aliased EXISTING ancestor segment
+  // must not defeat pending-entry matching. `directPathIdentity`'s own fallback (plain `path.resolve`, no
+  // filesystem lookup) never normalizes an alias on an ancestor it doesn't itself fully resolve, so a
+  // pending entry recorded via one spelling of a shared ancestor and queried via a DIFFERENT (but
+  // physically identical) spelling of that same ancestor used to find nothing. `ancestorAwarePathIdentity`
+  // (new, round 7) realpaths the nearest EXISTING ancestor — resolving the alias — while still carrying any
+  // non-existent trailing segment literally, so it matches ONLY the exact same (not-yet-existing) location.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const realOuterR7b = makeToplevelRepo("r7b-real");
+    const realSubR7b = path.join(realOuterR7b, "sub-r7b");
+    fs.mkdirSync(realSubR7b, { recursive: true }); // the EXISTING ancestor both spellings will share
+    const aliasOuterR7b = path.join(os.tmpdir(), `loom-mqup-r7b-alias-${sfx}`);
+    tmpDirs.push(aliasOuterR7b);
+    let aliasSupported = true;
+    try {
+      fs.symlinkSync(realOuterR7b, aliasOuterR7b, "junction"); // junction on win32; an ordinary symlink elsewhere
+    } catch {
+      aliasSupported = false; // e.g. no privilege to create the link on this host — skip loudly, never fake a pass
+    }
+    if (!aliasSupported) {
+      console.warn("[merge-quarantine-unresolvable-path] SKIPPED (R7-ANCESTOR-SPELLING): could not create a junction/symlink on this host — no live alias to test against.");
+    } else {
+      const aliasSubR7b = path.join(aliasOuterR7b, "sub-r7b");
+      check("(R7b precondition) the alias ancestor realpaths to the SAME physical sub as the real path (the hazard this test needs)", fs.realpathSync.native(aliasSubR7b) === fs.realpathSync.native(realSubR7b));
+      const realLeafR7b = path.join(realSubR7b, "never-created-leaf-r7b");
+      const aliasLeafR7b = path.join(aliasSubR7b, "never-created-leaf-r7b"); // same leaf NAME, different (but equivalent) ancestor spelling
+      check("(R7b precondition) neither leaf spelling exists on disk", !fs.existsSync(realLeafR7b) && !fs.existsSync(aliasLeafR7b));
+
+      // Hand-write a PENDING latch for the REAL spelling's leaf.
+      const sourceFileR7b = `pending-r7b-leaf-${sfx}.json`;
+      fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+      fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, sourceFileR7b), JSON.stringify({
+        repoPath: realLeafR7b, branch: "r7b-branch", reason: "round-7 ancestor-spelling repro",
+        enteredAt: Date.now(), tokens: ["t-r7b"],
+      }, null, 2) + "\n");
+      reenterMergeQuarantinesAtBoot([]);
+      check("(R7b precondition) loaded as PENDING under the real spelling", listActiveMergeQuarantines().some((q) => q.repoPath === realLeafR7b));
+
+      // Query via the ALIAS spelling's own leaf — a DIFFERENT STRING, never queried before, whose own full
+      // path also never resolves (the leaf itself was never created under either spelling).
+      const aliasCheckR7b = assertRepoNotQuarantined(aliasLeafR7b);
+      check("(R7b) THE JUNCTION/8.3 CASE: querying the ALIAS spelling of the SAME never-created leaf is refused, not silently ok:true", !aliasCheckR7b.ok);
+
+      clearMergeQuarantine(realLeafR7b);
+      check("(R7b cleanup) cleared", assertRepoNotQuarantined(realLeafR7b).ok && assertRepoNotQuarantined(aliasLeafR7b).ok);
+    }
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -663,6 +765,10 @@ console.log(failures === 0
     "merges into a still-pending latch for the same repo instead of orphaning it (RESIDUAL). Round 3: a " +
     "toplevel-bound repo's graduation/merge no longer self-deletes the latch it just wrote, even though " +
     "its old and current keys coincide (TOPLEVEL-A/TOPLEVEL-B); and armQuarantineKey's own union now " +
-    "updates EVERY key it's armed under, not just the one it was called with (UNION-KEYS)."
+    "updates EVERY key it's armed under, not just the one it was called with (UNION-KEYS). Round 7: a " +
+    "pending latch raised on a nested path also blocks a query for the repo ROOT once that nested path " +
+    "resolves again, via a walked-key fallback gated on its own resolvability (R7-SUB-THEN-QUERY-ROOT); " +
+    "and a junction/8.3-short-name-aliased existing ancestor no longer defeats pending-entry matching " +
+    "(R7-ANCESTOR-SPELLING)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

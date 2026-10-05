@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { useOwnLoomHome, mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
@@ -26,7 +27,8 @@ const mergeQuarantineModuleUrl = pathToFileURL(path.join(distGitDir, "merge-quar
 const {
   enterMergeQuarantine, activeMergeQuarantineFor, listActiveMergeQuarantines, clearMergeQuarantine,
   quarantineLatchIdFor, quarantineLatchFileIdsFor, clearMergeQuarantineReporting, clearMergeQuarantineLatchFile,
-  partitionQuarantinesByRegistration, reenterMergeQuarantinesAtBoot, MERGE_QUARANTINE_DIR,
+  clearMergeQuarantineByRecordedPath, partitionQuarantinesByRegistration, reenterMergeQuarantinesAtBoot,
+  assertRepoNotQuarantined, MERGE_QUARANTINE_DIR,
 } = await import(mergeQuarantineModuleUrl);
 const repoLockModuleUrl = pathToFileURL(path.join(distGitDir, "repo-lock.js")).href;
 const { canonicalRepoLockKey } = await import(repoLockModuleUrl);
@@ -41,6 +43,17 @@ function freshDir(tag) {
   const d = path.join(os.tmpdir(), `loom-mqcbp-${tag}-${sfx}`);
   fs.mkdirSync(d, { recursive: true });
   return d;
+}
+
+// A repo nested inside another git repo (its own `.git`) — shared by section (L) (the `{id}` form's
+// round-3 key-drift fix) and section (M) (the `{repoPath}` form's round-4 fix, card abccee85). Marker-only
+// (`resolveGitToplevelSync` just checks `fs.existsSync(path.join(dir, ".git"))` — no real git needed).
+function makeNestedGitFixture(tag) {
+  const outer = freshDir(`${tag}-outer`);
+  fs.mkdirSync(path.join(outer, ".git"), { recursive: true }); // marks outer as its own git root
+  const inner = path.join(outer, "inner");
+  fs.mkdirSync(path.join(inner, ".git"), { recursive: true }); // marks inner as a NESTED git root
+  return { outer, inner };
 }
 
 // ===================== (A) quarantineLatchIdFor — format =====================
@@ -266,6 +279,32 @@ function hashKey(key) {
   check("(I) THE ROUND-3 ORDERING BUG: quarantineLatchFileIdsFor's ids[0] (what /list hands out as `id`) names the hash with a real on-disk file", idsI[0] === realHash);
   check("(I) negative control: the OTHER id in the list (the degraded one) genuinely has NO file on disk", idsI.length === 2 && !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${idsI[1]}.json`)));
 
+  // --- (I-list) GET /internal/merge-quarantine/list projects THIS dual-armed entry's own `id`/`ids`
+  // correctly, BEFORE it's cleared (round 4, card abccee85) — the existing (H6) coverage only exercises a
+  // single-armed entry's id/ids, so a revert of the /list route back to `id: quarantineLatchIdFor(e.repoPath)`
+  // would pass (H6) but silently hand out the wrong (no-file) id for a dual-armed entry like this one.
+  {
+    const TMPI = mkdtempManaged("loom-mqcbp-gw-i-");
+    const PORTI = 46300 + (process.pid % 400);
+    const HI = { host: `127.0.0.1:${PORTI}`, origin: `http://127.0.0.1:${PORTI}`, "content-type": "application/json" };
+    const dbI = new Db(path.join(TMPI, "loom.db"));
+    const stubI = {};
+    const appI = await buildServer({
+      db: dbI, pty: stubI, sessions: stubI, mcp: stubI, orchMcp: stubI, platformMcp: stubI, auditMcp: stubI,
+      userAuditMcp: stubI, setupMcp: stubI, runMcp: stubI, control: stubI, usageStatus: stubI,
+    });
+    try {
+      const listResI = await appI.inject({ method: "GET", url: "/internal/merge-quarantine/list", headers: HI });
+      check("(I-list) GET /list → 200", listResI.statusCode === 200);
+      const itemI = listResI.json().items.find((it) => it.repoPath === repoDual);
+      check("(I-list) THE ROUND-3 ORDERING BUG, VIA THE ROUTE: item.id names the hash WITH a real on-disk file", itemI?.id === realHash);
+      check("(I-list) item.ids includes the degraded (no-file) id too", (itemI?.ids ?? []).includes(degradedId));
+    } finally {
+      await appI.close();
+      dbI.close();
+    }
+  }
+
   const clearDual = clearMergeQuarantineLatchFile(degradedId);
   check("(I) clearing by the degraded id reports ok:true, wasQuarantined:true", clearDual.ok === true && clearDual.wasQuarantined === true);
   check("(I) the in-memory entry is fully gone (both armed keys lifted)", !activeMergeQuarantineFor(repoDual));
@@ -328,13 +367,6 @@ function hashKey(key) {
   // (both resolve the SAME key). So every assertion here is keyed on the entries' own PHYSICAL latch
   // files (computed BEFORE any drift) and `listActiveMergeQuarantines()`'s own repoPath field, never on a
   // post-drift `activeMergeQuarantineFor(innerL/outerL)` call, which would conflate the two.
-  function makeNestedGitFixture(tag) {
-    const outer = freshDir(`${tag}-outer`);
-    fs.mkdirSync(path.join(outer, ".git"), { recursive: true }); // marks outer as its own git root
-    const inner = path.join(outer, "inner");
-    fs.mkdirSync(path.join(inner, ".git"), { recursive: true }); // marks inner as a NESTED git root
-    return { outer, inner };
-  }
 
   // --- (L) the drifted case: inner's own .git disappears between match and act ---
   const { outer: outerL, inner: innerL } = makeNestedGitFixture("nestL");
@@ -362,9 +394,9 @@ function hashKey(key) {
   clearMergeQuarantine(outerL);
   check("(L cleanup) outer's own latch file is now gone too", !fs.existsSync(outerLatchPathL));
 
-  // --- (L negative control) the identical fixture, with NO drift — proves (L)'s own assertions aren't
-  // vacuously true for every shape; without the drift, round 1/2's own code ALSO passes this, so only the
-  // drifted case above can ever manifest the round-3 bug. ---
+  // --- (L fixture sanity, no drift) the identical fixture, with NO drift — this does NOT discriminate the
+  // round-3 bug (round 1/2's own code ALSO passes it), so it's not a negative control; it just confirms
+  // the inner-cleared/outer-armed outcome holds on the ordinary (non-drifted) shape too. ---
   const { outer: outerLNC, inner: innerLNC } = makeNestedGitFixture("nestLnc");
   const idOuterLNC = quarantineLatchIdFor(outerLNC);
   const outerLatchPathLNC = path.join(MERGE_QUARANTINE_DIR, `${idOuterLNC}.json`);
@@ -373,13 +405,544 @@ function hashKey(key) {
   const idInnerLNC = quarantineLatchIdFor(innerLNC);
   const innerLatchPathLNC = path.join(MERGE_QUARANTINE_DIR, `${idInnerLNC}.json`);
   const clearLNC = clearMergeQuarantineLatchFile(idInnerLNC);
-  check("(L negative control, no drift) clearing inner by id reports ok:true", clearLNC.ok === true);
-  check("(L negative control, no drift) inner's own latch file is deleted", !fs.existsSync(innerLatchPathLNC));
-  check("(L negative control, no drift) outer's own latch file is still there", fs.existsSync(outerLatchPathLNC));
+  check("(L fixture sanity, no drift) clearing inner by id reports ok:true", clearLNC.ok === true);
+  check("(L fixture sanity, no drift) inner's own latch file is deleted", !fs.existsSync(innerLatchPathLNC));
+  check("(L fixture sanity, no drift) outer's own latch file is still there", fs.existsSync(outerLatchPathLNC));
   clearMergeQuarantine(outerLNC);
 }
 
+// ===================== (M) clearMergeQuarantineByRecordedPath — key drift, not a repoPath re-derive (round 4, card abccee85) =====================
+// Round 4 scope (delta Code Review c574056b of c0be9bf9 round 3): the `{repoPath}` form of
+// /clear-by-path still re-derived the repo's key by calling clearMergeQuarantineReporting(repoPath), which
+// recomputes canonicalRepoLockKey FRESH at clear time — the SAME class of bug round 3 fixed for the `{id}`
+// form (section (L) above). Under KEY DRIFT (a nested .git removed between match and act) that fresh
+// recompute can land on a DIFFERENT repo's key, lifting the WRONG entry while reporting
+// wasQuarantined:true and leaving the entry actually named by the given repoPath fully armed.
+{
+  // --- (M) the drifted case, at the module level ---
+  const { outer: outerM, inner: innerM } = makeNestedGitFixture("nestM");
+  const idOuterM = quarantineLatchIdFor(outerM);
+  const outerLatchPathM = path.join(MERGE_QUARANTINE_DIR, `${idOuterM}.json`);
+  enterMergeQuarantine(innerM, "b", "nested-inner (M)");
+  enterMergeQuarantine(outerM, "b", "nested-outer (M)");
+  check("(M precondition) inner and outer currently resolve to DIFFERENT keys", canonicalRepoLockKey(innerM) !== canonicalRepoLockKey(outerM));
+  check("(M precondition) outer's own latch file exists on disk", fs.existsSync(outerLatchPathM));
+
+  const idInnerM = quarantineLatchIdFor(innerM); // computed BEFORE the drift below
+  const innerLatchPathM = path.join(MERGE_QUARANTINE_DIR, `${idInnerM}.json`);
+  check("(M precondition) inner's own latch file exists on disk", fs.existsSync(innerLatchPathM));
+
+  fs.rmSync(path.join(innerM, ".git"), { recursive: true, force: true }); // the drift
+  check("(M precondition) a FRESH recompute of inner's key now drifts to equal outer's key", canonicalRepoLockKey(innerM) === canonicalRepoLockKey(outerM));
+
+  const clearM = clearMergeQuarantineByRecordedPath(innerM);
+  check("(M) clearing by inner's STORED repoPath reports wasQuarantined:true", clearM.wasQuarantined === true);
+  check("(M) THE ROUND-4 BUG: inner's own latch file (the one actually matched by this repoPath) is deleted", !fs.existsSync(innerLatchPathM));
+  check("(M) and outer's own latch file is STILL there, never collaterally deleted", fs.existsSync(outerLatchPathM));
+  const remainingM = listActiveMergeQuarantines();
+  check("(M) exactly one entry remains active, and it's the OUTER one", remainingM.length === 1 && remainingM[0]?.repoPath === outerM);
+  clearMergeQuarantine(outerM);
+  check("(M cleanup) outer's own latch file is now gone too", !fs.existsSync(outerLatchPathM));
+
+  // --- (M fixture sanity, no drift) the identical fixture, with NO drift ---
+  const { outer: outerMNC, inner: innerMNC } = makeNestedGitFixture("nestMnc");
+  const idOuterMNC = quarantineLatchIdFor(outerMNC);
+  const outerLatchPathMNC = path.join(MERGE_QUARANTINE_DIR, `${idOuterMNC}.json`);
+  enterMergeQuarantine(innerMNC, "b", "nested-inner-nc (M-NC)");
+  enterMergeQuarantine(outerMNC, "b", "nested-outer-nc (M-NC)");
+  const idInnerMNC = quarantineLatchIdFor(innerMNC);
+  const innerLatchPathMNC = path.join(MERGE_QUARANTINE_DIR, `${idInnerMNC}.json`);
+  const clearMNC = clearMergeQuarantineByRecordedPath(innerMNC);
+  check("(M fixture sanity, no drift) clearing inner by repoPath reports wasQuarantined:true", clearMNC.wasQuarantined === true);
+  check("(M fixture sanity, no drift) inner's own latch file is deleted", !fs.existsSync(innerLatchPathMNC));
+  check("(M fixture sanity, no drift) outer's own latch file is still there", fs.existsSync(outerLatchPathMNC));
+  clearMergeQuarantine(outerMNC);
+}
+
+// ===================== (M-route) /clear-by-path {repoPath} is actually WIRED to clearMergeQuarantineByRecordedPath, via real HTTP (round 4, card abccee85) =====================
+// (M) above proves the helper function itself; this proves the gateway route actually calls it (not just
+// a module-level unit that nothing in production reaches).
+{
+  const { outer: outerMR, inner: innerMR } = makeNestedGitFixture("nestMR");
+  const idOuterMR = quarantineLatchIdFor(outerMR);
+  const outerLatchPathMR = path.join(MERGE_QUARANTINE_DIR, `${idOuterMR}.json`);
+  enterMergeQuarantine(innerMR, "b", "nested-inner (M-route)");
+  enterMergeQuarantine(outerMR, "b", "nested-outer (M-route)");
+  const idInnerMR = quarantineLatchIdFor(innerMR);
+  const innerLatchPathMR = path.join(MERGE_QUARANTINE_DIR, `${idInnerMR}.json`);
+  fs.rmSync(path.join(innerMR, ".git"), { recursive: true, force: true }); // the drift
+
+  const TMPM = mkdtempManaged("loom-mqcbp-gw-m-");
+  const PORTM = 46700 + (process.pid % 400);
+  const HM = { host: `127.0.0.1:${PORTM}`, origin: `http://127.0.0.1:${PORTM}`, "content-type": "application/json" };
+  const dbM = new Db(path.join(TMPM, "loom.db"));
+  const stubM = {};
+  const appM = await buildServer({
+    db: dbM, pty: stubM, sessions: stubM, mcp: stubM, orchMcp: stubM, platformMcp: stubM, auditMcp: stubM,
+    userAuditMcp: stubM, setupMcp: stubM, runMcp: stubM, control: stubM, usageStatus: stubM,
+  });
+  try {
+    const clearMR = await appM.inject({ method: "POST", url: "/internal/merge-quarantine/clear-by-path", headers: HM, payload: { repoPath: innerMR } });
+    check("(M-route) POST /clear-by-path {repoPath: inner} (drifted) → 200", clearMR.statusCode === 200);
+    check("(M-route) reports wasQuarantined:true", clearMR.json().wasQuarantined === true);
+    check("(M-route) THE ROUND-4 BUG, VIA THE ROUTE: inner's own latch file is deleted", !fs.existsSync(innerLatchPathMR));
+    check("(M-route) outer's own latch file is STILL there, never collaterally deleted via the route", fs.existsSync(outerLatchPathMR));
+  } finally {
+    await appM.close();
+    dbM.close();
+  }
+  clearMergeQuarantine(outerMR);
+}
+
+// ===================== (N) legacyQuarantineHashFor — byte-identical after the directPathIdentity extraction (round 4, card abccee85) =====================
+// legacyQuarantineHashFor isn't exported — exercised indirectly via reenterMergeQuarantinesAtBoot's own
+// legacy-hash matching (the same technique merge-quarantine-key-migration.mjs already uses), against a
+// hand-rolled replica of the OLD (pre-7673d096) key algorithm computed independently in THIS file. Two
+// registered repos so a hash MISMATCH (the refactor broke something) is actually discriminated: it would
+// fall through to the broad every-registered-repo fail-closed sweep and wrongly quarantine BOTH.
+//
+// Round 5 correction (Code Review of 2362064b, finding 2): repoN used to be a bare freshDir with NO
+// enclosing `.git` anywhere up to the filesystem root — `canonicalRepoLockKey(repoN)` (the WALKING,
+// current algorithm) then falls back to repoN's own direct realpath, the EXACT SAME value
+// `legacyQuarantineHashFor` (which NEVER walks) produces. The two algorithms were coincidentally
+// indistinguishable for this fixture, so this section could not actually discriminate an extraction bug —
+// it would pass identically whether or not `legacyQuarantineHashFor` secretly started walking too. Fixed
+// by nesting repoN (no `.git` of its own) inside an outer directory that DOES have one, so the fresh
+// (walking) key resolves to the OUTER directory while the legacy (direct) hash still hashes repoN itself —
+// genuinely different values, so a broken extraction now actually fails this section's own checks below.
+{
+  function oldHashForN(boundPath) {
+    const real = fs.realpathSync.native(boundPath);
+    const key = process.platform === "win32" ? real.toLowerCase() : real;
+    return createHash("sha256").update(key).digest("hex").slice(0, 24);
+  }
+  const repoNOuter = freshDir("repoN-outer");
+  fs.mkdirSync(path.join(repoNOuter, ".git"), { recursive: true }); // marks the OUTER dir as its own git root
+  const repoN = path.join(repoNOuter, "repoN-nested"); // no .git of its own — nested inside repoNOuter
+  fs.mkdirSync(repoN, { recursive: true });
+  const repoNOther = freshDir("repoNOther"); // registered too, but NOT referenced by the corrupt latch below
+  const legacyHashN = oldHashForN(repoN);
+  const freshHashN = createHash("sha256").update(canonicalRepoLockKey(repoN)).digest("hex").slice(0, 24);
+  check("(N precondition) THE FIX ITSELF: the fresh (walking) hash and the legacy (direct) hash are now DIFFERENT values, so this section can actually discriminate an extraction bug", freshHashN !== legacyHashN);
+  const legacyLatchPathN = path.join(MERGE_QUARANTINE_DIR, `${legacyHashN}.json`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(legacyLatchPathN, "{not valid json"); // corrupt — forces the hash-match branch, never a clean parse
+  check("(N precondition) a corrupt latch exists under the hand-rolled legacy hash", fs.existsSync(legacyLatchPathN));
+  check("(N precondition) neither repo reads as quarantined yet", !activeMergeQuarantineFor(repoN) && !activeMergeQuarantineFor(repoNOther));
+
+  reenterMergeQuarantinesAtBoot([repoN, repoNOther]);
+  check("(N) THE BYTE-IDENTICAL PROOF: boot narrowed the corrupt legacy-hash latch to repoN ONLY — production's own legacyQuarantineHashFor(repoN) equals this file's own hand-rolled replica", !!activeMergeQuarantineFor(repoN));
+  check("(N) negative control: the UNRELATED registered repo is NOT quarantined (a hash mismatch would have fallen through to the broad every-registered-repo fail-closed sweep and caught it too)", !activeMergeQuarantineFor(repoNOther));
+  try { fs.unlinkSync(legacyLatchPathN); } catch { /* best-effort — the repo's own latch now lives under the fresh hash */ }
+  clearMergeQuarantine(repoN);
+}
+
+// ===================== (P) TRACE ONLY — a pending entry's own orphanLatchFiles sweep gap (round 4, card abccee85) =====================
+// Card abccee85 item 5: "confirm or refute with a repro before fixing" — a REPRO, not a fix (the manager
+// files the follow-up card for the actual fix). A PASS-2-created fail-closed entry (an orphan latch
+// matching NO registered repo) persists NO `resolvedKey` (only the in-memory-only `armedKeys`, stripped
+// before writeMergeQuarantineLatch persists it) — so if that repo's OWN path later becomes unresolvable on
+// a SUBSEQUENT boot, it reloads as a PENDING entry (the `!resolvableNow && !entry.resolvedKey` gate in
+// reenterMergeQuarantinesAtBoot), still carrying its old orphanLatchFiles forward. Neither pending-removal
+// branch (clearMergeQuarantineByKey's pending filter, or clearMergeQuarantineLatchFile's pending-match
+// branch) ever looks at orphanLatchFiles — only the pending entry's own sourceFile is deleted.
+//
+// GOTCHA that cost real debugging time: calling `reenterMergeQuarantinesAtBoot` TWICE in THIS process does
+// NOT correctly simulate "two separate real daemon boots" for this scenario — boot 1's own write already
+// sits in THIS process's module-level `activeQuarantines` map, so a second in-process call never actually
+// reaches the pending branch at all; it just re-matches the stale boot-1 ACTIVE entry still resident at the
+// same key, and clears it via the (fully-swept) active path, which trivially "passes" for the wrong
+// reason. BOOT 2 (and the clear that follows it) must run in a GENUINELY SEPARATE child process — a fresh
+// module instance, a fresh empty `activeQuarantines` map — same technique as
+// `merge-quarantine-unresolvable-path.mjs`'s own `rebootInChildProcess`.
+{
+  const repoP = freshDir("repoP");
+  const orphanPathP = path.join(MERGE_QUARANTINE_DIR, `orphan-p-${sfx}.json`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(orphanPathP, "{not valid json"); // unmatched corrupt orphan latch
+  check("(P precondition) the unmatched corrupt orphan latch exists", fs.existsSync(orphanPathP));
+
+  // BOOT 1 (in-process is fine here — nothing pre-exists for repoP's key yet): PASS 2 fail-closes repoP
+  // (its only registered repo), referencing the orphan file.
+  reenterMergeQuarantinesAtBoot([repoP]);
+  const entryP1 = activeMergeQuarantineFor(repoP);
+  check("(P precondition) repoP is quarantined fail-closed after boot 1", !!entryP1);
+  check("(P precondition) the entry carries the orphan filename", (entryP1?.orphanLatchFiles ?? []).includes(path.basename(orphanPathP)));
+  check("(P precondition) the entry has NO resolvedKey persisted (PASS 2's own fail-closed shape)", entryP1?.resolvedKey === undefined);
+  const idP = quarantineLatchIdFor(repoP); // computed BEFORE repoP's own directory is removed below
+  const ownLatchPathP = path.join(MERGE_QUARANTINE_DIR, `${idP}.json`);
+  check("(P precondition) repoP's own latch file exists on disk", fs.existsSync(ownLatchPathP));
+
+  // Between boot 1 and boot 2, repoP's own directory disappears entirely (only its MERGE_QUARANTINE_DIR
+  // latch content and the orphan file remain — neither lives under repoP itself) AND repoP stops being a
+  // registered project (simulating the project being deleted/unregistered alongside its own directory) —
+  // this is what keeps PASS 2, in the child's own boot 2, from re-arming a fresh ACTIVE entry under the
+  // same key and masking the pending-only code path this section exists to exercise.
+  fs.rmSync(repoP, { recursive: true, force: true });
+  check("(P precondition) repoP no longer resolves on disk at all", !fs.existsSync(repoP));
+
+  // BOOT 2 + the clear, BOTH in one child process (so the clear sees the SAME pending entry boot 2 itself
+  // produced, never this process's own stale state).
+  const childScript = `
+    const { reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, clearMergeQuarantineLatchFile } =
+      await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([]); // repoP is no longer registered — PASS 2 cannot re-arm an active entry for it
+    const entry = activeMergeQuarantineFor(${JSON.stringify(repoP)});
+    const clearResult = clearMergeQuarantineLatchFile(${JSON.stringify(idP)});
+    process.stdout.write(JSON.stringify({
+      entryOrphanLatchFiles: entry?.orphanLatchFiles ?? null,
+      entryResolvedKey: entry?.resolvedKey ?? null,
+      clearResult,
+    }));
+  `;
+  const childOut = execFileSync(process.execPath, ["--input-type=module", "-e", childScript], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  }).toString();
+  const resultP = JSON.parse(childOut);
+
+  check("(P precondition, child boot 2) repoP is reported via the PENDING lazy-resolve (no resolvedKey, no active re-arm)", resultP.entryResolvedKey === null);
+  check("(P precondition, child boot 2) the PENDING entry still carries the orphan filename forward", (resultP.entryOrphanLatchFiles ?? []).includes(path.basename(orphanPathP)));
+  check("(P) clearing the pending entry by id (in the child) reports ok:true", resultP.clearResult?.ok === true);
+  check("(P) the pending entry's OWN latch/source file is gone", !fs.existsSync(ownLatchPathP));
+
+  // Informational — see this card's own instruction: confirm/refute, don't fix here. Never fails the suite.
+  if (fs.existsSync(orphanPathP)) {
+    console.log(
+      "SKIP  (P) THE TRACED GAP, CONFIRMED: the orphan latch file survives clearing the pending entry that " +
+      "referenced it (card abccee85 item 5, traced not fixed — a follow-up card owns the actual fix; see " +
+      "docs/decisions/abccee85-recorded-path-clear-immune-to-key-drift.md)."
+    );
+  } else {
+    console.log("SKIP  (P) REFUTED this run: the orphan latch file was swept after all when the pending entry referencing it was cleared.");
+  }
+  try { fs.unlinkSync(orphanPathP); } catch { /* best-effort cleanup regardless of outcome */ }
+}
+
+// ===================== (Q) clearMergeQuarantineByRecordedPath — the FALLBACK recompute lifts an ENCLOSING repo's quarantine for a PENDING entry (round 5, Code Review of 2362064b, finding 1) =====================
+// When no ACTIVE entry's stored repoPath matches the given identity, the old fallback called
+// clearMergeQuarantineReporting(repoPath) directly, which recomputes canonicalRepoLockKey(repoPath) FRESH.
+// A PENDING entry's own repoPath typically does not resolve on disk AT ALL, so that fresh recompute walks
+// UP past it to the nearest EXISTING ancestor — which can be an ENCLOSING repo that is itself genuinely,
+// separately, ACTIVELY quarantined. The old code then lifted that OUTER active quarantine while reporting
+// wasQuarantined:true, leaving the actual (pending, inner) target fully intact. Reproduced with a REAL
+// child-process boot (same technique as (P) — a genuinely separate module instance/empty activeQuarantines
+// map), mirroring the reviewer's own repro: an outer repo quarantined WITH a resolvedKey, plus an inner
+// latch with NO resolvedKey at a path that never exists on disk.
+{
+  const outerQ = freshDir("outerQ");
+  fs.mkdirSync(path.join(outerQ, ".git"), { recursive: true });
+  const innerQ = path.join(outerQ, "inner-never-created-q"); // deliberately never created on disk
+  check("(Q precondition) innerQ does not exist on disk at all", !fs.existsSync(innerQ));
+
+  // Hand-write outer's own clean, already-correctly-keyed ACTIVE latch.
+  const outerKeyQ = canonicalRepoLockKey(outerQ);
+  const outerHashQ = hashKey(outerKeyQ);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const outerLatchPathQ = path.join(MERGE_QUARANTINE_DIR, `${outerHashQ}.json`);
+  fs.writeFileSync(outerLatchPathQ, JSON.stringify({
+    repoPath: outerQ, branch: "nested-outer (Q)", reason: "round-5 fallback-drift repro outer (finding 1)",
+    enteredAt: Date.now(), tokens: ["t-outer-q"], resolvedKey: outerKeyQ,
+  }, null, 2) + "\n");
+
+  // Hand-write inner's own PENDING (no resolvedKey, unresolvable path) latch under an unrelated filename.
+  const innerSourceFileQ = `pending-inner-q-${sfx}.json`;
+  const innerLatchPathQ = path.join(MERGE_QUARANTINE_DIR, innerSourceFileQ);
+  fs.writeFileSync(innerLatchPathQ, JSON.stringify({
+    repoPath: innerQ, branch: "(unknown — boot could not resolve which repo/branch this protects)",
+    reason: "round-5 fallback-drift repro inner (finding 1) — never resolvable", enteredAt: Date.now(), tokens: ["t-inner-q"],
+  }, null, 2) + "\n");
+
+  const childScriptQ = `
+    const { reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, listActiveMergeQuarantines, clearMergeQuarantineByRecordedPath } =
+      await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([]);
+    const beforeOuter = !!activeMergeQuarantineFor(${JSON.stringify(outerQ)});
+    const beforePendingInner = listActiveMergeQuarantines().some((e) => e.repoPath === ${JSON.stringify(innerQ)});
+    const clearResult = clearMergeQuarantineByRecordedPath(${JSON.stringify(innerQ)});
+    const afterOuter = !!activeMergeQuarantineFor(${JSON.stringify(outerQ)});
+    const afterPendingInner = listActiveMergeQuarantines().some((e) => e.repoPath === ${JSON.stringify(innerQ)});
+    process.stdout.write(JSON.stringify({ beforeOuter, beforePendingInner, clearResult, afterOuter, afterPendingInner }));
+  `;
+  const childOutQ = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptQ], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  }).toString();
+  const resultQ = JSON.parse(childOutQ);
+
+  check("(Q precondition, child) outer is active before the clear", resultQ.beforeOuter === true);
+  check("(Q precondition, child) inner is pending before the clear", resultQ.beforePendingInner === true);
+  check("(Q) clearing by inner's (pending) stored repoPath reports wasQuarantined:true", resultQ.clearResult?.wasQuarantined === true);
+  check("(Q) THE ROUND-5 BUG: outer's genuinely separate active quarantine is NEVER collaterally lifted", resultQ.afterOuter === true);
+  check("(Q) and outer's own latch file is STILL on disk, never collaterally deleted", fs.existsSync(outerLatchPathQ));
+  check("(Q) the inner pending entry is actually gone", resultQ.afterPendingInner === false);
+  check("(Q) and inner's own source latch file is deleted", !fs.existsSync(innerLatchPathQ));
+
+  clearMergeQuarantine(outerQ);
+  check("(Q cleanup) outer's own latch file is now gone too", !fs.existsSync(outerLatchPathQ));
+}
+
+// ===================== (R) clearMergeQuarantineByRecordedPath — clears EVERY matching active entry, not just the first (round 5, Code Review of 2362064b, finding 3) =====================
+// Two distinct active entries, under two distinct keys, can come to share ONE stored repoPath: a repo
+// raised once before an enclosing `.git` existed (keyed to itself) and raised AGAIN after one appears
+// nearby (keyed to the new enclosing toplevel) never merge into a single entry — `enterMergeQuarantine`
+// only merges when the CURRENT key already has an existing entry. The old loop returned on the FIRST
+// active match it found (Map iteration order), leaving any OTHER matching entry fully armed.
+{
+  const parentR = freshDir("repoR-parent");
+  const repoR = path.join(parentR, "repo");
+  fs.mkdirSync(repoR, { recursive: true });
+
+  enterMergeQuarantine(repoR, "b", "first-raise, no enclosing git yet (R)");
+  const keyR1 = canonicalRepoLockKey(repoR);
+  const idR1 = hashKey(keyR1);
+  const latchPathR1 = path.join(MERGE_QUARANTINE_DIR, `${idR1}.json`);
+  check("(R precondition) repoR's first raise has its own latch file on disk", fs.existsSync(latchPathR1));
+
+  fs.mkdirSync(path.join(parentR, ".git"), { recursive: true }); // the drift — parentR becomes repoR's new toplevel
+  const keyR2 = canonicalRepoLockKey(repoR);
+  check("(R precondition) repoR's key actually changed after the drift", keyR2 !== keyR1);
+
+  enterMergeQuarantine(repoR, "b", "second-raise, same repoPath, DIFFERENT key (R)");
+  const idR2 = hashKey(keyR2);
+  const latchPathR2 = path.join(MERGE_QUARANTINE_DIR, `${idR2}.json`);
+  check("(R precondition) repoR's second raise has its OWN, separate latch file under the new key", fs.existsSync(latchPathR2) && idR2 !== idR1);
+  check("(R precondition) TWO distinct active entries now share repoR's exact stored repoPath", listActiveMergeQuarantines().filter((e) => e.repoPath === repoR).length === 2);
+
+  const clearR = clearMergeQuarantineByRecordedPath(repoR);
+  check("(R) clearing by repoR's stored repoPath reports wasQuarantined:true", clearR.wasQuarantined === true);
+  check("(R) THE ROUND-5 BUG: BOTH matching active entries are cleared, not just the first one found", listActiveMergeQuarantines().filter((e) => e.repoPath === repoR).length === 0);
+  check("(R) the first raise's own latch file is gone", !fs.existsSync(latchPathR1));
+  check("(R) the second raise's own latch file is ALSO gone", !fs.existsSync(latchPathR2));
+}
+
+// ===================== (S) clearMergeQuarantineByKey's pending-sweep — REVERSE drift, reachable with NO given-string drift at all (round 5, Code Review of 2362064b, finding 4) =====================
+// clearMergeQuarantineByKey's own pending-sweep used to match a pending entry by a FRESH
+// canonicalRepoLockKey(p.entry.repoPath) recompute === the key being cleared — the SAME drift class as (Q)
+// above, but reachable through the ORDINARY clearMergeQuarantine helper (used by e.g. the project-resolved
+// `/clear` route and the in-process auto-clear-by-token path) with NO drift in the CALLER's own address at
+// all: the caller names OUTER's own exact, never-drifted repoPath, and an UNRELATED pending INNER entry
+// (whose own path never resolves, so its fresh recompute walks UP to OUTER's key) still gets silently
+// swept as collateral.
+{
+  const outerS = freshDir("outerS");
+  fs.mkdirSync(path.join(outerS, ".git"), { recursive: true });
+  const innerS = path.join(outerS, "inner-never-created-s"); // deliberately never created on disk
+  check("(S precondition) innerS does not exist on disk at all", !fs.existsSync(innerS));
+
+  // Hand-write OUTER's own clean, already-correctly-keyed ACTIVE latch — NOT via enterMergeQuarantine,
+  // which has its own separate pending-merge check (decision 54054c01) that would otherwise consume the
+  // pending latch below before this test ever reaches the clearMergeQuarantineByKey code path under test.
+  const outerKeyS = canonicalRepoLockKey(outerS);
+  const outerHashS = hashKey(outerKeyS);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const outerLatchPathS = path.join(MERGE_QUARANTINE_DIR, `${outerHashS}.json`);
+  fs.writeFileSync(outerLatchPathS, JSON.stringify({
+    repoPath: outerS, branch: "outer (S)", reason: "round-5 reverse-drift repro outer (finding 4)",
+    enteredAt: Date.now(), tokens: ["t-outer-s"], resolvedKey: outerKeyS,
+  }, null, 2) + "\n");
+
+  // Hand-write INNER's own PENDING (no resolvedKey, unresolvable path) latch under an unrelated filename.
+  const innerSourceFileS = `pending-inner-s-${sfx}.json`;
+  const innerLatchPathS = path.join(MERGE_QUARANTINE_DIR, innerSourceFileS);
+  fs.writeFileSync(innerLatchPathS, JSON.stringify({
+    repoPath: innerS, branch: "(unknown — boot could not resolve which repo/branch this protects)",
+    reason: "round-5 reverse-drift repro inner (finding 4) — never resolvable", enteredAt: Date.now(), tokens: ["t-inner-s"],
+  }, null, 2) + "\n");
+
+  // Round 6 (delta Code Review of 810e485b, finding 1, BLOCKING): the post-clear check now asserts the
+  // USER-VISIBLE outcome via `assertRepoNotQuarantined`, not the latch file's own on-disk presence. Before
+  // this round, `activeMergeQuarantineFor`'s own lazy pending-resolve ALSO recomputed `canonicalRepoLockKey`
+  // on the pending entry's repoPath (the same drift class (Q)/(S) exist to close) — so even though
+  // `clearMergeQuarantineByKey` genuinely lifted outer's own entry and deleted its latch file, a QUERY for
+  // outer right afterward still walked innerS's still-pending, still-unresolvable path UP to outer's key
+  // and misreported outer as still quarantined, FOREVER (clear and query had diverged). Fixed by matching
+  // the pending lookup there via `directPathIdentity` too — see the decision record, round 6.
+  const childScriptS = `
+    const { reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, listActiveMergeQuarantines, clearMergeQuarantine, assertRepoNotQuarantined } =
+      await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([]);
+    const beforeOuter = !!activeMergeQuarantineFor(${JSON.stringify(outerS)});
+    const beforePendingInner = listActiveMergeQuarantines().some((e) => e.repoPath === ${JSON.stringify(innerS)});
+    clearMergeQuarantine(${JSON.stringify(outerS)});
+    const afterOuterCheck = assertRepoNotQuarantined(${JSON.stringify(outerS)});
+    const afterPendingInner = listActiveMergeQuarantines().some((e) => e.repoPath === ${JSON.stringify(innerS)});
+    process.stdout.write(JSON.stringify({ beforeOuter, beforePendingInner, afterOuterCheck, afterPendingInner }));
+  `;
+  const childOutS = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptS], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  }).toString();
+  const resultS = JSON.parse(childOutS);
+
+  check("(S precondition, child) outer is active before the clear", resultS.beforeOuter === true);
+  check("(S precondition, child) inner is pending before the clear", resultS.beforePendingInner === true);
+  check("(S) clearing OUTER by its own exact, never-drifted repoPath deletes its own latch file", !fs.existsSync(outerLatchPathS));
+  check("(S) THE ROUND-6 BLOCKING BUG: the USER-VISIBLE outcome (assertRepoNotQuarantined) agrees outer is genuinely unblocked, not just the latch file", resultS.afterOuterCheck.ok === true);
+  check("(S) THE REVERSE-DRIFT BUG: clearing OUTER does NOT collaterally sweep the unrelated pending INNER entry", resultS.afterPendingInner === true);
+  check("(S) and inner's own source latch file is still on disk, never collaterally deleted", fs.existsSync(innerLatchPathS));
+
+  try { fs.unlinkSync(innerLatchPathS); } catch { /* best-effort cleanup */ }
+}
+
+// ===================== (T) enterMergeQuarantine's pending-merge check — a FRESH raise must never adopt an unrelated pending entry's identity (round 6, Code Review of 810e485b, finding 2, MAJOR, pre-existing) =====================
+// `enterMergeQuarantine`'s own pending-merge check (decision 54054c01) used to match by a FRESH
+// `canonicalRepoLockKey(p.entry.repoPath) === key` recompute, the SAME drift class as (Q)/(S) above.
+// `unionQuarantineEntries` keeps the OLDER identity's `repoPath` — so a brand-new raise on OUTER, with an
+// unrelated, still-pending, never-resolvable INNER latch recomputing to the SAME key, would silently adopt
+// INNER's repoPath for OUTER's own live, real unconfirmed-kill quarantine. A later clear-by-path targeting
+// INNER's own (genuinely unrelated) repoPath would then lift OUTER's real quarantine.
+{
+  const outerT = freshDir("outerT");
+  fs.mkdirSync(path.join(outerT, ".git"), { recursive: true });
+  const innerT = path.join(outerT, "inner-never-created-t"); // deliberately never created on disk
+
+  // Hand-write INNER's own PENDING (no resolvedKey, unresolvable path) latch, written BEFORE outer's raise
+  // below so it is unambiguously the OLDER entry (unionQuarantineEntries picks the older identity) — the
+  // exact shape that let the bug win every time it fired. NOTE: `branch` must NOT be
+  // PLACEHOLDER_BRANCH_CORRUPT/PLACEHOLDER_BRANCH_UNRESOLVED — isPlaceholderEntryShape would otherwise
+  // flag this as a generic boot-placeholder and unionQuarantineEntries' OWN "never let a placeholder win
+  // identity" rule (decision 92c645cc) masks this test's actual bug entirely (caught mid-development: with
+  // that text, the identity check below passed even on the unfixed code, for the wrong reason).
+  const innerSourceFileT = `pending-inner-t-${sfx}.json`;
+  const innerLatchPathT = path.join(MERGE_QUARANTINE_DIR, innerSourceFileT);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(innerLatchPathT, JSON.stringify({
+    repoPath: innerT, branch: "feature/unrelated-raise-on-inner",
+    reason: "round-6 cross-identity-merge repro inner (finding 2) — never resolvable", enteredAt: Date.now() - 60_000, tokens: ["t-inner-t"],
+  }, null, 2) + "\n");
+
+  const childScriptT = `
+    const { reenterMergeQuarantinesAtBoot, enterMergeQuarantine, activeMergeQuarantineFor, assertRepoNotQuarantined, clearMergeQuarantineByRecordedPath } =
+      await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([]);
+    enterMergeQuarantine(${JSON.stringify(outerT)}, "real-outer-branch", "unconfirmed-kill on outer (T)");
+    const outerEntry = activeMergeQuarantineFor(${JSON.stringify(outerT)});
+    const outerRepoPathAfterRaise = outerEntry ? outerEntry.repoPath : null;
+    clearMergeQuarantineByRecordedPath(${JSON.stringify(innerT)});
+    const outerCheckAfterClearingInner = assertRepoNotQuarantined(${JSON.stringify(outerT)});
+    process.stdout.write(JSON.stringify({ outerRepoPathAfterRaise, outerCheckAfterClearingInner }));
+  `;
+  const childOutT = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptT], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  }).toString();
+  const resultT = JSON.parse(childOutT);
+
+  check("(T) THE ROUND-6 MAJOR BUG: a fresh raise on OUTER carries OUTER's own repoPath, never adopting the unrelated pending INNER's identity", resultT.outerRepoPathAfterRaise === outerT);
+  check("(T) and clearing INNER by its own stored repoPath leaves OUTER's real, independent quarantine fully armed", resultT.outerCheckAfterClearingInner.ok === false);
+
+  try { fs.unlinkSync(innerLatchPathT); } catch { /* best-effort cleanup — may already be gone if the bug reproduced */ }
+}
+
+// ===================== (U) clearMergeQuarantineByRecordedPath's pending branch drops EVERY identity-matching pending entry, not just the first (round 6, Code Review of 810e485b, item 4) =====================
+// Consistent with clearMergeQuarantineByKey's own pending filter (which already dropped every match): more
+// than one pending latch can share one stored identity (e.g. duplicate/stale residue), and the old
+// `findIndex` + single-splice shape here left every match after the first fully intact.
+{
+  const parentU = freshDir("innerU-parent");
+  const innerU = path.join(parentU, "inner-never-created-u"); // deliberately never created on disk
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const sourceFileU1 = `pending-inner-u1-${sfx}.json`;
+  const sourceFileU2 = `pending-inner-u2-${sfx}.json`;
+  const pathU1 = path.join(MERGE_QUARANTINE_DIR, sourceFileU1);
+  const pathU2 = path.join(MERGE_QUARANTINE_DIR, sourceFileU2);
+  const bodyU = (tag) => JSON.stringify({
+    repoPath: innerU, branch: "(unknown — boot could not resolve which repo/branch this protects)",
+    reason: `round-6 duplicate-pending repro ${tag} (item 4) — never resolvable`, enteredAt: Date.now(), tokens: [`t-${tag}`],
+  }, null, 2) + "\n";
+  fs.writeFileSync(pathU1, bodyU("u1"));
+  fs.writeFileSync(pathU2, bodyU("u2"));
+
+  reenterMergeQuarantinesAtBoot([]);
+  const pendingCountBeforeU = listActiveMergeQuarantines().filter((e) => e.repoPath === innerU).length;
+  check("(U precondition) TWO distinct pending entries share the exact same stored repoPath", pendingCountBeforeU === 2);
+  check("(U precondition) both source files exist on disk", fs.existsSync(pathU1) && fs.existsSync(pathU2));
+
+  const clearU = clearMergeQuarantineByRecordedPath(innerU);
+  check("(U) clearing by the shared stored repoPath reports wasQuarantined:true", clearU.wasQuarantined === true);
+  check("(U) THE ITEM-4 BUG: BOTH pending entries are dropped, not just the first one found", listActiveMergeQuarantines().filter((e) => e.repoPath === innerU).length === 0);
+  check("(U) the first duplicate's source file is gone", !fs.existsSync(pathU1));
+  check("(U) the SECOND duplicate's source file is ALSO gone", !fs.existsSync(pathU2));
+}
+
+// ===================== (V) assertRepoNotQuarantined — names the BLOCKING entry's own repoPath/latch id, points at /clear-by-path (round 6, Code Review of 810e485b, item 3) =====================
+{
+  // --- (V1) ordinary case: the blocking entry IS the one asked about ---
+  const repoV = freshDir("repoV");
+  enterMergeQuarantine(repoV, "branch-v", "reason-v (V1)");
+  const checkV1 = assertRepoNotQuarantined(repoV);
+  check("(V1 precondition) repoV reads as quarantined", checkV1.ok === false);
+  const latchIdV1 = quarantineLatchIdFor(repoV);
+  check("(V1) the refusal reason names the blocking entry's own repoPath", checkV1.ok === false && checkV1.reason.includes(repoV));
+  check("(V1) the refusal reason names the blocking entry's own latch id", checkV1.ok === false && checkV1.reason.includes(latchIdV1));
+  check("(V1) the refusal reason points at /clear-by-path (not just the project-resolved /clear, which can be a dead end)", checkV1.ok === false && checkV1.reason.includes("/clear-by-path"));
+  clearMergeQuarantine(repoV);
+
+  // --- (V2) the blocking entry's repoPath DIFFERS from the one asked about: querying a SUBDIRECTORY of a
+  // quarantined repo returns the entry keyed by the repo's own ROOT (decision 7673d096 — two paths of one
+  // physical repo collapse onto one entry, by design) — the reason must name the ROOT, not the subdir. ---
+  const repoRootV2 = freshDir("repoRootV2");
+  fs.mkdirSync(path.join(repoRootV2, ".git"), { recursive: true });
+  const subdirV2 = path.join(repoRootV2, "sub");
+  fs.mkdirSync(subdirV2, { recursive: true });
+  enterMergeQuarantine(repoRootV2, "branch-v2", "reason-v2 (V2)");
+  check("(V2 precondition) the subdir and its repo root are genuinely different strings", subdirV2 !== repoRootV2);
+  const checkV2 = assertRepoNotQuarantined(subdirV2);
+  check("(V2 precondition) querying the SUBDIRECTORY still reads as quarantined (same canonical key)", checkV2.ok === false);
+  check("(V2) THE ITEM-3 FIX: the reason names the BLOCKING entry's own repoPath (the repo root), not the subdir that was asked about", checkV2.ok === false && checkV2.reason.includes(repoRootV2) && !checkV2.reason.includes(subdirV2));
+  clearMergeQuarantine(repoRootV2);
+}
+
+// ===================== (W) partitionQuarantinesByRegistration — a PENDING entry must not be mis-registered via an enclosing registered repo's key (round 6, Code Review of 810e485b — additional finding from the grep audit) =====================
+{
+  const registeredOuterW = freshDir("registeredOuterW");
+  fs.mkdirSync(path.join(registeredOuterW, ".git"), { recursive: true });
+  const innerW = path.join(registeredOuterW, "inner-never-created-w"); // deliberately never created on disk
+
+  const sourceFileW = `pending-inner-w-${sfx}.json`;
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const pathW = path.join(MERGE_QUARANTINE_DIR, sourceFileW);
+  fs.writeFileSync(pathW, JSON.stringify({
+    repoPath: innerW, branch: "(unknown — boot could not resolve which repo/branch this protects)",
+    reason: "round-6 pending-registration repro (additional finding) — never resolvable, unrelated to the registered outer repo",
+    enteredAt: Date.now(), tokens: ["t-w"],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([registeredOuterW]);
+  const entriesW = listActiveMergeQuarantines();
+  const innerEntryW = entriesW.find((e) => e.repoPath === innerW);
+  check("(W precondition) innerW is loaded as a PENDING entry", !!innerEntryW);
+  check("(W precondition) a fresh recompute of innerW's key WOULD coincidentally equal registeredOuterW's own key (the hazard this test exercises)", canonicalRepoLockKey(innerW) === canonicalRepoLockKey(registeredOuterW));
+
+  const { registered: registeredW, orphaned: orphanedW } = partitionQuarantinesByRegistration(entriesW, [registeredOuterW]);
+  check("(W) THE ADDITIONAL FINDING: the pending INNER entry is classified as orphaned, never wrongly registered via the enclosing repo's key", orphanedW.includes(innerEntryW) && !registeredW.includes(innerEntryW));
+
+  try { fs.unlinkSync(pathW); } catch { /* best-effort cleanup */ }
+}
+
+// ===================== (X) clearMergeQuarantineByRecordedPath — the LAST-RESORT fallback no longer recomputes from the given string (round 7, card abccee85) =====================
+// Once neither an ACTIVE nor a PENDING entry's stored repoPath matches at all, the old fallback called
+// clearMergeQuarantineReporting(repoPath) directly, recomputing canonicalRepoLockKey(repoPath) FRESH. A
+// typo'd/stale path that was NEVER itself quarantined (no entry anywhere — active or pending — stores it)
+// can still walk UP past its own non-existent leaf to a real, genuinely-quarantined ENCLOSING repo and
+// collaterally lift THAT unrelated quarantine while reporting wasQuarantined:true — the same drift class
+// round 5/6 already closed for the pending-entry case, reached here through the "nothing matches at all"
+// door instead.
+{
+  const outerX = freshDir("outerX");
+  fs.mkdirSync(path.join(outerX, ".git"), { recursive: true });
+  enterMergeQuarantine(outerX, "outer-x-branch", "round-7 last-resort-fallback repro (X)");
+  const typoX = path.join(outerX, "typo-path-never-quarantined-x"); // never created, never raised against
+  check("(X precondition) typoX does not exist on disk", !fs.existsSync(typoX));
+  check("(X precondition) outer is active before the clear attempt", assertRepoNotQuarantined(outerX).ok === false);
+
+  const clearX = clearMergeQuarantineByRecordedPath(typoX);
+  check("(X) THE ROUND-7 BUG: clearing a never-quarantined (typo'd) path reports wasQuarantined:false, never a collateral lift", clearX.wasQuarantined === false);
+  check("(X) the not-found reason names GET /internal/merge-quarantine/list", typeof clearX.reason === "string" && clearX.reason.includes("/internal/merge-quarantine/list"));
+  check("(X) outer's genuinely separate, real quarantine is NEVER collaterally lifted", assertRepoNotQuarantined(outerX).ok === false);
+
+  clearMergeQuarantine(outerX);
+  check("(X cleanup) outer is cleared for real afterward", assertRepoNotQuarantined(outerX).ok === true);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — /internal/merge-quarantine/clear-by-path (repoPath AND id addressing, exactly-one-of validation, path-traversal id rejection), GET /internal/merge-quarantine/list (id/registered projection), the shared clearMergeQuarantineReporting helper (no drift between /clear and /clear-by-path), partitionQuarantinesByRegistration / db.listAllRegisteredRepoPaths (live + multi-repo + archived registration, never swallowing a registered+quarantined repo into the orphan bucket, and a registered-path spelling variant), clearMergeQuarantineLatchFile's round-2 fixes (a dual-armed entry's real file, and an orphanLatchFiles sweep, both actually cleared by id), quarantineLatchFileIdsFor's round-3 real-file-first ordering, and clearMergeQuarantineLatchFile's round-3 key-addressed clear (immune to key drift between match and act) all behave as designed (card c0be9bf9)."
+  ? "\n✅ ALL PASS — /internal/merge-quarantine/clear-by-path (repoPath AND id addressing, exactly-one-of validation, path-traversal id rejection), GET /internal/merge-quarantine/list (id/registered projection, incl. a dual-armed entry's own id/ids BEFORE it's cleared), the shared clearMergeQuarantineReporting helper (no drift between /clear and /clear-by-path), partitionQuarantinesByRegistration / db.listAllRegisteredRepoPaths (live + multi-repo + archived registration, never swallowing a registered+quarantined repo into the orphan bucket, and a registered-path spelling variant), clearMergeQuarantineLatchFile's round-2/3 fixes, quarantineLatchFileIdsFor's round-3 real-file-first ordering, clearMergeQuarantineByRecordedPath's round-4/5 stored-repoPath-addressed clear (the `{repoPath}` form's own immunity to key drift, clearing every matching active entry, and the pending-fallback drift) and legacyQuarantineHashFor's byte-identical behavior, PLUS round 6's governing-rule fixes — pending entries are matched by stored directPathIdentity, never a freshly re-walked canonicalRepoLockKey, at every site: (T) enterMergeQuarantine's pending-merge no longer adopts an unrelated pending entry's identity for a fresh raise, (U) clearMergeQuarantineByRecordedPath's pending branch drops EVERY identity-matching pending entry, (V) assertRepoNotQuarantined names the BLOCKING entry's own repoPath/latch id and points at /clear-by-path, and (W) partitionQuarantinesByRegistration no longer mis-registers a pending entry via an enclosing repo's key — all behave as designed (cards c0be9bf9, abccee85). Section (P) is a card-abccee85-item-5 REPRO (trace only, informational, never fails this suite). Round 7: (X) clearMergeQuarantineByRecordedPath's own last-resort fallback no longer recomputes a fresh key from a never-quarantined (typo'd) given path — it reports not-found instead of collaterally lifting an unrelated enclosing repo's real quarantine."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

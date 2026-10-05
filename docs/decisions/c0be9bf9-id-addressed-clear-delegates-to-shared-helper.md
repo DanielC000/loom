@@ -45,8 +45,9 @@ so the clear can never drift onto a different key than the one the id actually n
 
 Test: `merge-quarantine-clear-by-path.mjs` section (L) — a repo nested inside another git repo (its own
 `.git`), both quarantined, the inner's own `.git` removed (the drift), then cleared by the INNER's id.
-Asserts the inner entry is actually cleared and the outer entry is untouched. A negative control (the
-identical fixture with NO drift) proves the assertion isn't vacuously true for every shape — the
+Asserts the inner entry is actually cleared and the outer entry is untouched. A fixture-sanity check (the
+identical fixture with NO drift — labeled "(L fixture sanity, no drift)" since card `abccee85`, round 4:
+it doesn't discriminate the bug, so "negative control" overstated what it proves) shows the
 inner-cleared/outer-armed outcome holds either way, but only the drifted case can ever manifest the round-3
 bug; without the drift, round 1/2's own code already passed this shape too.
 
@@ -59,6 +60,12 @@ file, not the real one. **Fix:** the function now sorts its id list so an id wit
 first. The function's own doc comment, and `gateway/server.ts`'s `/list` route comment, both previously
 implied every returned id "resolves to a real file" — corrected to state only `ids[0]` is guaranteed that,
 not the whole array.
+
+**Round 4 correction (card `abccee85`):** even that narrower claim over-stated it — `ids[0]` names a real
+file only WHENEVER any armed key has one; if the durable write itself failed (see
+`writeMergeQuarantineLatch`), no armed key may have a file at all, and `ids[0]` is then just whichever key
+happened to be first. Both doc comments (and the one above) are now worded that way. See decision
+`abccee85` for the repoPath-form key-drift fix from the same round.
 
 Test: `merge-quarantine-clear-by-path.mjs` section (I) (reusing its existing dual-armed fixture, no new
 fixture needed) now also asserts `quarantineLatchFileIdsFor(dualEntry)[0] === realHash` — the id with the

@@ -571,7 +571,7 @@ function describeBranchRetained(branch: string, assembledTip: string | null, liv
   // plainly rather than falling through to the tip-comparison wording below, which reads as a git-read
   // failure and gives no hint that a human REST clear is what's actually needed.
   if (reason === "quarantined") {
-    return `${branch}: the canonical repo is QUARANTINED — NOT finalized; branch and worktree kept, worker kept (${phase === "pre-stop" ? "live" : "stopped"}). A human must clear it: POST /internal/merge-quarantine/clear`;
+    return `${branch}: the canonical repo is QUARANTINED — NOT finalized; branch and worktree kept, worker kept (${phase === "pre-stop" ? "live" : "stopped"}). A human must clear it: GET /internal/merge-quarantine/list, then POST /internal/merge-quarantine/clear-by-path (the project-resolved /clear works only if a registered project's repo resolves to this entry)`;
   }
   const what = liveTip && assembledTip
     ? `${branch} advanced after the batch assembled it (assembled ${assembledTip.slice(0, 8)}, now ${liveTip.slice(0, 8)})`
@@ -589,7 +589,7 @@ function describeSoloRetained(branch: string, landedTip: string | undefined, liv
   // Round 6, item #10: same reasoning as describeBranchRetained's identical branch — a QUARANTINED
   // finalize is a distinct, actionable cause; don't bury it under generic tip-comparison wording.
   if (reason === "quarantined") {
-    return `${branch}: the canonical repo is QUARANTINED — NOT finalized: branch and worktree kept, no task move, no merge_done. A human must clear it: POST /internal/merge-quarantine/clear`;
+    return `${branch}: the canonical repo is QUARANTINED — NOT finalized: branch and worktree kept, no task move, no merge_done. A human must clear it: GET /internal/merge-quarantine/list, then POST /internal/merge-quarantine/clear-by-path (the project-resolved /clear works only if a registered project's repo resolves to this entry)`;
   }
   const what = liveTip && landedTip
     ? `${branch} advanced after this merge landed (landed ${landedTip.slice(0, 8)}, now ${liveTip.slice(0, 8)}); the later commit(s) are NOT on main and were never gated or reviewed by this merge`
@@ -1495,7 +1495,7 @@ function worktreeGcWarning(outcome: "wedged" | "left-on-disk" | "needs-human-ski
       // check passed but BEFORE this removal call ran) — finalizeMerge's own check normally catches this
       // far earlier and never reaches gcWorktreeDir at all; this case exists for completeness, not as the
       // common path. "The merge itself landed successfully" is NOT asserted here — it may not have.
-      return `worktree ${worktreePath} was NOT removed — the canonical repo became QUARANTINED (an earlier merge's git process tree could not be confirmed dead) in the brief window around this operation. Nothing here was touched further. Once the quarantine is cleared (auto-clears, or POST /internal/merge-quarantine/clear), re-run worker_merge_confirm to finish cleanup.`;
+      return `worktree ${worktreePath} was NOT removed — the canonical repo became QUARANTINED (an earlier merge's git process tree could not be confirmed dead) in the brief window around this operation. Nothing here was touched further. Once the quarantine is cleared (auto-clears, or see GET /internal/merge-quarantine/list then POST /internal/merge-quarantine/clear-by-path — the project-resolved /clear works only if a registered project's repo resolves to this entry), re-run worker_merge_confirm to finish cleanup.`;
   }
 }
 
