@@ -537,15 +537,17 @@ function hashKey(key) {
   clearMergeQuarantine(repoN);
 }
 
-// ===================== (P) TRACE ONLY — a pending entry's own orphanLatchFiles sweep gap (round 4, card abccee85) =====================
-// Card abccee85 item 5: "confirm or refute with a repro before fixing" — a REPRO, not a fix (the manager
-// files the follow-up card for the actual fix). A PASS-2-created fail-closed entry (an orphan latch
-// matching NO registered repo) persists NO `resolvedKey` (only the in-memory-only `armedKeys`, stripped
-// before writeMergeQuarantineLatch persists it) — so if that repo's OWN path later becomes unresolvable on
-// a SUBSEQUENT boot, it reloads as a PENDING entry (the `!resolvableNow && !entry.resolvedKey` gate in
-// reenterMergeQuarantinesAtBoot), still carrying its old orphanLatchFiles forward. Neither pending-removal
-// branch (clearMergeQuarantineByKey's pending filter, or clearMergeQuarantineLatchFile's pending-match
-// branch) ever looks at orphanLatchFiles — only the pending entry's own sourceFile is deleted.
+// ===================== (P) a pending entry's own orphanLatchFiles sweep gap — now FIXED (card 6237bef6, traced by round 4's abccee85) =====================
+// abccee85 item 5 only confirmed this with a REPRO (deliberately not a fix — see that card's own decision
+// record, "Traced, not fixed"). Card 6237bef6 closes it: a PASS-2-created fail-closed entry (an orphan
+// latch matching NO registered repo) persists NO `resolvedKey` (only the in-memory-only `armedKeys`,
+// stripped before writeMergeQuarantineLatch persists it) — so if that repo's OWN path later becomes
+// unresolvable on a SUBSEQUENT boot, it reloads as a PENDING entry (the `!resolvableNow && !entry.resolvedKey`
+// gate in reenterMergeQuarantinesAtBoot), still carrying its old orphanLatchFiles forward. All THREE
+// pending-removal sites (clearMergeQuarantineByKey's pending filter, clearMergeQuarantineLatchFile's
+// pending-match branch — both below — and clearMergeQuarantineByRecordedPath's own pending branch, (P2)
+// below, which abccee85's own trace never named) now sweep a cleared pending entry's own orphanLatchFiles
+// too, via the shared `sweepOrphanLatchFileIfUnreferenced` helper.
 //
 // GOTCHA that cost real debugging time: calling `reenterMergeQuarantinesAtBoot` TWICE in THIS process does
 // NOT correctly simulate "two separate real daemon boots" for this scenario — boot 1's own write already
@@ -598,24 +600,242 @@ function hashKey(key) {
   const childOut = execFileSync(process.execPath, ["--input-type=module", "-e", childScript], {
     env: { ...process.env, LOOM_HOME: loomHome },
   }).toString();
-  const resultP = JSON.parse(childOut);
+  // The module's own boot-time/clear-time console.log (e.g. "deleted orphan latch...") shares stdout with
+  // our deliberate final write — only the LAST line is ever our own JSON.stringify payload.
+  const resultP = JSON.parse(childOut.trim().split("\n").pop());
 
   check("(P precondition, child boot 2) repoP is reported via the PENDING lazy-resolve (no resolvedKey, no active re-arm)", resultP.entryResolvedKey === null);
   check("(P precondition, child boot 2) the PENDING entry still carries the orphan filename forward", (resultP.entryOrphanLatchFiles ?? []).includes(path.basename(orphanPathP)));
   check("(P) clearing the pending entry by id (in the child) reports ok:true", resultP.clearResult?.ok === true);
   check("(P) the pending entry's OWN latch/source file is gone", !fs.existsSync(ownLatchPathP));
+  // card 6237bef6 — was INFORMATIONAL (a bare SKIP print either way); now a HARD assertion: the orphan file
+  // referenced by nothing else must actually be swept once the pending entry that referenced it is cleared.
+  check("(P) THE FIX: the orphan latch file is swept once the pending entry referencing it is cleared", !fs.existsSync(orphanPathP));
+}
 
-  // Informational — see this card's own instruction: confirm/refute, don't fix here. Never fails the suite.
-  if (fs.existsSync(orphanPathP)) {
-    console.log(
-      "SKIP  (P) THE TRACED GAP, CONFIRMED: the orphan latch file survives clearing the pending entry that " +
-      "referenced it (card abccee85 item 5, traced not fixed — a follow-up card owns the actual fix; see " +
-      "docs/decisions/abccee85-recorded-path-clear-immune-to-key-drift.md)."
-    );
-  } else {
-    console.log("SKIP  (P) REFUTED this run: the orphan latch file was swept after all when the pending entry referencing it was cleared.");
-  }
-  try { fs.unlinkSync(orphanPathP); } catch { /* best-effort cleanup regardless of outcome */ }
+// ===================== (P2) site 3 of 3 — clearMergeQuarantineByRecordedPath's own pending branch sweeps orphanLatchFiles too (card 6237bef6) =====================
+// abccee85's own trace named only two pending-removal sites (clearMergeQuarantineByKey's pending filter,
+// and clearMergeQuarantineLatchFile's pending-match branch, section (P) above). This third site —
+// clearMergeQuarantineByRecordedPath's own direct `matchedPending` branch, reachable via
+// `/clear-by-path {repoPath}` — has the IDENTICAL gap and was not named. Same PASS-2/two-boot repro shape
+// as (P), but cleared by repoPath instead of by id.
+{
+  const repoP2 = freshDir("repoP2");
+  const orphanPathP2 = path.join(MERGE_QUARANTINE_DIR, `orphan-p2-${sfx}.json`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(orphanPathP2, "{not valid json");
+  check("(P2 precondition) the unmatched corrupt orphan latch exists", fs.existsSync(orphanPathP2));
+
+  reenterMergeQuarantinesAtBoot([repoP2]);
+  const entryP2_1 = activeMergeQuarantineFor(repoP2);
+  check("(P2 precondition) repoP2 is quarantined fail-closed after boot 1", !!entryP2_1);
+  check("(P2 precondition) the entry carries the orphan filename", (entryP2_1?.orphanLatchFiles ?? []).includes(path.basename(orphanPathP2)));
+  const idP2 = quarantineLatchIdFor(repoP2);
+  const ownLatchPathP2 = path.join(MERGE_QUARANTINE_DIR, `${idP2}.json`);
+  check("(P2 precondition) repoP2's own latch file exists on disk", fs.existsSync(ownLatchPathP2));
+
+  fs.rmSync(repoP2, { recursive: true, force: true });
+  check("(P2 precondition) repoP2 no longer resolves on disk at all", !fs.existsSync(repoP2));
+
+  const childScriptP2 = `
+    const { reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, clearMergeQuarantineByRecordedPath } =
+      await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([]); // repoP2 is no longer registered
+    const entry = activeMergeQuarantineFor(${JSON.stringify(repoP2)});
+    const clearResult = clearMergeQuarantineByRecordedPath(${JSON.stringify(repoP2)});
+    process.stdout.write(JSON.stringify({
+      entryOrphanLatchFiles: entry?.orphanLatchFiles ?? null,
+      entryResolvedKey: entry?.resolvedKey ?? null,
+      clearResult,
+    }));
+  `;
+  const childOutP2 = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptP2], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  }).toString();
+  // Same stdout-sharing caveat as (P) above — take only the last line.
+  const resultP2 = JSON.parse(childOutP2.trim().split("\n").pop());
+
+  check("(P2 precondition, child boot 2) repoP2 is reported via the PENDING lazy-resolve", resultP2.entryResolvedKey === null);
+  check("(P2 precondition, child boot 2) the PENDING entry still carries the orphan filename forward", (resultP2.entryOrphanLatchFiles ?? []).includes(path.basename(orphanPathP2)));
+  check("(P2) clearing the pending entry by repoPath (in the child) reports wasQuarantined:true", resultP2.clearResult?.wasQuarantined === true);
+  check("(P2) the pending entry's OWN latch/source file is gone", !fs.existsSync(ownLatchPathP2));
+  check("(P2) THE FIX: clearMergeQuarantineByRecordedPath's own pending branch also sweeps the orphan latch file", !fs.existsSync(orphanPathP2));
+}
+
+// ===================== (P-SHARED) an orphan file referenced by BOTH a pending and an active entry survives clearing EITHER one alone, and is swept once BOTH are cleared (card 6237bef6) =====================
+// Exercises the shared `sweepOrphanLatchFileIfUnreferenced` helper's own "still referenced" check across
+// BOTH structures, in both orders. Also closes a quieter, narrower sibling of the traced bug: the
+// PRE-EXISTING active-entry sweep used to check only `activeQuarantines`, so clearing the active side
+// alone (sub-case B) would, pre-fix, have deleted a file a PENDING entry still needed.
+{
+  // Sub-case A: clear the PENDING side first, then the ACTIVE side.
+  const repoActiveA = freshDir("repoActiveA");
+  const pendingPathA = path.join(os.tmpdir(), `loom-mqcbp-pendingA-${sfx}`); // deliberately never created
+  const orphanSharedA = path.join(MERGE_QUARANTINE_DIR, `orphan-shared-a-${sfx}.json`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(orphanSharedA, "{}\n"); // the shared file itself — content irrelevant, only existence matters here
+  check("(P-SHARED A precondition) neither repoActiveA's own latch nor pendingPathA exist yet", !fs.existsSync(pendingPathA));
+
+  const activeKeyA = canonicalRepoLockKey(repoActiveA);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(activeKeyA)}.json`), JSON.stringify({
+    repoPath: repoActiveA, branch: "shared-orphan-active-a", reason: "P-SHARED A — active side",
+    enteredAt: Date.now(), tokens: ["t-active-a"], resolvedKey: activeKeyA,
+    orphanLatchFiles: [path.basename(orphanSharedA)],
+  }, null, 2) + "\n");
+  const pendingSourceA = `pending-shared-a-${sfx}.json`;
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pendingSourceA), JSON.stringify({
+    repoPath: pendingPathA, branch: "shared-orphan-pending-a", reason: "P-SHARED A — pending side",
+    enteredAt: Date.now(), tokens: ["t-pending-a"],
+    orphanLatchFiles: [path.basename(orphanSharedA)],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([repoActiveA]);
+  check("(P-SHARED A precondition) the active entry loaded with the shared orphan reference", (activeMergeQuarantineFor(repoActiveA)?.orphanLatchFiles ?? []).includes(path.basename(orphanSharedA)));
+  check("(P-SHARED A precondition) the pending entry loaded too (unresolvable path)", listActiveMergeQuarantines().some((e) => e.repoPath === pendingPathA && (e.orphanLatchFiles ?? []).includes(path.basename(orphanSharedA))));
+
+  // Clear the PENDING side alone (also exercises site 3, clearMergeQuarantineByRecordedPath, again).
+  clearMergeQuarantineByRecordedPath(pendingPathA);
+  check("(P-SHARED A) the pending entry is gone", !listActiveMergeQuarantines().some((e) => e.repoPath === pendingPathA));
+  check("(P-SHARED A) the shared orphan file SURVIVES — the active entry still references it", fs.existsSync(orphanSharedA));
+
+  // Now clear the ACTIVE side too — nothing references the orphan file any more.
+  clearMergeQuarantine(repoActiveA);
+  check("(P-SHARED A) the active entry is gone", !activeMergeQuarantineFor(repoActiveA));
+  check("(P-SHARED A) THE FIX: the shared orphan file is now swept once BOTH referencing entries are cleared", !fs.existsSync(orphanSharedA));
+
+  // Sub-case B: the REVERSE order — clear the ACTIVE side first, then the PENDING side. Also proves the
+  // pre-existing active-path sweep no longer ignores a surviving PENDING reference (the narrower sibling
+  // bug this card's shared helper also closes).
+  const repoActiveB = freshDir("repoActiveB");
+  const pendingPathB = path.join(os.tmpdir(), `loom-mqcbp-pendingB-${sfx}`);
+  const orphanSharedB = path.join(MERGE_QUARANTINE_DIR, `orphan-shared-b-${sfx}.json`);
+  fs.writeFileSync(orphanSharedB, "{}\n");
+
+  const activeKeyB = canonicalRepoLockKey(repoActiveB);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(activeKeyB)}.json`), JSON.stringify({
+    repoPath: repoActiveB, branch: "shared-orphan-active-b", reason: "P-SHARED B — active side",
+    enteredAt: Date.now(), tokens: ["t-active-b"], resolvedKey: activeKeyB,
+    orphanLatchFiles: [path.basename(orphanSharedB)],
+  }, null, 2) + "\n");
+  const pendingSourceB = `pending-shared-b-${sfx}.json`;
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pendingSourceB), JSON.stringify({
+    repoPath: pendingPathB, branch: "shared-orphan-pending-b", reason: "P-SHARED B — pending side",
+    enteredAt: Date.now(), tokens: ["t-pending-b"],
+    orphanLatchFiles: [path.basename(orphanSharedB)],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([repoActiveB]);
+  check("(P-SHARED B precondition) both entries loaded with the shared orphan reference", (activeMergeQuarantineFor(repoActiveB)?.orphanLatchFiles ?? []).includes(path.basename(orphanSharedB)) &&
+    listActiveMergeQuarantines().some((e) => e.repoPath === pendingPathB && (e.orphanLatchFiles ?? []).includes(path.basename(orphanSharedB))));
+
+  // Clear the ACTIVE side alone FIRST this time.
+  clearMergeQuarantine(repoActiveB);
+  check("(P-SHARED B) the active entry is gone", !activeMergeQuarantineFor(repoActiveB));
+  check("(P-SHARED B) THE NARROWER SIBLING BUG: the shared orphan file SURVIVES — a PENDING entry still references it", fs.existsSync(orphanSharedB));
+
+  clearMergeQuarantineByRecordedPath(pendingPathB);
+  check("(P-SHARED B) the pending entry is gone", !listActiveMergeQuarantines().some((e) => e.repoPath === pendingPathB));
+  check("(P-SHARED B) THE FIX: the shared orphan file is now swept once BOTH referencing entries are cleared", !fs.existsSync(orphanSharedB));
+}
+
+// ===================== (P-MULTI) clearMergeQuarantineLatchFile drops EVERY pending entry sharing one id, not just the first found (card 6237bef6, round 2, item 1 — BLOCKING) =====================
+// PASS 1 (a `.json` final) and PASS 1b (a `.json.tmp-<pid>` residue) both independently defer an
+// unresolvable, no-resolvedKey entry to `pendingUnresolvedQuarantines` — so ONE unresolvable repo can end
+// up with SEVERAL distinct pending entries that all share the SAME hash/id (its own final plus a tmp, or
+// two tmps left by two interrupted writes). The pre-fix code used a plain `for...of` loop with an early
+// `return` on the FIRST match, so clearing by that shared id dropped only one of them: the repo stayed
+// blocked, the sibling file survived on disk, and it re-quarantined the repo on the next boot. Fixed:
+// collect EVERY matching pending entry via `.filter(...)`, drop them all, sweep each one's own
+// sourceFile + orphanLatchFiles, same "drop every one" rule abccee85 r6 already applies elsewhere.
+{
+  // Sub-case A: a FINAL (`.json`) and a TMP (`.json.tmp-<pid>`) residue, same id, same unresolvable repo.
+  const repoMultiA = path.join(os.tmpdir(), `loom-mqcbp-multiA-${sfx}`); // deliberately never created
+  const idMultiA = "aaaa11112222333344445555";
+  const finalPathMultiA = path.join(MERGE_QUARANTINE_DIR, `${idMultiA}.json`);
+  const tmpPathMultiA = path.join(MERGE_QUARANTINE_DIR, `${idMultiA}.json.tmp-111111`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(finalPathMultiA, JSON.stringify({
+    repoPath: repoMultiA, branch: "multi-a-final-branch", reason: "P-MULTI A — final, no resolvedKey",
+    enteredAt: Date.now(), tokens: ["t-multi-a-final"],
+  }, null, 2) + "\n");
+  fs.writeFileSync(tmpPathMultiA, JSON.stringify({
+    repoPath: repoMultiA, branch: "multi-a-tmp-branch", reason: "P-MULTI A — tmp, no resolvedKey",
+    enteredAt: Date.now(), tokens: ["t-multi-a-tmp"],
+  }, null, 2) + "\n");
+
+  const childScriptMultiA = `
+    const { reenterMergeQuarantinesAtBoot, listActiveMergeQuarantines, clearMergeQuarantineLatchFile } =
+      await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([]);
+    const beforeCount = listActiveMergeQuarantines().filter((e) => e.repoPath === ${JSON.stringify(repoMultiA)}).length;
+    const clearResult = clearMergeQuarantineLatchFile(${JSON.stringify(idMultiA)});
+    const afterCount = listActiveMergeQuarantines().filter((e) => e.repoPath === ${JSON.stringify(repoMultiA)}).length;
+    process.stdout.write(JSON.stringify({ beforeCount, clearResult, afterCount }));
+  `;
+  const outMultiA = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptMultiA], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  }).toString();
+  const resultMultiA = JSON.parse(outMultiA.trim().split("\n").pop());
+
+  check("(P-MULTI A precondition) boot 1 produced TWO distinct pending entries sharing one id (the final AND the tmp)", resultMultiA.beforeCount === 2);
+  check("(P-MULTI A) ONE clear-by-id reports ok:true, wasQuarantined:true", resultMultiA.clearResult?.ok === true && resultMultiA.clearResult?.wasQuarantined === true);
+  check("(P-MULTI A) THE FIX: that ONE clear drops BOTH pending entries, not just the first found", resultMultiA.afterCount === 0);
+  check("(P-MULTI A) the final file is gone from disk", !fs.existsSync(finalPathMultiA));
+  check("(P-MULTI A) the tmp file is ALSO gone from disk — never left behind to re-quarantine the next boot", !fs.existsSync(tmpPathMultiA));
+
+  const childScriptMultiABoot2 = `
+    const { reenterMergeQuarantinesAtBoot, listActiveMergeQuarantines } = await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([]);
+    process.stdout.write(JSON.stringify({ count: listActiveMergeQuarantines().filter((e) => e.repoPath === ${JSON.stringify(repoMultiA)}).length }));
+  `;
+  const outMultiABoot2 = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptMultiABoot2], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  }).toString();
+  check("(P-MULTI A) a SEPARATE boot 2 lists NOTHING for this repo — no resurrection", JSON.parse(outMultiABoot2.trim().split("\n").pop()).count === 0);
+
+  // Sub-case B: TWO tmp residues (no final at all), same id, same unresolvable repo.
+  const repoMultiB = path.join(os.tmpdir(), `loom-mqcbp-multiB-${sfx}`); // deliberately never created
+  const idMultiB = "bbbb11112222333344445555";
+  const tmpPathMultiB1 = path.join(MERGE_QUARANTINE_DIR, `${idMultiB}.json.tmp-222222`);
+  const tmpPathMultiB2 = path.join(MERGE_QUARANTINE_DIR, `${idMultiB}.json.tmp-333333`);
+  fs.writeFileSync(tmpPathMultiB1, JSON.stringify({
+    repoPath: repoMultiB, branch: "multi-b-tmp1-branch", reason: "P-MULTI B — tmp 1, no resolvedKey",
+    enteredAt: Date.now(), tokens: ["t-multi-b-tmp1"],
+  }, null, 2) + "\n");
+  fs.writeFileSync(tmpPathMultiB2, JSON.stringify({
+    repoPath: repoMultiB, branch: "multi-b-tmp2-branch", reason: "P-MULTI B — tmp 2, no resolvedKey",
+    enteredAt: Date.now(), tokens: ["t-multi-b-tmp2"],
+  }, null, 2) + "\n");
+
+  const childScriptMultiB = `
+    const { reenterMergeQuarantinesAtBoot, listActiveMergeQuarantines, clearMergeQuarantineLatchFile } =
+      await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([]);
+    const beforeCount = listActiveMergeQuarantines().filter((e) => e.repoPath === ${JSON.stringify(repoMultiB)}).length;
+    const clearResult = clearMergeQuarantineLatchFile(${JSON.stringify(idMultiB)});
+    const afterCount = listActiveMergeQuarantines().filter((e) => e.repoPath === ${JSON.stringify(repoMultiB)}).length;
+    process.stdout.write(JSON.stringify({ beforeCount, clearResult, afterCount }));
+  `;
+  const outMultiB = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptMultiB], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  }).toString();
+  const resultMultiB = JSON.parse(outMultiB.trim().split("\n").pop());
+
+  check("(P-MULTI B precondition) boot 1 produced TWO distinct pending entries sharing one id (two tmps, no final)", resultMultiB.beforeCount === 2);
+  check("(P-MULTI B) ONE clear-by-id reports ok:true, wasQuarantined:true", resultMultiB.clearResult?.ok === true && resultMultiB.clearResult?.wasQuarantined === true);
+  check("(P-MULTI B) THE FIX: that ONE clear drops BOTH pending entries, not just the first found", resultMultiB.afterCount === 0);
+  check("(P-MULTI B) the first tmp file is gone from disk", !fs.existsSync(tmpPathMultiB1));
+  check("(P-MULTI B) the second tmp file is ALSO gone from disk", !fs.existsSync(tmpPathMultiB2));
+
+  const childScriptMultiBBoot2 = `
+    const { reenterMergeQuarantinesAtBoot, listActiveMergeQuarantines } = await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([]);
+    process.stdout.write(JSON.stringify({ count: listActiveMergeQuarantines().filter((e) => e.repoPath === ${JSON.stringify(repoMultiB)}).length }));
+  `;
+  const outMultiBBoot2 = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptMultiBBoot2], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  }).toString();
+  check("(P-MULTI B) a SEPARATE boot 2 lists NOTHING for this repo — no resurrection", JSON.parse(outMultiBBoot2.trim().split("\n").pop()).count === 0);
 }
 
 // ===================== (Q) clearMergeQuarantineByRecordedPath — the FALLBACK recompute lifts an ENCLOSING repo's quarantine for a PENDING entry (round 5, Code Review of 2362064b, finding 1) =====================
@@ -943,6 +1163,6 @@ function hashKey(key) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — /internal/merge-quarantine/clear-by-path (repoPath AND id addressing, exactly-one-of validation, path-traversal id rejection), GET /internal/merge-quarantine/list (id/registered projection, incl. a dual-armed entry's own id/ids BEFORE it's cleared), the shared clearMergeQuarantineReporting helper (no drift between /clear and /clear-by-path), partitionQuarantinesByRegistration / db.listAllRegisteredRepoPaths (live + multi-repo + archived registration, never swallowing a registered+quarantined repo into the orphan bucket, and a registered-path spelling variant), clearMergeQuarantineLatchFile's round-2/3 fixes, quarantineLatchFileIdsFor's round-3 real-file-first ordering, clearMergeQuarantineByRecordedPath's round-4/5 stored-repoPath-addressed clear (the `{repoPath}` form's own immunity to key drift, clearing every matching active entry, and the pending-fallback drift) and legacyQuarantineHashFor's byte-identical behavior, PLUS round 6's governing-rule fixes — pending entries are matched by stored directPathIdentity, never a freshly re-walked canonicalRepoLockKey, at every site: (T) enterMergeQuarantine's pending-merge no longer adopts an unrelated pending entry's identity for a fresh raise, (U) clearMergeQuarantineByRecordedPath's pending branch drops EVERY identity-matching pending entry, (V) assertRepoNotQuarantined names the BLOCKING entry's own repoPath/latch id and points at /clear-by-path, and (W) partitionQuarantinesByRegistration no longer mis-registers a pending entry via an enclosing repo's key — all behave as designed (cards c0be9bf9, abccee85). Section (P) is a card-abccee85-item-5 REPRO (trace only, informational, never fails this suite). Round 7: (X) clearMergeQuarantineByRecordedPath's own last-resort fallback no longer recomputes a fresh key from a never-quarantined (typo'd) given path — it reports not-found instead of collaterally lifting an unrelated enclosing repo's real quarantine."
+  ? "\n✅ ALL PASS — /internal/merge-quarantine/clear-by-path (repoPath AND id addressing, exactly-one-of validation, path-traversal id rejection), GET /internal/merge-quarantine/list (id/registered projection, incl. a dual-armed entry's own id/ids BEFORE it's cleared), the shared clearMergeQuarantineReporting helper (no drift between /clear and /clear-by-path), partitionQuarantinesByRegistration / db.listAllRegisteredRepoPaths (live + multi-repo + archived registration, never swallowing a registered+quarantined repo into the orphan bucket, and a registered-path spelling variant), clearMergeQuarantineLatchFile's round-2/3 fixes, quarantineLatchFileIdsFor's round-3 real-file-first ordering, clearMergeQuarantineByRecordedPath's round-4/5 stored-repoPath-addressed clear (the `{repoPath}` form's own immunity to key drift, clearing every matching active entry, and the pending-fallback drift) and legacyQuarantineHashFor's byte-identical behavior, PLUS round 6's governing-rule fixes — pending entries are matched by stored directPathIdentity, never a freshly re-walked canonicalRepoLockKey, at every site: (T) enterMergeQuarantine's pending-merge no longer adopts an unrelated pending entry's identity for a fresh raise, (U) clearMergeQuarantineByRecordedPath's pending branch drops EVERY identity-matching pending entry, (V) assertRepoNotQuarantined names the BLOCKING entry's own repoPath/latch id and points at /clear-by-path, and (W) partitionQuarantinesByRegistration no longer mis-registers a pending entry via an enclosing repo's key — all behave as designed (cards c0be9bf9, abccee85). Round 7: (X) clearMergeQuarantineByRecordedPath's own last-resort fallback no longer recomputes a fresh key from a never-quarantined (typo'd) given path — it reports not-found instead of collaterally lifting an unrelated enclosing repo's real quarantine. Card 6237bef6: (P)/(P2)/(P-SHARED) turn card abccee85's traced-not-fixed gap into hard, two-way checks — a pending entry's own orphanLatchFiles are now actually swept on clear, at all three pending-removal sites (clearMergeQuarantineByKey, clearMergeQuarantineLatchFile, and clearMergeQuarantineByRecordedPath, the third abccee85 never named), and an orphan file still referenced by a SURVIVING entry (active or pending) is never deleted out from under it."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

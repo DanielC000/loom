@@ -475,6 +475,28 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
 }
 
 /**
+ * Delete `filename` (a basename under {@link MERGE_QUARANTINE_DIR}) from disk IFF no remaining entry —
+ * ACTIVE or PENDING — still references it in its own `orphanLatchFiles`. Call this ONLY after the caller
+ * has already removed whatever entry/entries it is in the process of clearing from `activeQuarantines`/
+ * `pendingUnresolvedQuarantines`, so "remaining" genuinely excludes them — never before.
+ *
+ * @decision 6237bef6 — shared by every orphan-latch sweep (active-entry clear AND every pending-entry
+ * clear) so "still referenced" always means the same thing. See the decision record for the gap this
+ * closes and why checking only one of active/pending is wrong.
+ */
+function sweepOrphanLatchFileIfUnreferenced(filename: string): void {
+  const stillReferenced =
+    [...activeQuarantines.values()].some((e) => e.orphanLatchFiles?.includes(filename)) ||
+    pendingUnresolvedQuarantines.some((p) => p.entry.orphanLatchFiles?.includes(filename));
+  if (stillReferenced) return;
+  try {
+    fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, filename));
+    // eslint-disable-next-line no-console
+    console.log(`[merge-quarantine] deleted orphan latch ${filename} — no remaining quarantine entry references it.`);
+  } catch { /* already gone, or never existed under that exact name — either way, nothing left to do */ }
+}
+
+/**
  * KEY-ADDRESSED core — empties the WHOLE outstanding-token set at once (round 7, M1) for the entry
  * currently armed at `key`: lifts every map slot it's armed under, deletes each one's physical latch,
  * sweeps a PENDING entry sharing `identityRepoPath`'s own identity, and deletes any now-unreferenced
@@ -506,21 +528,14 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // doc comment) so a clear issued while still unresolvable actually lifts it, and delete its OWN source
   // file too (round 2 finding 1), or it survives to resurrect the quarantine.
   const identity = directPathIdentity(identityRepoPath);
+  const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
   pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => {
     if (directPathIdentity(p.entry.repoPath) !== identity) return true;
+    for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
     try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, p.sourceFile)); } catch { /* best-effort */ }
     return false;
   });
-  if (!entry?.orphanLatchFiles?.length) return;
-  for (const orphanFile of entry.orphanLatchFiles) {
-    const stillReferenced = [...activeQuarantines.values()].some((e) => e.orphanLatchFiles?.includes(orphanFile));
-    if (stillReferenced) continue;
-    try {
-      fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, orphanFile));
-      // eslint-disable-next-line no-console
-      console.log(`[merge-quarantine] deleted orphan latch ${orphanFile} — no remaining quarantine entry references it.`);
-    } catch { /* already gone, or never existed under that exact name — either way, nothing left to do */ }
-  }
+  for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
 }
 
 /**
@@ -576,9 +591,14 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   const matchedPending = pendingUnresolvedQuarantines.filter((p) => directPathIdentity(p.entry.repoPath) === identity);
   if (matchedPending.length > 0) {
     pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => !matchedPending.includes(p));
+    // @decision 6237bef6 — sweep each dropped pending entry's OWN orphanLatchFiles too, not just its
+    // sourceFile; see the decision record (site 3 of 3 — abccee85's own trace named only the other two).
+    const orphanFilesToSweep = new Set<string>();
     for (const p of matchedPending) {
+      for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
       try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, p.sourceFile)); } catch { /* best-effort */ }
     }
+    for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
     return { wasQuarantined: true };
   }
   // Nothing active or pending matches this identity at all (round 7) — report NOT FOUND rather than
@@ -685,7 +705,13 @@ export function quarantineLatchFileIdsFor(entry: MergeQuarantineEntry): string[]
     });
   }
   const pending = pendingUnresolvedQuarantines.find((p) => p.entry === entry);
-  if (pending) return [pending.sourceFile.slice(0, -".json".length)];
+  if (pending) {
+    // @decision 6237bef6 — sourceFile is `<hash>.json` for a PASS-1-sourced pending entry but
+    // `<hash>.json.tmp-<pid>` for a PASS-1b tmp-residue one — cut at the first `.json`, not a fixed
+    // trailing-length slice, so both shapes recover the bare hash (never a literal `.json` substring).
+    const jsonIdx = pending.sourceFile.indexOf(".json");
+    return [jsonIdx === -1 ? pending.sourceFile : pending.sourceFile.slice(0, jsonIdx)];
+  }
   return [quarantineHashFor(entry.repoPath)];
 }
 
@@ -727,13 +753,27 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     clearMergeQuarantineByKey(key, matchedEntry.repoPath);
     return { ok: true, wasQuarantined: true };
   }
-  for (const pending of pendingUnresolvedQuarantines) {
-    if (pending.sourceFile !== `${id}.json`) continue;
-    // A pending entry isn't armed into activeQuarantines under any key — drop ONLY this exact pending
-    // entry and its own sourceFile directly, never a recomputed-key delegation (which could drift onto an
-    // unrelated repo's entry the same way the active-entry path used to — round 3).
-    pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => p !== pending);
-    try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, pending.sourceFile)); } catch { /* best-effort */ }
+  // @decision 6237bef6 (round 2, item 1) — match EITHER sourceFile shape (`.json` or `.json.tmp-…`), and
+  // collect EVERY pending entry sharing this id, never just the first found — see the decision record for
+  // the multi-pending-entries-per-id repro this closes.
+  const matchedPending = pendingUnresolvedQuarantines.filter((p) =>
+    p.sourceFile === `${id}.json` || p.sourceFile.startsWith(`${id}.json.tmp-`));
+  if (matchedPending.length > 0) {
+    // A pending entry isn't armed into activeQuarantines under any key — drop ONLY these exact pending
+    // entries and their own sourceFiles directly, never a recomputed-key delegation (which could drift
+    // onto an unrelated repo's entry the same way the active-entry path used to — round 3).
+    pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => !matchedPending.includes(p));
+    const orphanFilesToSweep = new Set<string>();
+    for (const pending of matchedPending) {
+      for (const f of pending.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
+      try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, pending.sourceFile)); } catch { /* best-effort */ }
+    }
+    for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
+    // Belt-and-suspenders, same as the raw-fallback branch below: sweep this id's own final (if any) and
+    // any remaining tmp residue directly, in case something under this exact id sits on disk but was
+    // never captured as an in-memory pending entry (e.g. a sibling tmp this process never parsed).
+    try { fs.unlinkSync(finalPath); } catch { /* ENOENT is the common case */ }
+    deleteMergeQuarantineTmpResidueForHash(id);
     return { ok: true, wasQuarantined: true };
   }
   // No in-memory entry anywhere matches this id — a truly corrupt/unparsable latch (or its own tmp
@@ -1043,6 +1083,15 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
         placeholder: isPlaceholderEntryShape(parsed) ? true : undefined,
       };
       const currentKey = canonicalRepoLockKey(entry.repoPath);
+      // @decision 6237bef6 — mirror PASS 1's own unresolvable/no-resolvedKey gate (card 369b97be): defer
+      // to pendingUnresolvedQuarantines here too, rather than arming a tmp-sourced entry under a possibly-
+      // degraded key the way the rest of this loop otherwise would.
+      if (!isRepoPathCurrentlyResolvable(entry.repoPath) && !entry.resolvedKey) {
+        // eslint-disable-next-line no-console
+        console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} has no recorded resolvedKey and could NOT be verified against its current key — ${entry.repoPath} (and every one of its ancestors) does not currently resolve on disk — leaving the tmp file AS WRITTEN and deferring enforcement to a lazy re-resolve on first query.`);
+        pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+        continue;
+      }
       // See PASS 1's identical threading note above — the second call must build on the first's result.
       const armedTmpEntry = armQuarantineKey(byRepoKey, currentKey, entry);
       if (entry.resolvedKey && entry.resolvedKey !== currentKey) {

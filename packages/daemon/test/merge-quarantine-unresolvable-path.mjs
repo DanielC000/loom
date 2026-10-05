@@ -90,9 +90,16 @@ const {
   clearMergeQuarantine, activeMergeQuarantineFor, assertRepoNotQuarantined, reenterMergeQuarantinesAtBoot,
   listActiveMergeQuarantines, MERGE_QUARANTINE_DIR,
 } = await import(mergeQuarantineModuleUrl);
+const repoLockModuleUrl = pathToFileURL(path.join(distGitDir, "repo-lock.js")).href;
+const { canonicalRepoLockKey } = await import(repoLockModuleUrl);
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// Mirrors merge-quarantine.ts's own private `quarantineHashForKey` — hashes a raw KEY directly (never a
+// repoPath), the same primitive the real module uses to name a latch file.
+function hashKey(key) {
+  return createHash("sha256").update(key).digest("hex").slice(0, 24);
+}
 const GIT_ID = "-c user.email=mqup@loom -c user.name=mqup";
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const tmpDirs = [];
@@ -746,6 +753,124 @@ try {
       check("(R7b cleanup) cleared", assertRepoNotQuarantined(realLeafR7b).ok && assertRepoNotQuarantined(aliasLeafR7b).ok);
     }
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO TMP-PENDING (card 369b97be, folded into 6237bef6) — PASS 1b (tmp-residue recovery) used to
+  // arm a `.json.tmp-<pid>` residue with no resolvedKey IMMEDIATELY under a possibly-degraded key, never
+  // deferring to `pendingUnresolvedQuarantines` the way PASS 1 already does for the equivalent `.json`
+  // final (scenario G above) — a two-path asymmetry. See
+  // docs/decisions/6237bef6-pending-entry-orphan-sweep-and-pass1b-deferral.md. Reproduces: a tmp residue
+  // with no resolvedKey, for a path that does not resolve on disk at all (no final, no in-memory entry
+  // anywhere) — a fresh boot must land it PENDING, not active-armed under a degraded key; once the path
+  // becomes resolvable again, a LATER, genuinely separate boot must re-resolve the quarantine under the
+  // CORRECT (freshly-walked) key.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    // Subdir-bound, same shape as scenario G above — the one shape that produces a GENUINE key mismatch:
+    // while the whole outer repo is absent, the existing-ancestor walk stops at os.tmpdir() and produces a
+    // literal (degenerate) key that still carries the "teamA" leaf segment; once the outer repo (with its
+    // own `.git`) is back, the REAL toplevel-walked key COLLAPSES to the outer repo's own realpath, never
+    // including that leaf segment — a bug that arms under the degenerate key would carry forward the wrong
+    // value instead of the real one computed once the path is genuinely resolvable.
+    const { repo: repoTP, subdir: subdirTP } = makeRepoWithSubdir("tp");
+    const rightKeyTP = canonicalRepoLockKey(subdirTP); // the REAL key, computed while fully present
+    const parkedRootTP = path.join(os.tmpdir(), `loom-mqup-parkedTP-${sfx}`);
+
+    fs.renameSync(repoTP, parkedRootTP); // simulate: an unmounted drive, whole repo gone
+    check("(TP precondition) subdirTP no longer resolves on disk at all", !fs.existsSync(subdirTP));
+
+    // Hand-write a tmp-RESIDUE latch (never a `.json` final) with NO resolvedKey — the shape a crash
+    // between fsync and rename would leave for a repo that was ALREADY unresolvable at that moment. The
+    // filename's own hash prefix is arbitrary (subdirTP is never registered in this scenario, so no
+    // hashToRepo match is possible either way) but must still match the real `.json.tmp-<pid>` shape the
+    // directory scan looks for.
+    const tmpPathTP = path.join(MERGE_QUARANTINE_DIR, "deadbeefdeadbeefdeadbeef.json.tmp-424242");
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(tmpPathTP, JSON.stringify({
+      repoPath: subdirTP, branch: "tmp-pending-branch",
+      reason: "scenario TP — tmp residue, no resolvedKey, repo absent at this boot",
+      enteredAt: Date.now(), tokens: ["t-tp"],
+    }, null, 2) + "\n");
+    check("(TP precondition) the hand-written tmp residue exists", fs.existsSync(tmpPathTP));
+
+    // card 6237bef6 round 2, item 2 — a SECOND, independent tmp-sourced pending entry, set up alongside
+    // subdirTP's own (never interfering with its continuation into boot 2 below), purely to test the two
+    // tmp-shaped id fixes (quarantineLatchFileIdsFor's pending-id slice, and clearMergeQuarantineLatchFile's
+    // pending-id match) IN THE SAME child process boot 1 exercises for subdirTP.
+    const repoTPIdCheck = path.join(os.tmpdir(), `loom-mqup-tpIdCheck-${sfx}`); // deliberately never created
+    const idCheckHash = "beefbeefbeefbeefbeefbeef";
+    const tmpPathTPIdCheck = path.join(MERGE_QUARANTINE_DIR, `${idCheckHash}.json.tmp-636363`);
+    fs.writeFileSync(tmpPathTPIdCheck, JSON.stringify({
+      repoPath: repoTPIdCheck, branch: "tmp-pending-idcheck-branch",
+      reason: "scenario TP — id-check tmp residue, no resolvedKey, repo absent at this boot",
+      enteredAt: Date.now(), tokens: ["t-tp-idcheck"],
+    }, null, 2) + "\n");
+    check("(TP-IDCHECK precondition) the hand-written tmp residue exists", fs.existsSync(tmpPathTPIdCheck));
+
+    // BOOT 1, in a genuinely separate child process (fresh empty map — same vacuity-avoidance as every
+    // other raise/reboot in this file) — subdirTP is still fully absent.
+    const childScriptTP1 = `
+      const { reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, quarantineLatchFileIdsFor, clearMergeQuarantineLatchFile } =
+        await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+      reenterMergeQuarantinesAtBoot([]);
+      const entry = activeMergeQuarantineFor(${JSON.stringify(subdirTP)});
+      const idCheckEntry = activeMergeQuarantineFor(${JSON.stringify(repoTPIdCheck)});
+      const idCheckIds = idCheckEntry ? quarantineLatchFileIdsFor(idCheckEntry) : null;
+      const idCheckClearResult = idCheckIds ? clearMergeQuarantineLatchFile(idCheckIds[0]) : null;
+      process.stdout.write(JSON.stringify({
+        found: !!entry, reason: entry?.reason ?? null,
+        // armedKeys is set ONLY by armQuarantineKey — a genuinely PENDING entry (pushed straight to
+        // pendingUnresolvedQuarantines, never armed into byRepoKey/activeQuarantines at all) never gets
+        // this field at all; present here would mean it was wrongly armed under a degraded key instead.
+        armedKeys: entry?.armedKeys ?? null,
+        idCheckFound: !!idCheckEntry, idCheckIds, idCheckClearResult,
+      }));
+    `;
+    const outTP1 = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptTP1], {
+      env: { ...process.env, LOOM_HOME: loomHome },
+    }).toString();
+    // The module's own boot-time console.log (e.g. a self-healing "recovered" line) can share stdout
+    // with our deliberate final write — only the LAST line is ever our own JSON.stringify payload.
+    const resultTP1 = JSON.parse(outTP1.trim().split("\n").pop());
+
+    check("(TP boot 1) a fresh boot reports this repo", resultTP1.found === true);
+    check("(TP boot 1) THE BUG THIS FIXES: never armed under any key — genuinely deferred to the pending set, not active data", resultTP1.armedKeys === null);
+    check("(TP boot 1) the real (manufactured) reason survives, never a generic placeholder", resultTP1.reason === "scenario TP — tmp residue, no resolvedKey, repo absent at this boot");
+    check("(TP boot 1) the tmp residue file is left AS WRITTEN, never unlinked while still pending", fs.existsSync(tmpPathTP));
+
+    check("(TP-IDCHECK) the id-check entry is found too", resultTP1.idCheckFound === true);
+    check("(TP-IDCHECK) card 6237bef6 M1: quarantineLatchFileIdsFor's ids[0] equals the tmp's OWN hash, not a garbled slice of its `.tmp-<pid>` suffix", (resultTP1.idCheckIds ?? [])[0] === idCheckHash);
+    check("(TP-IDCHECK) card 6237bef6 M2: clearing by that id reports ok:true, wasQuarantined:true", resultTP1.idCheckClearResult?.ok === true && resultTP1.idCheckClearResult?.wasQuarantined === true);
+    check("(TP-IDCHECK) the tmp residue is actually removed from disk by that clear", !fs.existsSync(tmpPathTPIdCheck));
+
+    // The drive remounts — the outer repo (and so subdirTP) now resolves, LATER, in a genuinely SEPARATE
+    // boot, under its REAL (toplevel-walked) key — which differs from the degenerate one above.
+    fs.renameSync(parkedRootTP, repoTP);
+    check("(TP) subdirTP resolves on disk again", fs.existsSync(subdirTP));
+
+    // BOOT 2, a SEPARATE child process (not the same one as boot 1, which already exited) — re-reads the
+    // SAME still-on-disk tmp file fresh; this time the path resolves, so it must arm normally rather than
+    // staying pending.
+    const childScriptTP2 = `
+      const { reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor } = await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+      reenterMergeQuarantinesAtBoot([]);
+      const entry = activeMergeQuarantineFor(${JSON.stringify(subdirTP)});
+      process.stdout.write(JSON.stringify({ found: !!entry, resolvedKey: entry?.resolvedKey ?? null }));
+    `;
+    const outTP2 = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptTP2], {
+      env: { ...process.env, LOOM_HOME: loomHome },
+    }).toString();
+    // Same stdout-sharing caveat as boot 1 above — take only the last line.
+    const resultTP2 = JSON.parse(outTP2.trim().split("\n").pop());
+    const rightFinalPathTP = path.join(MERGE_QUARANTINE_DIR, `${hashKey(rightKeyTP)}.json`);
+
+    check("(TP boot 2) the quarantine is still found once the path resolves again", resultTP2.found === true);
+    check("(TP boot 2) THE FIX: now armed under the CORRECT, freshly-walked key (never the earlier degraded one)", resultTP2.resolvedKey === rightKeyTP);
+    check("(TP boot 2) self-healing: the entry was promoted to its proper final filename for that right key", fs.existsSync(rightFinalPathTP));
+    check("(TP boot 2) the old tmp residue is cleaned up now that the promotion succeeded", !fs.existsSync(tmpPathTP));
+
+    clearMergeQuarantine(subdirTP);
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -769,6 +894,8 @@ console.log(failures === 0
     "pending latch raised on a nested path also blocks a query for the repo ROOT once that nested path " +
     "resolves again, via a walked-key fallback gated on its own resolvability (R7-SUB-THEN-QUERY-ROOT); " +
     "and a junction/8.3-short-name-aliased existing ancestor no longer defeats pending-entry matching " +
-    "(R7-ANCESTOR-SPELLING)."
+    "(R7-ANCESTOR-SPELLING). Card 369b97be/6237bef6: PASS 1b (tmp-residue recovery) now defers an " +
+    "unresolvable, no-resolvedKey tmp exactly like PASS 1 defers the equivalent final, instead of arming " +
+    "it under a degraded key immediately (TMP-PENDING)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
