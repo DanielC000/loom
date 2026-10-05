@@ -13,7 +13,7 @@ import { resolveExecutable } from "./resolve-bin.js";
 import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
 import { writeSessionSettings, writeSessionMcpConfig, unlinkSessionMcpConfig, unlinkSessionSettings, mcpTokenRidesEnv, withSettingsDirDenyForSpawn, toCliPermissionMode, type CliPermissionMode } from "./claude-settings.js";
-import { ensureTrusted } from "./claude-config.js";
+import { ensureTrustedResilient } from "./claude-config.js";
 import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, LOOM_PLATFORM_SERVER_ID, LOOM_AUDIT_SERVER_ID, LOOM_USER_AUDIT_SERVER_ID, LOOM_SETUP_SERVER_ID, LOOM_OPERATOR_SERVER_ID, LOOM_RUN_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tracker.js";
 import { injectSkills } from "../skills/inject.js";
@@ -6757,17 +6757,23 @@ export class PtyHost {
     // unattended `claude` blocks on the trust prompt and never reaches SessionStart (the load-bearing
     // trust-before-spawn invariant). This cannot move off the hot path à la markitdown.
     // Why the bounded cross-process lock inside (claude-config withTrustLock) does NOT freeze the event
-    // loop on an orchestration fan-out: spawn()→createPty()→ensureTrusted() is a fully synchronous call
-    // chain (no await), and JS is single-threaded — so two in-process spawns CANNOT interleave. Each
-    // ensureTrusted acquires the O_EXCL lock and releases it (in finally) within one synchronous call
-    // stack before the event loop can start the next spawn, so the lock is NEVER contended in-process
-    // and the sleepSync wait loop is unreachable from a single daemon's own fan-out. A burst of N
-    // first-spawns is N sequential synchronous read-modify-writes (the lock adds only an uncontended
-    // openSync(wx)+rmSync each). The contended path (sleepSync up to trustLockMs) is reachable ONLY
-    // across processes — a second Loom daemon sharing this home — which is exactly the cross-process
+    // loop on an orchestration fan-out: spawn()→createPty()→ensureTrustedResilient()→ensureTrusted() is a
+    // fully synchronous call chain (no await), and JS is single-threaded — so two in-process spawns CANNOT
+    // interleave. Each ensureTrusted acquires the O_EXCL lock and releases it (in finally) within one
+    // synchronous call stack before the event loop can start the next spawn, so the lock is NEVER
+    // contended in-process and the sleepSync wait loop is unreachable from a single daemon's own fan-out.
+    // A burst of N first-spawns is N sequential synchronous read-modify-writes (the lock adds only an
+    // uncontended openSync(wx)+rmSync each). The contended path (sleepSync up to trustLockMs) is reachable
+    // ONLY across processes — a second Loom daemon sharing this home — which is exactly the cross-process
     // clobber the lock exists to prevent; there the bounded 5s best-effort degrade is correct. The
     // already-trusted fast path is lock-free and covers the steady state.
-    ensureTrusted(opts.cwd);
+    // ensureTrustedResilient (card f024f21b) wraps the call above with ONE bounded whole-call retry on a
+    // persistent transient Windows EPERM/EACCES/EBUSY — still fully synchronous, still no await. Per the
+    // reasoning directly above, the contender it's buying time against can NEVER be a sibling in-process
+    // spawn (those can't interleave) — it's an EXTERNAL holder of ~/.claude.json: a live `claude` CLI
+    // session reading/writing its own config, or an AV/indexer. See that function's own doc +
+    // docs/decisions/f024f21b-*.md.
+    ensureTrustedResilient(opts.cwd);
     // Mirror Loom's managed skills into <cwd>/.claude/skills (project-local; shadow personal). Never
     // let a skills hiccup block a spawn — a session must boot even if skill delivery fails. The Obsidian
     // signal rides opts.sessionEnv (set by obsidianSessionEnv ONLY when obsidian.autoStart is on) — the

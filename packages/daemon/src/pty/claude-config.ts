@@ -43,7 +43,9 @@ export function transientFsRetryLimit(): number {
   if (!Number.isFinite(n) || floored < 1) return DEFAULT_TRANSIENT_FS_RETRY_LIMIT;
   return Math.min(floored, MAX_TRANSIENT_FS_RETRY_LIMIT);
 }
-const isTransientFsError = (code: string): boolean =>
+// Exported so a caller outside this module (ensureTrustedResilient's host.ts call site) can classify an
+// error the SAME way writeJsonAtomic/withTrustLock already do, instead of re-listing the three codes.
+export const isTransientFsError = (code: string): boolean =>
   code === "EPERM" || code === "EACCES" || code === "EBUSY";
 
 /** TEST SEAM: swap the fs.openSync used by withTrustLock's lock-acquire — fs's ESM namespace import
@@ -423,4 +425,58 @@ export function ensureTrusted(dir: string): void {
 
     writeJsonAtomic(claudeJson, cfg);
   });
+}
+
+// Card f024f21b: the gap between an exhausted whole `ensureTrusted()` attempt and the single outer retry
+// below — short + jittered to give an EXTERNAL holder of ~/.claude.json (a live `claude` CLI process
+// reading/writing its own config, or an AV/indexer mid-scan) a little more time to release the file.
+// createPty's own comment establishes that two IN-PROCESS spawns can never interleave (fully synchronous,
+// single-threaded), so the contender this retry is buying time against is never a sibling spawn on this
+// daemon — it's always something outside this process. The jitter only matters ACROSS processes (several
+// Loom daemons, or several unattended spawns each hitting their own exhausted budget around the same
+// moment) so their retries don't all land back on the same busy instant; it does nothing for a single
+// spawn racing itself. NOT the per-rename/lock-acquire backoff above (transientFsRetryLimit() stays
+// exactly as card 53e64114 decided) — this is a coarser, one-shot courtesy retry on top of it.
+const ENSURE_TRUSTED_RETRY_MIN_MS = 150;
+const ENSURE_TRUSTED_RETRY_MAX_MS = 400;
+
+/**
+ * Spawn-hot-path wrapper around `ensureTrusted`: on a persistent transient Windows FS error — i.e.
+ * `ensureTrusted`'s OWN internal retry budget (`transientFsRetryLimit()`) already exhausted, whether from
+ * `writeJsonAtomic`'s rename or `withTrustLock`'s lock-acquire — retry the WHOLE call exactly ONCE, after
+ * a short jittered delay (see constants above). The delay is bought against an EXTERNAL holder of
+ * ~/.claude.json — a live `claude` CLI session reading/writing its own config, or an AV/indexer — never a
+ * sibling in-process spawn (createPty's own comment covers why those can never interleave). A
+ * non-transient error (anything `isTransientFsError` doesn't classify) is NEVER retried — it propagates
+ * on the first attempt exactly as calling `ensureTrusted` directly would. A second exhausted attempt is
+ * NOT swallowed either — its failure rethrows, so a genuinely-persistent EPERM still fails the spawn
+ * exactly as it does today; this only buys one extra chance for that external race to clear. The common
+ * (no-contention, first-attempt-succeeds) path is byte-identical to calling `ensureTrusted` alone: no
+ * sleep, no log line.
+ *
+ * The sleep (`sleepSync`, same helper `withTrustLock` already uses) is SYNCHRONOUS and blocks the event
+ * loop for up to `ENSURE_TRUSTED_RETRY_MAX_MS` — same posture as `writeJsonAtomic`'s own rename backoff:
+ * only reachable on the already-rare failure path (the exhausted-budget case), never on an ordinary
+ * uncontended spawn, so it's an acceptable one-time stall there, not a change to the common-path cost.
+ *
+ * @decision f024f21b — never widen transientFsRetryLimit()/the per-rename backoff to "fix" this; that was
+ * already decided against on 53e64114. This is strictly a second whole-call attempt on top of it.
+ */
+export function ensureTrustedResilient(dir: string): void {
+  try {
+    ensureTrusted(dir);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "";
+    if (!isTransientFsError(code)) throw err;
+    const jitterMs = ENSURE_TRUSTED_RETRY_MIN_MS + Math.random() * (ENSURE_TRUSTED_RETRY_MAX_MS - ENSURE_TRUSTED_RETRY_MIN_MS);
+    sleepSync(jitterMs);
+    try {
+      ensureTrusted(dir);
+      console.warn(`[claude-config] ensureTrusted: transient ${code} exhausted its retry budget — whole-call retry succeeded`);
+    } catch (err2) {
+      const code2 = (err2 as NodeJS.ErrnoException).code ?? "";
+      console.warn(`[claude-config] ensureTrusted: transient ${code} exhausted its retry budget — whole-call retry also failed (${code2 || "?"}) — giving up`);
+      throw err2;
+    }
+  }
 }
