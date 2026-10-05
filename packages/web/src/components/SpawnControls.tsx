@@ -33,10 +33,14 @@ export function SpawnControls({ profileRole, onSpawn, pending }:
         <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20, minWidth: 170,
           background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: 4, overflow: "hidden",
           display: "flex", flexDirection: "column" }}>
+          {/* Each item states NO `color`: ghost supplies --loom-text-dim at rest and lifts it to
+              --loom-text on hover, and an inline colour here shadows that hover rule outright (this used
+              to state ghost's own hover value, so every item sat permanently lit and none could hover).
+              See the `.loom-btn-*` block in styles/global.css if an item needs a different tone. */}
           {options.map((o) => (
             <button key={o.label} disabled={pending} onClick={() => { setOpen(false); onSpawn(o.role); }}
               className="loom-btn loom-btn-ghost"
-              style={{ textAlign: "left", background: "transparent", border: "none", color: color.text,
+              style={{ textAlign: "left", background: "transparent", border: "none",
                 fontFamily: font.mono, fontSize: 12, padding: "6px 10px", cursor: "pointer" }}>
               {o.label}
             </button>

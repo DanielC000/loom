@@ -838,12 +838,14 @@ function BatchBranchCell({ row }: { row: GateHistoryRow }) {
           title={open ? "Hide the branches in this batch" : "Show the branches in this batch"}
           style={{
             display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 5px", margin: "-3px -5px",
-            borderRadius: radius.sm, font: "inherit", color: color.textDim, cursor: "pointer",
+            borderRadius: radius.sm, font: "inherit", cursor: "pointer",
           }}
         >
           <BatchTag />
           <span>{batchSummary(row.branchCount, requested)}</span>
-          <span aria-hidden="true" style={{ fontSize: 9, color: color.textDim }}>{open ? "▾" : "▸"}</span>
+          {/* Deliberately states no `color`: it INHERITS the button's, so the glyph lifts with the label
+              on ghost's hover rule instead of staying dim beside a brightening label. */}
+          <span aria-hidden="true" style={{ fontSize: 9 }}>{open ? "▾" : "▸"}</span>
         </button>
       ) : (
         // No recorded branch list (a row from before `branches` was stamped). The count still identifies

@@ -352,3 +352,191 @@ test("the composer's presets trigger and the popover's icon buttons hover (Compo
   await expect(row).toHaveCSS("color", "rgb(230, 234, 237)");
   await expect(row).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
 });
+
+// ── Card cf4caca8: the last two source-derived residuals of the same defect ────────────────────────
+// `aac0de44` closed the two sites it had MEASURED and left two it had only derived from source. Both are
+// raw `loom-btn loom-btn-ghost` elements stating `color` in their own inline style, and ghost's only hover
+// rule is `color: var(--loom-text)` — so each one shadowed it completely. They differ in what the inline
+// value WAS, which is why one fix is invisible at rest and the other is a deliberate design change:
+//
+//   Gates.tsx     `color: color.textDim` — ghost's own REST token, restated verbatim. Rest is unchanged by
+//                 the fix; only hover starts moving. (Its chevron `<span>` restated the same token one
+//                 level down, which would have left the glyph dim while its own label brightened, so that
+//                 one is gone too and the glyph now inherits.)
+//   SpawnControls `color: color.text` — ghost's HOVER token. The item sat permanently at hover brightness
+//                 and could not visibly hover at all. Removing it DIMS the rest state, which is the point:
+//                 the lead decision on cf4caca8 is that these menu items take ghost's normal rest/hover
+//                 behaviour like every other ghost item in the app.
+//
+// Measured pre-fix on the bundle at be61bd60, through the same reader used below — rest and settled hover
+// came back byte-identical at both buttons, and the chevron stayed dim throughout:
+//   Gates batch-expand   rest `rgb(138, 146, 155)` → settled hover `rgb(138, 146, 155)`
+//   Gates chevron span   `rgb(138, 146, 155)` WHILE its own button was hovered
+//   SpawnControls item   rest `rgb(230, 234, 237)` → settled hover `rgb(230, 234, 237)`
+//
+// --loom-text-dim #8a929b = rgb(138, 146, 155); --loom-text #e6eaed = rgb(230, 234, 237).
+
+/**
+ * Rest chrome, then the SETTLED chrome during a real hover — the reading `restThenHover` above cannot
+ * give you. That helper polls until the value CHANGES, so (a) it returns an interpolated frame of the
+ * 80ms `.loom-btn` transition rather than the end state, and (b) on an INERT button it has no change to
+ * poll for and dies in its own timeout, which reports "timed out" where the useful evidence is the two
+ * identical numbers. This one polls until two consecutive reads AGREE, so it returns a real settled value
+ * on a working button and the genuine unchanged value on a shadowed one — one call measures both
+ * polarities, and a revert's red lands on a value comparison with both numbers in its message.
+ */
+async function restThenSettledHover(
+  page: Page, el: Locator, opts?: { force?: boolean },
+): Promise<{ rest: Chrome; hover: Chrome }> {
+  const rest = await readChrome(el);
+  await el.hover(opts);
+  let prev = await readChrome(el);
+  for (let i = 0; i < 25; i++) {
+    await page.waitForTimeout(40);
+    const next = await readChrome(el);
+    if (JSON.stringify(next) === JSON.stringify(prev)) return { rest, hover: next };
+    prev = next;
+  }
+  throw new Error(`hover chrome never settled; last reading ${JSON.stringify(prev)}`);
+}
+
+test("the Gates batch-expand toggle hovers, and its chevron brightens with it (Gates.tsx)", async ({ page, loomDaemon }) => {
+  test.setTimeout(60_000);
+  // Same fixture recipe as gates.spec.ts: a seeded manager session plus ONE `build_gate` event carrying a
+  // batch `branches` array, which is what makes BatchBranchCell render an expandable control at all. No
+  // real gate and no real claude — and /gates is a plain table, so the page is light.
+  const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "Orchestrator" });
+  await loomDaemon.seedOrchestrationEvent({
+    managerSessionId: mgr.sessionId, kind: "build_gate",
+    detail: {
+      durationMs: 171000, gateCap: 2, concurrentGates: 1, passed: true, batched: true, branchCount: 2,
+      branches: [1, 2].map((n) => ({ workerSessionId: `w${n}`, taskId: `t${n}`, branch: `loom/cf4-hover-${n}` })),
+    },
+  });
+
+  await page.goto(`${loomDaemon.baseURL}/gates`);
+  await page.getByRole("button", { name: mgr.projectName, exact: true }).click();
+  // FIXTURE IDENTITY: the server-side filter must leave EXACTLY this spec's one row, so the button
+  // measured below cannot be a coincidental match against a sibling spec's rows on the shared daemon.
+  await expect(page.locator("table tbody tr")).toHaveCount(1);
+  // Keyed on `aria-expanded`, NOT on the title: the title flips to "Hide the branches in this batch" the
+  // moment the control opens, so a title-based locator stops resolving exactly where the functional check
+  // at the end of this test needs it. `toHaveCount(1)` against the single filtered row is the identity
+  // guard that keeps this selector honest.
+  const toggle = page.locator("table tbody button[aria-expanded]");
+  await expect(toggle).toHaveCount(1);
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(toggle).toHaveAttribute("title", "Show the branches in this batch");
+  await expect(toggle.getByText("2 branches", { exact: true })).toBeVisible();
+
+  // REST FIRST, and as an exact value: this fix is not allowed to restyle the rest state, so the token the
+  // deleted inline `color` set must still be what the variant class now supplies. Asserting it before the
+  // hover is what makes a revert's red land on the hover line — the mechanism — with rest green.
+  await expect(toggle).toHaveCSS("color", "rgb(138, 146, 155)");
+  expect(await isTopmostAtCentre(toggle), "the batch toggle should be pointer-reachable").toBe(true);
+
+  const t = await restThenSettledHover(page, toggle);
+  expect(t.rest.color, "rest is --loom-text-dim, exactly as the inline style set it").toBe("rgb(138, 146, 155)");
+  expect(t.hover.color, "ghost's hover rule lifts the label to --loom-text").toBe("rgb(230, 234, 237)");
+  // Ghost tints nothing else, so nothing but the label is allowed to move.
+  expect(t.hover.background).toBe(t.rest.background);
+  expect(t.hover.borderColor).toBe(t.rest.borderColor);
+
+  // The chevron glyph is a CHILD that restated the same --loom-text-dim one level down, so it would have
+  // stayed dim while its own button's label brightened — a half-lit control. It now inherits. `BatchTag`
+  // beside it deliberately keeps its phosphor chip colour: that is a distinct tone, not a restatement of
+  // the variant's own rest token, so it must NOT move, and asserting both is what separates the two cases.
+  // The pointer is still on the toggle from `restThenSettledHover`, so these are both HOVERED readings —
+  // which is the state the two cases differ in. Measured pre-fix: the chevron stayed `rgb(138, 146, 155)`
+  // while its own button's label was meant to be lifting.
+  const chevron = toggle.locator("span[aria-hidden='true']");
+  await expect(chevron).toHaveCount(1);
+  await expect(chevron).toHaveCSS("color", "rgb(230, 234, 237)");
+  await expect(toggle.getByText("batch", { exact: true })).toHaveCSS("color", "rgb(46, 230, 110)");
+
+  // The control still WORKS — a rest-and-hover reading alone would not prove the toggle does anything.
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(toggle).toHaveAttribute("title", "Hide the branches in this batch");
+  await expect(page.getByText("loom/cf4-hover-1", { exact: true })).toBeVisible();
+  await expect(page.getByText("loom/cf4-hover-2", { exact: true })).toBeVisible();
+});
+
+test("the SpawnControls spawn-role menu items hover (SpawnControls.tsx)", async ({ page, loomDaemon }) => {
+  test.setTimeout(60_000);
+  // A project with ONE non-worker agent and NO live session: AgentControl then renders the SpawnControls
+  // split-button (the manager go-live guard swaps it for a disabled "Live" only while a manager-role agent
+  // is ALREADY live), and with no session there is no terminal tile, so Overview stays light.
+  const project = await loomDaemon.createProject(`spawn-hover-${Date.now()}`);
+  const agent = await (await fetch(`${loomDaemon.baseURL}/api/projects/${project.id}/agents`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "Hover Probe" }),
+  })).json();
+  expect(agent.id, "the probe agent should be created").toBeTruthy();
+  await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
+  await page.goto(loomDaemon.baseURL + "/overview"); // `/` is Mission Control; the spawn cards are Overview's
+
+  // FIXTURE IDENTITY: exactly one spawn card, and it is the agent this test created — so the menu opened
+  // below belongs to this project and not to whatever a sibling spec left on the shared daemon.
+  await expect(page.getByText("Hover Probe", { exact: true })).toBeVisible();
+  const menuTrigger = page.locator('button[title="Override the spawn role"]');
+  await expect(menuTrigger).toHaveCount(1);
+  await menuTrigger.click();
+
+  const items = page.locator("button.loom-btn-ghost").filter({ hasText: /^(From profile \(default\)|Manager|Plain)$/ });
+  await expect(items).toHaveCount(3);
+
+  // PARK THE POINTER off the menu before reading any rest value. The click above left it on the ▾, and the
+  // panel opens at `top: 100%` directly beneath that button — close enough that the first item's "rest" is
+  // worth protecting rather than assuming. `useDismissable` closes on `mousedown`/Escape only, so a bare
+  // `mouse.move` cannot dismiss the panel. The spawn card's own 12px padding is inert copy.
+  const cardBox = await page.getByText("Hover Probe", { exact: true }).boundingBox();
+  expect(cardBox, "the agent name should have a layout box").toBeTruthy();
+  await page.mouse.move(cardBox!.x + 2, cardBox!.y + 2);
+
+  // Every item is DIM at rest now. This is the design change the card made, and it is the assertion a full
+  // revert (which pinned all three at --loom-text, ghost's own HOVER value) lands on first.
+  for (const label of ["From profile (default)", "Manager", "Plain"]) {
+    await expect(items.filter({ hasText: label })).toHaveCSS("color", "rgb(138, 146, 155)");
+  }
+
+  // Hover the LAST item: it is furthest from the parked pointer, and a rest-then-hover reading on one
+  // element is only honest when nothing was already hovering it.
+  const plain = items.filter({ hasText: "Plain" });
+  expect(await isTopmostAtCentre(plain), "the 'Plain' item should be pointer-reachable").toBe(true);
+  const p = await restThenSettledHover(page, plain);
+  // ⚠️ ORDER AND POLARITY, both load-bearing here, and NOT the same shape as the Gates test above. Because
+  // the deleted inline value WAS ghost's hover token, `hover === "rgb(230, 234, 237)"` passes VACUOUSLY on
+  // pre-fix code — the item was stuck AT that value — so on its own it is not a control for anything. The
+  // two assertions that actually discriminate are the rest-value loop above (which a full revert reddens
+  // first) and the `.not.toBe` below (which reddens on the inertness itself, independent of whatever the
+  // rest token is). Do not reorder these into the Gates test's rest-then-exact-hover shape.
+  expect(p.rest.color, "ghost's rest token, no longer overridden to its own hover value").toBe("rgb(138, 146, 155)");
+  expect(p.hover.color, "the item must visibly MOVE on hover; pre-fix both readings were rgb(230, 234, 237)")
+    .not.toBe(p.rest.color);
+  expect(p.hover.color, "ghost's hover rule now actually applies").toBe("rgb(230, 234, 237)");
+
+  // The two items NOT under the pointer stay dim, which is what proves the bright reading above is the
+  // hover rule firing on ONE element rather than a repaint of the whole menu.
+  await expect(items.filter({ hasText: "Manager" })).toHaveCSS("color", "rgb(138, 146, 155)");
+  await expect(items.filter({ hasText: "From profile (default)" })).toHaveCSS("color", "rgb(138, 146, 155)");
+
+  // The menu still WORKS — a rest-and-hover reading alone would not prove an item does anything. What the
+  // click must NOT do is reach the daemon: `createProject` git-inits and binds a REAL repo, so
+  // `POST /api/agents/:id/sessions` here is a genuinely spawnable session and would trip the fixture's
+  // own no-spawn guard (`[pty] spawn`) at teardown — the metered-spawn accident this harness exists to
+  // prevent. Intercepting it is also the sharper assertion: it pins the ROLE the item sends, which no
+  // amount of watching the menu close could show.
+  let spawnBody: unknown = null;
+  await page.route(
+    (url) => /\/api\/agents\/[^/]+\/sessions$/.test(url.pathname),
+    async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      spawnBody = route.request().postDataJSON();
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "e2e: spawn suppressed" }) });
+    },
+  );
+  await plain.click();
+  await expect(items).toHaveCount(0);
+  expect(spawnBody, "the 'Plain' item must send role:plain, not the profile default").toEqual({ role: "plain" });
+});
