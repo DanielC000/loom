@@ -142,13 +142,16 @@ assertExactHits("(1) positive control", "CLAUDE.md", {
 });
 
 // ── THE FIVE INERT_MERGE_EXACT_PATHS ENTRIES — pinned EXACT expected sets, hand-verified as synthetic ──
-// README.md's four hits are ALL against a throwaway fixture repo the test itself git-inits (never this
+// README.md's hits are ALL against a throwaway fixture repo the test itself git-inits (never this
 // project's own root) — hand-verified at card 82662e98: merge-gate.mjs/merge-union-gate.mjs read back a
 // conflict-resolution fixture's README to prove which side "won"; worker-prompt.mjs/worktrees.mjs read
-// back a worktree's own copy to prove branch-vs-main content diverged correctly. None assert anything
-// about THIS repo's real root README.md.
+// back a worktree's own copy to prove branch-vs-main content diverged correctly. merge-prelanded-
+// content-diverged.mjs (card afa80698 round 2, hand-verified 2026-10-05) reads back its OWN throwaway
+// `makeRepo()` fixture's README.md to prove a human's pre-existing unstaged edit to it survives a
+// `landedContentDiverged` refusal untouched. None assert anything about THIS repo's real root README.md.
 assertExactHits("(2)", "README.md", {
   "merge-gate.mjs": 1,
+  "merge-prelanded-content-diverged.mjs": 1,
   "merge-union-gate.mjs": 1,
   "worker-prompt.mjs": 3,
   "worktrees.mjs": 2,

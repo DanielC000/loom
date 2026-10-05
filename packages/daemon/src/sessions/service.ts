@@ -776,6 +776,10 @@ type ConfirmMergeResult = {
   /** @decision 99a1cf6f — `gateBaseInvalidated` is a real, resolved verdict about canonical main, never
    *  an ordinary rejection against the branch; `NEVER_CACHED_OUTCOMES` must never serve it from cache. */
   gateBaseInvalidated?: boolean;
+  /** @decision 24c22912 — the preLanded producer's squash staged non-empty content when it expected
+   *  nothing — main no longer carries the landed content (most often a human revert). Refused, canonical
+   *  repo restored, never a commit; real verdict about main, so never cached, same as `gateBaseInvalidated`. */
+  landedContentDiverged?: boolean;
   /** @decision d69d4858 — the canonical checkout was off the expected mainline branch; mirrors
    *  `mergeBatchTracked`'s own `branchDiverted`/`unverified`, same `NEVER_CACHED_OUTCOMES` strings. */
   branchDiverted?: boolean;
@@ -16191,6 +16195,10 @@ export class SessionService {
     // @decision 24c22912 — that stability proof is narrower than "matched at capture": three sequential
     //  awaits run in between, so it proves forward-only stability from an earlier read, never one atomic read.
     let gateBaseBranchHead: string | undefined;
+    // @decision 24c22912 — preLanded producer only, explicit rather than inferred from `gateBaseBranchHead`:
+    //  the squash MUST stage nothing here (content is already on main); refused otherwise, never re-landed.
+    //  Reset to `false` wherever `gateBaseBranchHead` resets to `undefined` for a different producer.
+    let expectAlreadyLanded = false;
     // @decision c24dd48a — this whole span, through the mergeBranch call, is wrapped in ONE try/finally so
     //  a passing gate's per-repo admission guard can NEVER leak; endSquash is confined to `gateRan` (card
     //  96d5f76b DoD-4: not called at all when false) and its release is identity-checked (card b9e07a4a).
@@ -16319,6 +16327,9 @@ export class SessionService {
         // stability proof available" and falls through to enforcing the ordinary check — never as "assume
         // unchanged".
         gateBaseBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+        // @decision 24c22912 — explicit, not inferred: this IS the preLanded producer, so the eventual
+        //  squash must stage nothing (its content is already on main) or mergeBranch refuses.
+        expectAlreadyLanded = true;
       }
 
       // @decision 293d418e — a branch whose content is PROVEN already on main (`preLanded`) finishes as ALREADY_MERGED here WITHOUT a gate: the gate exists to vet a
@@ -16442,6 +16453,10 @@ export class SessionService {
           // a stray preLanded-producer value must never silently soften that if the invariant above is ever
           // violated by a future change.
           gateBaseBranchHead = undefined;
+          // @decision 24c22912 (round 2, item 4) — DELIBERATELY NOT reset here, unlike `gateBaseBranchHead`
+          //  above: that reset swaps one real check for another; resetting this one would instead DISABLE
+          //  the only check that can catch a staged squash, loosening the guard. See that record.
+
           // Card a2873f7e: `steps:[]` — this result never actually spawned a step (it's a reuse of an
           // already-settled self-check), so there is nothing to report a per-step duration for.
           reuseResult = { passed: true, steps: [] };
@@ -17852,7 +17867,14 @@ export class SessionService {
       if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs }))) return refuseReviewedTipMoved(rt, "pre-squash");
     }
     const mainlineCheckedTip = await this.checkMainlineMove({ projectId: project.id, repoKey: worker.repoKey ?? "primary", repoPath, managerSessionId, workerSessionId, taskId }); // card 4fa36502: fail-open tripwire, before the squash trusts main's tip
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef);
+    // @decision 24c22912 (round 2, item 3) — CLOSE THE NO-GATECOMMAND ASYMMETRY: `expectAlreadyLanded`
+    //  above is derived only inside `if (gate)`, leaving a GATELESS project unprotected. Derived fresh
+    //  here, only when nothing already has (`!gate`) and the branch isn't owed/held. See that record.
+    if (!gate && !owedBase) {
+      const noGateLanded = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs });
+      if (noGateLanded) expectAlreadyLanded = true;
+    }
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded);
     if (mainlineCheckedTip && merge.ok && !merge.noop && merge.sha) await this.advanceMainlineWatermark(project.id, worker.repoKey ?? "primary", repoPath, mainlineCheckedTip, managerSessionId, workerSessionId, taskId); // card 4fa36502: a successful Loom landing is the new "explained" tip — but ONLY when this landing's check completed, so an unverified move stays catchable
     // Card 6f13746c: record the landing HERE — at the squash, still INSIDE the repo guard (`endSquash` / `releaseInertRepoGuard` run in the
     // `finally` below) — so the counter's order equals main's order: a later pass resets only what precedes it on main, and an ungated landing
@@ -17949,6 +17971,23 @@ export class SessionService {
         const { suppressed, sha } = await rejectNotify("solo_merge_transient", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: "solo_merge_transient", sha, ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, soloMergeTransient: true };
+      }
+      // @decision 24c22912 — preLanded's premise broke at squash time (staged non-empty, expected a
+      //  no-op); reset, refused, never re-landed. Checked AFTER quarantined/transient — either wins first
+      //  with its own correct wording; see that record for why (round 2, item 1).
+      if (merge.landedContentDiverged) {
+        const why = merge.reason ?? "this branch's previously-landed content is no longer on main — refusing to silently re-land it";
+        // Never claim "canonical repo untouched" when `merge.residuePossible` is true (resetOrSkip
+        // SKIPPED the reset) — mirrors `merge.transient`'s own residuePossible-conditional wording above.
+        const detailText = merge.residuePossible
+          ? `${why}; squash was attempted — the canonical repo may still carry STAGED content from it (the automatic cleanup could not run, most often because the canonical checkout already had unrelated unstaged changes); run \`git diff --cached\` in the canonical checkout to inspect it before relying on a re-confirm. A human must decide: abandon this worker/card, or re-cut the branch if re-landing the content is actually intended.`
+          : `${why}; squash was attempted but reset before committing — canonical repo untouched, worktree retained. A human must decide: abandon this worker/card, or re-cut the branch if re-landing the content is actually intended.`;
+        const { suppressed, sha } = await rejectNotify("landed_content_diverged", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "landed_content_diverged", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return {
+          merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan,
+          ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, landedContentDiverged: true,
+        };
       }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       // Card 4b7ff996 CR follow-up: derive "is this the canonical-checkout-is-dirty failure class" from
@@ -20923,7 +20962,7 @@ export class SessionService {
         // @decision 9f5ae011 — `soloMergeTransient` classifies distinctly too, same reasoning one layer
         // later: `resetOrSkip`'s own confirmed-kill cleanup clearing must see a fresh re-attempt, never a
         // stale cached rejection from before it cleared.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

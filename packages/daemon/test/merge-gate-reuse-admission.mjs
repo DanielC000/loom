@@ -216,19 +216,27 @@ try {
     check("(M2) control: the same call with CURRENT main merges (the refusal above was requireCanonicalHead, not a broken fixture)", r2.ok === true && fs.existsSync(path.join(M2.repo, M2.file)));
   }
   // ── (N) ALREADY-LANDED (preLanded) PURE RE-CONFIRM STAYS IDEMPOTENT WHEN ONLY MAIN MOVES — card
-  //        b0ab78d6, regression found and closed before merge. (M) above and this scenario are a
-  //        DISCRIMINATING PAIR, not two independent tests: (M) proves the fix still refuses when the
-  //        branch itself gains new content during the gate; (N) proves it does NOT refuse when the branch
-  //        is a TRUE pure duplicate and only main moves elsewhere. Only together do they prove the new
-  //        `gateBaseBranchHead` branch-stability check can actually tell the two cases apart — (N) alone
-  //        would not catch a fix that simply stopped enforcing `requireCanonicalHead` altogether on this
-  //        path (which would also make (N) pass, while quietly breaking (M)). Identical setup to (M) EXCEPT
-  //        the worktree/branch gains NOTHING new during the gate — this is the COMMON case on the preLanded
+  //        b0ab78d6, regression found and closed before merge. Identical setup to (M) EXCEPT the
+  //        worktree/branch gains NOTHING new during the gate — this is the COMMON case on the preLanded
   //        path (a stale/racing re-confirm, see the early-idempotency doc in worktrees.ts), and was
   //        idempotent (`ALREADY_MERGED`, `merged:true`) before `gateBaseMainHead` existed on this path at
-  //        all. A bare `gateBaseMainHead` capture (no branch-stability discriminator) regresses this into a
-  //        refusal purely because main moved elsewhere — routine on an active fleet, and harmless here since
-  //        nothing from this branch is landing either way.
+  //        all. A bare `gateBaseMainHead` capture (no branch-stability discriminator) would regress this
+  //        into a refusal purely because main moved elsewhere — routine on an active fleet, and harmless
+  //        here since nothing from this branch is landing either way.
+  //
+  //        🔴 STALE CLAIM REMOVED (found + corrected during card afa80698, 2026-10-05): this block used to
+  //        say (M) and (N) are a "discriminating pair" that together prove the `gateBaseBranchHead`
+  //        branch-stability check can tell the two cases apart. That stopped being true once
+  //        @decision 293d418e shipped: a CLEAN preLanded branch (what (N) uses) now finishes via the
+  //        no-gate `finishSoloAlreadyLanded` shortcut BEFORE ever reaching `mergeBranch`/
+  //        `mergeBranchLocked` — `calls === 0` below proves the gate (and therefore
+  //        `branchStableSinceGateBase`) never even runs on this path. (N) now only proves the CLEAN
+  //        gate-skip shortcut itself stays idempotent when main moves first; it no longer exercises
+  //        `gateBaseBranchHead` at all. The scenario that actually DOES exercise a dirty-preLanded
+  //        branch reaching a real `mergeBranch` call with main moving is `emit-compare-gate-scope-
+  //        reclassify.mjs`'s scenario (M2); its own safety-net companion invariant (refusing a squash
+  //        whose previously-landed content is no longer on main, e.g. a revert) is
+  //        `merge-prelanded-content-diverged.mjs`.
   {
     const N = mk("n", "feature-n.txt");
     makeRepo(N);

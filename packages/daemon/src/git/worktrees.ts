@@ -7134,7 +7134,8 @@ export async function verifyReviewedTipChain(
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string, expectedMainlineBranch?: string, expectedMainlineRef?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean }> {
+  expectAlreadyLanded?: boolean,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -7148,7 +7149,7 @@ export async function mergeBranch(
   // @decision 87a3c87e — never drop this pause/resume bracket, and never move resume out of `finally`.
   const pauseToken = pauseVaultAutoCommit(repoPath);
   try {
-    return await withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip, expectedMainlineBranch, expectedMainlineRef));
+    return await withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded));
   } catch (e) {
     // @decision 8d8fa497 — mirror every in-function quarantine site below: set `quarantined:true` here too.
     if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message, quarantined: true };
@@ -7308,7 +7309,8 @@ export function describeLockGiveUp(removal: LockRemovalResult & { removed: false
 async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string, expectedMainlineBranch?: string, expectedMainlineRef?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean }> {
+  expectAlreadyLanded?: boolean,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean }> {
   // QUARANTINE CHECK moved to the TRUE convergence point, `withCanonicalIndexLock` (git/repo-lock.ts) —
   // this function only ever runs INSIDE that lock (see `mergeBranch` above), so a check re-derived here
   // would be unreachable dead code: a quarantined repo now never gets this far.
@@ -7687,6 +7689,23 @@ async function mergeBranchLocked(
       // data this function already computed, so the caller (finalizeMerge) can persist ship-state without
       // a redundant lookup of its own.
       return { ok: true, noop: true, emptyKind: landed ? "ALREADY_MERGED" : "STAGE_EMPTY_RETRY", sha: landed ?? undefined, landedTip: resolvedBranchHead };
+    }
+    // @decision 24c22912 — EXPECT-ALREADY-LANDED: the preLanded producer proved this content is already on
+    // main, so the squash must stage NOTHING; a non-empty stage means main no longer carries it (most
+    // often a revert) — reset, land no commit, refuse. Full reasoning in that decision's own record.
+    if (expectAlreadyLanded) {
+      const cleanup = await resetOrSkip("landed-content-diverged cleanup");
+      const reason = "this branch's previously-landed content is no longer on main (most likely reverted "
+        + "by a human) — Loom will not silently re-land it; a human must decide: abandon this worker/card, "
+        + `or re-cut the branch if re-landing the content is actually intended${cleanup ? ` (${cleanup.message})` : "; canonical repo restored to its pre-merge state"}`;
+      return {
+        ok: false, landedContentDiverged: true, reason,
+        ...(cleanup?.quarantined ? { quarantined: true } : {}),
+        ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}),
+        // @decision 24c22912 (round 2, item 1) — set `residuePossible` for EVERY unsuccessful cleanup,
+        //  not just `transient`: a plain skip leaves the reverted content staged too. See that record.
+        ...(cleanup && !cleanup.quarantined && !cleanup.transient ? { residuePossible: true } : {}),
+      };
     }
     // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
     // Card 7a1a76e9 DoD-3: the task title still wins unconditionally when a task exists (⛔ do not regress
