@@ -1,7 +1,8 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 35cfcbe0 — the INERT-DIFF SKIP squash is pinned to the branch tip its skip decision covered (the two-path sibling of 01777ceb's reuse pin):
-//   (IP) a docs-only branch is inert-skipped (no gate); a NON-docs worker commit landing after the decision but before mergeBranch's lock is refused in-lock, never squashed
-//        ungated; the re-call re-evaluates (the diff is no longer inert, so a real gate runs) and merges.
+//   (IP) a docs-only branch is inert-skipped (no gate); a NON-docs worker commit landing after the decision but before mergeBranchLocked's own fresh tip re-read (injected via the
+//        `soloMergeGitFactory` seam, test/_late-commit-seam.mjs — never a test-held lock) is refused in-lock, never squashed ungated; the re-call re-evaluates (the diff is no longer
+//        inert, so a real gate runs) and merges.
 //   (RD) re-derivation: the branch moves during the guard wait; a later non-docs commit is still refused, and the covered tip is the re-classified one.
 //   (FC) isInertMergeDiff fails closed on an unreadable tip and evaluates the SHA it is given; the helper's discriminated input.
 //   (GO) with the gate OFF (`skipReason:"gate-disabled"`) the squash is pinned too (card 6f13746c routed that skip through a `skip:"gate-disabled"` LandingPin): a late commit is refused in-lock, and the re-call lands it.
@@ -13,7 +14,6 @@ import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 import { settleTracked } from "./_settle-tracked.mjs";
-import { waitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mcisp-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -25,8 +25,11 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, snapshotGateReflogs } = await import("../dist/git/worktrees.js");
-const { withCanonicalIndexLock } = await import("../dist/git/repo-lock.js");
 const { isInertMergeDiff, expectedTipForLanding } = await import("../dist/git/worktrees.js");
+// Dynamic, not static: _late-commit-seam.mjs itself dynamically imports ../dist/git/bounded.js (which
+// transitively reaches paths.js's module-scope LOOM_HOME constant) — a STATIC import here would resolve
+// that chain before this file's own LOOM_HOME assignment above ever runs, freezing the wrong (real) home.
+const { lateCommitBeforeSquashTarget } = await import("./_late-commit-seam.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -71,18 +74,18 @@ async function setup(sfx, { plant = false, gateCommand = "pnpm gate", docs = fal
 }
 const svc = (db, runGate, extra = {}) => new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap, runGate, ...extra });
 
+
 {
   // (IP) inert-skip pin.
-  const { db, mgrId, workerId, repo, worktreePath } = await setup(sfxOf("ip"), { docs: true });
+  const { db, mgrId, workerId, repo, worktreePath, branch } = await setup(sfxOf("ip"), { docs: true });
   let calls = 0;
-  const sessions = svc(db, async () => { calls++; return { passed: true, steps: [] }; });
-  let release;
-  const held = withCanonicalIndexLock(repo, () => new Promise((r) => { release = r; }));
-  const confirming = confirm(sessions, mgrId, workerId);
-  await waitUntil(() => db.listEvents(mgrId).some((e) => e.kind === "build_gate" && e.detail?.skipped === true), { timeoutMs: 60000, label: "the inert-skip decision was recorded" });
-  fs.writeFileSync(path.join(worktreePath, "late.txt"), "late"); commitAll(worktreePath, "late non-docs worker commit", GIT_ID);
-  release(); await held;
-  const r1 = await confirming;
+  const sessions = svc(db, async () => { calls++; return { passed: true, steps: [] }; }, {
+    soloMergeGitFactory: lateCommitBeforeSquashTarget(branch, () => {
+      fs.writeFileSync(path.join(worktreePath, "late.txt"), "late"); commitAll(worktreePath, "late non-docs worker commit", GIT_ID);
+    }),
+  });
+  const r1 = await confirm(sessions, mgrId, workerId);
+  check("(IP) precondition: the inert-skip decision was recorded", db.listEvents(mgrId).some((e) => e.kind === "build_gate" && e.detail?.skipped === true));
   check("(IP) the inert-skipped merge was REFUSED in-lock as gateTipMoved (nothing squashed, no gate ran)", r1.settled === true && r1.ok && r1.value.merged === false && r1.value.gateTipMoved?.phase === "in-lock" && calls === 0 && !fs.existsSync(path.join(repo, "docs", "note.md")) && !fs.existsSync(path.join(repo, "late.txt")));
   check("(IP) it reports gateRan:false", r1.ok && r1.value.gateRan === false);
   check("(IP) the refusal wording names the skip decision, not a gate spawn", r1.ok && /inert/i.test(r1.value.reason ?? "") && !/gate spawned/.test(r1.value.reason ?? ""));
@@ -95,9 +98,13 @@ const svc = (db, runGate, extra = {}) => new SessionService(db, ptyStub, new Orc
   // (RD) the RE-DERIVATION path: the branch moves (a docs-only commit) while the inert skip waits for the repo guard, so the skip is re-classified on a fresh tip
   // (`reclassifyTip`); a NON-docs commit landing after THAT decision must still be refused in-lock, and the refusal's `covered` tip is the re-classified one.
   // The wait is injected deterministically by wrapping the semaphore's repo-guard acquisition (the exact await the guard-wait sits on).
-  const { db, mgrId, workerId, repo, worktreePath } = await setup(sfxOf("rd"), { docs: true });
+  const { db, mgrId, workerId, repo, worktreePath, branch } = await setup(sfxOf("rd"), { docs: true });
   let calls = 0;
-  const sessions = svc(db, async () => { calls++; return { passed: true, steps: [] }; });
+  const sessions = svc(db, async () => { calls++; return { passed: true, steps: [] }; }, {
+    soloMergeGitFactory: lateCommitBeforeSquashTarget(branch, () => {
+      fs.writeFileSync(path.join(worktreePath, "late.txt"), "late"); commitAll(worktreePath, "late non-docs worker commit", GIT_ID);
+    }),
+  });
   let docsTip = null;
   const origAcquire = sessions.gateSemaphore.acquireRepoGuardOnly.bind(sessions.gateSemaphore);
   sessions.gateSemaphore.acquireRepoGuardOnly = async (...a) => {
@@ -105,14 +112,9 @@ const svc = (db, runGate, extra = {}) => new SessionService(db, ptyStub, new Orc
     if (docsTip === null) { fs.writeFileSync(path.join(worktreePath, "docs", "extra.md"), "more"); commitAll(worktreePath, "docs-only commit during the guard wait", GIT_ID); docsTip = headOf(worktreePath); }
     return r;
   };
-  let release;
-  const held = withCanonicalIndexLock(repo, () => new Promise((r) => { release = r; }));
-  const confirming = confirm(sessions, mgrId, workerId);
-  await waitUntil(() => db.listEvents(mgrId).some((e) => e.kind === "build_gate" && e.detail?.skipped === true), { timeoutMs: 60000, label: "the re-derived inert-skip decision was recorded" });
+  const r1 = await confirm(sessions, mgrId, workerId);
   check("(RD) precondition: the docs-only commit landed DURING the guard wait (so the re-derivation path ran)", docsTip !== null);
-  fs.writeFileSync(path.join(worktreePath, "late.txt"), "late"); commitAll(worktreePath, "late non-docs worker commit", GIT_ID);
-  release(); await held;
-  const r1 = await confirming;
+  check("(RD) precondition: the re-derived inert-skip decision was recorded", db.listEvents(mgrId).some((e) => e.kind === "build_gate" && e.detail?.skipped === true));
   check("(RD) refused in-lock as gateTipMoved after the re-derived skip; nothing squashed, no gate ran", r1.settled === true && r1.ok && r1.value.merged === false && r1.value.gateTipMoved?.phase === "in-lock" && r1.value.gateRan === false && calls === 0 && !fs.existsSync(path.join(repo, "late.txt")) && !fs.existsSync(path.join(repo, "docs", "note.md")));
   check("(RD) the refusal's covered tip is the RE-CLASSIFIED tip (the docs-only commit), not the pre-wait one", r1.ok && r1.value.gateTipMoved?.gated === docsTip);
   const rej = db.listEvents(mgrId).find((e) => e.kind === "merge_rejected" && e.detail?.reason === "gate_tip_moved");
@@ -133,15 +135,14 @@ const svc = (db, runGate, extra = {}) => new SessionService(db, ptyStub, new Orc
 }
 {
   // (GO) gate OFF: pinned (see the header).
-  const { db, mgrId, workerId, repo, worktreePath } = await setup(sfxOf("go"), { docs: true, mergeGate: "off" });
-  const sessions = svc(db, async () => { throw new Error("no gate may run with the gate off"); });
-  let release;
-  const held = withCanonicalIndexLock(repo, () => new Promise((r) => { release = r; }));
-  const confirming = confirm(sessions, mgrId, workerId);
-  await waitUntil(() => db.listEvents(mgrId).some((e) => e.kind === "build_gate" && e.detail?.skipReason === "gate-disabled"), { timeoutMs: 60000, label: "the gate-disabled skip was recorded" });
-  fs.writeFileSync(path.join(worktreePath, "late.txt"), "late"); commitAll(worktreePath, "late worker commit", GIT_ID);
-  release(); await held;
-  const r1 = await confirming;
+  const { db, mgrId, workerId, repo, worktreePath, branch } = await setup(sfxOf("go"), { docs: true, mergeGate: "off" });
+  const sessions = svc(db, async () => { throw new Error("no gate may run with the gate off"); }, {
+    soloMergeGitFactory: lateCommitBeforeSquashTarget(branch, () => {
+      fs.writeFileSync(path.join(worktreePath, "late.txt"), "late"); commitAll(worktreePath, "late worker commit", GIT_ID);
+    }),
+  });
+  const r1 = await confirm(sessions, mgrId, workerId);
+  check("(GO) precondition: the gate-disabled skip was recorded", db.listEvents(mgrId).some((e) => e.kind === "build_gate" && e.detail?.skipReason === "gate-disabled"));
   check("(GO) with the gate off the late commit is REFUSED in-lock (gateTipMoved, gateRan:false) and NOT squashed", r1.settled === true && r1.ok && r1.value.merged === false && r1.value.gateTipMoved?.phase === "in-lock" && r1.value.gateRan === false && !fs.existsSync(path.join(repo, "late.txt")));
   const r2 = await confirm(sessions, mgrId, workerId);
   check("(GO) never cached: the re-call re-decides and lands the new tip (gate still off, no gate run)", r2.ok && r2.value.merged === true && r2.value.skipReason === "gate-disabled" && fs.existsSync(path.join(repo, "late.txt")));

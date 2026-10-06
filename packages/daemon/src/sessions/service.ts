@@ -25,7 +25,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -71,7 +71,7 @@ import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
 import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
-import { canonicalRepoLockKey } from "../git/repo-lock.js";
+import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError } from "../git/repo-lock.js";
 import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
 import { isSupersededByRecycle, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
@@ -15828,26 +15828,11 @@ export class SessionService {
     // `stagedCanonicalDirtRefusalMessage`'s wording with mergeBranchLocked's own check so the two call
     // sites can never drift apart on the identical condition. Fail-safe: any probe error returns
     // `{staged:false}`, falling through to the real gate/squash, which still refuses via its own check.
-    const stagedDirt = await detectCanonicalStagedDirt(repoPath, { timeoutMs: this.gitOpMs });
-    if (stagedDirt.staged) {
-      const detailText = stagedCanonicalDirtRefusalMessage(branch, stagedDirt.paths ?? "");
-      const { suppressed, sha } = await rejectNotify("canonical_staged_dirt", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-      evt("merge_rejected", { reason: "canonical_staged_dirt", sha, ...(suppressed ? { suppressed: true } : {}) });
-      return squashRefusedResult({ merged: false, reason: `canonical repo has staged, uncommitted changes unrelated to '${branch}' — a human must resolve the canonical checkout by hand`, detailText, notified: !suppressed, opId: thisOpId });
-    }
-
+    //
     // @decision 4b7ff996 — admission-time preflight for a canonical-dirty-tracked overlap that can never
     //  land via `--squash`; escalates to the Platform Lead (project managers have no canonical-repo git
     //  write access), and fails safe (`{overlap:false}`) on any probe error rather than blocking a merge.
-    const dirtyOverlap = await detectCanonicalDirtyOverlap(repoPath, branch, { timeoutMs: this.gitOpMs });
-    if (dirtyOverlap.overlap) {
-      const paths = (dirtyOverlap.paths ?? []).join(", ");
-      const detailText = `CANONICAL CHECKOUT DIRTY ON A PATH THIS BRANCH TOUCHES: ${paths}. The canonical repo has unstaged tracked changes on this path — 'git merge --squash' cannot overwrite unstaged local modifications, so this merge cannot land no matter how many times it's retried. This is NOT a stale-base problem — the branch's own base is fine, and rebasing it changes nothing here. Squash phase never reached; canonical repo AND worktree untouched. A HUMAN must resolve the canonical checkout by hand (commit or discard the dirty path there) — project managers have no canonical-repo git write access, so escalate this to the Platform Lead.`;
-      const { suppressed, sha } = await rejectNotify("canonical_dirty_overlap", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-      evt("merge_rejected", { reason: "canonical_dirty_overlap", sha, dirtyPaths: dirtyOverlap.paths, ...(suppressed ? { suppressed: true } : {}) });
-      return squashRefusedResult({ merged: false, reason: `canonical repo has unstaged tracked changes on a path '${branch}' also touches (${paths}); a rebase will not help — escalate to the Platform Lead to resolve the canonical checkout`, detailText, notified: !suppressed, opId: thisOpId });
-    }
-
+    //
     // BACKSTOP (BEFORE the gate/merge) — card 98d6264d: the SAME defense as the tracked-path check just
     // above, for an UNTRACKED collision — `detectCanonicalDirtyOverlap`'s own probe (`--untracked-files=no`)
     // is deliberately blind to untracked paths (a different false-refusal it must stay narrow against — see
@@ -15859,7 +15844,39 @@ export class SessionService {
     // the path is narrowed on). Fail-safe like its sibling: any probe error/timeout returns
     // `{overlap:false}`, falling through to the real gate, which still (diagnosably) catches the genuine
     // case via the same `/would be overwritten by merge/i` backstop.
-    const untrackedOverlap = await detectCanonicalUntrackedOverlap(repoPath, branch, { timeoutMs: this.gitOpMs });
+    //
+    // @decision 6b8822d2 — ALL THREE probes share ONE `withCanonicalIndexLock` acquisition: a sibling's
+    // in-flight squash reads as staged OR unstaged-modified/untracked to an unlocked check (unpack_trees
+    // writes worktree files before the index rename). On RepoQuarantinedError, return the quarantined:true shape (below), never `{staged:false}`/`{overlap:false}`.
+    let stagedDirt: CanonicalStagedDirt;
+    let dirtyOverlap: CanonicalDirtyOverlap;
+    let untrackedOverlap: CanonicalUntrackedOverlap;
+    try {
+      ({ stagedDirt, dirtyOverlap, untrackedOverlap } = await withCanonicalIndexLock(repoPath, async () => ({
+        stagedDirt: await detectCanonicalStagedDirt(repoPath, { timeoutMs: this.gitOpMs }),
+        dirtyOverlap: await detectCanonicalDirtyOverlap(repoPath, branch, { timeoutMs: this.gitOpMs }),
+        untrackedOverlap: await detectCanonicalUntrackedOverlap(repoPath, branch, { timeoutMs: this.gitOpMs }),
+      })));
+    } catch (e) {
+      if (!(e instanceof RepoQuarantinedError)) throw e;
+      const { suppressed, sha } = await rejectNotify("quarantined", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${e.message}`);
+      evt("merge_rejected", { reason: "quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: e.message, notified: !suppressed, opId: thisOpId, gateRan: false, quarantined: true };
+    }
+    if (stagedDirt.staged) {
+      const detailText = stagedCanonicalDirtRefusalMessage(branch, stagedDirt.paths ?? "");
+      const { suppressed, sha } = await rejectNotify("canonical_staged_dirt", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "canonical_staged_dirt", sha, ...(suppressed ? { suppressed: true } : {}) });
+      return squashRefusedResult({ merged: false, reason: `canonical repo has staged, uncommitted changes unrelated to '${branch}' — a human must resolve the canonical checkout by hand`, detailText, notified: !suppressed, opId: thisOpId });
+    }
+    if (dirtyOverlap.overlap) {
+      const paths = (dirtyOverlap.paths ?? []).join(", ");
+      const detailText = `CANONICAL CHECKOUT DIRTY ON A PATH THIS BRANCH TOUCHES: ${paths}. The canonical repo has unstaged tracked changes on this path — 'git merge --squash' cannot overwrite unstaged local modifications, so this merge cannot land no matter how many times it's retried. This is NOT a stale-base problem — the branch's own base is fine, and rebasing it changes nothing here. Squash phase never reached; canonical repo AND worktree untouched. A HUMAN must resolve the canonical checkout by hand (commit or discard the dirty path there) — project managers have no canonical-repo git write access, so escalate this to the Platform Lead.`;
+      const { suppressed, sha } = await rejectNotify("canonical_dirty_overlap", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "canonical_dirty_overlap", sha, dirtyPaths: dirtyOverlap.paths, ...(suppressed ? { suppressed: true } : {}) });
+      return squashRefusedResult({ merged: false, reason: `canonical repo has unstaged tracked changes on a path '${branch}' also touches (${paths}); a rebase will not help — escalate to the Platform Lead to resolve the canonical checkout`, detailText, notified: !suppressed, opId: thisOpId });
+    }
+
     if (untrackedOverlap.overlap) {
       const paths = (untrackedOverlap.paths ?? []).join(", ");
       const detailText = `CANONICAL CHECKOUT HAS AN UNTRACKED FILE ON A PATH THIS BRANCH ALSO TOUCHES: ${paths}. The canonical repo has an untracked file at this path — 'git merge --squash' refuses to overwrite an untracked file it doesn't recognize (regardless of whether its content already matches), so this merge cannot land no matter how many times it's retried. This is NOT a stale-base problem — the branch's own base is fine, and rebasing it changes nothing here. Squash phase never reached; canonical repo AND worktree untouched. A HUMAN must resolve the canonical checkout by hand (move or remove the untracked path there) — project managers have no canonical-repo git write access, so escalate this to the Platform Lead.`;
@@ -18049,8 +18066,15 @@ export class SessionService {
       // advice burns another worker + gate lane and fails identically. Both of these are defense-in-depth
       // backstops — confirmWorkerMerge's own admission-time preflights (detectCanonicalStagedDirt,
       // detectCanonicalDirtyOverlap, both above, before the gate) are the PRIMARY catch for these same two
-      // conditions; this only fires when the canonical repo went dirty IN the race window between those
-      // preflights and this squash (the gate itself can run for minutes in between).
+      // conditions; this only fires when the canonical repo went genuinely dirty IN the race window
+      // between those preflights and this squash (the gate itself can run for minutes in between) — a
+      // HUMAN (or an unrelated interrupted process) staging something new in that window, never a
+      // CONCURRENT sibling merge: this in-lock check runs serialized inside the SAME per-repo mutex a
+      // sibling's own squash holds, so it can only ever observe that sibling's work already cleanly
+      // committed (or not yet started), never mid-flight. Card 6b8822d2 closed the concurrent-sibling
+      // false-positive shape upstream, at the admission-time staged-dirt preflight itself (now lock-wrapped
+      // too) — not here; this in-lock re-check was never actually capable of catching that shape as a
+      // "backstop," since the lock structurally prevents it from ever seeing a sibling's transient state.
       const detailText = merge.dirtyOverlap
         ? `${why}; squash was attempted but never committed — canonical repo untouched, worktree retained. This is NOT a stale-base problem — the branch's own base is fine, and rebasing it changes nothing here. The canonical checkout has local content in the way of a path this branch also touches (either unstaged changes to a tracked file, or an untracked file blocking it); a HUMAN must resolve the canonical checkout by hand (commit/discard the change, or move/remove the untracked file). Project managers have no canonical-repo git write access — escalate this to the Platform Lead.`
         : isStagedCanonicalRefusal

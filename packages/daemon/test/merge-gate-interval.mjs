@@ -45,8 +45,11 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
-const { withCanonicalIndexLock } = await import("../dist/git/repo-lock.js");
 const M = await import("../dist/orchestration/merge-gate-interval.js");
+// Dynamic, not static: _late-commit-seam.mjs itself dynamically imports ../dist/git/bounded.js (which
+// transitively reaches paths.js's module-scope LOOM_HOME constant) — a STATIC import here would resolve
+// that chain before this file's own LOOM_HOME assignment above ever runs, freezing the wrong (real) home.
+const { lateCommitBeforeSquashTarget } = await import("./_late-commit-seam.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -143,7 +146,7 @@ async function addWorker(db, P, n, files) {
   return { taskId, workerId, worktreePath, branch };
 }
 /** A service whose injected gate honours `gate.pass` and counts calls; spies count the ONE decision + ONE recorder. */
-function mkService(db) {
+function mkService(db, extra = {}) {
   const gate = { calls: 0, pass: true, hold: null, failNext: false };
   const sessions = new SessionService(db, { stop() {}, isAlive() { return false; }, enqueueStdin() {} }, new OrchestrationControl(), {
     syncAttachBudgetMs: 60_000,
@@ -154,6 +157,7 @@ function mkService(db) {
       return gate.pass ? { passed: true, steps: [] } : { passed: false, failedStep: "test", failedStatus: 1, steps: [] };
     },
     reapWorktreeProcesses: noReap,
+    ...extra,
   });
   const spy = { decide: 0, record: 0, recorded: [] };
   const origDecide = sessions.decideMergeGateFor.bind(sessions);
@@ -288,16 +292,15 @@ try {
   {
     const P = mk("p"); makeRepo(P.repo);
     const db = new Db(); dbs.push(db);
-    const ctx = mkService(db);
     await seedProject(db, P, { mergeGate: "off", mergeGateInterval: 2 });
     const w = await addWorker(db, P, "p1", { "src/p1.ts": "export const p1 = 1;\n" });
-    let release;
-    const held = withCanonicalIndexLock(P.repo, () => new Promise((r) => { release = r; }));
-    const confirming = confirm(ctx.sessions, P.mgrId, w.workerId);
-    await waitUntil(() => db.listEvents(P.mgrId).some((e) => e.kind === "build_gate" && e.detail?.skipReason === "gate-interval"), { timeoutMs: 60000, label: "the interval-skip decision was recorded" });
-    fs.writeFileSync(path.join(w.worktreePath, "late.txt"), "late"); commitAll(w.worktreePath, "late worker commit", GIT_ID);
-    release(); await held;
-    const r1 = await confirming;
+    const ctx = mkService(db, {
+      soloMergeGitFactory: lateCommitBeforeSquashTarget(w.branch, () => {
+        fs.writeFileSync(path.join(w.worktreePath, "late.txt"), "late"); commitAll(w.worktreePath, "late worker commit", GIT_ID);
+      }),
+    });
+    const r1 = await confirm(ctx.sessions, P.mgrId, w.workerId);
+    check("(P) precondition: the interval-skip decision was recorded", db.listEvents(P.mgrId).some((e) => e.kind === "build_gate" && e.detail?.skipReason === "gate-interval"));
     check("(P) the interval-skip landing was REFUSED in-lock as gateTipMoved (nothing squashed, late commit not landed)", r1.merged === false && r1.gateTipMoved?.phase === "in-lock" && !fs.existsSync(path.join(P.repo, "p1.ts")) && !fs.existsSync(path.join(P.repo, "src", "p1.ts")) && !fs.existsSync(path.join(P.repo, "late.txt")));
     check("(P) it reports gateRan:false and the gate command was never called", r1.gateRan === false && ctx.gate.calls === 0);
     check("(P) a refused landing does NOT advance the ungated counter", db.getMergeGateState(P.projId).ungatedSinceLastPass === 0);

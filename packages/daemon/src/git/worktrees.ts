@@ -4537,6 +4537,14 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // edit near either anchor could in principle shift what the regex matches or what the structural
   // substring search finds.
   "packages/daemon/test/graceful-teardown-hard-exit-backstop.mjs",
+  // Card 6b8822d2 (Delta review round 2): its (STRUCTURAL) section reads real sessions/service.ts SOURCE
+  // directly (never dist/**) and checks, via a bounded text-gap search, that detectCanonicalStagedDirt/
+  // detectCanonicalDirtyOverlap/detectCanonicalUntrackedOverlap's call sites carry no lock-closing
+  // sequence between them — a genuinely new read with no live production re-derivation to inherit
+  // immunity from, same posture as quarantine-reason-windows-guidance.mjs's entry above. tsc keeps
+  // comments in source, so a comment-only edit inserting decoy call-site text between the real calls
+  // could in principle shift what the gap search finds.
+  "packages/daemon/test/merge-staged-dirt-lock-race.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its

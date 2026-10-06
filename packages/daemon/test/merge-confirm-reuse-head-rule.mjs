@@ -1,7 +1,8 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 01777ceb — the run_gate self-check / REUSE side of the "did the gate run on the commit its verdict names?" rule (split off merge-confirm-fail-identity-void.mjs):
 //   (DR)   a self-check that PASSED on a detached worktree is headCurrent:false and is never reused; the merge re-gates and refuses that PASS.
-//   (RP)   the REUSE squash is pinned to the tip the reuse proof saw: a commit landing after the decision but before mergeBranch's lock is refused in-lock.
+//   (RP)   the REUSE squash is pinned to the tip the reuse proof saw: a commit landing after the decision but before mergeBranchLocked's own fresh tip re-read (injected via the
+//          `soloMergeGitFactory` seam, test/_late-commit-seam.mjs — never a test-held lock) is refused in-lock.
 //   (BELT) the reuse proof's own head-off-branch condition, isolated from the settle-time check (+ BELT-U: head-off-branch-unknown).
 //   (RU)   card c3e1bfc3 — an unreadable reflog on the run_gate self-check is "could not verify", never "moved and came back".
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-confirm-reuse-head-rule.mjs
@@ -12,7 +13,6 @@ import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 import { settleTracked } from "./_settle-tracked.mjs";
-import { waitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mcrhr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -24,7 +24,10 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, snapshotGateReflogs } = await import("../dist/git/worktrees.js");
-const { withCanonicalIndexLock } = await import("../dist/git/repo-lock.js");
+// Dynamic, not static: _late-commit-seam.mjs itself dynamically imports ../dist/git/bounded.js (which
+// transitively reaches paths.js's module-scope LOOM_HOME constant) — a STATIC import here would resolve
+// that chain before this file's own LOOM_HOME assignment above ever runs, freezing the wrong (real) home.
+const { lateCommitBeforeSquashTarget } = await import("./_late-commit-seam.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -67,6 +70,7 @@ async function setup(sfx, { plant = false, gateCommand = "pnpm gate" } = {}) {
 }
 const svc = (db, runGate, extra = {}) => new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap, runGate, ...extra });
 
+
 {
   // (DR) the run_gate REUSE path: a self-check that PASSED on a detached worktree (T3, branch ref still T1) must not be reused by the merge.
   const { db, mgrId, workerId, repo, worktreePath } = await setup(sfxOf("dr"));
@@ -84,20 +88,20 @@ const svc = (db, runGate, extra = {}) => new SessionService(db, ptyStub, new Orc
   check("(DR) the T3 commit still exists and the worktree is retained", fs.existsSync(worktreePath) && (() => { try { return execSync(`git cat-file -t ${t3}`, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === "commit"; } catch { return false; } })());
 }
 {
-  // (RP) the REUSE squash is pinned (975c774b's pin, on the reuse sibling): a worker commit landing AFTER the reuse decision but BEFORE mergeBranch's lock must be refused in-lock,
-  // not squashed as an unverified `reused:true`. The canonical index lock is held from the test so the commit lands exactly in that window.
-  const { db, mgrId, workerId, repo, worktreePath } = await setup(sfxOf("rp"));
+  // (RP) the REUSE squash is pinned (975c774b's pin, on the reuse sibling): a worker commit landing AFTER the reuse decision but BEFORE mergeBranchLocked's own fresh tip re-read must
+  // be refused in-lock, not squashed as an unverified `reused:true`. The late commit is injected via the `soloMergeGitFactory` seam (test/_late-commit-seam.mjs), from WITHIN
+  // mergeBranchLocked's own first git call — never a test-held lock (see that helper's own doc for why).
+  const { db, mgrId, workerId, repo, worktreePath, branch } = await setup(sfxOf("rp"));
   let calls = 0;
-  const sessions = svc(db, async () => { calls++; return { passed: true, steps: [] }; });
+  const sessions = svc(db, async () => { calls++; return { passed: true, steps: [] }; }, {
+    soloMergeGitFactory: lateCommitBeforeSquashTarget(branch, () => {
+      fs.writeFileSync(path.join(worktreePath, "late.txt"), "late"); commitAll(worktreePath, "late worker commit", GIT_ID);
+    }),
+  });
   const sc = await sessions.runWorkerGate(workerId);
   check("(RP) precondition: the attached self-check settled green and current (reusable)", sc.settled === true && sc.ok === true && sc.value.passed === true && sc.value.headCurrent === true && calls === 1);
-  let release;
-  const held = withCanonicalIndexLock(repo, () => new Promise((r) => { release = r; }));
-  const confirming = confirm(sessions, mgrId, workerId);
-  await waitUntil(() => db.listEvents(mgrId).some((e) => e.kind === "build_gate" && e.detail?.reused === true), { timeoutMs: 60000, label: "the reuse decision was recorded" });
-  fs.writeFileSync(path.join(worktreePath, "late.txt"), "late"); commitAll(worktreePath, "late worker commit", GIT_ID);
-  release(); await held;
-  const r1 = await confirming;
+  const r1 = await confirm(sessions, mgrId, workerId);
+  check("(RP) precondition: the reuse decision was recorded", db.listEvents(mgrId).some((e) => e.kind === "build_gate" && e.detail?.reused === true));
   check("(RP) the reused merge was REFUSED in-lock as gateTipMoved (not squashed)", r1.settled === true && r1.ok && r1.value.merged === false && r1.value.gateTipMoved?.phase === "in-lock" && !fs.existsSync(path.join(repo, "feature.txt")) && !fs.existsSync(path.join(repo, "late.txt")));
   check("(RP) it reports gateRan:false + the reused opId (nothing ran) and no gate call was made", r1.ok && r1.value.gateRan === false && !!r1.value.reusedOpId && calls === 1);
   check("(RP) the refusal wording names the reused self-check, not a gate spawn (card 35cfcbe0 nit)", r1.ok && /reused self-check/.test(r1.value.reason ?? "") && !/gate spawned/.test(r1.value.reason ?? ""));
